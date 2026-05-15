@@ -34,7 +34,7 @@ You can use it to:
 ## What Brovan offers
 
 * PE, ELF, and .NET binary parsing support
-* Windows user-mode PE emulation
+* Windows user-mode PE emulation (x86 isn't currently supported for windows)
 * Linux/ELF guest support for common syscall flows
 * syscall modeling for many Windows user-mode paths and linux user paths, but more will be worked on
 * generic raw binary/blob loading with the guest of your choice
