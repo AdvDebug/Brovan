@@ -1,6 +1,7 @@
 using System;
 using System.Net;
 using System.Net.Sockets;
+using Brovan.Core.Emulation;
 
 namespace Brovan.Core.Emulation.OS.Linux.network
 {
@@ -75,6 +76,12 @@ namespace Brovan.Core.Emulation.OS.Linux.network
                 {
                     Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
                     return;
+                }
+
+                if (Received > 0)
+                {
+                    EndPoint RemoteOverride = SourceAddress == 0 ? null : RemoteEndPoint;
+                    NetworkTrafficPcapCapture.RecordInbound(SocketHandle.Handle, Transfer.Slice(0, Received), RemoteOverride);
                 }
 
                 if (SourceAddress != 0 && !SocketHelpers.TryWriteSocketAddress(Instance, SourceAddress, SourceAddressLength, RemoteEndPoint, out Error))

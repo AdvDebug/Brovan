@@ -1,6 +1,7 @@
 using System;
 using System.Net;
 using System.Net.Sockets;
+using Brovan.Core.Emulation;
 
 namespace Brovan.Core.Emulation.OS.Linux.network
 {
@@ -85,6 +86,9 @@ namespace Brovan.Core.Emulation.OS.Linux.network
                 }
 
                 int Sent = Destination == null ? SocketHandle.Handle.Send(Transfer, HostFlags) : SocketHandle.Handle.SendTo(Buffer, 0, (int)Length, HostFlags, Destination);
+                if (Sent > 0)
+                    NetworkTrafficPcapCapture.RecordOutbound(SocketHandle.Handle, Buffer.AsSpan(0, Sent), Destination);
+
                 Helper.SetReturnValue(Instance, Context, (long)Sent);
             }
             catch (SocketException Ex)

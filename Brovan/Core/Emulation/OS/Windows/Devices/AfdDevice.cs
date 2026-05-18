@@ -568,6 +568,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             try
             {
                 int Sent = _socket.Send(Payload, 0, (int)Length, SocketFlags.None);
+                if (Sent > 0)
+                    NetworkTrafficPcapCapture.RecordOutbound(_socket, Payload.AsSpan(0, Sent));
+
                 Data.Information = (ulong)Sent;
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -626,7 +629,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 int Received = _socket.Receive(RecvBuffer, 0, (int)Length, SocketFlags.None);
 
                 if (Received > 0)
+                {
                     Instance.WriteMemory(BufferPtr, RecvBuffer.AsSpan(0, Received));
+                    NetworkTrafficPcapCapture.RecordInbound(_socket, RecvBuffer.AsSpan(0, Received));
+                }
 
                 Data.Information = (ulong)Math.Max(0, Received);
                 return NTSTATUS.STATUS_SUCCESS;
@@ -821,5 +827,4 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
     }
-
 }

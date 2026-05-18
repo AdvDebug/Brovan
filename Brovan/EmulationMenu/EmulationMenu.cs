@@ -74,6 +74,7 @@ namespace Brovan.EmulationMenu
             new CommandHelpEntry("funcmon", "funcmon <address|symbol> [cc] [arg_types...]", "Monitor function enter/leave with parameters."),
             new CommandHelpEntry("ldrplog", "ldrplog <address>|off|once", "Decode internal ntdll loader log calls."),
             new CommandHelpEntry("checkprot", "checkprot <address>", "Show memory protection for an address."),
+            new CommandHelpEntry("pcap", "pcap <on|off|status> [path]", "Dump emulated network traffic to a pcap file.", "netdump", "capture")
         };
 
         private static readonly Dictionary<string, CommandHelpEntry> CommandHelpLookup = BuildCommandHelpLookup();
@@ -173,6 +174,66 @@ namespace Brovan.EmulationMenu
                 return Generic.IsX86;
 
             return true;
+        }
+
+        private static void HandlePcapCommand(string[] args)
+        {
+            if (args.Length == 0 || args[0].Equals("status", StringComparison.OrdinalIgnoreCase))
+            {
+                if (NetworkTrafficPcapCapture.IsEnabled)
+                    PrintHighlight($"[*] Network pcap capture is enabled: {NetworkTrafficPcapCapture.OutputPath} (packets: {NetworkTrafficPcapCapture.PacketCount})", true);
+                else
+                    PrintHighlight("[-] Network pcap capture is disabled.", true);
+
+                return;
+            }
+
+            string action = args[0].ToLowerInvariant();
+            switch (action)
+            {
+                case "help":
+                case "?":
+                    Console.WriteLine("pcap commands:");
+                    Console.WriteLine("  pcap on <path>     Start dumping emulated network traffic to a pcap file.");
+                    Console.WriteLine("  pcap off           Stop dumping network traffic.");
+                    Console.WriteLine("  pcap status        Show the current capture state.");
+                    return;
+
+                case "on":
+                    if (args.Length < 2)
+                    {
+                        PrintHighlight("[-] Usage: pcap on <path>", true);
+                        return;
+                    }
+
+                    string Path = string.Join(" ", args, 1, args.Length - 1);
+                    if (NetworkTrafficPcapCapture.Enable(Path))
+                    {
+                        PrintHighlight($"[+] Network pcap capture enabled: {NetworkTrafficPcapCapture.OutputPath}", true);
+                    }
+                    else
+                    {
+                        PrintHighlight("[-] Failed to open the pcap output file.", true);
+                    }
+                    return;
+
+                case "off":
+                    NetworkTrafficPcapCapture.Disable();
+                    PrintHighlight("[+] Network pcap capture disabled.", true);
+                    return;
+            }
+
+            string TargetPath = string.Join(" ", args);
+            if (string.IsNullOrWhiteSpace(TargetPath))
+            {
+                PrintHighlight("[-] Usage: pcap <on|off|status> [path]", true);
+                return;
+            }
+
+            if (NetworkTrafficPcapCapture.Enable(TargetPath))
+                PrintHighlight($"[+] Network pcap capture enabled: {NetworkTrafficPcapCapture.OutputPath}", true);
+            else
+                PrintHighlight("[-] Failed to open the pcap output file.", true);
         }
 
         private static bool TryResolveRegister(string Name, out int Register, out string RegisterName)
@@ -1260,6 +1321,10 @@ namespace Brovan.EmulationMenu
 
                 case "dumpregs":
                     Console.WriteLine(Emulator.GetDump());
+                    break;
+
+                case "pcap":
+                    HandlePcapCommand(args);
                     break;
 
                 case "threads":
