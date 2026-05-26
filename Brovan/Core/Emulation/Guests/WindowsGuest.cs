@@ -1106,9 +1106,6 @@ namespace Brovan.Core.Emulation.Guests
             if (UsesDirectBlobStartup)
                 EnsureDirectBlobStandardHandles();
 
-            if (IsPeImage && !Instance.ApplyPeImageProtections(Instance._binary, MainModule))
-                throw new InvalidOperationException("Failed to apply main PE image protections.");
-
             WinSyscallTable = HelperFunctions.BuildWinSyscallDictionary(Instance._binary.Architecture);
 
             ulong PageSize = 0x2000;
@@ -1434,8 +1431,10 @@ namespace Brovan.Core.Emulation.Guests
                     return;
                 }
 
-                using BinaryFile Library = new BinaryFile(NtdllPath, true);
-                Instance.LoadWinLibrary(Library, true, MapBySections: false);
+                using (BinaryFile Library = new BinaryFile(NtdllPath, true))
+                {
+                    Instance.LoadWinLibrary(Library, true, MapBySections: false);
+                }
             }
             catch (Exception ex)
             {
