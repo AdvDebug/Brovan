@@ -12,7 +12,52 @@
 
 Brovan is a powerful user-mode binary emulator for inspecting and running x86_64 programs in a controlled emulated environment. It supports PE, ELF, memory dumps, and even raw files with no recognized file format.
 
-It is a tool used to analyze binaries in an interactive way and discovering what functions they are trying to access, what they are doing, and fully controlling the program inside the emulator. it is useful for malware analysis, reverse engineering, debugging binaries, or generally understanding what a program is doing, without executing their instructions directly on the host CPU.
+It is a tool used to analyze binaries in an interactive way and discovering what functions they are trying to access, what they are doing, and fully controlling the program inside the emulator.
+
+it is useful for malware analysis, reverse engineering, debugging binaries, or generally understanding what a program is doing, without executing their instructions directly on the host CPU.
+
+## Core Features
+
+<div align="center">
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>🖥️ Multi-format loading</h3>
+      <p>Run <b>PE</b>, <b>ELF</b>, memory dumps, and even raw binaries with no recognized file format.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>🧠 Interactive analysis</h3>
+      <p>Inspect execution live, follow control flow, and understand what a program is doing as it runs.</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>🔎 Syscall & function tracing</h3>
+      <p>See which APIs, syscalls, and functions the target resolves and accesses inside the emulator.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>🛡️ Controlled execution</h3>
+      <p>Emulate binaries in a safe sandbox environment without executing them directly on the host CPU.</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>🌐 Network traffic dumping</h3>
+      <p>Capture and inspect emulated network activity to better understand program behavior.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>⚙️ Reverse-engineering friendly</h3>
+      <p>Useful for malware analysis, debugging, and general binary inspection workflows.</p>
+    </td>
+  </tr>
+</table>
+
+</div>
+
+<div align="center">
+  <p><strong>And much more ✨</strong></p>
+</div>
 
 ## Preview
 
@@ -69,7 +114,7 @@ The wiki is the main source for:
 
 - Build instructions
 - Architecture overview
-- Usage guide
+- Usage guide (recommended, as Brovan have a lot than it advertises and some other useful functionalities)
 - Command reference
 
 See the wiki here: https://github.com/AdvDebug/Brovan/wiki
