@@ -1,0 +1,44 @@
+name: Build Brovan
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build (${{ matrix.rid }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            artifact: brovan-windows-x64
+          - rid: linux-x64
+            artifact: brovan-linux-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore Brovan.csproj
+
+      - name: Publish
+        run: dotnet publish Brovan.csproj -c Release -r ${{ matrix.rid }} --self-contained true -o publish
+
+      - name: Zip output
+        shell: pwsh
+        run: Compress-Archive -Path publish\* -DestinationPath "${{ matrix.artifact }}.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
