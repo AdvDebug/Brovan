@@ -3,20 +3,24 @@ name: Build Brovan
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
 
 jobs:
   build:
-    name: Build (${{ matrix.rid }})
-    runs-on: windows-latest
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+
     strategy:
       fail-fast: false
       matrix:
         include:
-          - rid: win-x64
-            artifact: brovan-windows-x64
-          - rid: linux-x64
-            artifact: brovan-linux-x64
+          - platform: Windows x64
+            runner: windows-latest
+            rid: win-x64
+
+          - platform: Linux x64
+            runner: ubuntu-latest
+            rid: linux-x64
 
     steps:
       - name: Checkout
@@ -28,17 +32,13 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore Brovan.csproj
+        run: dotnet restore Brovan/Brovan.csproj
 
       - name: Publish
-        run: dotnet publish Brovan.csproj -c Release -r ${{ matrix.rid }} --self-contained true -o publish
+        run: dotnet publish Brovan/Brovan.csproj -c Release -r ${{ matrix.rid }} --self-contained false -o artifacts
 
-      - name: Zip output
-        shell: pwsh
-        run: Compress-Archive -Path publish\* -DestinationPath "${{ matrix.artifact }}.zip" -Force
-
-      - name: Upload artifact
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.zip
+          name: Brovan ${{ matrix.platform }}
+          path: artifacts/**
