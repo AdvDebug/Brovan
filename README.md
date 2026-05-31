@@ -121,7 +121,8 @@ See the wiki here: https://github.com/AdvDebug/Brovan/wiki
 
 > [!WARNING]
 > The [Releases](https://github.com/AdvDebug/Brovan/releases) page may not always have the latest changes.  
-> For the most up-to-date version, **[build from source](https://github.com/AdvDebug/Brovan/wiki/Building-Brovan)** instead.
+> For the most up-to-date version, **[build from source](https://github.com/AdvDebug/Brovan/wiki/Building-Brovan)** instead
+> or use the latest build from <a href="https://github.com/AdvDebug/Brovan/actions">GitHub Actions</a>
 
 # Credits
 Thanks to <a href="https://github.com/icedland/iced">Iced library</a> for x86_64 disassembly and assembly.
