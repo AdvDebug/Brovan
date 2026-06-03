@@ -146,6 +146,7 @@ namespace Brovan.Core.Emulation
 
         public bool IsReserved;
         public bool IsCommitted;
+        public bool IsReset;
 
         /// <summary>
         /// Initial memory protections when the region was allocated.

@@ -713,6 +713,7 @@ namespace Brovan.Core.Emulation
                    Left.Protect == Right.Protect &&
                    Left.IsReserved == Right.IsReserved &&
                    Left.IsCommitted == Right.IsCommitted &&
+                   Left.IsReset == Right.IsReset &&
                    Left.Protections == Right.Protections &&
                    Left.InitialProtections == Right.InitialProtections &&
                    Left.SpecialProtections == Right.SpecialProtections &&
@@ -1422,6 +1423,7 @@ namespace Brovan.Core.Emulation
                     Protect = Region.AllocationProtect,
                     IsReserved = true,
                     IsCommitted = false,
+                    IsReset = Region.IsReset,
                     InitialProtections = AllocationProt,
                     Protections = MemoryProtection.None,
                     SpecialProtections = SpecialProtections.None,
@@ -1439,6 +1441,7 @@ namespace Brovan.Core.Emulation
                 Protect = Protect,
                 IsReserved = true,
                 IsCommitted = true,
+                IsReset = Region.IsReset,
                 InitialProtections = AllocationProt,
                 Protections = NewProt,
                 SpecialProtections = Special,
@@ -1457,6 +1460,7 @@ namespace Brovan.Core.Emulation
                     Protect = Region.AllocationProtect,
                     IsReserved = true,
                     IsCommitted = false,
+                    IsReset = Region.IsReset,
                     InitialProtections = AllocationProt,
                     Protections = MemoryProtection.None,
                     SpecialProtections = SpecialProtections.None,
@@ -1475,6 +1479,7 @@ namespace Brovan.Core.Emulation
                    Left.Protect == Right.Protect &&
                    Left.IsReserved == Right.IsReserved &&
                    Left.IsCommitted == Right.IsCommitted &&
+                   Left.IsReset == Right.IsReset &&
                    Left.InitialProtections == Right.InitialProtections &&
                    Left.Protections == Right.Protections &&
                    Left.SpecialProtections == Right.SpecialProtections &&
@@ -1543,6 +1548,7 @@ namespace Brovan.Core.Emulation
                         Protect = Region.AllocationProtect,
                         IsReserved = true,
                         IsCommitted = false,
+                        IsReset = Region.IsReset,
                         InitialProtections = AllocationProt,
                         Protections = MemoryProtection.None,
                         SpecialProtections = SpecialProtections.None,
