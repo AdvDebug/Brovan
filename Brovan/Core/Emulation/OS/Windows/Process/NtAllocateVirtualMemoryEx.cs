@@ -108,10 +108,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
                 ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
                 ulong RegionSizePtr = Instance.WinHelper.GetArg64(2);
-                ulong AllocationTypeValue = Instance.WinHelper.GetArg64(3);
-                ulong ProtectValue = Instance.WinHelper.GetArg64(4);
+                ulong AllocationTypeValue = (uint)Instance.WinHelper.GetArg64(3);
+                ulong ProtectValue = (uint)Instance.WinHelper.GetArg64(4);
                 ulong ExtendedParametersPtr = Instance.WinHelper.GetArg64(5);
-                ulong ExtendedParameterCount = Instance.WinHelper.GetArg64(6);
+                ulong ExtendedParameterCount = (uint)Instance.WinHelper.GetArg64(6);
 
                 if (BaseAddressPtr == 0 || RegionSizePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;

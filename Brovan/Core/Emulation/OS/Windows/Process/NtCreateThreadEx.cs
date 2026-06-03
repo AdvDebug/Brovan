@@ -53,11 +53,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Instance.WinUnimplemented;
 
             ulong ThreadHandlePtr = Instance.WinHelper.GetArg64(0);
-            ulong DesiredAccess = Instance.WinHelper.GetArg64(1);
+            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
             ulong ProcessHandle = Instance.WinHelper.GetArg64(3);
             ulong StartRoutine = Instance.WinHelper.GetArg64(4);
             ulong Argument = Instance.WinHelper.GetArg64(5);
-            ulong CreateFlags = Instance.WinHelper.GetArg64(6);
+            ulong CreateFlags = (uint)Instance.WinHelper.GetArg64(6);
             ulong StackSize = Instance.WinHelper.GetArg64(8);
             ulong AttributeList = Instance.WinHelper.GetArg64(10);
 

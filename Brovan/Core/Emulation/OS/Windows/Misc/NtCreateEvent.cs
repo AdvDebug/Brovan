@@ -9,7 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
                 ulong EventHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = Instance.WinHelper.GetArg64(1);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
                 ulong ObjectAttributes = Instance.WinHelper.GetArg64(2);
                 uint EventType = (uint)Instance.WinHelper.GetArg64(3);
                 bool InitialState = (byte)Instance.WinHelper.GetArg64(4, true) != 0;

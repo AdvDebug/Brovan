@@ -9,7 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
                 ulong IoCompletionHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = Instance.WinHelper.GetArg64(1);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
                 ulong Count = Instance.WinHelper.GetArg64(3);
 
                 if (IoCompletionHandlePtr == 0)

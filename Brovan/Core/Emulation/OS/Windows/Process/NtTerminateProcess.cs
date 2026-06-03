@@ -14,7 +14,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
                 ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-                ulong ExitCode = Instance.WinHelper.GetArg64(1);
+                ulong ExitCode = (uint)Instance.WinHelper.GetArg64(1);
 
                 if (ExitCode == 0)
                 {

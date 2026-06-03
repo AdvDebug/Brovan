@@ -14,7 +14,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong WParam = Instance.WinHelper.GetArg64(2);
             ulong LParam = Instance.WinHelper.GetArg64(3);
             ulong XParam = Instance.WinHelper.GetArg64(4);
-            ulong Flags = Instance.WinHelper.GetArg64(6);
+            ulong Flags = (uint)Instance.WinHelper.GetArg64(6);
             bool Ansi = (XParam & 1) != 0 || (Flags & 1) != 0;
 
             if ((Message & 0xFFFE0000u) != 0)

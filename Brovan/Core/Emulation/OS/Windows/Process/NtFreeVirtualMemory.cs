@@ -17,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
                 ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
                 ulong RegionSizePtr = Instance.WinHelper.GetArg64(2);
-                ulong FreeType = Instance.WinHelper.GetArg64(3);
+                ulong FreeType = (uint)Instance.WinHelper.GetArg64(3);
 
                 if (BaseAddressPtr == 0 || RegionSizePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;

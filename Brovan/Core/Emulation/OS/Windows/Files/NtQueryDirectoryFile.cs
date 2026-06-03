@@ -20,9 +20,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong FileInformation = Instance.WinHelper.GetArg64(5);
             uint Length = (uint)Instance.WinHelper.GetArg64(6);
             uint FileInformationClass = (uint)Instance.WinHelper.GetArg64(7);
-            bool ReturnSingleEntry = Instance.WinHelper.GetArg64(8) != 0;
+            bool ReturnSingleEntry = (uint)Instance.WinHelper.GetArg64(8) != 0;
             ulong FileName = Instance.WinHelper.GetArg64(9);
-            bool RestartScan = Instance.WinHelper.GetArg64(10) != 0;
+            bool RestartScan = (uint)Instance.WinHelper.GetArg64(10) != 0;
 
             uint QueryFlags = 0;
             if (RestartScan)
