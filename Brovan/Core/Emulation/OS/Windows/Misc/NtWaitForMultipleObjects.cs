@@ -82,7 +82,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint Count = (uint)Instance.WinHelper.GetArg64(0);
             ulong HandlesPtr = Instance.WinHelper.GetArg64(1);
             uint WaitType = (uint)Instance.WinHelper.GetArg64(2);
-            bool Alertable = Instance.WinHelper.GetArg64(3) != 0;
+            bool Alertable = (uint)Instance.WinHelper.GetArg64(3) != 0;
             ulong TimeoutPtr = Instance.WinHelper.GetArg64(4);
 
             EmulatedThread Thread = Instance.CurrentThread;

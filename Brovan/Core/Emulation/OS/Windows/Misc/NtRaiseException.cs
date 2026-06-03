@@ -17,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ExceptionRecordPtr = Instance.WinHelper.GetArg64(0);
             ulong ContextRecordPtr = Instance.WinHelper.GetArg64(1);
 
-            bool FirstChance = Instance.WinHelper.GetArg64(2) != 0;
+            bool FirstChance = (uint)Instance.WinHelper.GetArg64(2) != 0;
             _ = FirstChance;
 
             if (ExceptionRecordPtr == 0 || ContextRecordPtr == 0)

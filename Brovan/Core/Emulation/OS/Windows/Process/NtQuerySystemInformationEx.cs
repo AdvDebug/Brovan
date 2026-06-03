@@ -10,11 +10,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)Instance.WinHelper.GetArg64(0);
+                // SystemInformationClass, InputBufferLength and SystemInformationLength are ULONG (32-bit);
+                // mask to 32 bits since the caller can leave garbage in the upper half of the (stack-passed) slots.
+                SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg64(0);
                 ulong InputBufferPtr = Instance.WinHelper.GetArg64(1);
-                ulong InputBufferLength = Instance.WinHelper.GetArg64(2);
+                ulong InputBufferLength = (uint)Instance.WinHelper.GetArg64(2);
                 ulong SystemInformationPtr = Instance.WinHelper.GetArg64(3);
-                ulong SystemInformationLength = Instance.WinHelper.GetArg64(4);
+                ulong SystemInformationLength = (uint)Instance.WinHelper.GetArg64(4);
                 ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(5);
 
                 if (InputBufferLength != 0)

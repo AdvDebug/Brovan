@@ -38,8 +38,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
                 ulong ZeroBits = Instance.WinHelper.GetArg64(2); // ignored for now
                 ulong RegionSizePtr = Instance.WinHelper.GetArg64(3);
-                ulong AllocationTypeValue = Instance.WinHelper.GetArg64(4);
-                ulong ProtectValue = Instance.WinHelper.GetArg64(5);
+                ulong AllocationTypeValue = (uint)Instance.WinHelper.GetArg64(4);
+                ulong ProtectValue = (uint)Instance.WinHelper.GetArg64(5);
                 ulong RegionSize = 0;
                 if (ProcessHandle != ulong.MaxValue)
                 {

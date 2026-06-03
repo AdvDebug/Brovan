@@ -9,7 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
                 ulong WorkerFactoryHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = Instance.WinHelper.GetArg64(1);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
                 ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
                 ulong IoCompletionHandle = Instance.WinHelper.GetArg64(3);
                 ulong WorkerProcessHandle = Instance.WinHelper.GetArg64(4);

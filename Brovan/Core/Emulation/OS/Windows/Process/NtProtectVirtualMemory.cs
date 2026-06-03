@@ -16,7 +16,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
                 ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
                 ulong RegionSizePtr = Instance.WinHelper.GetArg64(2);
-                ulong NewProtection = Instance.WinHelper.GetArg64(3);
+                ulong NewProtection = (uint)Instance.WinHelper.GetArg64(3);
                 ulong OldProtectionPtr = Instance.WinHelper.GetArg64(4);
 
                 // current process

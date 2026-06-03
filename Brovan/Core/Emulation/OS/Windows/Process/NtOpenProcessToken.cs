@@ -16,7 +16,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Is64)
             {
                 ProcessHandle = Instance.WinHelper.GetArg64(0);
-                DesiredAccess = Instance.WinHelper.GetArg64(1);
+                DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
                 TokenHandlePtr = Instance.WinHelper.GetArg64(2);
 
                 if (TokenHandlePtr == 0 || !Instance.IsRegionMapped(TokenHandlePtr, 8))

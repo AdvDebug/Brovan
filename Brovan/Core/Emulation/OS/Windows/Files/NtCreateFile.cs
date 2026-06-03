@@ -31,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private NTSTATUS Handle64(BinaryEmulator Instance)
         {
             ulong FileHandlePtr = Instance.WinHelper.GetArg64(0);
-            ulong DesiredAccess = Instance.WinHelper.GetArg64(1);
+            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
             ulong IoStatusBlockPtr = Instance.WinHelper.GetArg64(3);
             uint CreateDisposition = (uint)Instance.WinHelper.GetArg64(7);

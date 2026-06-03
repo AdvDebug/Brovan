@@ -33,10 +33,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
                 ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
                 ulong RegionSizePtr = Instance.WinHelper.GetArg64(2);
-                ulong AllocationTypeValue = Instance.WinHelper.GetArg64(3);
-                ulong ProtectValue = Instance.WinHelper.GetArg64(4);
+                // AllocationType, PageProtection and ExtendedParameterCount are ULONG (32-bit) in the
+                // syscall signature; the caller can leave garbage in the upper 32 bits of the register,
+                // so mask to 32 bits. Without this, a real count of 0 with non-zero high bits is read as
+                // non-zero and wrongly fails the "count != 0 but pointer == 0" check (INVALID_PARAMETER).
+                ulong AllocationTypeValue = (uint)Instance.WinHelper.GetArg64(3);
+                ulong ProtectValue = (uint)Instance.WinHelper.GetArg64(4);
                 ulong ExtendedParametersPtr = Instance.WinHelper.GetArg64(5);
-                ulong ExtendedParameterCount = Instance.WinHelper.GetArg64(6);
+                ulong ExtendedParameterCount = (uint)Instance.WinHelper.GetArg64(6);
 
                 if (ProtectValue == 0x08 || ProtectValue == 0x80)
                     return NTSTATUS.STATUS_INVALID_PAGE_PROTECTION;

@@ -9,7 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
                 ulong SemaphoreHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = Instance.WinHelper.GetArg64(1);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
                 ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
                 int InitialCount = (int)Instance.WinHelper.GetArg64(3, true);
                 int MaximumCount = (int)Instance.WinHelper.GetArg64(4, true);
