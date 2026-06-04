@@ -7,6 +7,79 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const ulong PageSize = 0x1000;
         private const ulong AllocationGranularity = 0x10000;
+        private const ulong MemReset = 0x00080000UL;
+        private const ulong MemResetUndo = 0x01000000UL;
+
+        private static bool TryApplyResetState(BinaryEmulator Instance, ulong BaseAddress, ulong RegionSize, bool Reset, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_SUCCESS;
+
+            if (BaseAddress == 0 || RegionSize == 0)
+            {
+                Status = NTSTATUS.STATUS_INVALID_PARAMETER;
+                return false;
+            }
+
+            if ((BaseAddress & (PageSize - 1)) != 0 || (RegionSize & (PageSize - 1)) != 0)
+            {
+                Status = NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+                return false;
+            }
+
+            ulong End = BaseAddress + RegionSize;
+            if (End < BaseAddress)
+            {
+                Status = NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+                return false;
+            }
+
+            ulong Current = BaseAddress;
+            ulong AllocationBase = 0;
+            bool HasAllocationBase = false;
+
+            while (Current < End)
+            {
+                if (!Instance.TryFindMemoryRegionIndex(Current, out int Index) || !Instance.TryFindMemoryRegion(Current, out MemoryRegion Region))
+                {
+                    Status = NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+                    return false;
+                }
+
+                if (!Region.IsReserved || !Region.IsCommitted)
+                {
+                    Status = NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+                    return false;
+                }
+
+                if (!HasAllocationBase)
+                {
+                    AllocationBase = Region.AllocationBase;
+                    HasAllocationBase = true;
+                }
+                else if (Region.AllocationBase != AllocationBase)
+                {
+                    Status = NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+                    return false;
+                }
+
+                ulong RegionEnd = Region.BaseAddress + Region.Size;
+                if (RegionEnd <= Current)
+                {
+                    Status = NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+                    return false;
+                }
+
+                if (Region.IsReset != Reset)
+                {
+                    Region.IsReset = Reset;
+                    Instance.SetMemoryRegion(Index, Region);
+                }
+
+                Current = Math.Min(RegionEnd, End);
+            }
+
+            return true;
+        }
 
         /// <summary>
         /// Finds a free base address (allocation granularity aligned) that does not overlap any existing region.
@@ -71,12 +144,32 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (RegionSizeRaw == 0 || AllocationTypeValue == 0 || ProtectValue == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
-
                 ulong BaseAddress = Instance.ReadMemoryULong(BaseAddressPtr);
 
                 bool Reserve = (AllocationTypeValue & 0x2000UL) != 0; // MEM_RESERVE
                 bool Commit = (AllocationTypeValue & 0x1000UL) != 0;  // MEM_COMMIT
+
+                bool Reset = (AllocationTypeValue & MemReset) != 0;
+                bool ResetUndo = (AllocationTypeValue & MemResetUndo) != 0;
+                if (Reset || ResetUndo)
+                {
+                    if ((Reset && ResetUndo) || (Reset && AllocationTypeValue != MemReset) || (ResetUndo && AllocationTypeValue != MemResetUndo))
+                        return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                    ulong ResetRegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
+                    if (!TryApplyResetState(Instance, BaseAddress, ResetRegionSize, Reset, out NTSTATUS ResetStatus))
+                        return ResetStatus;
+
+                    if (!Instance._emulator.WriteMemory(BaseAddressPtr, BaseAddress))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    if (!Instance._emulator.WriteMemory(RegionSizePtr, ResetRegionSize))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
+                RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
 
                 Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
 
@@ -157,13 +250,33 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (RegionSizeRaw == 0 || AllocationTypeValue == 0 || ProtectValue == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
-
                 uint BaseAddress32 = Instance.ReadMemoryUInt(BaseAddressPtr);
                 ulong BaseAddress = BaseAddress32;
 
                 bool Reserve = (AllocationTypeValue & 0x2000U) != 0; // MEM_RESERVE
-                bool Commit = (AllocationTypeValue & 0x1000U) != 0;  // MEM_COMMIT
+                bool Commit = (AllocationTypeValue & 0x1000U) != 0; // MEM_COMMIT
+
+                bool Reset = (AllocationTypeValue & MemReset) != 0;
+                bool ResetUndo = (AllocationTypeValue & MemResetUndo) != 0;
+                if (Reset || ResetUndo)
+                {
+                    if ((Reset && ResetUndo) || (Reset && AllocationTypeValue != MemReset) || (ResetUndo && AllocationTypeValue != MemResetUndo))
+                        return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                    ulong ResetRegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
+                    if (!TryApplyResetState(Instance, BaseAddress, ResetRegionSize, Reset, out NTSTATUS ResetStatus))
+                        return ResetStatus;
+
+                    if (!Instance._emulator.WriteMemory(BaseAddressPtr, (uint)BaseAddress))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    if (!Instance._emulator.WriteMemory(RegionSizePtr, (uint)ResetRegionSize))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
+                RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
 
                 Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
 
