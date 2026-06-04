@@ -13,7 +13,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Instance.WinUnimplemented;
 
             ulong SectionHandlePtr = Instance.WinHelper.GetArg64(0);
-            ulong DesiredAccess = Instance.WinHelper.GetArg64(1);
+            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
             ulong MaximumSizePtr = Instance.WinHelper.GetArg64(3);
             uint SectionPageProtection = (uint)Instance.WinHelper.GetArg64(4);

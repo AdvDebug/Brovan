@@ -10,7 +10,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Instance.WinUnimplemented;
 
             ulong ThreadHandle = Instance.WinHelper.GetArg64(0);
-            ulong ExitStatus = Instance.WinHelper.GetArg64(1);
+            ulong ExitStatus = (uint)Instance.WinHelper.GetArg64(1);
 
             bool TerminatingSelfByNullHandle = ThreadHandle == 0;
             EmulatedThread TargetThread = null;

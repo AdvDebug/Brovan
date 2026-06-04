@@ -83,7 +83,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance._binary.Architecture != BinaryArchitecture.x64)
                 return Instance.WinUnimplemented;
 
-            bool Alertable = Instance.WinHelper.GetArg64(0) != 0;
+            bool Alertable = (uint)Instance.WinHelper.GetArg64(0) != 0;
             ulong DelayIntervalPtr = Instance.WinHelper.GetArg64(1);
             long DelayMs = ReadDelayMs(Instance, DelayIntervalPtr);
             EmulatedThread Thread = Instance.CurrentThread;

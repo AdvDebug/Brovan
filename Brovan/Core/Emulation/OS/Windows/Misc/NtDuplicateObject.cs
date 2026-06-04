@@ -16,7 +16,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong SourceHandle = Instance.WinHelper.GetArg64(1);
                 ulong TargetProcessHandle = Instance.WinHelper.GetArg64(2);
                 ulong TargetHandlePtr = Instance.WinHelper.GetArg64(3);
-                ulong DesiredAccess = Instance.WinHelper.GetArg64(4);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(4);
                 uint HandleAttributes = (uint)Instance.WinHelper.GetArg64(5);
                 uint Options = (uint)Instance.WinHelper.GetArg64(6);
 

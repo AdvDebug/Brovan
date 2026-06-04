@@ -11,7 +11,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
                 ulong MutantHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = Instance.WinHelper.GetArg64(1);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
                 ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
 
                 return HandleOpenMutant64(Instance, MutantHandlePtr, DesiredAccess, ObjectAttributesPtr);

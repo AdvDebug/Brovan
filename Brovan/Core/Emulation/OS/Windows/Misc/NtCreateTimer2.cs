@@ -11,8 +11,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong TimerHandlePtr = Instance.WinHelper.GetArg64(0);
                 ulong TimerIdPtr = Instance.WinHelper.GetArg64(1);
                 ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
-                ulong Attributes = Instance.WinHelper.GetArg64(3);
-                ulong DesiredAccess = Instance.WinHelper.GetArg64(4);
+                ulong Attributes = (uint)Instance.WinHelper.GetArg64(3);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(4);
 
                 if (TimerHandlePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
