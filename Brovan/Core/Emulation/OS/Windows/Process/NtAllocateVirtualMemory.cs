@@ -278,6 +278,28 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
 
+                bool Reset = (AllocationTypeValue & MemReset) != 0;
+                bool ResetUndo = (AllocationTypeValue & MemResetUndo) != 0;
+                if (Reset || ResetUndo)
+                {
+                    if ((Reset && ResetUndo) || (Reset && AllocationTypeValue != MemReset) || (ResetUndo && AllocationTypeValue != MemResetUndo))
+                        return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                    ulong ResetRegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
+                    if (!TryApplyResetState(Instance, BaseAddress, ResetRegionSize, Reset, out NTSTATUS ResetStatus))
+                        return ResetStatus;
+
+                    if (!Instance._emulator.WriteMemory(BaseAddressPtr, (uint)BaseAddress))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    if (!Instance._emulator.WriteMemory(RegionSizePtr, (uint)ResetRegionSize))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
+                RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
+
                 Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
 
                 if (!Reserve && Commit && BaseAddress == 0)
