@@ -4,11 +4,7 @@ using System.Security.Cryptography;
 namespace Brovan.Core.Emulation.OS.Windows
 {
     /// <summary>
-    /// Emulates <c>\Device\KsecDD</c> (Kernel Security Support Provider device). During process
-    /// initialization bcrypt/CNG (and the CRT) open this device and use it for random number
-    /// generation (IOCTL_KSEC_RNG) and for RtlEncryptMemory/RtlDecryptMemory
-    /// (IOCTL_KSEC_*_MEMORY). If the open fails the owning DllMain returns FALSE and the process
-    /// aborts with STATUS_DLL_INIT_FAILED, so the device must at least be openable.
+    /// Emulates <c>\Device\KsecDD</c> (Kernel Security Support Provider device)
     /// </summary>
     internal sealed class KsecDevice : IWinDevice
     {
@@ -22,8 +18,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint IOCTL_KSEC_DECRYPT_MEMORY_CROSS_PROCESS = 0x390018;
         private const uint IOCTL_KSEC_ENCRYPT_MEMORY_SAME_LOGON = 0x39001C;
         private const uint IOCTL_KSEC_DECRYPT_MEMORY_SAME_LOGON = 0x390020;
-        // FILE_DEVICE_KSEC function 0x100 (104-byte input, 8-byte output). bcrypt/CNG issues this
-        // from its DllMain during process init and only requires the call to succeed.
         private const uint IOCTL_KSEC_CLIENT_HANDSHAKE = 0x390400;
 
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
@@ -57,8 +51,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case IOCTL_KSEC_ENCRYPT_MEMORY_SAME_LOGON:
                 case IOCTL_KSEC_DECRYPT_MEMORY_SAME_LOGON:
                     {
-                        // RtlEncryptMemory/RtlDecryptMemory: emulate as identity so an encrypt followed
-                        // by a decrypt round-trips to the original plaintext within the emulated process.
                         byte[] Source = (Data.InputBuffer != null && Data.InputBuffer.Length > 0) ? Data.InputBuffer : Data.OutputBuffer;
                         if (Data.OutputBuffer != null && Source != null)
                         {
@@ -71,8 +63,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                 case IOCTL_KSEC_CLIENT_HANDSHAKE:
-                    // Acknowledge with success and a zeroed output token so the owning DllMain
-                    // returns TRUE instead of aborting the process with STATUS_DLL_INIT_FAILED.
                     if (Data.OutputBuffer != null && Data.OutputLength > 0)
                     {
                         uint OutN = Math.Min(Data.OutputLength, (uint)Data.OutputBuffer.Length);
