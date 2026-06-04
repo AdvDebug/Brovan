@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -33,8 +33,13 @@
 		<Copy SourceFiles="$(ProjectDir)Resources\libunicorn.so" DestinationFolder="$(PublishDir)" Condition="'$(RuntimeIdentifier)' != '' And $([System.String]::Copy('$(RuntimeIdentifier)').Contains('linux'))" SkipUnchangedFiles="true" />
 	</Target>
 
-	<Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="$([MSBuild]::IsOSPlatform('Windows'))">
-		<Exec Command="@echo off&#xA;:: Detect if this is a Linux target build&#xA;set &quot;RID=$(RuntimeIdentifier)&quot;&#xA;set &quot;IS_LINUX=0&quot;&#xA;if not &quot;%25RID%25&quot;==&quot;&quot; (&#xA;  echo %25RID%25 | findstr /i &quot;linux&quot; &gt;nul 2&gt;&amp;1&#xA;  if not errorlevel 1 set &quot;IS_LINUX=1&quot;&#xA;)&#xA;&#xA;:: Copy the appropriate unicorn library to the target directory&#xA;if &quot;%25IS_LINUX%25&quot;==&quot;1&quot; (&#xA;  copy /Y &quot;$(ProjectDir)Resources\libunicorn.so&quot; &quot;$(TargetDir)&quot; &gt;nul 2&gt;&amp;1&#xA;  if errorlevel 1 (&#xA;    echo Warning: Failed to copy libunicorn.so to the target path.&#xA;  ) else (&#xA;    echo Copied libunicorn.so to the target path successfully.&#xA;  )&#xA;) else (&#xA;  copy /Y &quot;$(ProjectDir)Resources\unicorn.dll&quot; &quot;$(TargetDir)&quot; &gt;nul 2&gt;&amp;1&#xA;  if errorlevel 1 (&#xA;    echo Warning: Failed to copy unicorn.dll to the target path.&#xA;  ) else (&#xA;    echo Copied unicorn.dll to the target path successfully.&#xA;  )&#xA;)&#xA;&#xA;:: Skip editbin entirely for Linux builds&#xA;if &quot;%25IS_LINUX%25&quot;==&quot;1&quot; (&#xA;  echo Skipping editbin for Linux build.&#xA;  exit /b 0&#xA;)&#xA;&#xA;:: Get the target path (which is the dll)&#xA;set &quot;ORIGINAL_PATH=$(TargetPath)&quot;&#xA;:: Replace the target path dll extension with an exe extension to pass it to editbin later.&#xA;set &quot;MODIFIED_PATH=%25ORIGINAL_PATH:.dll=.exe%25&quot;&#xA;echo Calling VsDevCmd.bat...&#xA;call &quot;$(DevEnvDir)..\Tools\VsDevCmd.bat&quot; &gt;nul 2&gt;&amp;1&#xA;if errorlevel 1 (&#xA;  echo Warning: Couldn't execute visual studio developer command prompt.&#xA;  exit /b 0&#xA;)&#xA;:: Check if editbin.exe is now available&#xA;where editbin.exe &gt;nul 2&gt;&amp;1&#xA;if errorlevel 1 (&#xA;  echo Warning: editbin.exe not found in environment. CFG won't be disabled, Brovan will try to disable it at runtime.&#xA;) else (&#xA;  :: Disable CFG using editbin.exe&#xA;  editbin.exe /GUARD:NO %25MODIFIED_PATH%25 &gt;nul 2&gt;&amp;1&#xA;  if errorlevel 1 (&#xA;    echo editbin.exe failed to run, CFG won't be disabled so Brovan will try to disable it at runtime.&#xA;  ) else (&#xA;    echo Disabled CFG using editbin.exe successfully.&#xA;  )&#xA;)&#xA;exit /b 0" />
+	<PropertyGroup>
+		<_ModifiedTargetPath>$([System.String]::Copy('$(TargetPath)').Replace('.dll', '.exe'))</_ModifiedTargetPath>
+	</PropertyGroup>
+
+	<Target Name="PostBuild" AfterTargets="Build" Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+		<Message Text="Skipping editbin for Linux build." Importance="high" Condition="'$(RuntimeIdentifier)' != '' And $([System.String]::Copy('$(RuntimeIdentifier)').Contains('linux'))" />
+		<Exec Command="call &quot;$(DevEnvDir)..\Tools\VsDevCmd.bat&quot; &gt;nul 2&gt;&amp;1 &amp;&amp; where editbin.exe &gt;nul 2&gt;&amp;1 &amp;&amp; editbin.exe /GUARD:NO &quot;$(_ModifiedTargetPath)&quot; &gt;nul 2&gt;&amp;1" Condition="'$(RuntimeIdentifier)' == '' Or $([System.String]::Copy('$(RuntimeIdentifier)').Contains('linux')) == false" IgnoreExitCode="true" />
 	</Target>
 
   <ItemGroup>
