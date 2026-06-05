@@ -1,0 +1,224 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.Immutable;
+using System.Text;
+using System.Threading;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+
+namespace Brovan.Generators
+{
+    [Generator(LanguageNames.CSharp)]
+    public sealed class WinRegistryGenerator : IIncrementalGenerator
+    {
+        public void Initialize(IncrementalGeneratorInitializationContext context)
+        {
+            IncrementalValuesProvider<INamedTypeSymbol?> ClassSymbols = context.SyntaxProvider.CreateSyntaxProvider(IsCandidate, GetSymbol);
+            IncrementalValueProvider<(Compilation Compilation, ImmutableArray<INamedTypeSymbol?> Classes)> Combined =
+                context.CompilationProvider.Combine(ClassSymbols.Collect());
+
+            context.RegisterSourceOutput(Combined, Execute);
+        }
+
+        private static bool IsCandidate(SyntaxNode Node, CancellationToken Token)
+        {
+            if (Node is not ClassDeclarationSyntax ClassNode)
+                return false;
+
+            return ClassNode.BaseList != null;
+        }
+
+        private static INamedTypeSymbol? GetSymbol(GeneratorSyntaxContext Context, CancellationToken Token)
+        {
+            return Context.SemanticModel.GetDeclaredSymbol(Context.Node) as INamedTypeSymbol;
+        }
+
+        private static void Execute(SourceProductionContext Context, (Compilation Compilation, ImmutableArray<INamedTypeSymbol?> Classes) Source)
+        {
+            Compilation Compilation = Source.Compilation;
+            ImmutableArray<INamedTypeSymbol?> Classes = Source.Classes;
+
+            INamedTypeSymbol? SyscallInterface = Compilation.GetTypeByMetadataName("Brovan.Core.Emulation.IWinSyscall");
+            INamedTypeSymbol? DeviceInterface = Compilation.GetTypeByMetadataName("Brovan.Core.Emulation.OS.Windows.IWinDevice");
+            if (SyscallInterface == null || DeviceInterface == null)
+                return;
+
+            List<INamedTypeSymbol> Syscalls = new List<INamedTypeSymbol>();
+            List<INamedTypeSymbol> Win32k = new List<INamedTypeSymbol>();
+            List<INamedTypeSymbol> Devices = new List<INamedTypeSymbol>();
+
+            HashSet<INamedTypeSymbol> Seen = new HashSet<INamedTypeSymbol>(SymbolEqualityComparer.Default);
+            for (int i = 0; i < Classes.Length; i++)
+            {
+                INamedTypeSymbol? Symbol = Classes[i];
+                if (Symbol == null)
+                    continue;
+
+                if (!Seen.Add(Symbol))
+                    continue;
+
+                if (Symbol.TypeKind != TypeKind.Class || Symbol.IsAbstract)
+                    continue;
+
+                string Namespace = Symbol.ContainingNamespace != null ? Symbol.ContainingNamespace.ToDisplayString() : string.Empty;
+
+                if (Implements(Symbol, SyscallInterface))
+                {
+                    if (!HasAccessibleParameterlessCtor(Symbol))
+                        continue;
+
+                    if (Namespace == "Brovan.Core.Emulation.OS.Windows")
+                        Syscalls.Add(Symbol);
+                    else if (Namespace == "Brovan.Core.Emulation.OS.Windows.Win32k")
+                        Win32k.Add(Symbol);
+                }
+
+                if (Implements(Symbol, DeviceInterface))
+                {
+                    if (!HasAccessibleParameterlessCtor(Symbol))
+                        continue;
+
+                    if (Namespace == "Brovan.Core.Emulation.OS.Windows")
+                        Devices.Add(Symbol);
+                }
+            }
+
+            Syscalls.Sort(CompareByName);
+            Win32k.Sort(CompareByName);
+            Devices.Sort(CompareByName);
+
+            string SourceText = BuildSource(Syscalls, Win32k, Devices);
+            Context.AddSource("WinRegistry.g.cs", SourceText);
+        }
+
+        private static int CompareByName(INamedTypeSymbol Left, INamedTypeSymbol Right)
+        {
+            return string.Compare(Left.Name, Right.Name, StringComparison.Ordinal);
+        }
+
+        private static bool Implements(INamedTypeSymbol Type, INamedTypeSymbol Interface)
+        {
+            foreach (INamedTypeSymbol Implemented in Type.AllInterfaces)
+            {
+                if (SymbolEqualityComparer.Default.Equals(Implemented, Interface))
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool HasAccessibleParameterlessCtor(INamedTypeSymbol Type)
+        {
+            foreach (IMethodSymbol Ctor in Type.InstanceConstructors)
+            {
+                if (Ctor.Parameters.Length == 0 && Ctor.DeclaredAccessibility != Accessibility.Private)
+                    return true;
+            }
+            return false;
+        }
+
+        private static string BuildSource(List<INamedTypeSymbol> Syscalls, List<INamedTypeSymbol> Win32k, List<INamedTypeSymbol> Devices)
+        {
+            StringBuilder Builder = new StringBuilder();
+            Builder.AppendLine("// <auto-generated />");
+            Builder.AppendLine("using System;");
+            Builder.AppendLine("namespace Brovan.Core.Emulation.OS.Windows");
+            Builder.AppendLine("{");
+
+            Builder.AppendLine("    internal static class WinSyscallRegistry");
+            Builder.AppendLine("    {");
+            AppendNameArray(Builder, "SupportedFunctions", Syscalls);
+            AppendNameArray(Builder, "SupportedFunctionsWin32k", Win32k);
+            AppendFactory(Builder, "Create", "global::Brovan.Core.Emulation.IWinSyscall", Syscalls);
+            AppendFactory(Builder, "CreateWin32k", "global::Brovan.Core.Emulation.IWinSyscall", Win32k);
+            Builder.AppendLine("    }");
+
+            Builder.AppendLine();
+            Builder.AppendLine("    internal static class WinDeviceRegistry");
+            Builder.AppendLine("    {");
+            AppendDeviceFactory(Builder, Devices);
+            Builder.AppendLine("    }");
+
+            Builder.AppendLine("}");
+
+            return Builder.ToString();
+        }
+
+        private static void AppendNameArray(StringBuilder Builder, string FieldName, List<INamedTypeSymbol> Types)
+        {
+            Builder.Append("        internal static readonly string[] ");
+            Builder.Append(FieldName);
+            Builder.AppendLine(" = new string[]");
+            Builder.AppendLine("        {");
+            foreach (INamedTypeSymbol Type in Types)
+            {
+                Builder.Append("            \"");
+                Builder.Append(Type.Name);
+                Builder.AppendLine("\",");
+            }
+            Builder.AppendLine("        };");
+            Builder.AppendLine();
+        }
+
+        private static void AppendFactory(StringBuilder Builder, string MethodName, string ReturnType, List<INamedTypeSymbol> Types)
+        {
+            Builder.Append("        internal static ");
+            Builder.Append(ReturnType);
+            Builder.Append(' ');
+            Builder.Append(MethodName);
+            Builder.AppendLine("(string name)");
+            Builder.AppendLine("        {");
+
+            if (Types.Count == 0)
+            {
+                Builder.AppendLine("            return null;");
+                Builder.AppendLine("        }");
+                Builder.AppendLine();
+                return;
+            }
+
+            Builder.AppendLine("            return name switch");
+            Builder.AppendLine("            {");
+            foreach (INamedTypeSymbol Type in Types)
+            {
+                Builder.Append("                \"");
+                Builder.Append(Type.Name);
+                Builder.Append("\" => new ");
+                Builder.Append(GetFullTypeName(Type));
+                Builder.AppendLine("(),");
+            }
+            Builder.AppendLine("                _ => null");
+            Builder.AppendLine("            };");
+            Builder.AppendLine("        }");
+            Builder.AppendLine();
+        }
+
+        private static void AppendDeviceFactory(StringBuilder Builder, List<INamedTypeSymbol> Devices)
+        {
+            Builder.AppendLine("        internal static global::Brovan.Core.Emulation.OS.Windows.IWinDevice[] CreateAll()");
+            Builder.AppendLine("        {");
+
+            if (Devices.Count == 0)
+            {
+                Builder.AppendLine("            return Array.Empty<global::Brovan.Core.Emulation.OS.Windows.IWinDevice>();");
+                Builder.AppendLine("        }");
+                return;
+            }
+
+            Builder.AppendLine("            return new global::Brovan.Core.Emulation.OS.Windows.IWinDevice[]");
+            Builder.AppendLine("            {");
+            foreach (INamedTypeSymbol Device in Devices)
+            {
+                Builder.Append("                new ");
+                Builder.Append(GetFullTypeName(Device));
+                Builder.AppendLine("(),");
+            }
+            Builder.AppendLine("            };");
+            Builder.AppendLine("        }");
+        }
+
+        private static string GetFullTypeName(INamedTypeSymbol Type)
+        {
+            return Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        }
+    }
+}

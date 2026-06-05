@@ -2,7 +2,6 @@ using System.Diagnostics;
 using static Brovan.Core.Helpers.BinaryHelpers;
 using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
-using System.Reflection;
 using Brovan.Core.Helpers;
 using System.Security.Cryptography;
 using System.Text;
@@ -1784,17 +1783,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Dictionary<string, IWinDevice> Devices = new Dictionary<string, IWinDevice>(StringComparer.OrdinalIgnoreCase);
 
-            var DeviceTypes = Assembly.GetExecutingAssembly().GetTypes().Where(Type =>
-                Type.Namespace == typeof(WinSysHelper).Namespace &&
-                typeof(IWinDevice).IsAssignableFrom(Type) &&
-                !Type.IsInterface &&
-                !Type.IsAbstract);
-
-            foreach (Type Type in DeviceTypes)
+            foreach (IWinDevice Device in WinDeviceRegistry.CreateAll())
             {
-                if (Activator.CreateInstance(Type, true) is not IWinDevice Device)
-                    continue;
-
                 string DeviceName = NormalizeDevicePath(Device.DeviceName);
                 if (string.IsNullOrEmpty(DeviceName))
                     continue;
@@ -1848,7 +1838,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Attempts to create a Windows device endpoint by resolving the device path through the reflected device registry.
+        /// Attempts to create a Windows device endpoint by resolving the device path through the generated device registry.
         /// </summary>
         /// <param name="Path">The normalized or raw NT device path.</param>
         /// <param name="EaBuffer">The extended attributes buffer supplied to NtCreateFile, if any.</param>
@@ -2607,15 +2597,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns></returns>
         public ulong GetArg64(int Index, bool UInt = false)
         {
-            if (Index < 0)
-            {
-                MethodBase Function = new StackTrace()?.GetFrame(1)?.GetMethod();
-                string Caller = Function != null ? $"{Function.DeclaringType?.FullName}.{Function.Name}" : "Unknown";
-
-                Utils.LogError($"[GetArg64] Accessing negative index value at {Caller}");
-                return 0;
-            }
-
             if (Index == 0) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R10);
             if (Index == 1) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RDX);
             if (Index == 2) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R8);
