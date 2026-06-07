@@ -2,6 +2,8 @@
 
 In this file I will mention some ideas, some bugs to fix, and implementations for anyone looking to contribute.
 
+But in a nutshell, the main ways to help would be to add more syscalls with correct implementations, improve visualizations, and improving compatbility with other programs.
+
 ## Reflection
 
 Right now i'm trying to eliminate reflection from the codebase, any contributions in that regard are welcome!
