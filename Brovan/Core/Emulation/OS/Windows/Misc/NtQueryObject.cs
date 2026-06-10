@@ -264,6 +264,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return "TpWorkerFactory";
             if (HandleObject is WinWaitCompletionPacket)
                 return "WaitCompletionPacket";
+            if (HandleObject is WinJob)
+                return "Job";
             return HandleObject.ObjectType.ToString();
         }
 
@@ -302,6 +304,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return WorkerFactory.Name ?? string.Empty;
             if (HandleObject is WinWaitCompletionPacket Packet)
                 return Packet.Name ?? string.Empty;
+            if (HandleObject is WinJob Job)
+                return Job.Name ?? string.Empty;
             return string.Empty;
         }
 
