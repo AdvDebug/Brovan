@@ -2420,15 +2420,6 @@ namespace Brovan
                 {
                     AllowedRoots.Clear();
 
-                    try
-                    {
-                        AllowedRoots.Add(Path.GetFullPath(VirtualFileSystemRoot));
-                    }
-                    catch
-                    {
-                        // ignore
-                    }
-
                     foreach (KeyValuePair<char, string> Pair in DriveMappings)
                     {
                         if (string.IsNullOrWhiteSpace(Pair.Value))
