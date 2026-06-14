@@ -74,6 +74,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             RegisterCharacterDevice("/dev/stdin", DevStdIn);
             RegisterCharacterDevice("/dev/stdout", DevStdOut);
             RegisterCharacterDevice("/dev/stderr", DevStdErr);
+            RegisterCharacterDevice("/dev/tty", DevTty);
 
             RegisterRegularFile("/proc/cpuinfo", ProcCpuInfo);
             RegisterRegularFile("/proc/filesystems", ProcFileSystems);
@@ -212,6 +213,35 @@ namespace Brovan.Core.Emulation.OS.Linux
 
             if (string.Equals(NormalizedPath, "/dev/stderr", StringComparison.Ordinal))
                 return TryDuplicateExistingDescriptor(Helper, 2, CloseOnExec, DescriptorLimit, out Result);
+
+            if (string.Equals(NormalizedPath, "/dev/tty", StringComparison.Ordinal))
+            {
+                if ((Flags & O_DIRECTORY) != 0)
+                {
+                    Result = -(long)LinuxErrno.ENOTDIR;
+                    return true;
+                }
+
+                FileObject TerminalObject = new FileObject
+                {
+                    Path = NormalizedPath,
+                    HostPath = NormalizedPath,
+                    StatusFlags = O_RDWR,
+                    IsSpecialPath = true,
+                    IsDirectory = false,
+                    TerminalState = Helper.TerminalState
+                };
+
+                if (!Helper.DescriptorTable.TryAddHandle(TerminalObject, CloseOnExec, DescriptorLimit, out ulong TerminalDescriptor))
+                {
+                    Result = -(long)LinuxErrno.EMFILE;
+                    return true;
+                }
+
+                Result = (long)TerminalDescriptor;
+                return true;
+            }
+
 
             if (TryGetExistingDescriptor(Helper, NormalizedPath, out ulong ExistingDescriptor, out bool IsDescriptorAlias))
             {
@@ -597,6 +627,7 @@ namespace Brovan.Core.Emulation.OS.Linux
                         AddEntry(Result, "/dev/stderr", "stderr", LinuxDirectoryEntryType.SymbolicLink);
                         AddEntry(Result, "/dev/stdin", "stdin", LinuxDirectoryEntryType.SymbolicLink);
                         AddEntry(Result, "/dev/stdout", "stdout", LinuxDirectoryEntryType.SymbolicLink);
+                        AddEntry(Result, "/dev/tty", "tty", LinuxDirectoryEntryType.CharacterDevice);
                         AddEntry(Result, "/dev/urandom", "urandom", LinuxDirectoryEntryType.CharacterDevice);
                         AddEntry(Result, "/dev/zero", "zero", LinuxDirectoryEntryType.CharacterDevice);
                         DirectoryEntries = Result;
@@ -1288,6 +1319,35 @@ namespace Brovan.Core.Emulation.OS.Linux
                 return -(long)LinuxErrno.EBADF;
 
             return WriteConsole(Instance, Helper, BufferAddress, Length, Console.OpenStandardError());
+        }
+
+        public long DevTty(BinaryEmulator Instance, LinuxSyscallsHelper Helper, FileObject File, ulong BufferAddress, ulong Length, bool Write = false)
+        {
+            if (Write)
+                return WriteConsole(Instance, Helper, BufferAddress, Length, Console.OpenStandardOutput());
+
+            if (Length == 0)
+                return 0;
+
+            if (!Instance.IsRegionMapped(BufferAddress, Length))
+                return -(long)LinuxErrno.EFAULT;
+
+            string? Input = Console.ReadLine();
+            if (Input == null)
+                return 0;
+
+            ulong TransferLength = ClampTransferCount(Length);
+            byte[] Data = Encoding.ASCII.GetBytes(Input);
+            if ((ulong)Data.Length > TransferLength)
+                Array.Resize(ref Data, (int)TransferLength);
+
+            if (Data.Length == 0)
+                return 0;
+
+            if (!Instance._emulator.WriteMemory(BufferAddress, Data))
+                return -(long)LinuxErrno.EFAULT;
+
+            return Data.Length;
         }
 
         public long GeneratedFile(BinaryEmulator Instance, LinuxSyscallsHelper Helper, FileObject File, ulong BufferAddress, ulong Length, bool Write = false)

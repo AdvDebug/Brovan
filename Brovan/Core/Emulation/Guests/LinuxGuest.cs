@@ -281,7 +281,16 @@ namespace Brovan.Core.Emulation.Guests
                 bool Set = false;
                 foreach (LinuxSyscallEntry SysEntry in X64Dictionary.Values)
                 {
-                    if (T.Name == SysEntry.Handler.GetType().Name)
+                    if (T.Name == SysEntry.Handler.GetType().Name || SysEntry.Number == -1)
+                    {
+                        Set = true;
+                        break;
+                    }
+                }
+
+                foreach(LinuxSyscallEntry SysEntry in X86Dictionary.Values)
+                {
+                    if (T.Name == SysEntry.Handler.GetType().Name || SysEntry.Number == -1)
                     {
                         Set = true;
                         break;
@@ -1058,6 +1067,7 @@ namespace Brovan.Core.Emulation.Guests
             RegisterSyscall("fstat64", -1, 197, new Fstat(true));
             RegisterSyscall("fadvise64", 221, 250, new Fadvise64());
             RegisterSyscall("statfs", 137, 99, new Statfs());
+            RegisterSyscall("ioctl", 16, 54, new Ioctl());
 
             // Process syscalls
             RegisterSyscall("exit", 60, 1, new Exit());

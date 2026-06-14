@@ -190,6 +190,16 @@ namespace Brovan.Core.Emulation.OS.Linux
         MAP_NOREPLACE = MAP_FIXED_NOREPLACE
     }
 
+    public enum LinuxIoctlRequest : uint
+    {
+        TCGETS = 0x5401,
+        TCSETS = 0x5402,
+        TCSETSW = 0x5403,
+        TCSETSF = 0x5404,
+        TIOCGWINSZ = 0x5413,
+        TIOCSWINSZ = 0x5414,
+    }
+
     public class SharedBuffer
     {
         private byte[] _buffer;
@@ -273,6 +283,7 @@ namespace Brovan.Core.Emulation.OS.Linux
         public int StatusFlags { get; set; }
         public string Path { get; set; } = "";
         public LinuxFileStream FileStream { get; set; }
+        public LinuxTerminalState TerminalState { get; set; }
 
         public string HostPath
         {
@@ -323,11 +334,11 @@ namespace Brovan.Core.Emulation.OS.Linux
 
         private readonly Dictionary<ulong, FileDescriptorEntry> DescriptorToEntry = new();
 
-        public FileDescriptorTable()
+        public FileDescriptorTable(LinuxTerminalState TerminalState)
         {
-            DescriptorToEntry[0] = new FileDescriptorEntry(new FileObject { RefCount = 1, Path = "/dev/stdin", StatusFlags = O_RDONLY, IsSpecialPath = true });
-            DescriptorToEntry[1] = new FileDescriptorEntry(new FileObject { RefCount = 1, Path = "/dev/stdout", StatusFlags = O_WRONLY, IsSpecialPath = true });
-            DescriptorToEntry[2] = new FileDescriptorEntry(new FileObject { RefCount = 1, Path = "/dev/stderr", StatusFlags = O_WRONLY, IsSpecialPath = true });
+            DescriptorToEntry[0] = new FileDescriptorEntry(new FileObject { RefCount = 1, Path = "/dev/stdin", StatusFlags = O_RDONLY, IsSpecialPath = true, TerminalState = TerminalState });
+            DescriptorToEntry[1] = new FileDescriptorEntry(new FileObject { RefCount = 1, Path = "/dev/stdout", StatusFlags = O_WRONLY, IsSpecialPath = true, TerminalState = TerminalState });
+            DescriptorToEntry[2] = new FileDescriptorEntry(new FileObject { RefCount = 1, Path = "/dev/stderr", StatusFlags = O_WRONLY, IsSpecialPath = true, TerminalState = TerminalState });
         }
 
         public bool TryAddHandle(IFileDescriptorObject Object, bool CloseOnExec, ulong Limit, out ulong Descriptor)
@@ -1863,8 +1874,8 @@ namespace Brovan.Core.Emulation.OS.Linux
 
         public LinuxTerminalState()
         {
-            Termios[5] = 0;
-            Termios[6] = 1;
+            Termios[5] = 0; // VTIME
+            Termios[6] = 1; // VMIN
         }
     }
 
@@ -1931,7 +1942,8 @@ namespace Brovan.Core.Emulation.OS.Linux
         {
             Shared = new SharedBuffer();
             ResourceLimits = new Dictionary<int, LinuxResourceLimit>();
-            DescriptorTable = new FileDescriptorTable();
+            TerminalState = new LinuxTerminalState();
+            DescriptorTable = new FileDescriptorTable(TerminalState);
             MountTable = new Dictionary<string, LinuxMountEntry>(StringComparer.Ordinal);
             ProcessTable = new Dictionary<int, LinuxProcessInfo>();
             PID = AllocateGuestProcessId();
@@ -1962,7 +1974,6 @@ namespace Brovan.Core.Emulation.OS.Linux
             {
                 CpuCount = GetDefaultGuestCpuCount()
             };
-            TerminalState = new LinuxTerminalState();
             SpecialPathsHandler = new SpecialPathsHandlers();
             InitializeSystemProcesses();
             InitializeCurrentProcess();
