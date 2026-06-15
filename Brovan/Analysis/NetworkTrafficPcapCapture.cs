@@ -145,17 +145,17 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        public static void RecordOutbound(Socket Socket, ReadOnlySpan<byte> Payload, EndPoint? RemoteOverride = null)
+        public static void RecordOutbound(BrovanSocket Socket, ReadOnlySpan<byte> Payload, EndPoint? RemoteOverride = null)
         {
             Record(Socket, Payload, true, RemoteOverride);
         }
 
-        public static void RecordInbound(Socket Socket, ReadOnlySpan<byte> Payload, EndPoint? RemoteOverride = null)
+        public static void RecordInbound(BrovanSocket Socket, ReadOnlySpan<byte> Payload, EndPoint? RemoteOverride = null)
         {
             Record(Socket, Payload, false, RemoteOverride);
         }
 
-        private static void Record(Socket Socket, ReadOnlySpan<byte> Payload, bool Outbound, EndPoint? RemoteOverride)
+        private static void Record(BrovanSocket Socket, ReadOnlySpan<byte> Payload, bool Outbound, EndPoint? RemoteOverride)
         {
             if (Socket == null || Payload.Length == 0)
                 return;
@@ -179,7 +179,7 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private static void RecordUdp(Socket Socket, ReadOnlySpan<byte> Payload, bool Outbound, EndPoint? RemoteOverride)
+        private static void RecordUdp(BrovanSocket Socket, ReadOnlySpan<byte> Payload, bool Outbound, EndPoint? RemoteOverride)
         {
             if (!TryGetEndpoints(Socket, Outbound, RemoteOverride, out PacketEndpoints Endpoints))
                 return;
@@ -200,7 +200,7 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private static void RecordTcp(Socket Socket, ReadOnlySpan<byte> Payload, bool Outbound, EndPoint? RemoteOverride)
+        private static void RecordTcp(BrovanSocket Socket, ReadOnlySpan<byte> Payload, bool Outbound, EndPoint? RemoteOverride)
         {
             if (!TryGetEndpoints(Socket, Outbound, RemoteOverride, out PacketEndpoints Endpoints))
                 return;
@@ -261,7 +261,7 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private static bool TryGetEndpoints(Socket Socket, bool Outbound, EndPoint? RemoteOverride, out PacketEndpoints Endpoints)
+        private static bool TryGetEndpoints(BrovanSocket Socket, bool Outbound, EndPoint? RemoteOverride, out PacketEndpoints Endpoints)
         {
             Endpoints = default;
 

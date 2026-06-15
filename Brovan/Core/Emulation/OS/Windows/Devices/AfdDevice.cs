@@ -39,10 +39,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int DefaultIoTimeoutMs = 5000;
         private const int DefaultAcceptTimeoutMs = 10000;
 
-        private Socket? _socket;
+        private BrovanSocket? _socket;
+        private NetworkAccessPolicy _policy;
         private bool IsListening;
 
-        private readonly Dictionary<int, Socket> _PendingAccepted = new();
+        private readonly Dictionary<int, BrovanSocket> _PendingAccepted = new();
         private int _NextSequence;
 
         private int WinAf = 2;
@@ -115,7 +116,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Type == SocketType.Unknown)
                 Type = SocketType.Stream;
 
-            _socket = new Socket(Family, Type, Protocol);
+            _socket = new BrovanSocket(Family, Type, Protocol, _policy);
             _socket.SendTimeout = DefaultIoTimeoutMs;
             _socket.ReceiveTimeout = DefaultIoTimeoutMs;
 
@@ -273,7 +274,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private Socket? AcceptWithTimeout(int TimeoutMs, out EndPoint? Remote)
+        private BrovanSocket? AcceptWithTimeout(int TimeoutMs, out EndPoint? Remote)
         {
             Remote = null;
             EnsureSocket();
@@ -285,7 +286,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!_socket.Poll(TimeoutMs * 1000, SelectMode.SelectRead))
                     return null;
 
-                Socket Accepted = _socket.Accept();
+                BrovanSocket Accepted = _socket.Accept();
                 Remote = Accepted.RemoteEndPoint;
                 return Accepted;
             }
@@ -340,7 +341,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance.Settings.GetNetworkPolicy().IsEndpointAllowed(EndPointValue);
         }
 
-        private static bool IsSocketRemoteAllowed(BinaryEmulator Instance, Socket Socket, bool RequireKnownRemote)
+        private static bool IsSocketRemoteAllowed(BinaryEmulator Instance, BrovanSocket Socket, bool RequireKnownRemote)
         {
             NetworkAccessPolicy Policy = Instance.Settings.GetNetworkPolicy();
             if (!Policy.HasAnyAccess())
@@ -458,7 +459,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Data.OutputBuffer == null || Data.OutputBuffer.Length < 20)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-            Socket? Accepted = AcceptWithTimeout(DefaultAcceptTimeoutMs, out EndPoint? Remote);
+            BrovanSocket? Accepted = AcceptWithTimeout(DefaultAcceptTimeoutMs, out EndPoint? Remote);
             if (Accepted == null)
                 return NTSTATUS.STATUS_TIMEOUT;
 
@@ -501,7 +502,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             int Sequence = BitConverter.ToInt32(Data.InputBuffer, 4);
             ulong AcceptHandle = ReadPtr(Instance, Data.InputBuffer, 8);
 
-            if (!_PendingAccepted.TryGetValue(Sequence, out Socket Accepted))
+            if (!_PendingAccepted.TryGetValue(Sequence, out BrovanSocket Accepted))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             WinFile? AcceptFile = Instance.WinHelper.GetFileByHandle(AcceptHandle, AccessMask.GiveTemp);
@@ -717,7 +718,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (File?.Handler?.Target is not AfdDevice EndpointDevice || EndpointDevice._socket == null)
                     continue;
 
-                Socket HostSocket = EndpointDevice._socket;
+                BrovanSocket HostSocket = EndpointDevice._socket;
 
                 bool ReadReady = false;
                 bool WriteReady = false;
@@ -773,6 +774,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (DecodeBase(Ioctl) != FsctlAfdBase)
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
+
+            _policy = Policy;
 
             int Request = DecodeRequest(Ioctl);
 

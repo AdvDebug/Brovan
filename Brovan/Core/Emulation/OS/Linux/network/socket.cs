@@ -8,7 +8,7 @@ namespace Brovan.Core.Emulation.OS.Linux.network
             int Type = unchecked((int)Context.Arg1);
             int Protocol = unchecked((int)Context.Arg2);
 
-            if (!SocketHelpers.TryCreateSocket(Domain, Type, Protocol, out SocketObject SocketObject, out bool CloseOnExec, out LinuxErrno Error))
+            if (!SocketHelpers.TryCreateSocket(Domain, Type, Protocol, out SocketObject SocketObject, out bool CloseOnExec, out LinuxErrno Error, Instance.Settings.NetworkPolicy))
             {
                 Helper.SetReturnValue(Instance, Context, -(long)Error);
                 return;

@@ -7,7 +7,6 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
-using HostSocket = System.Net.Sockets.Socket;
 using Brovan;
 using Brovan.Core.Emulation.Guests;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -1041,7 +1040,7 @@ namespace Brovan.Core.Emulation.OS.Linux
     internal sealed class SocketObject : IFileDescriptorObject, IDisposable
     {
         public int RefCount { get; set; }
-        public HostSocket Handle { get; }
+        public BrovanSocket Handle { get; }
         public int Domain { get; }
         public int Type { get; }
         public int Protocol { get; }
@@ -1052,7 +1051,7 @@ namespace Brovan.Core.Emulation.OS.Linux
         public SocketAsyncEventArgs? PendingConnect { get; set; }
         public bool PendingConnectCompleted { get; set; }
 
-        public SocketObject(HostSocket Handle, int Domain, int Type, int Protocol, int StatusFlags, bool NonBlocking)
+        public SocketObject(BrovanSocket Handle, int Domain, int Type, int Protocol, int StatusFlags, bool NonBlocking)
         {
             this.Handle = Handle;
             this.Domain = Domain;
@@ -1138,7 +1137,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             return 1024;
         }
 
-        public static bool TryCreateSocket(int Domain, int Type, int Protocol, out SocketObject Socket, out bool CloseOnExec, out LinuxErrno Error)
+        public static bool TryCreateSocket(int Domain, int Type, int Protocol, out SocketObject Socket, out bool CloseOnExec, out LinuxErrno Error, NetworkAccessPolicy Policy)
         {
             Socket = null;
             CloseOnExec = false;
@@ -1202,7 +1201,7 @@ namespace Brovan.Core.Emulation.OS.Linux
 
             try
             {
-                HostSocket HostHandle = new HostSocket(Family, HostType, HostProtocol);
+                BrovanSocket HostHandle = new BrovanSocket(Family, HostType, HostProtocol, Policy);
                 HostHandle.Blocking = !NonBlocking;
                 int StatusFlags = O_RDWR | (NonBlocking ? O_NONBLOCK : 0);
                 Socket = new SocketObject(HostHandle, Domain, BaseType, Protocol, StatusFlags, NonBlocking);

@@ -50,7 +50,7 @@ namespace Brovan.Core.Emulation.OS.Linux.network
 
             try
             {
-                HostSocket Accepted = SocketHandle.Handle.Accept();
+                BrovanSocket Accepted = SocketHandle.Handle.Accept();
                 EndPoint RemoteEndPoint = null;
                 try
                 {

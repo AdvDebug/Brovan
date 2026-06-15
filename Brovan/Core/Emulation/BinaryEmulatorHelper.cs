@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading.Tasks;
@@ -179,6 +182,376 @@ namespace Brovan.Core.Emulation
         public Dictionary<Registers, ulong> Registers { get; set; }
         public Dictionary<ulong, byte[]> MemoryRegions { get; set; }
         public HashSet<ulong> OriginalRegionAddresses { get; set; }
+    }
+
+    /// <summary>
+    /// <see cref="Socket"/> wrapper to enforce the network policies.
+    /// </summary>
+
+    public class BrovanSocket : IDisposable
+    {
+        private readonly Socket _socket;
+        private readonly NetworkAccessPolicy _policy;
+
+        public BrovanSocket(AddressFamily Family, SocketType Type, ProtocolType protocolType, NetworkAccessPolicy AccessPolicy)
+        {
+            _policy = AccessPolicy ?? throw new ArgumentNullException(nameof(AccessPolicy));
+            if (!_policy.HasAnyAccess())
+                throw new UnauthorizedAccessException("Session does not have any socket access.");
+
+            _socket = new Socket(Family, Type, protocolType);
+        }
+
+        private BrovanSocket(Socket socket, NetworkAccessPolicy AccessPolicy)
+        {
+            _socket = socket ?? throw new ArgumentNullException(nameof(socket));
+            _policy = AccessPolicy ?? throw new ArgumentNullException(nameof(AccessPolicy));
+            if (!_policy.HasAnyAccess())
+                throw new UnauthorizedAccessException("Session does not have any socket access.");
+        }
+
+        public int Available => _socket.Available;
+        public bool Blocking { get => _socket.Blocking; set => _socket.Blocking = value; }
+        public bool Connected => _socket.Connected;
+        public bool DontFragment { get => _socket.DontFragment; set => _socket.DontFragment = value; }
+        public bool ExclusiveAddressUse { get => _socket.ExclusiveAddressUse; set => _socket.ExclusiveAddressUse = value; }
+        public EndPoint RemoteEndPoint
+        {
+            get
+            {
+                EndPoint Remote = _socket.RemoteEndPoint;
+                EnsureCanAccessEndpoint(Remote);
+                return Remote;
+            }
+        }
+
+        public EndPoint LocalEndPoint
+        {
+            get
+            {
+                EndPoint Local = _socket.LocalEndPoint;
+                if (_policy.Mode != NetworkAccessMode.Full)
+                    EnsureCanBindEndpoint(Local);
+
+                return Local;
+            }
+        }
+        public AddressFamily AddressFamily => _socket.AddressFamily;
+        public SocketType SocketType => _socket.SocketType;
+        public ProtocolType ProtocolType => _socket.ProtocolType;
+        public int AvailableBytes => _socket.Available;
+        public int SendBufferSize { get => _socket.SendBufferSize; set => _socket.SendBufferSize = value; }
+        public int ReceiveBufferSize { get => _socket.ReceiveBufferSize; set => _socket.ReceiveBufferSize = value; }
+        public int SendTimeout { get => _socket.SendTimeout; set => _socket.SendTimeout = value; }
+        public int ReceiveTimeout { get => _socket.ReceiveTimeout; set => _socket.ReceiveTimeout = value; }
+        public LingerOption LingerState { get => _socket.LingerState; set => _socket.LingerState = value; }
+        public bool NoDelay { get => _socket.NoDelay; set => _socket.NoDelay = value; }
+        public short Ttl { get => _socket.Ttl; set => _socket.Ttl = value; }
+
+        private void EnsureCanAccessEndpoint(EndPoint? endPoint)
+        {
+            if (endPoint == null)
+                return;
+
+            if (!_policy.IsEndpointAllowed(endPoint))
+                throw new SecurityException("The remote endpoint is not whitelisted.");
+        }
+
+        private void EnsureCanAccessAddress(IPAddress? address)
+        {
+            if (address == null)
+                return;
+
+            if (!_policy.IsAddressAllowed(address))
+                throw new SecurityException("The remote endpoint is not whitelisted.");
+        }
+
+        private void EnsureCanAccessAddresses(IEnumerable<IPAddress>? addresses)
+        {
+            if (addresses == null)
+                return;
+
+            foreach (IPAddress Address in addresses)
+                EnsureCanAccessAddress(Address);
+        }
+
+        private void EnsureCanAccessHost(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host))
+                return;
+
+            try
+            {
+                IPAddress[] Resolved = Dns.GetHostAddresses(host);
+                EnsureCanAccessAddresses(Resolved);
+            }
+            catch (SocketException)
+            {
+            }
+            catch (ArgumentException)
+            {
+            }
+        }
+
+        private void EnsureCanBindEndpoint(EndPoint? endPoint)
+        {
+            EnsureCanAccessEndpoint(endPoint);
+        }
+
+        private void EnsureCurrentRemoteAllowed()
+        {
+            EndPoint? remoteEndPoint = null;
+            try
+            {
+                remoteEndPoint = _socket.RemoteEndPoint;
+            }
+            catch (SocketException)
+            {
+                return;
+            }
+            catch (ObjectDisposedException)
+            {
+                throw;
+            }
+
+            if (remoteEndPoint != null && !_policy.IsEndpointAllowed(remoteEndPoint))
+                throw new SecurityException("The remote endpoint is not whitelisted.");
+        }
+
+        public void Connect(EndPoint endPoint)
+        {
+            EnsureCanAccessEndpoint(endPoint);
+            _socket.Connect(endPoint);
+        }
+
+        public void Connect(IPAddress address, int port) => Connect(new IPEndPoint(address, port));
+
+        public void Connect(string host, int port)
+        {
+            EnsureCanAccessHost(host);
+            _socket.Connect(host, port);
+        }
+
+        public void Connect(string host, int port, string? localIP)
+        {
+            if (!string.IsNullOrWhiteSpace(localIP) && IPAddress.TryParse(localIP, out IPAddress? LocalAddress))
+                EnsureCanBindEndpoint(new IPEndPoint(LocalAddress!, 0));
+
+            EnsureCanAccessHost(host);
+            _socket.Connect(host, port);
+        }
+
+        public void Connect(IPAddress[] addresses, int port)
+        {
+            EnsureCanAccessAddresses(addresses);
+            _socket.Connect(addresses, port);
+        }
+
+        public IAsyncResult BeginConnect(EndPoint remoteEP, AsyncCallback? callback, object? state)
+        {
+            EnsureCanAccessEndpoint(remoteEP);
+            return _socket.BeginConnect(remoteEP, callback, state);
+        }
+
+        public IAsyncResult BeginConnect(IPAddress address, int port, AsyncCallback? callback, object? state)
+            => BeginConnect(new IPEndPoint(address, port), callback, state);
+
+        public IAsyncResult BeginConnect(IPAddress[] addresses, int port, AsyncCallback? callback, object? state)
+        {
+            EnsureCanAccessAddresses(addresses);
+            return _socket.BeginConnect(addresses, port, callback, state);
+        }
+
+        public IAsyncResult BeginConnect(string host, int port, AsyncCallback? callback, object? state)
+        {
+            EnsureCanAccessHost(host);
+            return _socket.BeginConnect(host, port, callback, state);
+        }
+
+        public void EndConnect(IAsyncResult asyncResult) => _socket.EndConnect(asyncResult);
+
+        public Task ConnectAsync(EndPoint remoteEP)
+        {
+            EnsureCanAccessEndpoint(remoteEP);
+            return _socket.ConnectAsync(remoteEP);
+        }
+
+        public ValueTask ConnectAsync(EndPoint remoteEP, CancellationToken cancellationToken)
+        {
+            EnsureCanAccessEndpoint(remoteEP);
+            return _socket.ConnectAsync(remoteEP, cancellationToken);
+        }
+
+        public Task ConnectAsync(IPAddress address, int port)
+            => ConnectAsync(new IPEndPoint(address, port));
+
+        public ValueTask ConnectAsync(IPAddress address, int port, CancellationToken cancellationToken)
+            => ConnectAsync(new IPEndPoint(address, port), cancellationToken);
+
+        public Task ConnectAsync(IPAddress[] addresses, int port)
+        {
+            EnsureCanAccessAddresses(addresses);
+            return _socket.ConnectAsync(addresses, port);
+        }
+
+        public ValueTask ConnectAsync(IPAddress[] addresses, int port, CancellationToken cancellationToken)
+        {
+            EnsureCanAccessAddresses(addresses);
+            return _socket.ConnectAsync(addresses, port, cancellationToken);
+        }
+
+        public Task ConnectAsync(string host, int port)
+        {
+            EnsureCanAccessHost(host);
+            return _socket.ConnectAsync(host, port);
+        }
+
+        public ValueTask ConnectAsync(string host, int port, CancellationToken cancellationToken)
+        {
+            EnsureCanAccessHost(host);
+            return _socket.ConnectAsync(host, port, cancellationToken);
+        }
+
+        public bool ConnectAsync(SocketAsyncEventArgs args)
+        {
+            EnsureCanAccessEndpoint(args?.RemoteEndPoint);
+            return _socket.ConnectAsync(args);
+        }
+
+        public BrovanSocket Accept()
+        {
+            Socket accepted = _socket.Accept();
+            try
+            {
+                return new BrovanSocket(accepted, _policy);
+            }
+            catch
+            {
+                try { accepted.Dispose(); } catch { }
+                throw;
+            }
+        }
+
+        public int Send(ReadOnlySpan<byte> data)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.Send(data);
+        }
+
+        public int Send(byte[] data)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.Send(data);
+        }
+
+        public int Send(ReadOnlySpan<byte> data, SocketFlags flags)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.Send(data, flags);
+        }
+
+        public int Send(byte[] data, SocketFlags flags)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.Send(data, flags);
+        }
+
+        public int Send(byte[] data, int offset, int size, SocketFlags flags)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.Send(data, offset, size, flags);
+        }
+
+        public int SendTo(byte[] data, int offset, int size, SocketFlags flags, EndPoint remoteEP)
+        {
+            EnsureCanAccessEndpoint(remoteEP);
+            return _socket.SendTo(data, offset, size, flags, remoteEP);
+        }
+
+        public int Receive(Span<byte> data, SocketFlags flags)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.Receive(data, flags);
+        }
+
+        public int Receive(byte[] data, SocketFlags flags)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.Receive(data, flags);
+        }
+
+        public int Receive(byte[] data, int offset, int size, SocketFlags flags)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.Receive(data, offset, size, flags);
+        }
+
+        public int ReceiveFrom(byte[] buffer, int offset, int size, SocketFlags flags, ref EndPoint remoteEP)
+        {
+            int Received = _socket.ReceiveFrom(buffer, offset, size, flags, ref remoteEP);
+            if (remoteEP != null && !_policy.IsEndpointAllowed(remoteEP))
+            {
+                if (Received > 0)
+                    Array.Clear(buffer, offset, Received);
+
+                throw new SecurityException("The remote endpoint is not whitelisted.");
+            }
+
+            return Received;
+        }
+
+        public object GetSocketOption(SocketOptionLevel level, SocketOptionName optionName) => _socket.GetSocketOption(level, optionName);
+        public byte[] GetSocketOption(SocketOptionLevel level, SocketOptionName optionName, int optionLength) => _socket.GetSocketOption(level, optionName, optionLength);
+        public void SetSocketOption(SocketOptionLevel level, SocketOptionName optionName, bool optionValue) => _socket.SetSocketOption(level, optionName, optionValue);
+        public void SetSocketOption(SocketOptionLevel level, SocketOptionName optionName, int optionValue) => _socket.SetSocketOption(level, optionName, optionValue);
+        public void SetSocketOption(SocketOptionLevel level, SocketOptionName optionName, byte[] optionValue) => _socket.SetSocketOption(level, optionName, optionValue);
+
+        public void Bind(EndPoint localEP)
+        {
+            EnsureCanBindEndpoint(localEP);
+            _socket.Bind(localEP);
+        }
+
+        public void Listen(int backlog)
+        {
+            if (!_policy.HasAnyAccess())
+                throw new UnauthorizedAccessException("Session does not have any socket access.");
+
+            if (_policy.Mode != NetworkAccessMode.Full)
+            {
+                EndPoint? localEndPoint = null;
+                try
+                {
+                    localEndPoint = _socket.LocalEndPoint;
+                }
+                catch (SocketException)
+                {
+                }
+
+                if (localEndPoint == null || !_policy.IsEndpointAllowed(localEndPoint))
+                    throw new SecurityException("The local endpoint is not whitelisted.");
+            }
+
+            _socket.Listen(backlog);
+        }
+
+        public bool Poll(int microSeconds, SelectMode mode) => _socket.Poll(microSeconds, mode);
+
+        public void Shutdown(SocketShutdown how)
+        {
+            EnsureCurrentRemoteAllowed();
+            _socket.Shutdown(how);
+        }
+
+        public void Disconnect(bool reuseSocket)
+        {
+            EnsureCurrentRemoteAllowed();
+            _socket.Disconnect(reuseSocket);
+        }
+
+        public void Close() => _socket.Close();
+        public void Close(int timeout) => _socket.Close(timeout);
+        public void Dispose() => _socket.Dispose();
     }
 
     public readonly struct ApiSetOverrideKey : IEquatable<ApiSetOverrideKey>
