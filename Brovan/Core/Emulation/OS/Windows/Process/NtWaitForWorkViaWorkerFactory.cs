@@ -1,5 +1,3 @@
-using System;
-using System.Collections.Generic;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows

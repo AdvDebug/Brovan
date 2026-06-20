@@ -102,6 +102,7 @@ namespace Brovan.Core
         /// <returns>The structure read from the supplied data.</returns>
         /// <exception cref="ArgumentNullException"></exception>
         /// <exception cref="ArgumentOutOfRangeException"></exception>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public T ReadStruct<T>(byte[] Data, int Offset) where T : unmanaged
         {
             if (Data == null || Data.Length == 0)
@@ -133,6 +134,7 @@ namespace Brovan.Core
         /// <returns>The structure read from the supplied data.</returns>
         /// <exception cref="ArgumentNullException"></exception>
         /// <exception cref="ArgumentOutOfRangeException"></exception>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public T ReadStruct<T>(ReadOnlySpan<byte> Data, int Offset) where T : unmanaged
         {
             if (Data.IsEmpty || Data.Length == 0)
@@ -787,14 +789,13 @@ namespace Brovan.Core
                 MaxEnd = SectionEnd;
 
             uint EndOffset = StartOffset;
-
+            byte[] ChunkData = GC.AllocateUninitializedArray<byte>(16);
             for (uint EndSearch = StartOffset; EndSearch < MaxEnd; EndSearch++)
             {
                 if (EndSearch + 16 > (uint)Data.Length)
                     break;
 
                 // Disassemble a chunk of code at the current position
-                byte[] ChunkData = new byte[16];
                 DataSpan.Slice((int)EndSearch, 16).CopyTo(ChunkData);
 
                 X86Instruction[] Instructions = Disassembler.Disassemble(ChunkData, EndSearch);
@@ -1053,6 +1054,7 @@ namespace Brovan.Core
         /// <param name="Rva">The RVA to convert.</param>
         /// <param name="FileOffset">Receives the file offset when conversion succeeds.</param>
         /// <returns>True if the RVA could be converted; otherwise, false.</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool TryRvaToFileOffset(uint Rva, out uint FileOffset)
         {
             if (RvaToFileOffsetCache != null &&
@@ -1714,7 +1716,7 @@ namespace Brovan.Core
         /// <summary>
         /// Parse and read .NET Binary information.
         /// </summary>
-        private void ParseDotNetFunctions()
+        private unsafe void ParseDotNetFunctions()
         {
             List<DotNetFunction> DotNetFunctionList = new List<DotNetFunction>();
             List<DotNetProperty> DotNetPropertyList = new List<DotNetProperty>();
@@ -1722,196 +1724,189 @@ namespace Brovan.Core
             List<DotNetType> DotNetTypeList = new List<DotNetType>();
             List<DotNetMember> DotNetMemberList = new List<DotNetMember>();
             MetadataReader MetadataReader = null;
-            byte[] Data = this.Data.ToArray();
             try
             {
-                using (MemoryStream Stream = new MemoryStream(Data))
+                // Gonna use PEReader (no manual parsing for now)
+                PEReader PEReader = new PEReader(Data.BasePtr, Data.Length, true);
+                MetadataReader = PEReader.GetMetadataReader();
+                foreach (TypeDefinitionHandle TypeHandle in MetadataReader.TypeDefinitions)
                 {
-                    // Gonna use PEReader (no manual parsing for now)
-                    PEReader PEReader = new PEReader(Stream);
-                    MetadataReader = PEReader.GetMetadataReader();
-                    foreach (TypeDefinitionHandle TypeHandle in MetadataReader.TypeDefinitions)
+                    TypeDefinition TypeDef = MetadataReader.GetTypeDefinition(TypeHandle);
+                    string TypeNamespace = TypeDef.Namespace.IsNil ? "" : MetadataReader.GetString(TypeDef.Namespace);
+                    string TypeName = MetadataReader.GetString(TypeDef.Name);
+                    AssemblyDefinition AsmDef = MetadataReader.GetAssemblyDefinition();
+                    string AssemblyName = MetadataReader.GetString(AsmDef.Name);
+                    foreach (MethodDefinitionHandle MethodHandle in TypeDef.GetMethods())
                     {
-                        TypeDefinition TypeDef = MetadataReader.GetTypeDefinition(TypeHandle);
-                        string TypeNamespace = TypeDef.Namespace.IsNil ? "" : MetadataReader.GetString(TypeDef.Namespace);
-                        string TypeName = MetadataReader.GetString(TypeDef.Name);
-                        AssemblyDefinition AsmDef = MetadataReader.GetAssemblyDefinition();
-                        string AssemblyName = MetadataReader.GetString(AsmDef.Name);
+                        MethodDefinition MethodDef = MetadataReader.GetMethodDefinition(MethodHandle);
+                        string MethodName = MetadataReader.GetString(MethodDef.Name);
 
-                        foreach (MethodDefinitionHandle MethodHandle in TypeDef.GetMethods())
+                        if (MethodDef.RelativeVirtualAddress == 0)
+                            continue;
+
+                        uint RVA = (uint)MethodDef.RelativeVirtualAddress;
+                        uint FileOffset = RvaToFileOffset(RVA, PE.Sections);
+                        if (FileOffset == 0 || FileOffset >= Data.Length - 1)
+                            continue;
+
+                        byte HeaderByte = Data[FileOffset];
+                        bool IsTiny = (HeaderByte & 0x03) == 0x02;
+                        uint CodeSize;
+
+                        if (IsTiny)
                         {
-                            MethodDefinition MethodDef = MetadataReader.GetMethodDefinition(MethodHandle);
-                            string MethodName = MetadataReader.GetString(MethodDef.Name);
-
-                            if (MethodDef.RelativeVirtualAddress == 0)
+                            CodeSize = (uint)(HeaderByte >> 2);
+                            FileOffset += 1;
+                        }
+                        else
+                        {
+                            if (FileOffset + 12 > Data.Length)
                                 continue;
 
-                            uint RVA = (uint)MethodDef.RelativeVirtualAddress;
-                            uint FileOffset = RvaToFileOffset(RVA, PE.Sections);
-                            if (FileOffset == 0 || FileOffset >= Data.Length - 1)
+                            ushort Flags_Size = ReadStruct<ushort>(DataSpan, (int)FileOffset);
+                            CodeSize = ReadStruct<uint>(DataSpan, (int)FileOffset + 4);
+                            FileOffset += 12;
+
+                            if (CodeSize > 1024 * 1024)
                                 continue;
+                        }
 
-                            byte HeaderByte = Data[FileOffset];
-                            bool IsTiny = (HeaderByte & 0x03) == 0x02;
-                            uint CodeSize;
+                        if (CodeSize == 0 || FileOffset + CodeSize > Data.Length)
+                            continue;
 
-                            if (IsTiny)
+                        ReadOnlySpan<byte> ILCode = DataSpan.Slice((int)FileOffset, (int)CodeSize);
+
+                        int ParameterCount = 0;
+                        foreach (ParameterHandle ParamHandle in MethodDef.GetParameters())
+                        {
+                            ParameterCount++;
+                        }
+
+                        BlobReader SignatureReader = MetadataReader.GetBlobReader(MethodDef.Signature);
+                        byte Convention = SignatureReader.ReadByte();
+                        bool IsInstance = (Convention & 0x20) != 0;
+                        int Token = MetadataTokens.GetToken(MethodHandle);
+                        if (!string.IsNullOrEmpty(MethodName))
+                        {
+                            int LocalsCount = 0;
+                            if (ILCode != null)
                             {
-                                CodeSize = (uint)(HeaderByte >> 2);
-                                FileOffset += 1;
-                            }
-                            else
-                            {
-                                if (FileOffset + 12 > Data.Length)
-                                    continue;
-
-                                ushort Flags_Size = ReadStruct<ushort>(Data, (int)FileOffset);
-                                CodeSize = ReadStruct<uint>(Data, (int)FileOffset + 4);
-                                FileOffset += 12;
-
-                                if (CodeSize > 1024 * 1024)
-                                    continue;
-                            }
-
-                            if (CodeSize == 0 || FileOffset + CodeSize > Data.Length)
-                                continue;
-
-                            byte[] ILCode = new byte[CodeSize];
-                            Array.Copy(Data, (int)FileOffset, ILCode, 0, (int)CodeSize);
-
-                            int ParameterCount = 0;
-                            foreach (ParameterHandle ParamHandle in MethodDef.GetParameters())
-                            {
-                                ParameterCount++;
-                            }
-
-                            BlobReader SignatureReader = MetadataReader.GetBlobReader(MethodDef.Signature);
-                            byte Convention = SignatureReader.ReadByte();
-                            bool IsInstance = (Convention & 0x20) != 0;
-                            int Token = MetadataTokens.GetToken(MethodHandle);
-                            if (!string.IsNullOrEmpty(MethodName))
-                            {
-                                int LocalsCount = 0;
-                                if (ILCode != null)
+                                MethodBodyBlock MethodBody = PEReader.GetMethodBody(MethodDef.RelativeVirtualAddress);
+                                if (!MethodBody.LocalSignature.IsNil)
                                 {
-                                    MethodBodyBlock MethodBody = PEReader.GetMethodBody(MethodDef.RelativeVirtualAddress);
-                                    if (!MethodBody.LocalSignature.IsNil)
-                                    {
-                                        StandaloneSignature LocalSignature = MetadataReader.GetStandaloneSignature(MethodBody.LocalSignature);
+                                    StandaloneSignature LocalSignature = MetadataReader.GetStandaloneSignature(MethodBody.LocalSignature);
 
-                                        // Get the signature blob reader to read the local variables count
-                                        BlobReader LocalSignatureReader = MetadataReader.GetBlobReader(LocalSignature.Signature);
-                                        SignatureHeader SigHeader = LocalSignatureReader.ReadSignatureHeader();
-                                        if (SigHeader.Kind == SignatureKind.LocalVariables)
-                                        {
-                                            LocalsCount = LocalSignatureReader.ReadCompressedInteger();
-                                        }
+                                    // Get the signature blob reader to read the local variables count
+                                    BlobReader LocalSignatureReader = MetadataReader.GetBlobReader(LocalSignature.Signature);
+                                    SignatureHeader SigHeader = LocalSignatureReader.ReadSignatureHeader();
+                                    if (SigHeader.Kind == SignatureKind.LocalVariables)
+                                    {
+                                        LocalsCount = LocalSignatureReader.ReadCompressedInteger();
                                     }
                                 }
-
-                                DotNetFunctionList.Add(new DotNetFunction
-                                {
-                                    FunctionName = MethodName,
-                                    TypeName = TypeName,
-                                    RVA = RVA,
-                                    FileOffset = FileOffset,
-                                    CodeSize = CodeSize,
-                                    Flags = (ushort)MethodDef.Attributes,
-                                    Token = Token,
-                                    ParameterCount = ParameterCount,
-                                    LocalsCount = LocalsCount,
-                                    ImplFlags = (MethodImplementations)MethodDef.ImplAttributes,
-                                    ILCode = ILCode,
-                                    IsInstance = IsInstance,
-                                    DeclaringType = TypeNamespace + "." + TypeName,
-                                    AssemblyName = AssemblyName
-                                });
-                            }
-                        }
-
-                        foreach (PropertyDefinitionHandle PropertyHandle in TypeDef.GetProperties())
-                        {
-                            PropertyDefinition PropertyDef = MetadataReader.GetPropertyDefinition(PropertyHandle);
-                            int Token = MetadataTokens.GetToken(PropertyHandle);
-                            DotNetPropertyList.Add(new DotNetProperty
-                            {
-                                PropertyName = MetadataReader.GetString(PropertyDef.Name),
-                                Token = Token
-                            });
-                        }
-
-                        foreach (FieldDefinitionHandle FieldHandle in TypeDef.GetFields())
-                        {
-                            FieldDefinition FieldDef = MetadataReader.GetFieldDefinition(FieldHandle);
-                            int Token = MetadataTokens.GetToken(FieldHandle);
-                            DotNetFieldList.Add(new DotNetField()
-                            {
-                                FieldName = MetadataReader.GetString(FieldDef.Name),
-                                Token = Token
-                            });
-                        }
-
-                        DotNetTypeList.Add(new DotNetType
-                        {
-                            TypeName = TypeName,
-                            Token = MetadataReader.GetToken(TypeHandle)
-                        });
-
-
-                        foreach (MemberReferenceHandle MemberHandle in MetadataReader.MemberReferences)
-                        {
-                            MemberReference MemberRef = MetadataReader.GetMemberReference(MemberHandle);
-                            string MemberName = MetadataReader.GetString(MemberRef.Name);
-                            int Token = MetadataTokens.GetToken(MemberHandle);
-
-                            string TypeNameMember = string.Empty;
-                            string DeclaringType = string.Empty;
-                            string AssemblyNameMember = string.Empty;
-
-                            EntityHandle ParentHandle = MemberRef.Parent;
-                            if (ParentHandle.Kind == HandleKind.TypeReference)
-                            {
-                                TypeReference TypeRef = MetadataReader.GetTypeReference((TypeReferenceHandle)ParentHandle);
-                                TypeNameMember = MetadataReader.GetString(TypeRef.Name);
-                                DeclaringType = MetadataReader.GetString(TypeRef.Namespace) + "." + TypeNameMember;
-
-                                EntityHandle Scope = TypeRef.ResolutionScope;
-                                if (Scope.Kind == HandleKind.AssemblyReference)
-                                {
-                                    AssemblyReference AsmRef = MetadataReader.GetAssemblyReference((AssemblyReferenceHandle)Scope);
-                                    AssemblyNameMember = MetadataReader.GetString(AsmRef.Name);
-                                }
-                            }
-                            else if (ParentHandle.Kind == HandleKind.TypeDefinition)
-                            {
-                                TypeDefinition TypeDefMember = MetadataReader.GetTypeDefinition((TypeDefinitionHandle)ParentHandle);
-                                DeclaringType = MetadataReader.GetString(TypeDefMember.Namespace) + "." + MetadataReader.GetString(TypeDefMember.Name);
-
-                                AssemblyDefinition AsmDefMember = MetadataReader.GetAssemblyDefinition();
-                                AssemblyNameMember = MetadataReader.GetString(AsmDefMember.Name);
-                            }
-                            else
-                            {
-                                DeclaringType = ParentHandle.ToString();
                             }
 
-                            // Read method signature blob
-                            bool IsInstance = false;
-                            BlobReader SignatureReader = MetadataReader.GetBlobReader(MemberRef.Signature);
-                            SignatureHeader SignatureHeader = SignatureReader.ReadSignatureHeader();
-                            IsInstance = SignatureHeader.IsInstance;
-
-                            DotNetMemberList.Add(new DotNetMember
+                            DotNetFunctionList.Add(new DotNetFunction
                             {
-                                MemberName = MemberName,
+                                FunctionName = MethodName,
+                                TypeName = TypeName,
+                                RVA = RVA,
+                                FileOffset = FileOffset,
+                                CodeSize = CodeSize,
+                                Flags = (ushort)MethodDef.Attributes,
                                 Token = Token,
-                                TypeName = TypeNameMember,
-                                DeclaringType = DeclaringType,
-                                AssemblyName = AssemblyNameMember,
-                                IsInstance = IsInstance
+                                ParameterCount = ParameterCount,
+                                LocalsCount = LocalsCount,
+                                ImplFlags = (MethodImplementations)MethodDef.ImplAttributes,
+                                ILCode = ILCode.ToArray(),
+                                IsInstance = IsInstance,
+                                DeclaringType = TypeNamespace + "." + TypeName,
+                                AssemblyName = AssemblyName
                             });
                         }
                     }
+
+                    foreach (PropertyDefinitionHandle PropertyHandle in TypeDef.GetProperties())
+                    {
+                        PropertyDefinition PropertyDef = MetadataReader.GetPropertyDefinition(PropertyHandle);
+                        int Token = MetadataTokens.GetToken(PropertyHandle);
+                        DotNetPropertyList.Add(new DotNetProperty
+                        {
+                            PropertyName = MetadataReader.GetString(PropertyDef.Name),
+                            Token = Token
+                        });
+                    }
+
+                    foreach (FieldDefinitionHandle FieldHandle in TypeDef.GetFields())
+                    {
+                        FieldDefinition FieldDef = MetadataReader.GetFieldDefinition(FieldHandle);
+                        int Token = MetadataTokens.GetToken(FieldHandle);
+                        DotNetFieldList.Add(new DotNetField()
+                        {
+                            FieldName = MetadataReader.GetString(FieldDef.Name),
+                            Token = Token
+                        });
+                    }
+
+                    DotNetTypeList.Add(new DotNetType
+                    {
+                        TypeName = TypeName,
+                        Token = MetadataReader.GetToken(TypeHandle)
+                    });
+                }
+
+                foreach (MemberReferenceHandle MemberHandle in MetadataReader.MemberReferences)
+                {
+                    MemberReference MemberRef = MetadataReader.GetMemberReference(MemberHandle);
+                    string MemberName = MetadataReader.GetString(MemberRef.Name);
+                    int Token = MetadataTokens.GetToken(MemberHandle);
+
+                    string TypeNameMember = string.Empty;
+                    string DeclaringType = string.Empty;
+                    string AssemblyNameMember = string.Empty;
+
+                    EntityHandle ParentHandle = MemberRef.Parent;
+                    if (ParentHandle.Kind == HandleKind.TypeReference)
+                    {
+                        TypeReference TypeRef = MetadataReader.GetTypeReference((TypeReferenceHandle)ParentHandle);
+                        TypeNameMember = MetadataReader.GetString(TypeRef.Name);
+                        DeclaringType = MetadataReader.GetString(TypeRef.Namespace) + "." + TypeNameMember;
+
+                        EntityHandle Scope = TypeRef.ResolutionScope;
+                        if (Scope.Kind == HandleKind.AssemblyReference)
+                        {
+                            AssemblyReference AsmRef = MetadataReader.GetAssemblyReference((AssemblyReferenceHandle)Scope);
+                            AssemblyNameMember = MetadataReader.GetString(AsmRef.Name);
+                        }
+                    }
+                    else if (ParentHandle.Kind == HandleKind.TypeDefinition)
+                    {
+                        TypeDefinition TypeDefMember = MetadataReader.GetTypeDefinition((TypeDefinitionHandle)ParentHandle);
+                        DeclaringType = MetadataReader.GetString(TypeDefMember.Namespace) + "." + MetadataReader.GetString(TypeDefMember.Name);
+
+                        AssemblyDefinition AsmDefMember = MetadataReader.GetAssemblyDefinition();
+                        AssemblyNameMember = MetadataReader.GetString(AsmDefMember.Name);
+                    }
+                    else
+                    {
+                        DeclaringType = ParentHandle.ToString();
+                    }
+
+                    // Read method signature blob
+                    bool IsInstance = false;
+                    BlobReader SignatureReader = MetadataReader.GetBlobReader(MemberRef.Signature);
+                    SignatureHeader SignatureHeader = SignatureReader.ReadSignatureHeader();
+                    IsInstance = SignatureHeader.IsInstance;
+
+                    DotNetMemberList.Add(new DotNetMember
+                    {
+                        MemberName = MemberName,
+                        Token = Token,
+                        TypeName = TypeNameMember,
+                        DeclaringType = DeclaringType,
+                        AssemblyName = AssemblyNameMember,
+                        IsInstance = IsInstance
+                    });
                 }
             }
             catch (Exception ex)

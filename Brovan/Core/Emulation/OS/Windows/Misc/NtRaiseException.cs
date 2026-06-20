@@ -95,6 +95,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (WinEmulatedThread.GetState(CurrentThread).ExceptionNesting > 2)
                 {
                     Instance.WinHelper.AbandonMutexesOwnedByThread(CurrentThread.ThreadId);
+                    Instance.WinHelper.ClearTerminationState(CurrentThread);
                     CurrentThread.State = EmulatedThreadState.Terminated;
                     CurrentThread.ExitCode = unchecked((int)ExceptionCode);
                     Instance.Threads[(uint)Instance.CurrentThreadId] = CurrentThread;

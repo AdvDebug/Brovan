@@ -1113,7 +1113,7 @@ namespace Brovan.Core.Helpers
         private MemoryMappedFile Mmf;
         private MemoryMappedViewAccessor View;
         private SafeMemoryMappedViewHandle Handle;
-        private byte* BasePtr;
+        public byte* BasePtr;
 
         public int Length { get; private set; }
         public bool IsMemoryMapped => ManagedData == null;

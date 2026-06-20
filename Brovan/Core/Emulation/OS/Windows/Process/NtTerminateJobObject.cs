@@ -59,13 +59,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                         continue;
 
                     Instance.WinHelper.AbandonMutexesOwnedByThread(ProcessThread.ThreadId);
+                    Instance.WinHelper.ClearTerminationState(ProcessThread);
                     ProcessThread.ExitCode = unchecked((int)ExitStatus);
                     ProcessThread.State = EmulatedThreadState.Terminated;
-                    ProcessThread.WaitActive = false;
-                    ProcessThread.WaitHandles = null;
-                    ProcessThread.WaitDeadline = -1;
-                    ProcessThread.WaitTimedOut = false;
-                    ProcessThread.WaitSatisfiedIndex = -1;
                 }
 
                 Instance.StopEmulation();

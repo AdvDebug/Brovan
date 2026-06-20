@@ -28,25 +28,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.AbandonMutexesOwnedByThread(TargetThread.ThreadId);
 
             TargetThread.ExitCode = unchecked((int)(uint)ExitStatus);
+            Instance.WinHelper.ClearTerminationState(TargetThread);
             TargetThread.State = EmulatedThreadState.Terminated;
-            TargetThread.WaitActive = false;
-            TargetThread.WaitHandles = null;
-            TargetThread.WaitDeadline = -1;
-            TargetThread.WaitTimedOut = false;
-            TargetThread.WaitSatisfiedIndex = -1;
-
-            WindowsThreadState State = WinEmulatedThread.TryGetState(TargetThread);
-            if (State != null)
-            {
-                State.ApcAlertable = false;
-                State.WaitAlertable = false;
-                State.WaitCompleted = false;
-                State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
-                State.WaitResumeRIP = 0;
-                State.WaitReturnRIP = 0;
-                State.WorkerFactoryWaitActive = false;
-                State.AlertByThreadIdWaitActive = false;
-            }
 
             if (Instance.CurrentThread != null && TargetThread.ThreadId == (uint)Instance.CurrentThreadId)
             {

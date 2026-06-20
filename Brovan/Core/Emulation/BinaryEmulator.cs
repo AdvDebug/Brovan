@@ -362,8 +362,8 @@ namespace Brovan.Core.Emulation
         public bool IsArmGuest => UnicornArch == Arch.ARM;
         public bool IsX64Guest => UnicornArch == Arch.X86 && UnicornMode == Mode.MODE_64;
         public bool IsArchX86Guest => UnicornArch == Arch.X86;
-        public ulong BaseAddress = 0x10000000UL; // Base Start
-        public ulong MaxAddress = 0x7FFFFFFFFUL;  // Max address limit
+        public readonly ulong BaseAddress = 0x10000000UL; // Base Start
+        public readonly ulong MaxAddress = 0x7FFFFFFFFUL;  // Max address limit
         private ulong _timestampCounter = 0x100000000UL;
 
         private const ulong TscCyclesPerInstruction = 3;
@@ -371,6 +371,7 @@ namespace Brovan.Core.Emulation
         private const ulong RdtscReadCycles = 60;
         private const ulong RdtscpReadCycles = 90;
         private readonly long EmulatedSystemTimeBaseFileTimeUtc = DateTime.UtcNow.ToFileTimeUtc();
+        private readonly Comparison<int> _memoryRegionIndexComparer;
 
         /// <summary>
         /// Current deterministic guest tick count in milliseconds.
@@ -476,6 +477,8 @@ namespace Brovan.Core.Emulation
 
             if (Binary.Architecture == BinaryArchitecture.Unknown)
                 throw new BadImageFormatException("Unsupported binary architecture.");
+
+            _memoryRegionIndexComparer = CompareMemoryRegionIndex;
             _binary = Binary;
             UnicornArch = Arch.X86;
             UnicornMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
@@ -515,6 +518,7 @@ namespace Brovan.Core.Emulation
             if (Data == null || Data.Length == 0)
                 throw new NullReferenceException(nameof(Data));
 
+            _memoryRegionIndexComparer = CompareMemoryRegionIndex;
             _binary = Binary ?? new BinaryFile(Data, true);
             UnicornArch = arch;
             UnicornMode = mode;
@@ -1032,7 +1036,7 @@ namespace Brovan.Core.Emulation
             for (int i = 0; i < _memory.Count; i++)
                 MemoryRegionIndex.Add(i);
 
-            MemoryRegionIndex.Sort(CompareMemoryRegionIndex);
+            MemoryRegionIndex.Sort(_memoryRegionIndexComparer);
             MemoryRegionIndexDirty = false;
         }
 
@@ -1705,7 +1709,12 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public List<EmulatedThread> GetThreadsSnapshot()
         {
-            return Threads.Values.OrderBy(Thread => Thread.ThreadId).ToList();
+            List<EmulatedThread> Snapshot = new List<EmulatedThread>(Threads.Count);
+            foreach (var Thread in Threads.Values)
+                Snapshot.Add(Thread);
+
+            Snapshot.Sort((a, b) => a.ThreadId.CompareTo(b.ThreadId));
+            return Snapshot;
         }
 
         /// <summary>

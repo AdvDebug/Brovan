@@ -5,6 +5,7 @@ using Brovan.Core.Helpers;
 using System.Text;
 using System.Buffers.Binary;
 using Brovan.Core.Emulation.OS.SharedHelpers;
+using System.IO;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -203,6 +204,38 @@ namespace Brovan.Core.Emulation.OS.Windows
                 State.AlertByThreadIdWaitActive = false;
                 State.AlertByThreadIdAddress = 0;
             }
+        }
+
+        /// <summary>
+        /// Clears wait, worker-factory, and exception state for a thread that is exiting.
+        /// </summary>
+        public void ClearTerminationState(EmulatedThread Thread, bool ClearAlertByThreadId = false)
+        {
+            if (Thread == null)
+                return;
+
+            ClearWaitState(Thread, true);
+
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State == null)
+                return;
+
+            State.WaitCompleted = false;
+            State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
+            State.WaitObjects = null;
+            State.DispatchException = false;
+            State.IsHandlingException = false;
+            State.ExceptionNesting = 0;
+            State.ExceptionInformation = null;
+            State.WorkerFactoryWaitActive = false;
+            State.WorkerFactoryHandle = 0;
+            State.WorkerFactoryMiniPackets = 0;
+            State.WorkerFactoryPacketsReturned = 0;
+            State.WorkerFactoryMaxPackets = 0;
+            State.WorkerFactoryReservedEntries?.Clear();
+            State.AlertByThreadIdPending = false;
+            State.AlertByThreadIdWaitActive = false;
+            State.AlertByThreadIdAddress = 0;
         }
 
         /// <summary>
@@ -1006,6 +1039,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong UserSharedDelta;
         public ulong ActiveWindow;
         public ulong FocusWindow;
+        private readonly Dictionary<string, string> _normalizedPathCache = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Initialize the environment for the helper (Processes, Console, etc).
@@ -2111,17 +2145,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return 0;
-        }
-
-        public byte[] StructureToBytes<T>(T str)
-        {
-            int size = Marshal.SizeOf<T>();
-            byte[] arr = new byte[size];
-            IntPtr ptr = Marshal.AllocHGlobal(size);
-            Marshal.StructureToPtr(str, ptr, false);
-            Marshal.Copy(ptr, arr, 0, size);
-            Marshal.FreeHGlobal(ptr);
-            return arr;
         }
 
         /// <summary>
@@ -3375,8 +3398,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(NtPath))
                 return null;
 
+            if (_normalizedPathCache.TryGetValue(NtPath, out string Cached))
+                return Cached;
+
             NtPath = FixupNtRegistryPath(NtPath);
-            return NormalizeKeyPath(NtPath);
+            NtPath = NormalizeKeyPath(NtPath);
+            _normalizedPathCache[NtPath] = NtPath;
+            return NtPath;
         }
 
         private bool IsVirtualRegistryRoot(string NtPath)
@@ -3389,7 +3417,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                    NtPath.Equals("\\Registry\\User", StringComparison.OrdinalIgnoreCase);
         }
 
-        private void AddVirtualRegistrySubKeys(string NtPath, SortedSet<string> Names)
+        private void AddVirtualRegistrySubKeys(string NtPath, List<string> Names)
         {
             if (string.IsNullOrEmpty(NtPath) || Names == null)
                 return;
@@ -3887,7 +3915,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(NtPath) || IsRegistryPathDeleted(NtPath))
                 return false;
 
-            SortedSet<string> Names = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<string> Names = new List<string>();
             AddVirtualRegistrySubKeys(NtPath, Names);
 
             if (RegKey.Hive != null && RegKey.Hive.Reader != null && RegKey.HasParsedKey)
@@ -3912,7 +3940,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Index >= Names.Count)
                 return false;
 
-            Name = Names.ElementAt(Index);
+            Names.Sort(StringComparer.OrdinalIgnoreCase);
+            Name = Names[Index];
             return true;
         }
 

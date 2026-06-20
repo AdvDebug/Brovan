@@ -23,6 +23,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     {
                         if (EmuThread.ThreadId != CurrentTID)
                         {
+                            Instance.WinHelper.ClearTerminationState(EmuThread);
                             EmuThread.State = EmulatedThreadState.Terminated;
                             EmuThread.ExitCode = (int)ExitCode;
                         }
@@ -39,6 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             continue;
 
                         Instance.WinHelper.AbandonMutexesOwnedByThread(ProcessThreads.ThreadId);
+                        Instance.WinHelper.ClearTerminationState(ProcessThreads);
                         ProcessThreads.State = EmulatedThreadState.Terminated;
                     }
                     Instance.StopEmulation();

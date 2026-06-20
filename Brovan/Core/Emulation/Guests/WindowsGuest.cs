@@ -35,6 +35,7 @@ namespace Brovan.Core.Emulation.Guests
         private readonly BlobData _blob;
         private readonly WindowsBlobLaunchMode _blobLaunchMode;
         private IReadOnlyDictionary<uint, IWinSyscall> WinSyscallTable = new Dictionary<uint, IWinSyscall>();
+        private WinModule _ntdllModule;
 
         private bool UsesDirectBlobStartup => IsBlob && _blobLaunchMode == WindowsBlobLaunchMode.Direct;
 
@@ -458,11 +459,6 @@ namespace Brovan.Core.Emulation.Guests
 
                 WinHelper?.InvokeException(ThreadState.ExceptionInformation.Status, ThreadState.ExceptionInformation);
 
-                // The exception is no longer pending once KiUserExceptionDispatcher has been entered.
-                // Keep IsHandlingException set until NtContinue/RtlRestoreContext completes the
-                // continuation, but do not leave DispatchException set while guest ntdll is
-                // dispatching handlers. NtContinue may be called from that path and must be
-                // treated as a local context switch, not as a request to terminate the process.
                 ThreadState.DispatchException = false;
 
                 State = Instance._emulator.Emulate(Instance.ReadRegister(Instance.IPRegister), 0, 0, QuantumInstructions);
@@ -539,11 +535,19 @@ namespace Brovan.Core.Emulation.Guests
                 if (Rule != null)
                 {
                     int MaxArgs = Rule.ArgsCount;
-                    ulong[] Args = MaxArgs <= 0
-                        ? Array.Empty<ulong>()
-                        : (CaptureSyscallHistory && MaxArgs <= HistoryArgs.Length
-                            ? HistoryArgs.Take(MaxArgs).ToArray()
-                            : ReadWindowsSyscallArguments(Instance, MaxArgs));
+                    ulong[] Args = Array.Empty<ulong>();
+                    if (MaxArgs > 0)
+                    {
+                        if (CaptureSyscallHistory && MaxArgs <= HistoryArgs.Length)
+                        {
+                            Args = new ulong[MaxArgs];
+                            Array.Copy(HistoryArgs, Args, MaxArgs);
+                        }
+                        else
+                        {
+                            Args = ReadWindowsSyscallArguments(Instance, MaxArgs);
+                        }
+                    }
 
                     SyscallContext Ctx = Instance.Syscalls.HandleSyscall(Syscall, HandlerName, Args);
                     if (Ctx.Handled)
@@ -711,11 +715,11 @@ namespace Brovan.Core.Emulation.Guests
             uint ThreadId = (uint)Instance.CurrentThreadId;
             if (!Instance.Threads.TryGetValue(ThreadId, out EmulatedThread Thread) || Thread == null)
                 return;
-
-            if (WinEmulatedThread.GetState(Thread).IsHandlingException)
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (State.IsHandlingException)
             {
-                WinEmulatedThread.GetState(Thread).ExceptionNesting++;
-                if (WinEmulatedThread.GetState(Thread).ExceptionNesting > 2)
+                State.ExceptionNesting++;
+                if (State.ExceptionNesting > 2)
                 {
                     Instance.WinHelper.AbandonMutexesOwnedByThread(Thread.ThreadId);
                     Thread.State = EmulatedThreadState.Terminated;
@@ -727,15 +731,15 @@ namespace Brovan.Core.Emulation.Guests
             }
             else
             {
-                WinEmulatedThread.GetState(Thread).IsHandlingException = true;
-                WinEmulatedThread.GetState(Thread).ExceptionNesting = 1;
+                State.IsHandlingException = true;
+                State.ExceptionNesting = 1;
             }
 
             ExceptionInformation ExceptionInfo = Info ?? new ExceptionInformation();
             ExceptionInfo.Status = Status;
             Thread.State = EmulatedThreadState.Exception;
-            WinEmulatedThread.GetState(Thread).DispatchException = true;
-            WinEmulatedThread.GetState(Thread).ExceptionInformation = ExceptionInfo;
+            State.DispatchException = true;
+            State.ExceptionInformation = ExceptionInfo;
             Instance.Threads[ThreadId] = Thread;
             Instance._emulator.StopEmulation();
         }
@@ -747,9 +751,9 @@ namespace Brovan.Core.Emulation.Guests
                 return;
 
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
-                Instance._emulator.WriteMemory(Teb + 0x68, BitConverter.GetBytes(LastError));
+                Instance._emulator.WriteMemory(Teb + 0x68, LastError);
             else
-                Instance._emulator.WriteMemory(Teb + 0x34, BitConverter.GetBytes(LastError));
+                Instance._emulator.WriteMemory(Teb + 0x34, LastError);
         }
 
         public void SetLastWinErrorRegister(BinaryEmulator Instance, NTSTATUS Status)
@@ -782,8 +786,6 @@ namespace Brovan.Core.Emulation.Guests
                 return Teb;
             }
 
-            byte[] PebPtr = BitConverter.GetBytes(PEB);
-            byte[] TebPtr = BitConverter.GetBytes(Teb);
             Instance._emulator.WriteMemoryByte(Teb, 0, 0x2000);
             Instance._emulator.WriteMemory(Teb, ulong.MaxValue, 8);
             Instance._emulator.WriteMemory(Teb + 0x8, Thread.StackAddress + Thread.StackSize);
@@ -791,10 +793,10 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(Teb + 0x18, 0UL, 8);
             Instance._emulator.WriteMemory(Teb + 0x20, 0UL, 8);
             Instance._emulator.WriteMemory(Teb + 0x28, 0UL, 8);
-            Instance._emulator.WriteMemory(Teb + 0x30, TebPtr, 8);
-            Instance._emulator.WriteMemory(Teb + 0x40, BitConverter.GetBytes(WinHelper.PID), 8);
-            Instance._emulator.WriteMemory(Teb + 0x48, BitConverter.GetBytes(Thread.ThreadId));
-            Instance._emulator.WriteMemory(Teb + 0x60, PebPtr);
+            Instance._emulator.WriteMemory(Teb + 0x30, Teb, 8);
+            Instance._emulator.WriteMemory(Teb + 0x40, WinHelper.PID, 8);
+            Instance._emulator.WriteMemory(Teb + 0x48, Thread.ThreadId);
+            Instance._emulator.WriteMemory(Teb + 0x60, PEB, 8);
             Instance._emulator.WriteMemory(Teb + 0x68, (uint)0u);
             Instance._emulator.WriteMemory(Teb + 0x108, (uint)0x0409u);
             Instance._emulator.WriteMemory(Teb + 0x1760, (uint)0u);
@@ -819,11 +821,10 @@ namespace Brovan.Core.Emulation.Guests
             if (LdrInitializeThunk != 0)
                 return;
 
-            WinModule Module = WinHelper.WinModules.FirstOrDefault(Mod => Mod.Name == "ntdll.dll");
-            if (Module == null)
+            if (_ntdllModule == null)
                 throw new Exception("ntdll.dll is not loaded.");
 
-            LdrInitializeThunk = Instance.TranslateVirtualAddress(Module.ExportsByName["LdrInitializeThunk"], "ntdll.dll");
+            LdrInitializeThunk = Instance.TranslateVirtualAddress(_ntdllModule.ExportsByName["LdrInitializeThunk"], "ntdll.dll");
         }
 
         public void ResolveRtlUserThreadStart(BinaryEmulator Instance)
@@ -831,11 +832,10 @@ namespace Brovan.Core.Emulation.Guests
             if (RtlUserThreadStart != 0)
                 return;
 
-            WinModule Module = WinHelper.WinModules.FirstOrDefault(Mod => Mod.Name == "ntdll.dll");
-            if (Module == null)
+            if (_ntdllModule == null)
                 throw new Exception("ntdll.dll is not loaded.");
 
-            RtlUserThreadStart = Instance.TranslateVirtualAddress(Module.ExportsByName["RtlUserThreadStart"], "ntdll.dll");
+            RtlUserThreadStart = Instance.TranslateVirtualAddress(_ntdllModule.ExportsByName["RtlUserThreadStart"], "ntdll.dll");
         }
 
         /// <summary>
@@ -871,10 +871,10 @@ namespace Brovan.Core.Emulation.Guests
                 GuestState = new WindowsThreadState()
             };
 
-            WinEmulatedThread.GetState(Thread);
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.Name ??= $"Thread_{Thread.ThreadId}";
 
-            WinEmulatedThread.GetState(Thread).ImpersonationToken = new WinToken
+            State.ImpersonationToken = new WinToken
             {
                 IsElevated = false,
                 IsRestricted = false,
@@ -884,7 +884,7 @@ namespace Brovan.Core.Emulation.Guests
                 SessionId = 1
             };
 
-            WinEmulatedThread.GetState(Thread).Teb = AllocateAndInitializeTEB(Instance, Thread, CreateFlags, InitialThread);
+            State.Teb = AllocateAndInitializeTEB(Instance, Thread, CreateFlags, InitialThread);
 
             ulong InitialStack = (Thread.StackAddress + Thread.StackSize) & ~0xFUL;
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
@@ -943,10 +943,10 @@ namespace Brovan.Core.Emulation.Guests
                 GuestState = new WindowsThreadState()
             };
 
-            WinEmulatedThread.GetState(Thread);
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.Name ??= $"Thread_{Thread.ThreadId}";
 
-            WinEmulatedThread.GetState(Thread).ImpersonationToken = new WinToken
+            State.ImpersonationToken = new WinToken
             {
                 IsElevated = false,
                 IsRestricted = false,
@@ -956,7 +956,7 @@ namespace Brovan.Core.Emulation.Guests
                 SessionId = 1
             };
 
-            WinEmulatedThread.GetState(Thread).Teb = AllocateAndInitializeTEB(Instance, Thread, CreateFlags, InitialThread);
+            State.Teb = AllocateAndInitializeTEB(Instance, Thread, CreateFlags, InitialThread);
 
             ulong InitialRSP = (Thread.StackAddress + Thread.StackSize) & ~0xFUL;
             InitialRSP -= 8;
@@ -980,7 +980,7 @@ namespace Brovan.Core.Emulation.Guests
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
                 Thread.Context.RCX = contextAddress;
-                Thread.Context.RDX = WinHelper.WinModules.FirstOrDefault(Mod => Mod.Name == "ntdll.dll")?.MappedBase ?? 0;
+                Thread.Context.RDX = _ntdllModule?.MappedBase ?? 0;
             }
 
             Instance.Threads[Thread.ThreadId] = Thread;
@@ -1049,8 +1049,14 @@ namespace Brovan.Core.Emulation.Guests
                 { "PATH", @"C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\" }
             };
 
-            string EnvironmentString = string.Join('\0', Env.Select(kv => $"{kv.Key}={kv.Value}")) + "\0\0";
-            byte[] EnvBytes = Encoding.Unicode.GetBytes(EnvironmentString);
+            StringBuilder Builder = new StringBuilder(1024);
+            foreach (var kv in Env)
+            {
+                Builder.Append(kv.Key).Append('=').Append(kv.Value).Append('\0');
+            }
+            Builder.Append('\0');
+
+            byte[] EnvBytes = Encoding.Unicode.GetBytes(Builder.ToString());
             size = (ulong)EnvBytes.Length;
             return EnvBytes;
         }
@@ -1193,9 +1199,9 @@ namespace Brovan.Core.Emulation.Guests
                         ulong Handle = WinHelper.ConsoleHandle.Handle;
                         Instance._emulator.WriteMemory(ProcessParams + 0x10, Handle, 8);
                         Instance._emulator.WriteMemory(ProcessParams + 0x18, new byte[] { 0x00, 0x00, 0x00, 0x00 });
-                        Instance._emulator.WriteMemory(ProcessParams + 0x20, BitConverter.GetBytes(WinHelper.STD_IN.Handle), 8);
-                        Instance._emulator.WriteMemory(ProcessParams + 0x28, BitConverter.GetBytes(WinHelper.STD_OUT.Handle), 8);
-                        Instance._emulator.WriteMemory(ProcessParams + 0x30, BitConverter.GetBytes(WinHelper.STD_OUT.Handle), 8);
+                        Instance._emulator.WriteMemory(ProcessParams + 0x20, WinHelper.STD_IN.Handle, 8);
+                        Instance._emulator.WriteMemory(ProcessParams + 0x28, WinHelper.STD_OUT.Handle, 8);
+                        Instance._emulator.WriteMemory(ProcessParams + 0x30, WinHelper.STD_OUT.Handle, 8);
                     }
                     WriteInlineUnicodeString(0x60, ImagePath);
                     WriteInlineUnicodeString(0x70, CommandLine);
@@ -1268,8 +1274,11 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(LdrData + 0x4, (byte)1, 1);
 
             List<ulong> Entries = new List<ulong>();
-            foreach (WinModule Module in WinHelper.WinModules.Where(Module => Module != null && Module.MappedBase != 0 && Module.SizeOfImage != 0))
+            foreach (WinModule Module in WinHelper.WinModules)
             {
+                if (Module == null || Module.MappedBase == 0 || Module.SizeOfImage == 0)
+                    continue;
+
                 ulong Entry = Instance.MapUniqueAddress(EntrySize, MemoryProtection.ReadWrite);
                 if (Entry == 0)
                     continue;
@@ -1303,8 +1312,11 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(LdrData + 0x4, (byte)1, 1);
 
             List<ulong> Entries = new List<ulong>();
-            foreach (WinModule Module in WinHelper.WinModules.Where(Module => Module != null && Module.MappedBase != 0 && Module.SizeOfImage != 0))
+            foreach (WinModule Module in WinHelper.WinModules)
             {
+                if (Module == null || Module.MappedBase == 0 || Module.SizeOfImage == 0)
+                    continue;
+
                 ulong Entry = Instance.MapUniqueAddress(EntrySize, MemoryProtection.ReadWrite);
                 if (Entry == 0)
                     continue;
@@ -1433,7 +1445,7 @@ namespace Brovan.Core.Emulation.Guests
 
                 using (BinaryFile Library = new BinaryFile(NtdllPath, true))
                 {
-                    Instance.LoadWinLibrary(Library, true, MapBySections: false);
+                    _ntdllModule = Instance.LoadWinLibrary(Library, true, MapBySections: false);
                 }
             }
             catch (Exception ex)
