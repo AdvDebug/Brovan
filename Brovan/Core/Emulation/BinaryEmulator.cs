@@ -2266,7 +2266,7 @@ namespace Brovan.Core.Emulation
                             return true;
                         }
 
-                        if (TryGetNextWaitSleepMs(out int SleepMs))
+                        if (TryGetNextWaitSleepMs(out int SleepMs, int.MaxValue))
                         {
                             if (Debug)
                                 TriggerDebugMessage($"scheduler: no runnable thread, advancing guest time by {SleepMs}ms");
