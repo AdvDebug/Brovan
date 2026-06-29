@@ -18,6 +18,8 @@ it is useful for malware analysis, reverse engineering, debugging binaries, or g
 
 ## Core Features
 
+Brovan supports multiple backends you can choose from depending on your needs. for example, Unicorn for analysis-oriented emulation and KVM for speed, with room for additional backends over time.
+
 <div align="center">
 
 <table>
