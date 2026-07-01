@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -6,7 +7,7 @@ using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
-    internal sealed class WindowsWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport
+    internal sealed class WindowsWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport, IGdiRenderSupport, IKeyboardTranslateSupport
     {
         private static readonly object WindowSync = new();
         private static readonly Dictionary<IntPtr, WindowsWindow> Windows = new();
@@ -19,11 +20,69 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static IntPtr _metricsFont = IntPtr.Zero;
         private static IntPtr _metricsPreviousFont = IntPtr.Zero;
 
+        private static readonly Dictionary<(int Width, int ColorRef), IntPtr> _penCache = new();
+        private static readonly Dictionary<int, IntPtr> _brushCache = new();
+
+        private static IntPtr GetOrCreatePen(int width, int colorRef)
+        {
+            width = Math.Max(width, 1);
+            (int, int) key = (width, colorRef);
+            if (_penCache.TryGetValue(key, out IntPtr pen))
+                return pen;
+
+            pen = CreatePen(PS_SOLID, width, colorRef);
+            if (pen != IntPtr.Zero)
+                _penCache[key] = pen;
+
+            return pen;
+        }
+
+        private static IntPtr GetOrCreateBrush(int colorRef)
+        {
+            if (_brushCache.TryGetValue(colorRef, out IntPtr brush))
+                return brush;
+
+            brush = CreateSolidBrush(colorRef);
+            if (brush != IntPtr.Zero)
+                _brushCache[colorRef] = brush;
+
+            return brush;
+        }
+
+        private static void DisposeCachedPensAndBrushes()
+        {
+            foreach (IntPtr pen in _penCache.Values)
+                DeleteObject(pen);
+            _penCache.Clear();
+
+            foreach (IntPtr brush in _brushCache.Values)
+                DeleteObject(brush);
+            _brushCache.Clear();
+        }
+
         private static int _pendingHostRepaint;
 
         public static bool ConsumePendingHostRepaint()
         {
             return Interlocked.Exchange(ref _pendingHostRepaint, 0) != 0;
+        }
+
+        private static readonly ConcurrentQueue<(uint Message, ulong WParam, ulong LParam)> _pendingHostInput = new();
+
+        public static bool TryDequeuePendingHostInput(out uint Message, out ulong WParam, out ulong LParam)
+        {
+            if (_pendingHostInput.TryDequeue(out var Item))
+            {
+                Message = Item.Message;
+                WParam = Item.WParam;
+                LParam = Item.LParam;
+                return true;
+            }
+
+            Message = 0;
+            WParam = 0;
+            LParam = 0;
+            return false;
         }
 
         private readonly IntPtr _instanceHandle;
@@ -42,6 +101,17 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_SETTEXT = 0x000C;
         private const uint WM_GETTEXT = 0x000D;
         private const uint WM_GETTEXTLENGTH = 0x000E;
+
+        private const uint WM_KEYDOWN = 0x0100;
+        private const uint WM_KEYUP = 0x0101;
+        private const uint WM_CHAR = 0x0102;
+        private const uint WM_SYSKEYDOWN = 0x0104;
+        private const uint WM_SYSKEYUP = 0x0105;
+        private const uint WM_MOUSEMOVE = 0x0200;
+        private const uint WM_LBUTTONDOWN = 0x0201;
+        private const uint WM_LBUTTONUP = 0x0202;
+        private const uint WM_RBUTTONDOWN = 0x0204;
+        private const uint WM_RBUTTONUP = 0x0205;
 
         private const uint WS_OVERLAPPEDWINDOW = 0x00CF0000;
         private const uint WS_POPUP = 0x80000000;
@@ -159,6 +229,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             foreach (WindowsWindow window in windows)
                 window.Dispose();
+
+            DisposeCachedPensAndBrushes();
         }
 
         private void RegisterWindowClass()
@@ -274,6 +346,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             uint exStyle = (uint)GetWindowLongPtrW(hwnd, GWL_EXSTYLE).ToInt64();
             ResolveOuterFromClient(style, exStyle, Math.Max(width, 1), Math.Max(height, 1), out int outerWidth, out int outerHeight);
 
+            if (rect.Right - rect.Left == outerWidth && rect.Bottom - rect.Top == outerHeight)
+                return;
+
             SetWindowPos(hwnd, IntPtr.Zero, rect.Left, rect.Top, outerWidth, outerHeight, SWP_NOZORDER | SWP_NOACTIVATE);
         }
 
@@ -355,6 +430,100 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 SelectObject(hdc, previousFont);
 
             ReleaseDC(windowHandle, hdc);
+        }
+
+        public void ExecuteGdiPrimitive(IntPtr windowHandle, GdiPrimitive primitive)
+        {
+            if (windowHandle == IntPtr.Zero)
+                return;
+
+            IntPtr hdc = GetDC(windowHandle);
+            if (hdc == IntPtr.Zero)
+                return;
+
+            IntPtr previousPen = IntPtr.Zero;
+            IntPtr previousBrush = IntPtr.Zero;
+
+            if (primitive.HasPen)
+            {
+                IntPtr pen = GetOrCreatePen(primitive.Pen.Width, unchecked((int)primitive.Pen.ColorRef));
+                if (pen != IntPtr.Zero)
+                    previousPen = SelectObject(hdc, pen);
+            }
+
+            if (primitive.HasBrush)
+            {
+                IntPtr brush = GetOrCreateBrush(unchecked((int)primitive.Brush.ColorRef));
+                if (brush != IntPtr.Zero)
+                    previousBrush = SelectObject(hdc, brush);
+            }
+
+            switch (primitive.Kind)
+            {
+                case GdiPrimitiveKind.Line:
+                    MoveToEx(hdc, primitive.X1, primitive.Y1, IntPtr.Zero);
+                    LineTo(hdc, primitive.X2, primitive.Y2);
+                    break;
+
+                case GdiPrimitiveKind.FillRect:
+                    PatBlt(hdc, primitive.X1, primitive.Y1, primitive.X2 - primitive.X1, primitive.Y2 - primitive.Y1, primitive.Rop);
+                    break;
+
+                case GdiPrimitiveKind.Rectangle:
+                    Rectangle(hdc, primitive.X1, primitive.Y1, primitive.X2, primitive.Y2);
+                    break;
+
+                case GdiPrimitiveKind.Ellipse:
+                    Ellipse(hdc, primitive.X1, primitive.Y1, primitive.X2, primitive.Y2);
+                    break;
+
+                case GdiPrimitiveKind.RoundRect:
+                    RoundRect(hdc, primitive.X1, primitive.Y1, primitive.X2, primitive.Y2, primitive.RoundedWidth, primitive.RoundedHeight);
+                    break;
+
+                case GdiPrimitiveKind.Polygon:
+                    if (primitive.Points != null && primitive.Points.Length > 0)
+                        Polygon(hdc, ToNativePoints(primitive.Points), primitive.Points.Length);
+                    break;
+
+                case GdiPrimitiveKind.Polyline:
+                    if (primitive.Points != null && primitive.Points.Length > 0)
+                        Polyline(hdc, ToNativePoints(primitive.Points), primitive.Points.Length);
+                    break;
+            }
+
+            if (previousPen != IntPtr.Zero)
+                SelectObject(hdc, previousPen);
+            if (previousBrush != IntPtr.Zero)
+                SelectObject(hdc, previousBrush);
+
+            ReleaseDC(windowHandle, hdc);
+        }
+
+        private static POINT[] ToNativePoints(GdiPoint[] points)
+        {
+            POINT[] native = new POINT[points.Length];
+            for (int i = 0; i < points.Length; i++)
+                native[i] = new POINT { X = points[i].X, Y = points[i].Y };
+
+            return native;
+        }
+
+        public bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character)
+        {
+            character = '\0';
+
+            byte[] keyboardState = new byte[256];
+            if (!GetKeyboardState(keyboardState))
+                return false;
+
+            StringBuilder buffer = new StringBuilder(4);
+            int result = ToUnicode(virtualKey, scanCode, keyboardState, buffer, buffer.Capacity, 0);
+            if (result <= 0 || buffer.Length == 0)
+                return false;
+
+            character = buffer[0];
+            return true;
         }
 
         public bool MeasureText(string text, out int width, out int height)
@@ -483,7 +652,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     EnsureAlive();
                     _title = value ?? string.Empty;
-                    Present();
+                    _manager.UpdateWindowText(_hwnd, _title);
                 }
             }
 
@@ -494,7 +663,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     EnsureAlive();
                     _width = Math.Max(value, 1);
-                    Present();
+                    _manager.UpdateWindowSize(_hwnd, _width, _height);
                 }
             }
 
@@ -505,7 +674,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     EnsureAlive();
                     _height = Math.Max(value, 1);
-                    Present();
+                    _manager.UpdateWindowSize(_hwnd, _width, _height);
                 }
             }
 
@@ -516,7 +685,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     EnsureAlive();
                     _visible = value;
-                    Present();
+                    _manager.UpdateWindowVisibility(_hwnd, _visible);
+                    if (_visible)
+                        _manager.UpdateWindowState(_hwnd, _state);
                 }
             }
 
@@ -527,7 +698,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     EnsureAlive();
                     _state = value;
-                    Present();
+                    if (_visible)
+                        _manager.UpdateWindowState(_hwnd, _state);
                 }
             }
 
@@ -540,7 +712,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     EnsureAlive();
                     _decorated = value;
-                    Present();
+                    _manager.ApplyDecorations(_hwnd, _decorated, _resizable);
                 }
             }
 
@@ -604,6 +776,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 if (msg == WM_PAINT || msg == WM_SIZE || msg == WM_SHOWWINDOW)
                     Interlocked.Exchange(ref _pendingHostRepaint, 1);
+
+                if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
+                    msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
+                    msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_CHAR ||
+                    msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP)
+                {
+                    _pendingHostInput.Enqueue((msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam)));
+                }
 
                 return DefWindowProcW(_hwnd, msg, wParam, lParam);
             }
@@ -773,6 +953,57 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static extern IntPtr GetStockObject(int fnObject);
 
         private const int STOCK_OBJECT_DEFAULT_GUI_FONT = 17;
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool MoveToEx(IntPtr hdc, int x, int y, IntPtr lpPoint);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool LineTo(IntPtr hdc, int x, int y);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool Rectangle(IntPtr hdc, int left, int top, int right, int bottom);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool Ellipse(IntPtr hdc, int left, int top, int right, int bottom);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool RoundRect(IntPtr hdc, int left, int top, int right, int bottom, int width, int height);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool Polygon(IntPtr hdc, [In] POINT[] points, int count);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool Polyline(IntPtr hdc, [In] POINT[] points, int count);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr CreatePen(int fnPenStyle, int nWidth, int crColor);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr CreateSolidBrush(int crColor);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeleteObject(IntPtr hObject);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool PatBlt(IntPtr hdc, int x, int y, int width, int height, uint rop);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetKeyboardState(byte[] lpKeyState);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int ToUnicode(uint wVirtKey, uint wScanCode, byte[] lpKeyState, [Out] StringBuilder pwszBuff, int cchBuff, uint wFlags);
+
+        private const int PS_SOLID = 0;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct SIZE

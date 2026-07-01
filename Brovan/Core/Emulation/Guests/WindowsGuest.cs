@@ -328,6 +328,9 @@ namespace Brovan.Core.Emulation.Guests
             State.ApcAlertable = false;
             State.AlertByThreadIdWaitActive = false;
             State.AlertByThreadIdAddress = 0;
+            State.MsgWaitActive = false;
+            State.MsgWaitMask = 0;
+            State.GetMessageWaitActive = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
 

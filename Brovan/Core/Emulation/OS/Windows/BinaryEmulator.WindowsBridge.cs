@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Runtime.InteropServices;
 using Brovan.Core.Emulation.OS.Windows;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 using Brovan.Core.Emulation.Guests;
 using Brovan.Core.Helpers;
 using Brovan.Analysis;
@@ -573,6 +574,96 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
+            if (State != null && State.GetMessageWaitActive)
+            {
+                if (Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, true, out Win32kMessage Message))
+                {
+                    Win32kHelper.WriteMessage(this, State.GetMessageMessagePtr, Message);
+                    State.GetMessageWaitActive = false;
+                    Thread.WaitSatisfiedIndex = Message.Message == Win32kHelper.WM_QUIT ? 0 : 1;
+                    State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
+                    return true;
+                }
+
+                return false;
+            }
+
+            if (State != null && State.MsgWaitActive)
+            {
+                bool MessageReady = Win32kHelper.HasQueuedInputEvent(this, State.MsgWaitMask);
+                bool HasHandles = Thread.WaitHandles != null && Thread.WaitHandles.Count > 0;
+
+                if (Thread.WaitAll)
+                {
+                    if (HasHandles)
+                    {
+                        for (int i = 0; i < Thread.WaitHandles.Count; i++)
+                        {
+                            if (!CanSatisfyWaitHandle(Thread.WaitHandles[i], Thread))
+                                goto CheckTimeout;
+                        }
+                    }
+
+                    if (!MessageReady)
+                        goto CheckTimeout;
+
+                    NTSTATUS AllWaitStatus = NTSTATUS.STATUS_SUCCESS;
+                    if (HasHandles)
+                    {
+                        for (int i = 0; i < Thread.WaitHandles.Count; i++)
+                        {
+                            ulong Handle = Thread.WaitHandles[i];
+                            bool AlreadyAcquired = false;
+                            for (int j = 0; j < i; j++)
+                            {
+                                if (Thread.WaitHandles[j] == Handle)
+                                {
+                                    AlreadyAcquired = true;
+                                    break;
+                                }
+                            }
+
+                            if (AlreadyAcquired)
+                                continue;
+
+                            if (!TryAcquireWaitHandle(Handle, Thread, out NTSTATUS AcquiredStatus))
+                                goto CheckTimeout;
+
+                            if (AcquiredStatus == NTSTATUS.STATUS_ABANDONED_WAIT_0 && AllWaitStatus == NTSTATUS.STATUS_SUCCESS)
+                                AllWaitStatus = (NTSTATUS)((uint)NTSTATUS.STATUS_ABANDONED_WAIT_0 + (uint)i);
+                        }
+                    }
+
+                    Thread.WaitSatisfiedIndex = 0;
+                    State.WaitStatus = AllWaitStatus;
+                    return true;
+                }
+
+                if (HasHandles)
+                {
+                    for (int i = 0; i < Thread.WaitHandles.Count; i++)
+                    {
+                        if (!TryAcquireWaitHandle(Thread.WaitHandles[i], Thread, out NTSTATUS AcquiredStatus))
+                            continue;
+
+                        Thread.WaitSatisfiedIndex = i;
+                        State.WaitStatus = AcquiredStatus == NTSTATUS.STATUS_ABANDONED_WAIT_0
+                            ? (NTSTATUS)((uint)NTSTATUS.STATUS_ABANDONED_WAIT_0 + (uint)i)
+                            : (NTSTATUS)(uint)i;
+                        return true;
+                    }
+                }
+
+                if (MessageReady)
+                {
+                    Thread.WaitSatisfiedIndex = Thread.WaitHandles?.Count ?? 0;
+                    State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
+                    return true;
+                }
+
+                goto CheckTimeout;
+            }
+
             if (Thread.WaitHandles != null && Thread.WaitHandles.Count > 0)
             {
                 if (Thread.WaitAll)
@@ -636,6 +727,22 @@ namespace Brovan.Core.Emulation
 
             return false;
         }
+
+        internal bool HasActiveGetMessageWait()
+        {
+            foreach (EmulatedThread Thread in Threads.Values)
+            {
+                if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                    continue;
+
+                WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+                if (State != null && State.GetMessageWaitActive)
+                    return true;
+            }
+
+            return false;
+        }
+
         public ulong TranslateVirtualAddress(ulong OriginalVA, string ModuleName)
         {
             WinModule ProcessModule = WinHelper?.WinModules.FirstOrDefault(m => m.Name.Equals(ModuleName, StringComparison.OrdinalIgnoreCase));

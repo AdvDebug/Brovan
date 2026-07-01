@@ -199,6 +199,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.WaitReturnRIP = 0;
             State.WaitAlertable = false;
             State.ApcAlertable = false;
+            State.MsgWaitActive = false;
+            State.MsgWaitMask = 0;
+            State.GetMessageWaitActive = false;
 
             if (ClearAlertByThreadId)
             {
@@ -2489,15 +2492,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint W32Pid = PID & 0xFFFFFFFCu;
             Emulator._emulator.WriteMemory(Entry + 0x08, W32Pid, 4);
             Emulator._emulator.WriteMemory(Entry + 0x0C, type, 1);
-            Emulator._emulator.WriteMemory(Entry + 0x0E, type, 1);
+
+            Emulator._emulator.WriteMemory(Entry + 0x0E, (byte)(type & 0x1F), 1);
 
             if (type == 1)
             {
                 ulong DcAttr = Emulator.MapUniqueAddress(0x600, MemoryProtection.ReadWrite);
                 if (DcAttr != 0)
                 {
-                    for (uint i = 0; i < 0x600; i += 8)
-                        Emulator._emulator.WriteMemory(DcAttr + i, 0UL, 8);
+                    Span<byte> Zeroed = Shared.GetSpan(0x600);
+                    Zeroed.Clear();
+                    Emulator._emulator.WriteMemory(DcAttr, Zeroed);
 
                     Emulator._emulator.WriteMemory(DcAttr, 1, 1);
                     Emulator._emulator.WriteMemory(DcAttr + 0x68, 1, 4);
@@ -2521,6 +2526,64 @@ namespace Brovan.Core.Emulation.OS.Windows
             return ((Xored << 63) | (Xored >> 1));
         }
 
+        private static ulong DecryptGdiPointer(ulong Encrypted)
+        {
+            ulong RotatedBack = (Encrypted << 1) | (Encrypted >> 63);
+            return RotatedBack ^ 1;
+        }
+
+        private const int DcAttrSelectedBrushOffset = 0xA0;
+        private const int DcAttrSelectedPenOffset = 0xA8;
+        private const int DcAttrCurrentPosXOffset = 0xD8;
+        private const int DcAttrCurrentPosYOffset = 0xDC;
+
+        public ulong GetDcAttributeAddress(ulong Hdc)
+        {
+            if (Hdc == 0 || ((Hdc >> 16) & 0xFF) != 1 || !ValidateGdiHandle(Hdc))
+                return 0;
+
+            ushort Index = (ushort)(Hdc & 0xFFFF);
+            ulong Entry = GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize;
+            ulong Encrypted = Emulator.ReadMemoryULong(Entry + 0x10);
+            return Encrypted == 0 ? 0 : DecryptGdiPointer(Encrypted);
+        }
+
+        public bool ReadDcCurrentPosition(ulong Hdc, out int X, out int Y)
+        {
+            X = 0;
+            Y = 0;
+
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            if (DcAttr == 0)
+                return false;
+
+            X = unchecked((int)Emulator.ReadMemoryUInt(DcAttr + DcAttrCurrentPosXOffset));
+            Y = unchecked((int)Emulator.ReadMemoryUInt(DcAttr + DcAttrCurrentPosYOffset));
+            return true;
+        }
+
+        public void WriteDcCurrentPosition(ulong Hdc, int X, int Y)
+        {
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            if (DcAttr == 0)
+                return;
+
+            Emulator._emulator.WriteMemory(DcAttr + DcAttrCurrentPosXOffset, unchecked((uint)X), 4);
+            Emulator._emulator.WriteMemory(DcAttr + DcAttrCurrentPosYOffset, unchecked((uint)Y), 4);
+        }
+
+        public ulong ReadDcSelectedPen(ulong Hdc)
+        {
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            return DcAttr == 0 ? 0 : Emulator.ReadMemoryULong(DcAttr + DcAttrSelectedPenOffset);
+        }
+
+        public ulong ReadDcSelectedBrush(ulong Hdc)
+        {
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            return DcAttr == 0 ? 0 : Emulator.ReadMemoryULong(DcAttr + DcAttrSelectedBrushOffset);
+        }
+
         public bool ValidateGdiHandle(ulong Handle)
         {
             if (Handle == 0 || GdiHandleTableAddress == 0)
@@ -2533,7 +2596,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             ulong Entry = GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize;
-            byte StoredUniq = (byte)Emulator.ReadMemoryUInt(Entry + 0x0D);
+            byte StoredUniq = (byte)Emulator.ReadMemoryUInt(Entry + 0x0C);
             return StoredUniq == Uniq;
         }
 
@@ -2692,6 +2755,81 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (DesktopDisplay is GuiThreadManager guiManager)
                 guiManager.EnqueueTextRender(Hwnd, text, x, y, rectLeft, rectTop, rectRight, rectBottom, options);
+        }
+
+        public void EnqueueGdiLine(ulong Hwnd, int X1, int Y1, int X2, int Y2, uint PenColor, int PenWidth)
+        {
+            if (DesktopDisplay is GuiThreadManager guiManager)
+                guiManager.EnqueueGdiPrimitive(new GdiPrimitive
+                {
+                    Kind = GdiPrimitiveKind.Line,
+                    X1 = X1,
+                    Y1 = Y1,
+                    X2 = X2,
+                    Y2 = Y2,
+                    Pen = new GdiPenDescriptor { ColorRef = PenColor, Width = PenWidth },
+                    HasPen = true,
+                });
+        }
+
+        public void EnqueueGdiFillRect(ulong Hwnd, int Left, int Top, int Right, int Bottom, uint BrushColor, uint Rop)
+        {
+            if (DesktopDisplay is GuiThreadManager guiManager)
+                guiManager.EnqueueGdiPrimitive(new GdiPrimitive
+                {
+                    Kind = GdiPrimitiveKind.FillRect,
+                    X1 = Left,
+                    Y1 = Top,
+                    X2 = Right,
+                    Y2 = Bottom,
+                    Rop = Rop,
+                    Brush = new GdiBrushDescriptor { ColorRef = BrushColor },
+                    HasBrush = true,
+                });
+        }
+
+        public void EnqueueGdiShape(ulong Hwnd, GdiPrimitiveKind Kind, int Left, int Top, int Right, int Bottom, uint PenColor, int PenWidth, uint BrushColor, int RoundedWidth = 0, int RoundedHeight = 0)
+        {
+            if (DesktopDisplay is GuiThreadManager guiManager)
+                guiManager.EnqueueGdiPrimitive(new GdiPrimitive
+                {
+                    Kind = Kind,
+                    X1 = Left,
+                    Y1 = Top,
+                    X2 = Right,
+                    Y2 = Bottom,
+                    RoundedWidth = RoundedWidth,
+                    RoundedHeight = RoundedHeight,
+                    Pen = new GdiPenDescriptor { ColorRef = PenColor, Width = PenWidth },
+                    Brush = new GdiBrushDescriptor { ColorRef = BrushColor },
+                    HasPen = true,
+                    HasBrush = true,
+                });
+        }
+
+        public void EnqueueGdiPoly(ulong Hwnd, GdiPrimitiveKind Kind, GdiPoint[] Points, uint PenColor, int PenWidth, uint BrushColor, bool HasBrush)
+        {
+            if (DesktopDisplay is GuiThreadManager guiManager)
+                guiManager.EnqueueGdiPrimitive(new GdiPrimitive
+                {
+                    Kind = Kind,
+                    Points = Points,
+                    Pen = new GdiPenDescriptor { ColorRef = PenColor, Width = PenWidth },
+                    Brush = new GdiBrushDescriptor { ColorRef = BrushColor },
+                    HasPen = true,
+                    HasBrush = HasBrush,
+                });
+        }
+
+        public bool TranslateVirtualKey(uint VirtualKey, uint ScanCode, out char Character)
+        {
+            Character = '\0';
+
+            EnsureDesktopDisplay();
+            if (DesktopDisplay is GuiThreadManager guiManager)
+                return guiManager.TranslateVirtualKey(VirtualKey, ScanCode, out Character);
+
+            return false;
         }
 
         public bool MeasureText(string Text, out int Width, out int Height)

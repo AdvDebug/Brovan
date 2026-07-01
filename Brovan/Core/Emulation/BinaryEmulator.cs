@@ -2289,7 +2289,18 @@ namespace Brovan.Core.Emulation
                         {
                             if (Debug)
                                 TriggerDebugMessage($"scheduler: no runnable thread, advancing guest time by {SleepMs}ms");
+                            if (HasActiveGetMessageWait())
+                                Thread.Sleep(Math.Min(SleepMs, 16));
                             AdvanceEmulatedTimeMilliseconds(SleepMs, AdvanceTimestampCounter: true);
+                            WakeupScanRequired = true;
+                            continue;
+                        }
+
+                        if (HasActiveGetMessageWait())
+                        {
+                            const int MessagePumpPollMs = 10;
+                            Thread.Sleep(MessagePumpPollMs);
+                            AdvanceEmulatedTimeMilliseconds(MessagePumpPollMs, AdvanceTimestampCounter: true);
                             WakeupScanRequired = true;
                             continue;
                         }

@@ -28,12 +28,22 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
     }
 
+    internal struct Win32kPenBrush
+    {
+        public bool IsPen;
+        public uint ColorRef;
+        public int PenWidth;
+    }
+
     internal static class Win32kHelper
     {
         internal const uint ERROR_INVALID_PARAMETER = 87;
         internal const uint ERROR_CALL_NOT_IMPLEMENTED = 120;
         internal const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
         internal const uint DEFAULT_SCREEN_DPI = 96;
+
+        internal const byte PenHandleType = 0x30;
+        internal const byte BrushHandleType = 0x10;
 
         internal const uint WM_NULL = 0x0000;
         internal const uint WM_DESTROY = 0x0002;
@@ -46,6 +56,34 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WM_NCHITTEST = 0x0084;
         internal const uint WM_PAINT = 0x000F;
         internal const uint WM_SETTEXT = 0x000C;
+        internal const uint WM_KEYDOWN = 0x0100;
+        internal const uint WM_KEYUP = 0x0101;
+        internal const uint WM_CHAR = 0x0102;
+        internal const uint WM_SYSKEYDOWN = 0x0104;
+        internal const uint WM_SYSKEYUP = 0x0105;
+        internal const uint WM_SYSCHAR = 0x0106;
+        internal const uint WM_MOUSEMOVE = 0x0200;
+        internal const uint WM_LBUTTONDOWN = 0x0201;
+        internal const uint WM_LBUTTONUP = 0x0202;
+        internal const uint WM_RBUTTONDOWN = 0x0204;
+        internal const uint WM_RBUTTONUP = 0x0205;
+
+        internal const uint QS_KEY = 0x0001;
+        internal const uint QS_MOUSEMOVE = 0x0002;
+        internal const uint QS_MOUSEBUTTON = 0x0004;
+        internal const uint QS_POSTMESSAGE = 0x0008;
+        internal const uint QS_TIMER = 0x0010;
+        internal const uint QS_PAINT = 0x0020;
+        internal const uint QS_SENDMESSAGE = 0x0040;
+        internal const uint QS_HOTKEY = 0x0080;
+        internal const uint QS_ALLPOSTMESSAGE = 0x0100;
+        internal const uint QS_RAWINPUT = 0x0400;
+        internal const uint QS_TOUCH = 0x0800;
+        internal const uint QS_POINTER = 0x1000;
+        internal const uint QS_MOUSE = QS_MOUSEMOVE | QS_MOUSEBUTTON;
+        internal const uint QS_INPUT = QS_MOUSE | QS_KEY | QS_RAWINPUT | QS_TOUCH | QS_POINTER;
+        internal const uint QS_ALLEVENTS = QS_INPUT | QS_POSTMESSAGE | QS_TIMER | QS_PAINT | QS_HOTKEY;
+        internal const uint QS_ALLINPUT = QS_ALLEVENTS | QS_SENDMESSAGE;
 
         private const int HTCLIENT = 1;
         private const ulong HWND_BROADCAST = 0xFFFF;
@@ -61,6 +99,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             public readonly Queue<Win32kMessage> MessageQueue = new();
             public readonly Dictionary<ulong, Win32kDeviceContext> DeviceContexts = new();
+            public readonly Dictionary<ulong, Win32kPenBrush> PenBrushObjects = new();
             public ulong NextDeviceContext = FirstDeviceContextHandle;
             public ulong CaptureWindow;
         }
@@ -144,6 +183,48 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return GetState(Instance).DeviceContexts.ContainsKey(Hdc);
         }
 
+        internal static ulong CreatePen(BinaryEmulator Instance, int Style, int Width, uint ColorRef)
+        {
+            ulong Handle = Instance.WinHelper.AllocateGdiHandle(PenHandleType);
+            if (Handle == 0)
+                return 0;
+
+            GetState(Instance).PenBrushObjects[Handle] = new Win32kPenBrush
+            {
+                IsPen = true,
+                ColorRef = ColorRef,
+                PenWidth = Width,
+            };
+            return Handle;
+        }
+
+        internal static ulong CreateSolidBrush(BinaryEmulator Instance, uint ColorRef)
+        {
+            ulong Handle = Instance.WinHelper.AllocateGdiHandle(BrushHandleType);
+            if (Handle == 0)
+                return 0;
+
+            GetState(Instance).PenBrushObjects[Handle] = new Win32kPenBrush
+            {
+                IsPen = false,
+                ColorRef = ColorRef,
+            };
+            return Handle;
+        }
+
+        internal static Win32kPenBrush ResolvePenBrush(BinaryEmulator Instance, ulong Handle, bool IsPen)
+        {
+            if (Handle != 0 && GetState(Instance).PenBrushObjects.TryGetValue(Handle, out Win32kPenBrush Found))
+                return Found;
+
+            return new Win32kPenBrush { IsPen = IsPen, ColorRef = 0x00000000, PenWidth = 1 };
+        }
+
+        internal static bool RemovePenBrush(BinaryEmulator Instance, ulong Handle)
+        {
+            return GetState(Instance).PenBrushObjects.Remove(Handle);
+        }
+
         internal static bool PostMessage(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam)
         {
             Win32kState State = GetState(Instance);
@@ -169,7 +250,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static bool TryGetMessage(BinaryEmulator Instance, ulong HwndFilter, uint MinMessage, uint MaxMessage, bool Remove, out Win32kMessage Message)
         {
-            DrainHostRepaintRequest(Instance);
+            DrainHostEvents(Instance);
 
             Win32kState State = GetState(Instance);
             int Index = 0;
@@ -188,6 +269,48 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Message = default;
             return false;
+        }
+
+        internal static bool HasQueuedInputEvent(BinaryEmulator Instance, uint WakeMask)
+        {
+            DrainHostEvents(Instance);
+
+            if (WakeMask == 0)
+                return false;
+
+            Win32kState State = GetState(Instance);
+            foreach (Win32kMessage Candidate in State.MessageQueue)
+            {
+                if ((GetMessageWakeBits(Candidate.Message) & WakeMask) != 0)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static uint GetMessageWakeBits(uint Message)
+        {
+            switch (Message)
+            {
+                case WM_PAINT:
+                    return QS_PAINT;
+                case WM_MOUSEMOVE:
+                    return QS_MOUSEMOVE;
+                case WM_LBUTTONDOWN:
+                case WM_LBUTTONUP:
+                case WM_RBUTTONDOWN:
+                case WM_RBUTTONUP:
+                    return QS_MOUSEBUTTON;
+                case WM_KEYDOWN:
+                case WM_KEYUP:
+                case WM_CHAR:
+                case WM_SYSKEYDOWN:
+                case WM_SYSKEYUP:
+                case WM_SYSCHAR:
+                    return QS_KEY;
+                default:
+                    return QS_POSTMESSAGE;
+            }
         }
 
         internal static bool WriteMessage(BinaryEmulator Instance, ulong Address, Win32kMessage Message)
@@ -292,19 +415,28 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return 0;
         }
 
-        private static void DrainHostRepaintRequest(BinaryEmulator Instance)
+        private const int MaxHostInputEventsPerDrain = 64;
+
+        private static void DrainHostEvents(BinaryEmulator Instance)
         {
             if (!GeneralHelper.IsWindows)
                 return;
 
-            if (!WindowsWinManager.ConsumePendingHostRepaint())
-                return;
-
             ulong Foreground = Instance.WinHelper.GetForegroundWindow();
+
+            if (WindowsWinManager.ConsumePendingHostRepaint() && Foreground != 0)
+                InvalidateWindow(Instance, Foreground);
+
             if (Foreground == 0)
                 return;
 
-            InvalidateWindow(Instance, Foreground);
+            for (int i = 0; i < MaxHostInputEventsPerDrain; i++)
+            {
+                if (!WindowsWinManager.TryDequeuePendingHostInput(out uint Message, out ulong WParam, out ulong LParam))
+                    break;
+
+                PostMessage(Instance, Foreground, Message, WParam, LParam);
+            }
         }
 
         internal static bool InvalidateWindow(BinaryEmulator Instance, ulong Hwnd)

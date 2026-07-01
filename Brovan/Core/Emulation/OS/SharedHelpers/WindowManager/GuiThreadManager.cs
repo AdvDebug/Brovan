@@ -43,6 +43,25 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         }
     }
 
+    internal sealed class GdiPrimitiveCommand : GuiCommand
+    {
+        public readonly GdiPrimitive Primitive;
+
+        public GdiPrimitiveCommand(GdiPrimitive primitive)
+        {
+            Primitive = primitive;
+        }
+
+        public override void Execute(IDisplayConnection display, IWindow window)
+        {
+            if (window == null)
+                return;
+
+            if (display is IGdiRenderSupport gdiRender)
+                gdiRender.ExecuteGdiPrimitive(window.NativeHandle, Primitive);
+        }
+    }
+
     internal sealed class CreateWindowCommand : GuiCommand
     {
         public readonly WindowOptions Options;
@@ -104,8 +123,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             if (window.State != State)
                 window.State = State;
-
-            window.Present();
         }
     }
 
@@ -213,6 +230,36 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return;
 
             _commandQueue.Add(new RenderTextCommand(text, x, y, rectLeft, rectTop, rectRight, rectBottom, options));
+        }
+
+        public void EnqueueGdiPrimitive(GdiPrimitive primitive)
+        {
+            if (_disposed)
+                return;
+
+            _commandQueue.Add(new GdiPrimitiveCommand(primitive));
+        }
+
+        public bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character)
+        {
+            character = '\0';
+
+            if (_disposed)
+                return false;
+
+            try
+            {
+                _initCompletion.Task.Wait(5000);
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (_display is not IKeyboardTranslateSupport support)
+                return false;
+
+            return support.TranslateVirtualKey(virtualKey, scanCode, out character);
         }
 
         public bool MeasureText(string text, out int width, out int height)

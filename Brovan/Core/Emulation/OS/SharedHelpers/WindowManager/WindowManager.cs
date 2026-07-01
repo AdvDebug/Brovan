@@ -72,6 +72,61 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         void RenderText(IntPtr windowHandle, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options);
     }
 
+    public enum GdiPrimitiveKind
+    {
+        Line,
+        FillRect,
+        Rectangle,
+        Ellipse,
+        RoundRect,
+        Polygon,
+        Polyline
+    }
+
+    public struct GdiPenDescriptor
+    {
+        public uint ColorRef;
+        public int Width;
+    }
+
+    public struct GdiBrushDescriptor
+    {
+        public uint ColorRef;
+    }
+
+    public struct GdiPoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    public struct GdiPrimitive
+    {
+        public GdiPrimitiveKind Kind;
+        public int X1;
+        public int Y1;
+        public int X2;
+        public int Y2;
+        public uint Rop;
+        public int RoundedWidth;
+        public int RoundedHeight;
+        public GdiPoint[] Points;
+        public GdiPenDescriptor Pen;
+        public GdiBrushDescriptor Brush;
+        public bool HasPen;
+        public bool HasBrush;
+    }
+
+    public interface IGdiRenderSupport
+    {
+        void ExecuteGdiPrimitive(IntPtr windowHandle, GdiPrimitive primitive);
+    }
+
+    public interface IKeyboardTranslateSupport
+    {
+        bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character);
+    }
+
     public struct TextMetricsData
     {
         public int Height;

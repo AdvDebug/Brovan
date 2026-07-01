@@ -45,6 +45,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool AlertByThreadIdPending { get; set; }
         public bool AlertByThreadIdWaitActive { get; set; }
         public ulong AlertByThreadIdAddress { get; set; }
+        public bool MsgWaitActive { get; set; }
+        public uint MsgWaitMask { get; set; }
+        public bool GetMessageWaitActive { get; set; }
+        public ulong GetMessageMessagePtr { get; set; }
+        public ulong GetMessageHwndFilter { get; set; }
+        public uint GetMessageMinMessage { get; set; }
+        public uint GetMessageMaxMessage { get; set; }
         public Stack<WinUserCallbackFrame> UserCallbackFrames { get; set; } = new();
     }
 
