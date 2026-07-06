@@ -770,6 +770,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 if (msg == WM_CLOSE)
                 {
+                    _pendingHostInput.Enqueue((msg, 0UL, 0UL));
                     Close();
                     return IntPtr.Zero;
                 }
