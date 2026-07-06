@@ -5139,7 +5139,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 WinFile Closing = HandleManager.GetObjectByHandle<WinFile>(Handle);
                 if (Closing != null && Closing.DeletePending && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
-                    ApplyDeleteOnClose(Closing);
+                {
+                    List<ulong> HandlesForObject = HandleManager.GetHandlesByObjectId(Closing.ObjectId);
+                    HandlesForObject.Remove(Handle);
+                    if (HandlesForObject.Count == 0)
+                        ApplyDeleteOnClose(Closing);
+                }
             }
 
             if (HandleManager.RemoveHandle(Handle))
@@ -5160,7 +5165,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Target.Directory)
                 {
                     if (Directory.Exists(VirtualPath))
-                        Directory.Delete(VirtualPath, true);
+                        Directory.Delete(VirtualPath, false);
                 }
                 else if (File.Exists(VirtualPath))
                 {

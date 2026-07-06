@@ -332,6 +332,7 @@ namespace Brovan.Generators
             "vkDestroyInstance",
             "vkEnumeratePhysicalDevices",
             "vkGetPhysicalDeviceProperties",
+            "vkGetPhysicalDeviceQueueFamilyProperties",
             "vkCreateDevice",
             "vkGetDeviceQueue",
             "vkCreateCommandPool",
