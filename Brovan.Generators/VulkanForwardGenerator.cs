@@ -568,18 +568,18 @@ namespace Brovan.Generators
                     "                if (hasAc != 0) { System.IntPtr ac = BrovVulkGenStruct.Rebuild(0, r, st); *(System.IntPtr*)(ci + 24) = ac; }\n" +
                     "                if (Brovan.GeneralHelper.IsLinux && ci != System.IntPtr.Zero)\n" +
                     "                {\n" +
-                    "                    uint extCount = *(uint*)(ci + 48);\n" +
-"                    if (extCount > 1024) extCount = 1024;\n" +
                     "                    System.IntPtr extPtr = *(System.IntPtr*)(ci + 56);\n" +
-                    "                    if (extCount != 0 && extPtr != System.IntPtr.Zero)\n" +
+                    "                    if (extPtr != System.IntPtr.Zero)\n" +
                     "                    {\n" +
-                    "                        System.IntPtr newArr = st.Alloc(BrovVulkGenStruct.CheckedBytes(extCount, 8));\n" +
+                    "                        uint cap = 1024;\n" +
+                    "                        System.IntPtr newArr = st.Alloc(BrovVulkGenStruct.CheckedBytes(cap, 8));\n" +
                     "                        uint newCount = 0;\n" +
                     "                        bool sawWin32 = false;\n" +
-                    "                        for (uint k = 0; k < extCount; k++)\n" +
+                    "                        for (uint k = 0; k < cap; k++)\n" +
                     "                        {\n" +
                     "                            System.IntPtr p = System.Runtime.InteropServices.Marshal.ReadIntPtr(extPtr, (int)(k * 8));\n" +
-                    "                            string name = p == System.IntPtr.Zero ? null : System.Runtime.InteropServices.Marshal.PtrToStringAnsi(p);\n" +
+                    "                            if (p == System.IntPtr.Zero) break;\n" +
+                    "                            string name = System.Runtime.InteropServices.Marshal.PtrToStringAnsi(p);\n" +
                     "                            if (name == \"VK_KHR_win32_surface\") { sawWin32 = true; continue; }\n" +
                     "                            System.Runtime.InteropServices.Marshal.WriteIntPtr(newArr, (int)(newCount * 8), p);\n" +
                     "                            newCount++;\n" +
