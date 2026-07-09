@@ -244,7 +244,7 @@ namespace Brovan.Core.Helpers
 
             try
             {
-                string DumpPath = Path.Combine(Environment.CurrentDirectory, "Dump.txt");
+                string DumpPath = Path.Combine(AppContext.BaseDirectory, "Dump.txt");
                 File.WriteAllText(DumpPath, Result.ToString());
                 PrintHighlight($"[*] Dump is saved at: \"{DumpPath}\".", true);
             }

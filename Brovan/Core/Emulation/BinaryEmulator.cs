@@ -330,6 +330,19 @@ namespace Brovan.Core.Emulation
         private readonly HashSet<int> MlfqQueuedThreads = new();
         private readonly uint[] MlfqQuanta = new uint[32];
         private bool MemoryRegionIndexDirty = true;
+        private bool _freedMemorySorted = true;
+
+        private static readonly MemoryRegionBaseComparer _memoryRegionBaseComparer = new();
+
+        private sealed class MemoryRegionBaseComparer : IComparer<MemoryRegion>
+        {
+            public int Compare(MemoryRegion x, MemoryRegion y)
+            {
+                if (x.BaseAddress < y.BaseAddress) return -1;
+                if (x.BaseAddress > y.BaseAddress) return 1;
+                return 0;
+            }
+        }
 
         private const int GprBatchCount = 18;
         private int[] _gprBatchRegs;
@@ -692,15 +705,40 @@ namespace Brovan.Core.Emulation
         /// </summary>
         private void ConsumeFreedMemoryRange(ulong Address, ulong Size)
         {
-            if (Size == 0)
+            if (Size == 0 || _freedmemory.Count == 0)
                 return;
 
+            EnsureFreedMemorySorted();
+
             ulong End = GetRangeEnd(Address, Size);
-            for (int i = 0; i < _freedmemory.Count; i++)
+
+            int lo = 0, hi = _freedmemory.Count - 1, firstCandidate = -1;
+            while (lo <= hi)
+            {
+                int mid = lo + ((hi - lo) >> 1);
+                ulong midEnd = GetRangeEnd(_freedmemory[mid].BaseAddress, _freedmemory[mid].Size);
+                if (midEnd > Address)
+                {
+                    firstCandidate = mid;
+                    hi = mid - 1;
+                }
+                else
+                {
+                    lo = mid + 1;
+                }
+            }
+
+            if (firstCandidate < 0)
+                return;
+
+            for (int i = firstCandidate; i < _freedmemory.Count; i++)
             {
                 MemoryRegion FreedMemory = _freedmemory[i];
                 ulong FreedStart = FreedMemory.BaseAddress;
                 ulong FreedEnd = GetRangeEnd(FreedMemory.BaseAddress, FreedMemory.Size);
+
+                if (FreedStart >= End)
+                    break;
 
                 if (!RegionsOverlap(Address, Size, FreedStart, FreedMemory.Size))
                     continue;
@@ -776,7 +814,9 @@ namespace Brovan.Core.Emulation
         /// </summary>
         internal void AddMemoryRegion(MemoryRegion Region)
         {
-            _memory.Add(Region);
+            int idx = _memory.BinarySearch(Region, _memoryRegionBaseComparer);
+            if (idx < 0) idx = ~idx;
+            _memory.Insert(idx, Region);
             MemoryRegionIndexDirty = true;
         }
 
@@ -818,8 +858,17 @@ namespace Brovan.Core.Emulation
         /// </summary>
         internal void SetMemoryRegion(int Index, MemoryRegion Region)
         {
+            if (Index < 0 || Index >= _memory.Count)
+                return;
+
+            ulong OldBase = _memory[Index].BaseAddress;
             _memory[Index] = Region;
-            MemoryRegionIndexDirty = true;
+
+            if (Region.BaseAddress != OldBase)
+            {
+                _memory.Sort(_memoryRegionBaseComparer);
+                MemoryRegionIndexDirty = true;
+            }
         }
 
         /// <summary>
@@ -828,6 +877,7 @@ namespace Brovan.Core.Emulation
         internal void ReplaceMemoryRegions(List<MemoryRegion> Regions)
         {
             _memory = Regions ?? new List<MemoryRegion>();
+            _memory.Sort(_memoryRegionBaseComparer);
             MemoryRegionIndexDirty = true;
         }
 
@@ -1065,8 +1115,6 @@ namespace Brovan.Core.Emulation
             for (int i = 0; i < _memory.Count; i++)
                 MemoryRegionIndex.Add(i);
 
-            CollectionsMarshal.AsSpan(MemoryRegionIndex).Sort(
-                new MemoryRegionIndexComparer(_memory));
             MemoryRegionIndexDirty = false;
         }
 
@@ -1259,25 +1307,45 @@ namespace Brovan.Core.Emulation
         /// <returns>returns true if freed, otherwise false.</returns>
         public bool IsRegionFreed(ulong BaseAddress, bool WholeMemory)
         {
-            if (_freedmemory.Count > 0)
+            if (_freedmemory.Count == 0)
+                return false;
+
+            EnsureFreedMemorySorted();
+
+            if (WholeMemory)
             {
-                foreach (MemoryRegion Region in _freedmemory)
+                int lo = 0, hi = _freedmemory.Count - 1, cand = -1;
+                while (lo <= hi)
                 {
-                    if (WholeMemory)
-                    {
-                        if (BaseAddress >= Region.BaseAddress && BaseAddress < Region.BaseAddress + Region.Size)
-                        {
-                            return true;
-                        }
-                    }
-                    else
-                    {
-                        if (Region.BaseAddress == BaseAddress)
-                            return true;
-                    }
+                    int mid = lo + ((hi - lo) >> 1);
+                    if (_freedmemory[mid].BaseAddress <= BaseAddress) { cand = mid; lo = mid + 1; }
+                    else hi = mid - 1;
                 }
+                if (cand < 0) return false;
+                MemoryRegion r = _freedmemory[cand];
+                return BaseAddress >= r.BaseAddress && BaseAddress < r.BaseAddress + r.Size;
             }
-            return false;
+            else
+            {
+                int lo = 0, hi = _freedmemory.Count - 1;
+                while (lo <= hi)
+                {
+                    int mid = lo + ((hi - lo) >> 1);
+                    ulong mb = _freedmemory[mid].BaseAddress;
+                    if (mb == BaseAddress) return true;
+                    if (mb < BaseAddress) lo = mid + 1;
+                    else hi = mid - 1;
+                }
+                return false;
+            }
+        }
+
+        private void EnsureFreedMemorySorted()
+        {
+            if (_freedMemorySorted)
+                return;
+            _freedmemory.Sort(_memoryRegionBaseComparer);
+            _freedMemorySorted = true;
         }
 
         /// <summary>
@@ -1307,6 +1375,7 @@ namespace Brovan.Core.Emulation
             {
                 RemoveMemoryRegion(Region);
                 _freedmemory.Add(Region);
+                _freedMemorySorted = false;
                 TriggerDebugMessage(() => $"memory: unmapped base=0x{Address:X} size=0x{Region.Size:X}");
                 return true;
             }
@@ -1320,26 +1389,49 @@ namespace Brovan.Core.Emulation
             if (BaseAddress == 0 || Size == 0)
                 return;
 
+            EnsureFreedMemorySorted();
+
             ulong Start = BaseAddress;
             ulong End = BaseAddress + Size;
 
-            for (int i = 0; i < _freedmemory.Count; i++)
+            int lo = 0, hi = _freedmemory.Count - 1, firstOverlap = -1;
+            while (lo <= hi)
             {
-                MemoryRegion Region = _freedmemory[i];
-                ulong RegionStart = Region.BaseAddress;
-                ulong RegionEnd = Region.BaseAddress + Region.Size;
-
-                // Merge overlaps and adjacent blocks.
-                if (End < RegionStart || Start > RegionEnd)
-                    continue;
-
-                Start = Math.Min(Start, RegionStart);
-                End = Math.Max(End, RegionEnd);
-                _freedmemory.RemoveAt(i);
-                i--;
+                int mid = lo + ((hi - lo) >> 1);
+                ulong midEnd = _freedmemory[mid].BaseAddress + _freedmemory[mid].Size;
+                if (midEnd >= Start)
+                {
+                    firstOverlap = mid;
+                    hi = mid - 1;
+                }
+                else
+                {
+                    lo = mid + 1;
+                }
             }
 
-            _freedmemory.Add(new MemoryRegion
+            int insertIdx = firstOverlap < 0 ? _freedmemory.Count : firstOverlap;
+
+            if (firstOverlap >= 0)
+            {
+                for (int i = firstOverlap; i < _freedmemory.Count; i++)
+                {
+                    MemoryRegion Region = _freedmemory[i];
+                    ulong RegionStart = Region.BaseAddress;
+                    ulong RegionEnd = Region.BaseAddress + Region.Size;
+
+                    if (End < RegionStart)
+                        break;
+
+                    Start = Math.Min(Start, RegionStart);
+                    End = Math.Max(End, RegionEnd);
+                    _freedmemory.RemoveAt(i);
+                    i--;
+                    insertIdx = i + 1;
+                }
+            }
+
+            _freedmemory.Insert(insertIdx < 0 ? 0 : insertIdx, new MemoryRegion
             {
                 BaseAddress = Start,
                 Size = End - Start,

@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 
 namespace Brovan.Core.Emulation.OS.Linux.Files
 {

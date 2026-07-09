@@ -1006,7 +1006,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<string, int> ImageViewCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal KuserSharedDataManager KuserSharedData;
         internal HandleManager HandleManager = new HandleManager();
-        private static string WinRegPath = Path.Combine(Environment.CurrentDirectory, "WinReg");
+        private static string WinRegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
         public RegistryManager RegManager = new RegistryManager(WinRegPath);
         public Hive[] RegHives;
         public HashSet<string> TempRegistryKeys = new(StringComparer.OrdinalIgnoreCase);
@@ -3852,16 +3852,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinFile? GetFileByHandle(ulong Handle, AccessMask Purpose)
         {
-            if (!HandleManager.HandleExists(Handle, HandleType.FileHandle))
+            if (!HandleManager.TryGetHandle(Handle, out HandleEntry Entry))
                 return null;
-
+            if (Entry.Object == null || Entry.Object.ObjectType != HandleType.FileHandle)
+                return null;
             if (Purpose != AccessMask.GiveTemp)
             {
-                if (!HandleManager.CheckAccess(Handle, Purpose))
-                    return null;
+                AccessMask Granted = Entry.Permissions;
+                if ((Granted & AccessMask.MaximumAllowed) == 0 && (Granted & AccessMask.GenericAll) == 0)
+                {
+                    if ((Granted & Purpose) != Purpose)
+                        return null;
+                }
             }
-
-            return HandleManager.GetObjectByHandle<WinFile>(Handle);
+            return Entry.Object as WinFile;
         }
 
         public bool ValidFileHandle(ulong Handle)
@@ -5212,19 +5216,22 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void CloseHandle(ulong Handle)
         {
-            if (HandleManager.HandleExists(Handle, HandleType.FileHandle))
+            if (HandleManager.TryGetHandle(Handle, out HandleEntry Entry))
             {
-                WinFile Closing = HandleManager.GetObjectByHandle<WinFile>(Handle);
-                if (Closing != null && Closing.DeletePending && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
+                if (Entry.Object != null && Entry.Object.ObjectType == HandleType.FileHandle)
                 {
-                    List<ulong> HandlesForObject = HandleManager.GetHandlesByObjectId(Closing.ObjectId);
-                    HandlesForObject.Remove(Handle);
-                    if (HandlesForObject.Count == 0)
-                        ApplyDeleteOnClose(Closing);
+                    WinFile Closing = Entry.Object as WinFile;
+                    if (Closing != null && Closing.DeletePending && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
+                    {
+                        List<ulong> HandlesForObject = HandleManager.GetHandlesByObjectId(Closing.ObjectId);
+                        HandlesForObject.Remove(Handle);
+                        if (HandlesForObject.Count == 0)
+                            ApplyDeleteOnClose(Closing);
+                    }
                 }
             }
 
-            if (HandleManager.RemoveHandle(Handle))
+            if (HandleManager.TryRemoveHandle(Handle, out _))
             {
                 RemoveWinHandle(Handle);
             }

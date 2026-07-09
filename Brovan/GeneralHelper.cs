@@ -155,7 +155,7 @@ namespace Brovan
     {
         public static bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
         public static bool IsLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
-        public static string WindowsLibsPath = Path.Combine(Environment.CurrentDirectory, "WindowsLibs");
+        public static string WindowsLibsPath = Path.Combine(AppContext.BaseDirectory, "WindowsLibs");
 
         public static string System32
         {
@@ -167,7 +167,7 @@ namespace Brovan
                 }
                 else
                 {
-                    return Path.Combine(Environment.CurrentDirectory, "WindowsLibs");
+                    return Path.Combine(AppContext.BaseDirectory, "WindowsLibs");
                 }
             }
         }
@@ -182,7 +182,7 @@ namespace Brovan
                 }
                 else
                 {
-                    return Path.Combine(Environment.CurrentDirectory, "WindowsLibs\\SysWOW64");
+                    return Path.Combine(AppContext.BaseDirectory, "WindowsLibs\\SysWOW64");
                 }
             }
         }
@@ -918,7 +918,7 @@ namespace Brovan
             private static readonly HashSet<string> AllowedRoots = new(IsWindows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             private static readonly Dictionary<string, string> LinuxMountMappings = new(StringComparer.Ordinal);
 
-            public static string VirtualFileSystemRoot = Path.Combine(Environment.CurrentDirectory, "VirtualFS");
+            public static string VirtualFileSystemRoot = Path.Combine(AppContext.BaseDirectory, "VirtualFS");
             public static string LinuxVirtualFileSystemRoot = Path.Combine(VirtualFileSystemRoot, "Linux");
             public static string LinuxCurrentDirectory = "/";
             public static string DefaultDriveLetter = "C";

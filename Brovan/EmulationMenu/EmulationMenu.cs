@@ -819,6 +819,8 @@ namespace Brovan.EmulationMenu
             PrintHighlight($"[+] Ghost patch @ 0x{GAddress:X} ({GBytes.Length} bytes)", true);
         }
 
+        [RequiresUnreferencedCode("Uses reflection to enumerate types and fields.")]
+        [RequiresDynamicCode("Uses MakeGenericMethod which requires dynamic code.")]
         private static void HandleParseStructCommand(string[] args)
         {
             if (args.Length < 2)
@@ -1159,6 +1161,8 @@ namespace Brovan.EmulationMenu
             CancelKeyPressRegistered = true;
         }
 
+        [RequiresUnreferencedCode("Uses reflection to enumerate types and invoke methods.")]
+        [RequiresDynamicCode("Uses MakeGenericMethod which requires dynamic code.")]
         public static void ExecuteCommand(string Command)
         {
             if (!TryParseCommandLine(Command, out string cmd, out string arguments, out string[] args))

@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -72,16 +73,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static string TryGetTargetString(IHandleObject Obj)
         {
-            Type T = Obj.GetType();
-
-            FieldInfo Field = T.GetField("Target", BindingFlags.Public | BindingFlags.Instance);
-            if (Field != null && Field.FieldType == typeof(string))
-                return (string)Field.GetValue(Obj);
-
-            PropertyInfo Prop = T.GetProperty("Target", BindingFlags.Public | BindingFlags.Instance);
-            if (Prop != null && Prop.PropertyType == typeof(string) && Prop.CanRead)
-                return (string)Prop.GetValue(Obj);
-
+            if (Obj is WinSymbolicLink Link)
+                return Link.Target;
             return null;
         }
     }

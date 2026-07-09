@@ -1,5 +1,7 @@
 using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -49,7 +51,7 @@ namespace Brovan.Core.Emulation.OS
         public override string ToString() => Success ? "OK" : $"FAIL({Error}){(Detail != null ? ": " + Detail : "")}";
     }
 
-    public static class StructSerializer
+    public static partial class StructSerializer
     {
         private const int MaxDepth = 4;
 
@@ -82,7 +84,7 @@ namespace Brovan.Core.Emulation.OS
             public readonly int Size64;
             public readonly bool IsBlittable;
 
-            public TypeDesc(Type T)
+            public TypeDesc([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] Type T)
             {
                 FieldInfo[] Raw = T.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
                 bool Expl = T.GetCustomAttribute<StructLayoutAttribute>()?.Value == LayoutKind.Explicit;
@@ -156,7 +158,7 @@ namespace Brovan.Core.Emulation.OS
                 return GetElementSize(Ft, Is64);
             }
 
-            internal static int GetElementSize(Type Ft, bool Is64)
+            internal static int GetElementSize([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] Type Ft, bool Is64)
             {
                 if (Ft.IsEnum)
                     Ft = Enum.GetUnderlyingType(Ft);
@@ -178,7 +180,7 @@ namespace Brovan.Core.Emulation.OS
 
         private static readonly Dictionary<Type, TypeDesc> Cache = new();
 
-        private static TypeDesc GetDesc(Type T)
+        private static TypeDesc GetDesc([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] Type T)
         {
             if (Cache.TryGetValue(T, out TypeDesc D)) return D;
             return Cache[T] = new TypeDesc(T);
@@ -192,7 +194,7 @@ namespace Brovan.Core.Emulation.OS
         /// <typeparam name="T">Struct</typeparam>
         /// <param name="Emulator">The emulator instance to determine architecture.</param>
         /// <returns>return the size.</returns>
-        public static uint GetStructSize<T>(BinaryEmulator Emulator) where T : struct
+        public static uint GetStructSize<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator) where T : struct
         {
             bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;
             return (uint)GetStructSize(typeof(T), Is64);
@@ -204,12 +206,12 @@ namespace Brovan.Core.Emulation.OS
         /// <typeparam name="T">Struct</typeparam>
         /// <param name="Is64">An indicator whether the architecture is x64.</param>
         /// <returns>return the size.</returns>
-        public static int GetStructSize<T>(bool Is64) where T : struct
+        public static int GetStructSize<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(bool Is64) where T : struct
         {
             return GetStructSize(typeof(T), Is64);
         }
 
-        private static int GetStructSize(Type T, bool Is64)
+        private static int GetStructSize([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] Type T, bool Is64)
         {
             TypeDesc Desc = GetDesc(T);
             return Is64 ? Desc.Size64 : Desc.Size32;
@@ -228,7 +230,7 @@ namespace Brovan.Core.Emulation.OS
         /// <param name="Address">The emulated address to write the struct to.</param>
         /// <param name="Value">The struct value to serialize.</param>
         /// <returns>Returns <see cref="WriteStructResult.Ok"/> on success, otherwise a failure result describing the error.</returns>
-        public static WriteStructResult WriteStruct<T>(BinaryEmulator Emulator, ulong Address, T Value) where T : struct
+        public static WriteStructResult WriteStruct<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator, ulong Address, T Value) where T : struct
         {
             if (Address == 0)
                 return WriteStructResult.Fail(WriteStructError.NullDestination, $"Destination address is NULL for {typeof(T).Name}");
@@ -260,6 +262,9 @@ namespace Brovan.Core.Emulation.OS
             byte[] SlowBuf = ArrayPool<byte>.Shared.Rent(SlowSize);
             try
             {
+                // MemoryStream backed by the rented buffer: no internal growth,
+                // no ToArray() needed. publiclyVisible:false so GetBuffer() is
+                // not callable (we use AsSpan instead).
                 using MemoryStream Ms = new(SlowBuf, 0, SlowSize, writable: true, publiclyVisible: false);
                 using BinaryWriter Bw = new(Ms, Encoding.Unicode, leaveOpen: true);
 
@@ -286,7 +291,7 @@ namespace Brovan.Core.Emulation.OS
         /// <param name="Address">The emulated address to read the struct from.</param>
         /// <param name="Value">The deserialized struct value on success.</param>
         /// <returns>Returns true if successful, otherwise false.</returns>
-        public static bool ParseStruct<T>(BinaryEmulator Emulator, ulong Address, out T Value) where T : struct
+        public static bool ParseStruct<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator, ulong Address, out T Value) where T : struct
         {
             Value = default;
             if (Address == 0) return false;
@@ -335,7 +340,7 @@ namespace Brovan.Core.Emulation.OS
         /// <remarks>
         /// This is mostly used in the fuzzing, this is never used in the emulator itself.
         /// </remarks>
-        public static bool ParseStruct<T>(BinaryEmulator Emulator, byte[] Data, out T Value) where T : struct
+        public static bool ParseStruct<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator, byte[] Data, out T Value) where T : struct
         {
             Value = default;
 
@@ -356,6 +361,8 @@ namespace Brovan.Core.Emulation.OS
 
         // --- Private workers ---
 
+        [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Non-blittable struct path -- hot-path structs are blittable and do not reach here.")]
+        [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "Non-blittable struct path -- hot-path structs are blittable and do not reach here.")]
         private static WriteStructResult BuildFields(BinaryEmulator Emulator, BinaryWriter Bw, object Value, int Depth, bool Is64)
         {
             if (Depth > MaxDepth)
@@ -598,6 +605,8 @@ namespace Brovan.Core.Emulation.OS
             return WriteStructResult.Ok;
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Non-blittable struct path -- hot-path structs are blittable and do not reach here.")]
+        [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "Non-blittable struct path -- hot-path structs are blittable and do not reach here.")]
         private static bool ReadFields(BinaryEmulator Emulator, byte[] Raw, int Base, ref object Value, int Depth, bool Is64)
         {
             if (Depth > MaxDepth) return false;
@@ -687,7 +696,7 @@ namespace Brovan.Core.Emulation.OS
 
                             if (Et.IsValueType && !Et.IsPrimitive && !Et.IsEnum)
                             {
-                                object Elem = Activator.CreateInstance(Et);
+                                object Elem = RuntimeHelpers.GetUninitializedObject(Et);
                                 if (!ReadFields(Emulator, Raw, ElemOff, ref Elem, Depth + 1, Is64)) return false;
                                 Arr.SetValue(Elem, I);
                                 continue;
@@ -768,7 +777,7 @@ namespace Brovan.Core.Emulation.OS
                         {
                             byte[] NR = Emulator.ReadMemory(Ptr, (uint)NS);
                             if (NR == null || NR.Length != NS) return false;
-                            object Inner = Activator.CreateInstance(Ft);
+                            object Inner = RuntimeHelpers.GetUninitializedObject(Ft);
                             if (!ReadFields(Emulator, NR, 0, ref Inner, Depth + 1, Is64)) return false;
                             D.Field.SetValue(Value, Inner);
                         }
@@ -776,7 +785,7 @@ namespace Brovan.Core.Emulation.OS
                     }
                     else
                     {
-                        object Nested = Activator.CreateInstance(Ft);
+                        object Nested = RuntimeHelpers.GetUninitializedObject(Ft);
                         if (!ReadFields(Emulator, Raw, Off, ref Nested, Depth + 1, Is64)) return false;
                         D.Field.SetValue(Value, Nested);
                         Cursor = Off + NS;

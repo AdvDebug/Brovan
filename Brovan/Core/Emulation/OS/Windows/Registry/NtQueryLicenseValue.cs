@@ -1,4 +1,4 @@
-using Brovan.Core.Helpers;
+﻿using Brovan.Core.Helpers;
 using System;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;

@@ -1462,7 +1462,7 @@ namespace Brovan.Core.Emulation.Guests
 
                 if (!File.Exists(NtdllPath))
                 {
-                    string CurrentPathNtdll = Path.Combine(Environment.CurrentDirectory, "ntdll.dll");
+                    string CurrentPathNtdll = Path.Combine(AppContext.BaseDirectory, "ntdll.dll");
                     if (File.Exists(CurrentPathNtdll))
                         NtdllPath = CurrentPathNtdll;
                 }

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -1405,6 +1406,7 @@ namespace Brovan
             return true;
         }
 
+        [RequiresUnreferencedCode("Uses reflection to enumerate fields and create instances.")]
         public static bool TryBuildStructInstance(Type structType, string fieldAssignments, out object structInstance, out string errorMessage)
         {
             structInstance = null;
@@ -2842,6 +2844,7 @@ namespace Brovan
             }
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = "Interactive helper -- not on the emulation hot path.")]
         private static FieldInfo FindInstanceField(Type Type, string Name)
         {
             for (Type Current = Type; Current != null; Current = Current.BaseType)
@@ -2854,6 +2857,7 @@ namespace Brovan
             return null;
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = "Interactive helper -- not on the emulation hot path.")]
         private static PropertyInfo FindInstanceProperty(Type Type, string Name)
         {
             for (Type Current = Type; Current != null; Current = Current.BaseType)
@@ -2866,6 +2870,7 @@ namespace Brovan
             return null;
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "Interactive helper -- not on the emulation hot path.")]
         private static IEnumerable<FieldInfo> EnumerateInstanceFields(Type Type)
         {
             Stack<Type> Types = new Stack<Type>();
@@ -2880,6 +2885,7 @@ namespace Brovan
             }
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "Interactive helper -- not on the emulation hot path.")]
         private static IEnumerable<PropertyInfo> EnumerateInstanceProperties(Type Type)
         {
             Stack<Type> Types = new Stack<Type>();

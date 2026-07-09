@@ -134,7 +134,10 @@ namespace Brovan.Core.Emulation
             if (Registered)
                 return;
 
-            NativeLibrary.SetDllImportResolver(typeof(Native).Assembly, Resolve);
+            try { NativeLibrary.SetDllImportResolver(typeof(Native).Assembly, Resolve); }
+            catch (InvalidOperationException) { }
+            try { NativeLibrary.SetDllImportResolver(typeof(Brovan.Core.Emulation.BinaryEmulator).Assembly, Resolve); }
+            catch (InvalidOperationException) { }
             Registered = true;
         }
 

@@ -270,7 +270,7 @@ namespace Brovan
                         try
                         {
                             byte[] ApiSetMap = CrossGenerator.GenerateMap();
-                            File.WriteAllBytes(Path.Combine(Environment.CurrentDirectory, "apisetmap.bin"), ApiSetMap);
+                            File.WriteAllBytes(Path.Combine(AppContext.BaseDirectory, "apisetmap.bin"), ApiSetMap);
                             PrintHighlight("[+] Custom ApiSetMap was generated.", true);
                         }
                         catch (Exception exception)
@@ -286,7 +286,7 @@ namespace Brovan
                     try
                     {
                         byte[] ApiSetMap = CrossGenerator.GenerateMap();
-                        File.WriteAllBytes(Path.Combine(Environment.CurrentDirectory, "apisetmap.bin"), ApiSetMap);
+                        File.WriteAllBytes(Path.Combine(AppContext.BaseDirectory, "apisetmap.bin"), ApiSetMap);
                         PrintHighlight("[+] Custom ApiSetMap was generated.", true);
                     }
                     catch (Exception ex)
@@ -297,7 +297,7 @@ namespace Brovan
                 }
             }
 
-            string RegPath = Path.Combine(Environment.CurrentDirectory, "WinReg");
+            string RegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
             if (!Directory.Exists(RegPath))
             {
                 if (IsWindows)

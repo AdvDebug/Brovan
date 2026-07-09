@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -189,6 +189,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (HandleTable.TryGetValue(Handle, out HandleEntry Entry))
                 return Entry.Permissions;
             return AccessMask.None;
+        }
+
+        public bool TryGetHandle(ulong Handle, out HandleEntry Entry)
+        {
+            return HandleTable.TryGetValue(Handle, out Entry);
+        }
+
+        public bool TryRemoveHandle(ulong Handle, out HandleEntry Entry)
+        {
+            if (!HandleTable.TryGetValue(Handle, out Entry))
+                return false;
+            HandleTable.Remove(Handle);
+            IHandleObject obj = Entry.Object;
+            if (ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
+            {
+                Handles.Remove(Handle);
+                if (Handles.Count == 0)
+                    ObjectIdToHandles.Remove(obj.ObjectId);
+            }
+            return true;
         }
 
         public bool RemoveHandle(ulong Handle)

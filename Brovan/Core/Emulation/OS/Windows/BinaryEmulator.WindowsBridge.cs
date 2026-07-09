@@ -12,7 +12,7 @@ namespace Brovan.Core.Emulation
 {
     public partial class BinaryEmulator
     {
-        public static readonly string ApiSetMapPath = Path.Combine(Environment.CurrentDirectory, "apisetmap.bin");
+        public static readonly string ApiSetMapPath = Path.Combine(AppContext.BaseDirectory, "apisetmap.bin");
 
         private static readonly Lazy<byte[]> LazyApiSetMapBlob = new(() =>
         {

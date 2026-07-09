@@ -161,18 +161,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static void WriteFileDirectoryInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
         {
-            Instance._emulator.WriteMemory(Address + 0x00, 0u, 4);
-            Instance._emulator.WriteMemory(Address + 0x04, FileIndex, 4);
-            Instance._emulator.WriteMemory(Address + 0x08, (ulong)Entry.CreationTime, 8);
-            Instance._emulator.WriteMemory(Address + 0x10, (ulong)Entry.LastAccessTime, 8);
-            Instance._emulator.WriteMemory(Address + 0x18, (ulong)Entry.LastWriteTime, 8);
-            Instance._emulator.WriteMemory(Address + 0x20, (ulong)Entry.ChangeTime, 8);
-            Instance._emulator.WriteMemory(Address + 0x28, Entry.EndOfFile, 8);
-            Instance._emulator.WriteMemory(Address + 0x30, Entry.AllocationSize, 8);
-            Instance._emulator.WriteMemory(Address + 0x38, Entry.FileAttributes, 4);
-            Instance._emulator.WriteMemory(Address + 0x3C, (uint)FileNameBytes.Length, 4);
+            Span<byte> Buf = stackalloc byte[0x40];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x00, 4), 0u);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x04, 4), FileIndex);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Buf.Slice(0x08, 8), Entry.CreationTime);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Buf.Slice(0x10, 8), Entry.LastAccessTime);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Buf.Slice(0x18, 8), Entry.LastWriteTime);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Buf.Slice(0x20, 8), Entry.ChangeTime);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0x28, 8), Entry.EndOfFile);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0x30, 8), Entry.AllocationSize);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x38, 4), Entry.FileAttributes);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x3C, 4), (uint)FileNameBytes.Length);
+            Instance._emulator.WriteMemory(Address, Buf);
             if (FileNameBytes.Length != 0)
-                Instance._emulator.WriteMemory(Address + 0x40, FileNameBytes, (uint)FileNameBytes.Length);
+                Instance._emulator.WriteMemory(Address + 0x40, FileNameBytes);
         }
 
         private static void WriteFileFullDirectoryInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
@@ -195,11 +197,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static void WriteFileNamesInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
         {
-            Instance._emulator.WriteMemory(Address + 0x00, 0u, 4);
-            Instance._emulator.WriteMemory(Address + 0x04, FileIndex, 4);
-            Instance._emulator.WriteMemory(Address + 0x08, (uint)FileNameBytes.Length, 4);
+            Span<byte> Buf = stackalloc byte[0x0C];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x00, 4), 0u);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x04, 4), FileIndex);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x08, 4), (uint)FileNameBytes.Length);
+            Instance._emulator.WriteMemory(Address, Buf);
             if (FileNameBytes.Length != 0)
-                Instance._emulator.WriteMemory(Address + 0x0C, FileNameBytes, (uint)FileNameBytes.Length);
+                Instance._emulator.WriteMemory(Address + 0x0C, FileNameBytes);
         }
 
         private static List<WinDirectoryEntry> ScanDirectory(string HostPath, string Mask)

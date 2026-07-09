@@ -1162,7 +1162,7 @@ namespace Brovan.Analysis
 
         private static string[] BuildMnemonicLower()
         {
-            Array Values = Enum.GetValues(typeof(Mnemonic));
+            Mnemonic[] Values = Enum.GetValues<Mnemonic>();
             string[] Table = new string[Values.Length];
             foreach (Mnemonic M in Values)
                 Table[(int)M] = M.ToString().ToLowerInvariant();

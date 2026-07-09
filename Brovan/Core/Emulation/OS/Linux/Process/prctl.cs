@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using Brovan.Core.Emulation.Guests;
 
 namespace Brovan.Core.Emulation.OS.Linux.Process
