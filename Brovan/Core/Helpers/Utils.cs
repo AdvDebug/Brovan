@@ -33,12 +33,16 @@ namespace Brovan.Core.Helpers
     internal class Utils
     {
         private const int StdOutputHandle = -11;
+        private const int LogFlushInterval = 64;
 
         private static readonly object LogLock = new object();
         private static readonly string LogPath = Path.Combine(AppContext.BaseDirectory, "error_log.log");
         private static readonly string UserProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) ?? string.Empty;
 
         private static readonly Regex WindowsUserDirRegex = new Regex(@"[A-Z]:\\Users\\[^\\]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private static StreamWriter? _logWriter;
+        private static int _logWriteCount;
+        private static bool _logShutdownHooked;
 
         /// <summary>
         /// Suppresses Brovan host output while leaving guest console writes untouched.
@@ -63,6 +67,50 @@ namespace Brovan.Core.Helpers
         }
 
         /// <summary>
+        /// Open (or reuse) the process-lifetime log writer.
+        /// </summary>
+        private static StreamWriter? EnsureLogWriter()
+        {
+            if (_logWriter != null)
+                return _logWriter;
+
+            try
+            {
+                FileStream fs = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete, bufferSize: 4096, options: FileOptions.SequentialScan);
+
+                _logWriter = new StreamWriter(fs, new UTF8Encoding(false), bufferSize: 4096) { AutoFlush = false };
+            }
+            catch
+            {
+                _logWriter = null;
+            }
+
+            if (!_logShutdownHooked)
+            {
+                _logShutdownHooked = true;
+                try
+                {
+                    AppDomain.CurrentDomain.ProcessExit += static (_, _) =>
+                    {
+                        try
+                        {
+                            lock (LogLock)
+                            {
+                                _logWriter?.Flush();
+                                _logWriter?.Dispose();
+                                _logWriter = null;
+                            }
+                        }
+                        catch{}
+                    };
+                }
+                catch{}
+            }
+
+            return _logWriter;
+        }
+
+        /// <summary>
         /// Log errors inside Brovan.
         /// </summary>
         /// <param name="Error">Error to log.</param>
@@ -74,11 +122,24 @@ namespace Brovan.Core.Helpers
             string Timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
             string SanitizedError = SanitizeError(Error);
 
-            string LogLine = $"[{Timestamp}] ERROR: {SanitizedError}{Environment.NewLine}";
-
             lock (LogLock)
             {
-                File.AppendAllText(LogPath, LogLine);
+                StreamWriter? w = EnsureLogWriter();
+                if (w == null)
+                    return;
+
+                w.Write('[');
+                w.Write(Timestamp);
+                w.Write("] ERROR: ");
+                w.Write(SanitizedError);
+                w.WriteLine();
+
+                _logWriteCount++;
+                if (_logWriteCount >= LogFlushInterval)
+                {
+                    _logWriteCount = 0;
+                    try { w.Flush(); } catch{};
+                }
             }
         }
 
@@ -91,7 +152,6 @@ namespace Brovan.Core.Helpers
                 return;
 
             const int ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4;
-            const uint CP_UTF8 = 65001;
 
             try
             {
