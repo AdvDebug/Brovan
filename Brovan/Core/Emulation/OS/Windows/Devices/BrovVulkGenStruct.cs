@@ -150,7 +150,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (dt < 32 && (d.SelMask & (1u << (int)dt)) != 0)
                         {
                             uint n = r.ReadU32();
-                            if (n != 0 && n != *(uint*)(dst + d.LenOffset))
+                            if (n != *(uint*)(dst + d.LenOffset))
                                 throw new InvalidOperationException("BrovVulk generic: descriptor array length mismatch.");
                             if (n > 0 && d.Sub >= 0)
                             {

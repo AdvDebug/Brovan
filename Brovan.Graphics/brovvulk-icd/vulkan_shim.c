@@ -31,39 +31,6 @@ static HANDLE brov_dev(void)
     return g_dev;
 }
 
-static const VkExtensionProperties g_InstanceExtensions[] =
-{
-    { "VK_KHR_surface",        25 },
-    { "VK_KHR_win32_surface",   6 },
-};
-
-VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
-    const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties)
-{
-    if (pLayerName != NULL)
-    {
-        if (pPropertyCount)
-            *pPropertyCount = 0;
-        return VK_SUCCESS;
-    }
-
-    uint32_t total = (uint32_t)(sizeof(g_InstanceExtensions) / sizeof(g_InstanceExtensions[0]));
-    if (pProperties == NULL)
-    {
-        if (pPropertyCount)
-            *pPropertyCount = total;
-        return VK_SUCCESS;
-    }
-
-    uint32_t avail = pPropertyCount ? *pPropertyCount : 0;
-    uint32_t copy = avail < total ? avail : total;
-    if (copy > 0)
-        memcpy(pProperties, g_InstanceExtensions, copy * sizeof(VkExtensionProperties));
-    if (pPropertyCount)
-        *pPropertyCount = copy;
-    return copy < total ? VK_INCOMPLETE : VK_SUCCESS;
-}
-
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(
     uint32_t *pPropertyCount, VkLayerProperties *pProperties)
 {
@@ -71,40 +38,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(
     if (pPropertyCount)
         *pPropertyCount = 0;
     return VK_SUCCESS;
-}
-
-static const VkExtensionProperties g_DeviceExtensions[] =
-{
-    { "VK_KHR_swapchain", 70 },
-};
-
-VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
-    VkPhysicalDevice physicalDevice, const char *pLayerName,
-    uint32_t *pPropertyCount, VkExtensionProperties *pProperties)
-{
-    (void)physicalDevice;
-    if (pLayerName != NULL)
-    {
-        if (pPropertyCount)
-            *pPropertyCount = 0;
-        return VK_SUCCESS;
-    }
-
-    uint32_t total = (uint32_t)(sizeof(g_DeviceExtensions) / sizeof(g_DeviceExtensions[0]));
-    if (pProperties == NULL)
-    {
-        if (pPropertyCount)
-            *pPropertyCount = total;
-        return VK_SUCCESS;
-    }
-
-    uint32_t avail = pPropertyCount ? *pPropertyCount : 0;
-    uint32_t copy = avail < total ? avail : total;
-    if (copy > 0)
-        memcpy(pProperties, g_DeviceExtensions, copy * sizeof(VkExtensionProperties));
-    if (pPropertyCount)
-        *pPropertyCount = copy;
-    return copy < total ? VK_INCOMPLETE : VK_SUCCESS;
 }
 
 #define BVK_HDR 8u
@@ -518,6 +451,223 @@ static int bvk_rec_flush(VkCommandBuffer cb)
 
 #include "obj/generated/brovvulk_gen.c"
 
+typedef struct
+{
+    VkDescriptorUpdateTemplateEntry *entries;
+    uint32_t entryCount;
+    VkDescriptorUpdateTemplateType templateType;
+} BvkTemplate;
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(
+    VkDevice device, const VkDescriptorUpdateTemplateCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkDescriptorUpdateTemplate *pDescriptorUpdateTemplate)
+{
+    (void)device; (void)pAllocator;
+    if (!pCreateInfo || !pDescriptorUpdateTemplate)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    BvkTemplate *t = (BvkTemplate *)malloc(sizeof(BvkTemplate));
+    if (!t)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    size_t bytes = pCreateInfo->descriptorUpdateEntryCount * sizeof(VkDescriptorUpdateTemplateEntry);
+    t->entries = (VkDescriptorUpdateTemplateEntry *)malloc(bytes ? bytes : 1);
+    if (!t->entries)
+    {
+        free(t);
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    memcpy(t->entries, pCreateInfo->pDescriptorUpdateEntries, bytes);
+    t->entryCount = pCreateInfo->descriptorUpdateEntryCount;
+    t->templateType = pCreateInfo->templateType;
+    *pDescriptorUpdateTemplate = (VkDescriptorUpdateTemplate)(uintptr_t)t;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplate(
+    VkDevice device, VkDescriptorUpdateTemplate descriptorUpdateTemplate, const VkAllocationCallbacks *pAllocator)
+{
+    (void)device; (void)pAllocator;
+    BvkTemplate *t = (BvkTemplate *)(uintptr_t)descriptorUpdateTemplate;
+    if (!t)
+        return;
+    free(t->entries);
+    free(t);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
+    VkDevice device, VkDescriptorSet descriptorSet, VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void *pData)
+{
+    BvkTemplate *t = (BvkTemplate *)(uintptr_t)descriptorUpdateTemplate;
+    if (!t || t->templateType != VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET || !pData)
+        return;
+    size_t scratchBytes = 0;
+    for (uint32_t i = 0; i < t->entryCount; i++)
+        scratchBytes += (size_t)t->entries[i].descriptorCount * sizeof(VkDescriptorImageInfo);
+    VkWriteDescriptorSet *writes = (VkWriteDescriptorSet *)malloc(
+        t->entryCount * sizeof(VkWriteDescriptorSet) + scratchBytes);
+    if (!writes)
+        return;
+    unsigned char *scratch = (unsigned char *)(writes + t->entryCount);
+    uint32_t writeCount = 0;
+    for (uint32_t i = 0; i < t->entryCount; i++)
+    {
+        const VkDescriptorUpdateTemplateEntry *e = &t->entries[i];
+        const unsigned char *src = (const unsigned char *)pData + e->offset;
+        VkWriteDescriptorSet *w = &writes[writeCount];
+        memset(w, 0, sizeof(*w));
+        w->sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w->dstSet = descriptorSet;
+        w->dstBinding = e->dstBinding;
+        w->dstArrayElement = e->dstArrayElement;
+        w->descriptorCount = e->descriptorCount;
+        w->descriptorType = e->descriptorType;
+        size_t elem;
+        int cls;
+        switch (e->descriptorType)
+        {
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+            elem = sizeof(VkDescriptorImageInfo);
+            cls = 0;
+            break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+            elem = sizeof(VkDescriptorBufferInfo);
+            cls = 1;
+            break;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+            elem = sizeof(VkBufferView);
+            cls = 2;
+            break;
+        default:
+            continue;
+        }
+        const void *arr;
+        if (e->stride == elem)
+            arr = src;
+        else
+        {
+            for (uint32_t k = 0; k < e->descriptorCount; k++)
+                memcpy(scratch + k * elem, src + (size_t)k * e->stride, elem);
+            arr = scratch;
+            scratch += (size_t)e->descriptorCount * elem;
+        }
+        if (cls == 0)
+            w->pImageInfo = (const VkDescriptorImageInfo *)arr;
+        else if (cls == 1)
+            w->pBufferInfo = (const VkDescriptorBufferInfo *)arr;
+        else
+            w->pTexelBufferView = (const VkBufferView *)arr;
+        writeCount++;
+    }
+    if (writeCount)
+        vkUpdateDescriptorSets(device, writeCount, writes, 0, NULL);
+    free(writes);
+}
+
+typedef struct
+{
+    uint64_t objectHandle;
+    uint64_t value;
+    uint32_t objectType;
+} BvkPrivateEntry;
+
+typedef struct
+{
+    SRWLOCK lock;
+    BvkPrivateEntry *entries;
+    uint32_t count;
+    uint32_t cap;
+} BvkPrivateSlot;
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreatePrivateDataSlot(
+    VkDevice device, const VkPrivateDataSlotCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkPrivateDataSlot *pPrivateDataSlot)
+{
+    (void)device; (void)pCreateInfo; (void)pAllocator;
+    if (!pPrivateDataSlot)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    BvkPrivateSlot *s = (BvkPrivateSlot *)calloc(1, sizeof(BvkPrivateSlot));
+    if (!s)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    InitializeSRWLock(&s->lock);
+    *pPrivateDataSlot = (VkPrivateDataSlot)(uintptr_t)s;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyPrivateDataSlot(
+    VkDevice device, VkPrivateDataSlot privateDataSlot, const VkAllocationCallbacks *pAllocator)
+{
+    (void)device; (void)pAllocator;
+    BvkPrivateSlot *s = (BvkPrivateSlot *)(uintptr_t)privateDataSlot;
+    if (!s)
+        return;
+    free(s->entries);
+    free(s);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkSetPrivateData(
+    VkDevice device, VkObjectType objectType, uint64_t objectHandle,
+    VkPrivateDataSlot privateDataSlot, uint64_t data)
+{
+    (void)device;
+    BvkPrivateSlot *s = (BvkPrivateSlot *)(uintptr_t)privateDataSlot;
+    if (!s)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    AcquireSRWLockExclusive(&s->lock);
+    for (uint32_t i = 0; i < s->count; i++)
+        if (s->entries[i].objectHandle == objectHandle && s->entries[i].objectType == (uint32_t)objectType)
+        {
+            s->entries[i].value = data;
+            ReleaseSRWLockExclusive(&s->lock);
+            return VK_SUCCESS;
+        }
+    if (s->count == s->cap)
+    {
+        uint32_t ncap = s->cap ? s->cap * 2 : 16;
+        BvkPrivateEntry *ne = (BvkPrivateEntry *)realloc(s->entries, ncap * sizeof(BvkPrivateEntry));
+        if (!ne)
+        {
+            ReleaseSRWLockExclusive(&s->lock);
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+        s->entries = ne;
+        s->cap = ncap;
+    }
+    s->entries[s->count].objectHandle = objectHandle;
+    s->entries[s->count].objectType = (uint32_t)objectType;
+    s->entries[s->count].value = data;
+    s->count++;
+    ReleaseSRWLockExclusive(&s->lock);
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPrivateData(
+    VkDevice device, VkObjectType objectType, uint64_t objectHandle,
+    VkPrivateDataSlot privateDataSlot, uint64_t *pData)
+{
+    (void)device;
+    BvkPrivateSlot *s = (BvkPrivateSlot *)(uintptr_t)privateDataSlot;
+    if (!pData)
+        return;
+    *pData = 0;
+    if (!s)
+        return;
+    AcquireSRWLockShared(&s->lock);
+    for (uint32_t i = 0; i < s->count; i++)
+        if (s->entries[i].objectHandle == objectHandle && s->entries[i].objectType == (uint32_t)objectType)
+        {
+            *pData = s->entries[i].value;
+            break;
+        }
+    ReleaseSRWLockShared(&s->lock);
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char *pName)
 {
     (void)instance;
@@ -530,9 +680,14 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
 
     M(vkGetInstanceProcAddr);
     M(vkGetDeviceProcAddr);
-    M(vkEnumerateInstanceExtensionProperties);
     M(vkEnumerateInstanceLayerProperties);
-    M(vkEnumerateDeviceExtensionProperties);
+    M(vkCreateDescriptorUpdateTemplate);
+    M(vkDestroyDescriptorUpdateTemplate);
+    M(vkUpdateDescriptorSetWithTemplate);
+    M(vkCreatePrivateDataSlot);
+    M(vkDestroyPrivateDataSlot);
+    M(vkSetPrivateData);
+    M(vkGetPrivateData);
 #include "obj/generated/brovvulk_gen_procs.inc"
 #undef M
 

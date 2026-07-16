@@ -77,6 +77,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             _len += (int)n;
         }
 
+        public void WriteBytes(byte[] src)
+        {
+            Ensure(src.Length);
+            src.CopyTo(_data.AsSpan(_len, src.Length));
+            _len += src.Length;
+        }
+
         public byte[] Finish(int result)
         {
             byte[] outp = new byte[4 + _len];
@@ -91,6 +98,87 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         [DllImport("kernel32.dll", EntryPoint = "GetModuleHandleW")]
         internal static extern IntPtr GetModuleHandleW(IntPtr lpModuleName);
+    }
+
+    internal static unsafe class BrovVulkGenExt
+    {
+        private const int PropSize = 260;
+
+        private static byte[] _instance;
+        private static byte[] _device;
+        private static IntPtr _devicePd;
+
+        public static int Instance(GenBuf w)
+        {
+            _instance ??= Filter(QueryHost(IntPtr.Zero), BrovVulkExtensions.Instance);
+            w.WriteBytes(_instance);
+            return 0;
+        }
+
+        public static int Device(IntPtr physicalDevice, GenBuf w)
+        {
+            if (_device == null || _devicePd != physicalDevice)
+            {
+                _device = Filter(QueryHost(physicalDevice), BrovVulkExtensions.Device);
+                _devicePd = physicalDevice;
+            }
+            w.WriteBytes(_device);
+            return 0;
+        }
+
+        private static Dictionary<string, uint> QueryHost(IntPtr physicalDevice)
+        {
+            Dictionary<string, uint> map = new Dictionary<string, uint>(StringComparer.Ordinal);
+            uint n = 0;
+            int rr = physicalDevice == IntPtr.Zero
+                ? (int)BrovVulkApi.vkEnumerateInstanceExtensionProperties(IntPtr.Zero, (IntPtr)(&n), IntPtr.Zero)
+                : (int)BrovVulkApi.vkEnumerateDeviceExtensionProperties(physicalDevice, IntPtr.Zero, (IntPtr)(&n), IntPtr.Zero);
+            if (rr < 0 || n == 0)
+                return map;
+            if (n > 4096)
+                n = 4096;
+            IntPtr buf = Marshal.AllocHGlobal((int)(n * PropSize));
+            try
+            {
+                rr = physicalDevice == IntPtr.Zero
+                    ? (int)BrovVulkApi.vkEnumerateInstanceExtensionProperties(IntPtr.Zero, (IntPtr)(&n), buf)
+                    : (int)BrovVulkApi.vkEnumerateDeviceExtensionProperties(physicalDevice, IntPtr.Zero, (IntPtr)(&n), buf);
+                if (rr < 0)
+                    return map;
+                for (uint k = 0; k < n; k++)
+                {
+                    IntPtr rec = buf + (int)(k * PropSize);
+                    string name = Marshal.PtrToStringAnsi(rec);
+                    if (!string.IsNullOrEmpty(name))
+                        map[name] = (uint)Marshal.ReadInt32(rec, 256);
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buf);
+            }
+            return map;
+        }
+
+        private static byte[] Filter(Dictionary<string, uint> host, (string Name, uint Version)[] advertised)
+        {
+            List<(string Name, uint Version)> keep = new List<(string, uint)>();
+            foreach ((string name, uint ver) in advertised)
+            {
+                string hostName = Brovan.GeneralHelper.IsLinux && name == "VK_KHR_win32_surface" ? "VK_KHR_xcb_surface" : name;
+                if (host.TryGetValue(hostName, out uint hv))
+                    keep.Add((name, Math.Min(ver, hv)));
+            }
+            byte[] payload = new byte[4 + keep.Count * PropSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0, 4), (uint)keep.Count);
+            for (int k = 0; k < keep.Count; k++)
+            {
+                int off = 4 + k * PropSize;
+                System.Text.Encoding.ASCII.GetBytes(keep[k].Name, payload.AsSpan(off, 255));
+                BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(off + 256, 4), keep[k].Version);
+            }
+            return payload;
+        }
     }
 
     internal sealed class GenState
