@@ -1,3 +1,6 @@
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
@@ -174,6 +177,106 @@ static int bvk_rq_send(uint32_t cmd, void *out, uint32_t outCap, uint32_t *outLe
     return vkres;
 }
 
+typedef struct
+{
+    uint32_t id;
+    uint64_t size;
+    void *map;
+} bvk_mem_entry;
+
+static SRWLOCK bvk_mem_lock = SRWLOCK_INIT;
+static bvk_mem_entry *bvk_mem_tab;
+static unsigned int bvk_mem_count;
+static unsigned int bvk_mem_cap;
+
+static bvk_mem_entry *bvk_mem_find(uint32_t id)
+{
+    for (unsigned int i = 0; i < bvk_mem_count; i++)
+        if (bvk_mem_tab[i].id == id)
+            return &bvk_mem_tab[i];
+    return NULL;
+}
+
+static void bvk_mem_add(uint32_t id, uint64_t size)
+{
+    AcquireSRWLockExclusive(&bvk_mem_lock);
+    if (bvk_mem_count == bvk_mem_cap)
+    {
+        unsigned int nc = bvk_mem_cap ? bvk_mem_cap * 2u : 64u;
+        bvk_mem_entry *nt = (bvk_mem_entry *)realloc(bvk_mem_tab, nc * sizeof(bvk_mem_entry));
+        if (!nt)
+        {
+            ReleaseSRWLockExclusive(&bvk_mem_lock);
+            return;
+        }
+        bvk_mem_tab = nt;
+        bvk_mem_cap = nc;
+    }
+    bvk_mem_tab[bvk_mem_count].id = id;
+    bvk_mem_tab[bvk_mem_count].size = size;
+    bvk_mem_tab[bvk_mem_count].map = NULL;
+    bvk_mem_count++;
+    ReleaseSRWLockExclusive(&bvk_mem_lock);
+}
+
+static int bvk_mem_size(uint32_t id, uint64_t *size)
+{
+    AcquireSRWLockShared(&bvk_mem_lock);
+    bvk_mem_entry *e = bvk_mem_find(id);
+    if (e)
+        *size = e->size;
+    ReleaseSRWLockShared(&bvk_mem_lock);
+    return e != NULL;
+}
+
+static int bvk_mem_mapped(uint32_t id)
+{
+    AcquireSRWLockShared(&bvk_mem_lock);
+    bvk_mem_entry *e = bvk_mem_find(id);
+    int mapped = e != NULL && e->map != NULL;
+    ReleaseSRWLockShared(&bvk_mem_lock);
+    return mapped;
+}
+
+static void bvk_mem_setmap(uint32_t id, void *map)
+{
+    AcquireSRWLockExclusive(&bvk_mem_lock);
+    bvk_mem_entry *e = bvk_mem_find(id);
+    if (e)
+        e->map = map;
+    ReleaseSRWLockExclusive(&bvk_mem_lock);
+}
+
+static void bvk_mem_clearmap(uint32_t id)
+{
+    AcquireSRWLockExclusive(&bvk_mem_lock);
+    bvk_mem_entry *e = bvk_mem_find(id);
+    void *map = NULL;
+    if (e)
+    {
+        map = e->map;
+        e->map = NULL;
+    }
+    ReleaseSRWLockExclusive(&bvk_mem_lock);
+    if (map)
+        VirtualFree(map, 0, MEM_RELEASE);
+}
+
+static void bvk_mem_remove(uint32_t id)
+{
+    AcquireSRWLockExclusive(&bvk_mem_lock);
+    bvk_mem_entry *e = bvk_mem_find(id);
+    void *map = NULL;
+    if (e)
+    {
+        map = e->map;
+        *e = bvk_mem_tab[--bvk_mem_count];
+    }
+    ReleaseSRWLockExclusive(&bvk_mem_lock);
+    if (map)
+        VirtualFree(map, 0, MEM_RELEASE);
+}
+
 #include "obj/generated/brovvulk_structs.h"
 
 static void bvk_ser_struct(int sid, const unsigned char *s)
@@ -242,14 +345,53 @@ static void bvk_ser_struct(int sid, const unsigned char *s)
             break;
         }
         case 9:
-            bvk_w_u32((*(const void *const *)fp) ? 1 : 0);
+        {
+            const void *pn = *(const void *const *)fp;
+            while (pn)
+            {
+                int psid = bvk_pnext_sid(*(const uint32_t *)pn);
+                if (psid >= 0)
+                {
+                    bvk_w_u32(1);
+                    bvk_w_u32((uint32_t)psid);
+                    bvk_ser_struct(psid, (const unsigned char *)pn);
+                    break;
+                }
+                pn = *(const void *const *)((const char *)pn + 8);
+            }
+            if (!pn)
+                bvk_w_u32(0);
             break;
+        }
         case 11:
         {
             const void *p = *(const void *const *)fp;
-            uint32_t n = (uint32_t)(*(const size_t *)(s + d->lenOffset));
+            uint32_t n = d->size == 8
+                ? (uint32_t)(*(const uint64_t *)(s + d->lenOffset))
+                : *(const uint32_t *)(s + d->lenOffset);
             if (p) { bvk_w_u32(n); bvk_w_bytes(p, n); }
             else bvk_w_u32(0);
+            break;
+        }
+        case 12:
+        {
+            uint32_t dt = *(const uint32_t *)(s + d->selOffset);
+            if (dt < 32 && (d->selMask & (1u << dt)))
+            {
+                const void *p = *(const void *const *)fp;
+                uint32_t n = *(const uint32_t *)(s + d->lenOffset);
+                if (p)
+                {
+                    bvk_w_u32(n);
+                    if (d->sub >= 0)
+                        for (uint32_t k = 0; k < n; k++)
+                            bvk_ser_struct(d->sub, (const unsigned char *)p + (size_t)k * bvk_struct_sizes[d->sub]);
+                    else
+                        for (uint32_t k = 0; k < n; k++)
+                            bvk_w_u32((uint32_t)(uintptr_t)((const void *const *)p)[k]);
+                }
+                else bvk_w_u32(0);
+            }
             break;
         }
         default:
@@ -261,67 +403,117 @@ static void bvk_ser_struct(int sid, const unsigned char *s)
 #define BVK_BATCH_ID 0xFFFFFFFEu
 #define BVK_BATCH_LIMIT 900000u
 
-static BVK_TLS unsigned char *bvk_rec;
-static BVK_TLS unsigned int bvk_reccap;
-static BVK_TLS unsigned int bvk_reclen;
-static BVK_TLS unsigned int bvk_reccount;
-
-static void bvk_rec_grow(unsigned int need)
+typedef struct
 {
-    if (need <= bvk_reccap)
+    VkCommandBuffer cb;
+    unsigned char *buf;
+    unsigned int cap, len, count;
+} bvk_rec_slot;
+
+static SRWLOCK bvk_rec_lock = SRWLOCK_INIT;
+static bvk_rec_slot *bvk_rec_tab;
+static unsigned int bvk_rec_ntab;
+
+static bvk_rec_slot *bvk_rec_slot_for(VkCommandBuffer cb)
+{
+    bvk_rec_slot *fre = NULL;
+    for (unsigned int i = 0; i < bvk_rec_ntab; i++)
+    {
+        if (bvk_rec_tab[i].cb == cb)
+            return &bvk_rec_tab[i];
+        if (!fre && bvk_rec_tab[i].cb == VK_NULL_HANDLE)
+            fre = &bvk_rec_tab[i];
+    }
+    if (fre) { fre->cb = cb; return fre; }
+    unsigned int ni = bvk_rec_ntab + 8u;
+    bvk_rec_slot *nt = (bvk_rec_slot *)realloc(bvk_rec_tab, ni * sizeof(bvk_rec_slot));
+    if (!nt)
+        return NULL;
+    memset(nt + bvk_rec_ntab, 0, 8u * sizeof(bvk_rec_slot));
+    bvk_rec_tab = nt;
+    bvk_rec_slot *s = &bvk_rec_tab[bvk_rec_ntab];
+    s->cb = cb;
+    bvk_rec_ntab = ni;
+    return s;
+}
+
+static void bvk_rec_slot_grow(bvk_rec_slot *s, unsigned int need)
+{
+    if (need <= s->cap)
         return;
-    unsigned int nc = bvk_reccap ? bvk_reccap : 65536u;
+    unsigned int nc = s->cap ? s->cap : 65536u;
     while (nc < need)
         nc *= 2u;
-    unsigned char *nb = (unsigned char *)realloc(bvk_rec, nc);
-    if (nb) { bvk_rec = nb; bvk_reccap = nc; }
+    unsigned char *nb = (unsigned char *)realloc(s->buf, nc);
+    if (nb) { s->buf = nb; s->cap = nc; }
 }
 
-static void bvk_rec_begin(void)
+static void bvk_rec_begin(VkCommandBuffer cb)
 {
-    bvk_rec_grow(BVK_HDR + 4);
-    bvk_reclen = BVK_HDR + 4;
-    bvk_reccount = 0;
+    AcquireSRWLockExclusive(&bvk_rec_lock);
+    bvk_rec_slot *s = bvk_rec_slot_for(cb);
+    if (s)
+    {
+        bvk_rec_slot_grow(s, BVK_HDR + 4);
+        s->len = BVK_HDR + 4;
+        s->count = 0;
+    }
+    ReleaseSRWLockExclusive(&bvk_rec_lock);
 }
 
-static int bvk_rec_dispatch(void)
+static int bvk_rec_dispatch_slot(bvk_rec_slot *s)
 {
-    uint32_t plen = bvk_reclen - BVK_HDR;
+    uint32_t plen = s->len - BVK_HDR;
     uint32_t cmd = BVK_BATCH_ID;
-    memcpy(bvk_rec + 0, &cmd, 4);
-    memcpy(bvk_rec + 4, &plen, 4);
-    memcpy(bvk_rec + BVK_HDR, &bvk_reccount, 4);
+    memcpy(s->buf + 0, &cmd, 4);
+    memcpy(s->buf + 4, &plen, 4);
+    memcpy(s->buf + BVK_HDR, &s->count, 4);
     HANDLE h = brov_dev();
     int r = VK_ERROR_INITIALIZATION_FAILED;
     if (h != INVALID_HANDLE_VALUE)
     {
         unsigned char obuf[32];
         DWORD ret = 0;
-        BOOL ok = DeviceIoControl(h, IOCTL_BROVVULK_GEN, bvk_rec, bvk_reclen, obuf, sizeof(obuf), &ret, NULL);
+        BOOL ok = DeviceIoControl(h, IOCTL_BROVVULK_GEN, s->buf, s->len, obuf, sizeof(obuf), &ret, NULL);
         if (ok && ret >= 4)
             memcpy(&r, obuf, 4);
     }
-    bvk_reclen = BVK_HDR + 4;
-    bvk_reccount = 0;
+    s->len = BVK_HDR + 4;
+    s->count = 0;
     return r;
 }
 
-static void bvk_rec_append(uint32_t id)
+static void bvk_rec_append(VkCommandBuffer cb, uint32_t id)
 {
-    unsigned int args = bvk_rqlen - BVK_HDR;
-    if (bvk_reccount != 0 && (uint64_t)bvk_reclen + 4 + args > BVK_BATCH_LIMIT)
-        bvk_rec_dispatch();
-    bvk_rec_grow(bvk_reclen + 4 + args);
-    memcpy(bvk_rec + bvk_reclen, &id, 4);
-    bvk_reclen += 4;
-    memcpy(bvk_rec + bvk_reclen, bvk_rq + BVK_HDR, args);
-    bvk_reclen += args;
-    bvk_reccount++;
+    AcquireSRWLockExclusive(&bvk_rec_lock);
+    bvk_rec_slot *s = bvk_rec_slot_for(cb);
+    if (s)
+    {
+        unsigned int args = bvk_rqlen - BVK_HDR;
+        if (s->count != 0 && (uint64_t)s->len + 4 + args > BVK_BATCH_LIMIT)
+            bvk_rec_dispatch_slot(s);
+        bvk_rec_slot_grow(s, s->len + 4 + args);
+        memcpy(s->buf + s->len, &id, 4);
+        s->len += 4;
+        memcpy(s->buf + s->len, bvk_rq + BVK_HDR, args);
+        s->len += args;
+        s->count++;
+    }
+    ReleaseSRWLockExclusive(&bvk_rec_lock);
 }
 
-static int bvk_rec_flush(void)
+static int bvk_rec_flush(VkCommandBuffer cb)
 {
-    return bvk_rec_dispatch();
+    AcquireSRWLockExclusive(&bvk_rec_lock);
+    bvk_rec_slot *s = bvk_rec_slot_for(cb);
+    int r = VK_SUCCESS;
+    if (s)
+    {
+        r = bvk_rec_dispatch_slot(s);
+        s->cb = VK_NULL_HANDLE;
+    }
+    ReleaseSRWLockExclusive(&bvk_rec_lock);
+    return r;
 }
 
 #include "obj/generated/brovvulk_gen.c"

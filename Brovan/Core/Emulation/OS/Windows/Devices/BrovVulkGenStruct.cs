@@ -22,6 +22,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return (int)total;
         }
 
+        private static void VerifyArrayLen(IntPtr dst, in BvkM d, uint n)
+        {
+            if (n != 0 && n != *(uint*)(dst + d.LenOffset))
+                throw new InvalidOperationException("BrovVulk generic: array length mismatch.");
+        }
+
         public static IntPtr Rebuild(int sid, GenReader r, GenState st)
         {
             IntPtr p = st.Alloc(BrovVulkStructMeta.Sizes[sid]);
@@ -51,6 +57,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case BvkMK.StructArray:
                     {
                         uint n = r.ReadU32();
+                        VerifyArrayLen(dst, d, n);
                         if (n > 0)
                         {
                             int esz = BrovVulkStructMeta.Sizes[d.Sub];
@@ -66,6 +73,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case BvkMK.HandleArray:
                     {
                         uint n = r.ReadU32();
+                        VerifyArrayLen(dst, d, n);
                         if (n > 0)
                         {
                             IntPtr arr = st.Alloc(CheckedBytes(n, 8));
@@ -79,6 +87,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case BvkMK.ScalarArray:
                     {
                         uint n = r.ReadU32();
+                        VerifyArrayLen(dst, d, n);
                         if (n > 0)
                         {
                             int bytes = CheckedBytes(n, d.Size);
@@ -104,6 +113,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case BvkMK.StringArray:
                     {
                         uint n = r.ReadU32();
+                        VerifyArrayLen(dst, d, n);
                         if (n > 0)
                         {
                             IntPtr arr = st.Alloc(CheckedBytes(n, 8));
@@ -122,6 +132,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case BvkMK.BlobPtr:
                     {
                         uint n = r.ReadU32();
+                        ulong declared = d.Size == 8 ? *(ulong*)(dst + d.LenOffset) : *(uint*)(dst + d.LenOffset);
+                        if (n != 0 && n != declared)
+                            throw new InvalidOperationException("BrovVulk generic: blob length mismatch.");
                         if (n > 0)
                         {
                             IntPtr s = st.Alloc(CheckedBytes(n, 1));
@@ -131,10 +144,47 @@ namespace Brovan.Core.Emulation.OS.Windows
                         else *(IntPtr*)fp = IntPtr.Zero;
                         break;
                     }
-                    case BvkMK.PNext:
-                        r.ReadU32();
-                        *(IntPtr*)fp = IntPtr.Zero;
+                    case BvkMK.SelectArray:
+                    {
+                        uint dt = *(uint*)(dst + d.SelOffset);
+                        if (dt < 32 && (d.SelMask & (1u << (int)dt)) != 0)
+                        {
+                            uint n = r.ReadU32();
+                            if (n != 0 && n != *(uint*)(dst + d.LenOffset))
+                                throw new InvalidOperationException("BrovVulk generic: descriptor array length mismatch.");
+                            if (n > 0 && d.Sub >= 0)
+                            {
+                                int esz = BrovVulkStructMeta.Sizes[d.Sub];
+                                IntPtr arr = st.Alloc(CheckedBytes(n, esz));
+                                for (uint k = 0; k < n; k++)
+                                    RebuildAt(d.Sub, r, st, arr + (int)(k * (uint)esz));
+                                *(IntPtr*)fp = arr;
+                            }
+                            else if (n > 0)
+                            {
+                                IntPtr arr = st.Alloc(CheckedBytes(n, 8));
+                                for (uint k = 0; k < n; k++)
+                                    *(IntPtr*)(arr + (int)(k * 8)) = st.Lookup(r.ReadU32(), d.HandleType);
+                                *(IntPtr*)fp = arr;
+                            }
+                            else *(IntPtr*)fp = IntPtr.Zero;
+                        }
+                        else *(IntPtr*)fp = IntPtr.Zero;
                         break;
+                    }
+                    case BvkMK.PNext:
+                    {
+                        uint has = r.ReadU32();
+                        if (has != 0)
+                        {
+                            int psid = (int)r.ReadU32();
+                            if (psid < 0 || psid >= BrovVulkStructMeta.PNext.Length || !BrovVulkStructMeta.PNext[psid])
+                                throw new InvalidOperationException("BrovVulk generic: pNext sid not allowed.");
+                            *(IntPtr*)fp = Rebuild(psid, r, st);
+                        }
+                        else *(IntPtr*)fp = IntPtr.Zero;
+                        break;
+                    }
                     case BvkMK.Ignore:
                         break;
                 }

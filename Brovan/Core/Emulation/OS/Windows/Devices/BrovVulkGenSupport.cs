@@ -95,9 +95,26 @@ namespace Brovan.Core.Emulation.OS.Windows
 
     internal sealed class GenState
     {
+        internal readonly struct MapEntry
+        {
+            public readonly IntPtr HostPtr;
+            public readonly ulong GuestVa;
+            public readonly ulong MapOffset;
+            public readonly ulong Size;
+
+            public MapEntry(IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size)
+            {
+                HostPtr = hostPtr;
+                GuestVa = guestVa;
+                MapOffset = mapOffset;
+                Size = size;
+            }
+        }
+
         private const int ArenaCap = 1 << 20;
 
         private readonly Dictionary<uint, (IntPtr Ptr, string Type)> _handles = new Dictionary<uint, (IntPtr, string)>();
+        private readonly Dictionary<uint, MapEntry> _mappings = new Dictionary<uint, MapEntry>();
         private uint _next = 1;
 
         private IntPtr _arena;
@@ -122,7 +139,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             throw new InvalidOperationException($"BrovVulk generic: bad handle id {id} (expected {type}).");
         }
 
-        public void Forget(uint id) => _handles.Remove(id);
+        public void Forget(uint id)
+        {
+            _handles.Remove(id);
+            _mappings.Remove(id);
+        }
+
+        public bool HasMapping(uint id) => _mappings.ContainsKey(id);
+
+        public void AddMapping(uint id, IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size) =>
+            _mappings[id] = new MapEntry(hostPtr, guestVa, mapOffset, size);
+
+        public bool TryGetMapping(uint id, out MapEntry entry) => _mappings.TryGetValue(id, out entry);
+
+        public void RemoveMapping(uint id) => _mappings.Remove(id);
+
+        public void ClearMappings() => _mappings.Clear();
+
+        public Dictionary<uint, MapEntry>.ValueCollection Mappings => _mappings.Values;
 
         public unsafe IntPtr Alloc(int size)
         {
