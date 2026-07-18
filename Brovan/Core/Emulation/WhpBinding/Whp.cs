@@ -856,8 +856,6 @@ namespace Brovan.Core.Emulation
                 ulong last = entry.End & ~WhpConstants.PageMask;
                 for (ulong page = first; page <= last; page += WhpConstants.PageSize)
                 {
-                    // A page stays write-only (mapped read-only, so reads run natively and only
-                    // writes fault) unless some hook covering it also watches reads.
                     if (_trappedPages.TryGetValue(page, out bool writeOnly))
                         _trappedPages[page] = writeOnly && !hookReads;
                     else
@@ -1051,9 +1049,6 @@ namespace Brovan.Core.Emulation
 
         private static WhvMapGpaRangeFlags ToWhpMapFlags(WhpMemoryPermission permissions)
         {
-            // Match the KVM backend's enforcement profile: mapped guest pages stay readable and
-            // executable, and only write access is gated so stores to read-only pages fault out to
-            // the memory hooks. Execute is not enforced separately, matching the KVM path.
             WhvMapGpaRangeFlags flags = WhvMapGpaRangeFlags.Read | WhvMapGpaRangeFlags.Execute;
             if ((permissions & WhpMemoryPermission.Write) != 0)
                 flags |= WhvMapGpaRangeFlags.Write;
@@ -1524,8 +1519,6 @@ namespace Brovan.Core.Emulation
 
                 if (anyTrapped && _trappedPages.TryGetValue(runAddress, out bool writeOnly))
                 {
-                    // A full trap leaves the page unmapped so every access faults. A write-only
-                    // trap keeps it mapped read-only so reads run natively and only writes fault.
                     if (writeOnly)
                     {
                         _desiredMaps[runAddress] = new InstalledMap
@@ -1753,10 +1746,6 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        // WHP does not auto-complete a faulting access the way KVM's MMIO exit does, so a watched
-        // page is temporarily mapped read/write and the faulting instruction is single-stepped; the
-        // trailing #DB (delivered through the guest IDT) lands on the vector-1 stub and drives
-        // CompleteSteppedAccess, which fires the watchpoint hooks and re-arms the trap.
         private unsafe void BeginSteppedCompletion(ulong pageGpa, ulong gpa, uint len, bool isWrite)
         {
             if (!_mappedPages.TryGetValue(pageGpa, out MappedPage page) || page.HostPage == IntPtr.Zero)
@@ -2013,8 +2002,6 @@ namespace Brovan.Core.Emulation
             values[14] = WhvRegisterValue.FromReg64(_regsCache.R14);
             values[15] = WhvRegisterValue.FromReg64(_regsCache.R15);
             values[16] = WhvRegisterValue.FromReg64(_regsCache.Rip);
-            // EFLAGS bit 1 is architecturally always set; WHP rejects the run with
-            // InvalidVpRegisterValue if it is clear, so force it before handing RFLAGS to the VP.
             values[17] = WhvRegisterValue.FromReg64(_regsCache.Rflags | 0x2UL);
 
             lock (_vcpuLock)
