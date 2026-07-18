@@ -1045,6 +1045,14 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        public unsafe IntPtr GetHostPointer(ulong address, ulong size)
+        {
+            if (size == 0 || size > int.MaxValue) return IntPtr.Zero;
+            if (Volatile.Read(ref _disposing) != 0 || Volatile.Read(ref _disposed) != 0) return IntPtr.Zero;
+            if (!TryGetHostPointer(address, (int)size, out byte* ptr, out long offset)) return IntPtr.Zero;
+            return (IntPtr)(ptr + offset);
+        }
+
         public bool IsRangeMapped(ulong address, ulong size)
         {
             if (size == 0) return true;

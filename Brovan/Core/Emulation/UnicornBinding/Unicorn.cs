@@ -1304,6 +1304,13 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        public unsafe IntPtr GetHostPointer(ulong address, ulong size)
+        {
+            if (size == 0 || size > int.MaxValue) return IntPtr.Zero;
+            if (!TryGetHostPointer(address, (int)size, out byte* ptr, out long offset)) return IntPtr.Zero;
+            return (IntPtr)(ptr + offset);
+        }
+
         private unsafe bool TryGetHostPointer(ulong address, int accessSize, out byte* ptr, out long offset)
         {
             if (!TryFindMappedRegion(address, out MappedRegion found))

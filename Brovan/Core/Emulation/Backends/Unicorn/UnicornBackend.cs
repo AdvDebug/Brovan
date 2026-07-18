@@ -184,6 +184,9 @@ namespace Brovan.Core.Emulation
         public bool IsRangeMapped(ulong address, ulong size)
             => Inner.IsRangeMapped(address, size);
 
+        public IntPtr GetHostPointer(ulong address, ulong size)
+            => Inner.GetHostPointer(address, size);
+
         public void Dispose()
         {
             foreach (var thunk in _liveThunks.Values)

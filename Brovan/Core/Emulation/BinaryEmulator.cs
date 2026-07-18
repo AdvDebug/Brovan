@@ -1307,6 +1307,11 @@ namespace Brovan.Core.Emulation
             return TryFindOverlappingMemoryRegion(Address, Size, out _);
         }
 
+        public IntPtr GetHostPointer(ulong Address, ulong Size)
+        {
+            return _emulator.GetHostPointer(Address, Size);
+        }
+
         /// <summary>
         /// Checks if the specified memory region is freed.
         /// </summary>

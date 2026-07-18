@@ -130,6 +130,9 @@ namespace Brovan.Core.Emulation
         public bool RemoveHooks()
             => Inner.RemoveHooks();
 
+        public IntPtr GetHostPointer(ulong address, ulong size)
+            => Inner.GetHostPointer(address, size);
+
         public bool IsRangeMapped(ulong address, ulong size)
             => Inner.IsRangeMapped(address, size);
 

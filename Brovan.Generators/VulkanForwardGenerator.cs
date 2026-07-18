@@ -118,10 +118,21 @@ namespace Brovan.Generators
 
         private static readonly Dictionary<string, string> ScalarCs = new Dictionary<string, string>
         {
-            ["uint32_t"] = "uint", ["int32_t"] = "int", ["uint64_t"] = "ulong", ["int64_t"] = "long",
-            ["float"] = "float", ["double"] = "double", ["size_t"] = "UIntPtr", ["int"] = "int",
-            ["VkBool32"] = "uint", ["VkDeviceSize"] = "ulong", ["VkDeviceAddress"] = "ulong",
-            ["uint8_t"] = "byte", ["VkSampleMask"] = "uint", ["VkFlags"] = "uint", ["VkFlags64"] = "ulong",
+            ["uint32_t"] = "uint",
+            ["int32_t"] = "int",
+            ["uint64_t"] = "ulong",
+            ["int64_t"] = "long",
+            ["float"] = "float",
+            ["double"] = "double",
+            ["size_t"] = "UIntPtr",
+            ["int"] = "int",
+            ["VkBool32"] = "uint",
+            ["VkDeviceSize"] = "ulong",
+            ["VkDeviceAddress"] = "ulong",
+            ["uint8_t"] = "byte",
+            ["VkSampleMask"] = "uint",
+            ["VkFlags"] = "uint",
+            ["VkFlags64"] = "ulong",
             ["char"] = "byte",
         };
 
@@ -286,13 +297,15 @@ namespace Brovan.Generators
                 if (!double.TryParse((string)f.Attribute("number"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double ver))
                     continue;
                 foreach (XElement req in f.Elements("require"))
-                foreach (XElement ty in req.Elements("type"))
                 {
-                    string tn = Canonical((string)ty.Attribute("name") ?? "");
-                    if (tn.Length == 0)
-                        continue;
-                    if (!m.CoreTypeVersion.TryGetValue(tn, out double cur) || ver < cur)
-                        m.CoreTypeVersion[tn] = ver;
+                    foreach (XElement ty in req.Elements("type"))
+                    {
+                        string tn = Canonical((string)ty.Attribute("name") ?? "");
+                        if (tn.Length == 0)
+                            continue;
+                        if (!m.CoreTypeVersion.TryGetValue(tn, out double cur) || ver < cur)
+                            m.CoreTypeVersion[tn] = ver;
+                    }
                 }
             }
 
@@ -377,10 +390,20 @@ namespace Brovan.Generators
             {
                 case "uint8_t": case "int8_t": case "char": size = 1; align = 1; return;
                 case "uint16_t": case "int16_t": size = 2; align = 2; return;
-                case "uint32_t": case "int32_t": case "int": case "float":
-                case "VkBool32": case "VkFlags": case "VkSampleMask": size = 4; align = 4; return;
-                case "uint64_t": case "int64_t": case "double": case "size_t":
-                case "VkDeviceSize": case "VkDeviceAddress": case "VkFlags64": size = 8; align = 8; return;
+                case "uint32_t":
+                case "int32_t":
+                case "int":
+                case "float":
+                case "VkBool32":
+                case "VkFlags":
+                case "VkSampleMask": size = 4; align = 4; return;
+                case "uint64_t":
+                case "int64_t":
+                case "double":
+                case "size_t":
+                case "VkDeviceSize":
+                case "VkDeviceAddress":
+                case "VkFlags64": size = 8; align = 8; return;
                 case "HINSTANCE": case "HWND": case "HANDLE": case "HMONITOR": case "HDC": case "LPCWSTR": size = 8; align = 8; return;
                 case "DWORD": case "BOOL": case "LONG": case "UINT": size = 4; align = 4; return;
             }
@@ -626,6 +649,10 @@ namespace Brovan.Generators
             "vkGetDeviceBufferMemoryRequirements",
             "vkGetDeviceImageMemoryRequirements",
             "vkGetPipelineCacheData",
+            "vkCmdBindIndexBuffer2",
+            "vkGetRenderingAreaGranularity",
+            "vkGetDeviceImageSubresourceLayout",
+            "vkGetImageSubresourceLayout2",
         };
 
         private static readonly HashSet<string> ExtAllowlist = new HashSet<string>
@@ -647,9 +674,14 @@ namespace Brovan.Generators
             "VK_EXT_memory_priority",
             "VK_EXT_4444_formats",
             "VK_EXT_non_seamless_cube_map",
+            "VK_KHR_maintenance5",
+            "VK_KHR_pipeline_library",
         };
 
         private const double MaxCoreVersion = 1.3;
+
+        private static bool IsWaitTimeoutParam(Model m, Param p)
+            => p.Name == "timeout" && ParamKind(m, p) == "ScalarIn" && ScalarWidth(m, p.Type) == 8;
 
         private static HashSet<string> PNextSet = new HashSet<string>();
 
@@ -706,9 +738,19 @@ namespace Brovan.Generators
 
         private static readonly Dictionary<string, byte> KindNum = new Dictionary<string, byte>
         {
-            ["Scalar"] = 0, ["Handle"] = 1, ["StructValue"] = 2, ["StructPtr"] = 3, ["StructArray"] = 4,
-            ["HandleArray"] = 5, ["ScalarArray"] = 6, ["StringZ"] = 7, ["StringArray"] = 8, ["PNext"] = 9, ["Ignore"] = 10,
-            ["BlobPtr"] = 11, ["SelectArray"] = 12,
+            ["Scalar"] = 0,
+            ["Handle"] = 1,
+            ["StructValue"] = 2,
+            ["StructPtr"] = 3,
+            ["StructArray"] = 4,
+            ["HandleArray"] = 5,
+            ["ScalarArray"] = 6,
+            ["StringZ"] = 7,
+            ["StringArray"] = 8,
+            ["PNext"] = 9,
+            ["Ignore"] = 10,
+            ["BlobPtr"] = 11,
+            ["SelectArray"] = 12,
         };
 
         private static bool StructIsFlat(Model m, string name, HashSet<string> seen)
@@ -973,6 +1015,12 @@ namespace Brovan.Generators
                 return "            case " + id + ":\n                return BrovVulkGenMemory.MapMemory(r, st, inst);\n";
             if (c.Name == "vkUnmapMemory")
                 return "            case " + id + ":\n                return BrovVulkGenMemory.UnmapMemory(r, st, inst);\n";
+            if (c.Name == "vkAllocateMemory")
+                return "            case " + id + ":\n                return BrovVulkGenMemory.AllocateMemory(r, w, st, inst, " + StructId["VkMemoryAllocateInfo"] + ");\n";
+            if (c.Name == "vkFreeMemory")
+                return "            case " + id + ":\n                return BrovVulkGenMemory.FreeMemory(r, st);\n";
+            if (c.Name == "vkCreateDevice")
+                return "            case " + id + ":\n                return BrovVulkGenMemory.CreateDevice(r, w, st, " + StructId["VkDeviceCreateInfo"] + ");\n";
             if (c.Name == "vkFlushMappedMemoryRanges")
                 return "            case " + id + ":\n                return BrovVulkGenMemory.FlushMappedMemoryRanges(r, st, inst);\n";
             if (c.Name == "vkInvalidateMappedMemoryRanges")
@@ -1139,6 +1187,8 @@ namespace Brovan.Generators
                     string ct = CsType(m, p.Type, 0);
                     int w = ScalarWidth(m, p.Type);
                     b.Append("                ").Append(ct).Append(" ").Append(local).Append(" = (").Append(ct).Append(")r.Read").Append(w == 8 ? "U64" : "U32").Append("();\n");
+                    if (IsWaitTimeoutParam(m, p))
+                        b.Append("                ").Append(local).Append(" = 0;\n");
                     callArgs.Add(local);
                 }
                 else if (kind == "ScalarOut")
@@ -1332,17 +1382,29 @@ namespace Brovan.Generators
                 return "VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(" + GuestSig(c) + ")\n" +
                     "{\n" +
                     "    (void)pAllocator;\n" +
+                    "    void *bvk_bounce = NULL;\n" +
+                    "    uint64_t bvk_bsize = 0;\n" +
+                    "    if (pAllocateInfo && pAllocateInfo->memoryTypeIndex < 32 && (bvk_hostvis_types >> pAllocateInfo->memoryTypeIndex) & 1)\n" +
+                    "    {\n" +
+                    "        bvk_bsize = (pAllocateInfo->allocationSize + 0xFFFull) & ~0xFFFull;\n" +
+                    "        bvk_bounce = VirtualAlloc(NULL, (SIZE_T)bvk_bsize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n" +
+                    "        if (!bvk_bounce) bvk_bsize = 0;\n" +
+                    "    }\n" +
                     "    bvk_rq_reset();\n" +
                     "    bvk_w_u32((uint32_t)(uintptr_t)device);\n" +
                     "    if (pAllocateInfo) { bvk_w_u32(1); bvk_ser_struct(" + StructId["VkMemoryAllocateInfo"] + ", (const unsigned char*)pAllocateInfo); } else bvk_w_u32(0);\n" +
+                    "    bvk_w_u64((uint64_t)(uintptr_t)bvk_bounce);\n" +
+                    "    bvk_w_u64(bvk_bsize);\n" +
                     "    unsigned char bvk_out[32]; unsigned int bvk_outLen = 0;\n" +
                     "    int bvk_r = bvk_rq_send(BVK_vkAllocateMemory, bvk_out, sizeof(bvk_out), &bvk_outLen);\n" +
                     "    if (bvk_r == 0 && pMemory && bvk_outLen >= 8)\n" +
                     "    {\n" +
                     "        uint32_t bvk_id; memcpy(&bvk_id, bvk_out + 4, 4);\n" +
                     "        *pMemory = (VkDeviceMemory)(uintptr_t)bvk_id;\n" +
-                    "        if (pAllocateInfo) bvk_mem_add(bvk_id, pAllocateInfo->allocationSize);\n" +
+                    "        if (pAllocateInfo) bvk_mem_add(bvk_id, pAllocateInfo->allocationSize, bvk_bounce);\n" +
                     "    }\n" +
+                    "    else if (bvk_bounce)\n" +
+                    "        VirtualFree(bvk_bounce, 0, MEM_RELEASE);\n" +
                     "    return (VkResult)bvk_r;\n" +
                     "}\n";
             if (c.Name == "vkFreeMemory")
@@ -1368,8 +1430,15 @@ namespace Brovan.Generators
                     "    if ((uint64_t)offset >= bvk_total) return VK_ERROR_MEMORY_MAP_FAILED;\n" +
                     "    uint64_t bvk_span = (size == VK_WHOLE_SIZE) ? bvk_total - offset : (uint64_t)size;\n" +
                     "    if (bvk_span == 0 || bvk_span > bvk_total - offset) return VK_ERROR_MEMORY_MAP_FAILED;\n" +
-                    "    void *bvk_map = VirtualAlloc(NULL, (SIZE_T)bvk_span, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n" +
-                    "    if (!bvk_map) return VK_ERROR_OUT_OF_HOST_MEMORY;\n" +
+                    "    void *bvk_bounce = bvk_mem_bounce(bvk_id);\n" +
+                    "    void *bvk_map;\n" +
+                    "    if (bvk_bounce)\n" +
+                    "        bvk_map = (char *)bvk_bounce + offset;\n" +
+                    "    else\n" +
+                    "    {\n" +
+                    "        bvk_map = VirtualAlloc(NULL, (SIZE_T)bvk_span, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n" +
+                    "        if (!bvk_map) return VK_ERROR_OUT_OF_HOST_MEMORY;\n" +
+                    "    }\n" +
                     "    bvk_rq_reset();\n" +
                     "    bvk_w_u32((uint32_t)(uintptr_t)device);\n" +
                     "    bvk_w_u32(bvk_id);\n" +
@@ -1379,8 +1448,8 @@ namespace Brovan.Generators
                     "    bvk_w_u64((uint64_t)(uintptr_t)bvk_map);\n" +
                     "    unsigned char bvk_out[32]; unsigned int bvk_outLen = 0;\n" +
                     "    int bvk_r = bvk_rq_send(BVK_vkMapMemory, bvk_out, sizeof(bvk_out), &bvk_outLen);\n" +
-                    "    if (bvk_r != 0) { VirtualFree(bvk_map, 0, MEM_RELEASE); return (VkResult)bvk_r; }\n" +
-                    "    bvk_mem_setmap(bvk_id, bvk_map);\n" +
+                    "    if (bvk_r != 0) { if (!bvk_bounce) VirtualFree(bvk_map, 0, MEM_RELEASE); return (VkResult)bvk_r; }\n" +
+                    "    bvk_mem_setmap(bvk_id, bvk_bounce ? NULL : bvk_map);\n" +
                     "    *ppData = bvk_map;\n" +
                     "    return VK_SUCCESS;\n" +
                     "}\n";
@@ -1564,7 +1633,19 @@ namespace Brovan.Generators
                 return b.ToString();
             }
             b.Append("    unsigned char bvk_out[").Append(GuestOutSize(m, c)).Append("]; unsigned int bvk_outLen = 0;\n");
-            b.Append("    int bvk_r = bvk_rq_send(BVK_").Append(c.Name).Append(", bvk_out, sizeof(bvk_out), &bvk_outLen);\n");
+            if (c.Params.Any(x => IsWaitTimeoutParam(m, x)))
+            {
+                b.Append("    int bvk_r;\n");
+                b.Append("    uint64_t bvk_start = GetTickCount64();\n");
+                b.Append("    for (;;)\n    {\n");
+                b.Append("        bvk_r = bvk_rq_send(BVK_").Append(c.Name).Append(", bvk_out, sizeof(bvk_out), &bvk_outLen);\n");
+                b.Append("        if ((bvk_r != VK_TIMEOUT && bvk_r != VK_NOT_READY) || timeout == 0) break;\n");
+                b.Append("        if (timeout != UINT64_MAX && (GetTickCount64() - bvk_start) * 1000000ull >= timeout)\n");
+                b.Append("        {\n            if (bvk_r == VK_NOT_READY) bvk_r = VK_TIMEOUT;\n            break;\n        }\n");
+                b.Append("        Sleep(0);\n    }\n");
+            }
+            else
+                b.Append("    int bvk_r = bvk_rq_send(BVK_").Append(c.Name).Append(", bvk_out, sizeof(bvk_out), &bvk_outLen);\n");
             b.Append("    unsigned int bvk_off = 4; (void)bvk_off;\n");
             for (int i = 0; i < c.Params.Count; i++)
             {
@@ -1620,6 +1701,10 @@ namespace Brovan.Generators
                     b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + (uint32_t)").Append(p.Length).Append(") { memcpy(").Append(p.Name).Append(", bvk_out + bvk_off, (uint32_t)").Append(p.Length).Append("); bvk_off += (uint32_t)").Append(p.Length).Append("; }\n");
                 }
             }
+            if (c.Name == "vkGetPhysicalDeviceMemoryProperties")
+                b.Append("    if (bvk_r == 0 && pMemoryProperties) bvk_note_memprops(pMemoryProperties);\n");
+            else if (c.Name == "vkGetPhysicalDeviceMemoryProperties2")
+                b.Append("    if (bvk_r == 0 && pMemoryProperties) bvk_note_memprops(&pMemoryProperties->memoryProperties);\n");
             if (Ret64(c))
             {
                 b.Append("    uint64_t bvk_rv = 0;\n");
@@ -1979,6 +2064,13 @@ namespace Brovan.Generators
                 if (c.Name != "vkGetInstanceProcAddr" && c.Name != "vkGetDeviceProcAddr"
                     && c.Name != "vkEnumerateInstanceLayerProperties")
                     defB.Append(c.Name).Append("\n");
+            }
+            foreach (Command alias in m.Commands.Values)
+            {
+                if (alias.Alias == null || !GenAllowlist.Contains(alias.Alias) || GenAllowlist.Contains(alias.Name))
+                    continue;
+                procB.Append("if (strcmp(pName, \"").Append(alias.Name).Append("\") == 0) return (PFN_vkVoidFunction)")
+                     .Append(alias.Alias).Append(";\n");
             }
             pb.Append("#endif\n");
             db.AppendLine("                default: return -3;");

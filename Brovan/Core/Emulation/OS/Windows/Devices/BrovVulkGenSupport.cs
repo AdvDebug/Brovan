@@ -189,13 +189,27 @@ namespace Brovan.Core.Emulation.OS.Windows
             public readonly ulong GuestVa;
             public readonly ulong MapOffset;
             public readonly ulong Size;
+            public readonly bool Imported;
 
-            public MapEntry(IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size)
+            public MapEntry(IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size, bool imported)
             {
                 HostPtr = hostPtr;
                 GuestVa = guestVa;
                 MapOffset = mapOffset;
                 Size = size;
+                Imported = imported;
+            }
+        }
+
+        public readonly struct DeviceImport
+        {
+            public readonly IntPtr GetHostPointerProps;
+            public readonly ulong Alignment;
+
+            public DeviceImport(IntPtr getHostPointerProps, ulong alignment)
+            {
+                GetHostPointerProps = getHostPointerProps;
+                Alignment = alignment;
             }
         }
 
@@ -203,6 +217,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private readonly Dictionary<uint, (IntPtr Ptr, string Type)> _handles = new Dictionary<uint, (IntPtr, string)>();
         private readonly Dictionary<uint, MapEntry> _mappings = new Dictionary<uint, MapEntry>();
+        private readonly HashSet<uint> _importedMem = new HashSet<uint>();
+        private readonly Dictionary<IntPtr, DeviceImport> _deviceImports = new Dictionary<IntPtr, DeviceImport>();
         private uint _next = 1;
 
         private IntPtr _arena;
@@ -252,12 +268,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             _handles.Remove(id);
             _mappings.Remove(id);
+            _importedMem.Remove(id);
         }
 
         public bool HasMapping(uint id) => _mappings.ContainsKey(id);
 
-        public void AddMapping(uint id, IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size) =>
-            _mappings[id] = new MapEntry(hostPtr, guestVa, mapOffset, size);
+        public void MarkImported(uint id) => _importedMem.Add(id);
+
+        public bool IsImportedMemory(uint id) => _importedMem.Contains(id);
+
+        public void SetDeviceImport(IntPtr device, DeviceImport import) => _deviceImports[device] = import;
+
+        public bool TryGetDeviceImport(IntPtr device, out DeviceImport import) => _deviceImports.TryGetValue(device, out import);
+
+        public void AddMapping(uint id, IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size, bool imported) =>
+            _mappings[id] = new MapEntry(hostPtr, guestVa, mapOffset, size, imported);
 
         public bool TryGetMapping(uint id, out MapEntry entry) => _mappings.TryGetValue(id, out entry);
 
