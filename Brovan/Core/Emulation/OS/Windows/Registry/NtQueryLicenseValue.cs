@@ -1,4 +1,4 @@
-﻿using Brovan.Core.Helpers;
+using Brovan.Core.Helpers;
 using System;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -169,15 +169,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ValueNamePtr = Instance.WinHelper.GetArg64(0);
-                ulong TypePtr = Instance.WinHelper.GetArg64(1);
-                ulong DataPtr = Instance.WinHelper.GetArg64(2);
-                uint DataSize = (uint)Instance.WinHelper.GetArg64(3, true);
-                ulong ResultDataSizePtr = Instance.WinHelper.GetArg64(4);
+                ulong ValueNamePtr = Instance.WinHelper.GetArg(0);
+                ulong TypePtr = Instance.WinHelper.GetArg(1);
+                ulong DataPtr = Instance.WinHelper.GetArg(2);
+                uint DataSize = (uint)Instance.WinHelper.GetArg(3);
+                ulong ResultDataSizePtr = Instance.WinHelper.GetArg(4);
 
-                if (!Instance.WinHelper.TryReadUnicodeString64(ValueNamePtr, out string ValueName, out NTSTATUS Status))
+                if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out NTSTATUS Status))
                     return Status;
 
                 NTSTATUS QueryStatus = QueryLicenseValue(Instance, ValueName, TypePtr, DataPtr, DataSize, ResultDataSizePtr);

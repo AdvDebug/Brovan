@@ -7,13 +7,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
             const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
 
-            ulong Hwnd = Instance.WinHelper.GetArg64(0);
-            ulong PropertyName = Instance.WinHelper.GetArg64(1);
+            ulong Hwnd = Instance.WinHelper.GetArg(0);
+            ulong PropertyName = Instance.WinHelper.GetArg(1);
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)

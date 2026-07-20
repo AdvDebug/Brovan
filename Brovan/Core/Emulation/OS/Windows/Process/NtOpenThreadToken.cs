@@ -6,23 +6,21 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
             WinSysHelper Helper = Instance.WinHelper;
             if (Helper == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
             ulong ThreadHandle = Instance.ReadRegister(Registers.UC_X86_REG_RCX);
-            ulong DesiredAccess = Instance.ReadRegister(Registers.UC_X86_REG_RDX);
-            ulong OpenAsSelf = Instance.ReadRegister(Registers.UC_X86_REG_R8);
-            ulong TokenHandlePtr = Instance.ReadRegister(Registers.UC_X86_REG_R9);
+            ulong DesiredAccess = Instance.WinHelper.GetArg(1);
+            ulong OpenAsSelf = Instance.WinHelper.GetArg(2);
+            ulong TokenHandlePtr = Instance.WinHelper.GetArg(3);
 
             if (TokenHandlePtr == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             EmulatedThread Thread = null;
-            if (ThreadHandle == HandleManager.CurrentThread)
+            if (HandleManager.IsCurrentThreadPseudoHandle(ThreadHandle))
             {
                 Thread = Instance.Threads.Values.FirstOrDefault(EmuThread => EmuThread.ThreadId == Instance.CurrentThreadId);
             }

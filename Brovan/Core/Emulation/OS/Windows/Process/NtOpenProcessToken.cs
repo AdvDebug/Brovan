@@ -15,20 +15,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Is64)
             {
-                ProcessHandle = Instance.WinHelper.GetArg64(0);
-                DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-                TokenHandlePtr = Instance.WinHelper.GetArg64(2);
+                ProcessHandle = Instance.WinHelper.GetArg(0);
+                DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                TokenHandlePtr = Instance.WinHelper.GetArg(2);
 
-                if (TokenHandlePtr == 0 || !Instance.IsRegionMapped(TokenHandlePtr, 8))
+                if (TokenHandlePtr == 0 || !Instance.IsRegionMapped(TokenHandlePtr, (uint)Instance.WinHelper.PointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
             else
             {
-                uint ESP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-                ProcessHandle = Instance.ReadMemoryUInt(ESP + 4);
-                DesiredAccess = Instance.ReadMemoryUInt(ESP + 8);
-                TokenHandlePtr = Instance.ReadMemoryUInt(ESP + 12);
+                ProcessHandle = (uint)Instance.WinHelper.GetArg(0);
+                DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                TokenHandlePtr = (uint)Instance.WinHelper.GetArg(2);
 
                 if (TokenHandlePtr == 0 || !Instance.IsRegionMapped(TokenHandlePtr, 4))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -36,7 +35,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinProcess TargetProcess = null;
 
-            if (ProcessHandle == ulong.MaxValue || ProcessHandle == uint.MaxValue)
+            if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
             {
                 TargetProcess = Instance.WinHelper.WinProcesses.FirstOrDefault(p => p.PID == Instance.WinHelper.PID);
             }

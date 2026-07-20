@@ -8,14 +8,13 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg64(0);
-                ulong InputBufferPtr = Instance.WinHelper.GetArg64(1);
-                ulong InputBufferLength = (uint)Instance.WinHelper.GetArg64(2);
-                ulong SystemInformationPtr = Instance.WinHelper.GetArg64(3);
-                ulong SystemInformationLength = (uint)Instance.WinHelper.GetArg64(4);
-                ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(5);
+                SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(0);
+                ulong InputBufferPtr = Instance.WinHelper.GetArg(1);
+                ulong InputBufferLength = (uint)Instance.WinHelper.GetArg(2);
+                ulong SystemInformationPtr = Instance.WinHelper.GetArg(3);
+                ulong SystemInformationLength = (uint)Instance.WinHelper.GetArg(4);
+                ulong ReturnLengthPtr = Instance.WinHelper.GetArg(5);
 
                 if (InputBufferLength != 0)
                 {
@@ -666,10 +665,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Instance.TriggerEventMessage($"[-] Unsupported SYSTEM_INFO_CLASS: 0x{SystemInformationClass:X}", LogFlags.Issues);
                         return Instance.WinUnimplemented;
                 }
-            }
-            else
-            {
-
             }
             return Instance.WinUnimplemented;
         }

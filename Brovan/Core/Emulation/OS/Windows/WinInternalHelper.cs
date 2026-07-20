@@ -98,6 +98,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public static readonly ulong RPC_CONTROL_DIRECTORY = 0x1114;
         public static readonly ulong CurrentProcess = ulong.MaxValue;
         public static readonly ulong CurrentThread = 0xFFFFFFFFFFFFFFFE;
+        public const ulong CurrentProcess32 = uint.MaxValue;
+        public const ulong CurrentThread32 = 0xFFFFFFFEUL;
+
+        public static bool IsCurrentThreadPseudoHandle(ulong Handle) => Handle == CurrentThread || Handle == CurrentThread32;
+
+        public static bool IsCurrentProcessPseudoHandle(ulong Handle) => Handle == CurrentProcess || Handle == CurrentProcess32;
         private ulong NextHandle = 0x40;
         private readonly Dictionary<ulong, HandleEntry> HandleTable = new();
         private readonly Dictionary<string, List<ulong>> ObjectIdToHandles = new();
@@ -367,6 +373,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteKsystemTimeToSpan(Destination, OffsetInterruptTime, InterruptTime);
             WriteKsystemTimeToSpan(Destination, OffsetTickCountQuad, TickCountQuad);
             BitConverter.TryWriteBytes(Destination.Slice(OffsetTickCountLowDeprecated, 4), (uint)TickCountQuad);
+
+            if (Destination.Length >= OffsetQpcFrequency + 8)
+                BinaryPrimitives.WriteInt64LittleEndian(Destination.Slice(OffsetQpcFrequency, 8), QpcFrequency);
         }
 
         private void IgnoreWrite(ulong Offset, ReadOnlySpan<byte> Data)
@@ -399,6 +408,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + OffsetTickCountLowDeprecated, (uint)TickCountQuad, 4);
             Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + (ulong)GetSystemCallOffset(), 0u, 4);
+            Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + (ulong)OffsetQpcFrequency, (ulong)QpcFrequency, 8);
         }
 
         private static void WriteKsystemTimeToSpan(Span<byte> Page, int Offset, ulong Value)
@@ -441,6 +451,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Page[OffsetQpcData] = 0;
                 Page[OffsetQpcData + 1] = 0;
+
+                WriteUInt32(Page, OffsetQpcFrequency, unchecked((uint)QpcFrequency));
+                WriteUInt32(Page, OffsetQpcFrequency + 4, unchecked((uint)(QpcFrequency >> 32)));
             }
             else
             {
@@ -579,22 +592,24 @@ namespace Brovan.Core.Emulation.OS.Windows
 
     internal sealed class PebLdrTracker
     {
-        private const int PebOffsetLdr = 0x18;
+        private readonly int PointerSize;
+        private readonly int PebOffsetLdr;
 
-        private const int PebLdrSize = 0x58;
-        private const int PebLdrOffsetInLoadOrder = 0x10;
+        private readonly int PebLdrSize;
+        private readonly int PebLdrOffsetInLoadOrder;
 
         private const int ListEntryOffsetFlink = 0x0;
 
         private const int LdrEntryOffsetInLoadOrderLinks = 0x00;
-        private const int LdrEntryOffsetDllBase = 0x30;
-        private const int LdrEntryOffsetSizeOfImage = 0x40;
-        private const int LdrEntryOffsetFullDllName = 0x48; // UNICODE_STRING
-        private const int LdrEntryOffsetBaseDllName = 0x58; // UNICODE_STRING
+        private readonly int LdrEntryOffsetDllBase;
+        private readonly int LdrEntryOffsetSizeOfImage;
+        private readonly int LdrEntryOffsetFullDllName;
+        private readonly int LdrEntryOffsetBaseDllName;
+        private readonly int LdrEntrySize;
 
-        private const int UnicodeStringSize = 0x10;
+        private readonly int UnicodeStringSize;
         private const int UnicodeStringOffsetLength = 0x0;
-        private const int UnicodeStringOffsetBuffer = 0x8;
+        private readonly int UnicodeStringOffsetBuffer;
 
         private const int MaxUnicodeStringBytes = 0x800; // hard cap (bytes)
 
@@ -633,6 +648,34 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Emulator = emulator;
             WinHelper = winHelper;
+
+            PointerSize = winHelper.PointerSize;
+
+            if (PointerSize == 8)
+            {
+                PebOffsetLdr = 0x18;
+                PebLdrSize = 0x58;
+                PebLdrOffsetInLoadOrder = 0x10;
+                LdrEntryOffsetDllBase = 0x30;
+                LdrEntryOffsetSizeOfImage = 0x40;
+                LdrEntryOffsetFullDllName = 0x48;
+                LdrEntryOffsetBaseDllName = 0x58;
+                LdrEntrySize = 0x80;
+                UnicodeStringSize = 0x10;
+                UnicodeStringOffsetBuffer = 0x8;
+                return;
+            }
+
+            PebOffsetLdr = 0x0C;
+            PebLdrSize = 0x30;
+            PebLdrOffsetInLoadOrder = 0x0C;
+            LdrEntryOffsetDllBase = 0x18;
+            LdrEntryOffsetSizeOfImage = 0x20;
+            LdrEntryOffsetFullDllName = 0x24;
+            LdrEntryOffsetBaseDllName = 0x2C;
+            LdrEntrySize = 0x40;
+            UnicodeStringSize = 0x8;
+            UnicodeStringOffsetBuffer = 0x4;
         }
 
         internal void Install()
@@ -684,7 +727,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             PebLdrWriteHook = OnPebLdrPointerWrite;
 
-            if (Emulator._emulator.AddMemoryHook(PebLdrPtr, PebLdrPtr + 7, BackendHookType.MemoryWrite, PebLdrWriteHook) == IntPtr.Zero)
+            if (Emulator._emulator.AddMemoryHook(PebLdrPtr, PebLdrPtr + (ulong)PointerSize - 1, BackendHookType.MemoryWrite, PebLdrWriteHook) == IntPtr.Zero)
             {
                 Utils.LogError($"[-] Failed to install PEB->Ldr MEM_WRITE hook. Error: {Emulator.GetLastError()}");
                 return;
@@ -756,7 +799,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void RefreshLdrHooks()
         {
-            ulong LdrData = SafeReadUlong(Emulator.PEB + (ulong)PebOffsetLdr);
+            ulong LdrData = SafeReadPointer(Emulator.PEB + (ulong)PebOffsetLdr);
 
             if (LdrData == 0 || !Emulator.IsRegionMapped(LdrData, (uint)PebLdrSize))
             {
@@ -858,15 +901,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Snapshot = new Dictionary<ulong, ModuleInfo>();
 
-            ulong LdrData = SafeReadUlong(Emulator.PEB + (ulong)PebOffsetLdr);
+            ulong LdrData = SafeReadPointer(Emulator.PEB + (ulong)PebOffsetLdr);
             if (LdrData == 0)
                 return false;
 
             ulong Head = LdrData + (ulong)PebLdrOffsetInLoadOrder;
-            if (!Emulator.IsRegionMapped(Head, 0x10))
+            if (!Emulator.IsRegionMapped(Head, (uint)(PointerSize * 2)))
                 return false;
 
-            ulong Cursor = SafeReadUlong(Head + (ulong)ListEntryOffsetFlink);
+            ulong Cursor = SafeReadPointer(Head + (ulong)ListEntryOffsetFlink);
             if (Cursor == 0)
                 return false;
 
@@ -875,10 +918,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 ulong Entry = Cursor - (ulong)LdrEntryOffsetInLoadOrderLinks;
 
-                if (!Emulator.IsRegionMapped(Entry, 0x80))
+                if (!Emulator.IsRegionMapped(Entry, (uint)LdrEntrySize))
                     return false;
 
-                ulong DllBase = SafeReadUlong(Entry + (ulong)LdrEntryOffsetDllBase);
+                ulong DllBase = SafeReadPointer(Entry + (ulong)LdrEntryOffsetDllBase);
                 uint SizeOfImage = SafeReadUInt(Entry + (ulong)LdrEntryOffsetSizeOfImage);
 
                 if (!TryReadUnicodeString(Entry + (ulong)LdrEntryOffsetBaseDllName, out string BaseName))
@@ -900,7 +943,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     };
                 }
 
-                Cursor = SafeReadUlong(Cursor + (ulong)ListEntryOffsetFlink);
+                Cursor = SafeReadPointer(Cursor + (ulong)ListEntryOffsetFlink);
             }
 
             return true;
@@ -916,7 +959,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return false;
 
                 ushort Length = Emulator._emulator.ReadMemoryUShort(unicodeStringAddress + (ulong)UnicodeStringOffsetLength);
-                ulong Buffer = Emulator.ReadMemoryULong(unicodeStringAddress + (ulong)UnicodeStringOffsetBuffer);
+                ulong Buffer = SafeReadPointer(unicodeStringAddress + (ulong)UnicodeStringOffsetBuffer);
 
                 if (Length == 0 || Buffer == 0)
                 {
@@ -943,13 +986,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private ulong SafeReadUlong(ulong address)
+        private ulong SafeReadPointer(ulong address)
         {
             try
             {
-                if (address == 0 || !Emulator.IsRegionMapped(address, 8))
+                if (address == 0 || !Emulator.IsRegionMapped(address, (uint)PointerSize))
                     return 0;
-                return Emulator.ReadMemoryULong(address);
+                return PointerSize == 8 ? Emulator.ReadMemoryULong(address) : Emulator.ReadMemoryUInt(address);
             }
             catch
             {

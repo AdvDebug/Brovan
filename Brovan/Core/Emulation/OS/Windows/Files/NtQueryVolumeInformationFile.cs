@@ -31,10 +31,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS Handle64(BinaryEmulator Instance)
         {
-            ulong FileHandle = Instance.ReadRegister(Registers.UC_X86_REG_R10);
-            ulong IoStatusBlockPtr = Instance.ReadRegister(Registers.UC_X86_REG_RDX);
-            ulong FsInfoBuffer = Instance.ReadRegister(Registers.UC_X86_REG_R8);
-            uint Length = (uint)Instance.ReadRegister(Registers.UC_X86_REG_R9);
+            ulong FileHandle = Instance.WinHelper.GetArg(0);
+            ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(1);
+            ulong FsInfoBuffer = Instance.WinHelper.GetArg(2);
+            uint Length = (uint)Instance.WinHelper.GetArg(3);
             uint FsInfoClass = (uint)Instance.WinHelper.GetArg64(4);
 
             return QueryVolumeInformation(Instance, FileHandle, IoStatusBlockPtr, FsInfoBuffer, Length, FsInfoClass, true);
@@ -174,9 +174,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static NTSTATUS WriteStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information, bool Is64Bit)
         {
             if (Is64Bit)
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, Status, Information);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, Information);
             else
-                Instance.WinHelper.WriteIoStatusBlock32(Instance, (uint)IoStatusBlockPtr, Status, (uint)Information);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, (uint)IoStatusBlockPtr, Status, (uint)Information);
 
             return Status;
         }

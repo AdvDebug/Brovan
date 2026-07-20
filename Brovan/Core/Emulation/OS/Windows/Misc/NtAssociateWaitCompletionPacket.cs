@@ -8,14 +8,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong WaitCompletionPacketHandle = Instance.WinHelper.GetArg64(0);
-                ulong IoCompletionHandle = Instance.WinHelper.GetArg64(1);
-                ulong TargetObjectHandle = Instance.WinHelper.GetArg64(2);
-                ulong KeyContext = Instance.WinHelper.GetArg64(3);
-                ulong ApcContext = Instance.WinHelper.GetArg64(4);
-                NTSTATUS IoStatus = (NTSTATUS)(uint)Instance.WinHelper.GetArg64(5);
-                ulong IoStatusInformation = Instance.WinHelper.GetArg64(6);
-                ulong AlreadySignaledPtr = Instance.WinHelper.GetArg64(7);
+                ulong WaitCompletionPacketHandle = Instance.WinHelper.GetArg(0);
+                ulong IoCompletionHandle = Instance.WinHelper.GetArg(1);
+                ulong TargetObjectHandle = Instance.WinHelper.GetArg(2);
+                ulong KeyContext = Instance.WinHelper.GetArg(3);
+                ulong ApcContext = Instance.WinHelper.GetArg(4);
+                NTSTATUS IoStatus = (NTSTATUS)(uint)Instance.WinHelper.GetArg(5);
+                ulong IoStatusInformation = Instance.WinHelper.GetArg(6);
+                ulong AlreadySignaledPtr = Instance.WinHelper.GetArg(7);
 
                 if (!Instance.WinHelper.HandleExists(WaitCompletionPacketHandle, HandleType.WaitCompletionPacketHandle))
                     return NTSTATUS.STATUS_INVALID_HANDLE;
@@ -53,15 +53,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            uint ESP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-            uint WaitCompletionPacketHandle32 = Instance.ReadMemoryUInt(ESP + 4);
-            uint IoCompletionHandle32 = Instance.ReadMemoryUInt(ESP + 8);
-            uint TargetObjectHandle32 = Instance.ReadMemoryUInt(ESP + 12);
-            uint KeyContext32 = Instance.ReadMemoryUInt(ESP + 16);
-            uint ApcContext32 = Instance.ReadMemoryUInt(ESP + 20);
-            NTSTATUS IoStatus32 = (NTSTATUS)Instance.ReadMemoryUInt(ESP + 24);
-            uint IoStatusInformation32 = Instance.ReadMemoryUInt(ESP + 28);
-            uint AlreadySignaledPtr32 = Instance.ReadMemoryUInt(ESP + 32);
+            uint WaitCompletionPacketHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            uint IoCompletionHandle32 = (uint)Instance.WinHelper.GetArg(1);
+            uint TargetObjectHandle32 = (uint)Instance.WinHelper.GetArg(2);
+            uint KeyContext32 = (uint)Instance.WinHelper.GetArg(3);
+            uint ApcContext32 = (uint)Instance.WinHelper.GetArg(4);
+            NTSTATUS IoStatus32 = (NTSTATUS)Instance.WinHelper.GetArg(5);
+            uint IoStatusInformation32 = (uint)Instance.WinHelper.GetArg(6);
+            uint AlreadySignaledPtr32 = (uint)Instance.WinHelper.GetArg(7);
 
             if (!Instance.WinHelper.HandleExists(WaitCompletionPacketHandle32, HandleType.WaitCompletionPacketHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;

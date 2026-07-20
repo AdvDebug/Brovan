@@ -225,7 +225,9 @@ namespace Brovan
             else
             {
                 // Linux / non-Windows: use shipped Windows DLLs
-                BasePath = WindowsLibsPath;
+                BasePath = (IsWow64 || Arch == BinaryArchitecture.x86)
+                    ? Path.Combine(WindowsLibsPath, "SysWOW64")
+                    : WindowsLibsPath;
             }
 
             string Result = Path.Combine(BasePath, Library);

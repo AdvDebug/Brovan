@@ -19,20 +19,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Is64)
             {
-                TokenHandle = Instance.WinHelper.GetArg64(0);
-                TokenInformationClass = (uint)Instance.WinHelper.GetArg64(1);
-                TokenInformation = Instance.WinHelper.GetArg64(2);
-                TokenInformationLength = (uint)Instance.WinHelper.GetArg64(3);
-                ReturnLengthPtr = Instance.WinHelper.GetArg64(4);
+                TokenHandle = Instance.WinHelper.GetArg(0);
+                TokenInformationClass = (uint)Instance.WinHelper.GetArg(1);
+                TokenInformation = Instance.WinHelper.GetArg(2);
+                TokenInformationLength = (uint)Instance.WinHelper.GetArg(3);
+                ReturnLengthPtr = Instance.WinHelper.GetArg(4);
             }
             else
             {
-                uint ESP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-                TokenHandle = Instance.ReadMemoryUInt(ESP + 4);
-                TokenInformationClass = Instance.ReadMemoryUInt(ESP + 8);
-                TokenInformation = Instance.ReadMemoryUInt(ESP + 12);
-                TokenInformationLength = Instance.ReadMemoryUInt(ESP + 16);
-                ReturnLengthPtr = Instance.ReadMemoryUInt(ESP + 20);
+                TokenHandle = (uint)Instance.WinHelper.GetArg(0);
+                TokenInformationClass = (uint)Instance.WinHelper.GetArg(1);
+                TokenInformation = (uint)Instance.WinHelper.GetArg(2);
+                TokenInformationLength = (uint)Instance.WinHelper.GetArg(3);
+                ReturnLengthPtr = (uint)Instance.WinHelper.GetArg(4);
             }
 
             if (ReturnLengthPtr != 0 && !Instance.IsRegionMapped(ReturnLengthPtr, 4))

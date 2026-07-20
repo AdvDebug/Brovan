@@ -9,12 +9,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong BaseAddressPtr = Instance.WinHelper.GetArg64(0);
-                ulong DefaultLcidPtr = Instance.WinHelper.GetArg64(1);
-                ulong CasingSizePtr = Instance.WinHelper.GetArg64(2);
-                ulong CurrentVerPtr = Instance.WinHelper.GetArg64(3);
+                ulong BaseAddressPtr = Instance.WinHelper.GetArg(0);
+                ulong DefaultLcidPtr = Instance.WinHelper.GetArg(1);
+                ulong CasingSizePtr = Instance.WinHelper.GetArg(2);
+                ulong CurrentVerPtr = Instance.WinHelper.GetArg(3);
 
-                if (BaseAddressPtr != 0 && !Instance.IsRegionMapped(BaseAddressPtr, 8))
+                if (BaseAddressPtr != 0 && !Instance.IsRegionMapped(BaseAddressPtr, (uint)Instance.WinHelper.PointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 if (DefaultLcidPtr != 0 && !Instance.IsRegionMapped(DefaultLcidPtr, 4))
@@ -49,7 +49,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     CasingSize = localesOffset;
                 }
 
-                if (BaseAddressPtr != 0) Instance._emulator.WriteMemory(BaseAddressPtr, addr, 8);
+                if (BaseAddressPtr != 0) Instance.WinHelper.WritePointer(BaseAddressPtr, addr);
                 if (DefaultLcidPtr != 0) Instance._emulator.WriteMemory(DefaultLcidPtr, LCID);
                 if (CasingSizePtr != 0) Instance._emulator.WriteMemory(CasingSizePtr, CasingSize, 8);
                 if (CanWriteVer) Instance._emulator.WriteMemory(CurrentVerPtr, 0u);
@@ -61,12 +61,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                uint esp = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-                uint BaseAddressPtr = Instance.ReadMemoryUInt(esp + 4);
-                uint DefaultLcidPtr = Instance.ReadMemoryUInt(esp + 8);
-                uint CasingSizePtr = Instance.ReadMemoryUInt(esp + 12);
-                uint CurrentVerPtr = Instance.ReadMemoryUInt(esp + 16); // optional
+                uint BaseAddressPtr = (uint)Instance.WinHelper.GetArg(0);
+                uint DefaultLcidPtr = (uint)Instance.WinHelper.GetArg(1);
+                uint CasingSizePtr = (uint)Instance.WinHelper.GetArg(2);
+                uint CurrentVerPtr = (uint)Instance.WinHelper.GetArg(3); // optional
 
                 if (BaseAddressPtr != 0 && !Instance.IsRegionMapped(BaseAddressPtr, 4))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;

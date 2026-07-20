@@ -61,11 +61,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong Address = Instance.WinHelper.GetArg64(0);
-            ulong TimeoutPtr = Instance.WinHelper.GetArg64(1);
+            ulong Address = Instance.WinHelper.GetArg(0);
+            ulong TimeoutPtr = Instance.WinHelper.GetArg(1);
 
             EmulatedThread Thread = Instance.CurrentThread;
             if (Thread == null)

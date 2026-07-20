@@ -24,11 +24,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS Handle32(BinaryEmulator Instance)
         {
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-            ulong ProcessHandle = Instance.ReadMemoryUInt(SP + 4);
-            ulong BaseAddressPtr = Instance.ReadMemoryUInt(SP + 8);
-            ulong NumberOfBytesToLockPtr = Instance.ReadMemoryUInt(SP + 12);
-            uint MapType = Instance.ReadMemoryUInt(SP + 16);
+            ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+            ulong BaseAddressPtr = Instance.WinHelper.GetArg(1);
+            ulong NumberOfBytesToLockPtr = Instance.WinHelper.GetArg(2);
+            uint MapType = (uint)Instance.WinHelper.GetArg(3);
 
             return HandleCommon(Instance, ProcessHandle, BaseAddressPtr, NumberOfBytesToLockPtr, MapType, 4);
         }

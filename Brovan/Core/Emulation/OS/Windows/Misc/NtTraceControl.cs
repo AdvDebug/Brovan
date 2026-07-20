@@ -21,15 +21,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            uint FunctionCode = (uint)Instance.WinHelper.GetArg64(0);
-            ulong InBuffer = Instance.WinHelper.GetArg64(1);
-            uint InBufferLength = (uint)Instance.WinHelper.GetArg64(2);
-            ulong OutBuffer = Instance.WinHelper.GetArg64(3);
-            uint OutBufferLength = (uint)Instance.WinHelper.GetArg64(4);
-            ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(5);
+            uint FunctionCode = (uint)Instance.WinHelper.GetArg(0);
+            ulong InBuffer = Instance.WinHelper.GetArg(1);
+            uint InBufferLength = (uint)Instance.WinHelper.GetArg(2);
+            ulong OutBuffer = Instance.WinHelper.GetArg(3);
+            uint OutBufferLength = (uint)Instance.WinHelper.GetArg(4);
+            ulong ReturnLengthPtr = Instance.WinHelper.GetArg(5);
 
             if (ReturnLengthPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;

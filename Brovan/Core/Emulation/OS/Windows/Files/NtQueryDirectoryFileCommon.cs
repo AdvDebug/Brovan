@@ -22,21 +22,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (GetHeaderSize(FileInformationClass) == 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
                 return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
 
             WinFile DirectoryHandle = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             if (DirectoryHandle == null || DirectoryHandle.Device)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
             string HostPath = GeneralHelper.IO.ResolveHostPath(DirectoryHandle.Path, Helpers.BinaryHelpers.BinaryFormat.PE);
             if (string.IsNullOrEmpty(HostPath) || !Directory.Exists(HostPath))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
@@ -63,7 +63,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (DirectoryHandle.DirectoryIndex >= DirectoryHandle.DirectoryEntries.Count)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_NO_MORE_FILES, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_NO_MORE_FILES, 0);
                 return NTSTATUS.STATUS_NO_MORE_FILES;
             }
 
@@ -88,7 +88,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     if (CurrentOffset == 0)
                     {
-                        Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_BUFFER_OVERFLOW, RequiredLength);
+                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_BUFFER_OVERFLOW, RequiredLength);
                         return NTSTATUS.STATUS_BUFFER_OVERFLOW;
                     }
 
@@ -117,7 +117,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (CurrentOffset != 0)
                 Status = NTSTATUS.STATUS_SUCCESS;
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, Status, Information);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, Status, Information);
             return Status;
         }
 

@@ -9,20 +9,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong FileHandle = Instance.WinHelper.GetArg64(0);
-            ulong EventHandle = Instance.WinHelper.GetArg64(1);
-            ulong ApcRoutine = Instance.WinHelper.GetArg64(2);
-            ulong ApcContext = Instance.WinHelper.GetArg64(3);
-            ulong IoStatusBlock = Instance.WinHelper.GetArg64(4);
-            ulong FileInformation = Instance.WinHelper.GetArg64(5);
-            uint Length = (uint)Instance.WinHelper.GetArg64(6);
-            uint FileInformationClass = (uint)Instance.WinHelper.GetArg64(7);
-            bool ReturnSingleEntry = (uint)Instance.WinHelper.GetArg64(8) != 0;
-            ulong FileName = Instance.WinHelper.GetArg64(9);
-            bool RestartScan = (uint)Instance.WinHelper.GetArg64(10) != 0;
+            ulong FileHandle = Instance.WinHelper.GetArg(0);
+            ulong EventHandle = Instance.WinHelper.GetArg(1);
+            ulong ApcRoutine = Instance.WinHelper.GetArg(2);
+            ulong ApcContext = Instance.WinHelper.GetArg(3);
+            ulong IoStatusBlock = Instance.WinHelper.GetArg(4);
+            ulong FileInformation = Instance.WinHelper.GetArg(5);
+            uint Length = (uint)Instance.WinHelper.GetArg(6);
+            uint FileInformationClass = (uint)Instance.WinHelper.GetArg(7);
+            bool ReturnSingleEntry = (uint)Instance.WinHelper.GetArg(8) != 0;
+            ulong FileName = Instance.WinHelper.GetArg(9);
+            bool RestartScan = (uint)Instance.WinHelper.GetArg(10) != 0;
 
             uint QueryFlags = 0;
             if (RestartScan)

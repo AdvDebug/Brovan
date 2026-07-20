@@ -24,8 +24,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                AhcServiceClass Service = (AhcServiceClass)(uint)Instance.WinHelper.GetArg64(0, true);
-                ulong ServiceData = Instance.WinHelper.GetArg64(1);
+                AhcServiceClass Service = (AhcServiceClass)(uint)Instance.WinHelper.GetArg(0);
+                ulong ServiceData = Instance.WinHelper.GetArg(1);
                 return HandleApphelpCacheControl(Instance, Service, ServiceData);
             }
             else if (Instance._binary.Architecture == BinaryArchitecture.x86)

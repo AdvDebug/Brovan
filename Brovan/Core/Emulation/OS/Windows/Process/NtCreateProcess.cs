@@ -14,14 +14,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ProcessHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
-                ulong ParentProcess = Instance.WinHelper.GetArg64(3);
-                ulong InheritObjectTable = Instance.WinHelper.GetArg64(4);
-                ulong SectionHandle = Instance.WinHelper.GetArg64(5);
-                ulong DebugPort = Instance.WinHelper.GetArg64(6);
-                ulong TokenHandle = Instance.WinHelper.GetArg64(7);
+                ulong ProcessHandlePtr = Instance.WinHelper.GetArg(0);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+                ulong ParentProcess = Instance.WinHelper.GetArg(3);
+                ulong InheritObjectTable = Instance.WinHelper.GetArg(4);
+                ulong SectionHandle = Instance.WinHelper.GetArg(5);
+                ulong DebugPort = Instance.WinHelper.GetArg(6);
+                ulong TokenHandle = Instance.WinHelper.GetArg(7);
 
                 if(ProcessHandlePtr == 0)
                 {

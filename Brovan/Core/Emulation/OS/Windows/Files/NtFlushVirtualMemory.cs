@@ -23,26 +23,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (BaseAddressPtr == 0 || RegionSizePtr == 0 || IoStatusBlockPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(BaseAddressPtr, 8) || !Instance.IsRegionMapped(RegionSizePtr, 8) || !Instance.IsRegionMapped(IoStatusBlockPtr, 0x10))
+            if (!Instance.IsRegionMapped(BaseAddressPtr, (uint)Instance.WinHelper.PointerSize) || !Instance.IsRegionMapped(RegionSizePtr, (uint)Instance.WinHelper.PointerSize) || !Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (!Instance.WinHelper.IsCurrentProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
-            ulong BaseAddress = Instance.ReadMemoryULong(BaseAddressPtr);
-            ulong RegionSize = Instance.ReadMemoryULong(RegionSizePtr);
+            ulong BaseAddress = Instance.WinHelper.ReadPointer(BaseAddressPtr);
+            ulong RegionSize = Instance.WinHelper.ReadPointer(RegionSizePtr);
 
             NTSTATUS Status = FlushRange(Instance, BaseAddress, RegionSize, out ulong FlushedSize);
             if (Status == NTSTATUS.STATUS_SUCCESS)
             {
-                Instance._emulator.WriteMemory(BaseAddressPtr, BaseAddress, 8);
-                Instance._emulator.WriteMemory(RegionSizePtr, FlushedSize, 8);
+                Instance.WinHelper.WritePointer(BaseAddressPtr, BaseAddress);
+                Instance.WinHelper.WritePointer(RegionSizePtr, FlushedSize);
             }
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, Status, FlushedSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, FlushedSize);
             return Status;
         }
 
@@ -61,7 +61,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Instance.WinHelper.IsCurrentProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation))
             {
-                Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
@@ -75,7 +75,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(RegionSizePtr, (uint)FlushedSize);
             }
 
-            Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, Status, (uint)Math.Min(FlushedSize, uint.MaxValue));
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, (uint)Math.Min(FlushedSize, uint.MaxValue));
             return Status;
         }
 

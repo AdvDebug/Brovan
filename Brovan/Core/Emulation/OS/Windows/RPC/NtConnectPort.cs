@@ -33,22 +33,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong PortHandlePtr = Instance.WinHelper.GetArg64(0);
-            ulong PortNamePtr = Instance.WinHelper.GetArg64(1);
-            ulong SecurityQosPtr = Instance.WinHelper.GetArg64(2);
-            ulong ClientViewPtr = Instance.WinHelper.GetArg64(3);
-            ulong ServerViewPtr = Instance.WinHelper.GetArg64(4);
-            ulong MaxMessageLengthPtr = Instance.WinHelper.GetArg64(5);
-            ulong ConnectionInfoPtr = Instance.WinHelper.GetArg64(6);
-            ulong ConnectionInfoLengthPtr = Instance.WinHelper.GetArg64(7);
+            ulong PortHandlePtr = Instance.WinHelper.GetArg(0);
+            ulong PortNamePtr = Instance.WinHelper.GetArg(1);
+            ulong SecurityQosPtr = Instance.WinHelper.GetArg(2);
+            ulong ClientViewPtr = Instance.WinHelper.GetArg(3);
+            ulong ServerViewPtr = Instance.WinHelper.GetArg(4);
+            ulong MaxMessageLengthPtr = Instance.WinHelper.GetArg(5);
+            ulong ConnectionInfoPtr = Instance.WinHelper.GetArg(6);
+            ulong ConnectionInfoLengthPtr = Instance.WinHelper.GetArg(7);
 
             if (PortHandlePtr == 0 || PortNamePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(PortHandlePtr, 8))
+            if (!Instance.IsRegionMapped(PortHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (!StructSerializer.ParseStruct(Instance, PortNamePtr, out UNICODE_STRING64 PortNameStruct))

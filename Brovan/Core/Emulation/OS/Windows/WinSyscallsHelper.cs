@@ -118,7 +118,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns>True if the handle references the current process and has the requested access.</returns>
         public bool IsCurrentProcessHandle(ulong ProcessHandle, AccessMask RequiredAccess)
         {
-            if (ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue)
+            if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) || ProcessHandle == uint.MaxValue)
                 return true;
 
             WinProcess Process = GetProcessByHandle(ProcessHandle, AccessMask.GiveTemp);
@@ -138,12 +138,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <param name="Thread">The current emulated thread.</param>
         /// <param name="PreferThreadLastRip">Use the last executed RIP when it is available.</param>
         /// <returns>The syscall instruction address.</returns>
+        internal const ulong Int2EInstructionLength = 2;
+
         public ulong GetSyscallRip(EmulatedThread Thread, bool PreferThreadLastRip)
         {
             if (PreferThreadLastRip && Thread != null && Thread.LastRIP != 0)
                 return Thread.LastRIP;
 
-            return Emulator.ReadRegister(Emulator.IPRegister);
+            ulong Ip = Emulator.ReadRegister(Emulator.IPRegister);
+
+            return Emulator.IsX86Guest ? Ip - Int2EInstructionLength : Ip;
         }
 
         /// <summary>
@@ -246,47 +250,31 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Writes a 64-bit IO_STATUS_BLOCK to emulated memory.
+        /// Writes an IO_STATUS_BLOCK to emulated memory using the guest pointer width.
         /// </summary>
         /// <param name="IoStatusBlockPtr">Address of the IO_STATUS_BLOCK.</param>
         /// <param name="Status">The operation status.</param>
         /// <param name="Information">The operation information value.</param>
-        public void WriteIoStatusBlock64(ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
+        public void WriteIoStatusBlock(ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
         {
-            Span<byte> Buffer = stackalloc byte[0x10];
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), (uint)Status);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), Information);
-            Emulator._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
+            WriteIoStatusBlock(Emulator, IoStatusBlockPtr, Status, Information);
         }
 
-        /// <summary>
-        /// Writes a 32-bit IO_STATUS_BLOCK to emulated memory.
-        /// </summary>
-        /// <param name="IoStatusBlockPtr">Address of the IO_STATUS_BLOCK.</param>
-        /// <param name="Status">The operation status.</param>
-        /// <param name="Information">The operation information value.</param>
-        public void WriteIoStatusBlock32(uint IoStatusBlockPtr, NTSTATUS Status, uint Information)
+        public void WriteIoStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
         {
-            Span<byte> Buffer = stackalloc byte[0x08];
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), (uint)Status);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), Information);
-            Emulator._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
-        }
+            if (PointerSize == 8)
+            {
+                Span<byte> Buffer64 = stackalloc byte[0x10];
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer64.Slice(0x00, 8), (uint)Status);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer64.Slice(0x08, 8), Information);
+                Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer64);
+                return;
+            }
 
-        public void WriteIoStatusBlock64(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
-        {
-            Span<byte> Buffer = stackalloc byte[0x10];
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), (uint)Status);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), Information);
-            Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
-        }
-
-        public void WriteIoStatusBlock32(BinaryEmulator Instance, uint IoStatusBlockPtr, NTSTATUS Status, uint Information)
-        {
-            Span<byte> Buffer = stackalloc byte[0x08];
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), (uint)Status);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), Information);
-            Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer);
+            Span<byte> Buffer32 = stackalloc byte[0x08];
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x00, 4), (uint)Status);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x04, 4), (uint)Information);
+            Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer32);
         }
 
         /// <summary>
@@ -351,6 +339,43 @@ namespace Brovan.Core.Emulation.OS.Windows
             Span<byte> Buffer = stackalloc byte[sizeof(ulong)];
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer, Value);
             return Emulator._emulator.WriteMemory(Address, Buffer);
+        }
+
+        public int PointerSize => Emulator._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
+
+        private const uint ObjectAttributes32Size = 0x18;
+
+        public bool TryReadUnicodeString(ulong UnicodeStringPtr, out string Value, out NTSTATUS Status)
+        {
+            return PointerSize == 8
+                ? TryReadUnicodeString64(UnicodeStringPtr, out Value, out Status)
+                : TryReadUnicodeString32((uint)UnicodeStringPtr, out Value, out Status);
+        }
+
+        public bool TryReadObjectAttributesName(ulong ObjectAttributesPtr, out ulong RootDirectory, out string Name, out string FullName, out NTSTATUS Status)
+        {
+            if (PointerSize == 8)
+            {
+                bool Ok64 = TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out Name, out FullName, out Status);
+                RootDirectory = Attributes.RootDirectory;
+                return Ok64;
+            }
+
+            bool Ok32 = TryReadObjectAttributesName32((uint)ObjectAttributesPtr, out uint Root32, out _, out Name, out FullName, out Status);
+            RootDirectory = Root32;
+            return Ok32;
+        }
+
+        public ulong ReadPointer(ulong Address)
+        {
+            return PointerSize == 8
+                ? Emulator._emulator.ReadMemoryULong(Address)
+                : Emulator._emulator.ReadMemoryUInt(Address);
+        }
+
+        public bool WritePointer(ulong Address, ulong Value)
+        {
+            return PointerSize == 8 ? WriteUInt64(Address, Value) : WriteUInt32(Address, (uint)Value);
         }
 
         public ulong BuildUnicodeString(string Buffer)
@@ -624,7 +649,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            const uint ObjectAttributes32Size = 0x18;
             if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributes32Size))
             {
                 Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -731,7 +755,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Resolves a 64-bit registry OBJECT_ATTRIBUTES value to a full NT registry path.
         /// </summary>
-        public bool TryResolveRegistryObjectPath64(ulong ObjectAttributesPtr, NTSTATUS MemoryFailureStatus, NTSTATUS EmptyPathStatus, NTSTATUS InvalidRootStatus, out string KeyPath, out NTSTATUS Status)
+        public bool TryResolveRegistryObjectPath(ulong ObjectAttributesPtr, NTSTATUS MemoryFailureStatus, NTSTATUS EmptyPathStatus, NTSTATUS InvalidRootStatus, out string KeyPath, out NTSTATUS Status)
         {
             KeyPath = string.Empty;
             Status = NTSTATUS.STATUS_SUCCESS;
@@ -742,35 +766,53 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            uint ObjectAttributesSize = (uint)Unsafe.SizeOf<OBJECT_ATTRIBUTES64>();
+            bool Is64 = PointerSize == 8;
+            uint ObjectAttributesSize = Is64 ? (uint)Unsafe.SizeOf<OBJECT_ATTRIBUTES64>() : ObjectAttributes32Size;
             if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
             {
                 Status = MemoryFailureStatus;
                 return false;
             }
 
-            if (!StructSerializer.ParseStruct(Emulator, ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes))
+            ulong RootDirectory;
+            ulong ObjectNamePtr;
+            if (Is64)
             {
-                Status = MemoryFailureStatus;
-                return false;
+                if (!StructSerializer.ParseStruct(Emulator, ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes))
+                {
+                    Status = MemoryFailureStatus;
+                    return false;
+                }
+
+                RootDirectory = Attributes.RootDirectory;
+                ObjectNamePtr = Attributes.ObjectName;
+            }
+            else
+            {
+                RootDirectory = Emulator._emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x04);
+                ObjectNamePtr = Emulator._emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x08);
             }
 
-            if (Attributes.ObjectName == 0)
+            if (ObjectNamePtr == 0)
             {
                 Status = NTSTATUS.STATUS_INVALID_PARAMETER;
                 return false;
             }
 
-            if (!TryReadUnicodeString64(Attributes.ObjectName, out KeyPath, out Status))
+            bool ReadName = Is64
+                ? TryReadUnicodeString64(ObjectNamePtr, out KeyPath, out Status)
+                : TryReadUnicodeString32((uint)ObjectNamePtr, out KeyPath, out Status);
+
+            if (!ReadName)
             {
                 if (Status == NTSTATUS.STATUS_ACCESS_VIOLATION)
                     Status = MemoryFailureStatus;
                 return false;
             }
 
-            if (Attributes.RootDirectory != 0)
+            if (RootDirectory != 0)
             {
-                WinRegKey ParentKey = HandleManager.GetObjectByHandle<WinRegKey>(Attributes.RootDirectory);
+                WinRegKey ParentKey = HandleManager.GetObjectByHandle<WinRegKey>(RootDirectory);
                 if (ParentKey == null || string.IsNullOrEmpty(ParentKey.FullPath))
                 {
                     Status = InvalidRootStatus;
@@ -902,16 +944,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             return UInt ? Emulator._emulator.ReadMemoryUInt(StackArgAddress2) : Emulator._emulator.ReadMemoryULong(StackArgAddress2);
         }
 
-        /// <summary>
-        /// Gets a x86 argument based on the index.
-        /// </summary>
-        /// <param name="Index">Index to read from. starting from 0.</param>
-        /// <returns></returns>
-        public uint GetArg32(int Index)
+        public ulong GetArg(int Index)
         {
-            uint ESP = Emulator._emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
-            return Emulator._emulator.ReadMemoryUInt((ulong)(ESP + 4 + (Index * 4)));
+            if (Emulator._binary.Architecture == BinaryArchitecture.x64)
+                return GetArg64(Index);
+
+            return Emulator._emulator.ReadMemoryUInt(_argCacheArgBase + (ulong)(Index * 4));
         }
+
+        public uint GetArg32(int Index) => (uint)GetArg(Index);
 
         public uint GenerateRandomPID()
         {
@@ -1040,6 +1081,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong _argCacheR8;
         private ulong _argCacheR9;
         private ulong _argCacheRSP;
+        private ulong _argCacheArgBase;
+
+        internal bool X86GateArgs = true;
 
         // Batch register array for GetArg64
         private static readonly int[] WinX64SyscallArgRegs = new int[]
@@ -1063,6 +1107,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Emulator._binary.Architecture != BinaryArchitecture.x64)
             {
                 _argCacheValid = false;
+                if (Emulator._binary.Architecture == BinaryArchitecture.x86)
+                {
+                    uint ESP = Emulator._emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
+                    _argCacheArgBase = X86GateArgs ? ESP + 8u : ESP + 4u;
+                }
                 return;
             }
             ulong[] Vals = _winX64SyscallArgValues;
@@ -1412,11 +1461,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Emulator == null)
                 return;
 
-            if (Emulator._binary == null || Emulator._binary.Architecture != BinaryArchitecture.x64)
-            {
-                Emulator.TriggerEventMessage("[-] InvokeException is only implemented for x64 right now.", LogFlags.Issues);
+            if (Emulator._binary == null)
                 return;
-            }
 
             if (ExceptionInformation == null)
                 ExceptionInformation = new ExceptionInformation { Status = Exception };
@@ -1448,7 +1494,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
             }
 
-            DispatchExceptionX64(dispatcher, Exception, ExceptionInformation);
+            if (PointerSize == 4)
+                DispatchExceptionX86(dispatcher, Exception, ExceptionInformation);
+            else
+                DispatchExceptionX64(dispatcher, Exception, ExceptionInformation);
         }
 
         private static ulong AlignDown(ulong Value, ulong Align)
@@ -1514,6 +1563,88 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return 0;
+        }
+
+        private void DispatchExceptionX86(ulong DispatcherAddress, NTSTATUS Exception, ExceptionInformation ExceptionInformation)
+        {
+            const uint ExceptionRecordSize = 0x50;
+            const uint ContextSize = 0x2CC;
+            const uint CONTEXT_I386 = 0x00010000;
+            const uint CONTEXT_CONTROL = 0x00000001;
+            const uint CONTEXT_INTEGER = 0x00000002;
+            const uint CONTEXT_SEGMENTS = 0x00000004;
+
+            uint InitialEsp = Emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
+            uint InitialEip = Emulator.ReadRegister32(Registers.UC_X86_REG_EIP);
+            uint InitialEFlags = Emulator.ReadRegister32(Registers.UC_X86_REG_EFLAGS);
+
+            uint AllocationSize = ContextSize + ExceptionRecordSize + 0x20;
+            uint NewEsp = (uint)AlignDown(InitialEsp - AllocationSize, 0x10);
+
+            if (!Emulator.IsRegionMapped(NewEsp, AllocationSize))
+            {
+                ulong PageStart = NewEsp & ~0xFFFUL;
+                ulong PageEnd = BinaryEmulator.AlignUp((ulong)NewEsp + AllocationSize, 0x1000);
+
+                for (ulong Page = PageStart; Page < PageEnd; Page += 0x1000)
+                {
+                    if (!Emulator.IsRegionMapped(Page, 1))
+                        Emulator._emulator.MapMemory(Page, 0x1000, MemoryProtection.ReadWrite);
+                    else
+                        Emulator._emulator.SetMemoryProtection(Page, 0x1000, MemoryProtection.ReadWrite);
+                }
+
+                if (!Emulator.IsRegionMapped(NewEsp, AllocationSize))
+                {
+                    Emulator.TriggerEventMessage($"[-] InvokeException failed: 32-bit exception frame not mapped (ESP=0x{NewEsp:X}).", LogFlags.Issues);
+                    return;
+                }
+            }
+
+            uint ContextAddress = NewEsp + 0x10;
+            uint ExceptionRecordAddress = ContextAddress + ContextSize;
+
+            Span<byte> Context = Shared.GetSpan(ContextSize);
+            Context.Clear();
+            WriteUInt32(Context, 0x00, CONTEXT_I386 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS);
+            WriteUInt32(Context, 0x8C, Emulator.ReadRegister32(Registers.UC_X86_REG_GS));
+            WriteUInt32(Context, 0x90, Emulator.ReadRegister32(Registers.UC_X86_REG_FS));
+            WriteUInt32(Context, 0x94, Emulator.ReadRegister32(Registers.UC_X86_REG_ES));
+            WriteUInt32(Context, 0x98, Emulator.ReadRegister32(Registers.UC_X86_REG_DS));
+            WriteUInt32(Context, 0x9C, Emulator.ReadRegister32(Registers.UC_X86_REG_EDI));
+            WriteUInt32(Context, 0xA0, Emulator.ReadRegister32(Registers.UC_X86_REG_ESI));
+            WriteUInt32(Context, 0xA4, Emulator.ReadRegister32(Registers.UC_X86_REG_EBX));
+            WriteUInt32(Context, 0xA8, Emulator.ReadRegister32(Registers.UC_X86_REG_EDX));
+            WriteUInt32(Context, 0xAC, Emulator.ReadRegister32(Registers.UC_X86_REG_ECX));
+            WriteUInt32(Context, 0xB0, Emulator.ReadRegister32(Registers.UC_X86_REG_EAX));
+            WriteUInt32(Context, 0xB4, Emulator.ReadRegister32(Registers.UC_X86_REG_EBP));
+            WriteUInt32(Context, 0xB8, InitialEip);
+            WriteUInt32(Context, 0xBC, Emulator.ReadRegister32(Registers.UC_X86_REG_CS));
+            WriteUInt32(Context, 0xC0, InitialEFlags);
+            WriteUInt32(Context, 0xC4, InitialEsp);
+            WriteUInt32(Context, 0xC8, Emulator.ReadRegister32(Registers.UC_X86_REG_SS));
+            Emulator._emulator.WriteMemory(ContextAddress, Context.Slice(0, (int)ContextSize));
+
+            Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
+            Record.Clear();
+            WriteUInt32(Record, 0x00, (uint)Exception);
+            WriteUInt32(Record, 0x04, 0);
+            WriteUInt32(Record, 0x08, 0);
+            WriteUInt32(Record, 0x0C, InitialEip);
+
+            ulong[] Parameters = ExceptionInformation?.Parameters ?? Array.Empty<ulong>();
+            uint NumberParameters = (uint)Math.Min(Parameters.Length, 15);
+            WriteUInt32(Record, 0x10, NumberParameters);
+            for (int i = 0; i < (int)NumberParameters; i++)
+                WriteUInt32(Record, 0x14 + (i * 4), (uint)Parameters[i]);
+
+            Emulator._emulator.WriteMemory(ExceptionRecordAddress, Record.Slice(0, (int)ExceptionRecordSize));
+
+            WriteUInt32(NewEsp, ExceptionRecordAddress);
+            WriteUInt32(NewEsp + 4, ContextAddress);
+
+            Emulator.WriteRegister32(Registers.UC_X86_REG_ESP, NewEsp);
+            Emulator.WriteRegister32(Registers.UC_X86_REG_EIP, (uint)DispatcherAddress);
         }
 
         private void DispatchExceptionX64(ulong DispatcherAddress, NTSTATUS Exception, ExceptionInformation ExceptionInformation)
@@ -1804,7 +1935,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns>returns true if an APC was dispatched, otherwise false.</returns>
         public bool DispatchNextUserApc(EmulatedThread Thread, bool ForceAlert)
         {
-            if (Emulator == null || Emulator._binary == null || Emulator._binary.Architecture != BinaryArchitecture.x64)
+            if (Emulator == null || Emulator._binary == null)
                 return false;
 
             int ApcIndex = GetDispatchableUserApcIndex(Thread, ForceAlert);
@@ -1819,12 +1950,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
+            if (Emulator.CurrentThread == Thread)
+                Emulator.SaveContext(Thread);
+
             if (Thread.WaitActive)
                 InterruptAlertableWaitWithUserApc(Thread);
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             WinPendingUserApc Apc = State.PendingUserApcs[ApcIndex];
             State.ApcAlertable = false;
+
+            if (PointerSize == 4)
+                return DispatchUserApcX86(Thread, State, ApcIndex, Apc, Dispatcher);
 
             const int ContinueOffset = 0x4F0;
             const int StackLayoutSize = 0x508;
@@ -1924,6 +2061,100 @@ namespace Brovan.Core.Emulation.OS.Windows
             Thread.Context.RIP = Dispatcher;
             Emulator.WriteRegister(Registers.UC_X86_REG_RSP, NewRsp);
             Emulator.WriteRegister(Registers.UC_X86_REG_RIP, Dispatcher);
+            return true;
+        }
+
+        private bool DispatchUserApcX86(EmulatedThread Thread, WindowsThreadState State, int ApcIndex, WinPendingUserApc Apc, ulong Dispatcher)
+        {
+            const uint ContextOffset = 0x14;
+            const uint ContextSize = 0x2CC;
+            const uint ExceptionRegistrationOffset = 0x310;
+            const uint FrameSize = ExceptionRegistrationOffset + 0x10;
+            const uint ContextI386 = 0x00010000;
+            const uint ContextControl = 0x00000001;
+            const uint ContextInteger = 0x00000002;
+            const uint ContextSegments = 0x00000004;
+
+            CpuContext Ctx = Thread.Context ?? new CpuContext();
+            uint InitialEsp = (uint)Ctx.RSP;
+            uint InitialEip = (uint)Ctx.RIP;
+            uint InitialEFlags = (uint)Ctx.RFLAGS;
+
+            uint NewEsp = (uint)AlignDown(InitialEsp - FrameSize, 0x10);
+
+            if (Thread.StackSize != 0 && (NewEsp < Thread.StackAddress || (ulong)NewEsp + FrameSize > Thread.StackAddress + Thread.StackSize))
+            {
+                if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                    Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: insufficient stack space (ESP=0x{InitialEsp:X}, NewESP=0x{NewEsp:X}).", LogFlags.Issues);
+                return false;
+            }
+
+            if (!Emulator.IsRegionMapped(NewEsp, FrameSize))
+            {
+                ulong PageStart = NewEsp & ~0xFFFUL;
+                ulong PageEnd = BinaryEmulator.AlignUp((ulong)NewEsp + FrameSize, 0x1000);
+
+                for (ulong Page = PageStart; Page < PageEnd; Page += 0x1000)
+                {
+                    if (!Emulator.IsRegionMapped(Page, 1))
+                        Emulator._emulator.MapMemory(Page, 0x1000, MemoryProtection.ReadWrite);
+                    else
+                        Emulator._emulator.SetMemoryProtection(Page, 0x1000, MemoryProtection.ReadWrite);
+                }
+
+                if (!Emulator.IsRegionMapped(NewEsp, FrameSize))
+                {
+                    if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                        Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: APC stack frame is not mapped (NewESP=0x{NewEsp:X}).", LogFlags.Issues);
+                    return false;
+                }
+            }
+
+            Span<byte> Frame = Shared.GetSpan(FrameSize);
+            Frame.Clear();
+
+            WriteUInt32(Frame, 0x00, (uint)Apc.ApcRoutine);
+            WriteUInt32(Frame, 0x04, (uint)Apc.ApcArgument1);
+            WriteUInt32(Frame, 0x08, (uint)Apc.ApcArgument2);
+            WriteUInt32(Frame, 0x0C, (uint)Apc.ApcArgument3);
+            WriteUInt32(Frame, 0x10, 1);
+
+            int Context = (int)ContextOffset;
+            WriteUInt32(Frame, Context + 0x00, ContextI386 | ContextControl | ContextInteger | ContextSegments);
+            WriteUInt32(Frame, Context + 0x8C, (uint)Ctx.GS);
+            WriteUInt32(Frame, Context + 0x90, (uint)Ctx.FS);
+            WriteUInt32(Frame, Context + 0x94, (uint)Ctx.ES);
+            WriteUInt32(Frame, Context + 0x98, (uint)Ctx.DS);
+            WriteUInt32(Frame, Context + 0x9C, (uint)Ctx.RDI);
+            WriteUInt32(Frame, Context + 0xA0, (uint)Ctx.RSI);
+            WriteUInt32(Frame, Context + 0xA4, (uint)Ctx.RBX);
+            WriteUInt32(Frame, Context + 0xA8, (uint)Ctx.RDX);
+            WriteUInt32(Frame, Context + 0xAC, (uint)Ctx.RCX);
+            WriteUInt32(Frame, Context + 0xB0, (uint)Ctx.RAX);
+            WriteUInt32(Frame, Context + 0xB4, (uint)Ctx.RBP);
+            WriteUInt32(Frame, Context + 0xB8, InitialEip);
+            WriteUInt32(Frame, Context + 0xBC, (uint)Ctx.CS);
+            WriteUInt32(Frame, Context + 0xC0, InitialEFlags);
+            WriteUInt32(Frame, Context + 0xC4, InitialEsp);
+            WriteUInt32(Frame, Context + 0xC8, (uint)Ctx.SS);
+
+            _ = ContextSize;
+
+            WriteUInt32(Frame, (int)ExceptionRegistrationOffset, 0xFFFFFFFF);
+
+            Emulator.WriteMemory(NewEsp, Frame);
+            State.PendingUserApcs.RemoveAt(ApcIndex);
+
+            if (Thread.Context == null)
+                Thread.Context = new CpuContext();
+            Thread.Context.RSP = NewEsp;
+            Thread.Context.RIP = Dispatcher;
+
+            if (Emulator.CurrentThread == Thread)
+            {
+                Emulator.WriteRegister32(Registers.UC_X86_REG_ESP, NewEsp);
+                Emulator.WriteRegister32(Registers.UC_X86_REG_EIP, (uint)Dispatcher);
+            }
             return true;
         }
 
@@ -4977,7 +5208,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             foreach (WinRegistryNotification Notification in Completed)
             {
                 if (Notification.IoStatusBlock != 0 && Emulator.IsRegionMapped(Notification.IoStatusBlock, 0x10))
-                    WriteIoStatusBlock64(Emulator, Notification.IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+                    WriteIoStatusBlock(Emulator, Notification.IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
 
                 if (Notification.EventHandle != 0)
                 {
@@ -5120,7 +5351,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             WinProcess Process = null;
 
-            if (ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue)
+            if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) || ProcessHandle == uint.MaxValue)
                 Process = WinProcesses.FirstOrDefault(p => p.PID == PID);
             else
                 Process = GetProcessByHandle(ProcessHandle, AccessMask.GiveTemp);
@@ -5146,7 +5377,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinProcess Process;
 
-            if (ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue)
+            if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) || ProcessHandle == uint.MaxValue)
                 Process = WinProcesses.FirstOrDefault(p => p.PID == PID);
             else
                 Process = GetProcessByHandle(ProcessHandle, AccessMask.GiveTemp);

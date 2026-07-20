@@ -4,8 +4,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            ulong FirstHandle = Instance.WinHelper.GetArg64(0);
-            ulong SecondHandle = Instance.WinHelper.GetArg64(1);
+            ulong FirstHandle = Instance.WinHelper.GetArg(0);
+            ulong SecondHandle = Instance.WinHelper.GetArg(1);
 
             NTSTATUS Status = ResolveObject(Instance, FirstHandle, out IHandleObject FirstObject);
             if (Status != NTSTATUS.STATUS_SUCCESS)
@@ -23,14 +23,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             Object = null;
 
             // check if it is the current process
-            if (Handle == HandleManager.CurrentProcess || Handle == uint.MaxValue)
+            if (HandleManager.IsCurrentProcessPseudoHandle(Handle) || Handle == uint.MaxValue)
             {
                 Object = Instance.WinHelper.WinProcesses.FirstOrDefault(Process => Process.PID == Instance.WinHelper.PID);
                 return Object != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
             // check if it is the current thread
-            if (Handle == HandleManager.CurrentThread || Handle == 0xFFFFFFFEu)
+            if (HandleManager.IsCurrentThreadPseudoHandle(Handle) || Handle == 0xFFFFFFFEu)
             {
                 Object = Instance.CurrentThread;
                 return Object != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_HANDLE;

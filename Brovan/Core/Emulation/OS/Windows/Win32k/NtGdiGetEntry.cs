@@ -8,11 +8,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong Handle = Instance.WinHelper.GetArg64(0);
-            ulong OutBuffer = Instance.WinHelper.GetArg64(1);
+            ulong Handle = Instance.WinHelper.GetArg(0);
+            ulong OutBuffer = Instance.WinHelper.GetArg(1);
 
             if (OutBuffer == 0 || Handle == 0)
             {

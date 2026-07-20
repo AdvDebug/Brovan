@@ -133,9 +133,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static NTSTATUS WriteIoStatus(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information, bool Is64Bit)
         {
             if (Is64Bit)
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, Status, Information);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, Information);
             else
-                Instance.WinHelper.WriteIoStatusBlock32(Instance, (uint)IoStatusBlockPtr, Status, (uint)Information);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, (uint)IoStatusBlockPtr, Status, (uint)Information);
 
             return Status;
         }

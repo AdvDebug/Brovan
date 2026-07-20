@@ -8,16 +8,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong TimerHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong TimerIdPtr = Instance.WinHelper.GetArg64(1);
-                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
-                ulong Attributes = (uint)Instance.WinHelper.GetArg64(3);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(4);
+                ulong TimerHandlePtr = Instance.WinHelper.GetArg(0);
+                ulong TimerIdPtr = Instance.WinHelper.GetArg(1);
+                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+                ulong Attributes = (uint)Instance.WinHelper.GetArg(3);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(4);
 
                 if (TimerHandlePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                if (!Instance.IsRegionMapped(TimerHandlePtr, 8))
+                if (!Instance.IsRegionMapped(TimerHandlePtr, (uint)Instance.WinHelper.PointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 if (TimerIdPtr != 0 && !Instance.IsRegionMapped(TimerIdPtr, 4))
@@ -42,7 +42,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Timer, (AccessMask)DesiredAccess);
                 Instance.WinHelper.AddWinHandle(Handle);
 
-                if (!Instance._emulator.WriteMemory(TimerHandlePtr, Handle.Handle))
+                if (!Instance.WinHelper.WritePointer(TimerHandlePtr, Handle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 if (TimerIdPtr != 0)
@@ -55,13 +55,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-                uint TimerHandlePtr = Instance.ReadMemoryUInt(SP + 4);
-                uint TimerIdPtr = Instance.ReadMemoryUInt(SP + 8);
-                uint ObjectAttributesPtr = Instance.ReadMemoryUInt(SP + 12);
-                uint Attributes = Instance.ReadMemoryUInt(SP + 16);
-                uint DesiredAccess = Instance.ReadMemoryUInt(SP + 20);
+                uint TimerHandlePtr = (uint)Instance.WinHelper.GetArg(0);
+                uint TimerIdPtr = (uint)Instance.WinHelper.GetArg(1);
+                uint ObjectAttributesPtr = (uint)Instance.WinHelper.GetArg(2);
+                uint Attributes = (uint)Instance.WinHelper.GetArg(3);
+                uint DesiredAccess = (uint)Instance.WinHelper.GetArg(4);
 
                 if (TimerHandlePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;

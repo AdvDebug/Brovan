@@ -2301,7 +2301,7 @@ namespace Brovan.EmulationMenu
 
             if (Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86)
             {
-                PrintHighlight("[!] Brovan only supports very little syscalls for x86 binaries and no WOW64.");
+                PrintHighlight("[!] WOW64 support is still experimental, expect missing syscalls and incorrect behaviour.");
             }
 
             Console.Title = $"Emulating a {Binary.FileFormat}{(Binary.PE.DotNetStatus != DotNetStatus.None ? " (DotNet)" : string.Empty)} File{(Quick ? " in Quick Mode" : string.Empty)}";

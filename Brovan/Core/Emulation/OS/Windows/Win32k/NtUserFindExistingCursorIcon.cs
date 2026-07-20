@@ -6,12 +6,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong ModuleName = Instance.WinHelper.GetArg64(0);
-            ulong ResourceName = Instance.WinHelper.GetArg64(1);
-            ulong CursorFind = Instance.WinHelper.GetArg64(2);
+            ulong ModuleName = Instance.WinHelper.GetArg(0);
+            ulong ResourceName = Instance.WinHelper.GetArg(1);
+            ulong CursorFind = Instance.WinHelper.GetArg(2);
             _ = ModuleName;
             _ = ResourceName;
             _ = CursorFind;

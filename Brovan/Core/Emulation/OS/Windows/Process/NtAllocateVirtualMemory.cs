@@ -105,18 +105,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-                ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
-                ulong ZeroBits = Instance.WinHelper.GetArg64(2); // ignored for now
-                ulong RegionSizePtr = Instance.WinHelper.GetArg64(3);
-                ulong AllocationTypeValue = (uint)Instance.WinHelper.GetArg64(4);
-                ulong ProtectValue = (uint)Instance.WinHelper.GetArg64(5);
+                ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+                ulong BaseAddressPtr = Instance.WinHelper.GetArg(1);
+                ulong ZeroBits = Instance.WinHelper.GetArg(2); // ignored for now
+                ulong RegionSizePtr = Instance.WinHelper.GetArg(3);
+                ulong AllocationTypeValue = (uint)Instance.WinHelper.GetArg(4);
+                ulong ProtectValue = (uint)Instance.WinHelper.GetArg(5);
                 ulong RegionSize = 0;
-                if (ProcessHandle != ulong.MaxValue)
+                if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) && ProcessHandle != uint.MaxValue)
                 {
-                    RegionSize = Instance.ReadMemoryULong(RegionSizePtr);
+                    RegionSize = Instance.WinHelper.ReadPointer(RegionSizePtr);
 
                     if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                         return NTSTATUS.STATUS_INVALID_HANDLE;
@@ -140,11 +139,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (BaseAddressPtr == 0 || RegionSizePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                ulong RegionSizeRaw = Instance.ReadMemoryULong(RegionSizePtr);
+                ulong RegionSizeRaw = Instance.WinHelper.ReadPointer(RegionSizePtr);
                 if (RegionSizeRaw == 0 || AllocationTypeValue == 0 || ProtectValue == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                ulong BaseAddress = Instance.ReadMemoryULong(BaseAddressPtr);
+                ulong BaseAddress = Instance.WinHelper.ReadPointer(BaseAddressPtr);
 
                 bool Reserve = (AllocationTypeValue & 0x2000UL) != 0; // MEM_RESERVE
                 bool Commit = (AllocationTypeValue & 0x1000UL) != 0;  // MEM_COMMIT
@@ -160,10 +159,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!TryApplyResetState(Instance, BaseAddress, ResetRegionSize, Reset, out NTSTATUS ResetStatus))
                         return ResetStatus;
 
-                    if (!Instance._emulator.WriteMemory(BaseAddressPtr, BaseAddress))
+                    if (!Instance.WinHelper.WritePointer(BaseAddressPtr, BaseAddress))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!Instance._emulator.WriteMemory(RegionSizePtr, ResetRegionSize))
+                    if (!Instance.WinHelper.WritePointer(RegionSizePtr, ResetRegionSize))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                     return NTSTATUS.STATUS_SUCCESS;
@@ -179,7 +178,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (BaseAddress == 0)
                 {
-                    BaseAddress = FindFreeBaseAddress(Instance, RegionSize, IsX64: true);
+                    BaseAddress = FindFreeBaseAddress(Instance, RegionSize, Instance.WinHelper.PointerSize == 8);
                     if (BaseAddress == 0)
                         return NTSTATUS.STATUS_NO_MEMORY;
                 }
@@ -200,118 +199,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_NO_MEMORY;
                 }
 
-                if (!Instance._emulator.WriteMemory(BaseAddressPtr, BaseAddress))
+                if (!Instance.WinHelper.WritePointer(BaseAddressPtr, BaseAddress))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                if (!Instance._emulator.WriteMemory(RegionSizePtr, RegionSize))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-            else
-            {
-                uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-
-                uint ProcessHandle = Instance.ReadMemoryUInt(SP + 4);
-                uint BaseAddressPtr = Instance.ReadMemoryUInt(SP + 8);
-                uint ZeroBits = Instance.ReadMemoryUInt(SP + 12); // ignored for now
-                uint RegionSizePtr = Instance.ReadMemoryUInt(SP + 16);
-                uint AllocationTypeValue = Instance.ReadMemoryUInt(SP + 20);
-                uint ProtectValue = Instance.ReadMemoryUInt(SP + 24);
-
-                ulong RegionSize = 0;
-
-                if (ProcessHandle != uint.MaxValue)
-                {
-                    RegionSize = Instance.ReadMemoryUInt(RegionSizePtr);
-
-                    if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
-                        return NTSTATUS.STATUS_INVALID_HANDLE;
-
-                    if (BaseAddressPtr == 0)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                    if (RegionSize == 0)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                    WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessVMOperation);
-                    if (Process == null)
-                        return NTSTATUS.STATUS_INVALID_HANDLE;
-
-                    if (Instance.WinHelper.IsProtectedStatus(Process.Status))
-                        return NTSTATUS.STATUS_ACCESS_DENIED;
-
-                    return Instance.WinUnimplemented;
-                }
-
-                if (BaseAddressPtr == 0 || RegionSizePtr == 0)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                uint RegionSizeRaw = Instance.ReadMemoryUInt(RegionSizePtr);
-                if (RegionSizeRaw == 0 || AllocationTypeValue == 0 || ProtectValue == 0)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                uint BaseAddress32 = Instance.ReadMemoryUInt(BaseAddressPtr);
-                ulong BaseAddress = BaseAddress32;
-
-                bool Reserve = (AllocationTypeValue & 0x2000U) != 0; // MEM_RESERVE
-                bool Commit = (AllocationTypeValue & 0x1000U) != 0;  // MEM_COMMIT
-
-                bool Reset = (AllocationTypeValue & MemReset) != 0;
-                bool ResetUndo = (AllocationTypeValue & MemResetUndo) != 0;
-                if (Reset || ResetUndo)
-                {
-                    if ((Reset && ResetUndo) || (Reset && AllocationTypeValue != MemReset) || (ResetUndo && AllocationTypeValue != MemResetUndo))
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                    ulong ResetRegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
-                    if (!TryApplyResetState(Instance, BaseAddress, ResetRegionSize, Reset, out NTSTATUS ResetStatus))
-                        return ResetStatus;
-
-                    if (!Instance._emulator.WriteMemory(BaseAddressPtr, (uint)BaseAddress))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                    if (!Instance._emulator.WriteMemory(RegionSizePtr, (uint)ResetRegionSize))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                    return NTSTATUS.STATUS_SUCCESS;
-                }
-
-                RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
-
-                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                    Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
-
-                if (!Reserve && Commit && BaseAddress == 0)
-                    Reserve = true;
-
-                if (BaseAddress == 0)
-                {
-                    BaseAddress = FindFreeBaseAddress(Instance, RegionSize, IsX64: false);
-                    if (BaseAddress == 0)
-                        return NTSTATUS.STATUS_NO_MEMORY;
-                }
-                else
-                {
-                    BaseAddress = BinaryEmulator.AlignUp(BaseAddress, Reserve ? AllocationGranularity : PageSize);
-                }
-
-                if (Reserve)
-                {
-                    if (!Instance.ReserveMemory(BaseAddress, RegionSize, ProtectValue))
-                        return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
-                }
-
-                if (Commit)
-                {
-                    if (!Instance.CommitMemory(BaseAddress, RegionSize, ProtectValue))
-                        return NTSTATUS.STATUS_NO_MEMORY;
-                }
-
-                if (!Instance._emulator.WriteMemory(BaseAddressPtr, (uint)BaseAddress))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                if (!Instance._emulator.WriteMemory(RegionSizePtr, (uint)RegionSize))
+                if (!Instance.WinHelper.WritePointer(RegionSizePtr, RegionSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 return NTSTATUS.STATUS_SUCCESS;

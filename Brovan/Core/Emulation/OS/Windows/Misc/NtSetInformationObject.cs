@@ -10,10 +10,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong Handle = Instance.WinHelper.GetArg64(0);
-                uint ObjectInformationClass = (uint)Instance.WinHelper.GetArg64(1, true);
-                ulong ObjectInformationPtr = Instance.WinHelper.GetArg64(2);
-                uint Length = (uint)Instance.WinHelper.GetArg64(3, true);
+                ulong Handle = Instance.WinHelper.GetArg(0);
+                uint ObjectInformationClass = (uint)Instance.WinHelper.GetArg(1);
+                ulong ObjectInformationPtr = Instance.WinHelper.GetArg(2);
+                uint Length = (uint)Instance.WinHelper.GetArg(3);
 
                 if (!Instance.WinHelper.HandleExists(Handle))
                     return NTSTATUS.STATUS_INVALID_HANDLE;

@@ -7,8 +7,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
             const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
             const uint SWP_NOSIZE = 0x0001;
@@ -18,13 +16,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             const uint SWP_HIDEWINDOW = 0x0080;
             const uint WS_VISIBLE = 0x10000000;
 
-            ulong Hwnd = Instance.WinHelper.GetArg64(0);
-            ulong InsertAfter = Instance.WinHelper.GetArg64(1);
-            int X = unchecked((int)Instance.WinHelper.GetArg64(2, true));
-            int Y = unchecked((int)Instance.WinHelper.GetArg64(3, true));
-            int cx = unchecked((int)Instance.WinHelper.GetArg64(4, true));
-            int cy = unchecked((int)Instance.WinHelper.GetArg64(5, true));
-            uint Flags = (uint)Instance.WinHelper.GetArg64(6, true);
+            ulong Hwnd = Instance.WinHelper.GetArg(0);
+            ulong InsertAfter = Instance.WinHelper.GetArg(1);
+            int X = unchecked((int)Instance.WinHelper.GetArg(2));
+            int Y = unchecked((int)Instance.WinHelper.GetArg(3));
+            int cx = unchecked((int)Instance.WinHelper.GetArg(4));
+            int cy = unchecked((int)Instance.WinHelper.GetArg(5));
+            uint Flags = (uint)Instance.WinHelper.GetArg(6);
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)

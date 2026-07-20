@@ -20,11 +20,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            POWER_INFORMATION_LEVEL InformationLevel = (POWER_INFORMATION_LEVEL)Instance.WinHelper.GetArg64(0, true);
-            ulong InputBuffer = Instance.WinHelper.GetArg64(1);
-            uint InputBufferLength = (uint)Instance.WinHelper.GetArg64(2, true);
-            ulong OutputBuffer = Instance.WinHelper.GetArg64(3);
-            uint OutputBufferLength = (uint)Instance.WinHelper.GetArg64(4, true);
+            POWER_INFORMATION_LEVEL InformationLevel = (POWER_INFORMATION_LEVEL)Instance.WinHelper.GetArg(0);
+            ulong InputBuffer = Instance.WinHelper.GetArg(1);
+            uint InputBufferLength = (uint)Instance.WinHelper.GetArg(2);
+            ulong OutputBuffer = Instance.WinHelper.GetArg(3);
+            uint OutputBufferLength = (uint)Instance.WinHelper.GetArg(4);
 
             if (!NeedInputBuffer(InformationLevel) && InputBuffer != 0)
             {

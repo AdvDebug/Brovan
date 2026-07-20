@@ -9,13 +9,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            int X1 = unchecked((int)Instance.WinHelper.GetArg64(0, true));
-            int Y1 = unchecked((int)Instance.WinHelper.GetArg64(1, true));
-            int X2 = unchecked((int)Instance.WinHelper.GetArg64(2, true));
-            int Y2 = unchecked((int)Instance.WinHelper.GetArg64(3, true));
+            int X1 = unchecked((int)Instance.WinHelper.GetArg(0));
+            int Y1 = unchecked((int)Instance.WinHelper.GetArg(1));
+            int X2 = unchecked((int)Instance.WinHelper.GetArg(2));
+            int Y2 = unchecked((int)Instance.WinHelper.GetArg(3));
 
             int Left = System.Math.Min(X1, X2);
             int Right = System.Math.Max(X1, X2);

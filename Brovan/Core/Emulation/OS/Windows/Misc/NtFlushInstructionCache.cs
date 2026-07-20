@@ -6,14 +6,12 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-            ulong BaseAddress = Instance.WinHelper.GetArg64(1);
-            ulong Length = (uint)Instance.WinHelper.GetArg64(2);
+            ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+            ulong BaseAddress = Instance.WinHelper.GetArg(1);
+            ulong Length = (uint)Instance.WinHelper.GetArg(2);
 
-            if (ProcessHandle != ulong.MaxValue && !Instance.WinHelper.ValidProcessHandle(ProcessHandle))
+            if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) && !Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

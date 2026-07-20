@@ -6,24 +6,22 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong SemaphoreHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
-                int InitialCount = (int)Instance.WinHelper.GetArg64(3, true);
-                int MaximumCount = (int)Instance.WinHelper.GetArg64(4, true);
+                ulong SemaphoreHandlePtr = Instance.WinHelper.GetArg(0);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+                int InitialCount = (int)Instance.WinHelper.GetArg(3);
+                int MaximumCount = (int)Instance.WinHelper.GetArg(4);
 
                 return HandleCreateSemaphore64(Instance, SemaphoreHandlePtr, DesiredAccess, ObjectAttributesPtr, InitialCount, MaximumCount);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-            uint SemaphoreHandlePtr32 = Instance.ReadMemoryUInt(SP + 4);
-            uint DesiredAccess32 = Instance.ReadMemoryUInt(SP + 8);
-            uint ObjectAttributesPtr32 = Instance.ReadMemoryUInt(SP + 12);
-            int InitialCount32 = (int)Instance.ReadMemoryUInt(SP + 16);
-            int MaximumCount32 = (int)Instance.ReadMemoryUInt(SP + 20);
+            uint SemaphoreHandlePtr32 = (uint)Instance.WinHelper.GetArg(0);
+            uint DesiredAccess32 = (uint)Instance.WinHelper.GetArg(1);
+            uint ObjectAttributesPtr32 = (uint)Instance.WinHelper.GetArg(2);
+            int InitialCount32 = (int)Instance.WinHelper.GetArg(3);
+            int MaximumCount32 = (int)Instance.WinHelper.GetArg(4);
 
             return HandleCreateSemaphore32(Instance, SemaphoreHandlePtr32, DesiredAccess32, ObjectAttributesPtr32, InitialCount32, MaximumCount32);
         }
@@ -33,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (SemaphoreHandlePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(SemaphoreHandlePtr, 8))
+            if (!Instance.IsRegionMapped(SemaphoreHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (MaximumCount <= 0 || InitialCount < 0 || InitialCount > MaximumCount)
@@ -42,7 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             string Name = string.Empty;
             if (ObjectAttributesPtr != 0)
             {
-                if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out _, out _, out string FullName, out NTSTATUS ObjectNameStatus))
+                if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out _, out _, out string FullName, out NTSTATUS ObjectNameStatus))
                     return ObjectNameStatus;
 
                 Name = FullName;

@@ -72,6 +72,8 @@ namespace Brovan.Core.Emulation
             => Inner.WriteRegister32(register, value);
         public bool WriteRegister32(int register, uint value)
             => Inner.WriteRegister32(register, value);
+        public bool WriteGdtr(ulong Base, uint Limit)
+            => Inner.WriteGdtr(Base, Limit);
         public bool WriteRegisterByte(Registers register, byte value)
             => Inner.WriteRegisterByte(register, value);
         public bool WriteRegisterByte(int register, byte value)

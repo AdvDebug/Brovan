@@ -7,55 +7,53 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong FileHandle = Instance.WinHelper.GetArg64(0);
-            ulong EventHandle = Instance.WinHelper.GetArg64(1);
+            ulong FileHandle = Instance.WinHelper.GetArg(0);
+            ulong EventHandle = Instance.WinHelper.GetArg(1);
 
-            // ulong ApcRoutine = Instance.WinHelper.GetArg64(2); // not used for now
-            // ulong ApcContext = Instance.WinHelper.GetArg64(3); // not used for now
-            ulong IoStatusBlockPtr = Instance.WinHelper.GetArg64(4);
-            uint IoControlCode = (uint)Instance.WinHelper.GetArg64(5, true);
-            ulong InputBufferPtr = Instance.WinHelper.GetArg64(6);
-            uint InputBufferLength = (uint)Instance.WinHelper.GetArg64(7, true);
-            ulong OutputBufferPtr = Instance.WinHelper.GetArg64(8);
-            uint OutputBufferLength = (uint)Instance.WinHelper.GetArg64(9, true);
+            // ulong ApcRoutine = Instance.WinHelper.GetArg(2); // not used for now
+            // ulong ApcContext = Instance.WinHelper.GetArg(3); // not used for now
+            ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(4);
+            uint IoControlCode = (uint)Instance.WinHelper.GetArg(5);
+            ulong InputBufferPtr = Instance.WinHelper.GetArg(6);
+            uint InputBufferLength = (uint)Instance.WinHelper.GetArg(7);
+            ulong OutputBufferPtr = Instance.WinHelper.GetArg(8);
+            uint OutputBufferLength = (uint)Instance.WinHelper.GetArg(9);
 
             if (IoStatusBlockPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, 0x10))
+            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             WinFile File = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             if (File == null)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
             if (!File.Device || File.Handler == null)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
             }
 
             if (InputBufferPtr != 0 && InputBufferLength != 0 && !Instance.IsRegionMapped(InputBufferPtr, InputBufferLength))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
             if (OutputBufferPtr != 0 && OutputBufferLength != 0 && !Instance.IsRegionMapped(OutputBufferPtr, OutputBufferLength))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
             if (!HasIoControlAccess(Instance, FileHandle, IoControlCode))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
@@ -97,7 +95,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, Status, Information);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, Information);
 
             if (EventHandle != 0 && Status != NTSTATUS.STATUS_PENDING)
             {

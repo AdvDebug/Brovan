@@ -8,8 +8,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong EventHandle = Instance.WinHelper.GetArg64(0);
-                ulong PreviousStatePtr = Instance.WinHelper.GetArg64(1);
+                ulong EventHandle = Instance.WinHelper.GetArg(0);
+                ulong PreviousStatePtr = Instance.WinHelper.GetArg(1);
 
                 return Handle(Instance, EventHandle, PreviousStatePtr, true);
             }
@@ -57,8 +57,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong EventHandle = Instance.WinHelper.GetArg64(0);
-                ulong PreviousStatePtr = Instance.WinHelper.GetArg64(1);
+                ulong EventHandle = Instance.WinHelper.GetArg(0);
+                ulong PreviousStatePtr = Instance.WinHelper.GetArg(1);
 
                 return NtSetEvent.Handle(Instance, EventHandle, PreviousStatePtr, false);
             }
@@ -80,7 +80,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong EventHandle = Instance.WinHelper.GetArg64(0);
+                ulong EventHandle = Instance.WinHelper.GetArg(0);
 
                 return NtSetEvent.Handle(Instance, EventHandle, 0, false);
             }

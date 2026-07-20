@@ -8,8 +8,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong WaitCompletionPacketHandle = Instance.WinHelper.GetArg64(0);
-                ulong RemoveSignaledPacket = Instance.WinHelper.GetArg64(1);
+                ulong WaitCompletionPacketHandle = Instance.WinHelper.GetArg(0);
+                ulong RemoveSignaledPacket = Instance.WinHelper.GetArg(1);
 
                 if (!Instance.WinHelper.HandleExists(WaitCompletionPacketHandle, HandleType.WaitCompletionPacketHandle))
                     return NTSTATUS.STATUS_INVALID_HANDLE;
@@ -24,9 +24,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            uint ESP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-            uint WaitCompletionPacketHandle32 = Instance.ReadMemoryUInt(ESP + 4);
-            uint RemoveSignaledPacket32 = Instance.ReadMemoryUInt(ESP + 8);
+            uint WaitCompletionPacketHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            uint RemoveSignaledPacket32 = (uint)Instance.WinHelper.GetArg(1);
 
             if (!Instance.WinHelper.HandleExists(WaitCompletionPacketHandle32, HandleType.WaitCompletionPacketHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;

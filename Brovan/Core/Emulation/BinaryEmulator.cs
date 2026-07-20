@@ -110,7 +110,7 @@ namespace Brovan.Core.Emulation
     }
 
     /// <summary>
-    /// Host-backed guest networking policy.
+    /// Host-backed guest networking policy to enforce security rules on guest socket.
     /// </summary>
     public sealed class NetworkAccessPolicy
     {
@@ -205,9 +205,6 @@ namespace Brovan.Core.Emulation
         }
     }
 
-    /// <summary>
-    /// Binary emulator settings.
-    /// </summary>
     public struct BinaryEmulatorSettings
     {
         /// <summary>
@@ -345,6 +342,7 @@ namespace Brovan.Core.Emulation
         }
 
         private const int GprBatchCount = 18;
+        private const int GprBatchCount32 = 10;
         private int[] _gprBatchRegs;
         private ulong[] _gprBatchScratch;
         internal BinaryEmulatorSettings Settings;
@@ -381,7 +379,9 @@ namespace Brovan.Core.Emulation
         public bool IsX64Guest => BackendArch == Arch.X86 && BackendMode == Mode.MODE_64;
         public bool IsArchX86Guest => BackendArch == Arch.X86;
         public readonly ulong BaseAddress = 0x10000000UL; // Base Start
-        public readonly ulong MaxAddress = 0x7FFFFFFFFUL;  // Max address limit
+        public ulong MaxAddress => IsArchX86Guest && _binary.FileFormat == BinaryFormat.PE
+            ? (_binary.PE.Characteristics.HasFlag(System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) ? 0xBFFF0000UL : 0x7FFF0000UL)
+            : 0x7FFFFFFFFUL;
         private ulong _timestampCounter = 0x100000000UL;
 
         private const ulong TscCyclesPerInstruction = 3;
@@ -1768,6 +1768,27 @@ namespace Brovan.Core.Emulation
             return ContextAddress;
         }
 
+        internal ulong BuildInitialContext32(ulong Eip, ulong Esp, ulong Eax, ulong Ebx)
+        {
+            const uint ContextI386ControlIntegerSegments = 0x00010000 | 0x1 | 0x2 | 0x4;
+            ulong ContextSize = 0x2CC;
+            ulong ContextAddress = MapUniqueAddress(ContextSize, MemoryProtection.ReadWrite);
+            _emulator.WriteMemory(ContextAddress + 0x00, ContextI386ControlIntegerSegments, 4);
+            _emulator.WriteMemory(ContextAddress + 0x8C, ReadRegister32(Registers.UC_X86_REG_GS), 4);
+            _emulator.WriteMemory(ContextAddress + 0x90, ReadRegister32(Registers.UC_X86_REG_FS), 4);
+            _emulator.WriteMemory(ContextAddress + 0x94, ReadRegister32(Registers.UC_X86_REG_ES), 4);
+            _emulator.WriteMemory(ContextAddress + 0x98, ReadRegister32(Registers.UC_X86_REG_DS), 4);
+            _emulator.WriteMemory(ContextAddress + 0xA4, (uint)Ebx, 4);
+            _emulator.WriteMemory(ContextAddress + 0xB0, (uint)Eax, 4);
+            _emulator.WriteMemory(ContextAddress + 0xB8, (uint)Eip, 4);
+            _emulator.WriteMemory(ContextAddress + 0xBC, ReadRegister32(Registers.UC_X86_REG_CS), 4);
+            _emulator.WriteMemory(ContextAddress + 0xC0, 0x202u, 4);
+            _emulator.WriteMemory(ContextAddress + 0xC4, (uint)Esp, 4);
+            _emulator.WriteMemory(ContextAddress + 0xC8, ReadRegister32(Registers.UC_X86_REG_SS), 4);
+
+            return ContextAddress;
+        }
+
         public EmulatedThread CreateEmulatedThread(ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8)
         {
             return Guest.CreateEmulatedThread(this, StartAddress, Name, Parameter, StackSizeOverride, BasePriority);
@@ -1778,18 +1799,27 @@ namespace Brovan.Core.Emulation
             int[] Regs = _gprBatchRegs;
             if (Regs == null)
             {
-                Regs = new int[GprBatchCount]
-                {
-                    (int)Registers.UC_X86_REG_RAX, (int)Registers.UC_X86_REG_RBX,
-                    (int)Registers.UC_X86_REG_RCX, (int)Registers.UC_X86_REG_RDX,
-                    (int)Registers.UC_X86_REG_RSI, (int)Registers.UC_X86_REG_RDI,
-                    (int)Registers.UC_X86_REG_RBP, (int)Registers.UC_X86_REG_RSP,
-                    (int)Registers.UC_X86_REG_R8,  (int)Registers.UC_X86_REG_R9,
-                    (int)Registers.UC_X86_REG_R10, (int)Registers.UC_X86_REG_R11,
-                    (int)Registers.UC_X86_REG_R12, (int)Registers.UC_X86_REG_R13,
-                    (int)Registers.UC_X86_REG_R14, (int)Registers.UC_X86_REG_R15,
-                    IPRegister,                    (int)Registers.UC_X86_REG_EFLAGS
-                };
+                Regs = IsX86Guest
+                    ? new int[GprBatchCount32]
+                    {
+                        (int)Registers.UC_X86_REG_EAX, (int)Registers.UC_X86_REG_EBX,
+                        (int)Registers.UC_X86_REG_ECX, (int)Registers.UC_X86_REG_EDX,
+                        (int)Registers.UC_X86_REG_ESI, (int)Registers.UC_X86_REG_EDI,
+                        (int)Registers.UC_X86_REG_EBP, (int)Registers.UC_X86_REG_ESP,
+                        IPRegister,                    (int)Registers.UC_X86_REG_EFLAGS
+                    }
+                    : new int[GprBatchCount]
+                    {
+                        (int)Registers.UC_X86_REG_RAX, (int)Registers.UC_X86_REG_RBX,
+                        (int)Registers.UC_X86_REG_RCX, (int)Registers.UC_X86_REG_RDX,
+                        (int)Registers.UC_X86_REG_RSI, (int)Registers.UC_X86_REG_RDI,
+                        (int)Registers.UC_X86_REG_RBP, (int)Registers.UC_X86_REG_RSP,
+                        (int)Registers.UC_X86_REG_R8,  (int)Registers.UC_X86_REG_R9,
+                        (int)Registers.UC_X86_REG_R10, (int)Registers.UC_X86_REG_R11,
+                        (int)Registers.UC_X86_REG_R12, (int)Registers.UC_X86_REG_R13,
+                        (int)Registers.UC_X86_REG_R14, (int)Registers.UC_X86_REG_R15,
+                        IPRegister,                    (int)Registers.UC_X86_REG_EFLAGS
+                    };
                 _gprBatchRegs = Regs;
             }
             return Regs;
@@ -1806,10 +1836,15 @@ namespace Brovan.Core.Emulation
             if (c == null) return false;
             int[] Regs = GetGprBatchRegs();
             ulong[] Vals = _gprBatchScratch ??= new ulong[GprBatchCount];
-            if (!_emulator.ReadRegisterBatch(Regs, Vals, GprBatchCount))
+            if (!_emulator.ReadRegisterBatch(Regs, Vals, Regs.Length))
                 return false;
             c.RAX = Vals[0];  c.RBX = Vals[1];  c.RCX = Vals[2];  c.RDX = Vals[3];
             c.RSI = Vals[4];  c.RDI = Vals[5];  c.RBP = Vals[6];  c.RSP = Vals[7];
+            if (Regs.Length == GprBatchCount32)
+            {
+                c.RIP = Vals[8]; c.RFLAGS = Vals[9];
+                return true;
+            }
             c.R8 = Vals[8];   c.R9 = Vals[9];   c.R10 = Vals[10]; c.R11 = Vals[11];
             c.R12 = Vals[12]; c.R13 = Vals[13]; c.R14 = Vals[14]; c.R15 = Vals[15];
             c.RIP = Vals[16]; c.RFLAGS = Vals[17];
@@ -1823,10 +1858,17 @@ namespace Brovan.Core.Emulation
             ulong[] Vals = _gprBatchScratch ??= new ulong[GprBatchCount];
             Vals[0]  = c.RAX;  Vals[1]  = c.RBX;  Vals[2]  = c.RCX;  Vals[3]  = c.RDX;
             Vals[4]  = c.RSI;  Vals[5]  = c.RDI;  Vals[6]  = c.RBP;  Vals[7]  = c.RSP;
-            Vals[8]  = c.R8;   Vals[9]  = c.R9;   Vals[10] = c.R10;  Vals[11] = c.R11;
-            Vals[12] = c.R12;  Vals[13] = c.R13;  Vals[14] = c.R14;  Vals[15] = c.R15;
-            Vals[16] = c.RIP;  Vals[17] = c.RFLAGS;
-            _emulator.WriteRegisterBatch(Regs, Vals, GprBatchCount);
+            if (Regs.Length == GprBatchCount32)
+            {
+                Vals[8] = c.RIP; Vals[9] = c.RFLAGS;
+            }
+            else
+            {
+                Vals[8]  = c.R8;   Vals[9]  = c.R9;   Vals[10] = c.R10;  Vals[11] = c.R11;
+                Vals[12] = c.R12;  Vals[13] = c.R13;  Vals[14] = c.R14;  Vals[15] = c.R15;
+                Vals[16] = c.RIP;  Vals[17] = c.RFLAGS;
+            }
+            _emulator.WriteRegisterBatch(Regs, Vals, Regs.Length);
         }
 
         public void LoadContext(EmulatedThread t)
@@ -1835,7 +1877,8 @@ namespace Brovan.Core.Emulation
 
             if (t.SwitchingContext)
             {
-                t.Context.RIP = t.Context.RIP - 2;
+                if (!IsX86Guest)
+                    t.Context.RIP = t.Context.RIP - 2;
                 t.SwitchingContext = false;
             }
 
@@ -1963,8 +2006,8 @@ namespace Brovan.Core.Emulation
 
             if (StopIfCurrentThread)
             {
-                ulong SyscallRip = _emulator.ReadRegister(IPRegister);
-                _emulator.WriteRegister(IPRegister, SyscallRip + 2);
+                if (!IsX86Guest)
+                    _emulator.WriteRegister(IPRegister, _emulator.ReadRegister(IPRegister) + 2);
                 _emulator.StopEmulation();
             }
         }

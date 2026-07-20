@@ -8,14 +8,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong JobHandle = Instance.WinHelper.GetArg64(0);
-                ulong ProcessHandle = Instance.WinHelper.GetArg64(1);
+                ulong JobHandle = Instance.WinHelper.GetArg(0);
+                ulong ProcessHandle = Instance.WinHelper.GetArg(1);
                 return Instance.WinHelper.AssignProcessToJobHandle(JobHandle, ProcessHandle);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-            uint JobHandle32 = Instance.ReadMemoryUInt(SP + 4);
-            uint ProcessHandle32 = Instance.ReadMemoryUInt(SP + 8);
+            uint JobHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            uint ProcessHandle32 = (uint)Instance.WinHelper.GetArg(1);
             return Instance.WinHelper.AssignProcessToJobHandle(JobHandle32, ProcessHandle32);
         }
     }

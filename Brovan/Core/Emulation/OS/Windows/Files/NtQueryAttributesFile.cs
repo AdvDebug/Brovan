@@ -12,11 +12,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(0);
-            ulong FileInformationPtr = Instance.WinHelper.GetArg64(1);
+            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(0);
+            ulong FileInformationPtr = Instance.WinHelper.GetArg(1);
 
             if (ObjectAttributesPtr == 0 || FileInformationPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -24,13 +22,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(FileInformationPtr, FileBasicInformationSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
+            if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out ulong AttributesRoot, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
                 return ObjectNameStatus;
 
             if (string.IsNullOrEmpty(Name))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            string EmulatedPath = Instance.WinHelper.ResolveWindowsFilePath(FullName, Attributes.RootDirectory);
+            string EmulatedPath = Instance.WinHelper.ResolveWindowsFilePath(FullName, AttributesRoot);
             if (string.IsNullOrEmpty(EmulatedPath))
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 

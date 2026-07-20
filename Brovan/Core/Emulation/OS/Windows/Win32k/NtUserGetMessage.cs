@@ -30,13 +30,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong MessagePtr = Instance.WinHelper.GetArg64(0);
-            ulong HwndFilter = Instance.WinHelper.GetArg64(1);
-            uint MinMessage = (uint)Instance.WinHelper.GetArg64(2, true);
-            uint MaxMessage = (uint)Instance.WinHelper.GetArg64(3, true);
+            ulong MessagePtr = Instance.WinHelper.GetArg(0);
+            ulong HwndFilter = Instance.WinHelper.GetArg(1);
+            uint MinMessage = (uint)Instance.WinHelper.GetArg(2);
+            uint MaxMessage = (uint)Instance.WinHelper.GetArg(3);
 
             if (MessagePtr == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

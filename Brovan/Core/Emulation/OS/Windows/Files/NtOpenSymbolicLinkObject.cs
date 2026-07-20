@@ -7,26 +7,24 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong LinkHandlePtr = Instance.WinHelper.GetArg64(0);
-            AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg64(1);
-            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
+            ulong LinkHandlePtr = Instance.WinHelper.GetArg(0);
+            AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg(1);
+            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
 
             if (LinkHandlePtr == 0 || ObjectAttributesPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(LinkHandlePtr, 8))
+            if (!Instance.IsRegionMapped(LinkHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
+            if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out ulong AttributesRoot, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
                 return ObjectNameStatus;
 
             if (string.IsNullOrEmpty(Name))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            string Target = ResolveSymbolicLinkTarget(Instance, Attributes.RootDirectory, Name, FullName);
+            string Target = ResolveSymbolicLinkTarget(Instance, AttributesRoot, Name, FullName);
             if (Target == null)
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
@@ -39,7 +37,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(LinkObj, DesiredAccess);
             Instance.WinHelper.AddWinHandle(Handle);
 
-            if (!Instance._emulator.WriteMemory(LinkHandlePtr, Handle.Handle))
+            if (!Instance.WinHelper.WritePointer(LinkHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

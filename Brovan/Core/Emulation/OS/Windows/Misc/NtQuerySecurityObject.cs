@@ -16,11 +16,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong Handle = Instance.WinHelper.GetArg64(0);
-                uint SecurityInformation = (uint)Instance.WinHelper.GetArg64(1, true);
-                ulong SecurityDescriptorPtr = Instance.WinHelper.GetArg64(2);
-                uint Length = (uint)Instance.WinHelper.GetArg64(3, true);
-                ulong LengthNeededPtr = Instance.WinHelper.GetArg64(4);
+                ulong Handle = Instance.WinHelper.GetArg(0);
+                uint SecurityInformation = (uint)Instance.WinHelper.GetArg(1);
+                ulong SecurityDescriptorPtr = Instance.WinHelper.GetArg(2);
+                uint Length = (uint)Instance.WinHelper.GetArg(3);
+                ulong LengthNeededPtr = Instance.WinHelper.GetArg(4);
 
                 return QuerySecurityObject(Instance, Handle, SecurityInformation, SecurityDescriptorPtr, Length, LengthNeededPtr);
             }
@@ -67,8 +67,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool IsKnownHandle(BinaryEmulator Instance, ulong Handle)
         {
-            return Handle == HandleManager.CurrentProcess ||
-                   Handle == HandleManager.CurrentThread ||
+            return HandleManager.IsCurrentProcessPseudoHandle(Handle) ||
+                   HandleManager.IsCurrentThreadPseudoHandle(Handle) ||
                    Handle == uint.MaxValue ||
                    Handle == HandleManager.KNOWN_DLLS_DIRECTORY ||
                    Handle == HandleManager.KNOWN_DLLS32_DIRECTORY ||

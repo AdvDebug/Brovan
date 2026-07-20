@@ -6,12 +6,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong Hdc = Instance.WinHelper.GetArg64(0);
-            int X = unchecked((int)Instance.WinHelper.GetArg64(1, true));
-            int Y = unchecked((int)Instance.WinHelper.GetArg64(2, true));
+            ulong Hdc = Instance.WinHelper.GetArg(0);
+            int X = unchecked((int)Instance.WinHelper.GetArg(1));
+            int Y = unchecked((int)Instance.WinHelper.GetArg(2));
 
             ulong Hwnd = Instance.WinHelper.GetHwndFromDc(Hdc);
             if (Hwnd == 0)

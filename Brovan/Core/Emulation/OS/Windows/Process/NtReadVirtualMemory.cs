@@ -12,14 +12,13 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-                ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
-                ulong BufferPtr = Instance.WinHelper.GetArg64(2);
-                ulong NumberOfBytesToRead = Instance.WinHelper.GetArg64(3);
+                ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+                ulong BaseAddressPtr = Instance.WinHelper.GetArg(1);
+                ulong BufferPtr = Instance.WinHelper.GetArg(2);
+                ulong NumberOfBytesToRead = Instance.WinHelper.GetArg(3);
             current_process:
-                if (ProcessHandle == ulong.MaxValue)
+                if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
                 {
                     if (BaseAddressPtr == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -33,8 +32,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (NumberOfBytesToRead == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                    ulong BaseAddress = Instance.ReadMemoryULong(BaseAddressPtr);
-                    ulong Buffer = Instance.ReadMemoryULong(BufferPtr);
+                    ulong BaseAddress = Instance.WinHelper.ReadPointer(BaseAddressPtr);
+                    ulong Buffer = Instance.WinHelper.ReadPointer(BufferPtr);
 
                     if (BaseAddress == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -101,10 +100,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Instance.TriggerEventMessage($"[+] The emulated process tried to read the memory of process \"{Process.Name}\", random data was generated for it.", LogFlags.Syscall);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-
             }
             return Instance.WinUnimplemented;
         }

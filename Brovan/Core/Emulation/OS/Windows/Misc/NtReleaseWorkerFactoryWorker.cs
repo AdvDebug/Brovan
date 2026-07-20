@@ -6,7 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            ulong WorkerFactoryHandle = Instance.WinHelper.GetArg64(0);
+            ulong WorkerFactoryHandle = Instance.WinHelper.GetArg(0);
 
             WinWorkerFactory Factory = WorkerFactoryHelper.GetFactory(Instance, WorkerFactoryHandle);
             if (Factory == null)

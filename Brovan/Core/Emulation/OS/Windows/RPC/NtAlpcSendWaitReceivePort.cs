@@ -18,17 +18,15 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong PortHandle = Instance.WinHelper.GetArg64(0);
-            uint Flags = (uint)Instance.WinHelper.GetArg64(1, true);
-            ulong SendMessagePtr = Instance.WinHelper.GetArg64(2);
-            ulong SendMessageAttributesPtr = Instance.WinHelper.GetArg64(3);
-            ulong ReceiveMessagePtr = Instance.WinHelper.GetArg64(4);
-            ulong BufferLengthPtr = Instance.WinHelper.GetArg64(5);
-            ulong ReceiveMessageAttributesPtr = Instance.WinHelper.GetArg64(6);
-            ulong TimeoutPtr = Instance.WinHelper.GetArg64(7);
+            ulong PortHandle = Instance.WinHelper.GetArg(0);
+            uint Flags = (uint)Instance.WinHelper.GetArg(1);
+            ulong SendMessagePtr = Instance.WinHelper.GetArg(2);
+            ulong SendMessageAttributesPtr = Instance.WinHelper.GetArg(3);
+            ulong ReceiveMessagePtr = Instance.WinHelper.GetArg(4);
+            ulong BufferLengthPtr = Instance.WinHelper.GetArg(5);
+            ulong ReceiveMessageAttributesPtr = Instance.WinHelper.GetArg(6);
+            ulong TimeoutPtr = Instance.WinHelper.GetArg(7);
 
             WinPort Port = Instance.WinHelper.HandleManager.GetObjectByHandle<WinPort>(PortHandle);
             if (Port == null)

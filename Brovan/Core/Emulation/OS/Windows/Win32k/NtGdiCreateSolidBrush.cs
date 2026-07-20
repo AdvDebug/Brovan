@@ -6,10 +6,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            uint ColorRef = (uint)Instance.WinHelper.GetArg64(0);
+            uint ColorRef = (uint)Instance.WinHelper.GetArg(0);
 
             ulong BrushHandle = Win32kHelper.CreateSolidBrush(Instance, ColorRef);
             Instance.SetRawSyscallReturn(BrushHandle);

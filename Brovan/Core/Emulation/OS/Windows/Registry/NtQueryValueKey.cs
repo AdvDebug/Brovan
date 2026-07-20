@@ -28,15 +28,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong KeyHandle = Instance.WinHelper.GetArg64(0);
-            ulong ValueNamePtr = Instance.WinHelper.GetArg64(1);
-            KEY_VALUE_INFORMATION_CLASS KeyValueInformationClass = (KEY_VALUE_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg64(2);
-            ulong KeyValueInformationPtr = Instance.WinHelper.GetArg64(3);
-            uint Length = (uint)Instance.WinHelper.GetArg64(4, true);
-            ulong ResultLengthPtr = Instance.WinHelper.GetArg64(5);
+            ulong KeyHandle = Instance.WinHelper.GetArg(0);
+            ulong ValueNamePtr = Instance.WinHelper.GetArg(1);
+            KEY_VALUE_INFORMATION_CLASS KeyValueInformationClass = (KEY_VALUE_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(2);
+            ulong KeyValueInformationPtr = Instance.WinHelper.GetArg(3);
+            uint Length = (uint)Instance.WinHelper.GetArg(4);
+            ulong ResultLengthPtr = Instance.WinHelper.GetArg(5);
 
             if (ResultLengthPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -53,7 +51,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            if (!Instance.WinHelper.TryReadUnicodeString64(ValueNamePtr, out string ValueName, out NTSTATUS Status))
+            if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out NTSTATUS Status))
                 return Status;
 
             WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);

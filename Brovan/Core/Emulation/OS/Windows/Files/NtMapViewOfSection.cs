@@ -92,29 +92,71 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(BaseStaticServerData + 0xB50, BaseStaticServerData, 8);
         }
 
+        private static void ApplySharedSectionToPeb(BinaryEmulator Instance, ulong Base)
+        {
+            if (Instance.WinHelper.PointerSize == 8)
+            {
+                Instance._emulator.WriteMemory(Instance.PEB + 0x88, Base, 8);
+                Instance._emulator.WriteMemory(Instance.PEB + 0x90, Base + 0x3000, 8);
+                Instance._emulator.WriteMemory(Instance.PEB + 0x98, Base + 0x10, 8);
+                Instance._emulator.WriteMemory(Instance.PEB + 0x380, Base, 8);
+                return;
+            }
+
+            Instance._emulator.WriteMemory(Instance.PEB + 0x4C, (uint)Base);
+            Instance._emulator.WriteMemory(Instance.PEB + 0x50, (uint)(Base + 0x3000));
+            Instance._emulator.WriteMemory(Instance.PEB + 0x54, (uint)(Base + 0x10));
+            Instance._emulator.WriteMemory(Instance.PEB + 0x248, Base, 8);
+        }
+
+        internal static bool EnsureWindowsSharedSection(BinaryEmulator Instance)
+        {
+            const ulong SharedSectionSize = 0x10000;
+
+            WinSection Section = Instance.WinHelper.WinSections.FirstOrDefault(s => s != null && !string.IsNullOrEmpty(s.Name) && s.Name.EndsWith("\\Windows\\SharedSection", StringComparison.OrdinalIgnoreCase));
+
+            if (Section == null)
+            {
+                ulong Allocated = Instance.MapUniqueAddress((uint)SharedSectionSize, MemoryProtection.ReadWrite);
+                if (Allocated == 0)
+                    return false;
+
+                Section = Instance.WinHelper.GetSectionByHandle((ulong)Instance.WinHelper.CreateSectionHandle("\\Windows\\SharedSection", SharedSectionSize, (uint)Instance.WinHelper.ConvertInternalToWinProtect(MemoryProtection.ReadWrite), 0, null, Allocated, AccessMask.SectionAllAccess).Handle, AccessMask.GiveTemp);
+                if (Section == null)
+                    return false;
+            }
+
+            if (!Section.Initialized)
+            {
+                InitializeWindowsSharedSection(Instance, Section.BackingAddress);
+                Section.Initialized = true;
+            }
+
+            ApplySharedSectionToPeb(Instance, Section.BackingAddress);
+            return true;
+        }
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong SectionHandle = Instance.WinHelper.GetArg64(0);
-            ulong ProcessHandle = Instance.WinHelper.GetArg64(1);
-            ulong BaseAddressPtr = Instance.WinHelper.GetArg64(2);
-            ulong ZeroBits = Instance.WinHelper.GetArg64(3);
-            ulong CommitSizePtr = Instance.WinHelper.GetArg64(4);
-            ulong SectionOffsetPtr = Instance.WinHelper.GetArg64(5);
-            ulong ViewSizePtr = Instance.WinHelper.GetArg64(6);
-            uint InheritDisposition = (uint)Instance.WinHelper.GetArg64(7);
-            uint AllocationType = (uint)Instance.WinHelper.GetArg64(8);
-            uint Win32Protect = (uint)Instance.WinHelper.GetArg64(9);
+            ulong SectionHandle = Instance.WinHelper.GetArg(0);
+            ulong ProcessHandle = Instance.WinHelper.GetArg(1);
+            ulong BaseAddressPtr = Instance.WinHelper.GetArg(2);
+            ulong ZeroBits = Instance.WinHelper.GetArg(3);
+            ulong CommitSizePtr = Instance.WinHelper.GetArg(4);
+            ulong SectionOffsetPtr = Instance.WinHelper.GetArg(5);
+            ulong ViewSizePtr = Instance.WinHelper.GetArg(6);
+            uint InheritDisposition = (uint)Instance.WinHelper.GetArg(7);
+            uint AllocationType = (uint)Instance.WinHelper.GetArg(8);
+            uint Win32Protect = (uint)Instance.WinHelper.GetArg(9);
 
-            if (ProcessHandle != ulong.MaxValue)
+            if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if (BaseAddressPtr == 0 || ViewSizePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(BaseAddressPtr, 8) || !Instance.IsRegionMapped(ViewSizePtr, 8))
+            if (!Instance.IsRegionMapped(BaseAddressPtr, (uint)Instance.WinHelper.PointerSize) || !Instance.IsRegionMapped(ViewSizePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             WinSection Section = Instance.WinHelper.GetSectionByHandle(SectionHandle, AccessMask.GiveTemp);
@@ -135,13 +177,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Section.Initialized = true;
                 }
 
-                Instance._emulator.WriteMemory(Instance.PEB + 0x88, Base, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + 0x98, Base + 0x10, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + 0x380, Base, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + 0x90, Base + 0x3000, 8);
+                ApplySharedSectionToPeb(Instance, Base);
 
-                Instance._emulator.WriteMemory(BaseAddressPtr, Base, 8);
-                Instance._emulator.WriteMemory(ViewSizePtr, Size, 8);
+                Instance.WinHelper.WritePointer(BaseAddressPtr, Base);
+                Instance.WinHelper.WritePointer(ViewSizePtr, Size);
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtMapViewOfSection: SharedSection Base=0x{Base:X}, Size=0x{Size:X}", LogFlags.Syscall);
@@ -149,8 +188,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            ulong RequestedBase = Instance._emulator.ReadMemoryULong(BaseAddressPtr);
-            ulong RequestedSize = Instance._emulator.ReadMemoryULong(ViewSizePtr);
+            ulong RequestedBase = Instance.WinHelper.ReadPointer(BaseAddressPtr);
+            ulong RequestedSize = Instance.WinHelper.ReadPointer(ViewSizePtr);
 
             ulong SectionOffset = 0;
             if (SectionOffsetPtr != 0)
@@ -212,10 +251,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (RequestedSize != 0 && RequestedSize < ReturnedSize)
                         ReturnedSize = BinaryEmulator.AlignUp(RequestedSize, PageSize);
 
-                    if (!Instance._emulator.WriteMemory(BaseAddressPtr, ReturnedBase, 8))
+                    if (!Instance.WinHelper.WritePointer(BaseAddressPtr, ReturnedBase))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!Instance._emulator.WriteMemory(ViewSizePtr, ReturnedSize, 8))
+                    if (!Instance.WinHelper.WritePointer(ViewSizePtr, ReturnedSize))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                     NTSTATUS Status = NTSTATUS.STATUS_SUCCESS;
@@ -250,10 +289,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             MemoryProtection Protection = Instance.WinHelper.ConvertWinProtectToInternal(Win32Protect);
             Instance._emulator.SetMemoryProtection(ReturnedBase, ReturnedSize, Protection);
 
-            if (!Instance._emulator.WriteMemory(BaseAddressPtr, ReturnedBase, 8))
+            if (!Instance.WinHelper.WritePointer(BaseAddressPtr, ReturnedBase))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance._emulator.WriteMemory(ViewSizePtr, ReturnedSize, 8))
+            if (!Instance.WinHelper.WritePointer(ViewSizePtr, ReturnedSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

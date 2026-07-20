@@ -8,14 +8,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong JobHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
+                ulong JobHandlePtr = Instance.WinHelper.GetArg(0);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
 
                 if (JobHandlePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                if (!Instance.IsRegionMapped(JobHandlePtr, 8))
+                if (!Instance.IsRegionMapped(JobHandlePtr, (uint)Instance.WinHelper.PointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 string Name = string.Empty;
@@ -27,21 +27,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!StructSerializer.ParseStruct(Instance, ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 ObjectAttrs))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (ObjectAttrs.ObjectName != 0 && !Instance.WinHelper.TryReadUnicodeString64(ObjectAttrs.ObjectName, out Name, out NTSTATUS NameStatus))
+                    if (ObjectAttrs.ObjectName != 0 && !Instance.WinHelper.TryReadUnicodeString(ObjectAttrs.ObjectName, out Name, out NTSTATUS NameStatus))
                         return NameStatus;
                 }
 
                 WinHandle Handle = Instance.WinHelper.CreateJobHandle(Name, (AccessMask)(uint)DesiredAccess);
-                if (!Instance._emulator.WriteMemory(JobHandlePtr, Handle.Handle))
+                if (!Instance.WinHelper.WritePointer(JobHandlePtr, Handle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-            uint JobHandlePtr32 = Instance.ReadMemoryUInt(SP + 4);
-            uint DesiredAccess32 = Instance.ReadMemoryUInt(SP + 8);
-            uint ObjectAttributesPtr32 = Instance.ReadMemoryUInt(SP + 12);
+            uint JobHandlePtr32 = (uint)Instance.WinHelper.GetArg(0);
+            uint DesiredAccess32 = (uint)Instance.WinHelper.GetArg(1);
+            uint ObjectAttributesPtr32 = (uint)Instance.WinHelper.GetArg(2);
 
             if (JobHandlePtr32 == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;

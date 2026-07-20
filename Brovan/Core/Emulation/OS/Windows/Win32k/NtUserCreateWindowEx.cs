@@ -7,24 +7,22 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
             const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
 
-            ulong exStyleArg = Instance.WinHelper.GetArg64(0, true);
-            ulong ClassNamePtr = Instance.WinHelper.GetArg64(1);
-            ulong ClassVersionPtr = Instance.WinHelper.GetArg64(2);
-            ulong WindowNamePtr = Instance.WinHelper.GetArg64(3);
-            ulong StyleArg = Instance.WinHelper.GetArg64(4, true);
-            int x = unchecked((int)Instance.WinHelper.GetArg64(5, true));
-            int y = unchecked((int)Instance.WinHelper.GetArg64(6, true));
-            int width = unchecked((int)Instance.WinHelper.GetArg64(7, true));
-            int height = unchecked((int)Instance.WinHelper.GetArg64(8, true));
-            ulong ParentHwnd = Instance.WinHelper.GetArg64(9);
-            ulong MenuHandle = Instance.WinHelper.GetArg64(10);
-            ulong InstanceHandle = Instance.WinHelper.GetArg64(11);
-            ulong CreateParam = Instance.WinHelper.GetArg64(12);
+            ulong exStyleArg = Instance.WinHelper.GetArg(0);
+            ulong ClassNamePtr = Instance.WinHelper.GetArg(1);
+            ulong ClassVersionPtr = Instance.WinHelper.GetArg(2);
+            ulong WindowNamePtr = Instance.WinHelper.GetArg(3);
+            ulong StyleArg = Instance.WinHelper.GetArg(4);
+            int x = unchecked((int)Instance.WinHelper.GetArg(5));
+            int y = unchecked((int)Instance.WinHelper.GetArg(6));
+            int width = unchecked((int)Instance.WinHelper.GetArg(7));
+            int height = unchecked((int)Instance.WinHelper.GetArg(8));
+            ulong ParentHwnd = Instance.WinHelper.GetArg(9);
+            ulong MenuHandle = Instance.WinHelper.GetArg(10);
+            ulong InstanceHandle = Instance.WinHelper.GetArg(11);
+            ulong CreateParam = Instance.WinHelper.GetArg(12);
 
             if (ParentHwnd != 0 && Instance.WinHelper.GetWindow(ParentHwnd) == null)
             {

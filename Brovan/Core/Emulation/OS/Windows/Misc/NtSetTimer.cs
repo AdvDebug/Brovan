@@ -8,26 +8,25 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong TimerHandle = Instance.WinHelper.GetArg64(0);
-                ulong DueTimePtr = Instance.WinHelper.GetArg64(1);
-                ulong TimerApcRoutine = Instance.WinHelper.GetArg64(2);
-                ulong TimerContext = Instance.WinHelper.GetArg64(3);
-                ulong ResumeTimer = Instance.WinHelper.GetArg64(4);
-                long Period = unchecked((long)Instance.WinHelper.GetArg64(5));
-                ulong PreviousStatePtr = Instance.WinHelper.GetArg64(6);
+                ulong TimerHandle = Instance.WinHelper.GetArg(0);
+                ulong DueTimePtr = Instance.WinHelper.GetArg(1);
+                ulong TimerApcRoutine = Instance.WinHelper.GetArg(2);
+                ulong TimerContext = Instance.WinHelper.GetArg(3);
+                ulong ResumeTimer = Instance.WinHelper.GetArg(4);
+                long Period = unchecked((long)Instance.WinHelper.GetArg(5));
+                ulong PreviousStatePtr = Instance.WinHelper.GetArg(6);
 
                 return HandleSetTimer64(Instance, TimerHandle, DueTimePtr, TimerApcRoutine, TimerContext, ResumeTimer, Period, PreviousStatePtr);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-            uint TimerHandle32 = Instance.ReadMemoryUInt(SP + 4);
-            uint DueTimePtr32 = Instance.ReadMemoryUInt(SP + 8);
-            uint TimerApcRoutine32 = Instance.ReadMemoryUInt(SP + 12);
-            uint TimerContext32 = Instance.ReadMemoryUInt(SP + 16);
-            uint ResumeTimer32 = Instance.ReadMemoryUInt(SP + 20);
-            long Period32 = unchecked((int)Instance.ReadMemoryUInt(SP + 24));
-            uint PreviousStatePtr32 = Instance.ReadMemoryUInt(SP + 28);
+            uint TimerHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            uint DueTimePtr32 = (uint)Instance.WinHelper.GetArg(1);
+            uint TimerApcRoutine32 = (uint)Instance.WinHelper.GetArg(2);
+            uint TimerContext32 = (uint)Instance.WinHelper.GetArg(3);
+            uint ResumeTimer32 = (uint)Instance.WinHelper.GetArg(4);
+            long Period32 = unchecked((int)Instance.WinHelper.GetArg(5));
+            uint PreviousStatePtr32 = (uint)Instance.WinHelper.GetArg(6);
 
             return HandleSetTimer32(Instance, TimerHandle32, DueTimePtr32, TimerApcRoutine32, TimerContext32, ResumeTimer32, Period32, PreviousStatePtr32);
         }

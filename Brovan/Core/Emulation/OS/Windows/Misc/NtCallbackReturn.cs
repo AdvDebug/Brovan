@@ -7,12 +7,10 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong ResultAddress = Instance.WinHelper.GetArg64(0);
-            uint ResultLength = (uint)Instance.WinHelper.GetArg64(1, true);
-            NTSTATUS Status = (NTSTATUS)Instance.WinHelper.GetArg64(2, true);
+            ulong ResultAddress = Instance.WinHelper.GetArg(0);
+            uint ResultLength = (uint)Instance.WinHelper.GetArg(1);
+            NTSTATUS Status = (NTSTATUS)Instance.WinHelper.GetArg(2);
 
             bool Completed = Instance.WinHelper.CompleteUserCallback(ResultAddress, ResultLength);
             if (!Completed)

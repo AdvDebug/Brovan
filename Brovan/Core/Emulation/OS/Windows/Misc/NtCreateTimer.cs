@@ -6,22 +6,20 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong TimerHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
-                ulong TimerType = (uint)Instance.WinHelper.GetArg64(3);
+                ulong TimerHandlePtr = Instance.WinHelper.GetArg(0);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+                ulong TimerType = (uint)Instance.WinHelper.GetArg(3);
 
                 return HandleCreateTimer64(Instance, TimerHandlePtr, DesiredAccess, ObjectAttributesPtr, TimerType);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-            uint TimerHandlePtr32 = Instance.ReadMemoryUInt(SP + 4);
-            uint DesiredAccess32 = Instance.ReadMemoryUInt(SP + 8);
-            uint ObjectAttributesPtr32 = Instance.ReadMemoryUInt(SP + 12);
-            uint TimerType32 = Instance.ReadMemoryUInt(SP + 16);
+            uint TimerHandlePtr32 = (uint)Instance.WinHelper.GetArg(0);
+            uint DesiredAccess32 = (uint)Instance.WinHelper.GetArg(1);
+            uint ObjectAttributesPtr32 = (uint)Instance.WinHelper.GetArg(2);
+            uint TimerType32 = (uint)Instance.WinHelper.GetArg(3);
 
             return HandleCreateTimer32(Instance, TimerHandlePtr32, DesiredAccess32, ObjectAttributesPtr32, TimerType32);
         }
@@ -31,7 +29,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (TimerHandlePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(TimerHandlePtr, 8))
+            if (!Instance.IsRegionMapped(TimerHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (TimerType > (ulong)TIMER_TYPE.SynchronizationTimer)
@@ -41,7 +39,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NameStatus;
 
             WinHandle Handle = Instance.WinHelper.CreateTimerHandle(Name, (TIMER_TYPE)TimerType, (AccessMask)(uint)DesiredAccess);
-            if (!Instance._emulator.WriteMemory(TimerHandlePtr, Handle.Handle))
+            if (!Instance.WinHelper.WritePointer(TimerHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             return NTSTATUS.STATUS_SUCCESS;
@@ -132,7 +130,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ObjectName == 0)
                 return true;
 
-            if (!Instance.WinHelper.TryReadUnicodeString64(ObjectName, out string LocalName, out Status))
+            if (!Instance.WinHelper.TryReadUnicodeString(ObjectName, out string LocalName, out Status))
                 return false;
 
             Name = Instance.WinHelper.ResolveObjectNameWithRootDirectory(RootDirectory, LocalName);

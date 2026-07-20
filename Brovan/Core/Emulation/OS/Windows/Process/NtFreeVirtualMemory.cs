@@ -14,10 +14,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-                ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
-                ulong RegionSizePtr = Instance.WinHelper.GetArg64(2);
-                ulong FreeType = (uint)Instance.WinHelper.GetArg64(3);
+                ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+                ulong BaseAddressPtr = Instance.WinHelper.GetArg(1);
+                ulong RegionSizePtr = Instance.WinHelper.GetArg(2);
+                ulong FreeType = (uint)Instance.WinHelper.GetArg(3);
 
                 if (BaseAddressPtr == 0 || RegionSizePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -25,7 +25,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Instance.IsRegionMapped(BaseAddressPtr, sizeof(ulong)) || !Instance.IsRegionMapped(RegionSizePtr, sizeof(ulong)))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                if (ProcessHandle != ulong.MaxValue)
+                if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
                 {
                     if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                         return NTSTATUS.STATUS_INVALID_HANDLE;
@@ -40,8 +40,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return Instance.WinUnimplemented;
                 }
 
-                ulong BaseAddress = Instance.ReadMemoryULong(BaseAddressPtr);
-                ulong RegionSize = Instance.ReadMemoryULong(RegionSizePtr);
+                ulong BaseAddress = Instance.WinHelper.ReadPointer(BaseAddressPtr);
+                ulong RegionSize = Instance.WinHelper.ReadPointer(RegionSizePtr);
 
                 bool Decommit = (FreeType & MemDecommit) != 0;
                 bool Release = (FreeType & MemRelease) != 0;
@@ -100,12 +100,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Instance._binary.Architecture == BinaryArchitecture.x86)
             {
-                uint ESP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-                uint ProcessHandle = Instance.ReadMemoryUInt(ESP + 4);
-                uint BaseAddressPtr = Instance.ReadMemoryUInt(ESP + 8);
-                uint RegionSizePtr = Instance.ReadMemoryUInt(ESP + 12);
-                uint FreeType = Instance.ReadMemoryUInt(ESP + 16);
+                uint ProcessHandle = (uint)Instance.WinHelper.GetArg(0);
+                uint BaseAddressPtr = (uint)Instance.WinHelper.GetArg(1);
+                uint RegionSizePtr = (uint)Instance.WinHelper.GetArg(2);
+                uint FreeType = (uint)Instance.WinHelper.GetArg(3);
 
                 if (BaseAddressPtr == 0 || RegionSizePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;

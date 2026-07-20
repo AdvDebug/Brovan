@@ -7,16 +7,15 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong KeyHandle = Instance.WinHelper.GetArg64(0);
-                ulong ValueNamePtr = Instance.WinHelper.GetArg64(1);
-                uint TitleIndex = (uint)Instance.WinHelper.GetArg64(2, true);
-                uint Type = (uint)Instance.WinHelper.GetArg64(3, true);
-                ulong DataPtr = Instance.WinHelper.GetArg64(4);
-                uint DataSize = (uint)Instance.WinHelper.GetArg64(5, true);
+                ulong KeyHandle = Instance.WinHelper.GetArg(0);
+                ulong ValueNamePtr = Instance.WinHelper.GetArg(1);
+                uint TitleIndex = (uint)Instance.WinHelper.GetArg(2);
+                uint Type = (uint)Instance.WinHelper.GetArg(3);
+                ulong DataPtr = Instance.WinHelper.GetArg(4);
+                uint DataSize = (uint)Instance.WinHelper.GetArg(5);
 
-                if (!Instance.WinHelper.TryReadUnicodeString64(ValueNamePtr, out string ValueName, out NTSTATUS Status))
+                if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out NTSTATUS Status))
                     return Status;
 
                 byte[] Data = Array.Empty<byte>();

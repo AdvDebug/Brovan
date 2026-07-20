@@ -9,12 +9,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                NTSTATUS ErrorStatus = (NTSTATUS)(uint)Instance.WinHelper.GetArg64(0);
-                uint NumberOfParameters = (uint)Instance.WinHelper.GetArg64(1);
-                uint UnicodeStringParameterMask = (uint)Instance.WinHelper.GetArg64(2);
-                ulong ParametersPtr = Instance.WinHelper.GetArg64(3);
-                uint ValidResponseOptions = (uint)Instance.WinHelper.GetArg64(4);
-                ulong ResponsePtr = Instance.WinHelper.GetArg64(5);
+                NTSTATUS ErrorStatus = (NTSTATUS)(uint)Instance.WinHelper.GetArg(0);
+                uint NumberOfParameters = (uint)Instance.WinHelper.GetArg(1);
+                uint UnicodeStringParameterMask = (uint)Instance.WinHelper.GetArg(2);
+                ulong ParametersPtr = Instance.WinHelper.GetArg(3);
+                uint ValidResponseOptions = (uint)Instance.WinHelper.GetArg(4);
+                ulong ResponsePtr = Instance.WinHelper.GetArg(5);
 
                 if (ResponsePtr != 0)
                 {
@@ -41,14 +41,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                uint ESP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-                NTSTATUS ErrorStatus = (NTSTATUS)Instance.ReadMemoryUInt(ESP + 4);
-                uint NumberOfParameters = Instance.ReadMemoryUInt(ESP + 8);
-                uint UnicodeStringParameterMask = Instance.ReadMemoryUInt(ESP + 12);
-                uint ParametersPtr = Instance.ReadMemoryUInt(ESP + 16);
-                uint ValidResponseOptions = Instance.ReadMemoryUInt(ESP + 20);
-                uint ResponsePtr = Instance.ReadMemoryUInt(ESP + 24);
+                NTSTATUS ErrorStatus = (NTSTATUS)Instance.WinHelper.GetArg(0);
+                uint NumberOfParameters = (uint)Instance.WinHelper.GetArg(1);
+                uint UnicodeStringParameterMask = (uint)Instance.WinHelper.GetArg(2);
+                uint ParametersPtr = (uint)Instance.WinHelper.GetArg(3);
+                uint ValidResponseOptions = (uint)Instance.WinHelper.GetArg(4);
+                uint ResponsePtr = (uint)Instance.WinHelper.GetArg(5);
 
                 if (ResponsePtr != 0)
                 {

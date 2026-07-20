@@ -6,13 +6,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong ThreadIds = Instance.WinHelper.GetArg64(0);
-            uint Count = (uint)Instance.WinHelper.GetArg64(1);
-            _ = Instance.WinHelper.GetArg64(2);
-            _ = Instance.WinHelper.GetArg64(3);
+            ulong ThreadIds = Instance.WinHelper.GetArg(0);
+            uint Count = (uint)Instance.WinHelper.GetArg(1);
+            _ = Instance.WinHelper.GetArg(2);
+            _ = Instance.WinHelper.GetArg(3);
 
             if (Count == 0)
                 return NTSTATUS.STATUS_SUCCESS;

@@ -8,18 +8,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
             const uint ERROR_INVALID_PARAMETER = 87;
 
-            ulong WndClassPtr = Instance.WinHelper.GetArg64(0);
-            ulong ClassNamePtr = Instance.WinHelper.GetArg64(1);
-            ulong ClassVersionPtr = Instance.WinHelper.GetArg64(2);
-            ulong ClassMenuNamePtr = Instance.WinHelper.GetArg64(3);
-            uint FunctionId = (uint)Instance.WinHelper.GetArg64(4, true);
-            uint Flags = (uint)Instance.WinHelper.GetArg64(5, true);
-            ulong WowPtr = Instance.WinHelper.GetArg64(6);
+            ulong WndClassPtr = Instance.WinHelper.GetArg(0);
+            ulong ClassNamePtr = Instance.WinHelper.GetArg(1);
+            ulong ClassVersionPtr = Instance.WinHelper.GetArg(2);
+            ulong ClassMenuNamePtr = Instance.WinHelper.GetArg(3);
+            uint FunctionId = (uint)Instance.WinHelper.GetArg(4);
+            uint Flags = (uint)Instance.WinHelper.GetArg(5);
+            ulong WowPtr = Instance.WinHelper.GetArg(6);
 
             if (WndClassPtr == 0 || ClassNamePtr == 0)
             {

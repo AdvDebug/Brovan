@@ -6,18 +6,17 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong KeyHandle = Instance.WinHelper.GetArg64(0);
-                ulong EventHandle = Instance.WinHelper.GetArg64(1);
-                ulong ApcRoutine = Instance.WinHelper.GetArg64(2);
-                ulong ApcContext = Instance.WinHelper.GetArg64(3);
-                ulong IoStatusBlock = Instance.WinHelper.GetArg64(4);
-                uint CompletionFilter = (uint)Instance.WinHelper.GetArg64(5, true);
-                bool WatchTree = Instance.WinHelper.GetArg64(6, true) != 0;
-                ulong Buffer = Instance.WinHelper.GetArg64(7);
-                uint BufferSize = (uint)Instance.WinHelper.GetArg64(8, true);
-                bool Asynchronous = Instance.WinHelper.GetArg64(9, true) != 0;
+                ulong KeyHandle = Instance.WinHelper.GetArg(0);
+                ulong EventHandle = Instance.WinHelper.GetArg(1);
+                ulong ApcRoutine = Instance.WinHelper.GetArg(2);
+                ulong ApcContext = Instance.WinHelper.GetArg(3);
+                ulong IoStatusBlock = Instance.WinHelper.GetArg(4);
+                uint CompletionFilter = (uint)Instance.WinHelper.GetArg(5);
+                bool WatchTree = Instance.WinHelper.GetArg(6) != 0;
+                ulong Buffer = Instance.WinHelper.GetArg(7);
+                uint BufferSize = (uint)Instance.WinHelper.GetArg(8);
+                bool Asynchronous = Instance.WinHelper.GetArg(9) != 0;
 
                 WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
                 if (RegKey == null)
@@ -49,11 +48,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (!Asynchronous)
                 {
-                    Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlock, NTSTATUS.STATUS_PENDING, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_PENDING, 0);
                 Instance.WinHelper.RegisterRegistryNotification(new WinRegistryNotification
                 {
                     KeyPath = RegKey.FullPath,

@@ -8,9 +8,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong Handle = Instance.WinHelper.GetArg64(0);
+                ulong Handle = Instance.WinHelper.GetArg(0);
 
-                if (Handle == HandleManager.CurrentProcess || Handle == HandleManager.CurrentThread)
+                if (HandleManager.IsCurrentProcessPseudoHandle(Handle) || HandleManager.IsCurrentThreadPseudoHandle(Handle))
                     return NTSTATUS.STATUS_SUCCESS;
 
                 if (Instance.WinHelper.HandleExists(Handle))
@@ -32,7 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 uint Handle = Instance.WinHelper.GetArg32(0);
 
-                if (Handle == HandleManager.CurrentProcess || Handle == HandleManager.CurrentThread)
+                if (HandleManager.IsCurrentProcessPseudoHandle(Handle) || HandleManager.IsCurrentThreadPseudoHandle(Handle))
                     return NTSTATUS.STATUS_SUCCESS;
 
                 if (Instance.WinHelper.HandleExists(Handle))

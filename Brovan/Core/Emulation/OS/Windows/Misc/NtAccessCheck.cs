@@ -44,14 +44,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong SecurityDescriptor = Instance.WinHelper.GetArg64(0);
-                ulong ClientToken = Instance.WinHelper.GetArg64(1);
-                uint DesiredAccess = (uint)Instance.WinHelper.GetArg64(2, true);
-                ulong GenericMappingPtr = Instance.WinHelper.GetArg64(3);
-                ulong PrivilegeSet = Instance.WinHelper.GetArg64(4);
-                ulong PrivilegeSetLengthPtr = Instance.WinHelper.GetArg64(5);
-                ulong GrantedAccessPtr = Instance.WinHelper.GetArg64(6);
-                ulong AccessStatusPtr = Instance.WinHelper.GetArg64(7);
+                ulong SecurityDescriptor = Instance.WinHelper.GetArg(0);
+                ulong ClientToken = Instance.WinHelper.GetArg(1);
+                uint DesiredAccess = (uint)Instance.WinHelper.GetArg(2);
+                ulong GenericMappingPtr = Instance.WinHelper.GetArg(3);
+                ulong PrivilegeSet = Instance.WinHelper.GetArg(4);
+                ulong PrivilegeSetLengthPtr = Instance.WinHelper.GetArg(5);
+                ulong GrantedAccessPtr = Instance.WinHelper.GetArg(6);
+                ulong AccessStatusPtr = Instance.WinHelper.GetArg(7);
 
                 if (GrantedAccessPtr == 0 || AccessStatusPtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;

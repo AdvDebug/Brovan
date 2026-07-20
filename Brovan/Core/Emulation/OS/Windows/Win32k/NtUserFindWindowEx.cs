@@ -7,14 +7,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong ParentHwnd = Instance.WinHelper.GetArg64(0);
-            ulong ChildAfterHwnd = Instance.WinHelper.GetArg64(1);
-            ulong ClassNamePtr = Instance.WinHelper.GetArg64(2);
-            ulong WindowNamePtr = Instance.WinHelper.GetArg64(3);
-            ulong Unknown = Instance.WinHelper.GetArg64(4, true);
+            ulong ParentHwnd = Instance.WinHelper.GetArg(0);
+            ulong ChildAfterHwnd = Instance.WinHelper.GetArg(1);
+            ulong ClassNamePtr = Instance.WinHelper.GetArg(2);
+            ulong WindowNamePtr = Instance.WinHelper.GetArg(3);
+            ulong Unknown = Instance.WinHelper.GetArg(4);
 
             if (!TryReadOptionalUnicodeString64(Instance, ClassNamePtr, out string ClassName, out bool HasClassName))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

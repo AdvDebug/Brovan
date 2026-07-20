@@ -9,14 +9,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong JobHandle = Instance.WinHelper.GetArg64(0);
-                ulong ExitCode = (uint)Instance.WinHelper.GetArg64(1);
+                ulong JobHandle = Instance.WinHelper.GetArg(0);
+                ulong ExitCode = (uint)Instance.WinHelper.GetArg(1);
                 return TerminateJob(Instance, JobHandle, ExitCode);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-            uint JobHandle32 = Instance.ReadMemoryUInt(SP + 4);
-            uint ExitCode32 = Instance.ReadMemoryUInt(SP + 8);
+            uint JobHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            uint ExitCode32 = (uint)Instance.WinHelper.GetArg(1);
             return TerminateJob(Instance, JobHandle32, ExitCode32);
         }
 

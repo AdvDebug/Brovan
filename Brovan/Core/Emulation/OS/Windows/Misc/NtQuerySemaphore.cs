@@ -10,22 +10,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong SemaphoreHandle = Instance.WinHelper.GetArg64(0);
-                SEMAPHORE_INFORMATION_CLASS SemaphoreInformationClass = (SEMAPHORE_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg64(1, true);
-                ulong SemaphoreInformation = Instance.WinHelper.GetArg64(2);
-                uint SemaphoreInformationLength = (uint)Instance.WinHelper.GetArg64(3, true);
-                ulong ReturnLength = Instance.WinHelper.GetArg64(4);
+                ulong SemaphoreHandle = Instance.WinHelper.GetArg(0);
+                SEMAPHORE_INFORMATION_CLASS SemaphoreInformationClass = (SEMAPHORE_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(1);
+                ulong SemaphoreInformation = Instance.WinHelper.GetArg(2);
+                uint SemaphoreInformationLength = (uint)Instance.WinHelper.GetArg(3);
+                ulong ReturnLength = Instance.WinHelper.GetArg(4);
 
                 return HandleQuerySemaphore(Instance, SemaphoreHandle, SemaphoreInformationClass, SemaphoreInformation, SemaphoreInformationLength, ReturnLength);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-            uint SemaphoreHandle32 = Instance.ReadMemoryUInt(SP + 4);
-            SEMAPHORE_INFORMATION_CLASS SemaphoreInformationClass32 = (SEMAPHORE_INFORMATION_CLASS)Instance.ReadMemoryUInt(SP + 8);
-            uint SemaphoreInformation32 = Instance.ReadMemoryUInt(SP + 12);
-            uint SemaphoreInformationLength32 = Instance.ReadMemoryUInt(SP + 16);
-            uint ReturnLength32 = Instance.ReadMemoryUInt(SP + 20);
+            uint SemaphoreHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            SEMAPHORE_INFORMATION_CLASS SemaphoreInformationClass32 = (SEMAPHORE_INFORMATION_CLASS)Instance.WinHelper.GetArg(1);
+            uint SemaphoreInformation32 = (uint)Instance.WinHelper.GetArg(2);
+            uint SemaphoreInformationLength32 = (uint)Instance.WinHelper.GetArg(3);
+            uint ReturnLength32 = (uint)Instance.WinHelper.GetArg(4);
 
             return HandleQuerySemaphore(Instance, SemaphoreHandle32, SemaphoreInformationClass32, SemaphoreInformation32, SemaphoreInformationLength32, ReturnLength32);
         }

@@ -29,14 +29,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong WorkerFactoryHandle = Instance.WinHelper.GetArg64(0);
-            ulong MiniPackets = Instance.WinHelper.GetArg64(1);
-            uint Count = (uint)Instance.WinHelper.GetArg64(2);
-            ulong PacketsReturnedPtr = Instance.WinHelper.GetArg64(3);
-            ulong DeferredWork = Instance.WinHelper.GetArg64(4);
+            ulong WorkerFactoryHandle = Instance.WinHelper.GetArg(0);
+            ulong MiniPackets = Instance.WinHelper.GetArg(1);
+            uint Count = (uint)Instance.WinHelper.GetArg(2);
+            ulong PacketsReturnedPtr = Instance.WinHelper.GetArg(3);
+            ulong DeferredWork = Instance.WinHelper.GetArg(4);
             _ = DeferredWork;
 
             if (MiniPackets == 0 || Count == 0)
@@ -114,7 +112,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Thread.WaitDeadline = Deadline;
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_PENDING;
-            State.WaitResumeRIP = Instance.ReadRegister(Instance.IPRegister);
+            State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
             State.WaitReturnRIP = State.WaitResumeRIP + 2;
             State.WaitAlertable = false;
             State.WorkerFactoryReservedEntries?.Clear();

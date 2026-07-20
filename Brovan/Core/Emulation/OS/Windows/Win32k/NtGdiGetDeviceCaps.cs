@@ -4,7 +4,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            int Index = unchecked((int)Instance.WinHelper.GetArg64(1, true));
+            int Index = unchecked((int)Instance.WinHelper.GetArg(1));
             Instance.SetRawSyscallReturn(unchecked((ulong)(uint)GetDeviceCapability(Index)));
             return NTSTATUS.STATUS_SUCCESS;
         }

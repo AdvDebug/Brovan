@@ -18,12 +18,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                Routine = (uint)Instance.WinHelper.GetArg64(0);
+                Routine = (uint)Instance.WinHelper.GetArg(0);
             }
             else
             {
-                uint Esp = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-                Routine = Instance.ReadMemoryUInt(Esp + 4);
+                Routine = (uint)Instance.WinHelper.GetArg(0);
             }
 
             if (Routine == ThreadStateCaptureWindow)

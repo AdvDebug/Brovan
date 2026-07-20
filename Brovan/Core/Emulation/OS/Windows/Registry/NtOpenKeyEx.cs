@@ -15,20 +15,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong HandlePtr = Instance.WinHelper.GetArg64(0);
-                AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg64(1);
-                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
-                RegOpenOptions OpenOptions = (RegOpenOptions)Instance.WinHelper.GetArg64(3, true);
+                ulong HandlePtr = Instance.WinHelper.GetArg(0);
+                AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg(1);
+                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+                RegOpenOptions OpenOptions = (RegOpenOptions)Instance.WinHelper.GetArg(3);
 
                 if (HandlePtr == 0 || ObjectAttributesPtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                if (!Instance.IsRegionMapped(HandlePtr, 8))
+                if (!Instance.IsRegionMapped(HandlePtr, (uint)Instance.WinHelper.PointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                if (!Instance.WinHelper.TryResolveRegistryObjectPath64(ObjectAttributesPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, NTSTATUS.STATUS_OBJECT_NAME_INVALID, NTSTATUS.STATUS_INVALID_HANDLE, out string KeyPath, out NTSTATUS Status))
+                if (!Instance.WinHelper.TryResolveRegistryObjectPath(ObjectAttributesPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, NTSTATUS.STATUS_OBJECT_NAME_INVALID, NTSTATUS.STATUS_INVALID_HANDLE, out string KeyPath, out NTSTATUS Status))
                 {
                     return Status;
                 }
@@ -41,7 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WinHandle Handle = Instance.WinHelper.OpenRegistryKey(KeyPath, DesiredAccess);
                 if (Handle != null && Handle.Handle != 0)
                 {
-                    if (!Instance._emulator.WriteMemory(HandlePtr, Handle.Handle))
+                    if (!Instance.WinHelper.WritePointer(HandlePtr, Handle.Handle))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                     return NTSTATUS.STATUS_SUCCESS;

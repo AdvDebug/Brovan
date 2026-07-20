@@ -6,10 +6,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-                ulong ExitCode = (uint)Instance.WinHelper.GetArg64(1);
+                ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+                ulong ExitCode = (uint)Instance.WinHelper.GetArg(1);
 
                 if (ProcessHandle == 0)
                 {
@@ -27,7 +26,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
-                if (ProcessHandle == ulong.MaxValue)
+                if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
                 {
                     if ((Instance.Settings.Flags & LogFlags.Important) != 0)
                         Instance.TriggerEventMessage($"[{(ExitCode == 0 ? '+' : '!')}] Process asked to be terminated with exit code 0x{ExitCode:X}", LogFlags.Important);

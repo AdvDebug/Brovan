@@ -8,8 +8,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            ulong ContextPtr = Instance.WinHelper.GetArg64(0);
-            ulong ContinueArgument = Instance.WinHelper.GetArg64(1);
+            ulong ContextPtr = Instance.WinHelper.GetArg(0);
+            ulong ContinueArgument = Instance.WinHelper.GetArg(1);
 
             NTSTATUS Status = GetTestAlert(Instance, ContinueArgument, out bool TestAlert);
             if (Status != NTSTATUS.STATUS_SUCCESS)

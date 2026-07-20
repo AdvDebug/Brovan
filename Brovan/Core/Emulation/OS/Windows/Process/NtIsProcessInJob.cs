@@ -9,17 +9,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-                ulong JobHandle = Instance.WinHelper.GetArg64(1);
+                ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+                ulong JobHandle = Instance.WinHelper.GetArg(1);
                 if (!Instance.WinHelper.HandleExists(JobHandle))
                     return NTSTATUS.STATUS_INVALID_HANDLE;
                 bool IsInJob = Instance.WinHelper.IsProcessInJob(ProcessHandle, JobHandle);
                 return IsInJob ? NTSTATUS.STATUS_PROCESS_IN_JOB : NTSTATUS.STATUS_SUCCESS;
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-            uint ProcessHandle32 = Instance.ReadMemoryUInt(SP + 4);
-            uint JobHandle32 = Instance.ReadMemoryUInt(SP + 8);
+            uint ProcessHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            uint JobHandle32 = (uint)Instance.WinHelper.GetArg(1);
             bool IsInJob32 = Instance.WinHelper.IsProcessInJob(ProcessHandle32, JobHandle32);
             if (!Instance.WinHelper.HandleExists(JobHandle32))
                 return NTSTATUS.STATUS_INVALID_HANDLE;

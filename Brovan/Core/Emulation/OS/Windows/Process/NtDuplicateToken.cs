@@ -23,12 +23,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Is64)
             {
-                ExistingTokenHandle = Instance.WinHelper.GetArg64(0);
-                DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-                ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
-                EffectiveOnly = (uint)Instance.WinHelper.GetArg64(3) != 0;
-                RequestedTokenType = (uint)Instance.WinHelper.GetArg64(4);
-                NewTokenHandlePtr = Instance.WinHelper.GetArg64(5);
+                ExistingTokenHandle = Instance.WinHelper.GetArg(0);
+                DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+                EffectiveOnly = (uint)Instance.WinHelper.GetArg(3) != 0;
+                RequestedTokenType = (uint)Instance.WinHelper.GetArg(4);
+                NewTokenHandlePtr = Instance.WinHelper.GetArg(5);
             }
             else
             {

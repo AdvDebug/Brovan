@@ -8,22 +8,20 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong MutantHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
-                bool InitialOwner = (uint)Instance.WinHelper.GetArg64(3) != 0;
+                ulong MutantHandlePtr = Instance.WinHelper.GetArg(0);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+                bool InitialOwner = (uint)Instance.WinHelper.GetArg(3) != 0;
 
                 return HandleCreateMutant64(Instance, MutantHandlePtr, DesiredAccess, ObjectAttributesPtr, InitialOwner);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-            uint MutantHandlePtr32 = Instance.ReadMemoryUInt(SP + 4);
-            uint DesiredAccess32 = Instance.ReadMemoryUInt(SP + 8);
-            uint ObjectAttributesPtr32 = Instance.ReadMemoryUInt(SP + 12);
-            bool InitialOwner32 = Instance.ReadMemoryUInt(SP + 16) != 0;
+            uint MutantHandlePtr32 = (uint)Instance.WinHelper.GetArg(0);
+            uint DesiredAccess32 = (uint)Instance.WinHelper.GetArg(1);
+            uint ObjectAttributesPtr32 = (uint)Instance.WinHelper.GetArg(2);
+            bool InitialOwner32 = Instance.WinHelper.GetArg(3) != 0;
 
             return HandleCreateMutant32(Instance, MutantHandlePtr32, DesiredAccess32, ObjectAttributesPtr32, InitialOwner32);
         }
@@ -33,13 +31,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (MutantHandlePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(MutantHandlePtr, 8))
+            if (!Instance.IsRegionMapped(MutantHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             string Name = string.Empty;
             if (ObjectAttributesPtr != 0)
             {
-                if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out _, out _, out string FullName, out NTSTATUS ObjectNameStatus))
+                if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out _, out _, out string FullName, out NTSTATUS ObjectNameStatus))
                     return ObjectNameStatus;
 
                 Name = FullName;

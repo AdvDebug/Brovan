@@ -10,17 +10,16 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong LinkHandle = Instance.WinHelper.GetArg64(0);
-            ulong LinkTargetPtr = Instance.WinHelper.GetArg64(1);
-            uint ReturnedLengthPtr = (uint)Instance.WinHelper.GetArg64(2);
+            ulong LinkHandle = Instance.WinHelper.GetArg(0);
+            ulong LinkTargetPtr = Instance.WinHelper.GetArg(1);
+            uint ReturnedLengthPtr = (uint)Instance.WinHelper.GetArg(2);
 
             if (LinkHandle == 0 || LinkTargetPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            uint UsSize = (uint)Marshal.SizeOf<UNICODE_STRING64>();
+            bool Is64 = Instance.WinHelper.PointerSize == 8;
+            uint UsSize = Is64 ? 16u : 8u;
             if (!Instance.IsRegionMapped(LinkTargetPtr, UsSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
@@ -38,16 +37,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Target == null)
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
             
-            if (!StructSerializer.ParseStruct(Instance, LinkTargetPtr, out UNICODE_STRING64 Out))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            ushort OutMaximumLength = Instance._emulator.ReadMemoryUShort(LinkTargetPtr + 2);
+            ulong OutBuffer = Is64
+                ? Instance._emulator.ReadMemoryULong(LinkTargetPtr + 8)
+                : Instance._emulator.ReadMemoryUInt(LinkTargetPtr + 4);
 
-            if (Out.MaximumLength == 0)
+            if (OutMaximumLength == 0)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-            if (Out.Buffer == 0)
+            if (OutBuffer == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(Out.Buffer, Out.MaximumLength))
+            if (!Instance.IsRegionMapped(OutBuffer, OutMaximumLength))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             uint RequiredBytes = (uint)(Target.Length * 2);
@@ -57,13 +58,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance._emulator.WriteMemory(LinkTargetPtr + 0, (ushort)Math.Min(RequiredBytes, 0xFFFF), 2);
 
-            if (Out.MaximumLength < RequiredBytes)
+            if (OutMaximumLength < RequiredBytes)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-            Instance._emulator.WriteMemory(Out.Buffer, Target, Encoding.Unicode);
+            Instance._emulator.WriteMemory(OutBuffer, Target, Encoding.Unicode);
 
-            if (Out.MaximumLength >= RequiredBytes + 2)
-                Instance._emulator.WriteMemory(Out.Buffer + RequiredBytes, (ushort)0, 2);
+            if (OutMaximumLength >= RequiredBytes + 2)
+                Instance._emulator.WriteMemory(OutBuffer + RequiredBytes, (ushort)0, 2);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtQuerySymbolicLinkObject: Handle=0x{LinkHandle:X}, Target=\"{Target}\" (Len={RequiredBytes}).", LogFlags.Syscall);

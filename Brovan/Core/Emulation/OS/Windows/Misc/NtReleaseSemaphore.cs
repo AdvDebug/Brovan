@@ -8,18 +8,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong SemaphoreHandle = Instance.WinHelper.GetArg64(0);
-                int ReleaseCount = (int)Instance.WinHelper.GetArg64(1, true);
-                ulong PreviousCountPtr = Instance.WinHelper.GetArg64(2);
+                ulong SemaphoreHandle = Instance.WinHelper.GetArg(0);
+                int ReleaseCount = (int)Instance.WinHelper.GetArg(1);
+                ulong PreviousCountPtr = Instance.WinHelper.GetArg(2);
 
                 return HandleReleaseSemaphore(Instance, SemaphoreHandle, ReleaseCount, PreviousCountPtr);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-            uint SemaphoreHandle32 = Instance.ReadMemoryUInt(SP + 4);
-            int ReleaseCount32 = (int)Instance.ReadMemoryUInt(SP + 8);
-            uint PreviousCountPtr32 = Instance.ReadMemoryUInt(SP + 12);
+            uint SemaphoreHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            int ReleaseCount32 = (int)Instance.WinHelper.GetArg(1);
+            uint PreviousCountPtr32 = (uint)Instance.WinHelper.GetArg(2);
 
             return HandleReleaseSemaphore(Instance, SemaphoreHandle32, ReleaseCount32, PreviousCountPtr32);
         }

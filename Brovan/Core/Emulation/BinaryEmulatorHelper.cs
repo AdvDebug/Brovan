@@ -1580,7 +1580,41 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            if (GeneralHelper.IsWindows)
+            bool AddSyscallsFromFiles(string NtdllPath, string Win32uPath)
+            {
+                if (!File.Exists(NtdllPath))
+                {
+                    Utils.LogError($"[WinSyscallBuilder] Missing ntdll.dll: {NtdllPath}");
+                    Utils.PrintHighlight("[-] Missing ntdll.dll. Syscalls won't work.", true);
+                    return false;
+                }
+
+                using BinaryFile Ntdll = new BinaryFile(NtdllPath, true);
+                using BinaryFile Win32u = File.Exists(Win32uPath) ? new BinaryFile(Win32uPath, true) : null;
+
+                if (Win32u == null)
+                    Utils.PrintHighlight("[-] win32u.dll not found, UI-related syscalls may not work.", true);
+
+                ReadOnlySpan<byte> NtdllData = Ntdll.GetBinaryData();
+                ReadOnlySpan<byte> Win32uData = Win32u != null ? Win32u.GetBinaryData() : ReadOnlySpan<byte>.Empty;
+
+                AddSyscallsFromExports(Ntdll.ExportFunctions, NtdllData, SupportedFunctions, false);
+
+                if (Win32u != null)
+                    AddSyscallsFromExports(Win32u.ExportFunctions, Win32uData, SupportedFunctionsWin32k, true);
+
+                return true;
+            }
+
+            if (BinaryArch == BinaryArchitecture.x86)
+            {
+                string NtdllPath = GeneralHelper.GetWindowsLibPath("ntdll.dll", true, BinaryArchitecture.x86);
+                string Win32uPath = GeneralHelper.GetWindowsLibPath("win32u.dll", true, BinaryArchitecture.x86);
+
+                if (!AddSyscallsFromFiles(NtdllPath, Win32uPath))
+                    return SyscallDictionary;
+            }
+            else if (GeneralHelper.IsWindows)
             {
                 IntPtr NtdllModule = NativeWinImports.GetModuleHandleA("ntdll.dll");
                 if (NtdllModule == IntPtr.Zero)
@@ -1611,26 +1645,8 @@ namespace Brovan.Core.Emulation
                 string NtdllPath = Path.Combine(GeneralHelper.WindowsLibsPath, "ntdll.dll");
                 string Win32uPath = Path.Combine(GeneralHelper.WindowsLibsPath, "win32u.dll");
 
-                if (!File.Exists(NtdllPath))
-                {
-                    Utils.LogError($"[WinSyscallBuilder] Missing ntdll.dll: {NtdllPath}");
-                    Utils.PrintHighlight("[-] Missing ntdll.dll in WindowsLibs. Syscalls won't work.", true);
+                if (!AddSyscallsFromFiles(NtdllPath, Win32uPath))
                     return SyscallDictionary;
-                }
-
-                using BinaryFile Ntdll = new BinaryFile(NtdllPath, true);
-                using BinaryFile Win32u = File.Exists(Win32uPath) ? new BinaryFile(Win32uPath, true) : null;
-
-                if (Win32u == null)
-                    Utils.PrintHighlight("[-] win32u.dll not found in WindowsLibs, UI-related syscalls may not work.", true);
-
-                ReadOnlySpan<byte> NtdllData = Ntdll.GetBinaryData();
-                ReadOnlySpan<byte> Win32uData = Win32u != null ? Win32u.GetBinaryData() : ReadOnlySpan<byte>.Empty;
-
-                AddSyscallsFromExports(Ntdll.ExportFunctions, NtdllData, SupportedFunctions, false);
-
-                if (Win32u != null)
-                    AddSyscallsFromExports(Win32u.ExportFunctions, Win32uData, SupportedFunctionsWin32k, true);
             }
 
             if (SyscallDictionary.Count > 0)

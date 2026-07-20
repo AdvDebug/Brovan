@@ -13,9 +13,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if(Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ProcessHandlePtr = Instance.WinHelper.GetArg64(0);
-                uint DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-                ulong ClientIdPtr = Instance.WinHelper.GetArg64(3);
+                ulong ProcessHandlePtr = Instance.WinHelper.GetArg(0);
+                uint DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                ulong ClientIdPtr = Instance.WinHelper.GetArg(3);
                 ulong TargetPid = Instance.ReadMemoryUInt(ClientIdPtr);
 
 
@@ -62,7 +62,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 WinHandle EmulatedHandle = Instance.WinHelper.OpenProcessHandle(TargetProcess.PID, (AccessMask)DesiredAccess);
 
-                if (!Instance._emulator.WriteMemory(ProcessHandlePtr, EmulatedHandle.Handle))
+                if (!Instance.WinHelper.WritePointer(ProcessHandlePtr, EmulatedHandle.Handle))
                 {
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }
@@ -73,10 +73,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                uint ESP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-                uint ProcessHandlePtr = Instance.ReadMemoryUInt(ESP + 4);
-                uint DesiredAccess = Instance.ReadMemoryUInt(ESP + 8);
-                uint ClientIdPtr = Instance.ReadMemoryUInt(ESP + 16);
+                uint ProcessHandlePtr = (uint)Instance.WinHelper.GetArg(0);
+                uint DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                uint ClientIdPtr = (uint)Instance.WinHelper.GetArg(3);
                 uint TargetPid = Instance.ReadMemoryUInt(ClientIdPtr);
 
 

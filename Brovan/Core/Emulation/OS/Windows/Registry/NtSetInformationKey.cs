@@ -6,12 +6,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong KeyHandle = Instance.WinHelper.GetArg64(0);
-                KEY_SET_INFORMATION_CLASS KeySetInformationClass = (KEY_SET_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg64(1, true);
-                ulong KeySetInformation = Instance.WinHelper.GetArg64(2);
-                uint KeySetInformationLength = (uint)Instance.WinHelper.GetArg64(3, true);
+                ulong KeyHandle = Instance.WinHelper.GetArg(0);
+                KEY_SET_INFORMATION_CLASS KeySetInformationClass = (KEY_SET_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(1);
+                ulong KeySetInformation = Instance.WinHelper.GetArg(2);
+                uint KeySetInformationLength = (uint)Instance.WinHelper.GetArg(3);
 
                 WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
                 if (RegKey == null)

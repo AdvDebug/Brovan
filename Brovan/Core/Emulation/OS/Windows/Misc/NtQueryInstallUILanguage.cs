@@ -15,7 +15,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong LanguageIdPtr = Instance.WinHelper.GetArg64(0);
+                ulong LanguageIdPtr = Instance.WinHelper.GetArg(0);
 
                 if (LanguageIdPtr == 0 || !Instance.IsRegionMapped(LanguageIdPtr, 2))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;

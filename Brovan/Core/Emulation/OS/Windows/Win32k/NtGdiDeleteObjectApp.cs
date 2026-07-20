@@ -6,10 +6,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong Handle = Instance.WinHelper.GetArg64(0);
+            ulong Handle = Instance.WinHelper.GetArg(0);
             Win32kHelper.RemovePenBrush(Instance, Handle);
             bool Deleted = Instance.WinHelper.FreeGdiHandle(Handle);
             Instance.SetRawSyscallReturn(Deleted ? 1ul : 0ul);

@@ -8,8 +8,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-                ulong BaseAddress = Instance.WinHelper.GetArg64(1);
+                ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+                ulong BaseAddress = Instance.WinHelper.GetArg(1);
                 return NtUnmapViewOfSectionEx.UnmapView(Instance, ProcessHandle, BaseAddress, 0, nameof(NtUnmapViewOfSection));
             }
             else

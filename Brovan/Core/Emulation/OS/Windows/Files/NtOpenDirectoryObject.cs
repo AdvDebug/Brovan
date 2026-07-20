@@ -7,20 +7,18 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong DirectoryHandlePtr = Instance.WinHelper.GetArg64(0);
-            AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg64(1);
-            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
+            ulong DirectoryHandlePtr = Instance.WinHelper.GetArg(0);
+            AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg(1);
+            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
 
             if (DirectoryHandlePtr == 0 || ObjectAttributesPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(DirectoryHandlePtr, 8))
+            if (!Instance.IsRegionMapped(DirectoryHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out _, out string ObjectName, out string FullName, out NTSTATUS ObjectNameStatus))
+            if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out _, out string ObjectName, out string FullName, out NTSTATUS ObjectNameStatus))
                 return ObjectNameStatus;
 
             if (string.IsNullOrEmpty(ObjectName))
@@ -33,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
             }
 
-            if (!Instance._emulator.WriteMemory(DirectoryHandlePtr, OutHandle))
+            if (!Instance.WinHelper.WritePointer(DirectoryHandlePtr, OutHandle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

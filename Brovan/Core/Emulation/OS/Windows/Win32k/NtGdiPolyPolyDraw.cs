@@ -11,14 +11,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong Hdc = Instance.WinHelper.GetArg64(0);
-            ulong PointsPtr = Instance.WinHelper.GetArg64(1);
-            ulong CountsPtr = Instance.WinHelper.GetArg64(2);
-            uint FigureCount = (uint)Instance.WinHelper.GetArg64(3);
-            uint DrawType = (uint)Instance.WinHelper.GetArg64(4, true);
+            ulong Hdc = Instance.WinHelper.GetArg(0);
+            ulong PointsPtr = Instance.WinHelper.GetArg(1);
+            ulong CountsPtr = Instance.WinHelper.GetArg(2);
+            uint FigureCount = (uint)Instance.WinHelper.GetArg(3);
+            uint DrawType = (uint)Instance.WinHelper.GetArg(4);
 
             ulong Hwnd = Instance.WinHelper.GetHwndFromDc(Hdc);
             if (Hwnd == 0 || PointsPtr == 0 || CountsPtr == 0 || FigureCount == 0)

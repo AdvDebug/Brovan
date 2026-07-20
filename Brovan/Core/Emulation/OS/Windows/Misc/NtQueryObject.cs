@@ -14,11 +14,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong Handle = Instance.WinHelper.GetArg64(0);
-                OBJECT_INFORMATION_CLASS ObjectInformationClass = (OBJECT_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg64(1, true);
-                ulong ObjectInformation = Instance.WinHelper.GetArg64(2);
-                uint ObjectInformationLength = (uint)Instance.WinHelper.GetArg64(3, true);
-                ulong ReturnLength = Instance.WinHelper.GetArg64(4);
+                ulong Handle = Instance.WinHelper.GetArg(0);
+                OBJECT_INFORMATION_CLASS ObjectInformationClass = (OBJECT_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(1);
+                ulong ObjectInformation = Instance.WinHelper.GetArg(2);
+                uint ObjectInformationLength = (uint)Instance.WinHelper.GetArg(3);
+                ulong ReturnLength = Instance.WinHelper.GetArg(4);
                 return HandleQueryObject(Instance, Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength, ReturnLength, true);
             }
             else
@@ -80,9 +80,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Attributes |= ObjInherit;
                 GrantedAccess = (uint)Instance.WinHelper.HandleManager.GetPermissionsByHandle(Handle);
             }
-            else if (Handle == HandleManager.CurrentProcess)
+            else if (HandleManager.IsCurrentProcessPseudoHandle(Handle))
                 GrantedAccess = (uint)AccessMask.ProcessAllAccess;
-            else if (Handle == HandleManager.CurrentThread)
+            else if (HandleManager.IsCurrentThreadPseudoHandle(Handle))
                 GrantedAccess = (uint)AccessMask.StandardRightsAll;
 
             OBJECT_BASIC_INFORMATION_DATA Data = new OBJECT_BASIC_INFORMATION_DATA
@@ -177,13 +177,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             TypeName = string.Empty;
             Name = string.Empty;
 
-            if (Handle == HandleManager.CurrentProcess)
+            if (HandleManager.IsCurrentProcessPseudoHandle(Handle))
             {
                 TypeName = "Process";
                 return true;
             }
 
-            if (Handle == HandleManager.CurrentThread)
+            if (HandleManager.IsCurrentThreadPseudoHandle(Handle))
             {
                 TypeName = "Thread";
                 return true;
@@ -228,9 +228,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private string GetObjectTypeName(BinaryEmulator Instance, ulong Handle, IHandleObject HandleObject)
         {
-            if (Handle == HandleManager.CurrentProcess)
+            if (HandleManager.IsCurrentProcessPseudoHandle(Handle))
                 return "Process";
-            if (Handle == HandleManager.CurrentThread)
+            if (HandleManager.IsCurrentThreadPseudoHandle(Handle))
                 return "Thread";
             if (Handle == HandleManager.KNOWN_DLLS_DIRECTORY || Handle == HandleManager.KNOWN_DLLS32_DIRECTORY || Handle == HandleManager.BASE_NAMED_OBJECTS_DIRECTORY || Handle == HandleManager.RPC_CONTROL_DIRECTORY)
                 return "Directory";

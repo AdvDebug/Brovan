@@ -14,9 +14,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Is64)
             {
-                Flags = (uint)Instance.WinHelper.GetArg64(0);
-                DataSizePtr = Instance.WinHelper.GetArg64(1);
-                DataPtr = Instance.WinHelper.GetArg64(2);
+                Flags = (uint)Instance.WinHelper.GetArg(0);
+                DataSizePtr = Instance.WinHelper.GetArg(1);
+                DataPtr = Instance.WinHelper.GetArg(2);
             }
             else
             {

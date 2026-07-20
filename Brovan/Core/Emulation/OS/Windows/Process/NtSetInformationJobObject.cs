@@ -10,18 +10,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong JobHandle = Instance.WinHelper.GetArg64(0);
-                ulong JobObjectInformationClass = (uint)Instance.WinHelper.GetArg64(1);
-                ulong JobObjectInformation = Instance.WinHelper.GetArg64(2);
-                ulong JobObjectInformationLength = (uint)Instance.WinHelper.GetArg64(3);
+                ulong JobHandle = Instance.WinHelper.GetArg(0);
+                ulong JobObjectInformationClass = (uint)Instance.WinHelper.GetArg(1);
+                ulong JobObjectInformation = Instance.WinHelper.GetArg(2);
+                ulong JobObjectInformationLength = (uint)Instance.WinHelper.GetArg(3);
                 return HandleSet(Instance, JobHandle, JobObjectInformationClass, JobObjectInformation, JobObjectInformationLength);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-            uint JobHandle32 = Instance.ReadMemoryUInt(SP + 4);
-            uint JobObjectInformationClass32 = Instance.ReadMemoryUInt(SP + 8);
-            uint JobObjectInformation32 = Instance.ReadMemoryUInt(SP + 12);
-            uint JobObjectInformationLength32 = Instance.ReadMemoryUInt(SP + 16);
+            uint JobHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            uint JobObjectInformationClass32 = (uint)Instance.WinHelper.GetArg(1);
+            uint JobObjectInformation32 = (uint)Instance.WinHelper.GetArg(2);
+            uint JobObjectInformationLength32 = (uint)Instance.WinHelper.GetArg(3);
             return HandleSet(Instance, JobHandle32, JobObjectInformationClass32, JobObjectInformation32, JobObjectInformationLength32);
         }
 

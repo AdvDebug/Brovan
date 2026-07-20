@@ -49,29 +49,27 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong ThreadHandlePtr = Instance.WinHelper.GetArg64(0);
-            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-            ulong ProcessHandle = Instance.WinHelper.GetArg64(3);
-            ulong StartRoutine = Instance.WinHelper.GetArg64(4);
-            ulong Argument = Instance.WinHelper.GetArg64(5);
-            ulong CreateFlags = (uint)Instance.WinHelper.GetArg64(6);
-            ulong StackSize = Instance.WinHelper.GetArg64(8);
-            ulong AttributeList = Instance.WinHelper.GetArg64(10);
+            ulong ThreadHandlePtr = Instance.WinHelper.GetArg(0);
+            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+            ulong ProcessHandle = Instance.WinHelper.GetArg(3);
+            ulong StartRoutine = Instance.WinHelper.GetArg(4);
+            ulong Argument = Instance.WinHelper.GetArg(5);
+            ulong CreateFlags = (uint)Instance.WinHelper.GetArg(6);
+            ulong StackSize = Instance.WinHelper.GetArg(8);
+            ulong AttributeList = Instance.WinHelper.GetArg(10);
 
             if (ThreadHandlePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(ThreadHandlePtr, 8))
+            if (!Instance.IsRegionMapped(ThreadHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (StartRoutine == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             // Only current-process thread creation is modeled.
-            if (ProcessHandle != ulong.MaxValue)
+            if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
             {
                 if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                     return NTSTATUS.STATUS_INVALID_HANDLE;

@@ -11,20 +11,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong SectionHandlePtr = Instance.WinHelper.GetArg64(0);
-            AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg64(1);
-            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
+            ulong SectionHandlePtr = Instance.WinHelper.GetArg(0);
+            AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg(1);
+            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
 
             if (SectionHandlePtr == 0 || ObjectAttributesPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(SectionHandlePtr, 8))
+            if (!Instance.IsRegionMapped(SectionHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
+            if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out ulong AttributesRoot, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
                 return ObjectNameStatus;
 
             if (string.IsNullOrEmpty(Name))
@@ -42,9 +40,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             string ResolvedKnownDllBackingPath = null;
 
-            if (IsKnownDllPath(Instance, Attributes.RootDirectory, FullName))
+            if (IsKnownDllPath(Instance, AttributesRoot, FullName))
             {
-                ResolvedKnownDllBackingPath = ResolveKnownDllBackingPath(Instance, Attributes.RootDirectory, FullName, Name);
+                ResolvedKnownDllBackingPath = ResolveKnownDllBackingPath(Instance, AttributesRoot, FullName, Name);
                 AllocationAttributes = SEC_IMAGE;
                 SectionPageProtection = PAGE_EXECUTE_READ;
             }
@@ -91,7 +89,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            string ResolvedBackingPath = ResolvedKnownDllBackingPath ?? ResolveKnownDllBackingPath(Instance, Attributes.RootDirectory, FullName, Name);
+            string ResolvedBackingPath = ResolvedKnownDllBackingPath ?? ResolveKnownDllBackingPath(Instance, AttributesRoot, FullName, Name);
             if (ResolvedBackingPath == null)
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 

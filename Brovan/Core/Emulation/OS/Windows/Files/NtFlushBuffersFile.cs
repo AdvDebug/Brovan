@@ -20,11 +20,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IoStatusBlockPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, 0x10))
+            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             NTSTATUS Status = FlushHandle(Instance, FileHandle);
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, Status, 0);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
             return Status;
         }
 
@@ -40,7 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             NTSTATUS Status = FlushHandle(Instance, FileHandle);
-            Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, Status, 0);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
             return Status;
         }
 

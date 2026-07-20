@@ -8,14 +8,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong WaitCompletionPacketHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-                ulong ObjectAttributes = Instance.WinHelper.GetArg64(2);
+                ulong WaitCompletionPacketHandlePtr = Instance.WinHelper.GetArg(0);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                ulong ObjectAttributes = Instance.WinHelper.GetArg(2);
 
                 if (WaitCompletionPacketHandlePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                if (!Instance.IsRegionMapped(WaitCompletionPacketHandlePtr, 8))
+                if (!Instance.IsRegionMapped(WaitCompletionPacketHandlePtr, (uint)Instance.WinHelper.PointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 _ = ObjectAttributes;
@@ -29,16 +29,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Packet, (AccessMask)DesiredAccess);
                 Instance.WinHelper.AddWinHandle(Handle);
 
-                if (!Instance._emulator.WriteMemory(WaitCompletionPacketHandlePtr, Handle.Handle))
+                if (!Instance.WinHelper.WritePointer(WaitCompletionPacketHandlePtr, Handle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            uint ESP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-            uint WaitCompletionPacketHandlePtr32 = Instance.ReadMemoryUInt(ESP + 4);
-            uint DesiredAccess32 = Instance.ReadMemoryUInt(ESP + 8);
-            uint ObjectAttributes32 = Instance.ReadMemoryUInt(ESP + 12);
+            uint WaitCompletionPacketHandlePtr32 = (uint)Instance.WinHelper.GetArg(0);
+            uint DesiredAccess32 = (uint)Instance.WinHelper.GetArg(1);
+            uint ObjectAttributes32 = (uint)Instance.WinHelper.GetArg(2);
 
             if (WaitCompletionPacketHandlePtr32 == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;

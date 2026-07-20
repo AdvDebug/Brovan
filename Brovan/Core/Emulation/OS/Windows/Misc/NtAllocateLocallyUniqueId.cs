@@ -8,10 +8,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong LuidPtr = Instance.WinHelper.GetArg64(0);
+            ulong LuidPtr = Instance.WinHelper.GetArg(0);
             if (LuidPtr == 0 || !Instance.IsRegionMapped(LuidPtr, 8))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 

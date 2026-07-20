@@ -6,19 +6,17 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong FileHandle = Instance.WinHelper.GetArg64(0);
-            ulong EventHandle = Instance.WinHelper.GetArg64(1);
-            ulong ApcRoutine = Instance.WinHelper.GetArg64(2);
-            ulong ApcContext = Instance.WinHelper.GetArg64(3);
-            ulong IoStatusBlock = Instance.WinHelper.GetArg64(4);
-            ulong FileInformation = Instance.WinHelper.GetArg64(5);
-            uint Length = (uint)Instance.WinHelper.GetArg64(6);
-            uint FileInformationClass = (uint)Instance.WinHelper.GetArg64(7);
-            uint QueryFlags = (uint)Instance.WinHelper.GetArg64(8);
-            ulong FileName = Instance.WinHelper.GetArg64(9);
+            ulong FileHandle = Instance.WinHelper.GetArg(0);
+            ulong EventHandle = Instance.WinHelper.GetArg(1);
+            ulong ApcRoutine = Instance.WinHelper.GetArg(2);
+            ulong ApcContext = Instance.WinHelper.GetArg(3);
+            ulong IoStatusBlock = Instance.WinHelper.GetArg(4);
+            ulong FileInformation = Instance.WinHelper.GetArg(5);
+            uint Length = (uint)Instance.WinHelper.GetArg(6);
+            uint FileInformationClass = (uint)Instance.WinHelper.GetArg(7);
+            uint QueryFlags = (uint)Instance.WinHelper.GetArg(8);
+            ulong FileName = Instance.WinHelper.GetArg(9);
 
             return NtQueryDirectoryFileCommon.Handle(Instance, FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName);
         }

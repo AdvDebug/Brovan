@@ -8,20 +8,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong TimerHandle = Instance.WinHelper.GetArg64(0);
-                ulong TimerSetInformationClass = Instance.WinHelper.GetArg64(1);
-                ulong TimerSetInformation = Instance.WinHelper.GetArg64(2);
-                ulong TimerSetInformationLength = Instance.WinHelper.GetArg64(3);
+                ulong TimerHandle = Instance.WinHelper.GetArg(0);
+                ulong TimerSetInformationClass = Instance.WinHelper.GetArg(1);
+                ulong TimerSetInformation = Instance.WinHelper.GetArg(2);
+                ulong TimerSetInformationLength = Instance.WinHelper.GetArg(3);
 
                 return HandleSetTimerEx64(Instance, TimerHandle, TimerSetInformationClass, TimerSetInformation, TimerSetInformationLength);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-            uint TimerHandle32 = Instance.ReadMemoryUInt(SP + 4);
-            uint TimerSetInformationClass32 = Instance.ReadMemoryUInt(SP + 8);
-            uint TimerSetInformation32 = Instance.ReadMemoryUInt(SP + 12);
-            uint TimerSetInformationLength32 = Instance.ReadMemoryUInt(SP + 16);
+            uint TimerHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            uint TimerSetInformationClass32 = (uint)Instance.WinHelper.GetArg(1);
+            uint TimerSetInformation32 = (uint)Instance.WinHelper.GetArg(2);
+            uint TimerSetInformationLength32 = (uint)Instance.WinHelper.GetArg(3);
 
             return HandleSetTimerEx32(Instance, TimerHandle32, TimerSetInformationClass32, TimerSetInformation32, TimerSetInformationLength32);
         }

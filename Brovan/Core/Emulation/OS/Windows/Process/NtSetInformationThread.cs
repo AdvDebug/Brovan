@@ -27,12 +27,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private NTSTATUS Handle32(BinaryEmulator Instance)
         {
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-            uint ThreadHandle = Instance.ReadMemoryUInt(SP + 4);
-            int ThreadInformationClassValue = (int)Instance.ReadMemoryUInt(SP + 8);
-            uint ThreadInformationPtr = Instance.ReadMemoryUInt(SP + 12);
-            uint ThreadInformationLength = Instance.ReadMemoryUInt(SP + 16);
+            uint ThreadHandle = (uint)Instance.WinHelper.GetArg(0);
+            int ThreadInformationClassValue = (int)Instance.WinHelper.GetArg(1);
+            uint ThreadInformationPtr = (uint)Instance.WinHelper.GetArg(2);
+            uint ThreadInformationLength = (uint)Instance.WinHelper.GetArg(3);
 
             return HandleCommon(Instance, ThreadHandle, ThreadInformationClassValue, ThreadInformationPtr, ThreadInformationLength);
         }

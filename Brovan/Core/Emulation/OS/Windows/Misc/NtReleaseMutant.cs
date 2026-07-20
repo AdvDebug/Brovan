@@ -8,16 +8,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong MutantHandle = Instance.WinHelper.GetArg64(0);
-                ulong PreviousCountPtr = Instance.WinHelper.GetArg64(1);
+                ulong MutantHandle = Instance.WinHelper.GetArg(0);
+                ulong PreviousCountPtr = Instance.WinHelper.GetArg(1);
 
                 return HandleReleaseMutant(Instance, MutantHandle, PreviousCountPtr);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-            uint MutantHandle32 = Instance.ReadMemoryUInt(SP + 4);
-            uint PreviousCountPtr32 = Instance.ReadMemoryUInt(SP + 8);
+            uint MutantHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            uint PreviousCountPtr32 = (uint)Instance.WinHelper.GetArg(1);
 
             return HandleReleaseMutant(Instance, MutantHandle32, PreviousCountPtr32);
         }

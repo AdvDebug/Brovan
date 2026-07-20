@@ -9,12 +9,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)Instance.WinHelper.GetArg64(0);
-                ulong SystemInformationPtr = Instance.WinHelper.GetArg64(1);
-                ulong SystemInformationLength = Instance.WinHelper.GetArg64(2);
-                ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(3);
+                SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)Instance.WinHelper.GetArg(0);
+                ulong SystemInformationPtr = Instance.WinHelper.GetArg(1);
+                ulong SystemInformationLength = Instance.WinHelper.GetArg(2);
+                ulong ReturnLengthPtr = Instance.WinHelper.GetArg(3);
 
                 if (SystemInformationPtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -466,7 +465,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case SYSTEM_INFORMATION_CLASS.SystemEmulationBasicInformation:
                     case SYSTEM_INFORMATION_CLASS.SystemBasicInformation:
                         {
-                            uint RequiredLength = 0x40;
+                            // ActiveProcessorsAffinityMask, NumberOfProcessors) is pointer-sized and
+                            const ulong MinimumUserModeAddress = 0x10000UL;
+                            ulong PointerSize = (ulong)Instance.WinHelper.PointerSize;
+                            ulong PointerFields = SystemInformationPtr + (PointerSize == 8 ? 0x20u : 0x1Cu);
+                            uint RequiredLength = PointerSize == 8 ? 0x40u : 0x2Cu;
                             if (SystemInformationLength < RequiredLength)
                             {
                                 if (ReturnLengthPtr != 0)
@@ -494,10 +497,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x14, HighestPhysicalPageNumber);
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x18, AllocationGranularity);
 
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, Instance.BaseAddress);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, Instance.MaxAddress);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x30, 0x1);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x38, (byte)Environment.ProcessorCount);
+                            Instance.WinHelper.WritePointer(PointerFields, MinimumUserModeAddress);
+                            Instance.WinHelper.WritePointer(PointerFields + PointerSize, Instance.MaxAddress);
+                            Instance.WinHelper.WritePointer(PointerFields + PointerSize * 2, 0x1);
+                            Instance.WinHelper.WriteByte(PointerFields + PointerSize * 3, (byte)Environment.ProcessorCount);
 
                             if (ReturnLengthPtr != 0)
                             {
@@ -513,10 +516,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Instance.TriggerEventMessage($"[!] Unsupported NtQuerySystemInformation class: 0x{SystemInformationClass:X}", LogFlags.Issues);
                         break;
                 }
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-
             }
             return Instance.WinUnimplemented;
         }

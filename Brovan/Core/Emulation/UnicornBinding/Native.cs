@@ -70,6 +70,18 @@ namespace Brovan.Core.Emulation
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         public static extern UCErrors uc_reg_read(IntPtr uc, Registers Reg, out byte value);
 
+        [StructLayout(LayoutKind.Sequential)]
+        public struct uc_x86_mmr
+        {
+            public ushort selector;
+            public ulong Base;
+            public uint limit;
+            public uint flags;
+        }
+
+        [DllImport("unicorn", EntryPoint = "uc_reg_write", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors uc_reg_write_mmr(IntPtr uc, Registers Reg, ref uc_x86_mmr value);
+
         [DllImport("unicorn", EntryPoint = "uc_reg_write", CallingConvention = CallingConvention.Cdecl)]
         public static extern UCErrors uc_reg_write_raw(IntPtr uc, int Reg, ref ulong value);
 

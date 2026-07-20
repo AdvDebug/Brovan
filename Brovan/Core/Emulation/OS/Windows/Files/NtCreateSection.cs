@@ -9,21 +9,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong SectionHandlePtr = Instance.WinHelper.GetArg64(0);
-            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg64(2);
-            ulong MaximumSizePtr = Instance.WinHelper.GetArg64(3);
-            uint SectionPageProtection = (uint)Instance.WinHelper.GetArg64(4);
-            uint AllocationAttributes = (uint)Instance.WinHelper.GetArg64(5);
-            ulong FileHandle = Instance.WinHelper.GetArg64(6);
+            ulong SectionHandlePtr = Instance.WinHelper.GetArg(0);
+            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+            ulong MaximumSizePtr = Instance.WinHelper.GetArg(3);
+            uint SectionPageProtection = (uint)Instance.WinHelper.GetArg(4);
+            uint AllocationAttributes = (uint)Instance.WinHelper.GetArg(5);
+            ulong FileHandle = Instance.WinHelper.GetArg(6);
 
             if (SectionHandlePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(SectionHandlePtr, 8))
+            if (!Instance.IsRegionMapped(SectionHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             bool IsImage = (AllocationAttributes & SEC_IMAGE) != 0;

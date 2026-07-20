@@ -18,13 +18,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong KeyHandle = Instance.WinHelper.GetArg64(0);
-                KEY_INFORMATION_CLASS KeyInformationClass = (KEY_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg64(1);
-                ulong KeyInformationPtr = Instance.WinHelper.GetArg64(2);
-                uint Length = (uint)Instance.WinHelper.GetArg64(3, true);
-                ulong ResultLengthPtr = Instance.WinHelper.GetArg64(4);
+                ulong KeyHandle = Instance.WinHelper.GetArg(0);
+                KEY_INFORMATION_CLASS KeyInformationClass = (KEY_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(1);
+                ulong KeyInformationPtr = Instance.WinHelper.GetArg(2);
+                uint Length = (uint)Instance.WinHelper.GetArg(3);
+                ulong ResultLengthPtr = Instance.WinHelper.GetArg(4);
 
                 if (ResultLengthPtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;

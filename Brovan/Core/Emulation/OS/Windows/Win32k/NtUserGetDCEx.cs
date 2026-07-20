@@ -6,12 +6,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong Hwnd = Instance.WinHelper.GetArg64(0);
-            ulong HdcClipRegion = Instance.WinHelper.GetArg64(1);
-            uint Flags = (uint)Instance.WinHelper.GetArg64(2, true);
+            ulong Hwnd = Instance.WinHelper.GetArg(0);
+            ulong HdcClipRegion = Instance.WinHelper.GetArg(1);
+            uint Flags = (uint)Instance.WinHelper.GetArg(2);
 
             ulong Hdc = Win32kHelper.CreateDeviceContext(Instance, Hwnd, false, false);
             Instance.SetLastWinError(Hdc == 0 ? Win32kHelper.ERROR_INVALID_WINDOW_HANDLE : 0u);

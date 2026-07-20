@@ -7,30 +7,28 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong FileHandle = Instance.WinHelper.GetArg64(0);
-            ulong EventHandle = Instance.WinHelper.GetArg64(1);
-            ulong ApcRoutine = Instance.WinHelper.GetArg64(2);
-            ulong ApcContext = Instance.WinHelper.GetArg64(3);
-            ulong IoStatusBlockPtr = Instance.WinHelper.GetArg64(4);
-            ulong BufferPtr = Instance.WinHelper.GetArg64(5);
-            uint Length = (uint)Instance.WinHelper.GetArg64(6, true);
-            ulong ByteOffsetPtr = Instance.WinHelper.GetArg64(7);
-            ulong KeyPtr = Instance.WinHelper.GetArg64(8);
+            ulong FileHandle = Instance.WinHelper.GetArg(0);
+            ulong EventHandle = Instance.WinHelper.GetArg(1);
+            ulong ApcRoutine = Instance.WinHelper.GetArg(2);
+            ulong ApcContext = Instance.WinHelper.GetArg(3);
+            ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(4);
+            ulong BufferPtr = Instance.WinHelper.GetArg(5);
+            uint Length = (uint)Instance.WinHelper.GetArg(6);
+            ulong ByteOffsetPtr = Instance.WinHelper.GetArg(7);
+            ulong KeyPtr = Instance.WinHelper.GetArg(8);
 
             if (IoStatusBlockPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, 0x10))
+            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (Length != 0)
             {
                 if (BufferPtr == 0 || !Instance.IsRegionMapped(BufferPtr, Length))
                 {
-                    Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }
             }
@@ -42,7 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             if (FileObj == null)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
@@ -52,27 +50,27 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     if (!HasWriteAccess(Instance, FileHandle))
                     {
-                        Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                         return NTSTATUS.STATUS_ACCESS_DENIED;
                     }
 
-                    Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Length);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Length);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
             }
 
             if (FileObj.Directory)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
                 return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
             }
 
             if (!HasWriteAccess(Instance, FileHandle))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
@@ -85,14 +83,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             Span<byte> Incoming = Length == 0 ? Span<byte>.Empty : Instance.WinHelper.ReadMemorySpan(BufferPtr, Length);
             if (Length != 0 && Incoming.Length == 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
             WindowsFileStream Stream = FileObj.GetFileStream(true);
             if (Stream == null)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
@@ -103,7 +101,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Incoming.Length != 0 && FileObj.HasConflictingIoLock((ulong)Offset, (ulong)Incoming.Length, true))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_LOCK_CONFLICT, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_LOCK_CONFLICT, 0);
                 return NTSTATUS.STATUS_FILE_LOCK_CONFLICT;
             }
 
@@ -114,14 +112,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             catch
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
             FileObj.Real = true;
             FileObj.Position = Offset + Incoming.Length;
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Incoming.Length);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Incoming.Length);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtWriteFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Wrote=0x{Incoming.Length:X}.", LogFlags.Syscall);
@@ -133,21 +131,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Length == 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
             Span<byte> Data = Instance.WinHelper.ReadMemorySpan(BufferPtr, Length);
             if (Data.Length == 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
             GeneralHelper.ConsoleWrite(Data, Instance.Settings.ConsoleOutputMode);
             Console.Out.Flush();
 
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Data.Length);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Data.Length);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

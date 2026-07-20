@@ -8,11 +8,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong Address1 = Instance.WinHelper.GetArg64(0);
-            ulong Address2 = Instance.WinHelper.GetArg64(1);
+            ulong Address1 = Instance.WinHelper.GetArg(0);
+            ulong Address2 = Instance.WinHelper.GetArg(1);
 
             if (Address1 == 0 || Address2 == 0)
                 return NTSTATUS.STATUS_INVALID_ADDRESS;

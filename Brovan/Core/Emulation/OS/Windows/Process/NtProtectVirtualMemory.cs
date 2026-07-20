@@ -11,28 +11,28 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-                ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
-                ulong RegionSizePtr = Instance.WinHelper.GetArg64(2);
-                ulong NewProtection = (uint)Instance.WinHelper.GetArg64(3);
-                ulong OldProtectionPtr = Instance.WinHelper.GetArg64(4);
+                int PointerSize = Instance.WinHelper.PointerSize;
+                ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+                ulong BaseAddressPtr = Instance.WinHelper.GetArg(1);
+                ulong RegionSizePtr = Instance.WinHelper.GetArg(2);
+                ulong NewProtection = (uint)Instance.WinHelper.GetArg(3);
+                ulong OldProtectionPtr = Instance.WinHelper.GetArg(4);
 
                 // current process
-                if (ProcessHandle == ulong.MaxValue)
+                if (Instance.WinHelper.IsCurrentProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation))
                 {
                     if (BaseAddressPtr == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                    if (!Instance.IsRegionMapped(BaseAddressPtr, sizeof(ulong)))
+                    if (!Instance.IsRegionMapped(BaseAddressPtr, (uint)PointerSize))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!Instance.IsRegionMapped(RegionSizePtr, sizeof(ulong)))
+                    if (!Instance.IsRegionMapped(RegionSizePtr, (uint)PointerSize))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    ulong BaseAddress = Instance.ReadMemoryULong(BaseAddressPtr);
-                    ulong RegionSize = Instance.ReadMemoryULong(RegionSizePtr);
+                    ulong BaseAddress = Instance.WinHelper.ReadPointer(BaseAddressPtr);
+                    ulong RegionSize = Instance.WinHelper.ReadPointer(RegionSizePtr);
 
                     if (BaseAddress == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -61,7 +61,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     MemoryProtection OldProt = OldRegion.Protections;
 
-                    if (OldProtectionPtr != 0 && !Instance.IsRegionMapped(OldProtectionPtr, sizeof(ulong)))
+                    if (OldProtectionPtr != 0 && !Instance.IsRegionMapped(OldProtectionPtr, sizeof(uint)))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                     const ulong PAGE_NOACCESS = 0x01;
@@ -165,7 +165,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if ((OldRegion.SpecialProtections & SpecialProtections.Guard) != 0)
                             OldWinProt |= 0x100;
 
-                        if (!Instance._emulator.WriteMemory(OldProtectionPtr, OldWinProt))
+                        if (!Instance.WinHelper.WriteUInt32(OldProtectionPtr, (uint)OldWinProt))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
@@ -189,11 +189,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return Instance.WinUnimplemented;
                 }
             }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-
-            }
-            return Instance.WinUnimplemented;
         }
     }
 }

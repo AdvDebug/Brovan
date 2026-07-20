@@ -8,10 +8,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            uint ThreadId = (uint)Instance.WinHelper.GetArg64(0);
+            uint ThreadId = (uint)Instance.WinHelper.GetArg(0);
             return NtAlertThreadByThreadId.AlertThread(Instance, ThreadId);
         }
     }

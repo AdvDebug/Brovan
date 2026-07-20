@@ -7,14 +7,12 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            ulong ThreadHandle = Instance.WinHelper.GetArg64(0);
-            uint ThreadInformationClass = (uint)Instance.WinHelper.GetArg64(1);
-            ulong ThreadInformation = Instance.WinHelper.GetArg64(2);
-            uint ThreadInformationLength = (uint)Instance.WinHelper.GetArg64(3);
-            ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(4);
+            ulong ThreadHandle = Instance.WinHelper.GetArg(0);
+            uint ThreadInformationClass = (uint)Instance.WinHelper.GetArg(1);
+            ulong ThreadInformation = Instance.WinHelper.GetArg(2);
+            uint ThreadInformationLength = (uint)Instance.WinHelper.GetArg(3);
+            ulong ReturnLengthPtr = Instance.WinHelper.GetArg(4);
 
             if (ReturnLengthPtr != 0 && !Instance.IsRegionMapped(ReturnLengthPtr, 4))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -55,7 +53,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 case THREADINFOCLASS.ThreadBasicInformation:
                     {
-                        uint RequiredSize = 0x30;
+                        bool Is64 = Instance.WinHelper.PointerSize == 8;
+                        uint RequiredSize = Is64 ? 0x30u : 0x1Cu;
                         NTSTATUS Status = ValidateOutputBuffer(RequiredSize);
                         if (Status != NTSTATUS.STATUS_SUCCESS)
                             return Status;
@@ -68,12 +67,25 @@ namespace Brovan.Core.Emulation.OS.Windows
                             : (uint)NTSTATUS.STATUS_PENDING;
 
                         BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), ExitStatus);
-                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), WinEmulatedThread.GetState(ThreadObj).Teb);
-                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x10, 8), Instance.WinHelper.PID);
-                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x18, 8), (ulong)ThreadObj.ThreadId);
-                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x20, 8), 1UL);
-                        BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x28, 4), (uint)ThreadObj.EffectivePriority);
-                        BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x2C, 4), (uint)ThreadObj.BasePriority);
+
+                        if (Is64)
+                        {
+                            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), WinEmulatedThread.GetState(ThreadObj).Teb);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x10, 8), Instance.WinHelper.PID);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x18, 8), (ulong)ThreadObj.ThreadId);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x20, 8), 1UL);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x28, 4), (uint)ThreadObj.EffectivePriority);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x2C, 4), (uint)ThreadObj.BasePriority);
+                        }
+                        else
+                        {
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), (uint)WinEmulatedThread.GetState(ThreadObj).Teb);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x08, 4), (uint)Instance.WinHelper.PID);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x0C, 4), ThreadObj.ThreadId);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x10, 4), 1u);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x14, 4), (uint)ThreadObj.EffectivePriority);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x18, 4), (uint)ThreadObj.BasePriority);
+                        }
 
                         if (!Instance.WriteMemory(ThreadInformation, Buffer.Slice(0, (int)RequiredSize)))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -203,7 +215,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         private static EmulatedThread ResolveThreadFromHandle(BinaryEmulator Instance, ulong ThreadHandle)
         {
-            if (ThreadHandle == HandleManager.CurrentThread || ThreadHandle == 0xFFFFFFFEu)
+            if (HandleManager.IsCurrentThreadPseudoHandle(ThreadHandle) || ThreadHandle == 0xFFFFFFFEu)
                 return Instance.CurrentThread;
 
             return Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(ThreadHandle);

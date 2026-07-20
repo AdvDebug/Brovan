@@ -119,6 +119,8 @@ namespace Brovan.Core.Emulation
         bool WriteRegister(int register, ulong value);
         bool WriteRegister32(Registers register, uint value);
         bool WriteRegister32(int register, uint value);
+
+        bool WriteGdtr(ulong Base, uint Limit);
         bool WriteRegisterByte(Registers register, byte value);
         bool WriteRegisterByte(int register, byte value);
         bool WriteRegisterByte(Registers register, byte[] value);

@@ -10,22 +10,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong MutantHandle = Instance.WinHelper.GetArg64(0);
-                MUTANT_INFORMATION_CLASS MutantInformationClass = (MUTANT_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg64(1, true);
-                ulong MutantInformation = Instance.WinHelper.GetArg64(2);
-                uint MutantInformationLength = (uint)Instance.WinHelper.GetArg64(3, true);
-                ulong ReturnLength = Instance.WinHelper.GetArg64(4);
+                ulong MutantHandle = Instance.WinHelper.GetArg(0);
+                MUTANT_INFORMATION_CLASS MutantInformationClass = (MUTANT_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(1);
+                ulong MutantInformation = Instance.WinHelper.GetArg(2);
+                uint MutantInformationLength = (uint)Instance.WinHelper.GetArg(3);
+                ulong ReturnLength = Instance.WinHelper.GetArg(4);
 
                 return HandleQueryMutant(Instance, MutantHandle, MutantInformationClass, MutantInformation, MutantInformationLength, ReturnLength, true);
             }
 
-            uint SP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
 
-            uint MutantHandle32 = Instance.ReadMemoryUInt(SP + 4);
-            MUTANT_INFORMATION_CLASS MutantInformationClass32 = (MUTANT_INFORMATION_CLASS)Instance.ReadMemoryUInt(SP + 8);
-            uint MutantInformation32 = Instance.ReadMemoryUInt(SP + 12);
-            uint MutantInformationLength32 = Instance.ReadMemoryUInt(SP + 16);
-            uint ReturnLength32 = Instance.ReadMemoryUInt(SP + 20);
+            uint MutantHandle32 = (uint)Instance.WinHelper.GetArg(0);
+            MUTANT_INFORMATION_CLASS MutantInformationClass32 = (MUTANT_INFORMATION_CLASS)Instance.WinHelper.GetArg(1);
+            uint MutantInformation32 = (uint)Instance.WinHelper.GetArg(2);
+            uint MutantInformationLength32 = (uint)Instance.WinHelper.GetArg(3);
+            uint ReturnLength32 = (uint)Instance.WinHelper.GetArg(4);
 
             return HandleQueryMutant(Instance, MutantHandle32, MutantInformationClass32, MutantInformation32, MutantInformationLength32, ReturnLength32, false);
         }

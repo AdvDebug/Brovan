@@ -45,21 +45,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(FileHandlePtr, sizeof(ulong)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, 16))
+            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.TryReadObjectAttributesName64(ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out string ObjectName, out string FullName, out NTSTATUS ObjectNameStatus))
+            if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out ulong AttributesRoot, out string ObjectName, out string FullName, out NTSTATUS ObjectNameStatus))
                 return ObjectNameStatus;
 
             string RawPath = FullName;
-            ulong RootDirectoryHandle = Attributes.RootDirectory;
+            ulong RootDirectoryHandle = AttributesRoot;
 
 
             if (IsConsoleRelativeObject(ObjectName, RootDirectoryHandle, Instance) || IsConsolePath(RawPath))
             {
                 ulong HandleValue = Instance.WinHelper.ConsoleHandle.Handle;
                 Instance._emulator.WriteMemory(FileHandlePtr, HandleValue);
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
@@ -75,7 +75,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     if (VolumeStatus != NTSTATUS.STATUS_SUCCESS)
                     {
-                        Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, VolumeStatus, 0);
+                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, VolumeStatus, 0);
                         return VolumeStatus;
                     }
 
@@ -89,7 +89,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
                 {
-                    Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, DeviceStatus, 0);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, DeviceStatus, 0);
                     return DeviceStatus;
                 }
 
@@ -99,7 +99,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             string Path = ResolveNtPath(Instance, RawPath, RootDirectoryHandle);
             if (string.IsNullOrEmpty(Path))
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND, 0);
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
@@ -136,7 +136,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 uint HandleValue = (uint)Instance.WinHelper.ConsoleHandle.Handle;
                 Instance._emulator.WriteMemory(FileHandlePtr, HandleValue);
-                Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
@@ -152,7 +152,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     if (VolumeStatus != NTSTATUS.STATUS_SUCCESS)
                     {
-                        Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, VolumeStatus, 0);
+                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, VolumeStatus, 0);
                         return VolumeStatus;
                     }
 
@@ -166,7 +166,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
                 {
-                    Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, DeviceStatus, 0);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, DeviceStatus, 0);
                     return DeviceStatus;
                 }
 
@@ -176,7 +176,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             string Path = ResolveNtPath(Instance, RawPath, RootDirectoryHandle);
             if (string.IsNullOrEmpty(Path))
             {
-                Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND, 0);
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
@@ -190,13 +190,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if ((CreateOptions & FILE_DIRECTORY_FILE) != 0 && (CreateOptions & FILE_NON_DIRECTORY_FILE) != 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
             if ((CreateOptions & FILE_NON_DIRECTORY_FILE) != 0 && IsDirectory)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_INVALID, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_INVALID, 0);
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
             }
 
@@ -206,13 +206,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (IsDirectory && FileExists)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_NOT_A_DIRECTORY, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_NOT_A_DIRECTORY, 0);
                 return NTSTATUS.STATUS_NOT_A_DIRECTORY;
             }
 
             if (!IsDirectory && DirectoryExists)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
                 return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
             }
 
@@ -220,7 +220,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Status != NTSTATUS.STATUS_SUCCESS)
             {
-                Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, Status, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
                 return Status;
             }
 
@@ -243,7 +243,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.AddWinHandle(Handle);
 
             Instance._emulator.WriteMemory(FileHandlePtr, (ulong)Handle.Handle);
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Information);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Information);
 
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -255,13 +255,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if ((CreateOptions & FILE_DIRECTORY_FILE) != 0 && (CreateOptions & FILE_NON_DIRECTORY_FILE) != 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
             if ((CreateOptions & FILE_NON_DIRECTORY_FILE) != 0 && IsDirectory)
             {
-                Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_INVALID, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_INVALID, 0);
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
             }
 
@@ -271,13 +271,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (IsDirectory && FileExists)
             {
-                Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_NOT_A_DIRECTORY, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_NOT_A_DIRECTORY, 0);
                 return NTSTATUS.STATUS_NOT_A_DIRECTORY;
             }
 
             if (!IsDirectory && DirectoryExists)
             {
-                Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
                 return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
             }
 
@@ -285,7 +285,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Status != NTSTATUS.STATUS_SUCCESS)
             {
-                Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, Status, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
                 return Status;
             }
 
@@ -308,7 +308,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.AddWinHandle(Handle);
 
             Instance._emulator.WriteMemory(FileHandlePtr, (uint)Handle.Handle);
-            Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Information);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Information);
 
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -496,7 +496,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.AddWinHandle(Handle);
 
             Instance._emulator.WriteMemory(FileHandlePtr, (ulong)Handle.Handle);
-            Instance.WinHelper.WriteIoStatusBlock64(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -517,7 +517,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.AddWinHandle(Handle);
 
             Instance._emulator.WriteMemory(FileHandlePtr, (uint)Handle.Handle);
-            Instance.WinHelper.WriteIoStatusBlock32(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

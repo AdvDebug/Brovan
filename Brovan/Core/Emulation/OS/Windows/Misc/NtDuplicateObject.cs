@@ -12,13 +12,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong SourceProcessHandle = Instance.WinHelper.GetArg64(0);
-                ulong SourceHandle = Instance.WinHelper.GetArg64(1);
-                ulong TargetProcessHandle = Instance.WinHelper.GetArg64(2);
-                ulong TargetHandlePtr = Instance.WinHelper.GetArg64(3);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(4);
-                uint HandleAttributes = (uint)Instance.WinHelper.GetArg64(5);
-                uint Options = (uint)Instance.WinHelper.GetArg64(6);
+                ulong SourceProcessHandle = Instance.WinHelper.GetArg(0);
+                ulong SourceHandle = Instance.WinHelper.GetArg(1);
+                ulong TargetProcessHandle = Instance.WinHelper.GetArg(2);
+                ulong TargetHandlePtr = Instance.WinHelper.GetArg(3);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(4);
+                uint HandleAttributes = (uint)Instance.WinHelper.GetArg(5);
+                uint Options = (uint)Instance.WinHelper.GetArg(6);
 
                 return DuplicateObject(Instance, SourceProcessHandle, SourceHandle, TargetProcessHandle, TargetHandlePtr, DesiredAccess, HandleAttributes, Options, 8);
             }
@@ -218,12 +218,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool IsCurrentProcessPseudo(ulong Handle)
         {
-            return Handle == HandleManager.CurrentProcess || Handle == uint.MaxValue;
+            return HandleManager.IsCurrentProcessPseudoHandle(Handle) || Handle == uint.MaxValue;
         }
 
         private static bool IsCurrentThreadPseudo(ulong Handle)
         {
-            return Handle == HandleManager.CurrentThread || Handle == 0xFFFFFFFEu;
+            return HandleManager.IsCurrentThreadPseudoHandle(Handle) || Handle == 0xFFFFFFFEu;
         }
     }
 }

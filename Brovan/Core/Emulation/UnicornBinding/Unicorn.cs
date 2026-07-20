@@ -744,6 +744,19 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        public bool WriteGdtr(ulong Base, uint Limit)
+        {
+            if (DisposedCheck())
+                return false;
+
+            uc_x86_mmr Value = new uc_x86_mmr { selector = 0, Base = Base, limit = Limit, flags = 0 };
+            lock (_registerLock)
+            {
+                _error = uc_reg_write_mmr(_uc, Registers.UC_X86_REG_GDTR, ref Value);
+                return _error == UCErrors.UC_ERR_OK;
+            }
+        }
+
         /// <summary>
         /// Write to a register.
         /// </summary>

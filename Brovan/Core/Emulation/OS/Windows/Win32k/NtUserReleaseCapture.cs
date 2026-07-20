@@ -6,8 +6,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
             Win32kHelper.SetCaptureWindow(Instance, 0);
             Instance.SetLastWinError(0);

@@ -76,14 +76,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            uint Count = (uint)Instance.WinHelper.GetArg64(0);
-            ulong HandlesPtr = Instance.WinHelper.GetArg64(1);
-            uint WaitType = (uint)Instance.WinHelper.GetArg64(2);
-            bool Alertable = (uint)Instance.WinHelper.GetArg64(3) != 0;
-            ulong TimeoutPtr = Instance.WinHelper.GetArg64(4);
+            uint Count = (uint)Instance.WinHelper.GetArg(0);
+            ulong HandlesPtr = Instance.WinHelper.GetArg(1);
+            uint WaitType = (uint)Instance.WinHelper.GetArg(2);
+            bool Alertable = (uint)Instance.WinHelper.GetArg(3) != 0;
+            ulong TimeoutPtr = Instance.WinHelper.GetArg(4);
 
             EmulatedThread Thread = Instance.CurrentThread;
             if (Thread == null)
@@ -106,13 +104,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (HandlesPtr == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.IsRegionMapped(HandlesPtr, (uint)(Count * 8)))
+            uint HandleSize = (uint)Instance.WinHelper.PointerSize;
+
+            if (!Instance.IsRegionMapped(HandlesPtr, Count * HandleSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             List<ulong> Handles = new List<ulong>((int)Count);
             for (int i = 0; i < Count; i++)
             {
-                ulong H = Instance.ReadMemoryULong(HandlesPtr + (ulong)(i * 8));
+                ulong H = Instance.WinHelper.ReadPointer(HandlesPtr + (ulong)i * HandleSize);
                 Handles.Add(H);
             }
 

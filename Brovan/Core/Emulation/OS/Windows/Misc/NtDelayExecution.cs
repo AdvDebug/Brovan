@@ -80,11 +80,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return Instance.WinUnimplemented;
 
-            bool Alertable = (uint)Instance.WinHelper.GetArg64(0) != 0;
-            ulong DelayIntervalPtr = Instance.WinHelper.GetArg64(1);
+            bool Alertable = (uint)Instance.WinHelper.GetArg(0) != 0;
+            ulong DelayIntervalPtr = Instance.WinHelper.GetArg(1);
             long DelayMs = ReadDelayMs(Instance, DelayIntervalPtr);
             EmulatedThread Thread = Instance.CurrentThread;
 

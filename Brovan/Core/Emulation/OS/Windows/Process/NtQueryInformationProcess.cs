@@ -8,15 +8,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtQueryInformationProcess : IWinSyscall
     {
+        private const uint MemExecuteOptionEnable = 0x2;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-                PROCESSINFOCLASS InfoClass = (PROCESSINFOCLASS)Instance.WinHelper.GetArg64(1);
-                ulong OutBufferPtr = Instance.WinHelper.GetArg64(2);
-                uint OutBufferLength = (uint)Instance.WinHelper.GetArg64(3);
-                ulong ReturnLengthPtr = Instance.WinHelper.GetArg64(4);
+                ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+                PROCESSINFOCLASS InfoClass = (PROCESSINFOCLASS)Instance.WinHelper.GetArg(1);
+                ulong OutBufferPtr = Instance.WinHelper.GetArg(2);
+                uint OutBufferLength = (uint)Instance.WinHelper.GetArg(3);
+                ulong ReturnLengthPtr = Instance.WinHelper.GetArg(4);
                 void SetReturnLength(uint Len)
                 {
                     if (ReturnLengthPtr == 0)
@@ -25,30 +26,22 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return;
                     Instance._emulator.WriteMemory(ReturnLengthPtr, Len);
                 }
-                bool CurrentProcess = ProcessHandle == ulong.MaxValue;
+                bool CurrentProcess = HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle);
                 switch (InfoClass)
                 {
                     case PROCESSINFOCLASS.ProcessBasicInformation:
-                        if (OutBufferLength < 48)
+                    {
+                        uint PbiSize = (uint)(Instance.WinHelper.PointerSize == 8 ? 48 : 24);
+                        if (OutBufferLength < PbiSize)
                         {
                             return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                         }
 
                         if (CurrentProcess)
                         {
-                            Span<byte> PBIBuffer = GetSharedWriteBuffer(Instance, 48);
-                            WriteUInt32(PBIBuffer, 0, (uint)NTSTATUS.STATUS_PENDING);
-                            WriteUInt64(PBIBuffer, 8, Instance.PEB);
-                            WriteUInt64(PBIBuffer, 16, (ulong)Environment.ProcessorCount);
-                            WriteUInt64(PBIBuffer, 24, (ulong)Instance.WinHelper.CurrentPriority);
-                            WriteUInt64(PBIBuffer, 32, Instance.WinHelper.PID);
-                            WriteUInt64(PBIBuffer, 40, Instance.WinHelper.PPID);
-
-                            if (!Instance.WriteMemory(OutBufferPtr, PBIBuffer))
-                            {
+                            if (!WriteProcessBasicInformation(Instance, OutBufferPtr, Instance.PEB, (ulong)Instance.WinHelper.CurrentPriority, Instance.WinHelper.PID, Instance.WinHelper.PPID))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                            }
-                            SetReturnLength(48);
+                            SetReturnLength(PbiSize);
                             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                                 Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried own PROCESS_BASIC_INFORMATION (PEB = 0x{Instance.PEB:X}).", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
@@ -64,19 +57,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     return NTSTATUS.STATUS_ACCESS_DENIED;
                                 }
 
-                                Span<byte> PBIBuffer = GetSharedWriteBuffer(Instance, 48);
-                                WriteUInt32(PBIBuffer, 0, (uint)NTSTATUS.STATUS_PENDING);
-                                WriteUInt64(PBIBuffer, 8, Instance.PEB);
-                                WriteUInt64(PBIBuffer, 16, (ulong)Environment.ProcessorCount);
-                                WriteUInt64(PBIBuffer, 24, 0x8UL);
-                                WriteUInt64(PBIBuffer, 32, Process.PID);
-                                WriteUInt64(PBIBuffer, 40, Process.PPID);
-
-                                if (!Instance.WriteMemory(OutBufferPtr, PBIBuffer))
-                                {
+                                if (!WriteProcessBasicInformation(Instance, OutBufferPtr, Instance.PEB, 0x8UL, Process.PID, Process.PPID))
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                                }
-                                SetReturnLength(48);
+                                SetReturnLength(PbiSize);
                                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                                     Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried PROCESS_BASIC_INFORMATION of process \"{Process.Name}\" (PID={Process.PID}).", LogFlags.Syscall);
                                 return NTSTATUS.STATUS_SUCCESS;
@@ -86,6 +69,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INVALID_HANDLE;
                             }
                         }
+                    }
                     case PROCESSINFOCLASS.ProcessTimes:
                         {
                             NTSTATUS Status = QueryProcessTimes(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
@@ -137,18 +121,32 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 }
                             }
                         }
+                    case PROCESSINFOCLASS.ProcessExecuteFlags:
+                        {
+                            if (OutBufferLength < sizeof(uint))
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                            if (!Instance.IsRegionMapped(OutBufferPtr, sizeof(uint)))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            if (!Instance.WinHelper.WriteUInt32(OutBufferPtr, MemExecuteOptionEnable))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            SetReturnLength(sizeof(uint));
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
                     case PROCESSINFOCLASS.ProcessDebugPort:
-                        if (OutBufferLength >= 8)
+                        if (OutBufferLength >= (ulong)Instance.WinHelper.PointerSize)
                         {
                             if (CurrentProcess)
                             {
-                                if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, 8))
+                                if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, (uint)Instance.WinHelper.PointerSize))
                                 {
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
                                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                                     Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried own debug port.", LogFlags.Syscall);
-                                SetReturnLength(8);
+                                SetReturnLength((uint)Instance.WinHelper.PointerSize);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
                             else
@@ -161,11 +159,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                                         return NTSTATUS.STATUS_ACCESS_DENIED;
                                     }
 
-                                    if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, 8))
+                                    if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, (uint)Instance.WinHelper.PointerSize))
                                     {
                                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                     }
-                                    SetReturnLength(8);
+                                    SetReturnLength((uint)Instance.WinHelper.PointerSize);
                                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                                         Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried debug port for process \"{Process.Name}\".", LogFlags.Syscall);
                                     return NTSTATUS.STATUS_SUCCESS;
@@ -183,13 +181,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case PROCESSINFOCLASS.ProcessDebugObjectHandle:
                         if (CurrentProcess)
                         {
-                            if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, 8))
+                            if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, (uint)Instance.WinHelper.PointerSize))
                             {
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
                             }
                             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                                 Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried own debug object handle.", LogFlags.Syscall);
-                            SetReturnLength(8);
+                            SetReturnLength((uint)Instance.WinHelper.PointerSize);
                             return NTSTATUS.STATUS_PORT_NOT_SET;
                         }
                         else
@@ -202,11 +200,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     return NTSTATUS.STATUS_ACCESS_DENIED;
                                 }
 
-                                if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, 8))
+                                if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, (uint)Instance.WinHelper.PointerSize))
                                 {
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
-                                SetReturnLength(8);
+                                SetReturnLength((uint)Instance.WinHelper.PointerSize);
                                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                                     Instance.TriggerEventMessage($"[!] NtQueryInformationProcess: Queried debug object handle for process \"{Process.Name}\".", LogFlags.Syscall);
                                 return NTSTATUS.STATUS_PORT_NOT_SET;
@@ -218,7 +216,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                         break;
                     case PROCESSINFOCLASS.ProcessWow64Information:
-                        if (OutBufferLength < 8)
+                        if (OutBufferLength < (ulong)Instance.WinHelper.PointerSize)
                         {
                             return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                         }
@@ -226,13 +224,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                         {
                             if (CurrentProcess)
                             {
-                                if (!Instance._emulator.WriteMemory(OutBufferPtr, (ulong)(Instance._binary.Architecture == BinaryArchitecture.x64 ? 0 : 1), 8))
+                                if (!Instance.WinHelper.WritePointer(OutBufferPtr, Instance._binary.Architecture == BinaryArchitecture.x64 ? 0UL : Instance.PEB))
                                 {
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 }
                                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                                     Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried own Wow64 status.", LogFlags.Syscall);
-                                SetReturnLength(8);
+                                SetReturnLength((uint)Instance.WinHelper.PointerSize);
                                 return NTSTATUS.STATUS_SUCCESS;
                             }
                             else
@@ -245,11 +243,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                                         return NTSTATUS.STATUS_ACCESS_DENIED;
                                     }
 
-                                    if (!Instance._emulator.WriteMemory(OutBufferPtr, Process.Arch == BinaryArchitecture.x64 ? 0u : 1u, 4))
+                                    if (!Instance.WinHelper.WritePointer(OutBufferPtr, Process.Arch == BinaryArchitecture.x64 ? 0UL : Instance.PEB))
                                     {
                                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                     }
-                                    SetReturnLength(8);
+                                    SetReturnLength((uint)Instance.WinHelper.PointerSize);
                                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                                         Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried Wow64 status of process \"{Process.Name}\".", LogFlags.Syscall);
                                     return NTSTATUS.STATUS_SUCCESS;
@@ -356,7 +354,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     case PROCESSINFOCLASS.ProcessImageInformation:
                         {
-                            uint StructSize = 0x40;
+                            bool Is64Image = Instance.WinHelper.PointerSize == 8;
+                            uint StructSize = Is64Image ? 0x40u : 0x30u;
 
                             if (OutBufferLength < StructSize)
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
@@ -364,23 +363,30 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (!Instance.IsRegionMapped(OutBufferPtr, StructSize))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                            ulong EntryPoint = Instance.WinHelper.WinModules[0].MappedBase + (ulong)Instance._binary.PE.OptionalHeader64.AddressOfEntryPoint;
+                            uint AddressOfEntryPoint = Is64Image
+                                ? Instance._binary.PE.OptionalHeader64.AddressOfEntryPoint
+                                : Instance._binary.PE.OptionalHeader32.AddressOfEntryPoint;
 
-                            ulong TransferAddress = EntryPoint;
+                            ulong TransferAddress = Instance.WinHelper.WinModules[0].MappedBase + AddressOfEntryPoint;
                             uint ZeroBits = 0;
 
                             ulong MaximumStackSize = Instance.StackSize;
                             ulong CommittedStackSize = Instance.StackSize;
 
-                            uint SubSystemType = (uint)Instance._binary.PE.OptionalHeader64.Subsystem;
+                            uint SubSystemType = Is64Image
+                                ? (uint)Instance._binary.PE.OptionalHeader64.Subsystem
+                                : (uint)Instance._binary.PE.OptionalHeader32.Subsystem;
 
-                            uint SubSystemVersion = ((uint)Instance._binary.PE.OptionalHeader64.MinorSubsystemVersion << 16) |
-                                                    (uint)Instance._binary.PE.OptionalHeader64.MajorSubsystemVersion;
+                            uint SubSystemVersion = Is64Image
+                                ? (((uint)Instance._binary.PE.OptionalHeader64.MinorSubsystemVersion << 16) | (uint)Instance._binary.PE.OptionalHeader64.MajorSubsystemVersion)
+                                : (((uint)Instance._binary.PE.OptionalHeader32.MinorSubsystemVersion << 16) | (uint)Instance._binary.PE.OptionalHeader32.MajorSubsystemVersion);
 
                             uint GpValue = 0;
 
                             ushort ImageCharacteristics = (ushort)Instance._binary.PE.FileHeader.Characteristics;
-                            ushort DllCharacteristics = (ushort)Instance._binary.PE.OptionalHeader64.DllCharacteristics;
+                            ushort DllCharacteristics = Is64Image
+                                ? (ushort)Instance._binary.PE.OptionalHeader64.DllCharacteristics
+                                : (ushort)Instance._binary.PE.OptionalHeader32.DllCharacteristics;
 
                             ushort Machine = (ushort)Instance._binary.PE.FileHeader.Machine;
 
@@ -393,25 +399,39 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
 
-                            WriteUInt64(Buffer, 0x00, TransferAddress);
-                            WriteUInt64(Buffer, 0x08, ZeroBits);
-                            WriteUInt64(Buffer, 0x10, MaximumStackSize);
-                            WriteUInt64(Buffer, 0x18, CommittedStackSize);
-                            WriteUInt32(Buffer, 0x20, SubSystemType);
-                            WriteUInt32(Buffer, 0x24, SubSystemVersion);
-                            WriteUInt32(Buffer, 0x28, GpValue);
-                            WriteUInt16(Buffer, 0x2C, ImageCharacteristics);
-                            WriteUInt16(Buffer, 0x2E, DllCharacteristics);
-                            WriteUInt16(Buffer, 0x30, Machine);
-                            Buffer[0x32] = ImageContainsCode;
-                            Buffer[0x33] = ImageFlags;
-                            WriteUInt32(Buffer, 0x34, LoaderFlags);
-                            WriteUInt32(Buffer, 0x38, ImageFileSize);
-                            WriteUInt32(Buffer, 0x3C, CheckSum);
+                            int Cursor;
+                            if (Is64Image)
+                            {
+                                WriteUInt64(Buffer, 0x00, TransferAddress);
+                                WriteUInt64(Buffer, 0x08, ZeroBits);
+                                WriteUInt64(Buffer, 0x10, MaximumStackSize);
+                                WriteUInt64(Buffer, 0x18, CommittedStackSize);
+                                Cursor = 0x20;
+                            }
+                            else
+                            {
+                                WriteUInt32(Buffer, 0x00, (uint)TransferAddress);
+                                WriteUInt32(Buffer, 0x04, ZeroBits);
+                                WriteUInt32(Buffer, 0x08, (uint)MaximumStackSize);
+                                WriteUInt32(Buffer, 0x0C, (uint)CommittedStackSize);
+                                Cursor = 0x10;
+                            }
+
+                            WriteUInt32(Buffer, Cursor + 0x00, SubSystemType);
+                            WriteUInt32(Buffer, Cursor + 0x04, SubSystemVersion);
+                            WriteUInt32(Buffer, Cursor + 0x08, GpValue);
+                            WriteUInt16(Buffer, Cursor + 0x0C, ImageCharacteristics);
+                            WriteUInt16(Buffer, Cursor + 0x0E, DllCharacteristics);
+                            WriteUInt16(Buffer, Cursor + 0x10, Machine);
+                            Buffer[Cursor + 0x12] = ImageContainsCode;
+                            Buffer[Cursor + 0x13] = ImageFlags;
+                            WriteUInt32(Buffer, Cursor + 0x14, LoaderFlags);
+                            WriteUInt32(Buffer, Cursor + 0x18, ImageFileSize);
+                            WriteUInt32(Buffer, Cursor + 0x1C, CheckSum);
 
                             if (!Instance.WriteMemory(OutBufferPtr, Buffer))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                            SetReturnLength(0x40);
+                            SetReturnLength(StructSize);
                             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                                 Instance.TriggerEventMessage($"[+] NtQueryInformationProcess: Queried ProcessImageInformation (TransferAddress=0x{TransferAddress:X}).", LogFlags.Syscall);
                             return NTSTATUS.STATUS_SUCCESS;
@@ -468,216 +488,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Helpers.Utils.PrintHighlight($"[!] NtQueryInformationProcess: InfoClass 0x{InfoClass:X} is not implemented");
                 return Instance.WinUnimplemented;
             }
-            else
-            {
-                uint ESP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-                uint ProcessHandle = Instance.ReadMemoryUInt(ESP + 4);
-                PROCESSINFOCLASS InfoClass = (PROCESSINFOCLASS)Instance.ReadMemoryUInt(ESP + 8);
-                uint OutBufferPtr = Instance.ReadMemoryUInt(ESP + 12);
-                uint OutBufferLength = Instance.ReadMemoryUInt(ESP + 16);
-                uint ReturnLengthPtr = Instance.ReadMemoryUInt(ESP + 20);
-                void SetReturnLength(uint Len)
-                {
-                    if (ReturnLengthPtr == 0)
-                        return;
-                    if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
-                        return;
-                    Instance._emulator.WriteMemory(ReturnLengthPtr, Len);
-                }
-                bool CurrentProcess = ProcessHandle == uint.MaxValue;
-                switch (InfoClass)
-                {
-                    case PROCESSINFOCLASS.ProcessBasicInformation:
-                        if (OutBufferLength < 24)
-                        {
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                        }
-
-                        if (CurrentProcess)
-                        {
-                            Span<byte> PBIBuffer = GetSharedWriteBuffer(Instance, 24);
-                            WriteUInt32(PBIBuffer, 0, (uint)NTSTATUS.STATUS_PENDING);
-                            WriteUInt32(PBIBuffer, 4, (uint)Instance.PEB);
-                            WriteUInt32(PBIBuffer, 8, (uint)Environment.ProcessorCount);
-                            WriteUInt32(PBIBuffer, 12, Instance.WinHelper.CurrentPriority);
-                            WriteUInt32(PBIBuffer, 16, Instance.WinHelper.PID);
-                            WriteUInt32(PBIBuffer, 20, Instance.WinHelper.PPID);
-
-                            if (!Instance.WriteMemory(OutBufferPtr, PBIBuffer))
-                            {
-                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                            }
-                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                                Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried own PROCESS_BASIC_INFORMATION.", LogFlags.Syscall);
-                            return NTSTATUS.STATUS_SUCCESS;
-                        }
-                        else
-                        {
-                            if (Instance.WinHelper.ValidProcessHandle(ProcessHandle))
-                            {
-                                WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryInformation | AccessMask.ProcessQueryLimitedInformation);
-
-                                if (Process == null)
-                                {
-                                    return NTSTATUS.STATUS_ACCESS_DENIED;
-                                }
-
-                                Span<byte> PBIBuffer = GetSharedWriteBuffer(Instance, 24);
-                                WriteUInt32(PBIBuffer, 0, (uint)NTSTATUS.STATUS_PENDING);
-                                WriteUInt32(PBIBuffer, 4, (uint)Instance.PEB);
-                                WriteUInt32(PBIBuffer, 8, (uint)Environment.ProcessorCount);
-                                WriteUInt32(PBIBuffer, 12, 0x8u);
-                                WriteUInt32(PBIBuffer, 16, Process.PID);
-                                WriteUInt32(PBIBuffer, 20, Process.PPID);
-
-                                if (!Instance.WriteMemory(OutBufferPtr, PBIBuffer))
-                                {
-                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                                }
-                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried PROCESS_BASIC_INFORMATION of process \"{Process.Name}\".", LogFlags.Syscall);
-                                return NTSTATUS.STATUS_SUCCESS;
-                            }
-                            else
-                            {
-                                return NTSTATUS.STATUS_INVALID_HANDLE;
-                            }
-                        }
-                    case PROCESSINFOCLASS.ProcessTimes:
-                        {
-                            NTSTATUS Status = QueryProcessTimes(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
-                            if (Status == NTSTATUS.STATUS_SUCCESS)
-                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried ProcessTimes.", LogFlags.Syscall);
-                            return Status;
-                        }
-                    case PROCESSINFOCLASS.ProcessBreakOnTermination:
-                        if (OutBufferLength < 1)
-                        {
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                        }
-                        else
-                        {
-                            if (CurrentProcess)
-                            {
-                                if (!Instance.WinHelper.WriteByte(OutBufferPtr, 0))
-                                {
-                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                                }
-                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried own ProcessBreakOnTermination.", LogFlags.Syscall);
-                                return NTSTATUS.STATUS_SUCCESS;
-                            }
-                            else
-                            {
-                                if (Instance.WinHelper.ValidProcessHandle(ProcessHandle))
-                                {
-                                    WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation | AccessMask.ProcessQueryInformation);
-                                    if (Process == null)
-                                    {
-                                        return NTSTATUS.STATUS_ACCESS_DENIED;
-                                    }
-
-                                    if (!Instance.WinHelper.WriteByte(OutBufferPtr, Process.Critical ? (byte)1 : (byte)0))
-                                    {
-                                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                                    }
-                                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                                        Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried ProcessBreakOnTermination for \"{Process.Name}\".", LogFlags.Syscall);
-                                    return NTSTATUS.STATUS_SUCCESS;
-                                }
-                                else
-                                {
-                                    return NTSTATUS.STATUS_INVALID_HANDLE;
-                                }
-                            }
-                        }
-                    case PROCESSINFOCLASS.ProcessDebugPort:
-                        if (OutBufferLength >= 4)
-                        {
-                            if (CurrentProcess)
-                            {
-                                if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, 4))
-                                {
-                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                                }
-                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                                    Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): Queried own debug port.", LogFlags.Syscall);
-                                return NTSTATUS.STATUS_SUCCESS;
-                            }
-                            else
-                            {
-                                if (Instance.WinHelper.ValidProcessHandle(ProcessHandle))
-                                {
-                                    WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation | AccessMask.ProcessQueryInformation);
-                                    if (Process == null)
-                                    {
-                                        return NTSTATUS.STATUS_ACCESS_DENIED;
-                                    }
-
-                                    if (!Instance.WinHelper.WriteZeroMemory(OutBufferPtr, 8))
-                                    {
-                                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                                    }
-                                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                                        Instance.TriggerEventMessage($"[!] NtQueryInformationProcess (x86): Queried debug port of \"{Process.Name}\".", LogFlags.Syscall);
-                                    return NTSTATUS.STATUS_SUCCESS;
-                                }
-                                else
-                                {
-                                    return NTSTATUS.STATUS_INVALID_HANDLE;
-                                }
-                            }
-                        }
-                        else
-                        {
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                        }
-                    case PROCESSINFOCLASS.ProcessWow64Information:
-                        if (OutBufferLength < 4)
-                        {
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                        }
-                        else
-                        {
-                            if (CurrentProcess)
-                            {
-                                if (!Instance._emulator.WriteMemory(OutBufferPtr, Instance._binary.Architecture == BinaryArchitecture.x64 ? 0u : 1u, 4))
-                                {
-                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                                }
-                                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                                    Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried own Wow64 info.", LogFlags.Syscall);
-                                return NTSTATUS.STATUS_SUCCESS;
-                            }
-                            else
-                            {
-                                if (Instance.WinHelper.ValidProcessHandle(ProcessHandle))
-                                {
-                                    WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation | AccessMask.ProcessQueryInformation);
-                                    if (Process == null)
-                                    {
-                                        return NTSTATUS.STATUS_ACCESS_DENIED;
-                                    }
-
-                                    if (!Instance._emulator.WriteMemory(OutBufferPtr, Process.Arch == BinaryArchitecture.x64 ? 0u : 1u, 4))
-                                    {
-                                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                                    }
-                                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                                        Instance.TriggerEventMessage($"[+] NtQueryInformationProcess (x86): Queried Wow64 info for \"{Process.Name}\".", LogFlags.Syscall);
-                                    return NTSTATUS.STATUS_SUCCESS;
-                                }
-                                else
-                                {
-                                    return NTSTATUS.STATUS_INVALID_HANDLE;
-                                }
-                            }
-                        }
-                    default:
-                        return Instance.WinUnimplemented;
-                }
-            }
         }
 
 
@@ -687,12 +497,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
-            bool CurrentProcess = ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue;
+            bool CurrentProcess = HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) || ProcessHandle == uint.MaxValue;
             string FullPath = CurrentProcess ? Instance.WinHelper.WinModules[0].Path : Process.Path;
             if (string.IsNullOrEmpty(FullPath))
                 FullPath = Process.Path ?? string.Empty;
 
-            uint StructSize = StructSerializer.GetStructSize<UNICODE_STRING64>(Instance);
+            uint StructSize = (uint)(Instance.WinHelper.PointerSize == 8 ? 0x10 : 0x08);
             int PathByteCount = Encoding.Unicode.GetByteCount(FullPath) + 2;
             Span<byte> PathBytes = Instance.WinHelper.Shared.GetSpan((uint)PathByteCount);
             Encoding.Unicode.GetBytes(FullPath.AsSpan(), PathBytes);
@@ -717,17 +527,47 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance._emulator.WriteMemory(BufferPtr, PathBytes.Slice(0, PathByteCount)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            UNICODE_STRING64 Unicode = new UNICODE_STRING64()
-            {
-                Length = Length,
-                MaximumLength = MaximumLength,
-                Buffer = BufferPtr
-            };
-
-            if (!StructSerializer.WriteStruct(Instance, OutBufferPtr, Unicode).Success)
+            if (!WriteUnicodeStringHeader(Instance, OutBufferPtr, Length, MaximumLength, BufferPtr))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static bool WriteProcessBasicInformation(BinaryEmulator Instance, ulong OutBufferPtr, ulong Peb, ulong AffinityMask, ulong Pid, ulong ParentPid)
+        {
+            if (Instance.WinHelper.PointerSize == 8)
+            {
+                Span<byte> Buffer = GetSharedWriteBuffer(Instance, 48);
+                WriteUInt32(Buffer, 0, (uint)NTSTATUS.STATUS_PENDING);
+                WriteUInt64(Buffer, 8, Peb);
+                WriteUInt64(Buffer, 16, AffinityMask);
+                WriteUInt64(Buffer, 24, (ulong)Instance.WinHelper.CurrentPriority);
+                WriteUInt64(Buffer, 32, Pid);
+                WriteUInt64(Buffer, 40, ParentPid);
+                return Instance.WriteMemory(OutBufferPtr, Buffer);
+            }
+
+            Span<byte> Buffer32 = GetSharedWriteBuffer(Instance, 24);
+            WriteUInt32(Buffer32, 0x00, (uint)NTSTATUS.STATUS_PENDING);
+            WriteUInt32(Buffer32, 0x04, (uint)Peb);
+            WriteUInt32(Buffer32, 0x08, (uint)AffinityMask);
+            WriteUInt32(Buffer32, 0x0C, (uint)Instance.WinHelper.CurrentPriority);
+            WriteUInt32(Buffer32, 0x10, (uint)Pid);
+            WriteUInt32(Buffer32, 0x14, (uint)ParentPid);
+            return Instance.WriteMemory(OutBufferPtr, Buffer32);
+        }
+
+        private static bool WriteUnicodeStringHeader(BinaryEmulator Instance, ulong Address, ushort Length, ushort MaximumLength, ulong Buffer)
+        {
+            if (!Instance._emulator.WriteMemory(Address + 0x0, Length, 2))
+                return false;
+            if (!Instance._emulator.WriteMemory(Address + 0x2, MaximumLength, 2))
+                return false;
+
+            if (Instance.WinHelper.PointerSize == 8)
+                return Instance._emulator.WriteMemory(Address + 0x4, 0u, 4) && Instance.WinHelper.WritePointer(Address + 0x8, Buffer);
+
+            return Instance.WinHelper.WritePointer(Address + 0x4, Buffer);
         }
 
         private static Span<byte> GetSharedWriteBuffer(BinaryEmulator Instance, uint Size)
@@ -791,7 +631,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Process = null;
 
-            if (ProcessHandle == HandleManager.CurrentProcess || ProcessHandle == uint.MaxValue)
+            if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) || ProcessHandle == uint.MaxValue)
             {
                 Process = Instance.WinHelper.WinProcesses.FirstOrDefault(p => p.PID == Instance.WinHelper.PID);
                 return Process != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_HANDLE;

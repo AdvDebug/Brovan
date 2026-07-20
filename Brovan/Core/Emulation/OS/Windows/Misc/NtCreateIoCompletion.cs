@@ -4,18 +4,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtCreateIoCompletion : IWinSyscall
     {
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong IoCompletionHandlePtr = Instance.WinHelper.GetArg64(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg64(1);
-                ulong Count = Instance.WinHelper.GetArg64(3);
+                ulong IoCompletionHandlePtr = Instance.WinHelper.GetArg(0);
+                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+                ulong Count = Instance.WinHelper.GetArg(3);
 
                 if (IoCompletionHandlePtr == 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                if (!Instance.IsRegionMapped(IoCompletionHandlePtr, 8))
+                if (!Instance.IsRegionMapped(IoCompletionHandlePtr, (uint)Instance.WinHelper.PointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 uint Id = Instance.WinHelper.GenerateRandomPID();
@@ -28,16 +29,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(IoCompletion, (AccessMask)DesiredAccess);
                 Instance.WinHelper.AddWinHandle(Handle);
 
-                if (!Instance._emulator.WriteMemory(IoCompletionHandlePtr, Handle.Handle))
+                if (!Instance.WinHelper.WritePointer(IoCompletionHandlePtr, Handle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            uint ESP = Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
-            uint IoCompletionHandlePtr32 = Instance.ReadMemoryUInt(ESP + 4);
-            uint DesiredAccess32 = Instance.ReadMemoryUInt(ESP + 8);
-            uint Count32 = Instance.ReadMemoryUInt(ESP + 16);
+            uint IoCompletionHandlePtr32 = (uint)Instance.WinHelper.GetArg(0);
+            uint DesiredAccess32 = (uint)Instance.WinHelper.GetArg(1);
+            uint Count32 = (uint)Instance.WinHelper.GetArg(3);
 
             if (IoCompletionHandlePtr32 == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
