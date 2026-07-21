@@ -220,6 +220,9 @@ namespace Brovan.Core.Emulation.Guests
         internal Dictionary<int, LinuxSyscallEntry> X64Dictionary { get; private set; }
         internal Dictionary<int, LinuxSyscallEntry> X86Dictionary { get; private set; }
 
+        private SyscallDispatchTable<LinuxSyscallEntry> X64Table;
+        private SyscallDispatchTable<LinuxSyscallEntry> X86Table;
+
         /// <summary>
         /// Indicates whether the emulator will treat the data as a binary or as raw data.
         /// </summary>
@@ -303,6 +306,30 @@ namespace Brovan.Core.Emulation.Guests
                 }
             }
 #endif
+            X64Table = BuildDispatchTable(X64Dictionary);
+            X86Table = BuildDispatchTable(X86Dictionary);
+        }
+
+        private static SyscallDispatchTable<LinuxSyscallEntry> BuildDispatchTable(Dictionary<int, LinuxSyscallEntry> Source)
+        {
+            if (Source.Count == 0)
+                return SyscallDispatchTable<LinuxSyscallEntry>.Empty;
+            if (Source.Count >= ushort.MaxValue)
+                throw new InvalidOperationException($"Too many syscall handlers ({Source.Count}) for a ushort index map.");
+
+            List<int> Numbers = new List<int>(Source.Keys);
+            Numbers.Sort();
+
+            ushort[] IndexMap = new ushort[Numbers[Numbers.Count - 1] + 1];
+            LinuxSyscallEntry[] Entries = new LinuxSyscallEntry[Numbers.Count + 1];
+
+            for (int i = 0; i < Numbers.Count; i++)
+            {
+                Entries[i + 1] = Source[Numbers[i]];
+                IndexMap[Numbers[i]] = (ushort)(i + 1);
+            }
+
+            return new SyscallDispatchTable<LinuxSyscallEntry>(IndexMap, Entries);
         }
 
         public void Initialize(BinaryEmulator Instance, BinaryFile Binary)
@@ -456,7 +483,8 @@ namespace Brovan.Core.Emulation.Guests
                 int syscall = unchecked((int)Vals[0]);
                 ulong Rip = Vals[1];
 
-                if (X64Dictionary.TryGetValue(syscall, out LinuxSyscallEntry Entry))
+                LinuxSyscallEntry Entry = X64Table.Lookup(unchecked((uint)syscall));
+                if (Entry.Handler != null)
                 {
                     LinuxSyscallContext Context = new LinuxSyscallContext();
                     Context.Abi = SyscallAbi.X64;
@@ -475,9 +503,8 @@ namespace Brovan.Core.Emulation.Guests
                 }
                 else
                 {
-                    ulong[] Args = new ulong[] { Vals[2], Vals[3], Vals[4], Vals[5], Vals[6], Vals[7] };
                     if (Instance.Syscalls?.TraceEnabled == true)
-                        Instance.Syscalls.RecordSyscall(GuestOsKind.Linux, SyscallAbi.X64, unchecked((uint)syscall), null, Args, Vals[0], Rip, false);
+                        Instance.Syscalls.RecordSyscall(GuestOsKind.Linux, SyscallAbi.X64, unchecked((uint)syscall), null, new ulong[] { Vals[2], Vals[3], Vals[4], Vals[5], Vals[6], Vals[7] }, Vals[0], Rip, false);
                     if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                         Instance.TriggerEventMessage($"[!] Unknown linux syscall with the number 0x{syscall:X} has been executed.", LogFlags.Issues);
                 }
@@ -515,7 +542,8 @@ namespace Brovan.Core.Emulation.Guests
                 {
                     int syscall = unchecked((int)Instance.ReadRegister32(Registers.UC_X86_REG_EAX));
                     ulong Rip = Instance.ReadRegister(Instance.IPRegister);
-                    if (X86Dictionary.TryGetValue(syscall, out LinuxSyscallEntry Entry))
+                    LinuxSyscallEntry Entry = X86Table.Lookup(unchecked((uint)syscall));
+                    if (Entry.Handler != null)
                     {
                         Helper.SyncEmulatedClock(Instance);
                         LinuxSyscallContext Context = new LinuxSyscallContext();

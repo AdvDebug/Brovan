@@ -61,6 +61,26 @@ namespace Brovan.Core.Emulation
         public IWinSyscall Handler;
     }
 
+    public sealed class SyscallDispatchTable<TEntry> where TEntry : struct
+    {
+        public static readonly SyscallDispatchTable<TEntry> Empty = new SyscallDispatchTable<TEntry>(Array.Empty<ushort>(), new TEntry[1]);
+
+        private readonly ushort[] _indexMap;
+        private readonly TEntry[] _entries;
+
+        internal SyscallDispatchTable(ushort[] IndexMap, TEntry[] Entries)
+        {
+            _indexMap = IndexMap;
+            _entries = Entries;
+        }
+
+        public TEntry Lookup(uint Number)
+        {
+            ushort[] Map = _indexMap;
+            return _entries[Number < (uint)Map.Length ? Map[Number] : 0];
+        }
+    }
+
     /// <summary>
     /// Linux syscall handling interface.
     /// </summary>
@@ -1456,8 +1476,8 @@ namespace Brovan.Core.Emulation
             [new ApiSetOverrideKey("ext-ms-win-kernel32-errorhandling-l1-1-0.dll", "kernel32.dll")] = "faultrep.dll",
         };
 
-        private static IReadOnlyDictionary<uint, WinSyscallEntry> CachedSyscallDictionary = null;
-        private static IReadOnlyDictionary<uint, WinSyscallEntry> CachedSyscallDictionaryx86 = null;
+        private static SyscallDispatchTable<WinSyscallEntry> CachedSyscallTable = null;
+        private static SyscallDispatchTable<WinSyscallEntry> CachedSyscallTablex86 = null;
 
         public static uint TryExtractSyscallByte(ReadOnlySpan<byte> bytes)
         {
@@ -1479,28 +1499,50 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public static void ClearCachedSyscalls()
         {
-            if (CachedSyscallDictionary != null)
+            if (CachedSyscallTable != null)
             {
-                CachedSyscallDictionary = null;
+                CachedSyscallTable = null;
             }
 
-            if (CachedSyscallDictionaryx86 != null)
+            if (CachedSyscallTablex86 != null)
             {
-                CachedSyscallDictionaryx86 = null;
+                CachedSyscallTablex86 = null;
             }
         }
 
+        private static SyscallDispatchTable<WinSyscallEntry> ToDispatchTable(Dictionary<uint, WinSyscallEntry> Source)
+        {
+            if (Source.Count == 0)
+                return SyscallDispatchTable<WinSyscallEntry>.Empty;
+            if (Source.Count >= ushort.MaxValue)
+                throw new InvalidOperationException($"Too many syscall handlers ({Source.Count}) for a ushort index map.");
+
+            List<uint> Numbers = new List<uint>(Source.Keys);
+            Numbers.Sort();
+
+            ushort[] IndexMap = new ushort[Numbers[Numbers.Count - 1] + 1];
+            WinSyscallEntry[] Entries = new WinSyscallEntry[Numbers.Count + 1];
+
+            for (int i = 0; i < Numbers.Count; i++)
+            {
+                Entries[i + 1] = Source[Numbers[i]];
+                IndexMap[Numbers[i]] = (ushort)(i + 1);
+            }
+
+            return new SyscallDispatchTable<WinSyscallEntry>(IndexMap, Entries);
+        }
+
         /// <summary>
-        /// Build a dictionary with the syscalls.
+        /// Build a dispatch table with the syscalls.
         /// </summary>
         /// <param name="BinaryArch">Binary architecture to get for syscalls.</param>
-        /// <returns>returns the dictionary containing the syscalls.</returns>
-        public static IReadOnlyDictionary<uint, WinSyscallEntry> BuildWinSyscallDictionary(BinaryArchitecture BinaryArch)
+        /// <returns>returns the dispatch table containing the syscalls, keyed by syscall number.</returns>
+        public static SyscallDispatchTable<WinSyscallEntry> BuildWinSyscallTable(BinaryArchitecture BinaryArch)
         {
-            if (BinaryArch == BinaryArchitecture.x64 && CachedSyscallDictionary != null)
-                return CachedSyscallDictionary;
-            else if (BinaryArch == BinaryArchitecture.x86 && CachedSyscallDictionaryx86 != null)
-                return CachedSyscallDictionaryx86;
+            if (BinaryArch == BinaryArchitecture.x64 && CachedSyscallTable != null)
+                return CachedSyscallTable;
+            else if (BinaryArch == BinaryArchitecture.x86 && CachedSyscallTablex86 != null)
+                return CachedSyscallTablex86;
 
             HashSet<string> SupportedFunctions = new HashSet<string>(WinSyscallRegistry.SupportedFunctions, StringComparer.OrdinalIgnoreCase);
             HashSet<string> SupportedFunctionsWin32k = new HashSet<string>(WinSyscallRegistry.SupportedFunctionsWin32k, StringComparer.OrdinalIgnoreCase);
@@ -1612,7 +1654,7 @@ namespace Brovan.Core.Emulation
                 string Win32uPath = GeneralHelper.GetWindowsLibPath("win32u.dll", true, BinaryArchitecture.x86);
 
                 if (!AddSyscallsFromFiles(NtdllPath, Win32uPath))
-                    return SyscallDictionary;
+                    return ToDispatchTable(SyscallDictionary);
             }
             else if (GeneralHelper.IsWindows)
             {
@@ -1646,18 +1688,19 @@ namespace Brovan.Core.Emulation
                 string Win32uPath = Path.Combine(GeneralHelper.WindowsLibsPath, "win32u.dll");
 
                 if (!AddSyscallsFromFiles(NtdllPath, Win32uPath))
-                    return SyscallDictionary;
+                    return ToDispatchTable(SyscallDictionary);
             }
 
+            SyscallDispatchTable<WinSyscallEntry> ResultTable = ToDispatchTable(SyscallDictionary);
             if (SyscallDictionary.Count > 0)
             {
                 if (BinaryArch == BinaryArchitecture.x64)
-                    CachedSyscallDictionary = new Dictionary<uint, WinSyscallEntry>(SyscallDictionary);
+                    CachedSyscallTable = ResultTable;
                 else
-                    CachedSyscallDictionaryx86 = new Dictionary<uint, WinSyscallEntry>(SyscallDictionary);
+                    CachedSyscallTablex86 = ResultTable;
             }
 
-            return SyscallDictionary;
+            return ResultTable;
         }
     }
 }

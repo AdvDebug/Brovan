@@ -235,15 +235,11 @@ namespace Brovan.Core.Emulation.Guests
             return true;
         }
 
-        public string GetRegisterName(int Register)
-        {
-            foreach (KeyValuePair<string, int> Entry in RegisterNames)
-            {
-                if (Entry.Value == Register)
-                    return Entry.Key.ToUpperInvariant();
-            }
+        private readonly Dictionary<int, string> RegisterNamesById = new();
 
-            return $"REG_{Register}";
+        public string GetRegisterName(int register)
+        {
+            return RegisterNamesById.TryGetValue(register, out string name) ? name : $"REG_{register}";
         }
 
         public string GetRegisterDump(BinaryEmulator Instance)
@@ -264,9 +260,10 @@ namespace Brovan.Core.Emulation.Guests
             return string.Empty;
         }
 
-        private void AddAlias(string Name, int Register)
+        private void AddAlias(string name, int register)
         {
-            RegisterNames[Name] = Register;
+            RegisterNames[name] = register;
+            RegisterNamesById.TryAdd(register, name.ToUpperInvariant());
         }
 
         private void AddX86RegisterNames()

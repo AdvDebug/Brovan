@@ -47,7 +47,7 @@ namespace Brovan.Core.Emulation.Guests
 
         private readonly BlobData _blob;
         private readonly WindowsBlobLaunchMode _blobLaunchMode;
-        private IReadOnlyDictionary<uint, WinSyscallEntry> WinSyscallTable = new Dictionary<uint, WinSyscallEntry>();
+        private SyscallDispatchTable<WinSyscallEntry> WinSyscallTable = SyscallDispatchTable<WinSyscallEntry>.Empty;
         private WinModule _ntdllModule;
 
         private bool UsesDirectBlobStartup => IsBlob && _blobLaunchMode == WindowsBlobLaunchMode.Direct;
@@ -559,7 +559,7 @@ namespace Brovan.Core.Emulation.Guests
                 bool CaptureSyscallHistory = Instance.Syscalls?.TraceEnabled == true;
                 ulong[] HistoryArgs = CaptureSyscallHistory ? ReadWindowsSyscallArguments(Instance, 6) : Array.Empty<ulong>();
 
-                WinSyscallTable.TryGetValue(Syscall, out WinSyscallEntry Entry);
+                WinSyscallEntry Entry = WinSyscallTable.Lookup(Syscall);
                 string HandlerName = Entry.Name;
                 bool IsImplemented = Entry.Handler != null;
 
@@ -1192,7 +1192,7 @@ namespace Brovan.Core.Emulation.Guests
             if (UsesDirectBlobStartup)
                 EnsureDirectBlobStandardHandles();
 
-            WinSyscallTable = HelperFunctions.BuildWinSyscallDictionary(Instance._binary.Architecture);
+            WinSyscallTable = HelperFunctions.BuildWinSyscallTable(Instance._binary.Architecture);
 
             ulong PageSize = 0x2000;
             PEB = Instance.MapUniqueAddress(PageSize, MemoryProtection.ReadWrite);

@@ -3101,10 +3101,9 @@ namespace Brovan.Core.Emulation
                 MemoryRegion Region = new MemoryRegion();
                 TryFindMemoryRegion(Address, out Region);
 
-                if (Region.BaseAddress != 0 && !RegionSnapshots.ContainsKey(Region.BaseAddress))
+                if (Region.BaseAddress != 0 && !RegionSnapshots.TryGetValue(Region.BaseAddress, out _))
                 {
-                    byte[] Data = _emulator.ReadMemory(Region.BaseAddress, Region.Size);
-                    RegionSnapshots[Region.BaseAddress] = Data;
+                    RegionSnapshots[Region.BaseAddress] = _emulator.ReadMemory(Region.BaseAddress, Region.Size);
                 }
             }
             catch
