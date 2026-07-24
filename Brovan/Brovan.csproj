@@ -20,8 +20,41 @@
         <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
     </PropertyGroup>
 
-    <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="$([MSBuild]::IsOSPlatform('Windows'))">
-        <Exec Command="@echo off&#xA;:: Detect if this is a Linux target build&#xA;set &quot;RID=$(RuntimeIdentifier)&quot;&#xA;set &quot;IS_LINUX=0&quot;&#xA;if not &quot;%25RID%25&quot;==&quot;&quot; (&#xA;  echo %25RID%25 | findstr /i &quot;linux&quot; &gt;nul 2&gt;&amp;1&#xA;  if not errorlevel 1 set &quot;IS_LINUX=1&quot;&#xA;)&#xA;&#xA;:: Skip editbin entirely for Linux builds&#xA;if &quot;%25IS_LINUX%25&quot;==&quot;1&quot; (&#xA;  echo Skipping editbin for Linux build.&#xA;  exit /b 0&#xA;)&#xA;&#xA;:: Get the target path (which is the dll)&#xA;set &quot;ORIGINAL_PATH=$(TargetPath)&quot;&#xA;:: Replace the target path dll extension with an exe extension to pass it to editbin later.&#xA;set &quot;MODIFIED_PATH=%25ORIGINAL_PATH:.dll=.exe%25&quot;&#xA;echo Calling VsDevCmd.bat...&#xA;call &quot;$(DevEnvDir)..\Tools\VsDevCmd.bat&quot; &gt;nul 2&gt;&amp;1&#xA;if errorlevel 1 (&#xA;  echo Warning: Couldn't execute visual studio developer command prompt.&#xA;  exit /b 0&#xA;)&#xA;:: Check if editbin.exe is now available&#xA;where editbin.exe &gt;nul 2&gt;&amp;1&#xA;if errorlevel 1 (&#xA;  echo Warning: editbin.exe not found in environment. CFG won't be disabled, Brovan will try to disable it at runtime.&#xA;) else (&#xA;  :: Disable CFG using editbin.exe&#xA;  editbin.exe /GUARD:NO %25MODIFIED_PATH%25 &gt;nul 2&gt;&amp;1&#xA;  if errorlevel 1 (&#xA;    echo editbin.exe failed to run, CFG won't be disabled so Brovan will try to disable it at runtime.&#xA;  ) else (&#xA;    echo Disabled CFG using editbin.exe successfully.&#xA;  )&#xA;)&#xA;exit /b 0" />
+    <UsingTask TaskName="DisableGuardCF" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+        <ParameterGroup>
+            <FilePath ParameterType="System.String" Required="true" />
+        </ParameterGroup>
+        <Task>
+            <Using Namespace="System" />
+            <Using Namespace="System.IO" />
+            <Code Type="Fragment" Language="cs"><![CDATA[
+                byte[] Image = File.ReadAllBytes(FilePath);
+                if (Image.Length < 0x40 || Image[0] != (byte)'M' || Image[1] != (byte)'Z')
+                    return true;
+
+                int PeHeaderOffset = BitConverter.ToInt32(Image, 0x3C);
+
+                int DllCharacteristicsOffset = PeHeaderOffset + 4 + 20 + 0x46;
+                if (PeHeaderOffset <= 0 || DllCharacteristicsOffset + 2 > Image.Length ||
+                    Image[PeHeaderOffset] != (byte)'P' || Image[PeHeaderOffset + 1] != (byte)'E')
+                    return true;
+
+                const ushort GuardCF = 0x4000;
+                ushort DllCharacteristics = BitConverter.ToUInt16(Image, DllCharacteristicsOffset);
+                if ((DllCharacteristics & GuardCF) == 0)
+                    return true;
+
+                DllCharacteristics &= unchecked((ushort)~GuardCF);
+                Image[DllCharacteristicsOffset] = (byte)DllCharacteristics;
+                Image[DllCharacteristicsOffset + 1] = (byte)(DllCharacteristics >> 8);
+                File.WriteAllBytes(FilePath, Image);
+                Log.LogMessage(MessageImportance.High, "Cleared the GuardCF flag in " + Path.GetFileName(FilePath) + " so Unicorn can run without a CFG-disabling restart.");
+            ]]></Code>
+        </Task>
+    </UsingTask>
+
+    <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="Exists('$(TargetDir)$(TargetName).exe')">
+        <DisableGuardCF FilePath="$(TargetDir)$(TargetName).exe" />
     </Target>
 
     <ItemGroup>
