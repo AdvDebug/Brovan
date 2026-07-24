@@ -45,7 +45,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinToken Token = null;
 
-            long TokenHandleSigned = Is64 ? unchecked((long)TokenHandle) : unchecked((int)(uint)TokenHandle);
+            long TokenHandleSigned = HandleManager.ToSignedHandle(TokenHandle);
 
             if (TokenHandleSigned == -4 || TokenHandleSigned == -5 || TokenHandleSigned == -6)
             {

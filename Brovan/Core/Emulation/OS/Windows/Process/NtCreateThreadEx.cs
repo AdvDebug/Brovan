@@ -13,36 +13,40 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance == null || Thread == null || AttributeList == 0)
                 return;
 
-            if (!Instance.IsRegionMapped(AttributeList, 8))
+            WinSysHelper Helper = Instance.WinHelper;
+            ulong PointerSize = (ulong)Helper.PointerSize;
+            ulong AttributeSize = PointerSize * 4;
+
+            if (!Instance.IsRegionMapped(AttributeList, PointerSize))
                 return;
 
-            ulong TotalLength = Instance.ReadMemoryULong(AttributeList);
-            if (TotalLength < 8 + 32)
+            ulong TotalLength = Helper.ReadPointer(AttributeList);
+            if (TotalLength < PointerSize + AttributeSize)
                 return;
 
-            ulong Count = (TotalLength - 8) / 32;
+            ulong Count = (TotalLength - PointerSize) / AttributeSize;
             if (Count > 32)
                 Count = 32;
 
             for (ulong Index = 0; Index < Count; Index++)
             {
-                ulong AttributeAddress = AttributeList + 8 + Index * 32;
-                if (!Instance.IsRegionMapped(AttributeAddress, 32))
+                ulong AttributeAddress = AttributeList + PointerSize + Index * AttributeSize;
+                if (!Instance.IsRegionMapped(AttributeAddress, AttributeSize))
                     break;
 
-                ulong Attribute = Instance.ReadMemoryULong(AttributeAddress);
-                ulong Size = Instance.ReadMemoryULong(AttributeAddress + 8);
-                ulong ValuePtr = Instance.ReadMemoryULong(AttributeAddress + 16);
+                ulong Attribute = Helper.ReadPointer(AttributeAddress);
+                ulong Size = Helper.ReadPointer(AttributeAddress + PointerSize);
+                ulong ValuePtr = Helper.ReadPointer(AttributeAddress + PointerSize * 2);
 
-                if (Attribute == PS_ATTRIBUTE_CLIENT_ID && Size >= 16 && ValuePtr != 0 && Instance.IsRegionMapped(ValuePtr, 16))
+                if (Attribute == PS_ATTRIBUTE_CLIENT_ID && Size >= PointerSize * 2 && ValuePtr != 0 && Instance.IsRegionMapped(ValuePtr, PointerSize * 2))
                 {
-                    Instance._emulator.WriteMemory(ValuePtr, (ulong)Instance.WinHelper.PID, 8);
-                    Instance._emulator.WriteMemory(ValuePtr + 8, (ulong)Thread.ThreadId, 8);
+                    Helper.WritePointer(ValuePtr, Helper.PID);
+                    Helper.WritePointer(ValuePtr + PointerSize, Thread.ThreadId);
                 }
-                else if (Attribute == PS_ATTRIBUTE_TEB_ADDRESS && Size >= 8 && ValuePtr != 0 && Instance.IsRegionMapped(ValuePtr, 8))
+                else if (Attribute == PS_ATTRIBUTE_TEB_ADDRESS && Size >= PointerSize && ValuePtr != 0 && Instance.IsRegionMapped(ValuePtr, PointerSize))
                 {
                     WindowsThreadState State = WinEmulatedThread.GetState(Thread);
-                    Instance._emulator.WriteMemory(ValuePtr, State.Teb, 8);
+                    Helper.WritePointer(ValuePtr, State.Teb);
                 }
             }
         }
@@ -94,7 +98,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(NewThread, Permissions);
             Instance.WinHelper.AddWinHandle(Handle);
 
-            if (!Instance._emulator.WriteMemory(ThreadHandlePtr, Handle.Handle, 8))
+            if (!Instance.WinHelper.WritePointer(ThreadHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             WriteThreadCreationAttributes(Instance, NewThread, AttributeList);

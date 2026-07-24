@@ -14,14 +14,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ThreadHandlePtr == 0 || ClientIdPtr == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            ulong Tid = Instance._emulator.ReadMemoryULong(ClientIdPtr + 0x8);
+            ulong Tid = Instance.WinHelper.ReadPointer(ClientIdPtr + (ulong)Instance.WinHelper.PointerSize);
             EmulatedThread Thread = Instance.Threads.Values.FirstOrDefault(EmuThread => EmuThread.ThreadId == Tid);
             if (Thread == null)
                 return NTSTATUS.STATUS_INVALID_CID;
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Thread, (AccessMask)DesiredAccess);
             Instance.WinHelper.AddWinHandle(Handle);
-            Instance._emulator.WriteMemory(ThreadHandlePtr, Handle.Handle, 8);
+            Instance.WinHelper.WritePointer(ThreadHandlePtr, Handle.Handle);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

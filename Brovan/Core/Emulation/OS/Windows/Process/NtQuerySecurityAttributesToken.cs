@@ -14,16 +14,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint BufferLength = (uint)Instance.WinHelper.GetArg(4);
             ulong ReturnLengthPtr = Instance.WinHelper.GetArg(5);
 
-            const uint RequiredSize = 0x10;
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+            uint RequiredSize = 0x8 + PointerSize;
 
-            long SignedTokenHandle = unchecked((long)TokenHandle);
+            long SignedTokenHandle = HandleManager.ToSignedHandle(TokenHandle);
             if (SignedTokenHandle != -4 && SignedTokenHandle != -5 && SignedTokenHandle != -6 && !Instance.WinHelper.HandleManager.HandleExists(TokenHandle, HandleType.TokenHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if (NumberOfAttrs != 0 && AttributesPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (AttributesPtr != 0 && NumberOfAttrs != 0 && !Instance.IsRegionMapped(AttributesPtr, NumberOfAttrs * 8UL))
+            if (AttributesPtr != 0 && NumberOfAttrs != 0 && !Instance.IsRegionMapped(AttributesPtr, NumberOfAttrs * (ulong)PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (ReturnLengthPtr != 0)
@@ -46,7 +47,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(Buffer + 0x0, (ushort)0, 2); // Version
             Instance._emulator.WriteMemory(Buffer + 0x2, (ushort)0, 2); // Reserved
             Instance._emulator.WriteMemory(Buffer + 0x4, 0u, 4); // AttributeCount
-            Instance._emulator.WriteMemory(Buffer + 0x8, 0UL, 8); // Attribute pointer
+            Instance.WinHelper.WritePointer(Buffer + 0x8, 0); // Attribute pointer
 
             return NTSTATUS.STATUS_SUCCESS;
         }

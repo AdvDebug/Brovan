@@ -94,9 +94,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Token = null;
             Access = AccessMask.None;
 
-            long SignedHandle = Instance._binary.Architecture == BinaryArchitecture.x64
-                ? unchecked((long)TokenHandle)
-                : unchecked((int)(uint)TokenHandle);
+            long SignedHandle = HandleManager.ToSignedHandle(TokenHandle);
 
             if (SignedHandle == -4 || SignedHandle == -5 || SignedHandle == -6)
             {

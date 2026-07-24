@@ -79,10 +79,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return VolumeStatus;
                     }
 
-                    return CreateDeviceHandle64(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeInternalPath, VolumeHandler);
+                    return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeInternalPath, VolumeHandler);
                 }
 
-                return CreateDeviceHandle64(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeDevicePath, null);
+                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeDevicePath, null);
             }
 
             if (Instance.WinHelper.TryCreateDevice(Normalized, Ea, out string DevicePath, out WinDeviceDelegate DeviceHandler, out NTSTATUS DeviceStatus))
@@ -93,7 +93,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return DeviceStatus;
                 }
 
-                return CreateDeviceHandle64(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler);
+                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler);
             }
 
             string Path = ResolveNtPath(Instance, RawPath, RootDirectoryHandle);
@@ -156,10 +156,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return VolumeStatus;
                     }
 
-                    return CreateDeviceHandle32(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, VolumeInternalPath, VolumeHandler);
+                    return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, VolumeInternalPath, VolumeHandler);
                 }
 
-                return CreateDeviceHandle32(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, VolumeDevicePath, null);
+                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, VolumeDevicePath, null);
             }
 
             if (Instance.WinHelper.TryCreateDevice(Normalized, Ea, out string DevicePath, out WinDeviceDelegate DeviceHandler, out NTSTATUS DeviceStatus))
@@ -170,7 +170,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return DeviceStatus;
                 }
 
-                return CreateDeviceHandle32(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, DevicePath, DeviceHandler);
+                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, DevicePath, DeviceHandler);
             }
 
             string Path = ResolveNtPath(Instance, RawPath, RootDirectoryHandle);
@@ -479,7 +479,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return new string(Buf);
         }
 
-        internal static NTSTATUS CreateDeviceHandle64(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string InternalPath, WinDeviceDelegate Handler)
+        internal static NTSTATUS CreateDeviceHandle(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string InternalPath, WinDeviceDelegate Handler)
         {
             WinFile FileObj = new WinFile
             {
@@ -495,28 +495,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
             Instance.WinHelper.AddWinHandle(Handle);
 
-            Instance._emulator.WriteMemory(FileHandlePtr, (ulong)Handle.Handle);
-            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
-            return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        internal static NTSTATUS CreateDeviceHandle32(BinaryEmulator Instance, uint FileHandlePtr, uint IoStatusBlockPtr, AccessMask Permissions, string InternalPath, WinDeviceDelegate Handler)
-        {
-            WinFile FileObj = new WinFile
-            {
-                Path = InternalPath,
-                Device = true,
-                Real = false,
-                Directory = false,
-                Position = 0,
-                Handler = Handler
-            };
-
-            Instance.WinHelper.WinFiles.Add(FileObj);
-            WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
-            Instance.WinHelper.AddWinHandle(Handle);
-
-            Instance._emulator.WriteMemory(FileHandlePtr, (uint)Handle.Handle);
+            Instance.WinHelper.WritePointer(FileHandlePtr, Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
             return NTSTATUS.STATUS_SUCCESS;
         }

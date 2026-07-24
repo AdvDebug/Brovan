@@ -104,6 +104,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public static bool IsCurrentThreadPseudoHandle(ulong Handle) => Handle == CurrentThread || Handle == CurrentThread32;
 
         public static bool IsCurrentProcessPseudoHandle(ulong Handle) => Handle == CurrentProcess || Handle == CurrentProcess32;
+
+        public static long ToSignedHandle(ulong Handle) => Handle <= uint.MaxValue ? (int)(uint)Handle : (long)Handle;
+
         private ulong NextHandle = 0x40;
         private readonly Dictionary<ulong, HandleEntry> HandleTable = new();
         private readonly Dictionary<string, List<ulong>> ObjectIdToHandles = new();

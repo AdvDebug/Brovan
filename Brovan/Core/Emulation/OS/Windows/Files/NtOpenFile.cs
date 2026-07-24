@@ -41,10 +41,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return VolumeStatus;
                     }
 
-                    return NtCreateFile.CreateDeviceHandle64(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeInternalPath, VolumeHandler);
+                    return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeInternalPath, VolumeHandler);
                 }
 
-                return NtCreateFile.CreateDeviceHandle64(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeDevicePath, null);
+                return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeDevicePath, null);
             }
 
             if (Instance.WinHelper.TryCreateDevice(Normalized, Array.Empty<byte>(), out string DevicePath, out WinDeviceDelegate DeviceHandler, out NTSTATUS DeviceStatus))
@@ -55,7 +55,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return DeviceStatus;
                 }
 
-                return NtCreateFile.CreateDeviceHandle64(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler);
+                return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler);
             }
 
             string Path = ResolveNtPath(Instance, FullName, AttributesRoot);

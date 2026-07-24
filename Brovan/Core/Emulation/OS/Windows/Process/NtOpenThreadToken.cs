@@ -11,7 +11,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Helper == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            ulong ThreadHandle = Instance.ReadRegister(Registers.UC_X86_REG_RCX);
+            ulong ThreadHandle = Instance.WinHelper.GetArg(0);
             ulong DesiredAccess = Instance.WinHelper.GetArg(1);
             ulong OpenAsSelf = Instance.WinHelper.GetArg(2);
             ulong TokenHandlePtr = Instance.WinHelper.GetArg(3);
@@ -57,7 +57,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             var Handle = Helper.HandleManager.AddHandle(Token, MapDesiredTokenAccess((AccessMask)(uint)DesiredAccess) | AccessMask.TokenDuplicate);
-            Instance._emulator.WriteMemory(TokenHandlePtr, Handle.Handle, 8);
+            Helper.WritePointer(TokenHandlePtr, Handle.Handle);
 
             return NTSTATUS.STATUS_SUCCESS;
         }
