@@ -4784,6 +4784,65 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool RegistryKeyExists(string NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly)
         {
+            string Normalized = NormalizeNtRegistryPath(NtPath);
+
+            if (Emulator.IsX86Guest
+                && TryApplyWow64RegistryRedirect(Normalized, out string Redirected)
+                && RegistryKeyExistsExact(Redirected, out Hive, out Key, out TempOnly))
+                return true;
+
+            return RegistryKeyExistsExact(Normalized, out Hive, out Key, out TempOnly);
+        }
+
+        /// <summary>
+        /// Rewrites an HKLM/HKCU SOFTWARE key into its WOW6432Node view for 32-bit guests
+        /// </summary>
+        private static bool TryApplyWow64RegistryRedirect(string NtPath, out string Redirected)
+        {
+            Redirected = null;
+            if (string.IsNullOrEmpty(NtPath))
+                return false;
+
+            const string SoftwareSegment = "\\SOFTWARE";
+            int SoftwareStart;
+
+            if (NtPath.StartsWith("\\Registry\\Machine" + SoftwareSegment, StringComparison.OrdinalIgnoreCase))
+            {
+                SoftwareStart = "\\Registry\\Machine".Length;
+            }
+            else if (NtPath.StartsWith("\\Registry\\User\\", StringComparison.OrdinalIgnoreCase))
+            {
+                int UserRootLength = "\\Registry\\User\\".Length;
+                int Index = NtPath.IndexOf(SoftwareSegment, UserRootLength, StringComparison.OrdinalIgnoreCase);
+                if (Index < 0 || NtPath.IndexOf('\\', UserRootLength) != Index)
+                    return false;
+                SoftwareStart = Index;
+            }
+            else
+            {
+                return false;
+            }
+
+            int SoftwareEnd = SoftwareStart + SoftwareSegment.Length;
+            if (NtPath.Length != SoftwareEnd && (NtPath.Length <= SoftwareEnd || NtPath[SoftwareEnd] != '\\'))
+                return false;
+
+            string Tail = NtPath.Length > SoftwareEnd ? NtPath.Substring(SoftwareEnd + 1) : string.Empty;
+            if (Tail.Length == 0)
+                return false;
+
+            int Separator = Tail.IndexOf('\\');
+            string FirstSegment = Separator < 0 ? Tail : Tail.Substring(0, Separator);
+            if (FirstSegment.Equals("Wow6432Node", StringComparison.OrdinalIgnoreCase) ||
+                FirstSegment.Equals("Classes", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            Redirected = NtPath.Substring(0, SoftwareEnd) + "\\Wow6432Node\\" + Tail;
+            return true;
+        }
+
+        private bool RegistryKeyExistsExact(string NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly)
+        {
             Hive = null;
             Key = default;
             TempOnly = false;

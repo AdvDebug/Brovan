@@ -933,6 +933,17 @@ namespace Brovan
             public static string LinuxCurrentDirectory = "/";
             public static string DefaultDriveLetter = "C";
 
+            public static bool Wow64FileRedirect;
+
+            private const string System32WindowsPath = "C:\\Windows\\System32";
+            private const string SysWow64WindowsPath = "C:\\Windows\\SysWOW64";
+            private const string SysnativeWindowsPath = "C:\\Windows\\Sysnative";
+
+            private static readonly string[] Wow64RedirectExclusions =
+            {
+                "catroot", "catroot2", "driverstore", "drivers\\etc", "logfiles", "spool"
+            };
+
             /// <summary>
             /// Initializes the default sandbox drive mappings and allowed IO roots.
             /// </summary>
@@ -1844,6 +1855,13 @@ namespace Brovan
                     string LeafOnly = Path.GetFileName(RawWinPath);
                     if (!string.IsNullOrEmpty(LeafOnly) && string.Equals(LeafOnly, RawWinPath, StringComparison.OrdinalIgnoreCase))
                     {
+                        if (Wow64FileRedirect)
+                        {
+                            string Wow64LeafPath = TryResolveFromWindowsLibsRelative(Path.Combine(WindowsLibsPath, "SysWOW64"), LeafOnly);
+                            if (!string.IsNullOrEmpty(Wow64LeafPath))
+                                return Wow64LeafPath;
+                        }
+
                         string LeafLibPath = TryResolveFromWindowsLibsByLeaf(LeafOnly);
                         if (!string.IsNullOrEmpty(LeafLibPath))
                             return LeafLibPath;
@@ -1853,6 +1871,8 @@ namespace Brovan
                 string WinPath = NormalizeWindowsEmulatedPath(RawWinPath);
                 if (string.IsNullOrEmpty(WinPath))
                     return null;
+
+                WinPath = ApplyWow64FileRedirect(WinPath);
 
                 string VirtualPath = ResolveVirtualHostPathInternal(WinPath, CreateDirectories, PreserveFinalLink);
                 if (!string.IsNullOrEmpty(VirtualPath))
@@ -1898,6 +1918,7 @@ namespace Brovan
                 if (string.IsNullOrEmpty(WinPath))
                     return null;
 
+                WinPath = ApplyWow64FileRedirect(WinPath);
                 return ResolveVirtualHostPathInternal(WinPath, CreateDirectories);
             }
 
@@ -1986,6 +2007,37 @@ namespace Brovan
                 }
 
                 return CanonicalizeWindowsAbsolutePath(WinPath);
+            }
+
+            /// <summary>
+            /// Applies WOW64 file-system redirection to a canonical absolute Windows path.
+            /// </summary>
+            private static string ApplyWow64FileRedirect(string WinPath)
+            {
+                if (!Wow64FileRedirect || string.IsNullOrEmpty(WinPath))
+                    return WinPath;
+
+                if (WinPath.Equals(SysnativeWindowsPath, StringComparison.OrdinalIgnoreCase))
+                    return System32WindowsPath;
+
+                if (WinPath.StartsWith(SysnativeWindowsPath + "\\", StringComparison.OrdinalIgnoreCase))
+                    return System32WindowsPath + "\\" + WinPath.Substring(SysnativeWindowsPath.Length + 1);
+
+                if (WinPath.Equals(System32WindowsPath, StringComparison.OrdinalIgnoreCase))
+                    return SysWow64WindowsPath;
+
+                if (!WinPath.StartsWith(System32WindowsPath + "\\", StringComparison.OrdinalIgnoreCase))
+                    return WinPath;
+
+                string Rest = WinPath.Substring(System32WindowsPath.Length + 1);
+                foreach (string Excluded in Wow64RedirectExclusions)
+                {
+                    if (Rest.Equals(Excluded, StringComparison.OrdinalIgnoreCase) ||
+                        Rest.StartsWith(Excluded + "\\", StringComparison.OrdinalIgnoreCase))
+                        return WinPath;
+                }
+
+                return SysWow64WindowsPath + "\\" + Rest;
             }
 
             private static string ResolveVirtualHostPathInternal(string WinPath, bool CreateDirectories, bool PreserveFinalLink = false)
