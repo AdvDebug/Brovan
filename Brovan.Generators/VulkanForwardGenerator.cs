@@ -699,6 +699,28 @@ namespace Brovan.Generators
             return sz;
         }
 
+        private static string GuestOffset(string structName, string memberName, int fallback)
+            => memberName == null ? fallback.ToString() : "(int)offsetof(" + structName + "," + memberName + ")";
+
+        private static string GuestNativeSize(string structName, MDesc d)
+        {
+            if (d.MemName == null)
+                return d.Size.ToString();
+
+            string field = "((" + structName + "*)0)->" + d.MemName;
+            switch (d.Kind)
+            {
+                case "Scalar":
+                    return "(int)sizeof(" + field + ")";
+                case "ScalarArray":
+                    return "(int)sizeof(*" + field + ")";
+                case "BlobPtr":
+                    return d.LenName == null ? d.Size.ToString() : "(int)sizeof(((" + structName + "*)0)->" + d.LenName + ")";
+                default:
+                    return d.Size.ToString();
+            }
+        }
+
         private static string CSig(Param p)
         {
             if (p.PtrDepth == 0 && p.ArrayLen > 1)
@@ -734,6 +756,10 @@ namespace Brovan.Generators
             public string HandleType = "";
             public int SelOffset = -1;
             public uint SelMask;
+
+            public string MemName;
+            public string LenName;
+            public string SelName;
         }
 
         private static readonly Dictionary<string, byte> KindNum = new Dictionary<string, byte>
@@ -753,6 +779,11 @@ namespace Brovan.Generators
             ["SelectArray"] = 12,
         };
 
+        private static readonly HashSet<string> PointerWidthTypes = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "size_t", "HINSTANCE", "HWND", "HANDLE", "HMONITOR", "HDC", "LPCWSTR"
+        };
+
         private static bool StructIsFlat(Model m, string name, HashSet<string> seen)
         {
             if (!seen.Add(name)) return true;
@@ -762,30 +793,38 @@ namespace Brovan.Generators
             {
                 if (mem.PtrDepth > 0) return false;
                 if (m.Handles.ContainsKey(mem.Type) || m.FuncPointers.Contains(mem.Type)) return false;
+                if (PointerWidthTypes.Contains(mem.Type)) return false;
                 if (m.Structs.ContainsKey(mem.Type) && !StructIsFlat(m, mem.Type, seen)) return false;
             }
             return true;
         }
 
-        private static int ResolveLen(Member mem, Dictionary<string, int> offsets)
+        private static int ResolveLen(Member mem, Dictionary<string, int> offsets) => ResolveLen(mem, offsets, out _);
+
+        private static int ResolveLen(Member mem, Dictionary<string, int> offsets, out string lenName)
         {
+            lenName = null;
             string len = mem.Length;
             if (len == null || len == "null-terminated") return -1;
             int comma = len.IndexOf(',');
             if (comma >= 0) len = len.Substring(0, comma);
             if (len.IndexOfAny(new[] { '/', '*', '-', '>', '(', ' ', '+' }) >= 0) return -1;
-            return offsets.TryGetValue(len, out int o) ? o : -1;
+            if (!offsets.TryGetValue(len, out int o)) return -1;
+            lenName = len;
+            return o;
         }
 
         private static MDesc ClassifyMember(Model m, VkStruct owner, Member mem, Dictionary<string, int> offsets, Dictionary<string, Layout> cache)
         {
-            MDesc d = new MDesc { Offset = offsets.TryGetValue(mem.Name, out int mo) ? mo : 0 };
+            MDesc d = new MDesc { Offset = offsets.TryGetValue(mem.Name, out int mo) ? mo : 0, MemName = mem.Name };
             if (mem.Name == "pNext") { d.Kind = "PNext"; d.Size = 8; return d; }
             if (owner.Name == "VkWriteDescriptorSet" && (mem.Name == "pImageInfo" || mem.Name == "pBufferInfo" || mem.Name == "pTexelBufferView"))
             {
                 d.Kind = "SelectArray";
                 d.SelOffset = offsets["descriptorType"];
+                d.SelName = "descriptorType";
                 d.LenOffset = offsets["descriptorCount"];
+                d.LenName = "descriptorCount";
                 if (mem.Name == "pImageInfo") { d.SubName = "VkDescriptorImageInfo"; d.SelMask = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 10); }
                 else if (mem.Name == "pBufferInfo") { d.SubName = "VkDescriptorBufferInfo"; d.SelMask = (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9); }
                 else { d.HandleType = "VkBufferView"; d.SelMask = (1u << 4) | (1u << 5); }
@@ -808,7 +847,7 @@ namespace Brovan.Generators
             }
             if (mem.Type == "char")
             {
-                if (mem.PtrDepth >= 2) { int lo = ResolveLen(mem, offsets); if (lo >= 0) { d.Kind = "StringArray"; d.LenOffset = lo; } else d.Kind = "Ignore"; return d; }
+                if (mem.PtrDepth >= 2) { int lo = ResolveLen(mem, offsets, out string saLen); if (lo >= 0) { d.Kind = "StringArray"; d.LenOffset = lo; d.LenName = saLen; } else d.Kind = "Ignore"; return d; }
                 d.Kind = "StringZ"; return d;
             }
             string blobLen = mem.AltLength != null && mem.AltLength.Contains("/") ? mem.AltLength
@@ -821,17 +860,19 @@ namespace Brovan.Generators
                 if (offsets.TryGetValue(num, out int blo))
                 {
                     Member lenMem = owner.Members.FirstOrDefault(x => x.Name == num);
-                    d.Kind = "BlobPtr"; d.LenOffset = blo; d.Size = lenMem != null ? ScalarWidth(m, lenMem.Type) : 8;
+                    d.Kind = "BlobPtr"; d.LenOffset = blo; d.LenName = num; d.Size = lenMem != null ? ScalarWidth(m, lenMem.Type) : 8;
                     return d;
                 }
             }
             if (mem.Type == "void") { d.Kind = "Ignore"; return d; }
-            int len = ResolveLen(mem, offsets);
+            int len = ResolveLen(mem, offsets, out string lenName);
             if (len >= 0)
             {
-                if (m.Handles.ContainsKey(mem.Type)) { d.Kind = "HandleArray"; d.LenOffset = len; d.HandleType = mem.Type; return d; }
-                if (m.Structs.ContainsKey(mem.Type)) { d.Kind = "StructArray"; d.SubName = mem.Type; d.LenOffset = len; return d; }
-                SizeAlign(m, mem.Type, 0, cache, out int ew, out _); d.Kind = "ScalarArray"; d.Size = ew; d.LenOffset = len; return d;
+                d.LenOffset = len;
+                d.LenName = lenName;
+                if (m.Handles.ContainsKey(mem.Type)) { d.Kind = "HandleArray"; d.HandleType = mem.Type; return d; }
+                if (m.Structs.ContainsKey(mem.Type)) { d.Kind = "StructArray"; d.SubName = mem.Type; return d; }
+                SizeAlign(m, mem.Type, 0, cache, out int ew, out _); d.Kind = "ScalarArray"; d.Size = ew; return d;
             }
             if (m.Structs.ContainsKey(mem.Type)) { d.Kind = "StructPtr"; d.SubName = mem.Type; return d; }
             d.Kind = "Ignore"; return d;
@@ -845,7 +886,8 @@ namespace Brovan.Generators
                 foreach (Param p in c.Params)
                 {
                     string k = ParamKind(m, p);
-                    if ((k == "StructIn" || k == "ArrayIn" || k == "ChainOut") && m.Structs.ContainsKey(p.Type) && need.Add(p.Type))
+                    if ((k == "StructIn" || k == "ArrayIn" || k == "ChainOut" || k == "StructOut" || k == "ArrayOut")
+                        && m.Structs.ContainsKey(p.Type) && need.Add(p.Type))
                         q.Enqueue(p.Type);
                 }
             foreach (string pn in PNextSet)
@@ -1160,6 +1202,8 @@ namespace Brovan.Generators
                     post.Add("                w.WriteU32(" + local + "c);");
                     if (elemHandle)
                         post.Add("                if (" + gate + local + "pr != 0) for (uint k = 0; k < " + local + "c; k++) w.WriteU32(st.Register(System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + "a, (int)k * 8), \"" + a.Type + "\"));");
+                    else if (elemStruct && StructId.ContainsKey(a.Type))
+                        post.Add("                if (" + gate + local + "pr != 0) for (uint k = 0; k < " + local + "c; k++) BrovVulkGenStruct.WritebackBody(" + StructId[a.Type] + ", w, " + local + "a + (int)(k * (uint)(" + esz + ")));");
                     else if (elemChain)
                         post.Add("                if (" + gate + local + "pr != 0) for (uint k = 0; k < " + local + "c; k++) w.WriteBytesFrom(" + local + "a + (int)(k * (uint)(" + esz + ")) + 16, (uint)(" + esz + " - 16));");
                     else
@@ -1180,7 +1224,7 @@ namespace Brovan.Generators
                     b.Append("                while (r.ReadU32() == 1) { uint ").Append(local).Append("st = r.ReadU32(); int ").Append(local).Append("sd = (int)r.ReadU32(); if (").Append(local).Append("sd < 0 || ").Append(local).Append("sd >= BrovVulkStructMeta.PNext.Length || !BrovVulkStructMeta.PNext[").Append(local).Append("sd]) throw new System.InvalidOperationException(\"BrovVulk generic: pNext sid not allowed.\"); System.IntPtr ").Append(local).Append("nd = st.Alloc(BrovVulkStructMeta.Sizes[").Append(local).Append("sd]); *(uint*)").Append(local).Append("nd = ").Append(local).Append("st; *(System.IntPtr*)(").Append(local).Append("tail + 8) = ").Append(local).Append("nd; ").Append(local).Append("tail = ").Append(local).Append("nd; ").Append(local).Append("ch.Add((").Append(local).Append("nd, ").Append(local).Append("sd)); }\n");
                     b.Append("                *(System.IntPtr*)(").Append(local).Append("tail + 8) = System.IntPtr.Zero;\n");
                     callArgs.Add(local);
-                    post.Add("                foreach (var e in " + local + "ch) w.WriteBytesFrom(e.Item1 + 16, (uint)(BrovVulkStructMeta.Sizes[e.Item2] - 16));");
+                    post.Add("                foreach (var e in " + local + "ch) BrovVulkGenStruct.WritebackBody(e.Item2, w, e.Item1);");
                 }
                 else if (kind == "ScalarIn")
                 {
@@ -1246,7 +1290,9 @@ namespace Brovan.Generators
                     b.Append("                int sz").Append(i).Append(" = BrovVulkLayout.StructSize[\"").Append(p.Type).Append("\"];\n");
                     b.Append("                System.IntPtr ").Append(local).Append(" = st.Alloc(sz").Append(i).Append(");\n");
                     callArgs.Add(local);
-                    post.Add("                w.WriteBytesFrom(" + local + ", (uint)sz" + i + ");");
+                    post.Add(StructId.ContainsKey(p.Type)
+                        ? "                BrovVulkGenStruct.WritebackBody(" + StructId[p.Type] + ", w, " + local + ");"
+                        : "                w.WriteBytesFrom(" + local + ", (uint)sz" + i + ");");
                 }
                 else if (kind == "ArrayIn" && (!m.Structs.ContainsKey(p.Type) || StructId.ContainsKey(p.Type))
                          && c.Params.Any(x => x.Name == p.Length))
@@ -1617,7 +1663,7 @@ namespace Brovan.Generators
                 else if (kind == "ChainOut")
                 {
                     b.Append("    bvk_w_u32(").Append(p.Name).Append(" ? *(const uint32_t*)").Append(p.Name).Append(" : 0);\n");
-                    b.Append("    if (").Append(p.Name).Append(") { const void *bvk_pn = *(const void*const*)((const char*)").Append(p.Name).Append(" + 8); while (bvk_pn) { int bvk_sd = bvk_pnext_sid(*(const uint32_t*)bvk_pn); if (bvk_sd >= 0) { bvk_w_u32(1); bvk_w_u32(*(const uint32_t*)bvk_pn); bvk_w_u32((uint32_t)bvk_sd); } bvk_pn = *(const void*const*)((const char*)bvk_pn + 8); } }\n");
+                    b.Append("    if (").Append(p.Name).Append(") { const void *bvk_pn = *(const void*const*)((const char*)").Append(p.Name).Append(" + BVK_PNEXT_OFF); while (bvk_pn) { int bvk_sd = bvk_pnext_sid(*(const uint32_t*)bvk_pn); if (bvk_sd >= 0) { bvk_w_u32(1); bvk_w_u32(*(const uint32_t*)bvk_pn); bvk_w_u32((uint32_t)bvk_sd); } bvk_pn = *(const void*const*)((const char*)bvk_pn + BVK_PNEXT_OFF); } }\n");
                     b.Append("    bvk_w_u32(0);\n");
                 }
             }
@@ -1654,11 +1700,13 @@ namespace Brovan.Generators
                 {
                     Param a = c.Params[i + 1];
                     bool elemHandle = m.Handles.ContainsKey(a.Type);
-                    bool elemChain = m.Structs.ContainsKey(a.Type) && StructHasPNext(m, a.Type);
+                    bool elemStruct = m.Structs.ContainsKey(a.Type);
                     b.Append("    if (bvk_r >= 0) { uint32_t bvk_oc = 0; if (bvk_outLen >= bvk_off + 4) { memcpy(&bvk_oc, bvk_out + bvk_off, 4); bvk_off += 4; } if (").Append(p.Name).Append(") *").Append(p.Name).Append(" = bvk_oc;\n");
                     if (elemHandle)
                         b.Append("        if (").Append(a.Name).Append(") for (uint32_t k = 0; k < bvk_oc; k++) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; ").Append(a.Name).Append("[k] = (").Append(a.Type).Append(")(uintptr_t)id; } }\n");
-                    else if (elemChain)
+                    else if (elemStruct && StructId.ContainsKey(a.Type))
+                        b.Append("        if (").Append(a.Name).Append(") for (uint32_t k = 0; k < bvk_oc; k++) bvk_off += bvk_deser_body(").Append(StructId[a.Type]).Append(", (unsigned char*)&").Append(a.Name).Append("[k], bvk_out + bvk_off); }\n");
+                    else if (m.Structs.ContainsKey(a.Type) && StructHasPNext(m, a.Type))
                         b.Append("        if (").Append(a.Name).Append(") for (uint32_t k = 0; k < bvk_oc; k++) { memcpy((char*)&").Append(a.Name).Append("[k] + 16, bvk_out + bvk_off, sizeof(*").Append(a.Name).Append(") - 16); bvk_off += (unsigned int)sizeof(*").Append(a.Name).Append(") - 16; } }\n");
                     else
                         b.Append("        if (").Append(a.Name).Append(") { memcpy(").Append(a.Name).Append(", bvk_out + bvk_off, bvk_oc * sizeof(*").Append(a.Name).Append(")); bvk_off += bvk_oc * (unsigned int)sizeof(*").Append(a.Name).Append("); } }\n");
@@ -1669,7 +1717,7 @@ namespace Brovan.Generators
                 if (kind == "ScalarOut")
                 {
                     int w = ScalarWidth(m, p.Type);
-                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + ").Append(w).Append(") { memcpy(").Append(p.Name).Append(", bvk_out + bvk_off, ").Append(w).Append("); bvk_off += ").Append(w).Append("; }\n");
+                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + ").Append(w).Append(") { bvk_r_scalar(").Append(p.Name).Append(", bvk_out + bvk_off, (int)sizeof(*").Append(p.Name).Append("), ").Append(w).Append("); bvk_off += ").Append(w).Append("; }\n");
                 }
                 else if (kind == "HandleOut")
                 {
@@ -1689,12 +1737,15 @@ namespace Brovan.Generators
                 }
                 else if (kind == "StructOut")
                 {
-                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(") { memcpy(").Append(p.Name).Append(", bvk_out + bvk_off, sizeof(*").Append(p.Name).Append(")); bvk_off += (unsigned int)sizeof(*").Append(p.Name).Append("); }\n");
+                    if (StructId.ContainsKey(p.Type))
+                        b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(") bvk_off += bvk_deser_body(").Append(StructId[p.Type]).Append(", (unsigned char*)").Append(p.Name).Append(", bvk_out + bvk_off);\n");
+                    else
+                        b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(") { memcpy(").Append(p.Name).Append(", bvk_out + bvk_off, sizeof(*").Append(p.Name).Append(")); bvk_off += (unsigned int)sizeof(*").Append(p.Name).Append("); }\n");
                 }
                 else if (kind == "ChainOut")
                 {
                     int baseSid = StructId[p.Type];
-                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(") { memcpy((char*)").Append(p.Name).Append(" + 16, bvk_out + bvk_off, bvk_struct_sizes[").Append(baseSid).Append("] - 16); bvk_off += (unsigned int)(bvk_struct_sizes[").Append(baseSid).Append("] - 16); void *bvk_pn = *(void**)((char*)").Append(p.Name).Append(" + 8); while (bvk_pn) { int bvk_sd = bvk_pnext_sid(*(const uint32_t*)bvk_pn); if (bvk_sd >= 0) { memcpy((char*)bvk_pn + 16, bvk_out + bvk_off, bvk_struct_sizes[bvk_sd] - 16); bvk_off += (unsigned int)(bvk_struct_sizes[bvk_sd] - 16); } bvk_pn = *(void**)((char*)bvk_pn + 8); } }\n");
+                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(") { bvk_off += bvk_deser_body(").Append(baseSid).Append(", (unsigned char*)").Append(p.Name).Append(", bvk_out + bvk_off); void *bvk_pn = *(void**)((char*)").Append(p.Name).Append(" + BVK_PNEXT_OFF); while (bvk_pn) { int bvk_sd = bvk_pnext_sid(*(const uint32_t*)bvk_pn); if (bvk_sd >= 0) bvk_off += bvk_deser_body(bvk_sd, (unsigned char*)bvk_pn, bvk_out + bvk_off); bvk_pn = *(void**)((char*)bvk_pn + BVK_PNEXT_OFF); } }\n");
                 }
                 else if (kind == "VoidOut" && c.Params.Any(x => x.Name == p.Length))
                 {
@@ -1953,7 +2004,11 @@ namespace Brovan.Generators
             StringBuilder gs = new StringBuilder();
             gs.Append("/* <auto-generated> Vulkan struct member descriptors from vk.xml. */\n");
             gs.Append("#ifndef BROVVULK_STRUCTS_H\n#define BROVVULK_STRUCTS_H\n");
-            gs.Append("typedef struct { unsigned char kind; int offset; int size; int sub; int lenOffset; int selOffset; unsigned int selMask; } BvkM;\n");
+            gs.Append("#include <stddef.h>\n");
+            gs.Append("typedef struct { unsigned char kind; int offset; int size; int nsize; int sub; int lenOffset; int selOffset; unsigned int selMask; } BvkM;\n");
+            gs.Append("#define BVK_PNEXT_OFF ((int)offsetof(VkBaseInStructure, pNext))\n");
+            gs.Append("#define BVK_SAME_SIZE(tag, expr, want) typedef char bvk_sz_##tag[((int)(expr) == (want)) ? 1 : -1]\n");
+            StringBuilder ga = new StringBuilder();
 
             for (int si = 0; si < needed.Count; si++)
             {
@@ -1962,10 +2017,11 @@ namespace Brovan.Generators
                 Layout lay = ComputeLayout(m, n, cache);
                 sm.Append("            new BvkM[] { ");
                 gs.Append("static const BvkM bvk_s").Append(si).Append("[] = { ");
-                if (s.IsUnion)
+                if (s.IsUnion || StructIsFlat(m, n, new HashSet<string>()))
                 {
                     sm.Append("new BvkM(BvkMK.Scalar, 0, ").Append(lay.Size).Append(", -1, -1, \"\", -1, 0u), ");
-                    gs.Append("{0,0,").Append(lay.Size).Append(",-1,-1,-1,0}, ");
+                    gs.Append("{0,0,").Append(lay.Size).Append(",(int)sizeof(").Append(n).Append("),-1,-1,-1,0}, ");
+                    ga.Append("BVK_SAME_SIZE(u").Append(si).Append(", sizeof(").Append(n).Append("), ").Append(lay.Size).Append(");\n");
                 }
                 else
                 {
@@ -1973,8 +2029,16 @@ namespace Brovan.Generators
                     {
                         MDesc d = ClassifyMember(m, s, mem, lay.Offsets, cache);
                         int sub = d.SubName != null && StructId.ContainsKey(d.SubName) ? StructId[d.SubName] : -1;
+                        if (d.Kind == "Scalar" && d.Size > 8 && d.MemName != null)
+                            ga.Append("BVK_SAME_SIZE(s").Append(si).Append('_').Append(d.MemName)
+                              .Append(", sizeof(((").Append(n).Append("*)0)->").Append(d.MemName).Append("), ").Append(d.Size).Append(");\n");
                         sm.Append("new BvkM(BvkMK.").Append(d.Kind).Append(", ").Append(d.Offset).Append(", ").Append(d.Size).Append(", ").Append(sub).Append(", ").Append(d.LenOffset).Append(", \"").Append(d.HandleType).Append("\", ").Append(d.SelOffset).Append(", ").Append(d.SelMask).Append("u), ");
-                        gs.Append("{").Append(KindNum[d.Kind]).Append(",").Append(d.Offset).Append(",").Append(d.Size).Append(",").Append(sub).Append(",").Append(d.LenOffset).Append(",").Append(d.SelOffset).Append(",").Append(d.SelMask).Append("u}, ");
+                        gs.Append("{").Append(KindNum[d.Kind]).Append(",").Append(GuestOffset(n, d.MemName, d.Offset)).Append(",").Append(d.Size)
+                          .Append(",").Append(GuestNativeSize(n, d))
+                          .Append(",").Append(sub)
+                          .Append(",").Append(GuestOffset(n, d.LenName, d.LenOffset))
+                          .Append(",").Append(GuestOffset(n, d.SelName, d.SelOffset))
+                          .Append(",").Append(d.SelMask).Append("u}, ");
                     }
                 }
                 sm.AppendLine("},");
@@ -2009,11 +2073,13 @@ namespace Brovan.Generators
             for (int si = 0; si < needed.Count; si++) gs.Append("bvk_s").Append(si).Append(", ");
             gs.Append("};\n");
             gs.Append("static const int bvk_struct_counts[] = { ");
-            foreach (string n in needed) gs.Append(m.Structs[n].IsUnion ? 1 : m.Structs[n].Members.Count).Append(", ");
+            foreach (string n in needed)
+                gs.Append(m.Structs[n].IsUnion || StructIsFlat(m, n, new HashSet<string>()) ? 1 : m.Structs[n].Members.Count).Append(", ");
             gs.Append("};\n");
-            gs.Append("static const int bvk_struct_sizes[] = { ");
-            foreach (string n in needed) gs.Append(ComputeLayout(m, n, cache).Size).Append(", ");
+            gs.Append("static const int bvk_struct_nsizes[] = { ");
+            foreach (string n in needed) gs.Append("(int)sizeof(").Append(n).Append("), ");
             gs.Append("};\n");
+            gs.Append(ga);
             gs.Append("static int bvk_pnext_sid(unsigned int stype) {\n    switch (stype) {\n");
             foreach (string n in needed)
             {

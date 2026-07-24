@@ -104,14 +104,66 @@ if errorlevel 1 (
 
 popd
 
+call :build_x86
+
 echo Deploying vulkan-1.dll:
 
 for /f "delims=" %%E in ('dir /s /b /a-d "%REPO%\Brovan\bin\Brovan.exe" 2^>nul') do call :deploy "%%~dpEVirtualFS"
 
 exit /b 0
 
+:build_x86
+
+set "HAVE_X86="
+call :find_vsdevcmd
+if errorlevel 1 (
+    echo   warning: VsDevCmd not found; skipping 32-bit SysWOW64 shim. 1>&2
+    exit /b 0
+)
+if not exist "%HERE%bin\x86" md "%HERE%bin\x86" || exit /b 1
+if not exist "%HERE%obj\build" md "%HERE%obj\build" || exit /b 1
+
+setlocal
+set "VSCMD_VER="
+call "%VSDEVCMD%" -arch=x86 -host_arch=amd64 >nul
+if errorlevel 1 goto :x86_failed
+
+cl /nologo /O2 /MT /LD "%HERE%vulkan_shim.c" /I"%HERE%." /I"%HERE%..\vulkan-headers" /Fo"%HERE%obj\build\vulkan_shim_x86.obj" /Fe"%HERE%bin\x86\vulkan-1.dll" /link /DEF:"%HERE%obj\generated\exports.def" /IMPLIB:"%HERE%bin\x86\vulkan-1.lib" kernel32.lib
+if errorlevel 1 goto :x86_failed
+
+endlocal & set "HAVE_X86=1"
+exit /b 0
+
+:x86_failed
+endlocal
+echo   warning: 32-bit shim build failed; SysWOW64 shim not updated. 1>&2
+exit /b 0
+
 :init_msvc
+call :find_vsdevcmd
+if errorlevel 1 exit /b 1
+call "%VSDEVCMD%" -arch=amd64 -host_arch=amd64 >nul
+exit /b %errorlevel%
+
+:find_vsdevcmd
 set "VSDEVCMD="
+
+set "VSWHERE="
+if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not defined VSWHERE if exist "%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+
+if defined VSWHERE (
+    set "VSWHERE_OUT=%TEMP%\brovvulk_vsdevcmd.txt"
+    "%VSWHERE%" -latest -products * -find Common7\Tools\VsDevCmd.bat >"!VSWHERE_OUT!" 2>nul
+    for /f "usebackq delims=" %%Q in ("!VSWHERE_OUT!") do (
+        if exist "%%Q" (
+            set "VSDEVCMD=%%Q"
+            del /q "!VSWHERE_OUT!" >nul 2>&1
+            goto :found_vsdevcmd
+        )
+    )
+    del /q "!VSWHERE_OUT!" >nul 2>&1
+)
 
 for %%P in (
     "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat"
@@ -125,24 +177,14 @@ for %%P in (
 ) do (
     if exist %%~P (
         set "VSDEVCMD=%%~P"
-        goto :have_vsdevcmd
-    )
-)
-
-for /f "usebackq delims=" %%P in (`where vswhere.exe 2^>nul`) do (
-    for /f "usebackq delims=" %%Q in (`"%%P" -latest -products * -requires Microsoft.Component.MSBuild -find Common7\Tools\VsDevCmd.bat 2^>nul`) do (
-        if exist "%%Q" (
-            set "VSDEVCMD=%%Q"
-            goto :have_vsdevcmd
-        )
+        goto :found_vsdevcmd
     )
 )
 
 exit /b 1
 
-:have_vsdevcmd
-call "%VSDEVCMD%" -arch=amd64 -host_arch=amd64 >nul
-exit /b %errorlevel%
+:found_vsdevcmd
+exit /b 0
 
 :deploy
 set "VFS=%~1\C\Windows\System32"
@@ -150,4 +192,10 @@ if not exist "%VFS%" md "%VFS%" || exit /b 1
 copy /Y "%HERE%bin\vulkan-1.dll" "%VFS%\vulkan-1.dll" >nul
 if errorlevel 1 exit /b 1
 echo   deployed -^> %VFS%\vulkan-1.dll
+if defined HAVE_X86 (
+    if not exist "%~1\C\Windows\SysWOW64" md "%~1\C\Windows\SysWOW64" || exit /b 1
+    copy /Y "%HERE%bin\x86\vulkan-1.dll" "%~1\C\Windows\SysWOW64\vulkan-1.dll" >nul
+    if errorlevel 1 exit /b 1
+    echo   deployed -^> %~1\C\Windows\SysWOW64\vulkan-1.dll
+)
 exit /b 0

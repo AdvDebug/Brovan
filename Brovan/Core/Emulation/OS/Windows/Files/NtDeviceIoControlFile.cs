@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -65,9 +66,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Data.InputLength = InputBufferLength;
             }
 
+            byte[] RentedOutput = null;
             if (OutputBufferPtr != 0 && OutputBufferLength != 0)
             {
-                Data.OutputBuffer = Instance.ReadMemory(OutputBufferPtr, OutputBufferLength);
+                RentedOutput = ArrayPool<byte>.Shared.Rent((int)OutputBufferLength);
+                Array.Clear(RentedOutput, 0, (int)OutputBufferLength);
+                Data.OutputBuffer = RentedOutput;
                 Data.OutputLength = OutputBufferLength;
             }
 
@@ -83,7 +87,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong Information = Data.Information;
 
-            if (OutputBufferPtr != 0 && OutputBufferLength != 0 && Data.OutputBuffer != null)
+            if (Status >= 0 && OutputBufferPtr != 0 && OutputBufferLength != 0 && Data.OutputBuffer != null)
             {
                 uint ToWrite = Math.Min(OutputBufferLength, (uint)Data.OutputBuffer.Length);
                 if (ToWrite > 0)
@@ -94,6 +98,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Information = ToWrite;
                 }
             }
+
+            if (RentedOutput != null && Status != NTSTATUS.STATUS_PENDING)
+                ArrayPool<byte>.Shared.Return(RentedOutput);
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, Information);
 

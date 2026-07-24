@@ -190,5 +190,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
         }
+
+        public static void WritebackBody(int sid, GenBuf w, IntPtr src)
+        {
+            foreach (BvkM d in BrovVulkStructMeta.Members[sid])
+            {
+                switch (d.Kind)
+                {
+                    case BvkMK.Scalar:
+                        w.WriteBytesFrom(src + d.Offset, (uint)d.Size);
+                        break;
+                    case BvkMK.StructValue:
+                        WritebackBody(d.Sub, w, src + d.Offset);
+                        break;
+                }
+            }
+        }
     }
 }

@@ -14,8 +14,10 @@
 
 #if defined(_MSC_VER)
 #define BVK_TLS __declspec(thread)
+#define BVK_INLINE __forceinline
 #else
 #define BVK_TLS __thread
+#define BVK_INLINE inline __attribute__((always_inline))
 #endif
 
 static HANDLE g_dev = INVALID_HANDLE_VALUE;
@@ -83,6 +85,24 @@ static void bvk_w_bytes(const void* s, unsigned int len)
     if (len)
         memcpy(bvk_rq + bvk_rqlen, s, len);
     bvk_rqlen += len;
+}
+
+static BVK_INLINE void bvk_w_scalar(const void* field, int nsize, int wsize)
+{
+    if (nsize >= wsize)
+    {
+        bvk_w_bytes(field, (unsigned int)wsize);
+        return;
+    }
+
+    uint64_t wide = 0;
+    memcpy(&wide, field, (size_t)nsize);
+    bvk_w_bytes(&wide, (unsigned int)wsize);
+}
+
+static BVK_INLINE void bvk_r_scalar(void* field, const unsigned char* src, int nsize, int wsize)
+{
+    memcpy(field, src, (size_t)(nsize < wsize ? nsize : wsize));
 }
 
 static int bvk_rq_send(uint32_t cmd, void* out, uint32_t outCap, uint32_t* outLen)
@@ -255,7 +275,7 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
         switch (d->kind)
         {
         case 0:
-            bvk_w_bytes(fp, (unsigned int)d->size);
+            bvk_w_scalar(fp, d->nsize, d->size);
             break;
         case 1:
             bvk_w_u32((uint32_t)(uintptr_t)(*(void* const*)fp));
@@ -274,7 +294,7 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
         {
             const void* p = *(const void* const*)fp;
             uint32_t n = *(const uint32_t*)(s + d->lenOffset);
-            if (p) { bvk_w_u32(n); for (uint32_t k = 0; k < n; k++) bvk_ser_struct(d->sub, (const unsigned char*)p + (size_t)k * bvk_struct_sizes[d->sub]); }
+            if (p) { bvk_w_u32(n); for (uint32_t k = 0; k < n; k++) bvk_ser_struct(d->sub, (const unsigned char*)p + (size_t)k * bvk_struct_nsizes[d->sub]); }
             else bvk_w_u32(0);
             break;
         }
@@ -290,7 +310,15 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
         {
             const void* p = *(const void* const*)fp;
             uint32_t n = *(const uint32_t*)(s + d->lenOffset);
-            if (p) { bvk_w_u32(n); bvk_w_bytes(p, n * (unsigned int)d->size); }
+            if (p)
+            {
+                bvk_w_u32(n);
+                if (d->nsize == d->size)
+                    bvk_w_bytes(p, n * (unsigned int)d->size);
+                else
+                    for (uint32_t k = 0; k < n; k++)
+                        bvk_w_scalar((const unsigned char*)p + (size_t)k * (size_t)d->nsize, d->nsize, d->size);
+            }
             else bvk_w_u32(0);
             break;
         }
@@ -322,7 +350,7 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
                     bvk_ser_struct(psid, (const unsigned char*)pn);
                     break;
                 }
-                pn = *(const void* const*)((const char*)pn + 8);
+                pn = *(const void* const*)((const char*)pn + BVK_PNEXT_OFF);
             }
             if (!pn)
                 bvk_w_u32(0);
@@ -331,7 +359,7 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
         case 11:
         {
             const void* p = *(const void* const*)fp;
-            uint32_t n = d->size == 8
+            uint32_t n = d->nsize == 8
                 ? (uint32_t)(*(const uint64_t*)(s + d->lenOffset))
                 : *(const uint32_t*)(s + d->lenOffset);
             if (p) { bvk_w_u32(n); bvk_w_bytes(p, n); }
@@ -350,7 +378,7 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
                     bvk_w_u32(n);
                     if (d->sub >= 0)
                         for (uint32_t k = 0; k < n; k++)
-                            bvk_ser_struct(d->sub, (const unsigned char*)p + (size_t)k * bvk_struct_sizes[d->sub]);
+                            bvk_ser_struct(d->sub, (const unsigned char*)p + (size_t)k * bvk_struct_nsizes[d->sub]);
                     else
                         for (uint32_t k = 0; k < n; k++)
                             bvk_w_u32((uint32_t)(uintptr_t)((const void* const*)p)[k]);
@@ -363,6 +391,30 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
             break;
         }
     }
+}
+
+static unsigned int bvk_deser_body(int sid, unsigned char* dst, const unsigned char* in)
+{
+    const BvkM* mm = bvk_structs[sid];
+    int mc = bvk_struct_counts[sid];
+    unsigned int off = 0;
+    for (int i = 0; i < mc; i++)
+    {
+        const BvkM* d = &mm[i];
+        switch (d->kind)
+        {
+        case 0:
+            bvk_r_scalar(dst + d->offset, in + off, d->nsize, d->size);
+            off += (unsigned int)d->size;
+            break;
+        case 2:
+            off += bvk_deser_body(d->sub, dst + d->offset, in + off);
+            break;
+        default:
+            break;
+        }
+    }
+    return off;
 }
 
 #define BVK_BATCH_ID 0xFFFFFFFEu
