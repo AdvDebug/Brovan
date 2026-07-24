@@ -149,11 +149,19 @@ namespace Brovan.Core.Emulation
         public const ulong PageTableEntryAddressMask = 0x000FFFFFFFFFF000UL;
 
         public const ushort KernelCodeSelector = 0x08;
+        public const ushort KernelDataSelector = 0x10;
+        public const ushort UserCodeSelector32 = 0x1B;
+        public const ushort UserDataSelector32 = 0x23;
         public const ushort UserDataSelector = 0x2B;
         public const ushort UserCodeSelector = 0x33;
-        public const ushort TssSelector = 0x38;
+        public const ushort UserFsSelector32 = 0x3B;
+        public const ushort UserGsSelector32 = 0x43;
+        public const ushort TssSelector = 0x60;
 
-        public const int ExceptionVectorCount = 32;
+        public const ushort GdtLimit = 0x6F;
+
+        public const int ExceptionVectorCount = 256;
+        public const uint FirstSoftwareInterruptVector = 32;
         public const ulong ExceptionStubStride = 8;
         public const byte ExceptionIstIndex = 1;
         public const byte ExceptionGateAttributes = 0xEE;

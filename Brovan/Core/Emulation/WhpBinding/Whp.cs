@@ -49,6 +49,7 @@ namespace Brovan.Core.Emulation
         private readonly List<DirtyRange> _dirtyRanges = new();
         private const int MaxDirtyRanges = 16;
 
+        private readonly bool _guest64;
         private ulong _pml4Gpa;
         private ulong _nextInternalGpa = WhpConstants.InternalPageTableBase;
 
@@ -72,6 +73,9 @@ namespace Brovan.Core.Emulation
         private WhvRegisterValue _pendingCs;
         private WhvRegisterValue _pendingSs;
         private bool _segmentsDirty;
+
+        private readonly WhvRegisterValue _userCodeSegment;
+        private readonly WhvRegisterValue _userDataSegment;
 
         private readonly List<MemoryHookEntry> _memoryHooks = new();
         private readonly List<MmioRegion> _mmioRegions = new();
@@ -200,8 +204,12 @@ namespace Brovan.Core.Emulation
 
         public Whp(Arch arch, Mode mode)
         {
-            if (arch != Arch.X86 || mode != Mode.MODE_64)
-                throw new WhpException("WHP backend only supports x86-64 long mode.");
+            if (arch != Arch.X86 || (mode != Mode.MODE_64 && mode != Mode.MODE_32))
+                throw new WhpException("WHP backend only supports x86 32-bit and x86-64 guests.");
+
+            _guest64 = mode == Mode.MODE_64;
+            _userCodeSegment = MakeSegment(_guest64 ? WhpConstants.UserCodeSelector : WhpConstants.UserCodeSelector32, true, true);
+            _userDataSegment = MakeSegment(_guest64 ? WhpConstants.UserDataSelector : WhpConstants.UserDataSelector32, false, true);
 
             EnsurePlatformSupport();
             ConfigurePartition();
@@ -1236,22 +1244,18 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private static ushort SegmentAttributes(bool isCode, bool isUser)
+        private ushort SegmentAttributes(bool isCode, bool isUser)
         {
             int type = isCode ? 0xB : 0x3;
             int dpl = isUser ? 3 : 0;
-            int db = isCode ? 0 : 1;
-            int l = isCode ? 1 : 0;
+            bool code64 = _guest64 && isCode;
+            int db = code64 ? 0 : 1;
+            int l = code64 ? 1 : 0;
             return (ushort)(type | (1 << 4) | (dpl << 5) | (1 << 7) | (l << 13) | (db << 14) | (1 << 15));
         }
 
-        private static WhvRegisterValue MakeSegment(ushort selector, bool isCode, bool isUser)
-            => WhvRegisterValue.FromSegment(0, 0xFFFFF, selector, SegmentAttributes(isCode, isUser));
-
-        private static readonly WhvRegisterValue UserCodeSegment =
-            MakeSegment(WhpConstants.UserCodeSelector, true, true);
-        private static readonly WhvRegisterValue UserDataSegment =
-            MakeSegment(WhpConstants.UserDataSelector, false, true);
+        private WhvRegisterValue MakeSegment(ushort selector, bool isCode, bool isUser)
+            => WhvRegisterValue.FromSegment(0, 0xFFFFFFFF, selector, SegmentAttributes(isCode, isUser));
 
         private void QueueCsSs(WhvRegisterValue cs, WhvRegisterValue ss)
         {
@@ -1351,36 +1355,45 @@ namespace Brovan.Core.Emulation
 
         private unsafe void InitializeVirtualProcessorState()
         {
-            const int count = 16;
-            Span<uint> names = stackalloc uint[count];
-            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[count];
+            const int maxCount = 16;
+            Span<uint> names = stackalloc uint[maxCount];
+            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[maxCount];
 
-            names[0] = (uint)WhvRegisterName.Cs; values[0] = UserCodeSegment;
-            names[1] = (uint)WhvRegisterName.Ss; values[1] = UserDataSegment;
-            names[2] = (uint)WhvRegisterName.Ds; values[2] = UserDataSegment;
-            names[3] = (uint)WhvRegisterName.Es; values[3] = UserDataSegment;
-            names[4] = (uint)WhvRegisterName.Fs; values[4] = MakeSegment(0x53, false, true);
-            names[5] = (uint)WhvRegisterName.Gs; values[5] = UserDataSegment;
+            names[0] = (uint)WhvRegisterName.Cs; values[0] = _userCodeSegment;
+            names[1] = (uint)WhvRegisterName.Ss; values[1] = _userDataSegment;
+            names[2] = (uint)WhvRegisterName.Ds; values[2] = _userDataSegment;
+            names[3] = (uint)WhvRegisterName.Es; values[3] = _userDataSegment;
+            names[4] = (uint)WhvRegisterName.Fs;
+            values[4] = _guest64 ? MakeSegment(0x53, false, true) : MakeSegment(WhpConstants.UserFsSelector32, false, true);
+            names[5] = (uint)WhvRegisterName.Gs;
+            values[5] = _guest64 ? _userDataSegment : MakeSegment(WhpConstants.UserGsSelector32, false, true);
             names[6] = (uint)WhvRegisterName.Tr;
             values[6] = WhvRegisterValue.FromSegment(_exceptionTssPageGpa, 0x67, WhpConstants.TssSelector, 0x8B);
-            names[7] = (uint)WhvRegisterName.Gdtr; values[7] = WhvRegisterValue.FromTable(_gdtPageGpa, 0x48);
+            names[7] = (uint)WhvRegisterName.Gdtr;
+            values[7] = WhvRegisterValue.FromTable(_gdtPageGpa, WhpConstants.GdtLimit);
             names[8] = (uint)WhvRegisterName.Idtr;
             values[8] = WhvRegisterValue.FromTable(_exceptionIdtPageGpa, (ushort)(WhpConstants.ExceptionVectorCount * 16 - 1));
             names[9] = (uint)WhvRegisterName.Cr0; values[9] = WhvRegisterValue.FromReg64(0x80000033UL);
             names[10] = (uint)WhvRegisterName.Cr3; values[10] = WhvRegisterValue.FromReg64(_pml4Gpa);
             names[11] = (uint)WhvRegisterName.Cr4; values[11] = WhvRegisterValue.FromReg64(0x620UL);
             names[12] = (uint)WhvRegisterName.Efer;
-            values[12] = WhvRegisterValue.FromReg64((1UL << 0) | (1UL << 8) | (1UL << 10) | (1UL << 11));
-            names[13] = (uint)WhvRegisterName.Star; values[13] = WhvRegisterValue.FromReg64((0x23UL << 48) | (0x08UL << 32));
-            names[14] = (uint)WhvRegisterName.Lstar; values[14] = WhvRegisterValue.FromReg64(_syscallTrapPageGpa);
-            names[15] = (uint)WhvRegisterName.Sfmask; values[15] = WhvRegisterValue.FromReg64(0);
+            values[12] = WhvRegisterValue.FromReg64((1UL << 8) | (1UL << 10) | (1UL << 11) | (_guest64 ? 1UL << 0 : 0));
+
+            int count = 13;
+            if (_guest64)
+            {
+                names[13] = (uint)WhvRegisterName.Star; values[13] = WhvRegisterValue.FromReg64((0x23UL << 48) | (0x08UL << 32));
+                names[14] = (uint)WhvRegisterName.Lstar; values[14] = WhvRegisterValue.FromReg64(_syscallTrapPageGpa);
+                names[15] = (uint)WhvRegisterName.Sfmask; values[15] = WhvRegisterValue.FromReg64(0);
+                count = maxCount;
+            }
 
             lock (_vcpuLock)
             {
                 fixed (uint* n = names)
                 fixed (WhvRegisterValue* v = values)
                 {
-                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, n, count, v);
+                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, n, (uint)count, v);
                     if (WhpNative.Failed(hr))
                         throw new WhpException("WHvSetVirtualProcessorRegisters(initial state) failed", hr);
                 }
@@ -1389,12 +1402,25 @@ namespace Brovan.Core.Emulation
 
         private unsafe void InitializeSyscallTrapPage()
         {
+            if (!_guest64) return;
+
             _syscallTrapPageGpa = AllocateInternalPage(true);
             if (_mappedPages.TryGetValue(_syscallTrapPageGpa, out MappedPage page))
             {
                 byte* code = (byte*)page.HostPage;
                 code[0] = 0xF4;
             }
+        }
+
+        private static unsafe void WriteDescriptor(byte* gdt, int index, ulong segmentBase, uint limit, byte access, byte flags)
+        {
+            ulong descriptor = (limit & 0xFFFFUL)
+                             | ((segmentBase & 0xFFFFFFUL) << 16)
+                             | ((ulong)access << 40)
+                             | ((ulong)((limit >> 16) & 0xF) << 48)
+                             | ((ulong)(flags & 0xF) << 52)
+                             | (((segmentBase >> 24) & 0xFFUL) << 56);
+            Unsafe.WriteUnaligned(gdt + index * 8, descriptor);
         }
 
         private void InitializeGdt()
@@ -1408,18 +1434,26 @@ namespace Brovan.Core.Emulation
                 byte* gdt = (byte*)gdtPage.HostPage;
                 Unsafe.InitBlockUnaligned(gdt, 0, (uint)WhpConstants.PageSize);
 
-                gdt[0x08] = 0xFF; gdt[0x09] = 0xFF; gdt[0x0A] = 0x00; gdt[0x0B] = 0x00;
-                gdt[0x0C] = 0x00; gdt[0x0D] = 0x9B; gdt[0x0E] = 0xAF; gdt[0x0F] = 0x00;
-
-                gdt[0x10] = 0xFF; gdt[0x11] = 0xFF; gdt[0x12] = 0x00; gdt[0x13] = 0x00;
-                gdt[0x14] = 0x00; gdt[0x15] = 0x93; gdt[0x16] = 0xCF; gdt[0x17] = 0x00;
-
-                gdt[0x28] = 0xFF; gdt[0x29] = 0xFF; gdt[0x2A] = 0x00; gdt[0x2B] = 0x00;
-                gdt[0x2C] = 0x00; gdt[0x2D] = 0xF3; gdt[0x2E] = 0xCF; gdt[0x2F] = 0x00;
-
-                gdt[0x30] = 0xFF; gdt[0x31] = 0xFF; gdt[0x32] = 0x00; gdt[0x33] = 0x00;
-                gdt[0x34] = 0x00; gdt[0x35] = 0xFB; gdt[0x36] = 0xAF; gdt[0x37] = 0x00;
+                WriteDescriptor(gdt, WhpConstants.KernelCodeSelector >> 3, 0, 0xFFFFF, 0x9B, 0xA);
+                WriteDescriptor(gdt, WhpConstants.KernelDataSelector >> 3, 0, 0xFFFFF, 0x93, 0xC);
+                WriteDescriptor(gdt, WhpConstants.UserCodeSelector32 >> 3, 0, 0xFFFFF, 0xFB, 0xC);
+                WriteDescriptor(gdt, WhpConstants.UserDataSelector32 >> 3, 0, 0xFFFFF, 0xF3, 0xC);
+                WriteDescriptor(gdt, WhpConstants.UserDataSelector >> 3, 0, 0xFFFFF, 0xF3, 0xC);
+                WriteDescriptor(gdt, WhpConstants.UserCodeSelector >> 3, 0, 0xFFFFF, 0xFB, 0xA);
+                WriteDescriptor(gdt, WhpConstants.UserFsSelector32 >> 3, 0, 0xFFFFF, 0xF3, 0xC);
+                WriteDescriptor(gdt, WhpConstants.UserGsSelector32 >> 3, 0, 0xFFFFF, 0xF3, 0xC);
             }
+        }
+
+        private static unsafe void WriteIdtGate(byte* idt, uint vector, ulong handler)
+        {
+            ulong low = (handler & 0xFFFF)
+                      | ((ulong)WhpConstants.KernelCodeSelector << 16)
+                      | ((ulong)(WhpConstants.ExceptionIstIndex & 0x7) << 32)
+                      | ((ulong)WhpConstants.ExceptionGateAttributes << 40)
+                      | (((handler >> 16) & 0xFFFF) << 48);
+            Unsafe.WriteUnaligned(idt + vector * 16, low);
+            Unsafe.WriteUnaligned(idt + vector * 16 + 8, (uint)((handler >> 32) & 0xFFFFFFFF));
         }
 
         private void InitializeExceptionHandling()
@@ -1444,18 +1478,7 @@ namespace Brovan.Core.Emulation
                 {
                     byte* idt = (byte*)idtPage.HostPage;
                     for (uint vector = 0; vector < WhpConstants.ExceptionVectorCount; vector++)
-                    {
-                        ulong handler = _exceptionStubPageGpa + vector * WhpConstants.ExceptionStubStride;
-
-                        ulong low = (handler & 0xFFFF)
-                                  | ((ulong)WhpConstants.KernelCodeSelector << 16)
-                                  | ((ulong)(WhpConstants.ExceptionIstIndex & 0x7) << 32)
-                                  | ((ulong)WhpConstants.ExceptionGateAttributes << 40)
-                                  | (((handler >> 16) & 0xFFFF) << 48);
-                        ulong high = (handler >> 32) & 0xFFFFFFFF;
-                        Unsafe.WriteUnaligned(idt + vector * 16, low);
-                        Unsafe.WriteUnaligned(idt + vector * 16 + 8, (uint)high);
-                    }
+                        WriteIdtGate(idt, vector, _exceptionStubPageGpa + vector * WhpConstants.ExceptionStubStride);
                 }
 
                 if (_mappedPages.TryGetValue(_exceptionTssPageGpa, out MappedPage tssPage))
@@ -1474,25 +1497,10 @@ namespace Brovan.Core.Emulation
                 unsafe
                 {
                     byte* gdt = (byte*)gdtMapped.HostPage;
-                    int tssIndex = WhpConstants.TssSelector >> 3;
                     ulong tssBase = _exceptionTssPageGpa;
-                    uint tssLimit = 0x67;
-                    gdt[tssIndex * 8 + 0] = (byte)(tssLimit & 0xFF);
-                    gdt[tssIndex * 8 + 1] = (byte)((tssLimit >> 8) & 0xFF);
-                    gdt[tssIndex * 8 + 2] = (byte)(tssBase & 0xFF);
-                    gdt[tssIndex * 8 + 3] = (byte)((tssBase >> 8) & 0xFF);
-                    gdt[tssIndex * 8 + 4] = (byte)((tssBase >> 16) & 0xFF);
-                    gdt[tssIndex * 8 + 5] = (byte)(0x89 | 0x80);
-                    gdt[tssIndex * 8 + 6] = (byte)(((tssLimit >> 16) & 0xF) | 0x00);
-                    gdt[tssIndex * 8 + 7] = (byte)((tssBase >> 24) & 0xFF);
-                    gdt[tssIndex * 8 + 8] = (byte)((tssBase >> 32) & 0xFF);
-                    gdt[tssIndex * 8 + 9] = (byte)((tssBase >> 40) & 0xFF);
-                    gdt[tssIndex * 8 + 10] = (byte)((tssBase >> 48) & 0xFF);
-                    gdt[tssIndex * 8 + 11] = (byte)((tssBase >> 56) & 0xFF);
-                    gdt[tssIndex * 8 + 12] = 0;
-                    gdt[tssIndex * 8 + 13] = 0;
-                    gdt[tssIndex * 8 + 14] = 0;
-                    gdt[tssIndex * 8 + 15] = 0;
+                    int tssIndex = WhpConstants.TssSelector >> 3;
+                    WriteDescriptor(gdt, tssIndex, tssBase & 0xFFFFFFFF, 0x67, 0x89, 0x0);
+                    Unsafe.WriteUnaligned(gdt + (tssIndex + 1) * 8, tssBase >> 32);
                 }
             }
         }
@@ -1553,6 +1561,9 @@ namespace Brovan.Core.Emulation
             return baseGpa;
         }
 
+        private const ulong PageTableEntryDefaultFlags =
+            WhpConstants.PageTableEntryPresent | WhpConstants.PageTableEntryWritable | WhpConstants.PageTableEntryUser;
+
         private void EnsureVirtualMapping(ulong guestAddress)
         {
             ulong pageBase = guestAddress & ~WhpConstants.PageMask;
@@ -1569,10 +1580,7 @@ namespace Brovan.Core.Emulation
             unsafe
             {
                 ulong* pt = (ulong*)ptPtr;
-                pt[ptIndex] = pageBase
-                    | WhpConstants.PageTableEntryPresent
-                    | WhpConstants.PageTableEntryWritable
-                    | WhpConstants.PageTableEntryUser;
+                pt[ptIndex] = pageBase | PageTableEntryDefaultFlags;
             }
         }
 
@@ -1587,10 +1595,7 @@ namespace Brovan.Core.Emulation
                 if ((entry & WhpConstants.PageTableEntryPresent) == 0)
                 {
                     ulong childGpa = AllocateInternalPage(false, false);
-                    entries[index] = childGpa
-                        | WhpConstants.PageTableEntryPresent
-                        | WhpConstants.PageTableEntryWritable
-                        | WhpConstants.PageTableEntryUser;
+                    entries[index] = childGpa | PageTableEntryDefaultFlags;
                     return childGpa;
                 }
                 return entry & WhpConstants.PageTableEntryAddressMask;
@@ -2015,7 +2020,7 @@ namespace Brovan.Core.Emulation
         {
             ulong rip = ReadRegister(Registers.UC_X86_REG_RIP);
 
-            if (_syscallHook != null && rip == (_syscallTrapPageGpa + 1))
+            if (_guest64 && _syscallHook != null && rip == (_syscallTrapPageGpa + 1))
             {
                 if (HandleSyscallTrap()) return true;
                 _error = WhpErrors.Ok;
@@ -2235,7 +2240,7 @@ namespace Brovan.Core.Emulation
                 after.Rip += 2;
             _regsDirty = true;
 
-            QueueCsSs(UserCodeSegment, UserDataSegment);
+            QueueCsSs(_userCodeSegment, _userDataSegment);
             return true;
         }
 
@@ -2275,7 +2280,7 @@ namespace Brovan.Core.Emulation
             for (int i = 0; i < _interruptHooks.Count; i++)
                 _interruptHooks[i].Callback(exception);
 
-            return false;
+            return _interruptHooks.Count != 0 && exception >= WhpConstants.FirstSoftwareInterruptVector;
         }
 
         private void AdvanceRip(ulong amount)
@@ -2507,6 +2512,22 @@ namespace Brovan.Core.Emulation
             WhvRegisterValue v = GetSingleRegister(name);
             v.Low = baseAddress;
             SetSingleRegister(name, v);
+
+            if (!_guest64)
+                SyncGdtDescriptorBase((ushort)(v.High >> 32), baseAddress);
+        }
+
+        private unsafe void SyncGdtDescriptorBase(ushort selector, ulong segmentBase)
+        {
+            int index = selector >> 3;
+            if (index != WhpConstants.UserFsSelector32 >> 3 && index != WhpConstants.UserGsSelector32 >> 3) return;
+            if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage gdtPage) || gdtPage.HostPage == IntPtr.Zero) return;
+
+            byte* descriptor = (byte*)gdtPage.HostPage + index * 8;
+            descriptor[2] = (byte)segmentBase;
+            descriptor[3] = (byte)(segmentBase >> 8);
+            descriptor[4] = (byte)(segmentBase >> 16);
+            descriptor[7] = (byte)(segmentBase >> 24);
         }
 
         private static bool IsDebugRegister(Registers register) => register switch
