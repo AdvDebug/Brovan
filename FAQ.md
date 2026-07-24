@@ -77,6 +77,6 @@ Currently unicorn doesn't have a fix, and looks like it won't come any time soon
 
 All unicorn programs running on windows, if they need to do anything real with unicorn, it needs to disable CFG. not just Brovan. this is usually done via the project settings and isn't ever mentioned, but the reason it is mentioned in Brovan is because the .NET Compiler doesn't support controlling the linker directly, so it is mentioned so people are aware.
 
-The post-build automatically disables it when building for Windows via editbin.exe, it can also restart the process with the mitigation disabled.
+The post-build automatically disables it when building for Windows via a custom code task, it can also restart the process with the mitigation disabled if the task failed during compilation.
 
 </details>
