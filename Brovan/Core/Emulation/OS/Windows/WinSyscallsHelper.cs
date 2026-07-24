@@ -1165,6 +1165,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong EtwNotificationEventHandle;
         internal PebLdrTracker LdrTracker;
         public readonly Dictionary<ulong, WinWindow> WinWindows = new();
+        private const int MaxDestroyedWindows = 64;
+        private readonly Dictionary<ulong, WinWindow> DestroyedWindows = new();
+        private readonly Queue<ulong> DestroyedWindowOrder = new();
         public readonly Dictionary<ushort, WinWindowClass> WinWindowClassesByAtom = new();
         private readonly Dictionary<string, ushort> WinWindowClassAtomsByKey = new(StringComparer.OrdinalIgnoreCase);
         private ushort NextWindowClassAtom = 0xC000;
@@ -3863,6 +3866,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
         }
 
+        public void HideDesktopWindow()
+        {
+            if (DesktopWindow == null || DesktopDisplay is not GuiThreadManager guiManager)
+                return;
+
+            guiManager.EnqueuePresent(DesktopWindowTitle, 0, 0, false, WindowState.Normal);
+        }
+
         /// <summary>
         /// Presents the current foreground Win32k window through the host window manager.
         /// </summary>
@@ -3931,6 +3942,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopDisplay == null)
                 return;
 
+            HostEventQueue.Reset();
             DesktopWindow = DesktopDisplay.CreateWindow(new WindowOptions
             {
                 Title = DesktopWindowTitle,
@@ -4051,10 +4063,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (FocusWindow == Hwnd)
                 FocusWindow = 0;
 
+            Win32kHelper.PostMessage(Emulator, Hwnd, Win32kHelper.WM_DESTROY, 0, 0);
+
             foreach (ulong Child in Window.Children.ToArray())
             {
                 DestroyWindow(Child);
             }
+
+            Win32kHelper.PostMessage(Emulator, Hwnd, Win32kHelper.WM_NCDESTROY, 0, 0);
 
             if (Window.ParentHwnd != 0 && WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow Parent))
             {
@@ -4068,8 +4084,34 @@ namespace Brovan.Core.Emulation.OS.Windows
             Window.Destroyed = true;
             ClearUserWindowHandleEntry(Window);
             WinWindows.Remove(Hwnd);
+            RememberDestroyedWindow(Window);
             PresentDesktop();
             return true;
+        }
+
+        private void RememberDestroyedWindow(WinWindow Window)
+        {
+            if (Window.WndProc == 0)
+                return;
+
+            while (DestroyedWindowOrder.Count >= MaxDestroyedWindows)
+                DestroyedWindows.Remove(DestroyedWindowOrder.Dequeue());
+
+            DestroyedWindows[Window.Hwnd] = Window;
+            DestroyedWindowOrder.Enqueue(Window.Hwnd);
+        }
+
+        public WinWindow GetDestroyedWindow(ulong Hwnd)
+        {
+            if (Hwnd == 0)
+                return null;
+
+            return DestroyedWindows.TryGetValue(Hwnd, out WinWindow Window) ? Window : null;
+        }
+
+        public void ForgetDestroyedWindow(ulong Hwnd)
+        {
+            DestroyedWindows.Remove(Hwnd);
         }
 
         public WinHandle OpenFileHandle(string Path, bool FSAccess, AccessMask Permissions)

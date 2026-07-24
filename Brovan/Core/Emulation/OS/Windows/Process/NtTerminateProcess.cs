@@ -40,6 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         ProcessThreads.ExitCode = (int)ExitCode;
                         Instance.WinHelper.ClearTerminationState(ProcessThreads);
                     }
+                    Instance.WinHelper.HideDesktopWindow();
                     Instance.StopEmulation();
                     return NTSTATUS.STATUS_SUCCESS;
                 }
@@ -63,6 +64,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             ProcessThreads.ExitCode = (int)ExitCode;
                             Instance.WinHelper.ClearTerminationState(ProcessThreads);
                         }
+                        Instance.WinHelper.HideDesktopWindow();
                         Instance.StopEmulation();
                         return NTSTATUS.STATUS_SUCCESS;
                     }

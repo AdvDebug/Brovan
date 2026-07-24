@@ -15,9 +15,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             WinWindow Window = Message.Hwnd == 0 ? null : Instance.WinHelper.GetWindow(Message.Hwnd);
             if (Message.Hwnd != 0 && Window == null)
             {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
+                bool Teardown = Message.Message == Win32kHelper.WM_DESTROY || Message.Message == Win32kHelper.WM_NCDESTROY;
+                Window = Teardown ? Instance.WinHelper.GetDestroyedWindow(Message.Hwnd) : null;
+
+                if (Window == null)
+                {
+                    Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
+                    Instance.SetRawSyscallReturn(0);
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
+                if (Message.Message == Win32kHelper.WM_NCDESTROY)
+                    Instance.WinHelper.ForgetDestroyedWindow(Message.Hwnd);
             }
 
             if (Window == null || Window.WndProc == 0)

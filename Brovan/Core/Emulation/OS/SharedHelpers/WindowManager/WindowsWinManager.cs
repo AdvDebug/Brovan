@@ -743,8 +743,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 if (msg == WM_CLOSE)
                 {
-                    HostEventQueue.Enqueue(msg, 0UL, 0UL);
-                    Close();
+                    HostEventQueue.RequestClose();
                     return IntPtr.Zero;
                 }
 

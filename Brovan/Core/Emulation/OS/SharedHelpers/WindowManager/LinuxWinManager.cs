@@ -369,7 +369,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_SIZE = 0x0005;
         private const uint WM_SETFOCUS = 0x0007;
         private const uint WM_KILLFOCUS = 0x0008;
-        private const uint WM_CLOSE = 0x0010;
         private const uint WM_KEYDOWN = 0x0100;
         private const uint WM_KEYUP = 0x0101;
         private const uint WM_SYSKEYDOWN = 0x0104;
@@ -537,57 +536,57 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 case X11.KeyPress:
                 case X11.KeyRelease:
-                {
-                    ref X11.XKeyEvent key = ref Unsafe.As<X11.XEvent, X11.XKeyEvent>(ref nativeEvent);
-                    _modifierState = key.State;
+                    {
+                        ref X11.XKeyEvent key = ref Unsafe.As<X11.XEvent, X11.XKeyEvent>(ref nativeEvent);
+                        _modifierState = key.State;
 
-                    uint virtualKey = KeysymToVirtualKey(LookupKeysym((byte)key.Keycode));
-                    if (virtualKey == 0)
+                        uint virtualKey = KeysymToVirtualKey(LookupKeysym((byte)key.Keycode));
+                        if (virtualKey == 0)
+                            return;
+
+                        bool down = nativeEvent.Type == X11.KeyPress;
+                        bool altHeld = (key.State & X11.Mod1Mask) != 0;
+                        bool system = altHeld || virtualKey == VK_MENU || virtualKey == VK_F10;
+
+                        uint message = down
+                            ? (system ? WM_SYSKEYDOWN : WM_KEYDOWN)
+                            : (system ? WM_SYSKEYUP : WM_KEYUP);
+
+                        HostEventQueue.Enqueue(message, virtualKey, BuildKeyLParam(key.Keycode, virtualKey, down, altHeld));
                         return;
-
-                    bool down = nativeEvent.Type == X11.KeyPress;
-                    bool altHeld = (key.State & X11.Mod1Mask) != 0;
-                    bool system = altHeld || virtualKey == VK_MENU || virtualKey == VK_F10;
-
-                    uint message = down
-                        ? (system ? WM_SYSKEYDOWN : WM_KEYDOWN)
-                        : (system ? WM_SYSKEYUP : WM_KEYUP);
-
-                    HostEventQueue.Enqueue(message, virtualKey, BuildKeyLParam(key.Keycode, virtualKey, down, altHeld));
-                    return;
-                }
+                    }
 
                 case X11.ButtonPress:
                 case X11.ButtonRelease:
-                {
-                    ref X11.XButtonEvent button = ref Unsafe.As<X11.XEvent, X11.XButtonEvent>(ref nativeEvent);
-                    _modifierState = button.State;
-                    TranslateButton(ref button, nativeEvent.Type == X11.ButtonPress);
-                    return;
-                }
+                    {
+                        ref X11.XButtonEvent button = ref Unsafe.As<X11.XEvent, X11.XButtonEvent>(ref nativeEvent);
+                        _modifierState = button.State;
+                        TranslateButton(ref button, nativeEvent.Type == X11.ButtonPress);
+                        return;
+                    }
 
                 case X11.MotionNotify:
-                {
-                    ref X11.XMotionEvent motion = ref Unsafe.As<X11.XEvent, X11.XMotionEvent>(ref nativeEvent);
-                    _modifierState = motion.State;
-                    HostEventQueue.Enqueue(WM_MOUSEMOVE, StateToMouseKeys(motion.State), MakeLParam(motion.X, motion.Y));
-                    return;
-                }
+                    {
+                        ref X11.XMotionEvent motion = ref Unsafe.As<X11.XEvent, X11.XMotionEvent>(ref nativeEvent);
+                        _modifierState = motion.State;
+                        HostEventQueue.Enqueue(WM_MOUSEMOVE, StateToMouseKeys(motion.State), MakeLParam(motion.X, motion.Y));
+                        return;
+                    }
 
                 case X11.Expose:
                     HostEventQueue.MarkRepaint();
                     return;
 
                 case X11.ConfigureNotify:
-                {
-                    ref X11.XConfigureEvent configure = ref Unsafe.As<X11.XEvent, X11.XConfigureEvent>(ref nativeEvent);
-                    if (TryGetWindow(configure.Window, out LinuxWindow? window))
-                        window?.OnConfigured(configure.Width, configure.Height);
+                    {
+                        ref X11.XConfigureEvent configure = ref Unsafe.As<X11.XEvent, X11.XConfigureEvent>(ref nativeEvent);
+                        if (TryGetWindow(configure.Window, out LinuxWindow? window))
+                            window?.OnConfigured(configure.Width, configure.Height);
 
-                    HostEventQueue.Enqueue(WM_SIZE, 0, MakeLParam(configure.Width, configure.Height));
-                    HostEventQueue.MarkRepaint();
-                    return;
-                }
+                        HostEventQueue.Enqueue(WM_SIZE, 0, MakeLParam(configure.Width, configure.Height));
+                        HostEventQueue.MarkRepaint();
+                        return;
+                    }
 
                 case X11.FocusIn:
                     HostEventQueue.Enqueue(WM_SETFOCUS, 0, 0);
@@ -598,18 +597,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     return;
 
                 case X11.ClientMessage:
-                {
-                    ref X11.XClientMessageEvent client = ref Unsafe.As<X11.XEvent, X11.XClientMessageEvent>(ref nativeEvent);
-                    if (client.MessageType == _wmProtocols && client.Data0 == _wmDeleteWindow)
                     {
-                        HostEventQueue.Enqueue(WM_CLOSE, 0, 0);
+                        ref X11.XClientMessageEvent client = ref Unsafe.As<X11.XEvent, X11.XClientMessageEvent>(ref nativeEvent);
+                        if (client.MessageType == _wmProtocols && client.Data0 == _wmDeleteWindow)
+                            HostEventQueue.RequestClose();
 
-                        if (TryGetWindow(client.Window, out LinuxWindow? window))
-                            window?.Dispose();
+                        return;
                     }
-
-                    return;
-                }
             }
         }
 
@@ -1120,54 +1114,54 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     break;
 
                 case GdiPrimitiveKind.Ellipse:
-                {
-                    Normalize(primitive, out int x, out int y, out uint width, out uint height);
-                    if (primitive.HasBrush)
                     {
-                        X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Brush.ColorRef));
-                        X11.XFillArc(_xDisplay, windowHandle, gc, x, y, width, height, 0, 360 * 64);
-                    }
+                        Normalize(primitive, out int x, out int y, out uint width, out uint height);
+                        if (primitive.HasBrush)
+                        {
+                            X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Brush.ColorRef));
+                            X11.XFillArc(_xDisplay, windowHandle, gc, x, y, width, height, 0, 360 * 64);
+                        }
 
-                    if (primitive.HasPen)
-                    {
-                        X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
-                        X11.XDrawArc(_xDisplay, windowHandle, gc, x, y, width, height, 0, 360 * 64);
-                    }
+                        if (primitive.HasPen)
+                        {
+                            X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
+                            X11.XDrawArc(_xDisplay, windowHandle, gc, x, y, width, height, 0, 360 * 64);
+                        }
 
-                    break;
-                }
+                        break;
+                    }
 
                 case GdiPrimitiveKind.Polygon:
-                {
-                    if (primitive.Points == null || primitive.Points.Length == 0)
+                    {
+                        if (primitive.Points == null || primitive.Points.Length == 0)
+                            break;
+
+                        X11.XPoint[] points = ToXPoints(primitive.Points, close: true);
+                        if (primitive.HasBrush)
+                        {
+                            X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Brush.ColorRef));
+                            X11.XFillPolygon(_xDisplay, windowHandle, gc, points, primitive.Points.Length, X11.Complex, X11.CoordModeOrigin);
+                        }
+
+                        if (primitive.HasPen)
+                        {
+                            X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
+                            X11.XDrawLines(_xDisplay, windowHandle, gc, points, points.Length, X11.CoordModeOrigin);
+                        }
+
                         break;
-
-                    X11.XPoint[] points = ToXPoints(primitive.Points, close: true);
-                    if (primitive.HasBrush)
-                    {
-                        X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Brush.ColorRef));
-                        X11.XFillPolygon(_xDisplay, windowHandle, gc, points, primitive.Points.Length, X11.Complex, X11.CoordModeOrigin);
                     }
-
-                    if (primitive.HasPen)
-                    {
-                        X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
-                        X11.XDrawLines(_xDisplay, windowHandle, gc, points, points.Length, X11.CoordModeOrigin);
-                    }
-
-                    break;
-                }
 
                 case GdiPrimitiveKind.Polyline:
-                {
-                    if (primitive.Points == null || primitive.Points.Length == 0)
-                        break;
+                    {
+                        if (primitive.Points == null || primitive.Points.Length == 0)
+                            break;
 
-                    X11.XPoint[] points = ToXPoints(primitive.Points, close: false);
-                    X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
-                    X11.XDrawLines(_xDisplay, windowHandle, gc, points, points.Length, X11.CoordModeOrigin);
-                    break;
-                }
+                        X11.XPoint[] points = ToXPoints(primitive.Points, close: false);
+                        X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
+                        X11.XDrawLines(_xDisplay, windowHandle, gc, points, points.Length, X11.CoordModeOrigin);
+                        break;
+                    }
             }
 
             X11.XFlush(_xDisplay);

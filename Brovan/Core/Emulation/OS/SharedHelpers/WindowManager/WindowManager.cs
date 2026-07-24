@@ -8,8 +8,28 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
     internal static class HostEventQueue
     {
+        private const uint WM_CLOSE = 0x0010;
+
         private static int _pendingRepaint;
+        private static int _closeRequested;
         private static readonly ConcurrentQueue<(uint Message, ulong WParam, ulong LParam)> PendingInput = new();
+
+        public static void RequestClose()
+        {
+            if (Interlocked.Exchange(ref _closeRequested, 1) != 0)
+                Environment.Exit(0);
+
+            Enqueue(WM_CLOSE, 0, 0);
+        }
+
+        public static void Reset()
+        {
+            Interlocked.Exchange(ref _closeRequested, 0);
+            Interlocked.Exchange(ref _pendingRepaint, 0);
+            while (PendingInput.TryDequeue(out _))
+            {
+            }
+        }
 
         public static void MarkRepaint()
         {

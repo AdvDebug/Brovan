@@ -54,6 +54,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WM_GETTEXT = 0x000D;
         internal const uint WM_GETTEXTLENGTH = 0x000E;
         internal const uint WM_NCHITTEST = 0x0084;
+        internal const uint WM_NCDESTROY = 0x0082;
         internal const uint WM_PAINT = 0x000F;
         internal const uint WM_SETTEXT = 0x000C;
         internal const uint WM_KEYDOWN = 0x0100;
@@ -102,6 +103,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly Dictionary<ulong, Win32kPenBrush> PenBrushObjects = new();
             public ulong NextDeviceContext = FirstDeviceContextHandle;
             public ulong CaptureWindow;
+            public bool QuitPosted;
+            public ulong QuitExitCode;
         }
 
         private sealed class Win32kDeviceContext
@@ -248,6 +251,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return true;
         }
 
+        internal static void PostQuitMessage(BinaryEmulator Instance, ulong ExitCode)
+        {
+            Win32kState State = GetState(Instance);
+            State.QuitExitCode = ExitCode;
+            State.QuitPosted = true;
+        }
+
         internal static bool TryGetMessage(BinaryEmulator Instance, ulong HwndFilter, uint MinMessage, uint MaxMessage, bool Remove, out Win32kMessage Message)
         {
             DrainHostEvents(Instance);
@@ -267,6 +277,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Index++;
             }
 
+            if (State.QuitPosted)
+            {
+                Message = new Win32kMessage(0, WM_QUIT, State.QuitExitCode, 0, unchecked((uint)Instance.EmulatedTickCount64), 0, 0);
+                if (Remove)
+                    State.QuitPosted = false;
+                return true;
+            }
+
             Message = default;
             return false;
         }
@@ -279,6 +297,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return false;
 
             Win32kState State = GetState(Instance);
+            if (State.QuitPosted && (WakeMask & QS_POSTMESSAGE) != 0)
+                return true;
+
             foreach (Win32kMessage Candidate in State.MessageQueue)
             {
                 if ((GetMessageWakeBits(Candidate.Message) & WakeMask) != 0)
