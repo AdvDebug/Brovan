@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Brovan.Core.Emulation.OS.Windows;
 using Brovan.Core.Emulation.OS.Windows.Win32k;
@@ -784,47 +785,104 @@ namespace Brovan.Core.Emulation
                 return;
 
             ulong RelocationTableAddress = MappedBase + RelocationDirectory.VirtualAddress;
-            ulong RelocationTableEnd = RelocationTableAddress + RelocationDirectory.Size;
+            int TableSize = (int)RelocationDirectory.Size;
 
-            while (RelocationTableAddress < RelocationTableEnd)
+            byte[] Table = ArrayPool<byte>.Shared.Rent(TableSize);
+            const int PatchWindow = (int)PageSize + 8;
+            byte[] PageBuffer = ArrayPool<byte>.Shared.Rent(PatchWindow);
+
+            try
             {
-                uint PageRva = ReadMemoryUInt(RelocationTableAddress);
-                uint BlockSize = ReadMemoryUInt(RelocationTableAddress + 4);
-                RelocationTableAddress += 8;
+                if (!ReadMemory(RelocationTableAddress, Table.AsSpan(0, TableSize), (uint)TableSize))
+                    return;
 
-                int EntryCount = ((int)BlockSize - 8) / 2;
-                for (int Index = 0; Index < EntryCount; Index++)
+                int Cursor = 0;
+                while (Cursor + 8 <= TableSize)
                 {
-                    ushort Entry = BitConverter.ToUInt16(ReadMemory(RelocationTableAddress, 2));
-                    RelocationTableAddress += 2;
+                    uint PageRva = BinaryPrimitives.ReadUInt32LittleEndian(Table.AsSpan(Cursor, 4));
+                    uint BlockSize = BinaryPrimitives.ReadUInt32LittleEndian(Table.AsSpan(Cursor + 4, 4));
+                    if (BlockSize < 8)
+                        break;
 
-                    ushort RelocationType = (ushort)(Entry >> 12);
-                    ushort Offset = (ushort)(Entry & 0x0FFF);
-                    ulong PatchAddress = MappedBase + PageRva + Offset;
+                    int EntriesOffset = Cursor + 8;
+                    int EntryBytes = (int)BlockSize - 8;
+                    if (EntriesOffset + EntryBytes > TableSize)
+                        EntryBytes = TableSize - EntriesOffset;
+                    if (EntryBytes < 0)
+                        break;
 
-                    switch (RelocationType)
+                    Cursor += (int)BlockSize;
+
+                    ulong PageBase = MappedBase + PageRva;
+                    int Available = PatchWindow;
+                    if (!ReadMemory(PageBase, PageBuffer.AsSpan(0, Available), (uint)Available))
                     {
-                        case 0:
-                            break;
+                        Available = (int)PageSize;
+                        if (!ReadMemory(PageBase, PageBuffer.AsSpan(0, Available), (uint)Available))
+                            continue;
+                    }
 
-                        case 3:
-                            uint Original32 = ReadMemoryUInt(PatchAddress);
-                            uint Patched32 = unchecked((uint)((long)Original32 + RelocationDelta));
-                            _emulator.WriteMemory(PatchAddress, Patched32);
-                            break;
+                    int LowOffset = int.MaxValue;
+                    int HighOffset = -1;
+                    int EntryCount = EntryBytes / 2;
 
-                        case 10:
-                            ulong Original64 = ReadMemoryULong(PatchAddress);
-                            ulong Patched64 = unchecked((ulong)((long)Original64 + RelocationDelta));
-                            _emulator.WriteMemory(PatchAddress, Patched64);
-                            break;
+                    for (int Index = 0; Index < EntryCount; Index++)
+                    {
+                        ushort Entry = BinaryPrimitives.ReadUInt16LittleEndian(Table.AsSpan(EntriesOffset + Index * 2, 2));
+                        ushort RelocationType = (ushort)(Entry >> 12);
+                        int Offset = Entry & 0x0FFF;
 
-                        default:
+                        int Width = RelocationType == 3 ? 4 : RelocationType == 10 ? 8 : 0;
+                        if (RelocationType == 0)
+                            continue;
+
+                        if (Width == 0)
+                        {
                             if ((Settings.Flags & LogFlags.Issues) != 0)
                                 TriggerEventMessage($"[-] Unsupported relocation type {RelocationType} in {Module.Name}", LogFlags.Issues);
-                            break;
+                            continue;
+                        }
+
+                        if (Offset + Width > Available)
+                        {
+                            ulong StraddleAddress = PageBase + (ulong)Offset;
+                            if (Width == 4)
+                            {
+                                uint Original32 = ReadMemoryUInt(StraddleAddress);
+                                _emulator.WriteMemory(StraddleAddress, unchecked((uint)((long)Original32 + RelocationDelta)));
+                            }
+                            else
+                            {
+                                ulong Original64 = ReadMemoryULong(StraddleAddress);
+                                _emulator.WriteMemory(StraddleAddress, unchecked((ulong)((long)Original64 + RelocationDelta)));
+                            }
+                            continue;
+                        }
+
+                        Span<byte> Target = PageBuffer.AsSpan(Offset, Width);
+                        if (Width == 4)
+                        {
+                            uint Original32 = BinaryPrimitives.ReadUInt32LittleEndian(Target);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Target, unchecked((uint)((long)Original32 + RelocationDelta)));
+                        }
+                        else
+                        {
+                            ulong Original64 = BinaryPrimitives.ReadUInt64LittleEndian(Target);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Target, unchecked((ulong)((long)Original64 + RelocationDelta)));
+                        }
+
+                        if (Offset < LowOffset) LowOffset = Offset;
+                        if (Offset + Width > HighOffset) HighOffset = Offset + Width;
                     }
+
+                    if (HighOffset > 0)
+                        _emulator.WriteMemory(PageBase + (ulong)LowOffset, PageBuffer.AsSpan(LowOffset, HighOffset - LowOffset));
                 }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Table);
+                ArrayPool<byte>.Shared.Return(PageBuffer);
             }
         }
 

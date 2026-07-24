@@ -1838,14 +1838,14 @@ namespace Brovan.Core.Emulation
             ulong[] Vals = _gprBatchScratch ??= new ulong[GprBatchCount];
             if (!_emulator.ReadRegisterBatch(Regs, Vals, Regs.Length))
                 return false;
-            c.RAX = Vals[0];  c.RBX = Vals[1];  c.RCX = Vals[2];  c.RDX = Vals[3];
-            c.RSI = Vals[4];  c.RDI = Vals[5];  c.RBP = Vals[6];  c.RSP = Vals[7];
+            c.RAX = Vals[0]; c.RBX = Vals[1]; c.RCX = Vals[2]; c.RDX = Vals[3];
+            c.RSI = Vals[4]; c.RDI = Vals[5]; c.RBP = Vals[6]; c.RSP = Vals[7];
             if (Regs.Length == GprBatchCount32)
             {
                 c.RIP = Vals[8]; c.RFLAGS = Vals[9];
                 return true;
             }
-            c.R8 = Vals[8];   c.R9 = Vals[9];   c.R10 = Vals[10]; c.R11 = Vals[11];
+            c.R8 = Vals[8]; c.R9 = Vals[9]; c.R10 = Vals[10]; c.R11 = Vals[11];
             c.R12 = Vals[12]; c.R13 = Vals[13]; c.R14 = Vals[14]; c.R15 = Vals[15];
             c.RIP = Vals[16]; c.RFLAGS = Vals[17];
             return true;
@@ -1856,17 +1856,17 @@ namespace Brovan.Core.Emulation
             if (c == null) return;
             int[] Regs = GetGprBatchRegs();
             ulong[] Vals = _gprBatchScratch ??= new ulong[GprBatchCount];
-            Vals[0]  = c.RAX;  Vals[1]  = c.RBX;  Vals[2]  = c.RCX;  Vals[3]  = c.RDX;
-            Vals[4]  = c.RSI;  Vals[5]  = c.RDI;  Vals[6]  = c.RBP;  Vals[7]  = c.RSP;
+            Vals[0] = c.RAX; Vals[1] = c.RBX; Vals[2] = c.RCX; Vals[3] = c.RDX;
+            Vals[4] = c.RSI; Vals[5] = c.RDI; Vals[6] = c.RBP; Vals[7] = c.RSP;
             if (Regs.Length == GprBatchCount32)
             {
                 Vals[8] = c.RIP; Vals[9] = c.RFLAGS;
             }
             else
             {
-                Vals[8]  = c.R8;   Vals[9]  = c.R9;   Vals[10] = c.R10;  Vals[11] = c.R11;
-                Vals[12] = c.R12;  Vals[13] = c.R13;  Vals[14] = c.R14;  Vals[15] = c.R15;
-                Vals[16] = c.RIP;  Vals[17] = c.RFLAGS;
+                Vals[8] = c.R8; Vals[9] = c.R9; Vals[10] = c.R10; Vals[11] = c.R11;
+                Vals[12] = c.R12; Vals[13] = c.R13; Vals[14] = c.R14; Vals[15] = c.R15;
+                Vals[16] = c.RIP; Vals[17] = c.RFLAGS;
             }
             _emulator.WriteRegisterBatch(Regs, Vals, Regs.Length);
         }

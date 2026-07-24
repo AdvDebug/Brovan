@@ -59,6 +59,10 @@ namespace Brovan.Core.Helpers
         private readonly SafeFileHandle Handle;
         private readonly long Length;
 
+        private readonly Dictionary<string, HiveKey> PathCache = new(StringComparer.OrdinalIgnoreCase);
+        private const int MaxCachedPaths = 8192;
+        private HiveKey CachedRootKey;
+
         public RegistryHiveReader(SafeFileHandle Handle, long Length)
         {
             this.Handle = Handle ?? throw new ArgumentNullException(nameof(Handle));
@@ -68,7 +72,15 @@ namespace Brovan.Core.Helpers
 
         public HiveKey GetRootKey()
         {
-            return ReadKeyAtAbsolute(MainKeyBlockOffset);
+            return CachedRootKey ??= ReadKeyAtAbsolute(MainKeyBlockOffset);
+        }
+
+        private void StorePathResult(string Path, HiveKey Key)
+        {
+            if (PathCache.Count >= MaxCachedPaths)
+                PathCache.Clear();
+
+            PathCache[Path] = Key;
         }
 
         public bool TryOpenPath(string RelativePath, out HiveKey Key)
@@ -86,6 +98,22 @@ namespace Brovan.Core.Helpers
                 return true;
             }
 
+            if (PathCache.TryGetValue(RelativePath, out HiveKey Cached))
+            {
+                Key = Cached;
+                return Cached != null;
+            }
+
+            bool Resolved = TryOpenPathUncached(RelativePath, out HiveKey Opened);
+            StorePathResult(RelativePath, Resolved ? Opened : null);
+            Key = Resolved ? Opened : default;
+            return Resolved;
+        }
+
+        private bool TryOpenPathUncached(string RelativePath, out HiveKey Key)
+        {
+            Key = default;
+
             static bool TryTraverse(RegistryHiveReader Self, string Path, out HiveKey OutKey)
             {
                 OutKey = default;
@@ -96,13 +124,29 @@ namespace Brovan.Core.Helpers
                     Path = Path.Replace("\\CurrentControlSet\\", "\\ControlSet001\\", StringComparison.OrdinalIgnoreCase);
 
                 string[] Parts = Path.Trim('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
+                string Prefix = string.Empty;
                 for (int i = 0; i < Parts.Length; i++)
+                {
+                    Prefix = string.Concat(Prefix, "\\", Parts[i]);
+
+                    if (Self.PathCache.TryGetValue(Prefix, out HiveKey CachedNode))
                     {
-                        if (!Self.TryGetSubKey(Current, Parts[i], out HiveKey Next))
+                        if (CachedNode == null)
                             return false;
 
-                        Current = Next;
+                        Current = CachedNode;
+                        continue;
                     }
+
+                    if (!Self.TryGetSubKey(Current, Parts[i], out HiveKey Next))
+                    {
+                        Self.StorePathResult(Prefix, null);
+                        return false;
+                    }
+
+                    Self.StorePathResult(Prefix, Next);
+                    Current = Next;
+                }
 
                 OutKey = Current;
                 return true;

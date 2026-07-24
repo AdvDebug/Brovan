@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -43,6 +44,11 @@ namespace Brovan.Core.Emulation
         private readonly Dictionary<ulong, InstalledMap> _desiredMaps = new();
         private readonly List<ulong> _staleMapKeys = new();
 
+        private readonly List<ulong> _activeMapStarts = new();
+        private bool _fullRebuildRequired = true;
+        private readonly List<DirtyRange> _dirtyRanges = new();
+        private const int MaxDirtyRanges = 16;
+
         private ulong _pml4Gpa;
         private ulong _nextInternalGpa = WhpConstants.InternalPageTableBase;
 
@@ -63,12 +69,19 @@ namespace Brovan.Core.Emulation
         private WhpRegisters _regsCache;
         private bool _regsValid;
         private bool _regsDirty;
+        private WhvRegisterValue _pendingCs;
+        private WhvRegisterValue _pendingSs;
+        private bool _segmentsDirty;
 
         private readonly List<MemoryHookEntry> _memoryHooks = new();
+        private readonly List<MmioRegion> _mmioRegions = new();
         private InstructionHookEntry _syscallHook;
         private readonly List<InstructionHookEntry> _instructionHooks = new();
         private readonly List<InterruptHookEntry> _interruptHooks = new();
         private readonly List<IntPtr> _liveHookHandles = new();
+
+        private readonly object _mmioLock = new();
+        private Thread _mmioRefreshThread;
 
         private bool _completionActive;
         private ulong _completionPageGpa;
@@ -108,12 +121,27 @@ namespace Brovan.Core.Emulation
             public WhvMapGpaRangeFlags Flags;
         }
 
+        private struct DirtyRange
+        {
+            public ulong Start;
+            public ulong End;
+        }
+
         private sealed class MemoryHookEntry
         {
             public ulong Begin;
             public ulong End;
             public BackendHookType Type;
             public MemoryHookCallback Callback;
+        }
+
+        private sealed class MmioRegion
+        {
+            public ulong Address;
+            public ulong Size;
+            public MmioReadCallback ReadCallback;
+            public MmioWriteCallback WriteCallback;
+            public IntPtr[] HostPages;
         }
 
         private sealed class InstructionHookEntry
@@ -158,6 +186,16 @@ namespace Brovan.Core.Emulation
             (uint)WhvRegisterName.R8, (uint)WhvRegisterName.R9, (uint)WhvRegisterName.R10, (uint)WhvRegisterName.R11,
             (uint)WhvRegisterName.R12, (uint)WhvRegisterName.R13, (uint)WhvRegisterName.R14, (uint)WhvRegisterName.R15,
             (uint)WhvRegisterName.Rip, (uint)WhvRegisterName.Rflags,
+        };
+
+        private static readonly uint[] GpRegNamesWithSegments =
+        {
+            (uint)WhvRegisterName.Rax, (uint)WhvRegisterName.Rbx, (uint)WhvRegisterName.Rcx, (uint)WhvRegisterName.Rdx,
+            (uint)WhvRegisterName.Rsi, (uint)WhvRegisterName.Rdi, (uint)WhvRegisterName.Rsp, (uint)WhvRegisterName.Rbp,
+            (uint)WhvRegisterName.R8, (uint)WhvRegisterName.R9, (uint)WhvRegisterName.R10, (uint)WhvRegisterName.R11,
+            (uint)WhvRegisterName.R12, (uint)WhvRegisterName.R13, (uint)WhvRegisterName.R14, (uint)WhvRegisterName.R15,
+            (uint)WhvRegisterName.Rip, (uint)WhvRegisterName.Rflags,
+            (uint)WhvRegisterName.Cs, (uint)WhvRegisterName.Ss,
         };
 
         public Whp(Arch arch, Mode mode)
@@ -250,6 +288,7 @@ namespace Brovan.Core.Emulation
                 }
 
                 page.Permissions = perm;
+                MarkSpanDirty(guest, WhpConstants.PageSize);
                 EnsureVirtualMapping(guest);
             }
 
@@ -268,6 +307,12 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
+            int removedRegions;
+            lock (_mmioLock)
+            {
+                removedRegions = _mmioRegions.RemoveAll(r => r.Address >= address && r.Address < address + size);
+            }
+
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong guest = address + off;
@@ -278,7 +323,10 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            RebuildMappings();
+            if (removedRegions != 0)
+                RefreshTrappedPages();
+            else
+                RebuildMappings();
             _error = WhpErrors.Ok;
             return true;
         }
@@ -291,12 +339,109 @@ namespace Brovan.Core.Emulation
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 if (_mappedPages.TryGetValue(address + off, out MappedPage page))
+                {
                     page.Permissions = perm;
+                    MarkSpanDirty(address + off, WhpConstants.PageSize);
+                }
             }
 
             RebuildMappings();
             _error = WhpErrors.Ok;
             return true;
+        }
+
+        public bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write)
+        {
+            if (DisposedCheck()) return false;
+
+            if (read == null || write == null ||
+                (address & WhpConstants.PageMask) != 0 || (size & WhpConstants.PageMask) != 0 || size == 0)
+            {
+                _error = WhpErrors.InvalidArgument;
+                return false;
+            }
+
+            if (!MapMemory(address, size, MemoryProtection.Read))
+                return false;
+
+            MmioRegion region = new MmioRegion
+            {
+                Address = address,
+                Size = size,
+                ReadCallback = read,
+                WriteCallback = write,
+                HostPages = new IntPtr[size / WhpConstants.PageSize],
+            };
+
+            for (ulong offset = 0; offset < size; offset += WhpConstants.PageSize)
+            {
+                if (_mappedPages.TryGetValue(address + offset, out MappedPage page) && page != null)
+                    region.HostPages[offset / WhpConstants.PageSize] = page.HostPage;
+            }
+
+            lock (_mmioLock)
+            {
+                _mmioRegions.RemoveAll(r => r.Address == address);
+                _mmioRegions.Add(region);
+                RefreshMmioRegion(region);
+            }
+
+            RefreshTrappedPages();
+            EnsureMmioRefreshThread();
+            _error = WhpErrors.Ok;
+            return true;
+        }
+
+        private void RefreshMmioBackedRegions()
+        {
+            if (_mmioRegions.Count == 0) return;
+
+            lock (_mmioLock)
+            {
+                for (int i = 0; i < _mmioRegions.Count; i++)
+                    RefreshMmioRegion(_mmioRegions[i]);
+            }
+        }
+
+        private unsafe void RefreshMmioRegion(MmioRegion region)
+        {
+            for (int i = 0; i < region.HostPages.Length; i++)
+            {
+                IntPtr hostPage = region.HostPages[i];
+                if (hostPage == IntPtr.Zero)
+                    continue;
+
+                ulong offset = (ulong)i * WhpConstants.PageSize;
+                int chunk = (int)Math.Min(WhpConstants.PageSize, region.Size - offset);
+                region.ReadCallback(offset, new Span<byte>((void*)hostPage, chunk));
+            }
+        }
+
+        private void EnsureMmioRefreshThread()
+        {
+            if (_mmioRefreshThread != null)
+                return;
+
+            _mmioRefreshThread = new Thread(MmioRefreshLoop)
+            {
+                IsBackground = true,
+                Name = "WhpMmioRefresh"
+            };
+            _mmioRefreshThread.Start();
+        }
+
+        private void MmioRefreshLoop()
+        {
+            while (!Disposed && !Disposing)
+            {
+                lock (_mmioLock)
+                {
+                    for (int i = 0; i < _mmioRegions.Count; i++)
+                        RefreshMmioRegion(_mmioRegions[i]);
+                }
+
+                Thread.Sleep(1);
+            }
         }
 
         public bool WriteMemory(ulong address, byte[] value, uint length = 0)
@@ -718,6 +863,8 @@ namespace Brovan.Core.Emulation
             {
                 while (!_stopRequested)
                 {
+                    RefreshMmioBackedRegions();
+
                     FlushRegisterCache();
 
                     ref WhvRunVpExitContext exit = ref RunVirtualProcessor();
@@ -863,6 +1010,17 @@ namespace Brovan.Core.Emulation
                 }
             }
 
+            for (int i = 0; i < _mmioRegions.Count; i++)
+            {
+                MmioRegion region = _mmioRegions[i];
+                for (ulong page = region.Address; page < region.Address + region.Size; page += WhpConstants.PageSize)
+                {
+                    if (!_trappedPages.ContainsKey(page))
+                        _trappedPages[page] = true;
+                }
+            }
+
+            RequireFullRebuild();
             RebuildMappings();
         }
 
@@ -996,6 +1154,11 @@ namespace Brovan.Core.Emulation
         {
             if (Interlocked.Exchange(ref _disposing, 1) == 1) return;
 
+            lock (_mmioLock)
+            {
+                _mmioRegions.Clear();
+            }
+
             try
             {
                 RemoveHooks();
@@ -1090,20 +1253,11 @@ namespace Brovan.Core.Emulation
         private static readonly WhvRegisterValue UserDataSegment =
             MakeSegment(WhpConstants.UserDataSelector, false, true);
 
-        private unsafe void SetCsSs(WhvRegisterValue cs, WhvRegisterValue ss)
+        private void QueueCsSs(WhvRegisterValue cs, WhvRegisterValue ss)
         {
-            Span<uint> names = stackalloc uint[2] { (uint)WhvRegisterName.Cs, (uint)WhvRegisterName.Ss };
-            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[2] { cs, ss };
-            lock (_vcpuLock)
-            {
-                fixed (uint* n = names)
-                fixed (WhvRegisterValue* v = values)
-                {
-                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, n, 2, v);
-                    if (WhpNative.Failed(hr))
-                        throw new WhpException("WHvSetVirtualProcessorRegisters(CS/SS) failed", hr);
-                }
-            }
+            _pendingCs = cs;
+            _pendingSs = ss;
+            _segmentsDirty = true;
         }
 
         private void ClearTrapFlag()
@@ -1468,6 +1622,7 @@ namespace Brovan.Core.Emulation
             _mappedPages[guestAddress] = page;
             _sortedPageKeysDirty = true;
             _mappingsDirty = true;
+            MarkSpanDirty(guestAddress, WhpConstants.PageSize);
             _lastLookupPageBase = ulong.MaxValue;
             _lastLookupPage = null;
         }
@@ -1477,8 +1632,63 @@ namespace Brovan.Core.Emulation
             if (!_mappedPages.Remove(guestAddress)) return;
             _sortedPageKeysDirty = true;
             _mappingsDirty = true;
+            MarkSpanDirty(guestAddress, WhpConstants.PageSize);
             _lastLookupPageBase = ulong.MaxValue;
             _lastLookupPage = null;
+        }
+
+        private void MarkSpanDirty(ulong address, ulong size)
+        {
+            if (_fullRebuildRequired) return;
+
+            ulong start = address & ~WhpConstants.PageMask;
+            ulong end = GetRangeEndAligned(address, size);
+            if (end <= start) return;
+
+            for (int i = _dirtyRanges.Count - 1; i >= 0; i--)
+            {
+                DirtyRange range = _dirtyRanges[i];
+                if (start > range.End || range.Start > end) continue;
+
+                if (range.Start < start) start = range.Start;
+                if (range.End > end) end = range.End;
+                _dirtyRanges.RemoveAt(i);
+            }
+
+            if (_dirtyRanges.Count >= MaxDirtyRanges)
+            {
+                RequireFullRebuild();
+                return;
+            }
+
+            _dirtyRanges.Add(new DirtyRange { Start = start, End = end });
+        }
+
+        private static ulong GetRangeEndAligned(ulong address, ulong size)
+        {
+            ulong end = address + size;
+            if (end < address) return ulong.MaxValue & ~WhpConstants.PageMask;
+            return (end + WhpConstants.PageMask) & ~WhpConstants.PageMask;
+        }
+
+        private void RequireFullRebuild()
+        {
+            _fullRebuildRequired = true;
+            _dirtyRanges.Clear();
+        }
+
+        private void AddActiveMap(ulong start, InstalledMap map)
+        {
+            _activeMaps[start] = map;
+            int index = _activeMapStarts.BinarySearch(start);
+            if (index < 0) _activeMapStarts.Insert(~index, start);
+        }
+
+        private void RemoveActiveMap(ulong start)
+        {
+            if (!_activeMaps.Remove(start)) return;
+            int index = _activeMapStarts.BinarySearch(start);
+            if (index >= 0) _activeMapStarts.RemoveAt(index);
         }
 
         private ulong[] GetSortedPageKeys()
@@ -1499,6 +1709,22 @@ namespace Brovan.Core.Emulation
         {
             _mappingsDirty = false;
 
+            if (!_fullRebuildRequired)
+            {
+                for (int i = 0; i < _dirtyRanges.Count; i++)
+                    RebuildMappingsIncremental(_dirtyRanges[i].Start, _dirtyRanges[i].End);
+
+                _dirtyRanges.Clear();
+                return;
+            }
+
+            RebuildMappingsFull();
+            _fullRebuildRequired = false;
+            _dirtyRanges.Clear();
+        }
+
+        private void RebuildMappingsFull()
+        {
             ulong[] sortedKeys = GetSortedPageKeys();
             int keyCount = _mappedPages.Count;
             bool anyTrapped = _trappedPages.Count != 0;
@@ -1580,6 +1806,127 @@ namespace Brovan.Core.Emulation
             {
                 MapGpaRange(kv.Key, kv.Value.Size, kv.Value.Host, kv.Value.Flags);
                 _activeMaps[kv.Key] = kv.Value;
+            }
+
+            _activeMapStarts.Clear();
+            foreach (KeyValuePair<ulong, InstalledMap> kv in _activeMaps)
+                _activeMapStarts.Add(kv.Key);
+            _activeMapStarts.Sort();
+        }
+
+        private int FirstActiveMapIndexAtOrBefore(ulong address)
+        {
+            int index = _activeMapStarts.BinarySearch(address);
+            if (index >= 0) return index;
+
+            index = ~index;
+            return index > 0 ? index - 1 : 0;
+        }
+
+        private void RebuildMappingsIncremental(ulong spanStart, ulong spanEnd)
+        {
+            int firstIndex = FirstActiveMapIndexAtOrBefore(spanStart);
+            for (int i = firstIndex; i < _activeMapStarts.Count; i++)
+            {
+                ulong start = _activeMapStarts[i];
+                if (start >= spanEnd) break;
+
+                InstalledMap active = _activeMaps[start];
+                ulong end = start + active.Size;
+                if (end <= spanStart) continue;
+
+                if (start < spanStart) spanStart = start;
+                if (end > spanEnd) spanEnd = end;
+            }
+
+            _desiredMaps.Clear();
+            BuildDesiredMapsForSpan(spanStart, spanEnd);
+
+            _staleMapKeys.Clear();
+            firstIndex = FirstActiveMapIndexAtOrBefore(spanStart);
+            for (int i = firstIndex; i < _activeMapStarts.Count; i++)
+            {
+                ulong start = _activeMapStarts[i];
+                if (start >= spanEnd) break;
+
+                InstalledMap active = _activeMaps[start];
+                if (start + active.Size <= spanStart) continue;
+
+                if (!_desiredMaps.TryGetValue(start, out InstalledMap want)
+                    || want.Size != active.Size
+                    || want.Host != active.Host
+                    || want.Flags != active.Flags)
+                {
+                    UnmapGpaRange(start, active.Size);
+                    _staleMapKeys.Add(start);
+                }
+                else
+                {
+                    _desiredMaps.Remove(start);
+                }
+            }
+
+            for (int i = 0; i < _staleMapKeys.Count; i++)
+                RemoveActiveMap(_staleMapKeys[i]);
+
+            foreach (KeyValuePair<ulong, InstalledMap> kv in _desiredMaps)
+            {
+                MapGpaRange(kv.Key, kv.Value.Size, kv.Value.Host, kv.Value.Flags);
+                AddActiveMap(kv.Key, kv.Value);
+            }
+        }
+
+        private void BuildDesiredMapsForSpan(ulong spanStart, ulong spanEnd)
+        {
+            bool anyTrapped = _trappedPages.Count != 0;
+
+            for (ulong address = spanStart; address < spanEnd;)
+            {
+                if (!_mappedPages.TryGetValue(address, out MappedPage page)
+                    || page == null
+                    || page.HostPage == IntPtr.Zero
+                    || page.Permissions == WhpMemoryPermission.None)
+                {
+                    address += WhpConstants.PageSize;
+                    continue;
+                }
+
+                if (anyTrapped && _trappedPages.TryGetValue(address, out bool writeOnly))
+                {
+                    if (writeOnly)
+                    {
+                        _desiredMaps[address] = new InstalledMap
+                        {
+                            Size = WhpConstants.PageSize,
+                            Host = page.HostPage,
+                            Flags = WhvMapGpaRangeFlags.Read | WhvMapGpaRangeFlags.Execute,
+                        };
+                    }
+                    address += WhpConstants.PageSize;
+                    continue;
+                }
+
+                long runHostBaseLong = page.HostPage.ToInt64();
+                WhvMapGpaRangeFlags runFlags = ToWhpMapFlags(page.Permissions);
+                ulong runSize = WhpConstants.PageSize;
+
+                while (address + runSize < spanEnd)
+                {
+                    if (!_mappedPages.TryGetValue(address + runSize, out MappedPage next) || next == null) break;
+                    if (next.Permissions != page.Permissions) break;
+                    if (next.HostPage == IntPtr.Zero) break;
+                    if (anyTrapped && _trappedPages.ContainsKey(address + runSize)) break;
+                    if (next.HostPage.ToInt64() != runHostBaseLong + (long)runSize) break;
+                    runSize += WhpConstants.PageSize;
+                }
+
+                _desiredMaps[address] = new InstalledMap
+                {
+                    Size = runSize,
+                    Host = new IntPtr(runHostBaseLong),
+                    Flags = runFlags,
+                };
+                address += runSize;
             }
         }
 
@@ -1858,7 +2205,7 @@ namespace Brovan.Core.Emulation
             regs.Rflags = frameRflags;
             _regsDirty = true;
 
-            SetCsSs(MakeSegment((ushort)frameCs, true, (frameCs & 3) == 3),
+            QueueCsSs(MakeSegment((ushort)frameCs, true, (frameCs & 3) == 3),
                 MakeSegment((ushort)frameSs, false, (frameSs & 3) == 3));
         }
 
@@ -1888,7 +2235,7 @@ namespace Brovan.Core.Emulation
                 after.Rip += 2;
             _regsDirty = true;
 
-            SetCsSs(UserCodeSegment, UserDataSegment);
+            QueueCsSs(UserCodeSegment, UserDataSegment);
             return true;
         }
 
@@ -1984,7 +2331,9 @@ namespace Brovan.Core.Emulation
 
         private unsafe void StoreRegisters()
         {
-            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpRegNames.Length];
+            bool withSegments = _segmentsDirty;
+            uint[] names = withSegments ? GpRegNamesWithSegments : GpRegNames;
+            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpRegNamesWithSegments.Length];
             values[0] = WhvRegisterValue.FromReg64(_regsCache.Rax);
             values[1] = WhvRegisterValue.FromReg64(_regsCache.Rbx);
             values[2] = WhvRegisterValue.FromReg64(_regsCache.Rcx);
@@ -2004,13 +2353,20 @@ namespace Brovan.Core.Emulation
             values[16] = WhvRegisterValue.FromReg64(_regsCache.Rip);
             values[17] = WhvRegisterValue.FromReg64(_regsCache.Rflags | 0x2UL);
 
+            if (withSegments)
+            {
+                values[18] = _pendingCs;
+                values[19] = _pendingSs;
+                _segmentsDirty = false;
+            }
+
             lock (_vcpuLock)
             {
-                fixed (uint* names = GpRegNames)
+                fixed (uint* n = names)
                 fixed (WhvRegisterValue* vals = values)
                 {
-                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, names,
-                        (uint)GpRegNames.Length, vals);
+                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, n,
+                        (uint)names.Length, vals);
                     if (WhpNative.Failed(hr))
                         throw new WhpException("WHvSetVirtualProcessorRegisters(GP) failed", hr);
                 }
@@ -2019,7 +2375,7 @@ namespace Brovan.Core.Emulation
 
         private void FlushRegisterCache()
         {
-            if (_regsDirty)
+            if (_regsDirty || _segmentsDirty)
             {
                 _regsDirty = false;
                 StoreRegisters();
@@ -2041,6 +2397,9 @@ namespace Brovan.Core.Emulation
 
         private unsafe WhvRegisterValue GetSingleRegister(WhvRegisterName name)
         {
+            if (_segmentsDirty && (name == WhvRegisterName.Cs || name == WhvRegisterName.Ss))
+                FlushRegisterCache();
+
             uint n = (uint)name;
             WhvRegisterValue value;
             lock (_vcpuLock)
