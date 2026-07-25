@@ -142,6 +142,10 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        bool ReadXmmRegisters(ulong[] values) => false;
+
+        bool WriteXmmRegisters(ulong[] values) => false;
+
         bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
         {
             if (registers == null || values == null || count <= 0 || count > registers.Length || count > values.Length)

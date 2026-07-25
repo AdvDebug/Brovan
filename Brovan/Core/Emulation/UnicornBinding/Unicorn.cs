@@ -964,6 +964,53 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        internal const int XmmRegisterCount = 16;
+
+        private static int[] _xmmBatchRegs;
+
+        private static int[] GetXmmBatchRegs()
+        {
+            int[] Regs = _xmmBatchRegs;
+            if (Regs == null)
+            {
+                Regs = new int[XmmRegisterCount];
+                for (int i = 0; i < XmmRegisterCount; i++)
+                    Regs[i] = (int)Registers.UC_X86_REG_XMM0 + i;
+                _xmmBatchRegs = Regs;
+            }
+            return Regs;
+        }
+
+        /// <summary>
+        /// Transfers XMM0-15 as 32 qwords, low half of each register first.
+        /// </summary>
+        public unsafe bool TransferXmmRegisters(ulong[] Values, bool Write)
+        {
+            if (DisposedCheck() || Values == null || Values.Length < XmmRegisterCount * 2)
+                return false;
+
+            lock (_registerLock)
+            {
+                if (_uc == IntPtr.Zero)
+                    return false;
+
+                int[] Regs = GetXmmBatchRegs();
+
+                fixed (int* RegsPtr = Regs)
+                fixed (ulong* ValsPtr = Values)
+                {
+                    void** PtrArray = stackalloc void*[XmmRegisterCount];
+                    for (int i = 0; i < XmmRegisterCount; i++)
+                        PtrArray[i] = &ValsPtr[i * 2];
+
+                    _error = Write
+                        ? uc_reg_write_batch(_uc, RegsPtr, PtrArray, XmmRegisterCount)
+                        : uc_reg_read_batch(_uc, RegsPtr, PtrArray, XmmRegisterCount);
+                    return _error == UCErrors.UC_ERR_OK;
+                }
+            }
+        }
+
         /// <summary>
         /// Get the CPU Flags.
         /// </summary>

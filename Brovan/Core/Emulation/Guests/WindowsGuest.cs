@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -1127,6 +1128,19 @@ namespace Brovan.Core.Emulation.Guests
                 { "PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC" },
                 { "PATH", @"C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\" }
             };
+
+            // pass DXVK environment variables if available to the guest for debugging
+            foreach (DictionaryEntry HostVariable in Environment.GetEnvironmentVariables())
+            {
+                string Name = HostVariable.Key as string;
+                if (string.IsNullOrEmpty(Name))
+                    continue;
+
+                if (!Name.StartsWith("DXVK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VK_", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                Env[Name] = HostVariable.Value as string ?? string.Empty;
+            }
 
             StringBuilder Builder = new StringBuilder(1024);
             foreach (var kv in Env)

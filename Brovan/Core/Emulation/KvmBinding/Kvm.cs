@@ -2332,6 +2332,41 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        internal const int XmmRegisterCount = 16;
+
+        /// <summary>
+        /// Transfers XMM0-15 as 32 qwords, low half of each register first.
+        /// </summary>
+        public unsafe bool TransferXmmRegisters(ulong[] Values, bool Write)
+        {
+            if (Values == null || Values.Length < XmmRegisterCount * 2)
+                return false;
+
+            LinuxKvmFpu Fpu = default;
+
+            lock (_vcpuLock)
+            {
+                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetFpu, (IntPtr)(&Fpu)) < 0)
+                    return false;
+
+                if (Write)
+                {
+                    for (int i = 0; i < XmmRegisterCount * 2; i++)
+                        ((ulong*)Fpu.Xmm)[i] = Values[i];
+
+                    if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoSetFpu, (IntPtr)(&Fpu)) < 0)
+                        return false;
+                }
+                else
+                {
+                    for (int i = 0; i < XmmRegisterCount * 2; i++)
+                        Values[i] = ((ulong*)Fpu.Xmm)[i];
+                }
+            }
+
+            return true;
+        }
+
         private unsafe void SetFpu(ref LinuxKvmFpu fpu)
         {
             lock (_vcpuLock)

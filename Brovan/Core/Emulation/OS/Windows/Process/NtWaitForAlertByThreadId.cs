@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -70,6 +70,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+
             if (State.WaitCompleted)
             {
                 NTSTATUS Status = State.WaitStatus;

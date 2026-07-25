@@ -13,6 +13,7 @@ namespace Brovan.Core.Emulation
         public ulong MXCSR;
         public ulong CS, DS, ES, FS, GS, SS;
         public ulong DR0, DR1, DR2, DR3, DR6, DR7;
+        public readonly ulong[] Xmm = new ulong[32];
     }
 
     public enum EmulatedThreadState

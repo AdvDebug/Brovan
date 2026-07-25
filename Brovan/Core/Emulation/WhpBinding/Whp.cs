@@ -2299,6 +2299,62 @@ namespace Brovan.Core.Emulation
             return ref _regsCache;
         }
 
+        internal const int XmmRegisterCount = 16;
+
+        private static readonly uint[] XmmRegNames = BuildXmmRegNames();
+
+        private static uint[] BuildXmmRegNames()
+        {
+            uint[] Names = new uint[XmmRegisterCount];
+            for (int i = 0; i < XmmRegisterCount; i++)
+                Names[i] = (uint)WhvRegisterName.Xmm0 + (uint)i;
+            return Names;
+        }
+
+        /// <summary>
+        /// Transfers XMM0-15 as 32 qwords, low half of each register first.
+        /// </summary>
+        public unsafe bool TransferXmmRegisters(ulong[] Values, bool Write)
+        {
+            if (Values == null || Values.Length < XmmRegisterCount * 2)
+                return false;
+
+            Span<WhvRegisterValue> Regs = stackalloc WhvRegisterValue[XmmRegisterCount];
+
+            if (Write)
+            {
+                for (int i = 0; i < XmmRegisterCount; i++)
+                {
+                    Regs[i].Low = Values[i * 2];
+                    Regs[i].High = Values[i * 2 + 1];
+                }
+            }
+
+            lock (_vcpuLock)
+            {
+                fixed (uint* Names = XmmRegNames)
+                fixed (WhvRegisterValue* Vals = Regs)
+                {
+                    int Hr = Write
+                        ? WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, Names, XmmRegisterCount, Vals)
+                        : WhpNative.WHvGetVirtualProcessorRegisters(_partition, VpIndex, Names, XmmRegisterCount, Vals);
+                    if (WhpNative.Failed(Hr))
+                        return false;
+                }
+            }
+
+            if (!Write)
+            {
+                for (int i = 0; i < XmmRegisterCount; i++)
+                {
+                    Values[i * 2] = Regs[i].Low;
+                    Values[i * 2 + 1] = Regs[i].High;
+                }
+            }
+
+            return true;
+        }
+
         private unsafe void LoadRegisters()
         {
             Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpRegNames.Length];

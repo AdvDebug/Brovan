@@ -95,6 +95,10 @@ namespace Brovan.Core.Emulation
             => Inner.ReadRegister(register);
         public ulong ReadRegister(int register)
             => Inner.ReadRegister(register);
+        public bool ReadXmmRegisters(ulong[] values)
+            => Inner.TransferXmmRegisters(values, false);
+        public bool WriteXmmRegisters(ulong[] values)
+            => Inner.TransferXmmRegisters(values, true);
         public uint ReadRegister32(Registers register)
             => Inner.ReadRegister32(register);
         public uint ReadRegister32(int register)

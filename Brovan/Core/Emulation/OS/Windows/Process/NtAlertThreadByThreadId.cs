@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -45,6 +45,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     Instance.WriteRegister(Registers.UC_X86_REG_RIP, TargetThread.Context.RIP);
                     Instance.WriteRegister(Registers.UC_X86_REG_RAX, TargetThread.Context.RAX);
+                }
+                else
+                {
+                    Instance.YieldSliceAfterWake();
                 }
             }
 

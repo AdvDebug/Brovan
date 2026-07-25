@@ -123,6 +123,8 @@ namespace Brovan.Core.Emulation
         Cr4 = 0x0000001F,
         Cr8 = 0x00000020,
 
+        Xmm0 = 0x00001000,
+
         Dr0 = 0x00000021,
         Dr1 = 0x00000022,
         Dr2 = 0x00000023,

@@ -98,6 +98,10 @@ namespace Brovan.Core.Emulation
             => Inner.ReadRegisterBatch(registers, values, count);
         public bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
             => Inner.WriteRegisterBatch(registers, values, count);
+        public bool ReadXmmRegisters(ulong[] values)
+            => Inner.TransferXmmRegisters(values, false);
+        public bool WriteXmmRegisters(ulong[] values)
+            => Inner.TransferXmmRegisters(values, true);
 
         public CPUFlags GetCPUFlags() => Inner.GetCPUFlags();
         public bool SetCPUFlags(CPUFlags flags) => Inner.SetCPUFlags(flags);

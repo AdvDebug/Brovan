@@ -112,6 +112,12 @@ namespace Brovan.Core.Emulation
         public IntPtr AddMemoryHook(ulong begin, ulong end, BackendHookType hookType, MemoryHookCallback callback)
             => Inner.AddMemoryHook(begin, end, hookType, callback);
 
+        public bool ReadXmmRegisters(ulong[] values)
+            => Inner.TransferXmmRegisters(values, false);
+
+        public bool WriteXmmRegisters(ulong[] values)
+            => Inner.TransferXmmRegisters(values, true);
+
         public IntPtr AddCodeHook(ulong begin, ulong end, CodeHookCallback callback)
             => Inner.AddCodeHook(begin, end, callback);
 

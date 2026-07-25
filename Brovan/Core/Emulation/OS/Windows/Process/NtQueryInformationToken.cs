@@ -154,7 +154,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteReturnLength(RequiredSize);
 
                 if (TokenInformationLength < RequiredSize)
-                    return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                    return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                 if (!Instance._emulator.WriteMemory(TokenInformation, Value))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -168,7 +168,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteReturnLength(RequiredSize);
 
                 if (TokenInformationLength < RequiredSize)
-                    return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                    return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                 if (!Instance._emulator.WriteMemory(TokenInformation, 0u))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -182,7 +182,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteReturnLength(RequiredSize);
 
                 if (TokenInformationLength < RequiredSize)
-                    return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                    return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                 Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                 Buffer.Clear();
@@ -201,7 +201,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteReturnLength(RequiredSize);
 
                 if (TokenInformationLength < RequiredSize)
-                    return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                    return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                 Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                 Buffer.Clear();
@@ -220,7 +220,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteReturnLength(RequiredSize);
 
                 if (TokenInformationLength < RequiredSize)
-                    return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                    return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                 Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                 Buffer.Clear();
@@ -257,7 +257,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                         Buffer.Clear();
@@ -282,7 +282,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                         Buffer.Clear();
@@ -326,7 +326,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         uint Value = Token.Type == TokenType.Primary ? 1u : 2u;
 
@@ -342,7 +342,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         uint Value = (uint)Token.ImpersonationLevel;
 
@@ -358,7 +358,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         uint Value = 0;
 
@@ -374,7 +374,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         if (!Instance._emulator.WriteMemory(TokenInformation, Token.SessionId))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -388,7 +388,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         uint Value = Token.IsElevated ? 1u : 0u;
 
@@ -406,7 +406,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                         Buffer.Clear();
@@ -423,7 +423,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                         Buffer.Clear();
@@ -455,7 +455,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         Span<byte> BufferData = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                         BufferData.Clear();
@@ -486,7 +486,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteReturnLength(RequiredSize);
 
                         if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                         Span<byte> BufferData = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                         BufferData.Clear();

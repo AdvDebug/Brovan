@@ -13,7 +13,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong ThreadHandle = Instance.WinHelper.GetArg(0);
             ulong DesiredAccess = Instance.WinHelper.GetArg(1);
-            ulong OpenAsSelf = Instance.WinHelper.GetArg(2);
             ulong TokenHandlePtr = Instance.WinHelper.GetArg(3);
 
             if (TokenHandlePtr == 0)
@@ -35,26 +34,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinToken Token = WinEmulatedThread.GetState(Thread).ImpersonationToken;
 
             if (Token == null)
-            {
-                if (OpenAsSelf == 0)
-                    return NTSTATUS.STATUS_NO_TOKEN;
-
-                WinProcess Process = Helper.WinProcesses.FirstOrDefault(Proc => Proc.PID == Helper.PID);
-                if (Process == null || Process.PrimaryToken == null)
-                    return NTSTATUS.STATUS_NO_TOKEN;
-
-                Token = new WinToken
-                {
-                    Type = TokenType.Impersonation,
-                    SessionId = Process.PrimaryToken.SessionId,
-                    IsElevated = Process.PrimaryToken.IsElevated,
-                    IsRestricted = Process.PrimaryToken.IsRestricted,
-                    EffectiveOnly = Process.PrimaryToken.EffectiveOnly,
-                    ImpersonationLevel = SecurityImpersonationLevel.SecurityImpersonation,
-                    OwningProcessId = Process.PrimaryToken.OwningProcessId,
-                    OwningThreadId = (ulong)Thread.ThreadId
-                };
-            }
+                return NTSTATUS.STATUS_NO_TOKEN;
 
             var Handle = Helper.HandleManager.AddHandle(Token, MapDesiredTokenAccess((AccessMask)(uint)DesiredAccess) | AccessMask.TokenDuplicate);
             Helper.WritePointer(TokenHandlePtr, Handle.Handle);

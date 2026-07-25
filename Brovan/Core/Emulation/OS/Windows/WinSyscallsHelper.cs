@@ -3961,6 +3961,67 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Data[Offset + i] = (byte)(Value >> (i * 8));
         }
 
+        private readonly Dictionary<string, ushort> RegisteredMessageAtoms = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<ushort, string> RegisteredMessageNames = new();
+        private readonly Dictionary<ulong, (int HookId, ulong HookProc)> WindowsHooks = new();
+        private ulong NextWindowsHook = 0x1F0000;
+
+        public ulong RegisterWindowsHook(int HookId, ulong HookProc)
+        {
+            ulong Hook = NextWindowsHook;
+            NextWindowsHook += 4;
+            WindowsHooks[Hook] = (HookId, HookProc);
+            return Hook;
+        }
+
+        public bool UnregisterWindowsHook(ulong Hook)
+        {
+            return WindowsHooks.Remove(Hook);
+        }
+
+        public bool UnregisterWindowClass(ulong InstanceHandle, string Name)
+        {
+            WinWindowClass WindowClass = GetWindowClass(InstanceHandle, Name, null);
+            if (WindowClass == null)
+                return false;
+
+            WinWindowClassesByAtom.Remove(WindowClass.Atom);
+            WinWindowClassAtomsByKey.Remove(BuildWindowClassKey(WindowClass.InstanceHandle, WindowClass.Name, WindowClass.Version));
+            return true;
+        }
+
+        public ushort RegisterWindowMessageAtom(string Name)
+        {
+            if (string.IsNullOrEmpty(Name))
+                return 0;
+
+            if (RegisteredMessageAtoms.TryGetValue(Name, out ushort Existing))
+                return Existing;
+
+            if (NextWindowClassAtom < 0xC000)
+                NextWindowClassAtom = 0xC000;
+
+            ushort Atom = NextWindowClassAtom++;
+            RegisteredMessageAtoms[Name] = Atom;
+            RegisteredMessageNames[Atom] = Name;
+            return Atom;
+        }
+
+        public bool TryGetAtomName(ushort Atom, out string Name)
+        {
+            if (RegisteredMessageNames.TryGetValue(Atom, out Name))
+                return true;
+
+            if (WinWindowClassesByAtom.TryGetValue(Atom, out WinWindowClass WindowClass) && !string.IsNullOrEmpty(WindowClass.Name))
+            {
+                Name = WindowClass.Name;
+                return true;
+            }
+
+            Name = null;
+            return false;
+        }
+
         public WinWindowClass RegisterWindowClass(WinWindowClass WindowClass)
         {
             if (WindowClass == null || string.IsNullOrEmpty(WindowClass.Name))

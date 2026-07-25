@@ -1525,6 +1525,22 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        /// <summary>
+        /// Ends the running thread's slice after it made another thread runnable, leaving it Ready so it resumes
+        /// where it left off. A wake only unblocks the target; without giving up the rest of the quantum the waker
+        /// keeps running for up to a full MLFQ slice (1.6M instructions at the lowest queue) before the scheduler
+        /// looks at the target again, and any handoff the waker then waits on costs that whole slice. Real hardware
+        /// hides this by running the woken thread on another core.
+        /// </summary>
+        internal void YieldSliceAfterWake()
+        {
+            if (CurrentThread != null && CurrentThread.State == EmulatedThreadState.Running)
+                CurrentThread.State = EmulatedThreadState.Ready;
+
+            SchedulerRefreshRequested = true;
+            _emulator.StopEmulation();
+        }
+
         private void StopAfterSyntheticInstruction(ulong NextIp)
         {
             SchedulerRefreshRequested = true;
@@ -1831,6 +1847,7 @@ namespace Brovan.Core.Emulation
         {
             if (t == null || t.Context == null) return;
             ReadGprBatch(t.Context);
+            _emulator.ReadXmmRegisters(t.Context.Xmm);
         }
 
         public bool ReadGprBatch(CpuContext c)
@@ -1885,6 +1902,7 @@ namespace Brovan.Core.Emulation
             }
 
             WriteGprBatch(t.Context);
+            _emulator.WriteXmmRegisters(t.Context.Xmm);
             Guest.OnThreadContextLoaded(this, t);
         }
 

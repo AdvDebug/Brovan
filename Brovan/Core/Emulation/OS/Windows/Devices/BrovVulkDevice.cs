@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -29,6 +30,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Ioctl == IOCTL_BROVVULK_GEN)
                 return HandleGenIoctl(ref Data, Instance);
+
+            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                Instance.TriggerEventMessage($"[BrovVulk] unknown IOCTL 0x{Ioctl:X}.", LogFlags.Issues);
+
             return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
         }
 
@@ -36,12 +41,22 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             byte[] Input = Data.InputBuffer;
             if (Input == null || Input.Length < 8)
+            {
+                if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                    Instance.TriggerEventMessage($"[BrovVulk] rejected IOCTL with a {(Input == null ? -1 : Input.Length)} byte input buffer.", LogFlags.Issues);
+
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
+            }
 
             uint Id = BinaryPrimitives.ReadUInt32LittleEndian(Input.AsSpan(0, 4));
             uint PayloadLen = BinaryPrimitives.ReadUInt32LittleEndian(Input.AsSpan(4, 4));
             if (PayloadLen > (uint)(Input.Length - 8) || PayloadLen > MaxGenPayload)
+            {
+                if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                    Instance.TriggerEventMessage($"[BrovVulk] rejected command {Id} with payload length {PayloadLen} in a {Input.Length} byte input buffer.", LogFlags.Issues);
+
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
+            }
 
             byte[] OutBytes;
             lock (Lock)
@@ -56,6 +71,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         uint Count = Reader.ReadU32();
                         if (Count > MaxBatchCommands)
                             throw new InvalidOperationException($"BrovVulk generic: batch count {Count} exceeds cap.");
+
                         Result = 0;
                         for (uint k = 0; k < Count; k++)
                         {
@@ -72,8 +88,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 catch (Exception Ex)
                 {
-                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                        Instance.TriggerEventMessage($"[!] BrovVulk(gen): {Ex.Message}", LogFlags.Syscall);
+                    if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                        Instance.TriggerEventMessage($"[!] BrovVulk(gen): {Ex.Message}", LogFlags.Issues);
                     Writer.Reset();
                     Result = VK_ERROR_INITIALIZATION_FAILED;
                 }
