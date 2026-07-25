@@ -138,6 +138,9 @@ namespace Brovan
         [DllImport("user32.dll")]
         public static extern int GetSystemMetrics(int nIndex);
 
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern unsafe bool EnumDisplaySettingsW(string lpszDeviceName, int iModeNum, byte* lpDevMode);
+
         [DllImport("user32.dll")]
         public static extern int GetSystemMetricsForDpi(int nIndex, uint dpi);
     }

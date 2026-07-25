@@ -954,15 +954,24 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public uint GetArg32(int Index) => (uint)GetArg(Index);
 
+        private uint SequentialIdCursor = 30000;
+
         public uint GenerateRandomPID()
         {
-            uint PID = (uint)RandomGen.Next(500, 29999);
-            if (PIDs.TryGetValue(PID, out _))
+            for (int Attempt = 0; Attempt < 64; Attempt++)
             {
-                return GenerateRandomPID();
+                uint Candidate = (uint)RandomGen.Next(500, 29999);
+                if (PIDs.TryAdd(Candidate, true))
+                    return Candidate;
             }
-            PIDs.Add(PID, true);
-            return PID;
+
+            // Long-running guests exhaust the random pool, so hand out sequential ids instead of retrying.
+            while (true)
+            {
+                uint Candidate = SequentialIdCursor++;
+                if (Candidate != 0 && PIDs.TryAdd(Candidate, true))
+                    return Candidate;
+            }
         }
 
         private User GenerateRandomSvchostUser()
@@ -1196,7 +1205,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ushort NextGdiHandleUniq = 0x77;
         private const int SmCxScreen = 0;
         private const int SmCyScreen = 1;
+        private const int EnumCurrentSettings = -1;
+        private const ushort DevModeSize = 0xDC;
+        private const int DevModeOffsetSize = 0x44;
+        private const int DevModeOffsetDisplayFrequency = 0xB8;
+        private const uint DefaultDisplayFrequency = 60;
+        private uint PrimaryDisplayFrequency;
         private const byte UserHandleTypeWindow = 1;
+        private const byte UserHandleTypeMonitor = 0xC;
+        private ulong UserPrimaryMonitorHandle;
         private ushort NextUserHandleIndex = 1;
         private ushort NextUserHandleUniq = 1;
         private ulong UserServerInfoAddress;
@@ -2575,6 +2592,171 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
+        private ulong GuestCallTrampoline;
+        private const ulong GuestCallTrampolineSize = 0x1000;
+        private const int GuestCallResultOffset = 0x00;
+        private const int GuestCallScratchOffset = 0x08;
+        private const int GuestCallCodeOffset = 0x20;
+
+        private bool TryGetNtSyscallNumber(string Name, out uint Number)
+        {
+            Number = 0;
+            WinModule Ntdll = WinModules.FirstOrDefault(m => m != null && m.Name != null && m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase));
+            if (Ntdll == null)
+                return false;
+
+            ulong Stub = GetExportAddress(Ntdll, Name);
+            if (Stub == 0 || !Emulator.IsRegionMapped(Stub, 8))
+                return false;
+
+            // mov r10, rcx ; mov eax, imm32
+            if (Emulator.ReadMemoryUInt(Stub) != 0xB8D18B4Cu)
+                return false;
+
+            Number = Emulator.ReadMemoryUInt(Stub + 4);
+            return true;
+        }
+
+        /// <summary>
+        /// Builds the page a guest callback returns to. Its code hands the stored result back through
+        /// NtCallbackReturn, which unwinds the frame pushed by BeginGuestCall.
+        /// </summary>
+        private ulong EnsureGuestCallTrampoline()
+        {
+            if (GuestCallTrampoline != 0 && Emulator.IsRegionMapped(GuestCallTrampoline, GuestCallTrampolineSize))
+                return GuestCallTrampoline;
+
+            if (!TryGetNtSyscallNumber("NtCallbackReturn", out uint CallbackReturn))
+                return 0;
+
+            ulong Page = Emulator.MapUniqueAddress(GuestCallTrampolineSize, MemoryProtection.All);
+            if (Page == 0 || !WriteZeroMemory(Page, (uint)GuestCallTrampolineSize))
+                return 0;
+
+            Span<byte> Code = stackalloc byte[26];
+            int At = 0;
+
+            Code[At++] = 0x48; Code[At++] = 0x8D; Code[At++] = 0x0D;
+            int Displacement = GuestCallResultOffset - (GuestCallCodeOffset + 7);
+            BinaryPrimitives.WriteInt32LittleEndian(Code.Slice(At, 4), Displacement);
+            At += 4;
+
+            Code[At++] = 0x49; Code[At++] = 0x89; Code[At++] = 0xCA;
+            Code[At++] = 0xBA;
+            BinaryPrimitives.WriteUInt32LittleEndian(Code.Slice(At, 4), 8u);
+            At += 4;
+
+            Code[At++] = 0x45; Code[At++] = 0x31; Code[At++] = 0xC0;
+            Code[At++] = 0xB8;
+            BinaryPrimitives.WriteUInt32LittleEndian(Code.Slice(At, 4), CallbackReturn);
+            At += 4;
+
+            Code[At++] = 0x0F; Code[At++] = 0x05;
+            Code[At++] = 0xCC;
+
+            if (!Emulator._emulator.WriteMemory(Page + GuestCallCodeOffset, Code.Slice(0, At)))
+                return 0;
+
+            GuestCallTrampoline = Page;
+            return GuestCallTrampoline;
+        }
+
+        /// <summary>
+        /// Calls a guest function from inside a syscall and resumes the syscall's caller afterwards with
+        /// ResultValue in RAX. Used for Win32 APIs whose kernel side calls back into user code.
+        /// </summary>
+        public ulong EnsureGuestCallScratch()
+        {
+            ulong Page = EnsureGuestCallTrampoline();
+            return Page == 0 ? 0 : Page + GuestCallScratchOffset;
+        }
+
+        public bool BeginGuestCall(ulong Function, ulong Arg0, ulong Arg1, ulong Arg2, ulong Arg3, ulong ResultValue)
+        {
+            if (PointerSize != 8 || Function == 0 || !Emulator.IsRegionMapped(Function, 1))
+                return false;
+
+            EmulatedThread Thread = Emulator.CurrentThread;
+            if (Thread == null)
+                return false;
+
+            ulong Page = EnsureGuestCallTrampoline();
+            if (Page == 0)
+                return false;
+
+            Emulator._emulator.WriteMemory(Page + GuestCallResultOffset, ResultValue, 8);
+
+            ulong CurrentRsp = Emulator.ReadRegister(Registers.UC_X86_REG_RSP);
+            WinUserCallbackFrame Frame = new WinUserCallbackFrame
+            {
+                SavedRsp = CurrentRsp,
+                SavedReturnAddress = Emulator.ReadMemoryULong(CurrentRsp),
+            };
+            WinEmulatedThread.GetState(Thread).UserCallbackFrames.Push(Frame);
+
+            ulong CallRsp = ((CurrentRsp - 0x200) & ~0xFUL) - 8;
+            Emulator._emulator.WriteMemory(CallRsp, Page + GuestCallCodeOffset, 8);
+
+            Emulator.WriteRegister(Registers.UC_X86_REG_RCX, Arg0);
+            Emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arg1);
+            Emulator.WriteRegister(Registers.UC_X86_REG_R8, Arg2);
+            Emulator.WriteRegister(Registers.UC_X86_REG_R9, Arg3);
+            Emulator.WriteRegister(Registers.UC_X86_REG_RSP, CallRsp);
+            Emulator.WriteRegister(Emulator.IPRegister, Function - 2);
+            Emulator.SuppressSyscallStatusWrite = true;
+            return true;
+        }
+
+        public ulong GetPrimaryMonitorHandle()
+        {
+            ulong Monitor = EnsureUserPrimaryMonitor();
+            if (Monitor == 0)
+                return 0;
+
+            if (UserPrimaryMonitorHandle != 0)
+                return UserPrimaryMonitorHandle;
+
+            if (!EnsureUserSharedInfo(out _, out ulong HandleTable, out uint EntrySize))
+                return 0;
+
+            ulong Handle = AllocateUserHandle();
+            if (Handle == 0)
+                return 0;
+
+            ushort Index = (ushort)(Handle & 0xFFFF);
+            ushort Uniq = (ushort)((Handle >> 16) & 0x7FFF);
+
+            ulong Entry = HandleTable + (ulong)Index * EntrySize;
+            Span<byte> Data = Shared.GetSpan(0x20);
+            Data.Slice(0, 0x20).Clear();
+            WriteU64(Data, 0x00, Monitor);
+            WriteU64(Data, 0x08, EnsureCurrentUserThreadInfo());
+            WriteU64(Data, 0x10, UserDesktopOwnerAddress);
+            Data[0x18] = UserHandleTypeMonitor;
+            Data[0x19] = 0;
+            WriteU16(Data, 0x1A, Uniq);
+
+            if (!Emulator._emulator.WriteMemory(Entry, Data.Slice(0, 0x20)))
+                return 0;
+
+            UserPrimaryMonitorHandle = Handle;
+            return UserPrimaryMonitorHandle;
+        }
+
+        public bool TryGetPrimaryMonitorRect(out int Left, out int Top, out int Right, out int Bottom)
+        {
+            Left = Top = Right = Bottom = 0;
+            ulong Monitor = EnsureUserPrimaryMonitor();
+            if (Monitor == 0)
+                return false;
+
+            Left = (int)Emulator.ReadMemoryUInt(Monitor + 0x1C);
+            Top = (int)Emulator.ReadMemoryUInt(Monitor + 0x20);
+            Right = (int)Emulator.ReadMemoryUInt(Monitor + 0x24);
+            Bottom = (int)Emulator.ReadMemoryUInt(Monitor + 0x28);
+            return Right > Left && Bottom > Top;
+        }
+
         public bool CompleteUserCallback(ulong ResultAddress, uint ResultLength)
         {
             EmulatedThread Thread = Emulator.CurrentThread;
@@ -3422,6 +3604,39 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return (1920, 1080);
+        }
+
+        public unsafe uint GetPrimaryDisplayFrequency()
+        {
+            if (PrimaryDisplayFrequency != 0)
+                return PrimaryDisplayFrequency;
+
+            PrimaryDisplayFrequency = DefaultDisplayFrequency;
+
+            try
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    Span<byte> DevMode = stackalloc byte[DevModeSize];
+                    DevMode.Clear();
+                    BinaryPrimitives.WriteUInt16LittleEndian(DevMode.Slice(DevModeOffsetSize), DevModeSize);
+
+                    fixed (byte* Buffer = DevMode)
+                    {
+                        if (NativeWinImports.EnumDisplaySettingsW(null, EnumCurrentSettings, Buffer))
+                        {
+                            uint Frequency = BinaryPrimitives.ReadUInt32LittleEndian(DevMode.Slice(DevModeOffsetDisplayFrequency));
+                            if (Frequency > 1)
+                                PrimaryDisplayFrequency = Frequency;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return PrimaryDisplayFrequency;
         }
 
         public ulong EnsureUserDesktopInfo()

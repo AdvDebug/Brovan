@@ -56,6 +56,7 @@ namespace Brovan.Generators
             public string AltLength;
             public int ArrayLen = 1;
             public string Values;
+            public bool Optional;
         }
 
         private sealed class VkStruct
@@ -248,7 +249,7 @@ namespace Brovan.Generators
                             continue;
                         ParseTyped(mem, out string ty, out string nm, out int pd, out bool isc);
                         int alen = pd == 0 ? ResolveArrayLen(mem, m.Constants) : 1;
-                        s.Members.Add(new Member { Name = nm, Type = ty, PtrDepth = pd, IsConst = isc, Length = (string)mem.Attribute("len"), AltLength = (string)mem.Attribute("altlen"), ArrayLen = alen, Values = (string)mem.Attribute("values") });
+                        s.Members.Add(new Member { Name = nm, Type = ty, PtrDepth = pd, IsConst = isc, Length = (string)mem.Attribute("len"), AltLength = (string)mem.Attribute("altlen"), ArrayLen = alen, Values = (string)mem.Attribute("values"), Optional = ((string)mem.Attribute("optional") ?? "").StartsWith("true", StringComparison.Ordinal) });
                     }
                     m.Structs[name] = s;
                 }
@@ -760,6 +761,7 @@ namespace Brovan.Generators
             public string MemName;
             public string LenName;
             public string SelName;
+            public bool Optional;
         }
 
         private static readonly Dictionary<string, byte> KindNum = new Dictionary<string, byte>
@@ -816,7 +818,7 @@ namespace Brovan.Generators
 
         private static MDesc ClassifyMember(Model m, VkStruct owner, Member mem, Dictionary<string, int> offsets, Dictionary<string, Layout> cache)
         {
-            MDesc d = new MDesc { Offset = offsets.TryGetValue(mem.Name, out int mo) ? mo : 0, MemName = mem.Name };
+            MDesc d = new MDesc { Offset = offsets.TryGetValue(mem.Name, out int mo) ? mo : 0, MemName = mem.Name, Optional = mem.Optional };
             if (mem.Name == "pNext") { d.Kind = "PNext"; d.Size = 8; return d; }
             if (owner.Name == "VkWriteDescriptorSet" && (mem.Name == "pImageInfo" || mem.Name == "pBufferInfo" || mem.Name == "pTexelBufferView"))
             {
@@ -1987,8 +1989,8 @@ namespace Brovan.Generators
             sm.AppendLine("    internal enum BvkMK : byte { Scalar, Handle, StructValue, StructPtr, StructArray, HandleArray, ScalarArray, StringZ, StringArray, PNext, Ignore, BlobPtr, SelectArray }");
             sm.AppendLine("    internal readonly struct BvkM");
             sm.AppendLine("    {");
-            sm.AppendLine("        public readonly BvkMK Kind; public readonly int Offset; public readonly int Size; public readonly int Sub; public readonly int LenOffset; public readonly string HandleType; public readonly int SelOffset; public readonly uint SelMask;");
-            sm.AppendLine("        public BvkM(BvkMK k, int o, int s, int sub, int lo, string ht, int so, uint sm) { Kind = k; Offset = o; Size = s; Sub = sub; LenOffset = lo; HandleType = ht; SelOffset = so; SelMask = sm; }");
+            sm.AppendLine("        public readonly BvkMK Kind; public readonly int Offset; public readonly int Size; public readonly int Sub; public readonly int LenOffset; public readonly string HandleType; public readonly int SelOffset; public readonly uint SelMask; public readonly bool Optional;");
+            sm.AppendLine("        public BvkM(BvkMK k, int o, int s, int sub, int lo, string ht, int so, uint sm, bool opt = false) { Kind = k; Offset = o; Size = s; Sub = sub; LenOffset = lo; HandleType = ht; SelOffset = so; SelMask = sm; Optional = opt; }");
             sm.AppendLine("    }");
             sm.AppendLine("    internal static class BrovVulkStructMeta");
             sm.AppendLine("    {");
@@ -2032,7 +2034,7 @@ namespace Brovan.Generators
                         if (d.Kind == "Scalar" && d.Size > 8 && d.MemName != null)
                             ga.Append("BVK_SAME_SIZE(s").Append(si).Append('_').Append(d.MemName)
                               .Append(", sizeof(((").Append(n).Append("*)0)->").Append(d.MemName).Append("), ").Append(d.Size).Append(");\n");
-                        sm.Append("new BvkM(BvkMK.").Append(d.Kind).Append(", ").Append(d.Offset).Append(", ").Append(d.Size).Append(", ").Append(sub).Append(", ").Append(d.LenOffset).Append(", \"").Append(d.HandleType).Append("\", ").Append(d.SelOffset).Append(", ").Append(d.SelMask).Append("u), ");
+                        sm.Append("new BvkM(BvkMK.").Append(d.Kind).Append(", ").Append(d.Offset).Append(", ").Append(d.Size).Append(", ").Append(sub).Append(", ").Append(d.LenOffset).Append(", \"").Append(d.HandleType).Append("\", ").Append(d.SelOffset).Append(", ").Append(d.SelMask).Append("u, ").Append(d.Optional ? "true" : "false").Append("), ");
                         gs.Append("{").Append(KindNum[d.Kind]).Append(",").Append(GuestOffset(n, d.MemName, d.Offset)).Append(",").Append(d.Size)
                           .Append(",").Append(GuestNativeSize(n, d))
                           .Append(",").Append(sub)

@@ -24,8 +24,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static void VerifyArrayLen(IntPtr dst, in BvkM d, uint n)
         {
-            if (n != 0 && n != *(uint*)(dst + d.LenOffset))
+            uint Declared = *(uint*)(dst + d.LenOffset);
+            if (n != 0 && n != Declared)
                 throw new InvalidOperationException("BrovVulk generic: array length mismatch.");
+
+            if (n == 0 && Declared != 0 && !d.Optional)
+                throw new InvalidOperationException("BrovVulk generic: required array is null but its count is non-zero.");
         }
 
         public static IntPtr Rebuild(int sid, GenReader r, GenState st)
