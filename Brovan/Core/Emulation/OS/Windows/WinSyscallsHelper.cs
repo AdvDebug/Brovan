@@ -18,7 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WindowsSharedBuffer Shared { get; private set; }
 
         private Random RandomGen = new Random();
-        private Dictionary<uint, bool> PIDs = new Dictionary<uint, bool>();
+        private HashSet<uint> PIDs = new HashSet<uint>();
         private IDisplayConnection DesktopDisplay;
         private IWindow DesktopWindow;
         private string DesktopWindowTitle;
@@ -955,13 +955,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint GetArg32(int Index) => (uint)GetArg(Index);
 
         private uint SequentialIdCursor = 30000;
+        private uint AnonymousObjectCursor;
 
         public uint GenerateRandomPID()
         {
             for (int Attempt = 0; Attempt < 64; Attempt++)
             {
                 uint Candidate = (uint)RandomGen.Next(500, 29999);
-                if (PIDs.TryAdd(Candidate, true))
+                if (PIDs.Add(Candidate))
                     return Candidate;
             }
 
@@ -969,10 +970,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             while (true)
             {
                 uint Candidate = SequentialIdCursor++;
-                if (Candidate != 0 && PIDs.TryAdd(Candidate, true))
+                if (Candidate != 0 && PIDs.Add(Candidate))
                     return Candidate;
             }
         }
+
+        public uint GenerateAnonymousObjectId() => ++AnonymousObjectCursor;
+
+        public string GenerateAnonymousObjectName(string Prefix) => $"{Prefix}{GenerateAnonymousObjectId()}";
 
         private User GenerateRandomSvchostUser()
         {
@@ -1151,7 +1156,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             _argCacheValid = false;
         }
 
-        public List<WinEvent> WinEvents = new List<WinEvent>();
         public List<WinSemaphore> WinSemaphores = new List<WinSemaphore>();
         public List<WinRegistryNotification> RegistryNotifications = new List<WinRegistryNotification>();
         public List<WinSection> WinSections = new List<WinSection>();
@@ -1171,8 +1175,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public List<WinPort> WinPorts = new List<WinPort>();
-        public List<WinEtwRegistration> WinEtwRegistrations = new List<WinEtwRegistration>();
-        public List<WinJob> WinJobs = new List<WinJob>();
         public ulong EtwNotificationEventHandle;
         internal PebLdrTracker LdrTracker;
         public readonly Dictionary<ulong, WinWindow> WinWindows = new();
@@ -1197,7 +1199,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int Win32ClientInfoActiveWindowPointerSlot = 9;
         private const ulong UserSharedInfoMirrorSize = 0x1B54;
         private const ulong UserMessageBitmaskSize = 0x80;
-        private const uint UserMessageBitmaskMax = 0x3FF;
         private ulong UserMessageBitmask1Address;
         private ulong UserMessageBitmask2Address;
         private const uint GdiHandleEntryCount = 0x1000;
@@ -5664,14 +5665,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinHandle CreateEventHandle(string Name, uint EventType, bool InitialState, AccessMask Permissions)
         {
             if (string.IsNullOrEmpty(Name))
-                Name = "Event_" + GenerateRandomPID().ToString();
+                Name = GenerateAnonymousObjectName("Event_");
 
-            WinEvent Ev = WinEvents.FirstOrDefault(e => e.Name.Equals(Name, StringComparison.OrdinalIgnoreCase));
-            if (Ev == null)
-            {
-                Ev = new WinEvent { Name = Name, Signaled = InitialState, EventType = EventType };
-                WinEvents.Add(Ev);
-            }
+            WinEvent Ev = HandleManager.GetObjectByObjectId<WinEvent>(Name)
+                ?? new WinEvent { Name = Name, Signaled = InitialState, EventType = EventType };
 
             WinHandle Handle = HandleManager.AddHandle(Ev, Permissions);
             AddWinHandle(Handle);
@@ -5681,27 +5678,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinHandle CreateTimerHandle(string Name, TIMER_TYPE TimerType, AccessMask Permissions)
         {
             if (string.IsNullOrEmpty(Name))
-                Name = "Timer_" + GenerateRandomPID().ToString();
+                Name = GenerateAnonymousObjectName("Timer_");
 
-            WinTimer Timer = null;
-            List<ulong> ExistingHandles = HandleManager.GetHandlesByObjectId(Name);
-            for (int i = 0; i < ExistingHandles.Count; i++)
-            {
-                Timer = HandleManager.GetObjectByHandle<WinTimer>(ExistingHandles[i]);
-                if (Timer != null)
-                    break;
-            }
-
-            if (Timer == null)
-            {
-                Timer = new WinTimer
+            WinTimer Timer = HandleManager.GetObjectByObjectId<WinTimer>(Name)
+                ?? new WinTimer
                 {
                     Name = Name,
                     TimerType = TimerType,
                     Signaled = false,
                     Active = false
                 };
-            }
 
             WinHandle Handle = HandleManager.AddHandle(Timer, Permissions);
             AddWinHandle(Handle);
@@ -5733,14 +5719,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinHandle CreateJobHandle(string Name, AccessMask Permissions)
         {
             if (string.IsNullOrEmpty(Name))
-                Name = "Job_" + GenerateRandomPID().ToString();
+                Name = GenerateAnonymousObjectName("Job_");
 
-            WinJob Job = WinJobs.FirstOrDefault(j => j.Name.Equals(Name, StringComparison.OrdinalIgnoreCase));
-            if (Job == null)
-            {
-                Job = new WinJob { Name = Name };
-                WinJobs.Add(Job);
-            }
+            WinJob Job = HandleManager.GetObjectByObjectId<WinJob>(Name) ?? new WinJob { Name = Name };
 
             WinHandle Handle = HandleManager.AddHandle(Job, Permissions);
             AddWinHandle(Handle);
@@ -5810,7 +5791,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinHandle CreateSemaphoreHandle(string Name, int InitialCount, int MaximumCount, AccessMask Permissions)
         {
             if (string.IsNullOrEmpty(Name))
-                Name = "Semaphore_" + GenerateRandomPID().ToString();
+                Name = GenerateAnonymousObjectName("Semaphore_");
 
             WinSemaphore Semaphore = WinSemaphores.FirstOrDefault(s => s.Name.Equals(Name, StringComparison.OrdinalIgnoreCase));
             if (Semaphore == null)
@@ -5838,7 +5819,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinHandle CreateSectionHandle(string Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, AccessMask Permissions)
         {
             if (string.IsNullOrEmpty(Name))
-                Name = "Section_" + GenerateRandomPID().ToString();
+                Name = GenerateAnonymousObjectName("Section_");
 
             WinSection Sec = new WinSection
             {

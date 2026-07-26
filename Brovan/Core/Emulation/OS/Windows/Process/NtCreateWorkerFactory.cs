@@ -30,7 +30,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!HandleManager.IsCurrentProcessPseudoHandle(WorkerProcessHandle) && !Instance.WinHelper.ValidProcessHandle(WorkerProcessHandle))
                     return NTSTATUS.STATUS_INVALID_HANDLE;
 
-                uint Id = Instance.WinHelper.GenerateRandomPID();
+                uint Id = Instance.WinHelper.GenerateAnonymousObjectId();
                 WinWorkerFactory Factory = new WinWorkerFactory
                 {
                     Name = "WorkerFactory_" + Id.ToString(),

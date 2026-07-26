@@ -26,7 +26,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (ObjectAttributesPtr != 0 && !Instance.IsRegionMapped(ObjectAttributesPtr, 0x30))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                uint TimerId = Instance.WinHelper.GenerateRandomPID();
+                uint TimerId = Instance.WinHelper.GenerateAnonymousObjectId();
 
                 string Name = "Timer_" + TimerId.ToString();
 
@@ -74,7 +74,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (ObjectAttributesPtr != 0 && !Instance.IsRegionMapped(ObjectAttributesPtr, 0x18))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                uint TimerId = Instance.WinHelper.GenerateRandomPID();
+                uint TimerId = Instance.WinHelper.GenerateAnonymousObjectId();
 
                 string Name = "Timer_" + TimerId.ToString();
 

@@ -19,10 +19,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Instance.IsRegionMapped(IoCompletionHandlePtr, (uint)Instance.WinHelper.PointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                uint Id = Instance.WinHelper.GenerateRandomPID();
                 WinIoCompletion IoCompletion = new WinIoCompletion
                 {
-                    Name = "IoCompletion_" + Id.ToString(),
+                    Name = Instance.WinHelper.GenerateAnonymousObjectName("IoCompletion_"),
                     Count = (uint)Count
                 };
 
@@ -45,10 +44,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(IoCompletionHandlePtr32, 4))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            uint Id32 = Instance.WinHelper.GenerateRandomPID();
             WinIoCompletion IoCompletion32 = new WinIoCompletion
             {
-                Name = "IoCompletion_" + Id32.ToString(),
+                Name = Instance.WinHelper.GenerateAnonymousObjectName("IoCompletion_"),
                 Count = Count32
             };
 

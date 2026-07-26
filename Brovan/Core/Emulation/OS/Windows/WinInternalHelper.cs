@@ -14,7 +14,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     public class WindowsSharedBuffer
     {
+        private const int MaxRetainedLength = 0x40000;
+        private const int TrimAfterSmallRequests = 256;
+
         private byte[] Buffer;
+        private int SmallRequestRun;
 
         public int Length => Buffer.Length;
 
@@ -62,7 +66,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         private void EnsureCapacity(int Size)
         {
             if (Size <= Buffer.Length)
+            {
+                if (Buffer.Length > MaxRetainedLength && Size <= MaxRetainedLength && ++SmallRequestRun >= TrimAfterSmallRequests)
+                {
+                    Buffer = new byte[MaxRetainedLength];
+                    SmallRequestRun = 0;
+                }
+
                 return;
+            }
+
+            SmallRequestRun = 0;
 
             int NewSize = Buffer.Length == 0 ? 0x1000 : Buffer.Length;
             while (NewSize < Size)
@@ -191,6 +205,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles))
                 return new List<ulong>(Handles);
             return new List<ulong>();
+        }
+
+        public T? GetObjectByObjectId<T>(string ObjectId) where T : class, IHandleObject
+        {
+            if (!ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles))
+                return null;
+
+            for (int Index = 0; Index < Handles.Count; Index++)
+            {
+                if (HandleTable.TryGetValue(Handles[Index], out HandleEntry Entry) && Entry.Object is T Typed)
+                    return Typed;
+            }
+
+            return null;
         }
 
         public AccessMask GetPermissionsByHandle(ulong Handle)

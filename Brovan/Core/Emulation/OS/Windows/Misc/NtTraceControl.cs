@@ -89,7 +89,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Registration, AccessMask.GiveTemp);
             Instance.WinHelper.AddWinHandle(Handle);
-            Instance.WinHelper.WinEtwRegistrations.Add(Registration);
 
             if (!Instance.WriteMemory(OutBuffer, Header))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

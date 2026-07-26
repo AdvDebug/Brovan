@@ -20,10 +20,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 _ = ObjectAttributes;
 
-                uint Id = Instance.WinHelper.GenerateRandomPID();
                 WinWaitCompletionPacket Packet = new WinWaitCompletionPacket
                 {
-                    Name = "WaitCompletionPacket_" + Id.ToString()
+                    Name = Instance.WinHelper.GenerateAnonymousObjectName("WaitCompletionPacket_")
                 };
 
                 WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Packet, (AccessMask)DesiredAccess);
@@ -47,10 +46,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             _ = ObjectAttributes32;
 
-            uint Id32 = Instance.WinHelper.GenerateRandomPID();
             WinWaitCompletionPacket Packet32 = new WinWaitCompletionPacket
             {
-                Name = "WaitCompletionPacket_" + Id32.ToString()
+                Name = Instance.WinHelper.GenerateAnonymousObjectName("WaitCompletionPacket_")
             };
 
             WinHandle Handle32 = Instance.WinHelper.HandleManager.AddHandle(Packet32, (AccessMask)DesiredAccess32);
