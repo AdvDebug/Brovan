@@ -921,16 +921,6 @@ namespace Brovan.Core.Emulation.Guests
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.Name ??= $"Thread_{Thread.ThreadId}";
 
-            State.ImpersonationToken = new WinToken
-            {
-                IsElevated = false,
-                IsRestricted = false,
-                OwningProcessId = WinHelper.PID,
-                OwningThreadId = Thread.ThreadId,
-                Type = TokenType.Primary,
-                SessionId = 1
-            };
-
             State.Teb = AllocateAndInitializeTEB(Instance, Thread, CreateFlags, InitialThread);
 
             ulong InitialStack = (Thread.StackAddress + Thread.StackSize) & ~0xFUL;
@@ -1005,16 +995,6 @@ namespace Brovan.Core.Emulation.Guests
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.Name ??= $"Thread_{Thread.ThreadId}";
-
-            State.ImpersonationToken = new WinToken
-            {
-                IsElevated = false,
-                IsRestricted = false,
-                OwningProcessId = WinHelper.PID,
-                OwningThreadId = Thread.ThreadId,
-                Type = TokenType.Primary,
-                SessionId = 1
-            };
 
             State.Teb = AllocateAndInitializeTEB(Instance, Thread, CreateFlags, InitialThread);
 

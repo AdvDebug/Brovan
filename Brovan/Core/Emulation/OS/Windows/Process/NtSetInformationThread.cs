@@ -87,8 +87,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (!Instance.IsRegionMapped(ThreadInformationPtr, 4))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                        int BasePriority = (int)Instance._emulator.ReadMemoryUInt(ThreadInformationPtr);
-                        Thread.BasePriority = ClampPriority(BasePriority);
+                        int PriorityDelta = (int)Instance._emulator.ReadMemoryUInt(ThreadInformationPtr);
+                        Thread.BasePriority = BasePriorityFromDelta(PriorityDelta);
                         return NTSTATUS.STATUS_SUCCESS;
                     }
 
@@ -316,6 +316,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Value < 1) return 1;
             if (Value > 31) return 31;
             return Value;
+        }
+
+        private static int BasePriorityFromDelta(int Delta)
+        {
+            const int ProcessBasePriority = 8;
+
+            if (Delta >= 16)
+                return 15;
+
+            if (Delta <= -16)
+                return 1;
+
+            return Math.Clamp(ProcessBasePriority + Delta, 1, 15);
         }
 
         private static EmulatedThread ResolveThreadFromHandle(BinaryEmulator Instance, ulong ThreadHandle)

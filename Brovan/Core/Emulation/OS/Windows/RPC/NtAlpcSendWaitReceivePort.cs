@@ -82,6 +82,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(ReceiveMessageAttributesPtr + 4, 0u);
             }
 
+            if (SendBytes != null && (Instance.Settings.Flags & LogFlags.General) != 0)
+                Instance.TriggerEventMessage($"[+] ALPC send \"{Port.Name}\" len=0x{SendBytes.Length:X}", LogFlags.General);
+
             if (ReceiveMessagePtr != 0)
             {
                 byte[] ReplyBytes = null;

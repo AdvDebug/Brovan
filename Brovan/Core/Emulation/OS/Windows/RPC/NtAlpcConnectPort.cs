@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
 using Brovan.Core.Emulation.OS.Windows.RPC.Ports;
@@ -33,6 +33,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(PortName))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
+            return Connect(Instance, PortHandlePtr, PortName);
+        }
+
+        internal static NTSTATUS Connect(BinaryEmulator Instance, ulong PortHandlePtr, string PortName)
+        {
             // Find existing port or create a new one with the CSRSS handler.
             WinPort Port = Instance.WinHelper.WinPorts
                 .FirstOrDefault(p => string.Equals(p.Name, PortName,
@@ -70,10 +75,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+            if ((Instance.Settings.Flags & LogFlags.General) != 0)
                 Instance.TriggerEventMessage(
-                $"[+] NtAlpcConnectPort: Port=\"{PortName}\", Handle=0x{Handle.Handle:X}",
-                LogFlags.Syscall);
+                $"[+] ALPC connect \"{PortName}\" Handle=0x{Handle.Handle:X}",
+                LogFlags.General);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

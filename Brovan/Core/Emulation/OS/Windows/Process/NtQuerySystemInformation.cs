@@ -162,6 +162,31 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
+                    case SYSTEM_INFORMATION_CLASS.SystemRecommendedSharedDataAlignment:
+                        {
+                            const uint CacheLineAlignment = 64;
+                            const uint RequiredLength = sizeof(uint);
+
+                            if (ReturnLengthPtr != 0)
+                            {
+                                if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                Instance._emulator.WriteMemory(ReturnLengthPtr, RequiredLength);
+                            }
+
+                            if (SystemInformationLength < RequiredLength)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                            if (!Instance.IsRegionMapped(SystemInformationPtr, RequiredLength))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            if (!Instance._emulator.WriteMemory(SystemInformationPtr, CacheLineAlignment))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
                     case SYSTEM_INFORMATION_CLASS.SystemNumaProcessorMap:
                         const uint HeaderSize = 0x08;
                         const uint GroupAffinitySize = 0x10;

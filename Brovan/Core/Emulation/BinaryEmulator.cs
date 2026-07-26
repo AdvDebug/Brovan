@@ -326,6 +326,7 @@ namespace Brovan.Core.Emulation
         private readonly Queue<int>[] MlfqReadyQueues = new Queue<int>[32];
         private readonly HashSet<int> MlfqQueuedThreads = new();
         private readonly uint[] MlfqQuanta = new uint[32];
+        private readonly int[] MlfqLevelSkips = new int[32];
         private bool MemoryRegionIndexDirty = true;
         private bool _freedMemorySorted = true;
 
@@ -2319,8 +2320,12 @@ namespace Brovan.Core.Emulation
             Thread = null;
             SelectedLevel = -1;
 
-            for (int Level = 0; Level < Levels; Level++)
+            for (int Attempt = 0; Attempt < Levels; Attempt++)
             {
+                int Level = PickMlfqLevel(ReadyQueues, Levels);
+                if (Level < 0)
+                    return false;
+
                 while (ReadyQueues[Level].Count > 0)
                 {
                     int Tid = ReadyQueues[Level].Dequeue();
@@ -2332,6 +2337,8 @@ namespace Brovan.Core.Emulation
                     if (!IsMlfqRunnableThread(Candidate))
                         continue;
 
+                    ChargeMlfqLevelSkips(ReadyQueues, Levels, Level);
+
                     Thread = Candidate;
                     SelectedLevel = Level;
                     return true;
@@ -2339,6 +2346,42 @@ namespace Brovan.Core.Emulation
             }
 
             return false;
+        }
+
+        // Guest wait deadlines run on host wall time, so emulator overhead keeps short sleepers permanently
+        // expired: they re-enter the boosted queues on every dispatch and strict priority order then never
+        // reaches a lower queue at all. Bounding how often a level may be skipped turns that livelock into a
+        // share of the dispatches.
+        private const int MlfqStarvationSkipLimit = 24;
+
+        private int PickMlfqLevel(Queue<int>[] ReadyQueues, int Levels)
+        {
+            int Best = -1;
+
+            for (int Level = 0; Level < Levels; Level++)
+            {
+                if (ReadyQueues[Level].Count == 0)
+                    continue;
+
+                if (Best < 0)
+                    Best = Level;
+
+                if (MlfqLevelSkips[Level] >= MlfqStarvationSkipLimit)
+                    return Level;
+            }
+
+            return Best;
+        }
+
+        private void ChargeMlfqLevelSkips(Queue<int>[] ReadyQueues, int Levels, int SelectedLevel)
+        {
+            MlfqLevelSkips[SelectedLevel] = 0;
+
+            for (int Level = SelectedLevel + 1; Level < Levels; Level++)
+            {
+                if (ReadyQueues[Level].Count > 0 && MlfqLevelSkips[Level] < int.MaxValue)
+                    MlfqLevelSkips[Level]++;
+            }
         }
 
         private bool HasLiveMlfqThread()
@@ -2353,7 +2396,7 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        private void RebuildMlfqReadyQueues(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, long SchedulerWorkTick, long AgingThresholdBudget, int AgingBoost)
+        private void RebuildMlfqReadyQueues(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, long AgingThresholdBudget, int AgingBoost)
         {
             for (int i = 0; i < Levels && i < ReadyQueues.Length; i++)
                 ReadyQueues[i]?.Clear();
@@ -2371,7 +2414,7 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 // if a thread hasn't run for a while, gently boost it upward.
-                if (AgingThresholdBudget > 0 && SchedulerWorkTick - t.LastRunTick >= AgingThresholdBudget)
+                if (AgingThresholdBudget > 0 && SchedulerTick - t.LastRunTick >= AgingThresholdBudget)
                     t.DynamicBoost = ClampInt(t.DynamicBoost + AgingBoost, -16, 16);
 
                 EnqueueMlfqThread(t, ReadyQueues, InQueue, Levels, SchedulerTick);
@@ -2379,7 +2422,7 @@ namespace Brovan.Core.Emulation
 
             if (Debug)
                 if (Debug)
-                    TriggerDebugMessage($"scheduler: rebuilt queues live={ThreadOrder.Count} queued={InQueue.Count} tick={SchedulerTick} work={SchedulerWorkTick}");
+                    TriggerDebugMessage($"scheduler: rebuilt queues live={ThreadOrder.Count} queued={InQueue.Count} tick={SchedulerTick}");
         }
 
         public bool RunMlfqScheduler(uint BaseQuantumInstructions = 200000, int Levels = 4, ulong MaxTotalInstructions = 0, uint MaxSlices = 0, long AgingThresholdSlices = 50)
@@ -2405,6 +2448,8 @@ namespace Brovan.Core.Emulation
                     ReadyQueues[i] = new Queue<int>();
                 else
                     ReadyQueues[i].Clear();
+
+                MlfqLevelSkips[i] = 0;
             }
 
             HashSet<int> InQueue = MlfqQueuedThreads;
@@ -2413,10 +2458,9 @@ namespace Brovan.Core.Emulation
             ulong Total = 0;
             uint Slices = 0;
             long SchedulerTick = 0;
-            long SchedulerWorkTick = 0;
             ulong PendingSchedulerTimeCycles = 0;
             const ulong SchedulerCyclesPerMillisecond = TscCyclesPerMillisecond;
-            long AgingThresholdBudget = AgingThresholdSlices <= 0 ? 0 : Math.Max(1, (long)BaseQuantumInstructions) * AgingThresholdSlices;
+            long AgingThresholdBudget = AgingThresholdSlices <= 0 ? 0 : AgingThresholdSlices;
             int KnownThreadOrderCount = ThreadOrder.Count;
             bool WakeupScanRequired = true;
 
@@ -2424,7 +2468,7 @@ namespace Brovan.Core.Emulation
                 if (Debug)
                     TriggerDebugMessage($"scheduler: start threads={ThreadOrder.Count} levels={Levels} baseQuantum={BaseQuantumInstructions} maxInstructions={MaxTotalInstructions} maxSlices={MaxSlices}");
 
-            RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, SchedulerWorkTick, AgingThresholdBudget, 1);
+            RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
             SchedulerRefreshRequested = false;
 
             while (true)
@@ -2435,7 +2479,7 @@ namespace Brovan.Core.Emulation
                 bool AgingDue = AgingThresholdSlices > 0 && SchedulerTick % AgingThresholdSlices == 0;
                 if (AgingDue)
                 {
-                    RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, SchedulerWorkTick, AgingThresholdBudget, 1);
+                    RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
                     KnownThreadOrderCount = ThreadOrder.Count;
                     WakeupScanRequired = false;
                 }
@@ -2618,9 +2662,8 @@ namespace Brovan.Core.Emulation
                     }
                 }
 
-                SchedulerWorkTick += SchedulerSliceWork;
                 Slices++;
-                ImmaBeEmulatedOOO.LastRunTick = SchedulerWorkTick;
+                ImmaBeEmulatedOOO.LastRunTick = SchedulerTick;
 
                 if (ImmaBeEmulatedOOO.Context?.RIP == 0)
                 {

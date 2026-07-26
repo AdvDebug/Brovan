@@ -1971,6 +1971,43 @@ namespace Brovan.Core.Emulation
             return FindModuleByAddress(Address, WinHelper);
         }
 
+        internal string DescribeAddress(ulong Address)
+        {
+            WinModule Module = FindModuleByAddress(Address, WinHelper);
+            if (Module == null)
+                return $"0x{Address:X}";
+
+            string Function = ResolveFunctionName(Address, Module);
+            return Function != null
+                ? $"{Module.Name}!{Function} (0x{Address:X})"
+                : $"{Module.Name}+0x{Address - Module.MappedBase:X} (0x{Address:X})";
+        }
+
+        /// <summary>
+        /// Scans the current stack for return addresses that land inside a mapped module. Used when the guest is
+        /// about to die and no code hooks are available to walk the frames properly.
+        /// </summary>
+        internal void TraceStackModuleFrames(string Prefix, int MaxFrames = 16)
+        {
+            ulong StackPointer = ReadRegister(IsX64Guest ? Registers.UC_X86_REG_RSP : Registers.UC_X86_REG_ESP);
+            uint PointerSize = (uint)WinHelper.PointerSize;
+            int Found = 0;
+
+            for (int i = 0; i < 256 && Found < MaxFrames; i++)
+            {
+                ulong Slot = StackPointer + (ulong)i * PointerSize;
+                if (!IsRegionMapped(Slot, PointerSize))
+                    break;
+
+                ulong Value = WinHelper.ReadPointer(Slot);
+                if (Value == 0 || FindModuleByAddress(Value, WinHelper) == null)
+                    continue;
+
+                TriggerEventMessage($"{Prefix}     [0x{Slot:X}] {DescribeAddress(Value)}", LogFlags.Issues);
+                Found++;
+            }
+        }
+
         private WinModule FindModuleByAddress(ulong Address, WinSysHelper Helper)
         {
             if (_lastAddressModule != null && Address >= _lastAddressModuleStart && Address < _lastAddressModuleEnd)
