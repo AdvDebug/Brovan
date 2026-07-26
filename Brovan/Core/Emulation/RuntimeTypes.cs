@@ -43,8 +43,6 @@ namespace Brovan.Core.Emulation
         public int QueueLevel;
         public ulong AffinityMask = ulong.MaxValue;
         public bool DisablePriorityBoost;
-        public int SpinWaitScore;
-        public ulong LastSpinWaitRip;
         public long LastReadyTick;
         public long LastRunTick = -1;
 

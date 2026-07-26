@@ -1,7 +1,4 @@
 using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
@@ -9,10 +6,23 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
     internal static class HostEventQueue
     {
         private const uint WM_CLOSE = 0x0010;
+        private const uint WM_MOUSEMOVE = 0x0200;
+        private const int InitialCapacity = 256;
+
+        private struct HostEvent
+        {
+            public uint Message;
+            public ulong WParam;
+            public ulong LParam;
+        }
+
+        private static readonly object InputSync = new();
+        private static HostEvent[] _input = new HostEvent[InitialCapacity];
+        private static int _head;
+        private static int _count;
 
         private static int _pendingRepaint;
         private static int _closeRequested;
-        private static readonly ConcurrentQueue<(uint Message, ulong WParam, ulong LParam)> PendingInput = new();
 
         public static void RequestClose()
         {
@@ -26,8 +36,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         {
             Interlocked.Exchange(ref _closeRequested, 0);
             Interlocked.Exchange(ref _pendingRepaint, 0);
-            while (PendingInput.TryDequeue(out _))
+
+            lock (InputSync)
             {
+                _head = 0;
+                _count = 0;
             }
         }
 
@@ -43,23 +56,62 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         public static void Enqueue(uint message, ulong wParam, ulong lParam)
         {
-            PendingInput.Enqueue((message, wParam, lParam));
+            lock (InputSync)
+            {
+                if (message == WM_MOUSEMOVE && _count != 0)
+                {
+                    ref HostEvent tail = ref _input[(_head + _count - 1) & (_input.Length - 1)];
+                    if (tail.Message == WM_MOUSEMOVE)
+                    {
+                        tail.WParam = wParam;
+                        tail.LParam = lParam;
+                        return;
+                    }
+                }
+
+                if (_count == _input.Length)
+                    Grow();
+
+                ref HostEvent slot = ref _input[(_head + _count) & (_input.Length - 1)];
+                slot.Message = message;
+                slot.WParam = wParam;
+                slot.LParam = lParam;
+                _count++;
+            }
         }
 
         public static bool TryDequeue(out uint message, out ulong wParam, out ulong lParam)
         {
-            if (PendingInput.TryDequeue(out var item))
+            lock (InputSync)
             {
-                message = item.Message;
-                wParam = item.WParam;
-                lParam = item.LParam;
+                if (_count == 0)
+                {
+                    message = 0;
+                    wParam = 0;
+                    lParam = 0;
+                    return false;
+                }
+
+                ref HostEvent slot = ref _input[_head];
+                message = slot.Message;
+                wParam = slot.WParam;
+                lParam = slot.LParam;
+
+                _head = (_head + 1) & (_input.Length - 1);
+                _count--;
                 return true;
             }
+        }
 
-            message = 0;
-            wParam = 0;
-            lParam = 0;
-            return false;
+        private static void Grow()
+        {
+            HostEvent[] grown = new HostEvent[_input.Length * 2];
+            int mask = _input.Length - 1;
+            for (int i = 0; i < _count; i++)
+                grown[i] = _input[(_head + i) & mask];
+
+            _input = grown;
+            _head = 0;
         }
     }
 
@@ -222,6 +274,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         IWindow CreateWindow(WindowOptions options);
 
         void PumpEvents();
+
+        /// <summary>
+        /// Blocks the calling thread until the host has an event to dispatch, <see cref="Wake"/> is called,
+        /// or the timeout elapses. Polling the backend on a fixed interval instead would floor input latency
+        /// at the poll period, so the wait has to be armed on both the host event source and the wake object.
+        /// </summary>
+        void WaitForEvents(int timeoutMilliseconds);
+
+        void Wake();
 
         bool IsConnected { get; }
 

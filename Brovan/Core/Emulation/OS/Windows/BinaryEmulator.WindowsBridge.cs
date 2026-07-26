@@ -740,7 +740,7 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State != null && State.GetMessageWaitActive)
+                if (State != null && (State.GetMessageWaitActive || State.MsgWaitActive))
                     return true;
             }
 

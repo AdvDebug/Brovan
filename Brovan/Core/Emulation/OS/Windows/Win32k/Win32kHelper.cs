@@ -145,6 +145,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return 0;
 
             ulong GdiHandle = Instance.WinHelper.AllocateGdiHandle(0x01);
+            if (GdiHandle == 0)
+                return 0;
 
             Win32kState State = GetState(Instance);
             State.DeviceContexts[GdiHandle] = new Win32kDeviceContext
@@ -163,7 +165,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return false;
 
             Win32kState State = GetState(Instance);
-            return State.DeviceContexts.Remove(Hdc);
+            if (!State.DeviceContexts.Remove(Hdc))
+                return false;
+
+            Instance.WinHelper.FreeGdiHandle(Hdc);
+            return true;
         }
 
         internal static ulong GetHwndFromDc(BinaryEmulator Instance, ulong Hdc)
@@ -442,11 +448,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             ulong Foreground = Instance.WinHelper.GetForegroundWindow();
 
-            if (HostEventQueue.ConsumeRepaint() && Foreground != 0)
-                InvalidateWindow(Instance, Foreground);
-
+            // Nothing can be delivered before the guest makes a window visible, and the host queue must survive
+            // until then: consuming the repaint flag (or draining input) here would discard the only events a
+            // thread parked in MsgWaitForMultipleObjectsEx can ever be woken by.
             if (Foreground == 0)
                 return;
+
+            if (HostEventQueue.ConsumeRepaint())
+                InvalidateWindow(Instance, Foreground);
 
             for (int i = 0; i < MaxHostInputEventsPerDrain; i++)
             {

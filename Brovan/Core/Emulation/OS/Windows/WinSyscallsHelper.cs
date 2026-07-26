@@ -1045,6 +1045,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint CurrentPriority = 0x8; // Default priority (Normal), changes only if the program changed it explicitly.
         public User CurrentUser = User.Standard;
         public string CurrentUserSid = "S-1-5-21-1000-1000-1000-1001";
+        public const string CurrentUserName = "User";
+        public const string CurrentUserProfile = @"C:\Users\" + CurrentUserName;
 
         // Other
         public List<WinHandle> WinHandles = new List<WinHandle>();
@@ -1200,9 +1202,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong UserMessageBitmask2Address;
         private const uint GdiHandleEntryCount = 0x1000;
         private const uint GdiHandleEntrySize = 0x18;
+
+        private const int GdiHandleTypeMask = 0x7F;
+        private const int GdiHandleUniqShift = 8;
+
         private ulong GdiHandleTableAddress;
         private ushort NextGdiHandleIndex = 1;
-        private ushort NextGdiHandleUniq = 0x77;
+        private readonly Stack<ushort> FreeGdiHandleIndices = new();
+        private readonly byte[] GdiHandleUniq = new byte[GdiHandleEntryCount];
+        private readonly ulong[] GdiHandleAttributes = new ulong[GdiHandleEntryCount];
         private const int SmCxScreen = 0;
         private const int SmCyScreen = 1;
         private const int EnumCurrentSettings = -1;
@@ -3006,10 +3014,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (GdiHandleTableAddress == 0)
                 return 0;
 
-            if (NextGdiHandleIndex == 0 || NextGdiHandleIndex >= GdiHandleEntryCount)
+            if (!TryTakeGdiHandleIndex(out ushort Index))
                 return 0;
-
-            ushort Index = NextGdiHandleIndex++;
 
             ulong Entry = GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize;
 
@@ -3017,14 +3023,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Emulator._emulator.WriteMemory(Entry + i, 0UL, 8);
 
             uint W32Pid = PID & 0xFFFFFFFCu;
+            ushort Upper = (ushort)((type & GdiHandleTypeMask) | (GdiHandleUniq[Index] << GdiHandleUniqShift));
             Emulator._emulator.WriteMemory(Entry + 0x08, W32Pid, 4);
-            Emulator._emulator.WriteMemory(Entry + 0x0C, type, 1);
+            Emulator._emulator.WriteMemory(Entry + 0x0C, Upper, 2);
 
             Emulator._emulator.WriteMemory(Entry + 0x0E, (byte)(type & 0x1F), 1);
 
             if (type == 1)
             {
-                ulong DcAttr = Emulator.MapUniqueAddress(0x600, MemoryProtection.ReadWrite);
+                ulong DcAttr = EnsureDcAttributeBlock(Index);
                 if (DcAttr != 0)
                 {
                     Span<byte> Zeroed = Shared.GetSpan(0x600);
@@ -3043,7 +3050,34 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            return ((ulong)type << 16) | Index;
+            return ((ulong)Upper << 16) | Index;
+        }
+
+        private bool TryTakeGdiHandleIndex(out ushort Index)
+        {
+            if (FreeGdiHandleIndices.TryPop(out Index))
+                return true;
+
+            if (NextGdiHandleIndex == 0 || NextGdiHandleIndex >= GdiHandleEntryCount)
+                return false;
+
+            Index = NextGdiHandleIndex++;
+            return true;
+        }
+
+        /// <summary>
+        /// The DC_ATTR block stays mapped for the lifetime of the slot rather than the lifetime of the DC. A
+        /// window repainting maps and abandons one per BeginPaint otherwise, and nothing ever reclaims it.
+        /// </summary>
+        private ulong EnsureDcAttributeBlock(ushort Index)
+        {
+            ulong Cached = GdiHandleAttributes[Index];
+            if (Cached != 0 && Emulator.IsRegionMapped(Cached, 0x600))
+                return Cached;
+
+            ulong DcAttr = Emulator.MapUniqueAddress(0x600, MemoryProtection.ReadWrite);
+            GdiHandleAttributes[Index] = DcAttr;
+            return DcAttr;
         }
 
         private static ulong EncryptGdiPointer(ulong Pointer)
@@ -3066,7 +3100,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public ulong GetDcAttributeAddress(ulong Hdc)
         {
-            if (Hdc == 0 || ((Hdc >> 16) & 0xFF) != 1 || !ValidateGdiHandle(Hdc))
+            if (Hdc == 0 || ((Hdc >> 16) & GdiHandleTypeMask) != 1 || !ValidateGdiHandle(Hdc))
                 return 0;
 
             ushort Index = (ushort)(Hdc & 0xFFFF);
@@ -3117,14 +3151,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             ushort Index = (ushort)(Handle & 0xFFFF);
-            byte Uniq = (byte)((Handle >> 16) & 0xFF);
+            ushort Upper = (ushort)((Handle >> 16) & 0xFFFF);
 
             if (Index == 0 || Index >= GdiHandleEntryCount)
                 return false;
 
             ulong Entry = GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize;
-            byte StoredUniq = (byte)Emulator.ReadMemoryUInt(Entry + 0x0C);
-            return StoredUniq == Uniq;
+            ushort StoredUpper = (ushort)Emulator.ReadMemoryUInt(Entry + 0x0C);
+            return StoredUpper == Upper;
         }
 
         public ulong GetGdiHandleTableAddress()
@@ -3240,17 +3274,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             EnsureGdiHandleTable();
-            if (GdiHandleTableAddress == 0)
+
+            if (!ValidateGdiHandle(Handle))
                 return false;
 
             ushort Index = (ushort)(Handle & 0xFFFF);
-            if (Index == 0 || Index >= GdiHandleEntryCount)
-                return false;
-
             ulong Entry = GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize;
             for (uint i = 0; i < GdiHandleEntrySize; i += 8)
                 Emulator._emulator.WriteMemory(Entry + i, 0UL, 8);
 
+            GdiHandleUniq[Index]++;
+            FreeGdiHandleIndices.Push(Index);
             return true;
         }
 
@@ -4709,7 +4743,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Dictionary<string, bool> KeyCache = new Dictionary<string, bool>(128, StringComparer.OrdinalIgnoreCase);
             Hive DefaultHive = RegHives != null && RegHives.Length != 0 ? RegHives[0] : null;
-            string UserProfile = "C:\\Users\\User";
+            string UserProfile = CurrentUserProfile;
             string UserRoot = "\\Registry\\User\\" + CurrentUserSid;
             string ExplorerRoot = UserRoot + "\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer";
 
@@ -4720,13 +4754,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             AddSyntheticRegistryKeyTrusted(ExplorerRoot + "\\SessionInfo\\0", KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "USERPROFILE", 2, UserProfile, KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEDRIVE", 1, "C:", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEPATH", 1, "\\Users\\User", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEPATH", 1, "\\Users\\" + CurrentUserName, KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "APPDATA", 2, "%USERPROFILE%\\AppData\\Roaming", KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "LOCALAPPDATA", 2, "%USERPROFILE%\\AppData\\Local", KeyCache, DefaultHive);
 
             string ProfileListKey = "\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\" + CurrentUserSid;
             AddSyntheticRegistryKeyTrusted(ProfileListKey, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(ProfileListKey, "ProfileImagePath", 2, "%SystemDrive%\\Users\\User", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(ProfileListKey, "ProfileImagePath", 2, "%SystemDrive%\\Users\\" + CurrentUserName, KeyCache, DefaultHive);
             SetSyntheticRegistryDwordTrusted(ProfileListKey, "Flags", 0, KeyCache, DefaultHive);
             SetSyntheticRegistryDwordTrusted(ProfileListKey, "State", 0, KeyCache, DefaultHive);
             SetSyntheticRegistryDwordTrusted(ProfileListKey, "RefCount", 0, KeyCache, DefaultHive);

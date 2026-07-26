@@ -5,7 +5,6 @@ using System.IO;
 using System.Linq;
 using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 using Brovan.Core.Emulation.OS.Windows;
 using Brovan.Core.Helpers;
@@ -1052,29 +1051,12 @@ namespace Brovan.Core.Emulation.Guests
         }
 
 
-        private static string GenerateRandomUsername()
-        {
-            const string Alphabet =
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
-                "abcdefghijklmnopqrstuvwxyz" +
-                "0123456789";
-            Random RandomGen = new Random();
-            int RandomLen = RandomGen.Next(5, 12);
-            byte[] RandomBytes = new byte[RandomLen];
-            RandomNumberGenerator.Fill(RandomBytes);
-
-            char[] result = new char[RandomLen];
-
-            for (int i = 0; i < RandomLen; i++)
-                result[i] = Alphabet[RandomBytes[i] % Alphabet.Length];
-
-            return new string(result);
-        }
-
         public byte[] BuildEnvironment(BinaryEmulator Instance, out ulong size)
         {
             size = 0;
-            string Username = GenerateRandomUsername();
+
+            string Username = WinSysHelper.CurrentUserName;
+            string UserProfile = WinSysHelper.CurrentUserProfile;
             Random RandomGen = new Random();
             string PcName = $"DESKTOP-{RandomGen.Next(4, 10)}";
             Dictionary<string, string> Env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -1082,12 +1064,14 @@ namespace Brovan.Core.Emulation.Guests
                 { "PROCESSOR_ARCHITECTURE", Instance._binary.Architecture == BinaryArchitecture.x64 ? "AMD64" : "x86" },
                 { "OS", "Windows_NT" },
                 { "NUMBER_OF_PROCESSORS", "8" },
-                { "TEMP", @$"C:\Users\{Username}\AppData\Local\Temp" },
-                { "TMP",  @$"C:\Users\{Username}\AppData\Local\Temp" },
+                { "TEMP", @$"{UserProfile}\AppData\Local\Temp" },
+                { "TMP",  @$"{UserProfile}\AppData\Local\Temp" },
+                { "APPDATA", @$"{UserProfile}\AppData\Roaming" },
+                { "LOCALAPPDATA", @$"{UserProfile}\AppData\Local" },
                 { "HOMEPATH", @$"\Users\{Username}" },
                 { "HOMEDRIVE", "C:" },
                 { "SYSTEMDRIVE", "C:" },
-                { "OneDrive", @$"C:\Users\{Username}\OneDrive" },
+                { "OneDrive", @$"{UserProfile}\OneDrive" },
                 { "SESSIONNAME", "Console" },
                 { "ALLUSERSPROFILE", @"C:\ProgramData" },
                 { "PUBLIC", @"C:\Users\Public" },
@@ -1098,7 +1082,7 @@ namespace Brovan.Core.Emulation.Guests
                 { "CommonProgramW6432", @"C:\Program Files\Common Files" },
                 { "WINDIR", @"C:\WINDOWS" },
                 { "USERNAME", Username },
-                { "USERPROFILE", @$"C:\Users\{Username}" },
+                { "USERPROFILE", UserProfile },
                 { "USERDOMAIN", PcName },
                 { "USERDOMAIN_ROAMINGPROFILE", PcName },
                 { "LOGONSERVER", @$"\\{PcName}" },

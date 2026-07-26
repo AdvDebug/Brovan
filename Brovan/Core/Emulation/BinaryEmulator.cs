@@ -2064,13 +2064,6 @@ namespace Brovan.Core.Emulation
             return Level;
         }
 
-        // Tight guest spin-waits need a near-immediate handoff to another runnable thread.
-        // Four instructions covers common load/compare/branch loops without shrinking normal thread quanta.
-        private const uint SpinWaitQuantumInstructions = 4;
-        private const int SpinWaitScoreThreshold = 1;
-        private const int SpinWaitScoreMaximum = 4;
-        private const ulong SpinWaitRipWindow = 0x80;
-
         private static void BuildMlfqQuanta(uint BaseQuantumInstructions, int Levels, uint[] Quanta)
         {
             if (Levels < 1 || Quanta == null || Quanta.Length == 0)
@@ -2086,78 +2079,6 @@ namespace Brovan.Core.Emulation
                 else
                     Quanta[i] = Prev * 2;
             }
-        }
-
-        private static bool IsNearRip(ulong Left, ulong Right, ulong Window)
-        {
-            return Left >= Right ? Left - Right <= Window : Right - Left <= Window;
-        }
-
-        private bool HasOtherMlfqRunnableThread(EmulatedThread CurrentThread)
-        {
-            for (int i = 0; i < ThreadOrder.Count; i++)
-            {
-                int Tid = ThreadOrder[i];
-                if (!Threads.TryGetValue((uint)Tid, out EmulatedThread Thread))
-                    continue;
-
-                if (Thread == null || Thread == CurrentThread)
-                    continue;
-
-                if (IsMlfqRunnableThread(Thread))
-                    return true;
-            }
-
-            return false;
-        }
-
-        private static uint GetMlfqThreadQuantumInstructions(EmulatedThread Thread, uint QueueQuantumInstructions, bool HasOtherRunnableThread)
-        {
-            if (Thread == null || !HasOtherRunnableThread || Thread.SpinWaitScore < SpinWaitScoreThreshold)
-                return QueueQuantumInstructions;
-
-            return QueueQuantumInstructions > SpinWaitQuantumInstructions ? SpinWaitQuantumInstructions : QueueQuantumInstructions;
-        }
-
-        private static void DecaySpinWaitHeuristic(EmulatedThread Thread)
-        {
-            if (Thread == null)
-                return;
-
-            if (Thread.SpinWaitScore > 0)
-            {
-                Thread.SpinWaitScore--;
-                return;
-            }
-
-            Thread.LastSpinWaitRip = 0;
-        }
-
-        private static void UpdateSpinWaitHeuristic(EmulatedThread Thread, bool CompletedFullQuantum, bool HasOtherRunnableThread, ulong RipBeforeSlice, ulong RipAfterSlice)
-        {
-            if (Thread == null)
-                return;
-
-            if (!CompletedFullQuantum || !HasOtherRunnableThread || RipBeforeSlice == 0 || RipAfterSlice == 0)
-            {
-                DecaySpinWaitHeuristic(Thread);
-                return;
-            }
-
-            bool LooksLikeTightLoop = IsNearRip(RipBeforeSlice, RipAfterSlice, SpinWaitRipWindow) ||
-                                      (Thread.LastSpinWaitRip != 0 && IsNearRip(Thread.LastSpinWaitRip, RipAfterSlice, SpinWaitRipWindow));
-
-            if (LooksLikeTightLoop)
-            {
-                if (Thread.SpinWaitScore < SpinWaitScoreMaximum)
-                    Thread.SpinWaitScore++;
-            }
-            else
-            {
-                DecaySpinWaitHeuristic(Thread);
-            }
-
-            Thread.LastSpinWaitRip = RipAfterSlice;
         }
 
         private bool IsMlfqRunnableThread(EmulatedThread Thread)
@@ -2569,14 +2490,12 @@ namespace Brovan.Core.Emulation
                 ulong RipBeforeSlice = ImmaBeEmulatedOOO.Context?.RIP ?? 0;
                 ImmaBeEmulatedOOO.State = EmulatedThreadState.Running;
 
-                bool HasOtherRunnableThread = HasOtherMlfqRunnableThread(ImmaBeEmulatedOOO);
-                uint QueueQuantumInstructions = MlfqQuanta[Math.Max(0, SelectedLevel)];
-                uint QuantumInstructions = GetMlfqThreadQuantumInstructions(ImmaBeEmulatedOOO, QueueQuantumInstructions, HasOtherRunnableThread);
+                uint QuantumInstructions = MlfqQuanta[Math.Max(0, SelectedLevel)];
 
                 if (Debug && (Slices < 64 || (Slices & 0xFF) == 0))
                 {
                     if (Debug)
-                        TriggerDebugMessage($"scheduler: run tid={ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} quantum={QuantumInstructions} priority={ImmaBeEmulatedOOO.EffectivePriority} boost={ImmaBeEmulatedOOO.DynamicBoost} spin={ImmaBeEmulatedOOO.SpinWaitScore} rip=0x{RipBeforeSlice:X}");
+                        TriggerDebugMessage($"scheduler: run tid={ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} quantum={QuantumInstructions} priority={ImmaBeEmulatedOOO.EffectivePriority} boost={ImmaBeEmulatedOOO.DynamicBoost} rip=0x{RipBeforeSlice:X}");
                 }
                 bool State = false;
                 bool SliceRequestedRefresh = false;
@@ -2621,20 +2540,13 @@ namespace Brovan.Core.Emulation
 
                 uint SchedulerSliceWork = 1;
 
-                bool CompletedFullQuantum = false;
                 if (State && ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
                 {
                     bool StoppedBeforeQuantum = ImmaBeEmulatedOOO.State != EmulatedThreadState.Running || ImmaBeEmulatedOOO.Context == null || ImmaBeEmulatedOOO.Context.RIP == 0;
 
                     if (!StoppedBeforeQuantum)
-                    {
                         SchedulerSliceWork = Math.Max(1U, QuantumInstructions);
-                        CompletedFullQuantum = true;
-                    }
                 }
-
-                ulong RipAfterSlice = ImmaBeEmulatedOOO.Context?.RIP ?? 0;
-                UpdateSpinWaitHeuristic(ImmaBeEmulatedOOO, CompletedFullQuantum, HasOtherRunnableThread, RipBeforeSlice, RipAfterSlice);
 
                 ImmaBeEmulatedOOO.InstructionsExecuted += SchedulerSliceWork;
                 Total += SchedulerSliceWork;

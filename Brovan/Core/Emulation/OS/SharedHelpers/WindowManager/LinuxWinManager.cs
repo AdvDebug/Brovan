@@ -1,8 +1,11 @@
 using System;
+using System.Buffers;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
@@ -76,6 +79,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         [LibraryImport("libX11.so.6")]
         public static partial int XPending(IntPtr display);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XConnectionNumber(IntPtr display);
 
         [LibraryImport("libX11.so.6")]
         public static partial int XNextEvent(IntPtr display, out XEvent @event);
@@ -159,7 +165,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial int XDrawLine(IntPtr display, IntPtr drawable, IntPtr gc, int x1, int y1, int x2, int y2);
 
         [LibraryImport("libX11.so.6")]
-        public static partial int XDrawLines(IntPtr display, IntPtr drawable, IntPtr gc, XPoint[] points, int count, int mode);
+        public static unsafe partial int XDrawLines(IntPtr display, IntPtr drawable, IntPtr gc, XPoint* points, int count, int mode);
 
         [LibraryImport("libX11.so.6")]
         public static partial int XDrawRectangle(IntPtr display, IntPtr drawable, IntPtr gc, int x, int y, uint width, uint height);
@@ -174,7 +180,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial int XFillArc(IntPtr display, IntPtr drawable, IntPtr gc, int x, int y, uint width, uint height, int angle1, int angle2);
 
         [LibraryImport("libX11.so.6")]
-        public static partial int XFillPolygon(IntPtr display, IntPtr drawable, IntPtr gc, XPoint[] points, int count, int shape, int mode);
+        public static unsafe partial int XFillPolygon(IntPtr display, IntPtr drawable, IntPtr gc, XPoint* points, int count, int shape, int mode);
 
         [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
         public static partial IntPtr XLoadQueryFont(IntPtr display, string name);
@@ -364,6 +370,31 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial void wl_display_disconnect(IntPtr display);
     }
 
+    internal static partial class Posix
+    {
+        public const short POLLIN = 0x001;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PollFd
+        {
+            public int Fd;
+            public short Events;
+            public short RevEvents;
+        }
+
+        [LibraryImport("libc", EntryPoint = "poll", SetLastError = true)]
+        public static unsafe partial int Poll(PollFd* fds, uint count, int timeout);
+
+        [LibraryImport("libc", EntryPoint = "eventfd", SetLastError = true)]
+        public static partial int EventFd(uint initval, int flags);
+
+        [LibraryImport("libc", EntryPoint = "read", SetLastError = true)]
+        public static unsafe partial nint Read(int fd, void* buffer, nuint count);
+
+        [LibraryImport("libc", EntryPoint = "write", SetLastError = true)]
+        public static unsafe partial nint Write(int fd, void* buffer, nuint count);
+    }
+
     internal sealed class LinuxWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport, IGdiRenderSupport, IKeyboardTranslateSupport
     {
         private const uint WM_SIZE = 0x0005;
@@ -405,12 +436,22 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             X11.PointerMotionMask | X11.ExposureMask |
             X11.StructureNotifyMask | X11.FocusChangeMask;
 
-        private readonly object _sync = new();
-        private readonly Dictionary<IntPtr, LinuxWindow> _windows = new();
+        private const int StackPointLimit = 128;
+        private const int EFD_CLOEXEC = 0x80000;
+        private const int EFD_NONBLOCK = 0x800;
+
+        private readonly ConcurrentDictionary<IntPtr, LinuxWindow> _windows = new();
         private readonly Dictionary<uint, nuint> _pixelCache = new();
         private IntPtr _xDisplay;
         private IntPtr _wlDisplay;
         private int _screen;
+        private int _connectionFd = -1;
+
+        /// <summary>
+        /// Deliberately never closed: a guest thread can call <see cref="Wake"/> while the GUI thread is tearing
+        /// the display down, and a closed descriptor number is free for the runtime to hand to something else.
+        /// </summary>
+        private int _wakeFd = -1;
         private IntPtr _colormap;
         private IntPtr _gc;
         private IntPtr _fontStruct;
@@ -418,6 +459,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private nuint _blackPixel;
         private uint _modifierState;
         private bool _disposed;
+
+        private int _gcFunction;
+        private uint _gcLineWidth;
+        private nuint _gcForeground;
+        private bool _gcStateKnown;
 
         private IntPtr _wmProtocols;
         private IntPtr _wmDeleteWindow;
@@ -470,6 +516,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private void InitializeX11()
         {
             _screen = X11.XDefaultScreen(_xDisplay);
+            _connectionFd = X11.XConnectionNumber(_xDisplay);
+            _wakeFd = Posix.EventFd(0, EFD_CLOEXEC | EFD_NONBLOCK);
             _colormap = X11.XDefaultColormap(_xDisplay, _screen);
             _whitePixel = X11.XWhitePixel(_xDisplay, _screen);
             _blackPixel = X11.XBlackPixel(_xDisplay, _screen);
@@ -505,8 +553,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             IntPtr windowHandle = CreateX11Window(options);
             LinuxWindow window = new(this, _xDisplay, windowHandle, options);
-            lock (_sync)
-                _windows[windowHandle] = window;
+            _windows[windowHandle] = window;
 
             ApplyDecorations(windowHandle, options.Decorated);
             ApplySizeHints(windowHandle, options.Resizable, Math.Max(options.Width, 1), Math.Max(options.Height, 1));
@@ -528,6 +575,52 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
 
             X11.XFlush(_xDisplay);
+        }
+
+        public unsafe void WaitForEvents(int timeoutMilliseconds)
+        {
+            if (_wakeFd < 0)
+                return;
+
+            bool displayLive = !_disposed && _xDisplay != IntPtr.Zero && _connectionFd >= 0;
+
+            // Xlib buffers events on the client side, so the socket can be quiet while a decoded event is
+            // already waiting. Polling the descriptor without this check sleeps on top of pending input.
+            if (displayLive && X11.XPending(_xDisplay) > 0)
+                return;
+
+            Posix.PollFd* descriptors = stackalloc Posix.PollFd[2];
+            descriptors[0].Fd = _wakeFd;
+            descriptors[0].Events = Posix.POLLIN;
+            descriptors[0].RevEvents = 0;
+
+            uint count = 1;
+            if (displayLive)
+            {
+                descriptors[1].Fd = _connectionFd;
+                descriptors[1].Events = Posix.POLLIN;
+                descriptors[1].RevEvents = 0;
+                count = 2;
+            }
+
+            if (Posix.Poll(descriptors, count, timeoutMilliseconds) <= 0)
+                return;
+
+            if ((descriptors[0].RevEvents & Posix.POLLIN) != 0)
+            {
+                ulong drained;
+                Posix.Read(_wakeFd, &drained, sizeof(ulong));
+            }
+        }
+
+        public unsafe void Wake()
+        {
+            int wakeFd = Volatile.Read(ref _wakeFd);
+            if (wakeFd < 0)
+                return;
+
+            ulong token = 1;
+            Posix.Write(wakeFd, &token, sizeof(ulong));
         }
 
         private unsafe void TranslateEvent(ref X11.XEvent nativeEvent)
@@ -797,16 +890,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             key.State = _modifierState;
             key.Keycode = scanCode & 0xFF;
 
-            lock (_sync)
+            foreach (KeyValuePair<IntPtr, LinuxWindow> entry in _windows)
             {
-                if (_windows.Count > 0)
-                {
-                    foreach (IntPtr handle in _windows.Keys)
-                    {
-                        key.Window = handle;
-                        break;
-                    }
-                }
+                key.Window = entry.Key;
+                break;
             }
 
             byte* buffer = stackalloc byte[8];
@@ -825,15 +912,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             _disposed = true;
 
-            LinuxWindow[] windows;
-            lock (_sync)
+            foreach (KeyValuePair<IntPtr, LinuxWindow> entry in _windows)
             {
-                windows = _windows.Values.ToArray();
-                _windows.Clear();
+                if (_windows.TryRemove(entry.Key, out LinuxWindow? window))
+                    window.Dispose();
             }
-
-            foreach (LinuxWindow window in windows)
-                window.Dispose();
 
             if (_xDisplay != IntPtr.Zero)
             {
@@ -1026,11 +1109,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (_xDisplay == IntPtr.Zero || handle == IntPtr.Zero)
                 return false;
 
-            bool removed;
-            lock (_sync)
-                removed = _windows.Remove(handle);
-
-            if (!removed)
+            if (!_windows.TryRemove(handle, out _))
                 return false;
 
             X11.XDestroyWindow(_xDisplay, handle);
@@ -1040,8 +1119,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         public bool TryGetWindow(IntPtr handle, out LinuxWindow? window)
         {
-            lock (_sync)
-                return _windows.TryGetValue(handle, out window);
+            return _windows.TryGetValue(handle, out window);
         }
 
         private IntPtr EnsureGraphicsContext(IntPtr drawable)
@@ -1050,12 +1128,45 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return _gc;
 
             _gc = X11.XCreateGC(_xDisplay, drawable, 0, IntPtr.Zero);
-            if (_gc != IntPtr.Zero && _fontStruct != IntPtr.Zero)
-            {
-                X11.XSetFont(_xDisplay, _gc, ReadFont().Fid);
-            }
+            if (_gc == IntPtr.Zero)
+                return _gc;
 
+            if (_fontStruct != IntPtr.Zero)
+                X11.XSetFont(_xDisplay, _gc, ReadFont().Fid);
+
+            _gcStateKnown = false;
+            SetGraphicsFunction(_gc, X11.GXcopy);
+            SetGraphicsLineWidth(_gc, 1);
+            SetGraphicsForeground(_gc, _blackPixel);
+            _gcStateKnown = true;
             return _gc;
+        }
+
+        private void SetGraphicsFunction(IntPtr gc, int function)
+        {
+            if (_gcStateKnown && _gcFunction == function)
+                return;
+
+            X11.XSetFunction(_xDisplay, gc, function);
+            _gcFunction = function;
+        }
+
+        private void SetGraphicsLineWidth(IntPtr gc, uint lineWidth)
+        {
+            if (_gcStateKnown && _gcLineWidth == lineWidth)
+                return;
+
+            X11.XSetLineAttributes(_xDisplay, gc, lineWidth, X11.LineSolid, X11.CapButt, X11.JoinMiter);
+            _gcLineWidth = lineWidth;
+        }
+
+        private void SetGraphicsForeground(IntPtr gc, nuint pixel)
+        {
+            if (_gcStateKnown && _gcForeground == pixel)
+                return;
+
+            X11.XSetForeground(_xDisplay, gc, pixel);
+            _gcForeground = pixel;
         }
 
         private X11.XFontStruct ReadFont()
@@ -1082,6 +1193,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return pixel;
         }
 
+        /// <summary>
+        /// Leaves the request in Xlib's output buffer. The GUI loop pumps events after every batch it drains and
+        /// flushes before it parks, so a per-primitive flush only costs one socket write per primitive.
+        /// </summary>
         public void ExecuteGdiPrimitive(IntPtr windowHandle, GdiPrimitive primitive)
         {
             if (_xDisplay == IntPtr.Zero || windowHandle == IntPtr.Zero)
@@ -1091,13 +1206,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (gc == IntPtr.Zero)
                 return;
 
-            X11.XSetFunction(_xDisplay, gc, X11.GXcopy);
-            X11.XSetLineAttributes(_xDisplay, gc, (uint)Math.Max(primitive.Pen.Width, 1), X11.LineSolid, X11.CapButt, X11.JoinMiter);
+            SetGraphicsFunction(gc, X11.GXcopy);
+            SetGraphicsLineWidth(gc, (uint)Math.Max(primitive.Pen.Width, 1));
 
             switch (primitive.Kind)
             {
                 case GdiPrimitiveKind.Line:
-                    X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
+                    SetGraphicsForeground(gc, ResolvePixel(primitive.Pen.ColorRef));
                     X11.XDrawLine(_xDisplay, windowHandle, gc, primitive.X1, primitive.Y1, primitive.X2, primitive.Y2);
                     break;
 
@@ -1118,13 +1233,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         Normalize(primitive, out int x, out int y, out uint width, out uint height);
                         if (primitive.HasBrush)
                         {
-                            X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Brush.ColorRef));
+                            SetGraphicsForeground(gc, ResolvePixel(primitive.Brush.ColorRef));
                             X11.XFillArc(_xDisplay, windowHandle, gc, x, y, width, height, 0, 360 * 64);
                         }
 
                         if (primitive.HasPen)
                         {
-                            X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
+                            SetGraphicsForeground(gc, ResolvePixel(primitive.Pen.ColorRef));
                             X11.XDrawArc(_xDisplay, windowHandle, gc, x, y, width, height, 0, 360 * 64);
                         }
 
@@ -1132,39 +1247,51 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     }
 
                 case GdiPrimitiveKind.Polygon:
-                    {
-                        if (primitive.Points == null || primitive.Points.Length == 0)
-                            break;
-
-                        X11.XPoint[] points = ToXPoints(primitive.Points, close: true);
-                        if (primitive.HasBrush)
-                        {
-                            X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Brush.ColorRef));
-                            X11.XFillPolygon(_xDisplay, windowHandle, gc, points, primitive.Points.Length, X11.Complex, X11.CoordModeOrigin);
-                        }
-
-                        if (primitive.HasPen)
-                        {
-                            X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
-                            X11.XDrawLines(_xDisplay, windowHandle, gc, points, points.Length, X11.CoordModeOrigin);
-                        }
-
-                        break;
-                    }
-
                 case GdiPrimitiveKind.Polyline:
-                    {
-                        if (primitive.Points == null || primitive.Points.Length == 0)
-                            break;
+                    DrawPoly(windowHandle, gc, primitive);
+                    break;
+            }
+        }
 
-                        X11.XPoint[] points = ToXPoints(primitive.Points, close: false);
-                        X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
-                        X11.XDrawLines(_xDisplay, windowHandle, gc, points, points.Length, X11.CoordModeOrigin);
-                        break;
-                    }
+        private unsafe void DrawPoly(IntPtr windowHandle, IntPtr gc, in GdiPrimitive primitive)
+        {
+            GdiPoint[] points = primitive.Points;
+            if (points == null || points.Length == 0)
+                return;
+
+            bool polygon = primitive.Kind == GdiPrimitiveKind.Polygon;
+            bool close = polygon && points.Length > 2 && (points[0].X != points[^1].X || points[0].Y != points[^1].Y);
+            int count = points.Length + (close ? 1 : 0);
+
+            X11.XPoint[] rented = count > StackPointLimit ? ArrayPool<X11.XPoint>.Shared.Rent(count) : null;
+            Span<X11.XPoint> native = rented != null ? rented.AsSpan(0, count) : stackalloc X11.XPoint[count];
+
+            for (int i = 0; i < points.Length; i++)
+            {
+                native[i].X = (short)points[i].X;
+                native[i].Y = (short)points[i].Y;
             }
 
-            X11.XFlush(_xDisplay);
+            if (close)
+                native[count - 1] = native[0];
+
+            fixed (X11.XPoint* buffer = native)
+            {
+                if (polygon && primitive.HasBrush)
+                {
+                    SetGraphicsForeground(gc, ResolvePixel(primitive.Brush.ColorRef));
+                    X11.XFillPolygon(_xDisplay, windowHandle, gc, buffer, points.Length, X11.Complex, X11.CoordModeOrigin);
+                }
+
+                if (!polygon || primitive.HasPen)
+                {
+                    SetGraphicsForeground(gc, ResolvePixel(primitive.Pen.ColorRef));
+                    X11.XDrawLines(_xDisplay, windowHandle, gc, buffer, count, X11.CoordModeOrigin);
+                }
+            }
+
+            if (rented != null)
+                ArrayPool<X11.XPoint>.Shared.Return(rented);
         }
 
         private void FillRect(IntPtr windowHandle, IntPtr gc, GdiPrimitive primitive)
@@ -1174,25 +1301,25 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             switch (primitive.Rop)
             {
                 case BLACKNESS:
-                    X11.XSetForeground(_xDisplay, gc, _blackPixel);
+                    SetGraphicsForeground(gc, _blackPixel);
                     break;
 
                 case WHITENESS:
-                    X11.XSetForeground(_xDisplay, gc, _whitePixel);
+                    SetGraphicsForeground(gc, _whitePixel);
                     break;
 
                 case DSTINVERT:
-                    X11.XSetFunction(_xDisplay, gc, X11.GXinvert);
+                    SetGraphicsFunction(gc, X11.GXinvert);
                     break;
 
                 case PATINVERT:
-                    X11.XSetFunction(_xDisplay, gc, X11.GXxor);
-                    X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Brush.ColorRef));
+                    SetGraphicsFunction(gc, X11.GXxor);
+                    SetGraphicsForeground(gc, ResolvePixel(primitive.Brush.ColorRef));
                     break;
 
                 case PATCOPY:
                 default:
-                    X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Brush.ColorRef));
+                    SetGraphicsForeground(gc, ResolvePixel(primitive.Brush.ColorRef));
                     break;
             }
 
@@ -1211,7 +1338,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             if (primitive.HasBrush)
             {
-                X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Brush.ColorRef));
+                SetGraphicsForeground(gc, ResolvePixel(primitive.Brush.ColorRef));
 
                 if (useArcs)
                     FillRoundRect(windowHandle, gc, x, y, width, height, arcWidth, arcHeight);
@@ -1222,7 +1349,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (!primitive.HasPen)
                 return;
 
-            X11.XSetForeground(_xDisplay, gc, ResolvePixel(primitive.Pen.ColorRef));
+            SetGraphicsForeground(gc, ResolvePixel(primitive.Pen.ColorRef));
 
             // Win32 Rectangle excludes the right/bottom edge. XDrawRectangle draws an inclusive border.
             uint outlineWidth = width - 1;
@@ -1274,20 +1401,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             height = (uint)Math.Abs(primitive.Y2 - primitive.Y1);
         }
 
-        private static X11.XPoint[] ToXPoints(GdiPoint[] points, bool close)
-        {
-            bool needsClose = close && points.Length > 2 && (points[0].X != points[^1].X || points[0].Y != points[^1].Y);
-            X11.XPoint[] native = new X11.XPoint[points.Length + (needsClose ? 1 : 0)];
-
-            for (int i = 0; i < points.Length; i++)
-                native[i] = new X11.XPoint { X = (short)points[i].X, Y = (short)points[i].Y };
-
-            if (needsClose)
-                native[^1] = native[0];
-
-            return native;
-        }
-
         public void RenderText(IntPtr windowHandle, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
         {
             if (_xDisplay == IntPtr.Zero || windowHandle == IntPtr.Zero || string.IsNullOrEmpty(text))
@@ -1299,9 +1412,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             X11.XFontStruct font = ReadFont();
 
-            X11.XSetFunction(_xDisplay, gc, X11.GXcopy);
-            X11.XSetForeground(_xDisplay, gc, _blackPixel);
-            X11.XSetBackground(_xDisplay, gc, _whitePixel);
+            SetGraphicsFunction(gc, X11.GXcopy);
+            SetGraphicsForeground(gc, _blackPixel);
 
             int textX = x;
             int textY = y + font.Ascent;
@@ -1314,7 +1426,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
 
             X11.XDrawString(_xDisplay, windowHandle, gc, textX, textY, text, text.Length);
-            X11.XFlush(_xDisplay);
         }
 
         public bool MeasureText(string text, out int width, out int height)

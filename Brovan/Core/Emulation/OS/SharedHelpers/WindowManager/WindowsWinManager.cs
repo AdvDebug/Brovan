@@ -1,14 +1,15 @@
 using System;
+using System.Buffers;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using System.Text;
+using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
     internal sealed class WindowsWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport, IGdiRenderSupport, IKeyboardTranslateSupport
     {
-        private static readonly object WindowSync = new();
-        private static readonly Dictionary<IntPtr, WindowsWindow> Windows = new();
+        private static readonly ConcurrentDictionary<IntPtr, WindowsWindow> Windows = new();
 
         private static readonly WindowProcDelegate WindowProcHandler = WindowProc;
         private static readonly IntPtr WindowProcPointer = Marshal.GetFunctionPointerForDelegate(WindowProcHandler);
@@ -20,6 +21,31 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private static readonly Dictionary<(int Width, int ColorRef), IntPtr> _penCache = new();
         private static readonly Dictionary<int, IntPtr> _brushCache = new();
+
+        private static IntPtr _stockBlackPen;
+        private static IntPtr _stockWhiteBrush;
+
+        private static IntPtr StockBlackPen
+        {
+            get
+            {
+                if (_stockBlackPen == IntPtr.Zero)
+                    _stockBlackPen = GetStockObject(STOCK_OBJECT_BLACK_PEN);
+
+                return _stockBlackPen;
+            }
+        }
+
+        private static IntPtr StockWhiteBrush
+        {
+            get
+            {
+                if (_stockWhiteBrush == IntPtr.Zero)
+                    _stockWhiteBrush = GetStockObject(STOCK_OBJECT_WHITE_BRUSH);
+
+                return _stockWhiteBrush;
+            }
+        }
 
         private static IntPtr GetOrCreatePen(int width, int colorRef)
         {
@@ -60,10 +86,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private readonly IntPtr _instanceHandle;
         private readonly string _className;
+
+        /// <summary>
+        /// Never disposed: a guest thread can submit work while the GUI thread is tearing the display down, and
+        /// the SafeHandle behind this is what keeps that racing <see cref="Wake"/> off a recycled handle value.
+        /// </summary>
+        private readonly AutoResetEvent _wakeEvent = new(false);
+
         private bool _disposed;
 
         private const int GWL_STYLE = -16;
-        private const int GWL_EXSTYLE = -20;
 
         private const uint WM_DESTROY = 0x0002;
         private const uint WM_CLOSE = 0x0010;
@@ -103,6 +135,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const int SW_RESTORE = 9;
 
         private const uint PM_REMOVE = 0x0001;
+
+        private const int StackPointLimit = 128;
+
+        private const uint QS_ALLINPUT = 0x04FF;
+        private const uint MWMO_INPUTAVAILABLE = 0x0004;
+        private const uint INFINITE = 0xFFFFFFFF;
+
+        private const uint CS_OWNDC = 0x0020;
 
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOMOVE = 0x0002;
@@ -160,8 +200,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 throw new InvalidOperationException("CreateWindowExW failed.");
 
             WindowsWindow window = new(this, hwnd, options);
-            lock (WindowSync)
-                Windows[hwnd] = window;
+            Windows[hwnd] = window;
 
             ApplyBrovanAccent(hwnd);
             ApplyInitialState(window, options);
@@ -186,6 +225,24 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
         }
 
+        public void WaitForEvents(int timeoutMilliseconds)
+        {
+            if (_disposed)
+            {
+                _wakeEvent.WaitOne(timeoutMilliseconds < 0 ? Timeout.Infinite : timeoutMilliseconds);
+                return;
+            }
+
+            IntPtr wakeHandle = _wakeEvent.SafeWaitHandle.DangerousGetHandle();
+            uint timeout = timeoutMilliseconds < 0 ? INFINITE : (uint)timeoutMilliseconds;
+            MsgWaitForMultipleObjectsEx(1, ref wakeHandle, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
+
+        public void Wake()
+        {
+            _wakeEvent.Set();
+        }
+
         public void Dispose()
         {
             if (_disposed)
@@ -193,16 +250,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             _disposed = true;
 
-            WindowsWindow[] windows;
-            lock (WindowSync)
+            foreach (KeyValuePair<IntPtr, WindowsWindow> entry in Windows)
             {
-                windows = new WindowsWindow[Windows.Values.Count];
-                Windows.Values.CopyTo(windows, 0);
-                Windows.Clear();
+                if (Windows.TryRemove(entry.Key, out WindowsWindow window))
+                    window.Dispose();
             }
-
-            foreach (WindowsWindow window in windows)
-                window.Dispose();
 
             DisposeCachedPensAndBrushes();
         }
@@ -212,7 +264,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             WNDCLASSEXW wndClass = new()
             {
                 cbSize = (uint)Marshal.SizeOf<WNDCLASSEXW>(),
-                style = 0,
+
+                style = CS_OWNDC,
                 lpfnWndProc = WindowProcPointer,
                 cbClsExtra = 0,
                 cbWndExtra = 0,
@@ -285,11 +338,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private static IntPtr WindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
         {
-            lock (WindowSync)
-            {
-                if (Windows.TryGetValue(hwnd, out WindowsWindow? window))
-                    return window.HandleMessage(msg, wParam, lParam);
-            }
+            if (Windows.TryGetValue(hwnd, out WindowsWindow? window))
+                return window.HandleMessage(msg, wParam, lParam);
 
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
@@ -299,13 +349,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (hwnd == IntPtr.Zero)
                 return false;
 
-            bool removed;
-            lock (WindowSync)
-            {
-                removed = Windows.Remove(hwnd);
-            }
-
-            if (!removed)
+            if (!Windows.TryRemove(hwnd, out _))
                 return false;
 
             return DestroyWindowNative(hwnd);
@@ -313,8 +357,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         internal void RemoveWindow(IntPtr hwnd)
         {
-            lock (WindowSync)
-                Windows.Remove(hwnd);
+            Windows.TryRemove(hwnd, out _);
         }
 
         internal void UpdateWindowText(IntPtr hwnd, string text)
@@ -322,15 +365,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             SetWindowTextW(hwnd, text ?? string.Empty);
         }
 
-        internal void UpdateWindowSize(IntPtr hwnd, int width, int height)
+        internal void UpdateWindowSize(IntPtr hwnd, uint style, int width, int height)
         {
             RECT rect;
             if (!GetWindowRect(hwnd, out rect))
                 return;
 
-            uint style = (uint)GetWindowLongPtrW(hwnd, GWL_STYLE).ToInt64();
-            uint exStyle = (uint)GetWindowLongPtrW(hwnd, GWL_EXSTYLE).ToInt64();
-            ResolveOuterFromClient(style, exStyle, Math.Max(width, 1), Math.Max(height, 1), out int outerWidth, out int outerHeight);
+            ResolveOuterFromClient(style, 0, Math.Max(width, 1), Math.Max(height, 1), out int outerWidth, out int outerHeight);
 
             if (rect.Right - rect.Left == outerWidth && rect.Bottom - rect.Top == outerHeight)
                 return;
@@ -376,73 +417,57 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
         }
 
-        internal void ApplyDecorations(IntPtr hwnd, bool decorated, bool resizable)
+        internal uint ApplyDecorations(IntPtr hwnd, uint currentStyle, bool decorated, bool resizable)
         {
-            long style = GetWindowLongPtrW(hwnd, GWL_STYLE).ToInt64();
+            uint style = currentStyle;
 
             if (decorated)
-                style |= (long)WS_OVERLAPPEDWINDOW;
+                style |= WS_OVERLAPPEDWINDOW;
             else
-                style &= ~((long)WS_CAPTION | (long)WS_THICKFRAME | (long)WS_MINIMIZEBOX | (long)WS_MAXIMIZEBOX | (long)WS_SYSMENU);
+                style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
 
             if (resizable)
-                style |= (long)(WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+                style |= WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
             else
-                style &= ~((long)WS_THICKFRAME | (long)WS_MINIMIZEBOX | (long)WS_MAXIMIZEBOX);
+                style &= ~(WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
 
-            SetWindowLongPtrW(hwnd, GWL_STYLE, new IntPtr(style));
+            if (style == currentStyle)
+                return style;
+
+            SetWindowLongPtrW(hwnd, GWL_STYLE, (IntPtr)style);
             SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            return style;
         }
 
         public void RenderText(IntPtr windowHandle, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
         {
-            if (windowHandle == IntPtr.Zero || string.IsNullOrEmpty(text))
+            if (string.IsNullOrEmpty(text) || !Windows.TryGetValue(windowHandle, out WindowsWindow? window))
                 return;
 
-            IntPtr hdc = GetDC(windowHandle);
+            IntPtr hdc = window.EnsureTextDeviceContext();
             if (hdc == IntPtr.Zero)
                 return;
-
-            IntPtr stockFont = GetStockObject(STOCK_OBJECT_DEFAULT_GUI_FONT);
-            IntPtr previousFont = stockFont != IntPtr.Zero ? SelectObject(hdc, stockFont) : IntPtr.Zero;
-
-            SetTextColor(hdc, 0x00000000);
-            SetBkMode(hdc, 1);
 
             RECT rect = new RECT { Left = rectLeft, Top = rectTop, Right = rectRight, Bottom = rectBottom };
             ExtTextOutW(hdc, x, y, options, ref rect, text, (uint)text.Length, IntPtr.Zero);
-
-            if (previousFont != IntPtr.Zero)
-                SelectObject(hdc, previousFont);
-
-            ReleaseDC(windowHandle, hdc);
         }
 
-        public void ExecuteGdiPrimitive(IntPtr windowHandle, GdiPrimitive primitive)
+        public unsafe void ExecuteGdiPrimitive(IntPtr windowHandle, GdiPrimitive primitive)
         {
-            if (windowHandle == IntPtr.Zero)
+            if (!Windows.TryGetValue(windowHandle, out WindowsWindow? window))
                 return;
 
-            IntPtr hdc = GetDC(windowHandle);
+            IntPtr hdc = window.EnsureDeviceContext();
             if (hdc == IntPtr.Zero)
                 return;
 
-            IntPtr previousPen = IntPtr.Zero;
-            IntPtr previousBrush = IntPtr.Zero;
+            window.SelectPen(primitive.HasPen
+                ? GetOrCreatePen(primitive.Pen.Width, unchecked((int)primitive.Pen.ColorRef))
+                : StockBlackPen);
 
-            if (primitive.HasPen)
-            {
-                IntPtr pen = GetOrCreatePen(primitive.Pen.Width, unchecked((int)primitive.Pen.ColorRef));
-                if (pen != IntPtr.Zero)
-                    previousPen = SelectObject(hdc, pen);
-            }
-
-            if (primitive.HasBrush)
-            {
-                IntPtr brush = GetOrCreateBrush(unchecked((int)primitive.Brush.ColorRef));
-                if (brush != IntPtr.Zero)
-                    previousBrush = SelectObject(hdc, brush);
-            }
+            window.SelectBrush(primitive.HasBrush
+                ? GetOrCreateBrush(unchecked((int)primitive.Brush.ColorRef))
+                : StockWhiteBrush);
 
             switch (primitive.Kind)
             {
@@ -468,47 +493,56 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     break;
 
                 case GdiPrimitiveKind.Polygon:
-                    if (primitive.Points != null && primitive.Points.Length > 0)
-                        Polygon(hdc, ToNativePoints(primitive.Points), primitive.Points.Length);
-                    break;
-
                 case GdiPrimitiveKind.Polyline:
-                    if (primitive.Points != null && primitive.Points.Length > 0)
-                        Polyline(hdc, ToNativePoints(primitive.Points), primitive.Points.Length);
+                    DrawPoly(hdc, primitive);
                     break;
             }
-
-            if (previousPen != IntPtr.Zero)
-                SelectObject(hdc, previousPen);
-            if (previousBrush != IntPtr.Zero)
-                SelectObject(hdc, previousBrush);
-
-            ReleaseDC(windowHandle, hdc);
         }
 
-        private static POINT[] ToNativePoints(GdiPoint[] points)
+        private static unsafe void DrawPoly(IntPtr hdc, in GdiPrimitive primitive)
         {
-            POINT[] native = new POINT[points.Length];
-            for (int i = 0; i < points.Length; i++)
-                native[i] = new POINT { X = points[i].X, Y = points[i].Y };
+            GdiPoint[] points = primitive.Points;
+            if (points == null || points.Length == 0)
+                return;
 
-            return native;
+            POINT[] rented = points.Length > StackPointLimit ? ArrayPool<POINT>.Shared.Rent(points.Length) : null;
+            Span<POINT> native = rented != null ? rented.AsSpan(0, points.Length) : stackalloc POINT[points.Length];
+
+            for (int i = 0; i < points.Length; i++)
+            {
+                native[i].X = points[i].X;
+                native[i].Y = points[i].Y;
+            }
+
+            fixed (POINT* buffer = native)
+            {
+                if (primitive.Kind == GdiPrimitiveKind.Polygon)
+                    Polygon(hdc, buffer, points.Length);
+                else
+                    Polyline(hdc, buffer, points.Length);
+            }
+
+            if (rented != null)
+                ArrayPool<POINT>.Shared.Return(rented);
         }
 
-        public bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character)
+        public unsafe bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character)
         {
             character = '\0';
 
-            byte[] keyboardState = new byte[256];
-            if (!GetKeyboardState(keyboardState))
-                return false;
+            Span<byte> keyboardState = stackalloc byte[256];
+            fixed (byte* state = keyboardState)
+            {
+                if (!GetKeyboardState(state))
+                    return false;
 
-            StringBuilder buffer = new StringBuilder(4);
-            int result = ToUnicode(virtualKey, scanCode, keyboardState, buffer, buffer.Capacity, 0);
-            if (result <= 0 || buffer.Length == 0)
-                return false;
+                char* buffer = stackalloc char[8];
+                if (ToUnicode(virtualKey, scanCode, state, buffer, 8, 0) <= 0)
+                    return false;
 
-            character = buffer[0];
+                character = buffer[0];
+            }
+
             return true;
         }
 
@@ -615,6 +649,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private WindowState _state;
             private bool _decorated;
             private readonly bool _resizable;
+            private uint _style;
+
+            private IntPtr _hdc;
+            private IntPtr _selectedPen;
+            private IntPtr _selectedBrush;
+            private bool _textStateApplied;
 
             internal WindowsWindow(WindowsWinManager manager, IntPtr hwnd, WindowOptions options)
             {
@@ -628,7 +668,50 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _decorated = options.Decorated;
                 _resizable = options.Resizable;
 
-                _manager.ApplyDecorations(_hwnd, _decorated, _resizable);
+                _style = unchecked((uint)GetWindowLongPtrW(hwnd, GWL_STYLE).ToInt64());
+                _style = _manager.ApplyDecorations(_hwnd, _style, _decorated, _resizable);
+            }
+
+            internal IntPtr EnsureDeviceContext()
+            {
+                if (_hdc == IntPtr.Zero && !_disposed)
+                    _hdc = GetDC(_hwnd);
+
+                return _hdc;
+            }
+
+            internal IntPtr EnsureTextDeviceContext()
+            {
+                IntPtr hdc = EnsureDeviceContext();
+                if (hdc == IntPtr.Zero || _textStateApplied)
+                    return hdc;
+
+                IntPtr font = GetStockObject(STOCK_OBJECT_DEFAULT_GUI_FONT);
+                if (font != IntPtr.Zero)
+                    SelectObject(hdc, font);
+
+                SetTextColor(hdc, 0x00000000);
+                SetBkMode(hdc, TRANSPARENT);
+                _textStateApplied = true;
+                return hdc;
+            }
+
+            internal void SelectPen(IntPtr pen)
+            {
+                if (pen == IntPtr.Zero || pen == _selectedPen)
+                    return;
+
+                SelectObject(_hdc, pen);
+                _selectedPen = pen;
+            }
+
+            internal void SelectBrush(IntPtr brush)
+            {
+                if (brush == IntPtr.Zero || brush == _selectedBrush)
+                    return;
+
+                SelectObject(_hdc, brush);
+                _selectedBrush = brush;
             }
 
             public string Title
@@ -649,7 +732,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     EnsureAlive();
                     _width = Math.Max(value, 1);
-                    _manager.UpdateWindowSize(_hwnd, _width, _height);
+                    _manager.UpdateWindowSize(_hwnd, _style, _width, _height);
                 }
             }
 
@@ -660,7 +743,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     EnsureAlive();
                     _height = Math.Max(value, 1);
-                    _manager.UpdateWindowSize(_hwnd, _width, _height);
+                    _manager.UpdateWindowSize(_hwnd, _style, _width, _height);
                 }
             }
 
@@ -698,7 +781,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     EnsureAlive();
                     _decorated = value;
-                    _manager.ApplyDecorations(_hwnd, _decorated, _resizable);
+                    _style = _manager.ApplyDecorations(_hwnd, _style, _decorated, _resizable);
                 }
             }
 
@@ -706,9 +789,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 EnsureAlive();
 
-                _manager.ApplyDecorations(_hwnd, _decorated, _resizable);
+                _style = _manager.ApplyDecorations(_hwnd, _style, _decorated, _resizable);
                 _manager.UpdateWindowText(_hwnd, _title);
-                _manager.UpdateWindowSize(_hwnd, _width, _height);
+                _manager.UpdateWindowSize(_hwnd, _style, _width, _height);
 
                 if (_visible)
                 {
@@ -735,40 +818,47 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     return;
 
                 _disposed = true;
+                _hdc = IntPtr.Zero;
+                _selectedPen = IntPtr.Zero;
+                _selectedBrush = IntPtr.Zero;
+                _textStateApplied = false;
                 _manager.RemoveWindow(_hwnd);
                 CloseWindowHandle(_hwnd);
             }
 
             internal IntPtr HandleMessage(uint msg, IntPtr wParam, IntPtr lParam)
             {
-                if (msg == WM_CLOSE)
+                switch (msg)
                 {
-                    HostEventQueue.RequestClose();
-                    return IntPtr.Zero;
-                }
+                    case WM_MOUSEMOVE:
+                    case WM_LBUTTONDOWN:
+                    case WM_LBUTTONUP:
+                    case WM_RBUTTONDOWN:
+                    case WM_RBUTTONUP:
+                    case WM_KEYDOWN:
+                    case WM_KEYUP:
+                    case WM_CHAR:
+                    case WM_SYSKEYDOWN:
+                    case WM_SYSKEYUP:
+                        HostEventQueue.Enqueue(msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam));
+                        break;
 
-                if (msg == WM_DESTROY)
-                {
-                    _manager.RemoveWindow(_hwnd);
+                    case WM_PAINT:
+                    case WM_SIZE:
+                    case WM_SHOWWINDOW:
+                        HostEventQueue.MarkRepaint();
+                        break;
 
-                    lock (WindowSync)
-                    {
-                        if (Windows.Count == 0)
+                    case WM_CLOSE:
+                        HostEventQueue.RequestClose();
+                        return IntPtr.Zero;
+
+                    case WM_DESTROY:
+                        _manager.RemoveWindow(_hwnd);
+                        if (Windows.IsEmpty)
                             PostQuitMessage(0);
-                    }
 
-                    return IntPtr.Zero;
-                }
-
-                if (msg == WM_PAINT || msg == WM_SIZE || msg == WM_SHOWWINDOW)
-                    HostEventQueue.MarkRepaint();
-
-                if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
-                    msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
-                    msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_CHAR ||
-                    msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP)
-                {
-                    HostEventQueue.Enqueue(msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam));
+                        return IntPtr.Zero;
                 }
 
                 return DefWindowProcW(_hwnd, msg, wParam, lParam);
@@ -941,7 +1031,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [DllImport("gdi32.dll", SetLastError = true)]
         private static extern IntPtr GetStockObject(int fnObject);
 
+        private const int STOCK_OBJECT_WHITE_BRUSH = 0;
+        private const int STOCK_OBJECT_BLACK_PEN = 7;
         private const int STOCK_OBJECT_DEFAULT_GUI_FONT = 17;
+
+        private const int TRANSPARENT = 1;
 
         [DllImport("gdi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -965,11 +1059,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         [DllImport("gdi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool Polygon(IntPtr hdc, [In] POINT[] points, int count);
+        private static extern unsafe bool Polygon(IntPtr hdc, POINT* points, int count);
 
         [DllImport("gdi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool Polyline(IntPtr hdc, [In] POINT[] points, int count);
+        private static extern unsafe bool Polyline(IntPtr hdc, POINT* points, int count);
 
         [DllImport("gdi32.dll", SetLastError = true)]
         private static extern IntPtr CreatePen(int fnPenStyle, int nWidth, int crColor);
@@ -987,10 +1081,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetKeyboardState(byte[] lpKeyState);
+        private static extern unsafe bool GetKeyboardState(byte* lpKeyState);
 
         [DllImport("user32.dll", SetLastError = true)]
-        private static extern int ToUnicode(uint wVirtKey, uint wScanCode, byte[] lpKeyState, [Out] StringBuilder pwszBuff, int cchBuff, uint wFlags);
+        private static extern unsafe int ToUnicode(uint wVirtKey, uint wScanCode, byte* lpKeyState, char* pwszBuff, int cchBuff, uint wFlags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint MsgWaitForMultipleObjectsEx(uint nCount, ref IntPtr pHandles, uint dwMilliseconds, uint dwWakeMask, uint dwFlags);
 
         private const int PS_SOLID = 0;
 
