@@ -72,15 +72,44 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (StartRoutine == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            // Only current-process thread creation is modeled.
             if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
             {
                 if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                     return NTSTATUS.STATUS_INVALID_HANDLE;
 
                 WinProcess Target = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessCreateThread);
-                if (Target == null || Target.PID != Instance.WinHelper.PID)
-                    return NTSTATUS.STATUS_NOT_SUPPORTED;
+                if (Target == null)
+                    return NTSTATUS.STATUS_ACCESS_DENIED;
+
+                if (Target.PID != Instance.WinHelper.PID)
+                {
+                    NTSTATUS RemoteStatus = GuestSessionRegistry.SendRequest(
+                        Target.PID,
+                        GuestSessionRegistry.OpcodeCreateThread,
+                        StartRoutine,
+                        Argument,
+                        ReadOnlySpan<byte>.Empty,
+                        Span<byte>.Empty,
+                        out _,
+                        out ulong RemoteThreadId);
+
+                    if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
+                        return RemoteStatus;
+
+                    WinSpawnedThread Remote = new WinSpawnedThread
+                    {
+                        Process = Target,
+                        ThreadId = (uint)RemoteThreadId,
+                    };
+
+                    WinHandle RemoteHandle = Instance.WinHelper.HandleManager.AddHandle(Remote, (AccessMask)(uint)DesiredAccess);
+                    Instance.WinHelper.AddWinHandle(RemoteHandle);
+
+                    if (!Instance.WinHelper.WritePointer(ThreadHandlePtr, RemoteHandle.Handle))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
             }
 
             ulong? StackOverride = null;

@@ -128,6 +128,11 @@ namespace Brovan
             Console.WriteLine("  --net-allow=<ip>  Allow a specific IPv4 or IPv6 address in addition to the selected policy.");
             Console.WriteLine("  --no-hooks        Run the emulator with no hooks. useful when you want maximum performance and want to see some program output.");
             Console.WriteLine("  --backend=<name>  Choose the emulation backend: unicorn (default), kvm (Linux), or whp (Windows Hypervisor Platform).");
+            Console.WriteLine("  --cwd <dir>       Directory the emulated program starts in. Defaults to the directory of the binary.");
+            Console.WriteLine("  --guest-cmdline <s>");
+            Console.WriteLine("                    Command line for the emulated program, excluding argv[0], used instead of");
+            Console.WriteLine("                    trailing arguments. Both options also accept \"base64:<value>\" so that");
+            Console.WriteLine("                    quotes and spaces survive intact.");
             Console.WriteLine();
             Console.WriteLine("Notes:");
             Console.WriteLine("  All Brovan flags must be passed before the program path.");
@@ -183,6 +188,97 @@ namespace Brovan
 
             Policy.AddAllowedAddress(Address);
             return true;
+        }
+
+        private const string Base64ArgumentPrefix = "base64:";
+
+        private static string DecodeArgumentValue(string Value)
+        {
+            if (string.IsNullOrEmpty(Value) || !Value.StartsWith(Base64ArgumentPrefix, StringComparison.Ordinal))
+                return Value;
+
+            try
+            {
+                return Encoding.UTF8.GetString(Convert.FromBase64String(Value.Substring(Base64ArgumentPrefix.Length)));
+            }
+            catch (FormatException)
+            {
+                PrintHighlight("[-] Invalid base64 argument value.", true);
+                return null;
+            }
+        }
+
+        private static string[] SplitCommandLine(string CommandLine)
+        {
+            List<string> Arguments = new List<string>();
+            if (string.IsNullOrWhiteSpace(CommandLine))
+                return Arguments.ToArray();
+
+            StringBuilder Current = new StringBuilder();
+            bool Quoted = false;
+            bool HasArgument = false;
+            int Backslashes = 0;
+
+            void Flush(bool BeforeQuote, out bool EscapedQuote)
+            {
+                EscapedQuote = false;
+                if (BeforeQuote)
+                {
+                    Current.Append('\\', Backslashes / 2);
+                    EscapedQuote = (Backslashes % 2) != 0;
+                }
+                else
+                {
+                    Current.Append('\\', Backslashes);
+                }
+
+                Backslashes = 0;
+            }
+
+            foreach (char Character in CommandLine)
+            {
+                if (Character == '\\')
+                {
+                    Backslashes++;
+                    HasArgument = true;
+                    continue;
+                }
+
+                if (Character == '"')
+                {
+                    Flush(true, out bool EscapedQuote);
+                    if (EscapedQuote)
+                        Current.Append('"');
+                    else
+                        Quoted = !Quoted;
+
+                    HasArgument = true;
+                    continue;
+                }
+
+                Flush(false, out _);
+
+                if (!Quoted && (Character == ' ' || Character == '\t'))
+                {
+                    if (HasArgument)
+                    {
+                        Arguments.Add(Current.ToString());
+                        Current.Clear();
+                        HasArgument = false;
+                    }
+
+                    continue;
+                }
+
+                Current.Append(Character);
+                HasArgument = true;
+            }
+
+            Flush(false, out _);
+            if (HasArgument)
+                Arguments.Add(Current.ToString());
+
+            return Arguments.ToArray();
         }
 
         private static bool TryParseBackendKind(string Value, out EmulationBackendKind Kind)
@@ -330,6 +426,8 @@ namespace Brovan
             bool Silent = false;
             string Command = null;
             string FilePath = null;
+            string WorkingDirectory = null;
+            string GuestCommandLine = null;
             EmulationBackendKind BackendKind = EmulationBackendKind.Unicorn;
             NetworkAccessPolicy NetworkPolicy = new NetworkAccessPolicy(NetworkAccessMode.Loopback);
             List<string> ProgramArgumentsList = new List<string>();
@@ -389,6 +487,20 @@ namespace Brovan
                         continue;
                     case "--no-hooks":
                         NoHooks = true;
+                        continue;
+                    case "--cwd":
+                        if (i + 1 >= args.Length)
+                            continue;
+
+                        WorkingDirectory = DecodeArgumentValue(args[i + 1]);
+                        i++;
+                        continue;
+                    case "--guest-cmdline":
+                        if (i + 1 >= args.Length)
+                            continue;
+
+                        GuestCommandLine = DecodeArgumentValue(args[i + 1]);
+                        i++;
                         continue;
                     case "--backend":
                         if (i + 1 >= args.Length || !TryParseBackendKind(args[i + 1], out EmulationBackendKind ArgumentBackendKind))
@@ -479,11 +591,13 @@ namespace Brovan
             }
 
             string[] ProgramArguments = ProgramArgumentsList.ToArray();
-            string RawProgramArguments = BuildRawProgramArguments(ProgramArguments);
+            string RawProgramArguments = GuestCommandLine ?? BuildRawProgramArguments(ProgramArguments);
+            if (GuestCommandLine != null)
+                ProgramArguments = SplitCommandLine(GuestCommandLine);
 
             // Set the dll import resolver based on the platform
             NativeLibraryResolver.Register();
-            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Quick, Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, NoHooks, BackendKind);
+            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Quick, Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, NoHooks, BackendKind, WorkingDirectory);
         }
     }
 }

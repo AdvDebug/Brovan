@@ -81,23 +81,41 @@ namespace Brovan.Core.Emulation.OS.Windows
                         goto current_process; // jump to the current process handling
                     }
 
-                    if (BaseAddressPtr == 0)
+                    ulong RemoteAddress = BaseAddressPtr;
+                    ulong LocalBuffer = BufferPtr;
+                    ulong BytesReadPtr = Instance.WinHelper.GetArg(4);
+
+                    if (RemoteAddress == 0 || LocalBuffer == 0 || NumberOfBytesToRead == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                    if (!Instance.IsRegionMapped(BaseAddressPtr, sizeof(ulong)))
+                    if (NumberOfBytesToRead > GuestSessionRegistry.MaxPayloadBytes)
+                        NumberOfBytesToRead = GuestSessionRegistry.MaxPayloadBytes;
+
+                    if (!Instance.IsRegionMapped(LocalBuffer, NumberOfBytesToRead))
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
-                    if (BufferPtr == 0)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
+                    byte[] Remote = new byte[NumberOfBytesToRead];
+                    NTSTATUS RemoteStatus = GuestSessionRegistry.SendRequest(
+                        Process.PID,
+                        GuestSessionRegistry.OpcodeReadMemory,
+                        RemoteAddress,
+                        0,
+                        ReadOnlySpan<byte>.Empty,
+                        Remote,
+                        out int RemoteLength,
+                        out _);
 
-                    if(NumberOfBytesToRead == 0)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
+                    if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
+                        return RemoteStatus;
 
-                    if (!Instance.WriteMemory(BufferPtr, Instance.WinHelper.GenerateRandomData((int)NumberOfBytesToRead))) // generate random data?
+                    if (!Instance._emulator.WriteMemory(LocalBuffer, Remote, 0, RemoteLength))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+                    if (BytesReadPtr != 0 && Instance.IsRegionMapped(BytesReadPtr, sizeof(ulong)))
+                        Instance._emulator.WriteMemory(BytesReadPtr, (ulong)RemoteLength, 8);
+
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                        Instance.TriggerEventMessage($"[+] The emulated process tried to read the memory of process \"{Process.Name}\", random data was generated for it.", LogFlags.Syscall);
+                        Instance.TriggerEventMessage($"[+] Read 0x{RemoteLength:X} bytes from process \"{Process.Name}\" at 0x{RemoteAddress:X}.", LogFlags.Syscall);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
             }

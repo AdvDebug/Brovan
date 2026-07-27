@@ -40,7 +40,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint ERROR_INVALID_PARAMETER = 87;
         internal const uint ERROR_CALL_NOT_IMPLEMENTED = 120;
         internal const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
-        internal const uint DEFAULT_SCREEN_DPI = 96;
 
         internal const byte PenHandleType = 0x30;
         internal const byte BrushHandleType = 0x10;
@@ -63,6 +62,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WM_SYSKEYDOWN = 0x0104;
         internal const uint WM_SYSKEYUP = 0x0105;
         internal const uint WM_SYSCHAR = 0x0106;
+        internal const uint WM_DPICHANGED = 0x02E0;
         internal const uint WM_MOUSEMOVE = 0x0200;
         internal const uint WM_LBUTTONDOWN = 0x0201;
         internal const uint WM_LBUTTONUP = 0x0202;
@@ -453,6 +453,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             // thread parked in MsgWaitForMultipleObjectsEx can ever be woken by.
             if (Foreground == 0)
                 return;
+
+            Win32kDpi.DrainHostDpiChange(Instance);
 
             if (HostEventQueue.ConsumeRepaint())
                 InvalidateWindow(Instance, Foreground);

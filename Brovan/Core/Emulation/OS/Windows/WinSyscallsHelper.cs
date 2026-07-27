@@ -1212,8 +1212,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Stack<ushort> FreeGdiHandleIndices = new();
         private readonly byte[] GdiHandleUniq = new byte[GdiHandleEntryCount];
         private readonly ulong[] GdiHandleAttributes = new ulong[GdiHandleEntryCount];
-        private const int SmCxScreen = 0;
-        private const int SmCyScreen = 1;
         private const int EnumCurrentSettings = -1;
         private const ushort DevModeSize = 0xDC;
         private const int DevModeOffsetSize = 0x44;
@@ -1230,6 +1228,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong UserDesktopInfoAddress;
         private ulong UserDesktopOwnerAddress;
         private ulong UserPrimaryMonitorAddress;
+        private const uint DpiChangeRectSize = 0x10;
+        private ulong DpiChangeRectAddress;
         private ulong UserSharedInfoMirrorAddress;
         private ulong UserSharedDelta;
         public ulong ActiveWindow;
@@ -3560,6 +3560,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Emulator._emulator.WriteMemory(Teb + Win32ClientInfoX86Base + ((ulong)Slot * 4UL), (uint)Value, 4);
+
+            Emulator._emulator.WriteMemory(Teb + Win32ClientInfoX64Base + ((ulong)Slot * 8UL), Value, 8);
         }
 
         private ulong ComputeUserSharedDelta(ulong ServerInfo, ulong HandleTable, ulong DisplayInfo)
@@ -3596,7 +3598,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!WriteZeroMemory(Monitor, (uint)UserPrimaryMonitorSize))
                 return 0;
 
-            (int Width, int Height) = GetHostPrimaryMonitorSize();
+            if (!WriteUserPrimaryMonitorInfo(Monitor))
+                return 0;
+
+            UserPrimaryMonitorAddress = Monitor;
+            return UserPrimaryMonitorAddress;
+        }
+
+        private bool WriteUserPrimaryMonitorInfo(ulong Monitor)
+        {
+            int Width = Win32kDpi.GetScreenWidth(Emulator);
+            int Height = Win32kDpi.GetScreenHeight(Emulator);
+            ushort Dpi = (ushort)Win32kDpi.GetEffectiveDpi(Emulator);
 
             UserPrimaryMonitorInfo MonitorInfo = new UserPrimaryMonitorInfo
             {
@@ -3609,36 +3622,37 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WorkTop = 0,
                 WorkRight = Width,
                 WorkBottom = Height,
-                DpiX = 96,
-                DpiY = 96
+                DpiX = Dpi,
+                DpiY = Dpi
             };
 
             Span<byte> Buffer = MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref MonitorInfo, 1));
-            if (!Emulator._emulator.WriteMemory(Monitor, Buffer))
-                return 0;
-
-            UserPrimaryMonitorAddress = Monitor;
-            return UserPrimaryMonitorAddress;
+            return Emulator._emulator.WriteMemory(Monitor, Buffer);
         }
 
-        private static (int Width, int Height) GetHostPrimaryMonitorSize()
+        public void RefreshDisplayDependentState()
         {
-            try
-            {
-                if (OperatingSystem.IsWindows())
-                {
-                    int Width = NativeWinImports.GetSystemMetrics(SmCxScreen);
-                    int Height = NativeWinImports.GetSystemMetrics(SmCyScreen);
+            if (UserPrimaryMonitorAddress != 0 && Emulator.IsRegionMapped(UserPrimaryMonitorAddress, UserPrimaryMonitorSize))
+                WriteUserPrimaryMonitorInfo(UserPrimaryMonitorAddress);
 
-                    if (Width > 0 && Height > 0)
-                        return (Width, Height);
-                }
-            }
-            catch
+            foreach (WinWindow Window in WinWindows.Values)
             {
+                if (Window.ClientWindowAddress != 0 && Emulator.IsRegionMapped(Window.ClientWindowAddress, UserWindowObjectSize))
+                    Win32kDpi.ApplyWindowContext(Emulator, Window.ClientWindowAddress);
             }
+        }
 
-            return (1920, 1080);
+        public ulong EnsureDpiChangeRect()
+        {
+            if (DpiChangeRectAddress != 0 && Emulator.IsRegionMapped(DpiChangeRectAddress, DpiChangeRectSize))
+                return DpiChangeRectAddress;
+
+            ulong Address = Emulator.MapUniqueAddress(DpiChangeRectSize, MemoryProtection.ReadWrite);
+            if (Address == 0 || !WriteZeroMemory(Address, DpiChangeRectSize))
+                return 0;
+
+            DpiChangeRectAddress = Address;
+            return DpiChangeRectAddress;
         }
 
         public unsafe uint GetPrimaryDisplayFrequency()
@@ -3702,7 +3716,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             UserSharedDisplayInfo DisplayInfo = new UserSharedDisplayInfo
             {
                 Type = 1u,
-                PrimaryMonitor = PrimaryMonitor
+                PrimaryMonitor = PrimaryMonitor,
+                CompositionFlags = 1u
             };
 
             Span<byte> Buffer = MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref DisplayInfo, 1));
@@ -3873,6 +3888,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xB8, Window.ClientTextBytes, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xC0, TextObject, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xE0, 0UL, 8);
+
+            Win32kDpi.ApplyWindowContext(Emulator, Window.ClientWindowAddress);
         }
 
         private ulong EnsureUserClassObject(WinWindow Window)
@@ -4265,6 +4282,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Decorated = true,
                 Center = true,
                 State = WindowState.Normal,
+                DpiAwareness = Win32kDpi.GetHostAwareness(Emulator),
             });
         }
 

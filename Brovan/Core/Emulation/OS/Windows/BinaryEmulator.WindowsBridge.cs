@@ -139,6 +139,12 @@ namespace Brovan.Core.Emulation
             if (Obj is EmulatedThread Thread)
                 return Thread.State == EmulatedThreadState.Terminated;
 
+            if (Obj is WinProcess Process)
+                return Process.SpawnedHasExited;
+
+            if (Obj is WinSpawnedThread SpawnedThread)
+                return SpawnedThread.Process == null || SpawnedThread.Process.SpawnedHasExited;
+
             if (Obj is WinTimer Timer)
             {
                 RefreshTimerState(Timer);

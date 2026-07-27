@@ -33,6 +33,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial int XDisplayHeight(IntPtr display, int screen);
 
         [LibraryImport("libX11.so.6")]
+        public static partial IntPtr XResourceManagerString(IntPtr display);
+
+        [LibraryImport("libX11.so.6")]
         public static partial nuint XWhitePixel(IntPtr display, int screen);
 
         [LibraryImport("libX11.so.6")]

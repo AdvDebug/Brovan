@@ -57,7 +57,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     return NTSTATUS.STATUS_ACCESS_DENIED;
                                 }
 
-                                if (!WriteProcessBasicInformation(Instance, OutBufferPtr, Instance.PEB, 0x8UL, Process.PID, Process.PPID))
+                                ulong Peb = Instance.PEB;
+                                if (Process.PID != Instance.WinHelper.PID &&
+                                    GuestSessionRegistry.SendRequest(Process.PID, GuestSessionRegistry.OpcodeQueryPeb, 0, 0, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out _, out ulong RemotePeb) == NTSTATUS.STATUS_SUCCESS)
+                                {
+                                    Peb = RemotePeb;
+                                }
+
+                                if (!WriteProcessBasicInformation(Instance, OutBufferPtr, Peb, 0x8UL, Process.PID, Process.PPID))
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 SetReturnLength(PbiSize);
                                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
