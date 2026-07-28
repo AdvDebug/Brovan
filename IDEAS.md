@@ -2,11 +2,7 @@
 
 In this file I will mention some ideas, some bugs to fix, and implementations for anyone looking to contribute.
 
-But in a nutshell, the main ways to help would be to add more syscalls with correct implementations, improve visualizations, and improving compatbility with other programs.
-
-## Reflection
-
-Right now i'm trying to eliminate reflection from the codebase, any contributions in that regard are welcome!
+But in a nutshell, the main ways to help would be to add more syscalls with correct implementations, improve visualizations, and improving compatibility with other programs.
 
 ## Syscall implementations (most important for the project)
 
@@ -37,6 +33,12 @@ Symlinks are currently handled in a bad way: instead of being handled as symlink
 * Avoid losing the fact that a path is a symlink.
 * Avoid bad behavior when symlinks point to other symlinks or form a loop.
 
+This causes the Linux folder to be large in size while it is much smaller.
+
+## Performance improvements
+
+Finding any bottlenecks or improvements in the emulator.
+
 ## Bug in the scheduler
 
-Right now there's a bug in the MLFQ scheduler that causes some multi-threaded windows programs to exit, i didn't dig too deep into it yet, so i'm sorry for the lack of context. but the bug happens mainly on multi-threaded apps, so you can try creating one then seeing what happens. the scheduler stops because it finds 2 waiting threads, which can never execute because no thread are in the 'Ready' state.
+Right now there's multiple bugs in the MLFQ scheduler that causes some multi-threaded windows programs to exit early or hang. Most of these issues are fixed, but some might still be lurking around.
