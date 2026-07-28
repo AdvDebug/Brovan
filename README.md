@@ -179,12 +179,6 @@ Thanks to <a href="https://github.com/unicorn-engine/unicorn">Unicorn Engine</a>
 
 Thanks to my friend <a href="https://github.com/GittingHubbers">GittingHubbers</a> for help with the MLFQ Scheduler.
 
-## Credits
-
-- [Iced](https://github.com/icedland/iced) for x86_64 disassembly/assembly.
-- [Unicorn Engine](https://github.com/unicorn-engine/unicorn) for core CPU emulation.
-- Thanks to [GittingHubbers](https://github.com/GittingHubbers) for help with the MLFQ scheduler.
-
 ## License
 
 GPL-2.0
