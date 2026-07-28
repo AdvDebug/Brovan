@@ -25,6 +25,8 @@ A good first contribution is usually one of these:
 - adding a syscall or improving existing ones
 - just testing the emulator and finding general bugs
 
+And keep your changes small. smaller changes in chunks and separate PRs are much better than a very big PR that is harder to review.
+
 ## How to contribute
 
 1. Fork the repository.
