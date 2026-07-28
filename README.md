@@ -68,8 +68,8 @@ Brovan can render guest graphical applications through its Brovvulk translation 
 <table width="100%">
   <tr>
     <td align="center" width="60%">
-      <a href="https://github.com/user-attachments/assets/d77b4d0a-6715-4e97-ac0b-f37ef23e37bd">
-        <img src="https://github.com/user-attachments/assets/15f11fe6-4f6b-4df1-a568-8be26d1e00d7" 
+      <a href="https://github.com/user-attachments/assets/a8090272-4dc1-47f8-bfd6-0407d2faaba2">
+        <img src="https://github.com/user-attachments/assets/a8090272-4dc1-47f8-bfd6-0407d2faaba2" 
              alt="Deltarune running in Brovan" width="100%" 
              style="border-radius: 8px; border: 1px solid #30363d;" />
       </a>
