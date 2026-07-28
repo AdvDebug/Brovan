@@ -40,6 +40,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ThreadId = Process.PID,
             };
 
+            Instance.WinHelper.WinProcesses.Add(Process);
+
             ulong ProcessHandle = Instance.WinHelper.HandleManager.AddHandle(Process, AccessMask.GenericAll).Handle;
             ulong ThreadHandle = Instance.WinHelper.HandleManager.AddHandle(Thread, AccessMask.GenericAll).Handle;
 

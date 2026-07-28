@@ -110,6 +110,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (State == SlotLive && IsHostProcessAlive(_view.ReadUInt32(Offset + SlotHostPidOffset)))
                             continue;
 
+                        ClearMailbox(i);
                         WriteSlot(Offset, GuestProcessId, Architecture, ImageName);
                         _ownSlot = i;
                         break;
@@ -570,6 +571,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             catch (Exception)
             {
             }
+        }
+
+        /// <summary>
+        /// A reused slot still holds the sequence numbers of its previous owner. This process starts counting
+        /// from zero, so without this it would read that stale request as a new one and run it.
+        /// </summary>
+        private static void ClearMailbox(int Slot)
+        {
+            if (_mailboxView == null)
+                return;
+
+            long Base = (long)Slot * MailboxSize;
+            for (int i = 0; i < MailboxPayloadOffset; i += 8)
+                _mailboxView.Write(Base + i, 0UL);
+
+            _mailboxView.Flush();
+            _lastHandledSequence = 0;
         }
 
         private static void WriteSlot(int Offset, uint GuestProcessId, uint Architecture, string ImageName)

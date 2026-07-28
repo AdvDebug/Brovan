@@ -957,6 +957,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         private uint SequentialIdCursor = 30000;
         private uint AnonymousObjectCursor;
 
+        private uint AdoptHostProcessId()
+        {
+            uint HostId = (uint)Environment.ProcessId;
+            if (HostId != 0 && PIDs.Add(HostId))
+                return HostId;
+
+            return GenerateRandomPID();
+        }
+
         public uint GenerateRandomPID()
         {
             for (int Attempt = 0; Attempt < 64; Attempt++)
@@ -1248,7 +1257,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             SyntheticVolumeWin32GuidPath = $"\\\\?\\Volume{{{SyntheticVolumeGuid}}}\\";
             SyntheticMountDevUniqueId = Guid.Parse(SyntheticVolumeGuid).ToByteArray();
             KuserSharedData = new KuserSharedDataManager(Emulator);
-            PID = GenerateRandomPID();
+            PID = AdoptHostProcessId();
             PPID = GenerateRandomPID();
             string FileName = null;
             BinaryFile Binary = Emulator._binary;

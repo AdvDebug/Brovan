@@ -111,8 +111,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance._emulator.WriteMemory(LocalBuffer, Remote, 0, RemoteLength))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (BytesReadPtr != 0 && Instance.IsRegionMapped(BytesReadPtr, sizeof(ulong)))
-                        Instance._emulator.WriteMemory(BytesReadPtr, (ulong)RemoteLength, 8);
+                    if (BytesReadPtr != 0)
+                    {
+                        uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+                        if (Instance.IsRegionMapped(BytesReadPtr, PointerSize))
+                            Instance._emulator.WriteMemory(BytesReadPtr, (ulong)RemoteLength, PointerSize);
+                    }
 
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                         Instance.TriggerEventMessage($"[+] Read 0x{RemoteLength:X} bytes from process \"{Process.Name}\" at 0x{RemoteAddress:X}.", LogFlags.Syscall);
