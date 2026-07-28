@@ -150,6 +150,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint SWP_NOACTIVATE = 0x0010;
         private const uint SWP_FRAMECHANGED = 0x0020;
 
+        private const uint WM_DPICHANGED = 0x02E0;
+
+        private static readonly IntPtr DpiContextUnaware = new(-1);
+        private static readonly IntPtr DpiContextSystemAware = new(-2);
+        private static readonly IntPtr DpiContextPerMonitorAwareV2 = new(-4);
+
+        private DpiAwareness _dpiAwareness = DpiAwareness.Unaware;
+        private bool _dpiAwarenessApplied;
+
         public WindowsWinManager()
         {
             if (!GeneralHelper.IsWindows)
@@ -170,6 +179,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 throw new ObjectDisposedException(nameof(WindowsWinManager));
 
             options = Normalize(options ?? new WindowOptions());
+            ApplyDpiAwareness(options.DpiAwareness);
 
             uint style = options.Decorated ? WS_OVERLAPPEDWINDOW : WS_POPUP;
             if (options.Visible)
@@ -180,7 +190,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             int requestedClientWidth = Math.Max(options.Width, 1);
             int requestedClientHeight = Math.Max(options.Height, 1);
-            ResolveOuterFromClient(style, 0, requestedClientWidth, requestedClientHeight, out int outerWidth, out int outerHeight);
+            ResolveOuterFromClient(style, 0, requestedClientWidth, requestedClientHeight, FrameDpi(IntPtr.Zero), out int outerWidth, out int outerHeight);
 
             IntPtr hwnd = CreateWindowExW(
                 0,
@@ -371,7 +381,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (!GetWindowRect(hwnd, out rect))
                 return;
 
-            ResolveOuterFromClient(style, 0, Math.Max(width, 1), Math.Max(height, 1), out int outerWidth, out int outerHeight);
+            ResolveOuterFromClient(style, 0, Math.Max(width, 1), Math.Max(height, 1), FrameDpi(hwnd), out int outerWidth, out int outerHeight);
 
             if (rect.Right - rect.Left == outerWidth && rect.Bottom - rect.Top == outerHeight)
                 return;
@@ -379,10 +389,51 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             SetWindowPos(hwnd, IntPtr.Zero, rect.Left, rect.Top, outerWidth, outerHeight, SWP_NOZORDER | SWP_NOACTIVATE);
         }
 
-        private static void ResolveOuterFromClient(uint style, uint exStyle, int clientWidth, int clientHeight, out int outerWidth, out int outerHeight)
+        private void ApplyDpiAwareness(DpiAwareness awareness)
+        {
+            if (_dpiAwarenessApplied && _dpiAwareness == awareness)
+                return;
+
+            IntPtr context = awareness switch
+            {
+                DpiAwareness.PerMonitor => DpiContextPerMonitorAwareV2,
+                DpiAwareness.System => DpiContextSystemAware,
+                _ => DpiContextUnaware,
+            };
+
+            try
+            {
+                if (SetThreadDpiAwarenessContext(context) == IntPtr.Zero)
+                    return;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return;
+            }
+
+            _dpiAwareness = awareness;
+            _dpiAwarenessApplied = true;
+        }
+
+        private uint FrameDpi(IntPtr hwnd)
+        {
+            if (_dpiAwareness == DpiAwareness.Unaware)
+                return 0;
+
+            if (hwnd != IntPtr.Zero)
+            {
+                uint windowDpi = GetDpiForWindow(hwnd);
+                if (windowDpi != 0)
+                    return windowDpi;
+            }
+
+            return HostDisplayMetrics.SystemDpi;
+        }
+
+        private static void ResolveOuterFromClient(uint style, uint exStyle, int clientWidth, int clientHeight, uint dpi, out int outerWidth, out int outerHeight)
         {
             RECT rect = new RECT { Left = 0, Top = 0, Right = clientWidth, Bottom = clientHeight };
-            if (AdjustWindowRectEx(ref rect, style, false, exStyle))
+            if (AdjustFrameRect(ref rect, style, exStyle, dpi))
             {
                 outerWidth = Math.Max(rect.Right - rect.Left, 1);
                 outerHeight = Math.Max(rect.Bottom - rect.Top, 1);
@@ -391,6 +442,23 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             outerWidth = Math.Max(clientWidth, 1);
             outerHeight = Math.Max(clientHeight, 1);
+        }
+
+        private static bool AdjustFrameRect(ref RECT rect, uint style, uint exStyle, uint dpi)
+        {
+            if (dpi != 0)
+            {
+                try
+                {
+                    if (AdjustWindowRectExForDpi(ref rect, style, false, exStyle, dpi))
+                        return true;
+                }
+                catch (EntryPointNotFoundException)
+                {
+                }
+            }
+
+            return AdjustWindowRectEx(ref rect, style, false, exStyle);
         }
 
         internal void UpdateWindowVisibility(IntPtr hwnd, bool visible)
@@ -849,6 +917,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         HostEventQueue.MarkRepaint();
                         break;
 
+                    case WM_DPICHANGED:
+                        HostDisplayMetrics.Invalidate();
+                        HostEventQueue.MarkDpiChanged(unchecked((uint)(long)wParam) & 0xFFFF);
+                        HostEventQueue.MarkRepaint();
+                        return IntPtr.Zero;
+
                     case WM_CLOSE:
                         HostEventQueue.RequestClose();
                         return IntPtr.Zero;
@@ -956,6 +1030,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool AdjustWindowRectEx(ref RECT lpRect, uint dwStyle, [MarshalAs(UnmanagedType.Bool)] bool bMenu, uint dwExStyle);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AdjustWindowRectExForDpi(ref RECT lpRect, uint dwStyle, [MarshalAs(UnmanagedType.Bool)] bool bMenu, uint dwExStyle, uint dpi);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hWnd);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr DefWindowProcW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);

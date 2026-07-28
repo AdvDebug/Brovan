@@ -257,6 +257,8 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public string RawProgramArguments;
 
+        public string WorkingDirectory;
+
         /// <summary>
         /// Parsed arguments passed to the emulated process, excluding argv[0].
         /// </summary>
@@ -370,6 +372,7 @@ namespace Brovan.Core.Emulation
         public bool Debug { get; set; }
 
         public string RawProgramArguments { get; }
+        public string WorkingDirectory { get; }
         public string[] ProgramArguments { get; }
 
         public int IPRegister { get; private set; }
@@ -528,6 +531,7 @@ namespace Brovan.Core.Emulation
             this.Settings = Settings;
             Debug = Settings.Debug;
             RawProgramArguments = Settings.RawProgramArguments ?? string.Empty;
+            WorkingDirectory = Settings.WorkingDirectory;
             ProgramArguments = Settings.ProgramArguments?.ToArray() ?? Array.Empty<string>();
 
             if (_binary.Architecture == BinaryArchitecture.x64)
@@ -567,6 +571,7 @@ namespace Brovan.Core.Emulation
             this.Settings = Settings;
             Debug = Settings.Debug;
             RawProgramArguments = Settings.RawProgramArguments ?? string.Empty;
+            WorkingDirectory = Settings.WorkingDirectory;
             ProgramArguments = Settings.ProgramArguments?.ToArray() ?? Array.Empty<string>();
 
             if (Guest is GenericGuest Generic)
@@ -2395,6 +2400,9 @@ namespace Brovan.Core.Emulation
             while (true)
             {
                 SchedulerTick++;
+
+                if (WinHelper != null)
+                    OS.Windows.RemoteProcessRequests.Drain(this);
 
                 bool ThreadOrderChanged = ThreadOrder.Count != KnownThreadOrderCount;
                 bool AgingDue = AgingThresholdSlices > 0 && SchedulerTick % AgingThresholdSlices == 0;

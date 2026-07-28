@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -26,6 +26,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         [FieldOffset(0x08)]
         public ulong PrimaryMonitor;
+
+        [FieldOffset(0x40)]
+        public uint CompositionFlags;
     }
 
     [StructLayout(LayoutKind.Explicit, Pack = 1)]
@@ -1091,8 +1094,34 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong InstrumentationCallback;
         public ulong JobObjectHandle;
 
+        public System.Diagnostics.Process SpawnedHost;
+
+        public bool SpawnedHasExited
+        {
+            get
+            {
+                try
+                {
+                    return SpawnedHost != null && SpawnedHost.HasExited;
+                }
+                catch (InvalidOperationException)
+                {
+                    return true;
+                }
+            }
+        }
+
         public string ObjectId => PID.ToString();
         public HandleType ObjectType => HandleType.ProcessHandle;
+    }
+
+    public sealed class WinSpawnedThread : IHandleObject
+    {
+        public WinProcess Process;
+        public uint ThreadId;
+
+        public string ObjectId => $"SPAWNEDTHREAD_{ThreadId}";
+        public HandleType ObjectType => HandleType.ThreadHandle;
     }
 
     public sealed class WinDirectoryEntry

@@ -7,6 +7,7 @@ using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
 using System.Text;
 using Brovan.Core.Emulation.OS.Windows;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 using Brovan.Core.Helpers;
 using static Brovan.Core.Emulation.OS.Windows.WinSysHelper;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -829,6 +830,7 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x0C, 0u);
                 Instance._emulator.WriteMemory(Teb + Wow64TlsWow64InfoOffset, (uint)(Teb + Wow64InfoOffset));
 
+                Win32kDpi.ApplyThreadContext(Instance, Teb);
                 return Teb;
             }
 
@@ -859,6 +861,8 @@ namespace Brovan.Core.Emulation.Guests
                 SameTebFlags |= TEB_SAME_TEB_FLAG_SKIP_LOADER_INIT;
             Instance._emulator.WriteMemory(Teb + TebSameTebFlagsOffset64, SameTebFlags, 2);
             Instance._emulator.WriteMemory(Teb + 0x180C, (uint)0u);
+
+            Win32kDpi.ApplyThreadContext(Instance, Teb);
             return Teb;
         }
 
@@ -1157,6 +1161,36 @@ namespace Brovan.Core.Emulation.Guests
             }
         }
 
+        private static void JoinGuestSession(BinaryEmulator Instance, WinModule MainModule)
+        {
+            string ImageName = MainModule?.Name;
+            if (string.IsNullOrEmpty(ImageName))
+                ImageName = Path.GetFileName(Instance._binary?.Location ?? string.Empty);
+
+            GuestSessionRegistry.Join(
+                Instance.WinHelper.PID,
+                (uint)Instance._binary.Architecture,
+                ImageName,
+                ExitCode =>
+                {
+                    Instance.TriggerEventMessage($"[!] Another process in the session asked this one to stop with exit code 0x{ExitCode:X}.", LogFlags.Important);
+                    Instance.WinHelper.HideDesktopWindow();
+                    Instance.StopEmulation();
+                });
+        }
+
+        private static string ResolveStartupDirectory(BinaryEmulator Instance, string ImagePath)
+        {
+            string Directory = Instance.WorkingDirectory;
+            if (string.IsNullOrWhiteSpace(Directory))
+                Directory = Path.GetDirectoryName(ImagePath);
+
+            if (string.IsNullOrWhiteSpace(Directory))
+                Directory = "C:\\";
+
+            return Directory.EndsWith("\\", StringComparison.Ordinal) ? Directory : Directory + "\\";
+        }
+
         public void PrepareWinEnvironment(BinaryEmulator Instance, WinModule MainModule)
         {
             Instance.EnsureInstructionHook();
@@ -1171,6 +1205,8 @@ namespace Brovan.Core.Emulation.Guests
                 EnsureDirectBlobStandardHandles();
 
             WinSyscallTable = HelperFunctions.BuildWinSyscallTable(Instance._binary.Architecture);
+            Win32kDpi.SeedFromImage(Instance, MainModule);
+            JoinGuestSession(Instance, MainModule);
 
             ulong PageSize = 0x2000;
             PEB = Instance.MapUniqueAddress(PageSize, MemoryProtection.ReadWrite);
@@ -1215,9 +1251,7 @@ namespace Brovan.Core.Emulation.Guests
                     string ImagePath = IsPeImage
                         ? Instance._binary.Location
                         : (!string.IsNullOrWhiteSpace(Instance._binary.Location) ? Instance._binary.Location : (!string.IsNullOrWhiteSpace(MainModule.Path) ? MainModule.Path : (!string.IsNullOrWhiteSpace(MainModule.Name) ? MainModule.Name : "blob.bin")));
-                    string CurrentDir = Path.GetDirectoryName(ImagePath) ?? "C:\\";
-                    if (string.IsNullOrWhiteSpace(CurrentDir)) CurrentDir = "C:\\";
-                    if (!CurrentDir.EndsWith("\\")) CurrentDir += "\\";
+                    string CurrentDir = ResolveStartupDirectory(Instance, ImagePath);
                     string DesktopInfo = "Winsta0\\Default";
                     string WindowTitle = ImagePath;
                     string CommandLine = GeneralHelper.QuoteCommandLineArg(ImagePath);
@@ -1335,9 +1369,7 @@ namespace Brovan.Core.Emulation.Guests
             string ImagePath = Instance._binary.Location;
             if (string.IsNullOrWhiteSpace(ImagePath))
                 ImagePath = !string.IsNullOrWhiteSpace(MainModule.Path) ? MainModule.Path : (!string.IsNullOrWhiteSpace(MainModule.Name) ? MainModule.Name : "app.exe");
-            string CurrentDir = Path.GetDirectoryName(ImagePath) ?? "C:\\";
-            if (string.IsNullOrWhiteSpace(CurrentDir)) CurrentDir = "C:\\";
-            if (!CurrentDir.EndsWith("\\")) CurrentDir += "\\";
+            string CurrentDir = ResolveStartupDirectory(Instance, ImagePath);
             string DesktopInfo = "Winsta0\\Default";
             string WindowTitle = ImagePath;
             string CommandLine = GeneralHelper.QuoteCommandLineArg(ImagePath);

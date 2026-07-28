@@ -1,0 +1,313 @@
+using System.Diagnostics;
+using System.Text;
+using Brovan.Core.Helpers;
+using static Brovan.Core.Helpers.BinaryHelpers;
+
+namespace Brovan.Core.Emulation.OS.Windows
+{
+    internal static class GuestProcessLauncher
+    {
+        private const string SpawnDepthVariable = "BROVAN_GUEST_SPAWN_DEPTH";
+        private const int MaxSpawnDepth = 8;
+
+        private const int MaxSessionProcesses = 6;
+
+        private const int MaxCommandLineChars = 8000;
+
+        private const ulong ParamsCurrentDirectory64 = 0x38;
+        private const ulong ParamsImagePathName64 = 0x60;
+        private const ulong ParamsCommandLine64 = 0x70;
+
+        private const ulong ParamsCurrentDirectory32 = 0x24;
+        private const ulong ParamsImagePathName32 = 0x38;
+        private const ulong ParamsCommandLine32 = 0x40;
+
+        private const int MaxStringBytes = 0x8000;
+
+        internal static bool TryLaunch(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, out WinProcess Process, out NTSTATUS Status)
+        {
+            Process = null;
+
+            bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
+            string ImagePath = ReadUnicodeString(Instance, ProcessParameters + (Is64 ? ParamsImagePathName64 : ParamsImagePathName32), Is64);
+            string CommandLine = ReadUnicodeString(Instance, ProcessParameters + (Is64 ? ParamsCommandLine64 : ParamsCommandLine32), Is64);
+            string CurrentDirectory = ReadUnicodeString(Instance, ProcessParameters + (Is64 ? ParamsCurrentDirectory64 : ParamsCurrentDirectory32), Is64);
+
+            if (string.IsNullOrWhiteSpace(ImagePath))
+                ImagePath = ImageNameHint;
+
+            if (string.IsNullOrWhiteSpace(ImagePath))
+            {
+                Status = NTSTATUS.STATUS_INVALID_PARAMETER;
+                return false;
+            }
+
+            if (!IsAcceptableImagePath(ImagePath))
+            {
+                Utils.LogError($"[GuestProcessLauncher] Refusing to launch {ImagePath}: unsupported path form.");
+                Status = NTSTATUS.STATUS_OBJECT_PATH_SYNTAX_BAD;
+                return false;
+            }
+
+            string HostImage = GeneralHelper.IO.ResolveHostPath(StripNtPrefix(ImagePath), BinaryFormat.PE);
+            if (string.IsNullOrEmpty(HostImage) || !File.Exists(HostImage))
+            {
+                Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+                return false;
+            }
+
+            if (!IsPortableExecutable(HostImage))
+            {
+                Utils.LogError($"[GuestProcessLauncher] Refusing to launch {HostImage}: not a PE image.");
+                Status = NTSTATUS.STATUS_INVALID_IMAGE_FORMAT;
+                return false;
+            }
+
+            if ((CommandLine?.Length ?? 0) > MaxCommandLineChars || (CurrentDirectory?.Length ?? 0) > MaxCommandLineChars)
+            {
+                Status = NTSTATUS.STATUS_INVALID_PARAMETER;
+                return false;
+            }
+
+            if (!TryReserveLaunchSlot(out Status))
+                return false;
+
+            string HostExecutable = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(HostExecutable))
+            {
+                Status = NTSTATUS.STATUS_NOT_SUPPORTED;
+                return false;
+            }
+
+            int Depth = GetSpawnDepth();
+            if (Depth >= MaxSpawnDepth)
+            {
+                Utils.LogError($"[GuestProcessLauncher] Refusing to launch {ImagePath}: spawn depth {Depth} reached.");
+                Status = NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
+                return false;
+            }
+
+            ProcessStartInfo StartInfo = new ProcessStartInfo
+            {
+                FileName = HostExecutable,
+                UseShellExecute = false,
+                WorkingDirectory = ResolveWorkingDirectory(CurrentDirectory, HostImage),
+            };
+
+            AppendEmulatorOptions(Instance, StartInfo.ArgumentList);
+
+            StartInfo.CreateNoWindow = Utils.SilentMode;
+
+            string GuestArguments = StripArgv0(CommandLine);
+            if (!string.IsNullOrEmpty(GuestArguments))
+            {
+                StartInfo.ArgumentList.Add("--guest-cmdline");
+                StartInfo.ArgumentList.Add(Encode(GuestArguments));
+            }
+
+            if (!string.IsNullOrWhiteSpace(CurrentDirectory))
+            {
+                StartInfo.ArgumentList.Add("--cwd");
+                StartInfo.ArgumentList.Add(Encode(StripNtPrefix(CurrentDirectory)));
+            }
+
+            StartInfo.ArgumentList.Add(HostImage);
+            StartInfo.Environment[SpawnDepthVariable] = (Depth + 1).ToString();
+            StartInfo.Environment["BROVAN_SESSION_ID"] = GuestSessionRegistry.SessionId;
+
+            Process HostProcess;
+            try
+            {
+                HostProcess = System.Diagnostics.Process.Start(StartInfo);
+            }
+            catch (Exception Ex)
+            {
+                Utils.LogError($"[GuestProcessLauncher] Failed to launch {HostImage}: {Ex.Message}");
+                Status = NTSTATUS.STATUS_NOT_SUPPORTED;
+                return false;
+            }
+
+            if (HostProcess == null)
+            {
+                Status = NTSTATUS.STATUS_NOT_SUPPORTED;
+                return false;
+            }
+
+            Process = new WinProcess
+            {
+                PID = unchecked((uint)HostProcess.Id),
+                PPID = Instance.WinHelper.PID,
+                Name = Path.GetFileName(HostImage),
+                Path = ImagePath,
+                Arch = Instance._binary.Architecture,
+                CreationTime = DateTime.UtcNow.ToFileTimeUtc(),
+                SpawnedHost = HostProcess,
+            };
+
+            Instance.TriggerEventMessage($"[GuestProcessLauncher] Launched {Process.Name} as host process {Process.PID} (depth {Depth + 1}).", LogFlags.Syscall);
+
+            Status = NTSTATUS.STATUS_SUCCESS;
+            return true;
+        }
+
+        private static string ResolveWorkingDirectory(string RequestedDirectory, string HostImage)
+        {
+            if (!string.IsNullOrWhiteSpace(RequestedDirectory))
+            {
+                string Resolved = GeneralHelper.IO.ResolveHostPath(StripNtPrefix(RequestedDirectory), BinaryFormat.PE);
+                if (!string.IsNullOrEmpty(Resolved) && Directory.Exists(Resolved))
+                    return Resolved;
+            }
+
+            return Path.GetDirectoryName(HostImage) ?? Environment.CurrentDirectory;
+        }
+
+        private static void AppendEmulatorOptions(BinaryEmulator Instance, System.Collections.ObjectModel.Collection<string> Arguments)
+        {
+            string Backend = Instance.Settings.BackendKind switch
+            {
+                EmulationBackendKind.Whp => "whp",
+                EmulationBackendKind.Kvm => "kvm",
+                _ => "unicorn",
+            };
+
+            Arguments.Add($"--backend={Backend}");
+
+            if (Utils.SilentMode)
+                Arguments.Add("--silent");
+
+            if (Instance.Settings.NoHooks)
+                Arguments.Add("--no-hooks");
+
+            ForwardHostOptions(Arguments);
+
+            Arguments.Add("-c");
+            Arguments.Add("start;exit");
+        }
+
+        private static void ForwardHostOptions(System.Collections.ObjectModel.Collection<string> Arguments)
+        {
+            string[] HostArguments = Environment.GetCommandLineArgs();
+
+            for (int i = 1; i < HostArguments.Length; i++)
+            {
+                string Argument = HostArguments[i];
+
+                if (Argument.StartsWith("--net=", StringComparison.OrdinalIgnoreCase) ||
+                    Argument.StartsWith("--net-allow=", StringComparison.OrdinalIgnoreCase) ||
+                    Argument.Equals("-q", StringComparison.OrdinalIgnoreCase) ||
+                    Argument.Equals("--quick", StringComparison.OrdinalIgnoreCase))
+                {
+                    Arguments.Add(Argument);
+                    continue;
+                }
+
+                if ((Argument.Equals("--net", StringComparison.OrdinalIgnoreCase) ||
+                     Argument.Equals("--net-allow", StringComparison.OrdinalIgnoreCase)) && i + 1 < HostArguments.Length)
+                {
+                    Arguments.Add(Argument);
+                    Arguments.Add(HostArguments[++i]);
+                }
+            }
+        }
+
+        private static int GetSpawnDepth()
+        {
+            return int.TryParse(Environment.GetEnvironmentVariable(SpawnDepthVariable), out int Depth) && Depth > 0 ? Depth : 0;
+        }
+
+        private static bool TryReserveLaunchSlot(out NTSTATUS Status)
+        {
+            int SessionProcesses = GuestSessionRegistry.CountLive();
+            if (SessionProcesses >= MaxSessionProcesses)
+            {
+                Utils.LogError($"[GuestProcessLauncher] Refusing to launch: the session already has {SessionProcesses} guest processes.");
+                Status = NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
+                return false;
+            }
+
+            Status = NTSTATUS.STATUS_SUCCESS;
+            return true;
+        }
+
+        private static bool IsAcceptableImagePath(string ImagePath)
+        {
+            string Path = StripNtPrefix(ImagePath).Replace('/', '\\');
+
+            if (Path.StartsWith("\\\\", StringComparison.Ordinal))
+                return false;
+
+            if (Path.StartsWith("\\Device\\", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return Path.Length >= 2 && Path[1] == ':' && char.IsAsciiLetter(Path[0]);
+        }
+
+        private static bool IsPortableExecutable(string HostImage)
+        {
+            try
+            {
+                using FileStream Stream = File.OpenRead(HostImage);
+                Span<byte> Header = stackalloc byte[2];
+                return Stream.Read(Header) == 2 && Header[0] == (byte)'M' && Header[1] == (byte)'Z';
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        private static string StripNtPrefix(string Path)
+        {
+            if (Path.StartsWith("\\??\\", StringComparison.Ordinal))
+                return Path.Substring(4);
+
+            if (Path.StartsWith("\\\\?\\", StringComparison.Ordinal))
+                return Path.Substring(4);
+
+            return Path;
+        }
+
+        private static string ReadUnicodeString(BinaryEmulator Instance, ulong Address, bool Is64)
+        {
+            if (Address == 0 || !Instance.IsRegionMapped(Address, Is64 ? 16UL : 8UL))
+                return null;
+
+            ushort Length = Instance._emulator.ReadMemoryUShort(Address);
+            ulong Buffer = Is64 ? Instance.ReadMemoryULong(Address + 8) : Instance.ReadMemoryUInt(Address + 4);
+            if (Length == 0 || Length > MaxStringBytes || Buffer == 0 || !Instance.IsRegionMapped(Buffer, Length))
+                return null;
+
+            return Instance._emulator.ReadMemoryString(Buffer, Length, Encoding.Unicode)?.TrimEnd('\0');
+        }
+
+        private static string Encode(string Value)
+        {
+            return "base64:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(Value));
+        }
+
+        private static string StripArgv0(string CommandLine)
+        {
+            if (string.IsNullOrWhiteSpace(CommandLine))
+                return null;
+
+            int Index = 0;
+            if (CommandLine[0] == '"')
+            {
+                Index = CommandLine.IndexOf('"', 1);
+                Index = Index < 0 ? CommandLine.Length : Index + 1;
+            }
+            else
+            {
+                while (Index < CommandLine.Length && CommandLine[Index] != ' ' && CommandLine[Index] != '\t')
+                    Index++;
+            }
+
+            return Index >= CommandLine.Length ? null : CommandLine.Substring(Index).TrimStart(' ', '\t');
+        }
+    }
+}

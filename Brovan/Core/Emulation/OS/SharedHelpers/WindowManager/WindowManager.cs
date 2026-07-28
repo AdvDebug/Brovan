@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
@@ -23,6 +24,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private static int _pendingRepaint;
         private static int _closeRequested;
+        private static int _pendingDpi;
 
         public static void RequestClose()
         {
@@ -36,12 +38,23 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         {
             Interlocked.Exchange(ref _closeRequested, 0);
             Interlocked.Exchange(ref _pendingRepaint, 0);
+            Interlocked.Exchange(ref _pendingDpi, 0);
 
             lock (InputSync)
             {
                 _head = 0;
                 _count = 0;
             }
+        }
+
+        public static void MarkDpiChanged(uint dpi)
+        {
+            Interlocked.Exchange(ref _pendingDpi, (int)dpi);
+        }
+
+        public static uint ConsumeDpiChange()
+        {
+            return (uint)Interlocked.Exchange(ref _pendingDpi, 0);
         }
 
         public static void MarkRepaint()
@@ -130,6 +143,211 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         Fullscreen
     }
 
+    public enum DpiAwareness
+    {
+        Unaware,
+        System,
+        PerMonitor
+    }
+
+    internal static class HostDisplayMetrics
+    {
+        internal const uint DefaultDpi = 96;
+
+        private const int MonitorDefaultToPrimary = 0x0001;
+        private const int MdtEffectiveDpi = 0;
+        private const int MdtRawDpi = 2;
+        private const int SmCxScreen = 0;
+        private const int SmCyScreen = 1;
+        private const int FallbackScreenWidth = 1920;
+        private const int FallbackScreenHeight = 1080;
+        private const uint MinimumDpi = 48;
+        private const uint MaximumDpi = 480;
+
+        private static readonly object Sync = new();
+        private static readonly IntPtr PerMonitorAwareV2 = new(-4);
+
+        private static uint _systemDpi;
+        private static uint _rawDpi;
+        private static int _screenWidth;
+        private static int _screenHeight;
+
+        public static bool VirtualizesUnawareWindows => OperatingSystem.IsWindows();
+
+        public static uint SystemDpi
+        {
+            get
+            {
+                Ensure();
+                return _systemDpi;
+            }
+        }
+
+        public static uint RawDpi
+        {
+            get
+            {
+                Ensure();
+                return _rawDpi;
+            }
+        }
+
+        public static int ScreenWidth
+        {
+            get
+            {
+                Ensure();
+                return _screenWidth;
+            }
+        }
+
+        public static int ScreenHeight
+        {
+            get
+            {
+                Ensure();
+                return _screenHeight;
+            }
+        }
+
+        public static void Invalidate()
+        {
+            lock (Sync)
+                _systemDpi = 0;
+        }
+
+        private static void Ensure()
+        {
+            lock (Sync)
+            {
+                if (_systemDpi != 0)
+                    return;
+
+                _systemDpi = DefaultDpi;
+                _rawDpi = DefaultDpi;
+                _screenWidth = FallbackScreenWidth;
+                _screenHeight = FallbackScreenHeight;
+
+                if (OperatingSystem.IsLinux())
+                {
+                    EnsureFromX11();
+                    return;
+                }
+
+                if (!OperatingSystem.IsWindows())
+                    return;
+
+                IntPtr previous = IntPtr.Zero;
+                try
+                {
+                    previous = NativeWinImports.SetThreadDpiAwarenessContext(PerMonitorAwareV2);
+
+                    IntPtr monitor = NativeWinImports.MonitorFromWindow(IntPtr.Zero, MonitorDefaultToPrimary);
+                    if (monitor != IntPtr.Zero)
+                    {
+                        if (NativeWinImports.GetDpiForMonitor(monitor, MdtEffectiveDpi, out uint effectiveDpi, out _) == 0 && effectiveDpi != 0)
+                            _systemDpi = effectiveDpi;
+
+                        if (NativeWinImports.GetDpiForMonitor(monitor, MdtRawDpi, out uint rawDpi, out _) == 0 && rawDpi != 0)
+                            _rawDpi = rawDpi;
+                        else
+                            _rawDpi = _systemDpi;
+                    }
+
+                    int width = NativeWinImports.GetSystemMetrics(SmCxScreen);
+                    int height = NativeWinImports.GetSystemMetrics(SmCyScreen);
+                    if (width > 0 && height > 0)
+                    {
+                        _screenWidth = width;
+                        _screenHeight = height;
+                    }
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    if (previous != IntPtr.Zero)
+                    {
+                        try
+                        {
+                            NativeWinImports.SetThreadDpiAwarenessContext(previous);
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void EnsureFromX11()
+        {
+            IntPtr display = IntPtr.Zero;
+            try
+            {
+                display = X11.XOpenDisplay(IntPtr.Zero);
+                if (display == IntPtr.Zero)
+                    return;
+
+                int screen = X11.XDefaultScreen(display);
+                int width = X11.XDisplayWidth(display, screen);
+                int height = X11.XDisplayHeight(display, screen);
+                if (width > 0 && height > 0)
+                {
+                    _screenWidth = width;
+                    _screenHeight = height;
+                }
+
+                if (TryReadXftDpi(X11.XResourceManagerString(display), out uint dpi))
+                {
+                    _systemDpi = dpi;
+                    _rawDpi = dpi;
+                }
+            }
+            catch (DllNotFoundException)
+            {
+            }
+            catch (EntryPointNotFoundException)
+            {
+            }
+            finally
+            {
+                if (display != IntPtr.Zero)
+                    X11.XCloseDisplay(display);
+            }
+        }
+
+        private static bool TryReadXftDpi(IntPtr resourceString, out uint dpi)
+        {
+            dpi = 0;
+            if (resourceString == IntPtr.Zero)
+                return false;
+
+            string resources = Marshal.PtrToStringUTF8(resourceString);
+            if (string.IsNullOrEmpty(resources))
+                return false;
+
+            foreach (string line in resources.Split('\n'))
+            {
+                int separator = line.IndexOf(':');
+                if (separator < 0 || !line.AsSpan(0, separator).TrimEnd().SequenceEqual("Xft.dpi"))
+                    continue;
+
+                if (!uint.TryParse(line.AsSpan(separator + 1).Trim(), out uint parsed))
+                    return false;
+
+                if (parsed < MinimumDpi || parsed > MaximumDpi)
+                    return false;
+
+                dpi = parsed;
+                return true;
+            }
+
+            return false;
+        }
+    }
+
     public sealed record WindowOptions
     {
         public string Title { get; init; } = string.Empty;
@@ -143,6 +361,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public bool Decorated { get; init; } = true;
         public bool Center { get; init; } = false;
         public WindowState State { get; init; } = WindowState.Normal;
+        public DpiAwareness DpiAwareness { get; init; } = DpiAwareness.Unaware;
     }
 
     public struct WindowData
