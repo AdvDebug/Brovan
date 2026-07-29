@@ -1504,7 +1504,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 set
                 {
                     EnsureAlive();
-                    _title = value ?? string.Empty;
+                    _title = string.Concat(value, " - Brovan") ?? string.Empty;
                     _manager.SetTitle(_window, _title);
                     X11.XFlush(_display);
                 }

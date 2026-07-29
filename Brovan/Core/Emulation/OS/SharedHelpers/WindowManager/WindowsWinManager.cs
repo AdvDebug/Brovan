@@ -728,7 +728,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 _manager = manager;
                 _hwnd = hwnd;
-                _title = options.Title ?? string.Empty;
+                _title = string.Concat(options.Title, " - Brovan") ?? string.Empty;
                 _width = Math.Max(options.Width, 1);
                 _height = Math.Max(options.Height, 1);
                 _visible = options.Visible;
@@ -788,7 +788,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 set
                 {
                     EnsureAlive();
-                    _title = value ?? string.Empty;
+                    _title = string.Concat(value, " - Brovan") ?? string.Empty;
                     _manager.UpdateWindowText(_hwnd, _title);
                 }
             }
