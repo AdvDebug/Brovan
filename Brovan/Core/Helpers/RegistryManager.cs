@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
@@ -774,14 +775,14 @@ namespace Brovan.Core.Helpers
         {
             Span<byte> Buf = stackalloc byte[4];
             ReadSpan(Offset, Buf);
-            return BitConverter.ToInt32(Buf);
+            return MemoryMarshal.Read<int>(Buf);
         }
 
         private short ReadI16(int Offset)
         {
             Span<byte> Buf = stackalloc byte[2];
             ReadSpan(Offset, Buf);
-            return BitConverter.ToInt16(Buf);
+            return MemoryMarshal.Read<short>(Buf);
         }
 
         private void ReadSpan(int Offset, Span<byte> Buffer)

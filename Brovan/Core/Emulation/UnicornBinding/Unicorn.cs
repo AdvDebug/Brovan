@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading.Tasks;
 using static Brovan.Core.Emulation.Native;
 using Brovan.Core.Emulation;
+using Brovan.Core.Helpers;
 using System.Buffers;
 
 namespace Brovan.Core.Emulation
@@ -682,20 +683,20 @@ namespace Brovan.Core.Emulation
                 int BytesRead;
                 if (encoding == Encoding.Unicode || encoding == Encoding.BigEndianUnicode)
                 {
-                    BytesRead = 0;
-                    for (int i = 0; i + 1 < length; i += 2)
+                    int NulIdx = SimdStringHelpers.IndexOfUtf16Nul(Buffer.AsSpan(0, length));
+                    if (NulIdx < 0)
                     {
-                        if (Buffer[i] == 0x00 && Buffer[i + 1] == 0x00)
-                            break;
-
-                        BytesRead += 2;
+                        BytesRead = length;
+                        if ((BytesRead & 1) != 0)
+                            BytesRead--;
+                    }
+                    else
+                    {
+                        BytesRead = NulIdx;
                     }
 
                     if (BytesRead == 0)
                         return string.Empty;
-
-                    if ((BytesRead & 1) != 0)
-                        BytesRead--;
                 }
                 else
                 {

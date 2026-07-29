@@ -7,6 +7,7 @@ using Brovan.Core.Helpers;
 using Brovan.Core.Emulation.Guests;
 using System.Security.Cryptography;
 using static Brovan.Core.Emulation.BinaryEmulator;
+using System.Buffers.Binary;
 
 namespace Brovan.Core.Emulation
 {
@@ -1194,6 +1195,65 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
+        /// Walks the sorted memory-region index and returns the first
+        /// <paramref name="Alignment"/>-aligned gap of at least <paramref name="Size"/>
+        /// bytes between <paramref name="MinAddress"/> and <paramref name="MaxAddress"/>.
+        /// </summary>
+        internal bool TryFindFreeBaseAddress(ulong Size, ulong Alignment, ulong MinAddress, ulong MaxAddress, out ulong Result)
+        {
+            Result = 0;
+            if (Size == 0 || Alignment == 0)
+                return false;
+
+            EnsureMemoryRegionIndex();
+
+            ulong Candidate = AlignUp(MinAddress, Alignment);
+            if (Candidate < MinAddress || Candidate >= MaxAddress)
+                return false;
+
+            int Count = MemoryRegionIndex.Count;
+            for (int i = 0; i < Count; i++)
+            {
+                MemoryRegion Region = _memory[MemoryRegionIndex[i]];
+
+                ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
+                if (RegionEnd <= Candidate)
+                    continue;
+
+                if (Region.BaseAddress <= Candidate)
+                {
+                    ulong Next = AlignUp(RegionEnd, Alignment);
+                    if (Next < RegionEnd || Next >= MaxAddress)
+                        return false;
+
+                    Candidate = Next;
+                    continue;
+                }
+
+                ulong Available = Region.BaseAddress - Candidate;
+                if (Available >= Size)
+                {
+                    Result = Candidate;
+                    return true;
+                }
+
+                ulong After = AlignUp(RegionEnd, Alignment);
+                if (After < RegionEnd || After >= MaxAddress)
+                    return false;
+
+                Candidate = After;
+            }
+
+            if (MaxAddress - Candidate >= Size)
+            {
+                Result = Candidate;
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
         /// Returns true if the entire [Address, Address+Size) range is covered by committed regions.
         /// This is used for validating reads/writes (commit semantics).
         /// </summary>
@@ -1780,14 +1840,17 @@ namespace Brovan.Core.Emulation
 
         internal ulong BuildInitialContext(ulong RIP, ulong RSP, ulong RCX = 0, ulong RDX = 0, uint Flags = 0x00100000 | 0x00000001 | 0x00000002)
         {
-            ulong ContextSize = 0x500;
+            const ulong ContextSize = 0x500;
             ulong ContextAddress = MapUniqueAddress(ContextSize, MemoryProtection.ReadWrite);
-            _emulator.WriteMemory(ContextAddress + 0x30, Flags, 4);
-            _emulator.WriteMemory(ContextAddress + 0x44, 0x202u, 4);
-            _emulator.WriteMemory(ContextAddress + 0x80, RCX, 8);
-            _emulator.WriteMemory(ContextAddress + 0x88, RDX, 8);
-            _emulator.WriteMemory(ContextAddress + 0x98, RSP, 8);
-            _emulator.WriteMemory(ContextAddress + 0xF8, RIP, 8);
+
+            Span<byte> Buf = stackalloc byte[(int)ContextSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x30, 4), Flags);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x44, 4), 0x202u);
+            BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0x80, 8), RCX);
+            BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0x88, 8), RDX);
+            BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0x98, 8), RSP);
+            BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0xF8, 8), RIP);
+            _emulator.WriteMemory(ContextAddress, Buf);
 
             return ContextAddress;
         }
@@ -1795,20 +1858,23 @@ namespace Brovan.Core.Emulation
         internal ulong BuildInitialContext32(ulong Eip, ulong Esp, ulong Eax, ulong Ebx)
         {
             const uint ContextI386ControlIntegerSegments = 0x00010000 | 0x1 | 0x2 | 0x4;
-            ulong ContextSize = 0x2CC;
+            const ulong ContextSize = 0x2CC;
             ulong ContextAddress = MapUniqueAddress(ContextSize, MemoryProtection.ReadWrite);
-            _emulator.WriteMemory(ContextAddress + 0x00, ContextI386ControlIntegerSegments, 4);
-            _emulator.WriteMemory(ContextAddress + 0x8C, ReadRegister32(Registers.UC_X86_REG_GS), 4);
-            _emulator.WriteMemory(ContextAddress + 0x90, ReadRegister32(Registers.UC_X86_REG_FS), 4);
-            _emulator.WriteMemory(ContextAddress + 0x94, ReadRegister32(Registers.UC_X86_REG_ES), 4);
-            _emulator.WriteMemory(ContextAddress + 0x98, ReadRegister32(Registers.UC_X86_REG_DS), 4);
-            _emulator.WriteMemory(ContextAddress + 0xA4, (uint)Ebx, 4);
-            _emulator.WriteMemory(ContextAddress + 0xB0, (uint)Eax, 4);
-            _emulator.WriteMemory(ContextAddress + 0xB8, (uint)Eip, 4);
-            _emulator.WriteMemory(ContextAddress + 0xBC, ReadRegister32(Registers.UC_X86_REG_CS), 4);
-            _emulator.WriteMemory(ContextAddress + 0xC0, 0x202u, 4);
-            _emulator.WriteMemory(ContextAddress + 0xC4, (uint)Esp, 4);
-            _emulator.WriteMemory(ContextAddress + 0xC8, ReadRegister32(Registers.UC_X86_REG_SS), 4);
+
+            Span<byte> Buf = stackalloc byte[(int)ContextSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x00, 4), ContextI386ControlIntegerSegments);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x8C, 4), ReadRegister32(Registers.UC_X86_REG_GS));
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x90, 4), ReadRegister32(Registers.UC_X86_REG_FS));
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x94, 4), ReadRegister32(Registers.UC_X86_REG_ES));
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x98, 4), ReadRegister32(Registers.UC_X86_REG_DS));
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xA4, 4), (uint)Ebx);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xB0, 4), (uint)Eax);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xB8, 4), (uint)Eip);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xBC, 4), ReadRegister32(Registers.UC_X86_REG_CS));
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xC0, 4), 0x202u);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xC4, 4), (uint)Esp);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xC8, 4), ReadRegister32(Registers.UC_X86_REG_SS));
+            _emulator.WriteMemory(ContextAddress, Buf);
 
             return ContextAddress;
         }
@@ -3223,8 +3289,7 @@ namespace Brovan.Core.Emulation
                         for (int i = 4; i < Arguments.Length; i++)
                         {
                             RSP -= 8;
-                            byte[] ArgBytes = BitConverter.GetBytes(Arguments[i]);
-                            _emulator.WriteMemory(RSP, ArgBytes);
+                            _emulator.WriteMemory(RSP, Arguments[i], 8);
                         }
                         RSP -= 8;
                         _emulator.WriteRegister(Registers.UC_X86_REG_RSP, RSP);
@@ -3245,8 +3310,7 @@ namespace Brovan.Core.Emulation
                         for (int i = 4; i < Arguments.Length; i++)
                         {
                             RSP -= 8;
-                            byte[] ArgBytes = BitConverter.GetBytes(Arguments[i]);
-                            _emulator.WriteMemory(RSP, ArgBytes);
+                            _emulator.WriteMemory(RSP, Arguments[i], 8);
                         }
                         _emulator.WriteRegister(Registers.UC_X86_REG_RSP, RSP);
                     }
@@ -3258,8 +3322,7 @@ namespace Brovan.Core.Emulation
                     for (int i = Arguments.Length - 1; i >= 0; i--)
                     {
                         ESP -= 4;
-                        byte[] ArgBytes = BitConverter.GetBytes((uint)Arguments[i]);
-                        _emulator.WriteMemory(ESP, ArgBytes);
+                        _emulator.WriteMemory(ESP, (uint)Arguments[i], 4);
                     }
                     ESP -= 4;
                     _emulator.WriteRegister(Registers.UC_X86_REG_ESP, ESP);
@@ -3312,8 +3375,7 @@ namespace Brovan.Core.Emulation
                         for (int i = 4; i < Arguments.Length; i++)
                         {
                             RSP -= 8;
-                            byte[] ArgBytes = BitConverter.GetBytes(Arguments[i]);
-                            _emulator.WriteMemory(RSP, ArgBytes);
+                            _emulator.WriteMemory(RSP, Arguments[i], 8);
                         }
                         RSP -= 8;
                         _emulator.WriteRegister(Registers.UC_X86_REG_RSP, RSP);
@@ -3334,8 +3396,7 @@ namespace Brovan.Core.Emulation
                         for (int i = 4; i < Arguments.Length; i++)
                         {
                             RSP -= 8;
-                            byte[] ArgBytes = BitConverter.GetBytes(Arguments[i]);
-                            _emulator.WriteMemory(RSP, ArgBytes);
+                            _emulator.WriteMemory(RSP, Arguments[i], 8);
                         }
                         _emulator.WriteRegister(Registers.UC_X86_REG_RSP, RSP);
                     }
@@ -3347,8 +3408,7 @@ namespace Brovan.Core.Emulation
                     for (int i = Arguments.Length - 1; i >= 0; i--)
                     {
                         ESP -= 4;
-                        byte[] ArgBytes = BitConverter.GetBytes((uint)Arguments[i]);
-                        _emulator.WriteMemory(ESP, ArgBytes);
+                        _emulator.WriteMemory(ESP, (uint)Arguments[i], 4);
                     }
                     ESP -= 4;
                     _emulator.WriteRegister(Registers.UC_X86_REG_ESP, ESP);

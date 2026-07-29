@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS
@@ -862,83 +863,89 @@ namespace Brovan.Core.Emulation.OS
         private static string ReadNullTerminatedString(BinaryEmulator Emulator, ulong Address, Encoding Enc)
         {
             const uint MaxReadSize = 1024;
-            uint ChunkSize = 8;
+            const int InitialChunkSize = 8;
+            const int MaxChunkSize = 64;
+
             bool Unicode = Enc.Equals(Encoding.Unicode) || Enc.Equals(Encoding.BigEndianUnicode);
             int CharSize = Unicode ? 2 : 1;
-            List<byte> Buf = new List<byte>(128);
-            ulong Cursor = Address;
-            uint TotalRead = 0;
 
-            byte[] Carry = Array.Empty<byte>();
-
-            while (TotalRead < MaxReadSize)
+            byte[] Rented = ArrayPool<byte>.Shared.Rent((int)MaxReadSize);
+            int TotalRead = 0;
+            try
             {
-                uint Remaining = MaxReadSize - TotalRead;
-                uint BytesToRead = ChunkSize > Remaining ? Remaining : ChunkSize;
+                uint ChunkSize = InitialChunkSize;
+                ulong Cursor = Address;
 
-                if (!Emulator.IsRegionMapped(Cursor, BytesToRead))
-                    break;
-
-                byte[] Chunk = Emulator.ReadMemory(Cursor, BytesToRead);
-                if (Chunk == null || Chunk.Length == 0) break;
-
-                byte[] Combined = new byte[Carry.Length + Chunk.Length];
-
-                if (Carry.Length > 0)
-                    Buffer.BlockCopy(Carry, 0, Combined, 0, Carry.Length);
-
-                Buffer.BlockCopy(Chunk, 0, Combined, Carry.Length, Chunk.Length);
-
-                int ProcessBytes = (Combined.Length / CharSize) * CharSize;
-
-                for (int I = 0; I + CharSize <= ProcessBytes; I += CharSize)
+                while (TotalRead < MaxReadSize)
                 {
+                    uint Remaining = MaxReadSize - (uint)TotalRead;
+                    uint BytesToRead = ChunkSize > Remaining ? Remaining : ChunkSize;
+
+                    if (!Emulator.IsRegionMapped(Cursor, BytesToRead))
+                        break;
+
+                    Span<byte> Tail = Rented.AsSpan(TotalRead, (int)BytesToRead);
+                    if (!Emulator.ReadMemory(Cursor, Tail))
+                        break;
+
+                    int ScanStart = Math.Max(0, TotalRead - (CharSize - 1));
+                    int ScanLen = TotalRead + (int)BytesToRead - ScanStart;
+                    ReadOnlySpan<byte> ScanSpan = Rented.AsSpan(ScanStart, ScanLen);
+
+                    int NulIdx;
                     if (Unicode)
-                    {
-                        if (Combined[I] == 0 && Combined[I + 1] == 0)
-                            goto Success;
-
-                        Buf.Add(Combined[I]);
-                        Buf.Add(Combined[I + 1]);
-                    }
+                        NulIdx = SimdStringHelpers.IndexOfUtf16Nul(ScanSpan);
                     else
+                        NulIdx = SimdStringHelpers.IndexOfZeroByte(ScanSpan);
+
+                    if (NulIdx >= 0)
                     {
-                        if (Combined[I] == 0)
-                            goto Success;
-
-                        Buf.Add(Combined[I]);
+                        int StringBytes = ScanStart + NulIdx;
+                        ReadOnlySpan<byte> StringSpan = Rented.AsSpan(0, StringBytes);
+                        return DecodeString(StringSpan, Enc, Unicode);
                     }
+
+                    TotalRead += (int)BytesToRead;
+                    Cursor += BytesToRead;
+
+                    if (BytesToRead < ChunkSize)
+                        break;
+
+                    if (ChunkSize < MaxChunkSize)
+                        ChunkSize += ChunkSize;
                 }
 
-                int Leftover = Combined.Length - ProcessBytes;
+                return null;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Rented);
+            }
+        }
 
-                if (Leftover > 0)
-                {
-                    Carry = new byte[Leftover];
-                    Buffer.BlockCopy(Combined, ProcessBytes, Carry, 0, Leftover);
-                }
-                else
-                {
-                    Carry = Array.Empty<byte>();
-                }
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static string DecodeString(ReadOnlySpan<byte> Bytes, Encoding Enc, bool Unicode)
+        {
+            if (Bytes.IsEmpty)
+                return string.Empty;
 
-                Cursor += (ulong)Chunk.Length;
+            if (Unicode)
+            {
+                string Fast = SimdStringHelpers.TryDecodeUtf16LeString(Bytes);
+                if (Fast != null)
+                    return Fast;
 
-                if (Chunk.Length < BytesToRead)
-                    break;
-
-                TotalRead += (uint)Chunk.Length;
-
-                if (ChunkSize < 64)
-                {
-                    ChunkSize += ChunkSize;
-                }
+                return Enc.GetString(Bytes);
             }
 
-            return null;
+            if (Enc.Equals(Encoding.ASCII))
+            {
+                string Fast = SimdStringHelpers.TryDecodeAsciiAsUtf16(Bytes);
+                if (Fast != null)
+                    return Fast;
+            }
 
-        Success:
-            return Enc.GetString(Buf.ToArray());
+            return Enc.GetString(Bytes);
         }
     }
 }

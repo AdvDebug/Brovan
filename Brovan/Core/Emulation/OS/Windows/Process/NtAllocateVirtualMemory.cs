@@ -88,17 +88,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             ulong AlignedSize = BinaryEmulator.AlignUp(Size, PageSize);
 
-            ulong Candidate = IsX64 ? 0x0000000100000000UL : 0x00100000UL;
-            Candidate = BinaryEmulator.AlignUp(Candidate, AllocationGranularity);
+            ulong MinAddress = IsX64 ? 0x0000000100000000UL : 0x00100000UL;
+            MinAddress = BinaryEmulator.AlignUp(MinAddress, AllocationGranularity);
 
-            // Prevent infinite loops on bad states.
-            for (int Index = 0; Index < 0x200000; Index++)
-            {
-                if (!Instance.IsRegionInUse(Candidate, AlignedSize))
-                    return Candidate;
-
-                Candidate = BinaryEmulator.AlignUp(Candidate + AllocationGranularity, AllocationGranularity);
-            }
+            if (Instance.TryFindFreeBaseAddress(AlignedSize, AllocationGranularity, MinAddress, ulong.MaxValue, out ulong Result))
+                return Result;
 
             return 0;
         }
