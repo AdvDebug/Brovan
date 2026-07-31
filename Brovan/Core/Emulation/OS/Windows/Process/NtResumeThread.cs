@@ -15,8 +15,28 @@ namespace Brovan.Core.Emulation.OS.Windows
                 TargetThread = Instance.CurrentThread;
             else
                 TargetThread = Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(ThreadHandle);
+
             if (TargetThread == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
+            {
+                // A spawned process runs its own initial thread, so there is nothing to resume, but the count a
+                // real initial thread would have had still has to come back or CreateProcess fails.
+                WinRemoteThread Remote = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRemoteThread>(ThreadHandle);
+                if (Remote == null)
+                    return NTSTATUS.STATUS_INVALID_HANDLE;
+
+                if (Remote.Process == null || Remote.Process.HasExited)
+                    return NTSTATUS.STATUS_THREAD_IS_TERMINATING;
+
+                if (PreviousSuspendCountPtr != 0)
+                {
+                    if (!Instance.IsRegionMapped(PreviousSuspendCountPtr, 4))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    Instance._emulator.WriteMemory(PreviousSuspendCountPtr, 1u);
+                }
+
+                return NTSTATUS.STATUS_SUCCESS;
+            }
 
             if (PreviousSuspendCountPtr != 0)
             {

@@ -1094,33 +1094,24 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong InstrumentationCallback;
         public ulong JobObjectHandle;
 
-        public System.Diagnostics.Process SpawnedHost;
-
-        public bool SpawnedHasExited
-        {
-            get
-            {
-                try
-                {
-                    return SpawnedHost != null && SpawnedHost.HasExited;
-                }
-                catch (InvalidOperationException)
-                {
-                    return true;
-                }
-            }
-        }
+        /// <summary>
+        /// Null for this emulator's own process and for the ones only made up to answer process enumeration.
+        /// </summary>
+        public RemoteGuestProcess Remote;
 
         public string ObjectId => PID.ToString();
         public HandleType ObjectType => HandleType.ProcessHandle;
     }
 
-    public sealed class WinSpawnedThread : IHandleObject
+    /// <summary>
+    /// A thread of a guest process running in another emulator, which is where it is scheduled and kept.
+    /// </summary>
+    public sealed class WinRemoteThread : IHandleObject
     {
-        public WinProcess Process;
+        public RemoteGuestProcess Process;
         public uint ThreadId;
 
-        public string ObjectId => $"SPAWNEDTHREAD_{ThreadId}";
+        public string ObjectId => $"REMOTETHREAD_{ThreadId}";
         public HandleType ObjectType => HandleType.ThreadHandle;
     }
 

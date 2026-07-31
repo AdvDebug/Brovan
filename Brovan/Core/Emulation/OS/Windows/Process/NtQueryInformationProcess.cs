@@ -58,11 +58,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 }
 
                                 ulong Peb = Instance.PEB;
-                                if (Process.PID != Instance.WinHelper.PID &&
-                                    GuestSessionRegistry.SendRequest(Process.PID, GuestSessionRegistry.OpcodeQueryPeb, 0, 0, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out _, out ulong RemotePeb) == NTSTATUS.STATUS_SUCCESS)
-                                {
-                                    Peb = RemotePeb;
-                                }
+                                if (Process.PID != Instance.WinHelper.PID && Process.Remote != null && Process.Remote.PebAddress != 0)
+                                    Peb = Process.Remote.PebAddress;
 
                                 if (!WriteProcessBasicInformation(Instance, OutBufferPtr, Peb, 0x8UL, Process.PID, Process.PPID))
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -362,7 +359,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case PROCESSINFOCLASS.ProcessImageInformation:
                         {
                             bool Is64Image = Instance.WinHelper.PointerSize == 8;
-                            uint StructSize = Is64Image ? 0x40u : 0x30u;
+                            uint StructSize = SECTION_IMAGE_INFORMATION.SizeOf(Is64Image);
 
                             if (OutBufferLength < StructSize)
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
@@ -375,66 +372,40 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 : Instance._binary.PE.OptionalHeader32.AddressOfEntryPoint;
 
                             ulong TransferAddress = Instance.WinHelper.WinModules[0].MappedBase + AddressOfEntryPoint;
-                            uint ZeroBits = 0;
 
-                            ulong MaximumStackSize = Instance.StackSize;
-                            ulong CommittedStackSize = Instance.StackSize;
-
-                            uint SubSystemType = Is64Image
-                                ? (uint)Instance._binary.PE.OptionalHeader64.Subsystem
-                                : (uint)Instance._binary.PE.OptionalHeader32.Subsystem;
-
-                            uint SubSystemVersion = Is64Image
-                                ? (((uint)Instance._binary.PE.OptionalHeader64.MinorSubsystemVersion << 16) | (uint)Instance._binary.PE.OptionalHeader64.MajorSubsystemVersion)
-                                : (((uint)Instance._binary.PE.OptionalHeader32.MinorSubsystemVersion << 16) | (uint)Instance._binary.PE.OptionalHeader32.MajorSubsystemVersion);
-
-                            uint GpValue = 0;
-
-                            ushort ImageCharacteristics = (ushort)Instance._binary.PE.FileHeader.Characteristics;
-                            ushort DllCharacteristics = Is64Image
-                                ? (ushort)Instance._binary.PE.OptionalHeader64.DllCharacteristics
-                                : (ushort)Instance._binary.PE.OptionalHeader32.DllCharacteristics;
-
-                            ushort Machine = (ushort)Instance._binary.PE.FileHeader.Machine;
-
-                            byte ImageContainsCode = 1;
-                            byte ImageFlags = 0;
-
-                            uint LoaderFlags = 0;
-                            uint ImageFileSize = 0;
-                            uint CheckSum = 0;
+                            SECTION_IMAGE_INFORMATION Information = new SECTION_IMAGE_INFORMATION
+                            {
+                                TransferAddress = TransferAddress,
+                                MaximumStackSize = Instance.StackSize,
+                                CommittedStackSize = Instance.StackSize,
+                                SubSystemType = Is64Image
+                                    ? Instance._binary.PE.OptionalHeader64.Subsystem
+                                    : Instance._binary.PE.OptionalHeader32.Subsystem,
+                                SubSystemMinorVersion = Is64Image
+                                    ? Instance._binary.PE.OptionalHeader64.MinorSubsystemVersion
+                                    : Instance._binary.PE.OptionalHeader32.MinorSubsystemVersion,
+                                SubSystemMajorVersion = Is64Image
+                                    ? Instance._binary.PE.OptionalHeader64.MajorSubsystemVersion
+                                    : Instance._binary.PE.OptionalHeader32.MajorSubsystemVersion,
+                                MajorOperatingSystemVersion = Is64Image
+                                    ? Instance._binary.PE.OptionalHeader64.MajorOperatingSystemVersion
+                                    : Instance._binary.PE.OptionalHeader32.MajorOperatingSystemVersion,
+                                MinorOperatingSystemVersion = Is64Image
+                                    ? Instance._binary.PE.OptionalHeader64.MinorOperatingSystemVersion
+                                    : Instance._binary.PE.OptionalHeader32.MinorOperatingSystemVersion,
+                                ImageCharacteristics = Instance._binary.PE.FileHeader.Characteristics,
+                                DllCharacteristics = Is64Image
+                                    ? Instance._binary.PE.OptionalHeader64.DllCharacteristics
+                                    : Instance._binary.PE.OptionalHeader32.DllCharacteristics,
+                                Machine = Instance._binary.PE.FileHeader.Machine,
+                                ImageContainsCode = true,
+                                CheckSum = Is64Image
+                                    ? Instance._binary.PE.OptionalHeader64.CheckSum
+                                    : Instance._binary.PE.OptionalHeader32.CheckSum,
+                            };
 
                             Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
-
-                            int Cursor;
-                            if (Is64Image)
-                            {
-                                WriteUInt64(Buffer, 0x00, TransferAddress);
-                                WriteUInt64(Buffer, 0x08, ZeroBits);
-                                WriteUInt64(Buffer, 0x10, MaximumStackSize);
-                                WriteUInt64(Buffer, 0x18, CommittedStackSize);
-                                Cursor = 0x20;
-                            }
-                            else
-                            {
-                                WriteUInt32(Buffer, 0x00, (uint)TransferAddress);
-                                WriteUInt32(Buffer, 0x04, ZeroBits);
-                                WriteUInt32(Buffer, 0x08, (uint)MaximumStackSize);
-                                WriteUInt32(Buffer, 0x0C, (uint)CommittedStackSize);
-                                Cursor = 0x10;
-                            }
-
-                            WriteUInt32(Buffer, Cursor + 0x00, SubSystemType);
-                            WriteUInt32(Buffer, Cursor + 0x04, SubSystemVersion);
-                            WriteUInt32(Buffer, Cursor + 0x08, GpValue);
-                            WriteUInt16(Buffer, Cursor + 0x0C, ImageCharacteristics);
-                            WriteUInt16(Buffer, Cursor + 0x0E, DllCharacteristics);
-                            WriteUInt16(Buffer, Cursor + 0x10, Machine);
-                            Buffer[Cursor + 0x12] = ImageContainsCode;
-                            Buffer[Cursor + 0x13] = ImageFlags;
-                            WriteUInt32(Buffer, Cursor + 0x14, LoaderFlags);
-                            WriteUInt32(Buffer, Cursor + 0x18, ImageFileSize);
-                            WriteUInt32(Buffer, Cursor + 0x1C, CheckSum);
+                            Information.WriteTo(Buffer, Is64Image);
 
                             if (!Instance.WriteMemory(OutBufferPtr, Buffer))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

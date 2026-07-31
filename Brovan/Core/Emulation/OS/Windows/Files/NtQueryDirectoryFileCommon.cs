@@ -1,8 +1,5 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
+using System.IO.Enumeration;
 using System.Text;
-using System.Text.RegularExpressions;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -305,8 +302,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(Mask) || Mask == "*" || Mask == "*.*")
                 return true;
 
-            string Pattern = "^" + Regex.Escape(Mask).Replace("\\*", ".*").Replace("\\?", ".") + "$";
-            return Regex.IsMatch(Name, Pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            return FileSystemName.MatchesSimpleExpression(Mask.AsSpan(), Name.AsSpan(), ignoreCase: true);
         }
 
         private static string ReadUnicodeString64(BinaryEmulator Instance, ulong UnicodeString)

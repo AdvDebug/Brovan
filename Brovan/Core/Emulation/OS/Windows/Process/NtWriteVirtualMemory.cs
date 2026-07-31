@@ -15,8 +15,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (BaseAddress == 0 || Buffer == 0 || NumberOfBytesToWrite == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (NumberOfBytesToWrite > GuestSessionRegistry.MaxPayloadBytes)
-                NumberOfBytesToWrite = GuestSessionRegistry.MaxPayloadBytes;
+            if (NumberOfBytesToWrite > GuestSessionMailbox.MaxPayloadBytes)
+                NumberOfBytesToWrite = GuestSessionMailbox.MaxPayloadBytes;
 
             if (!Instance.IsRegionMapped(Buffer, NumberOfBytesToWrite))
                 return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
@@ -36,16 +36,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Process.PID != Instance.WinHelper.PID)
                 {
-                    NTSTATUS RemoteStatus = GuestSessionRegistry.SendRequest(
-                        Process.PID,
-                        GuestSessionRegistry.OpcodeWriteMemory,
-                        BaseAddress,
-                        0,
-                        Payload,
-                        Span<byte>.Empty,
-                        out _,
-                        out ulong Written);
+                    if (Process.Remote == null)
+                        return NTSTATUS.STATUS_INVALID_CID;
 
+                    NTSTATUS RemoteStatus = Process.Remote.WriteMemory(BaseAddress, Payload, out ulong Written);
                     if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
                         return RemoteStatus;
 

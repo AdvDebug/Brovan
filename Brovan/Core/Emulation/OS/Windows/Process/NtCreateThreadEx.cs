@@ -83,23 +83,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Target.PID != Instance.WinHelper.PID)
                 {
-                    NTSTATUS RemoteStatus = GuestSessionRegistry.SendRequest(
-                        Target.PID,
-                        GuestSessionRegistry.OpcodeCreateThread,
-                        StartRoutine,
-                        Argument,
-                        ReadOnlySpan<byte>.Empty,
-                        Span<byte>.Empty,
-                        out _,
-                        out ulong RemoteThreadId);
+                    if (Target.Remote == null)
+                        return NTSTATUS.STATUS_INVALID_CID;
 
+                    NTSTATUS RemoteStatus = Target.Remote.CreateThread(StartRoutine, Argument, out uint RemoteThreadId);
                     if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
                         return RemoteStatus;
 
-                    WinSpawnedThread Remote = new WinSpawnedThread
+                    WinRemoteThread Remote = new WinRemoteThread
                     {
-                        Process = Target,
-                        ThreadId = (uint)RemoteThreadId,
+                        Process = Target.Remote,
+                        ThreadId = RemoteThreadId,
                     };
 
                     WinHandle RemoteHandle = Instance.WinHelper.HandleManager.AddHandle(Remote, (AccessMask)(uint)DesiredAccess);

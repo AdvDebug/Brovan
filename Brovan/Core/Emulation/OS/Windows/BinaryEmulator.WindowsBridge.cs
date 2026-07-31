@@ -140,10 +140,10 @@ namespace Brovan.Core.Emulation
                 return Thread.State == EmulatedThreadState.Terminated;
 
             if (Obj is WinProcess Process)
-                return Process.SpawnedHasExited;
+                return Process.Remote != null && Process.Remote.HasExited;
 
-            if (Obj is WinSpawnedThread SpawnedThread)
-                return SpawnedThread.Process == null || SpawnedThread.Process.SpawnedHasExited;
+            if (Obj is WinRemoteThread RemoteThread)
+                return RemoteThread.Process == null || RemoteThread.Process.HasExited;
 
             if (Obj is WinTimer Timer)
             {

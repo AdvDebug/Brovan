@@ -81,6 +81,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                         goto current_process; // jump to the current process handling
                     }
 
+                    if (Process.Remote == null)
+                        return NTSTATUS.STATUS_INVALID_CID;
+
                     ulong RemoteAddress = BaseAddressPtr;
                     ulong LocalBuffer = BufferPtr;
                     ulong BytesReadPtr = Instance.WinHelper.GetArg(4);
@@ -88,23 +91,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (RemoteAddress == 0 || LocalBuffer == 0 || NumberOfBytesToRead == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                    if (NumberOfBytesToRead > GuestSessionRegistry.MaxPayloadBytes)
-                        NumberOfBytesToRead = GuestSessionRegistry.MaxPayloadBytes;
+                    if (NumberOfBytesToRead > GuestSessionMailbox.MaxPayloadBytes)
+                        NumberOfBytesToRead = GuestSessionMailbox.MaxPayloadBytes;
 
                     if (!Instance.IsRegionMapped(LocalBuffer, NumberOfBytesToRead))
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
                     byte[] Remote = new byte[NumberOfBytesToRead];
-                    NTSTATUS RemoteStatus = GuestSessionRegistry.SendRequest(
-                        Process.PID,
-                        GuestSessionRegistry.OpcodeReadMemory,
-                        RemoteAddress,
-                        0,
-                        ReadOnlySpan<byte>.Empty,
-                        Remote,
-                        out int RemoteLength,
-                        out _);
-
+                    NTSTATUS RemoteStatus = Process.Remote.ReadMemory(RemoteAddress, Remote, out int RemoteLength);
                     if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
                         return RemoteStatus;
 

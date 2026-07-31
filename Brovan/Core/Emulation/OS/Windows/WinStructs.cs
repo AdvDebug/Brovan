@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -190,6 +191,62 @@ namespace Brovan.Core.Emulation.OS.Windows
     public struct KEY_NAME_INFORMATION
     {
         public uint NameLength;
+    }
+
+    public struct SECTION_IMAGE_INFORMATION
+    {
+        public ulong TransferAddress;
+        public ulong MaximumStackSize;
+        public ulong CommittedStackSize;
+        public uint SubSystemType;
+        public ushort SubSystemMinorVersion;
+        public ushort SubSystemMajorVersion;
+        public ushort MajorOperatingSystemVersion;
+        public ushort MinorOperatingSystemVersion;
+        public ushort ImageCharacteristics;
+        public ushort DllCharacteristics;
+        public ushort Machine;
+        public bool ImageContainsCode;
+        public uint LoaderFlags;
+        public uint ImageFileSize;
+        public uint CheckSum;
+
+        public static uint SizeOf(bool Is64) => Is64 ? 0x40u : 0x30u;
+
+        public readonly void WriteTo(Span<byte> Buffer, bool Is64)
+        {
+            int Cursor;
+            if (Is64)
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), TransferAddress);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), 0);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x10, 8), MaximumStackSize);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x18, 8), CommittedStackSize);
+                Cursor = 0x20;
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), (uint)TransferAddress);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), 0);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x08, 4), (uint)MaximumStackSize);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x0C, 4), (uint)CommittedStackSize);
+                Cursor = 0x10;
+            }
+
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(Cursor + 0x00, 4), SubSystemType);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(Cursor + 0x04, 2), SubSystemMinorVersion);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(Cursor + 0x06, 2), SubSystemMajorVersion);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(Cursor + 0x08, 2), MajorOperatingSystemVersion);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(Cursor + 0x0A, 2), MinorOperatingSystemVersion);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(Cursor + 0x0C, 2), ImageCharacteristics);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(Cursor + 0x0E, 2), DllCharacteristics);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(Cursor + 0x10, 2), Machine);
+            Buffer[Cursor + 0x12] = ImageContainsCode ? (byte)1 : (byte)0;
+            Buffer[Cursor + 0x13] = 0;
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(Cursor + 0x14, 4), LoaderFlags);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(Cursor + 0x18, 4), ImageFileSize);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(Cursor + 0x1C, 4), CheckSum);
+        }
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)]

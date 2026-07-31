@@ -1,4 +1,7 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -24,9 +27,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const int MaxStringBytes = 0x8000;
 
-        internal static bool TryLaunch(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, out WinProcess Process, out NTSTATUS Status)
+        private const int StartupTimeoutMilliseconds = 60000;
+        private const int StartupPollMilliseconds = 10;
+
+        private const int HeaderBytes = 0x400;
+        private const ushort DosSignature = 0x5A4D;
+        private const uint NtSignature = 0x00004550;
+        private const ushort OptionalHeaderMagic32 = 0x10B;
+        private const ushort OptionalHeaderMagic64 = 0x20B;
+
+        internal static bool TryLaunch(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
         {
             Process = null;
+            ImageInformation = default;
 
             bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
             string ImagePath = ReadUnicodeString(Instance, ProcessParameters + (Is64 ? ParamsImagePathName64 : ParamsImagePathName32), Is64);
@@ -56,7 +69,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            if (!IsPortableExecutable(HostImage))
+            if (!TryReadImageInformation(HostImage, out ImageInformation))
             {
                 Utils.LogError($"[GuestProcessLauncher] Refusing to launch {HostImage}: not a PE image.");
                 Status = NTSTATUS.STATUS_INVALID_IMAGE_FORMAT;
@@ -113,7 +126,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             StartInfo.ArgumentList.Add(HostImage);
             StartInfo.Environment[SpawnDepthVariable] = (Depth + 1).ToString();
-            StartInfo.Environment["BROVAN_SESSION_ID"] = GuestSessionRegistry.SessionId;
+            StartInfo.Environment["BROVAN_SESSION_ID"] = GuestSession.SessionId;
 
             Process HostProcess;
             try
@@ -133,21 +146,68 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
+            uint ProcessId = unchecked((uint)HostProcess.Id);
+
+            if (!WaitForStartup(HostProcess, ProcessId, out ulong PebAddress, out ulong StartupParameters))
+            {
+                Utils.LogError($"[GuestProcessLauncher] {Path.GetFileName(HostImage)} (host process {ProcessId}) never reached guest startup.");
+                Terminate(HostProcess);
+                Status = NTSTATUS.STATUS_TIMEOUT;
+                return false;
+            }
+
             Process = new WinProcess
             {
-                PID = unchecked((uint)HostProcess.Id),
+                PID = ProcessId,
                 PPID = Instance.WinHelper.PID,
                 Name = Path.GetFileName(HostImage),
                 Path = ImagePath,
                 Arch = Instance._binary.Architecture,
                 CreationTime = DateTime.UtcNow.ToFileTimeUtc(),
-                SpawnedHost = HostProcess,
+                Remote = RemoteGuestProcess.Adopt(HostProcess, PebAddress, StartupParameters),
             };
 
             Instance.TriggerEventMessage($"[GuestProcessLauncher] Launched {Process.Name} as host process {Process.PID} (depth {Depth + 1}).", LogFlags.Syscall);
 
             Status = NTSTATUS.STATUS_SUCCESS;
             return true;
+        }
+
+        /// <summary>
+        /// The child only owns a PEB and answers cross-process requests once its emulator booted, and the creating
+        /// kernel32 uses both as soon as this returns. Windows hands back an address space that already exists.
+        /// </summary>
+        private static bool WaitForStartup(Process HostProcess, uint ProcessId, out ulong PebAddress, out ulong StartupParameters)
+        {
+            long Deadline = Environment.TickCount64 + StartupTimeoutMilliseconds;
+
+            while (true)
+            {
+                if (GuestSession.TryReadStartup(ProcessId, out PebAddress, out StartupParameters))
+                    return PebAddress != 0;
+
+                if (HostProcess.HasExited || Environment.TickCount64 >= Deadline)
+                {
+                    PebAddress = 0;
+                    StartupParameters = 0;
+                    return false;
+                }
+
+                Thread.Sleep(StartupPollMilliseconds);
+            }
+        }
+
+        private static void Terminate(Process HostProcess)
+        {
+            try
+            {
+                if (!HostProcess.HasExited)
+                    HostProcess.Kill();
+            }
+            catch (Exception Ex)
+            {
+                Utils.LogError($"[GuestProcessLauncher] Failed to stop host process {HostProcess.Id}: {Ex.Message}");
+            }
         }
 
         private static string ResolveWorkingDirectory(string RequestedDirectory, string HostImage)
@@ -218,7 +278,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool TryReserveLaunchSlot(out NTSTATUS Status)
         {
-            int SessionProcesses = GuestSessionRegistry.CountLive();
+            int SessionProcesses = GuestSession.CountLive();
             if (SessionProcesses >= MaxSessionProcesses)
             {
                 Utils.LogError($"[GuestProcessLauncher] Refusing to launch: the session already has {SessionProcesses} guest processes.");
@@ -243,13 +303,84 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Path.Length >= 2 && Path[1] == ':' && char.IsAsciiLetter(Path[0]);
         }
 
-        private static bool IsPortableExecutable(string HostImage)
+        private static bool TryReadImageInformation(string HostImage, out SECTION_IMAGE_INFORMATION Information)
         {
+            Information = default;
+
             try
             {
                 using FileStream Stream = File.OpenRead(HostImage);
-                Span<byte> Header = stackalloc byte[2];
-                return Stream.Read(Header) == 2 && Header[0] == (byte)'M' && Header[1] == (byte)'Z';
+
+                Span<byte> Headers = stackalloc byte[HeaderBytes];
+                int Available = Stream.ReadAtLeast(Headers, HeaderBytes, false);
+                long FileSize = Stream.Length;
+
+                if (Available < Unsafe.SizeOf<IMAGE_DOS_HEADER>())
+                    return false;
+
+                IMAGE_DOS_HEADER DosHeader = MemoryMarshal.Read<IMAGE_DOS_HEADER>(Headers);
+                if (DosHeader.e_magic != DosSignature || DosHeader.e_lfanew < 0)
+                    return false;
+
+                int FileHeaderOffset = DosHeader.e_lfanew + 4;
+                int OptionalHeaderOffset = FileHeaderOffset + Unsafe.SizeOf<IMAGE_FILE_HEADER>();
+                if (OptionalHeaderOffset + 2 > Available)
+                    return false;
+
+                if (BinaryPrimitives.ReadUInt32LittleEndian(Headers.Slice(DosHeader.e_lfanew, 4)) != NtSignature)
+                    return false;
+
+                IMAGE_FILE_HEADER FileHeader = MemoryMarshal.Read<IMAGE_FILE_HEADER>(Headers.Slice(FileHeaderOffset));
+                ushort Magic = BinaryPrimitives.ReadUInt16LittleEndian(Headers.Slice(OptionalHeaderOffset, 2));
+
+                if (Magic == OptionalHeaderMagic64)
+                {
+                    if (OptionalHeaderOffset + Unsafe.SizeOf<IMAGE_OPTIONAL_HEADER64>() > Available)
+                        return false;
+
+                    IMAGE_OPTIONAL_HEADER64 Optional = MemoryMarshal.Read<IMAGE_OPTIONAL_HEADER64>(Headers.Slice(OptionalHeaderOffset));
+
+                    Information.TransferAddress = Optional.ImageBase + Optional.AddressOfEntryPoint;
+                    Information.MaximumStackSize = Optional.SizeOfStackReserve;
+                    Information.CommittedStackSize = Optional.SizeOfStackCommit;
+                    Information.SubSystemType = Optional.Subsystem;
+                    Information.SubSystemMinorVersion = Optional.MinorSubsystemVersion;
+                    Information.SubSystemMajorVersion = Optional.MajorSubsystemVersion;
+                    Information.MajorOperatingSystemVersion = Optional.MajorOperatingSystemVersion;
+                    Information.MinorOperatingSystemVersion = Optional.MinorOperatingSystemVersion;
+                    Information.DllCharacteristics = Optional.DllCharacteristics;
+                    Information.LoaderFlags = Optional.LoaderFlags;
+                    Information.CheckSum = Optional.CheckSum;
+                }
+                else if (Magic == OptionalHeaderMagic32)
+                {
+                    if (OptionalHeaderOffset + Unsafe.SizeOf<IMAGE_OPTIONAL_HEADER32>() > Available)
+                        return false;
+
+                    IMAGE_OPTIONAL_HEADER32 Optional = MemoryMarshal.Read<IMAGE_OPTIONAL_HEADER32>(Headers.Slice(OptionalHeaderOffset));
+
+                    Information.TransferAddress = (ulong)Optional.ImageBase + Optional.AddressOfEntryPoint;
+                    Information.MaximumStackSize = Optional.SizeOfStackReserve;
+                    Information.CommittedStackSize = Optional.SizeOfStackCommit;
+                    Information.SubSystemType = Optional.Subsystem;
+                    Information.SubSystemMinorVersion = Optional.MinorSubsystemVersion;
+                    Information.SubSystemMajorVersion = Optional.MajorSubsystemVersion;
+                    Information.MajorOperatingSystemVersion = Optional.MajorOperatingSystemVersion;
+                    Information.MinorOperatingSystemVersion = Optional.MinorOperatingSystemVersion;
+                    Information.DllCharacteristics = Optional.DllCharacteristics;
+                    Information.LoaderFlags = Optional.LoaderFlags;
+                    Information.CheckSum = Optional.CheckSum;
+                }
+                else
+                {
+                    return false;
+                }
+
+                Information.ImageCharacteristics = FileHeader.Characteristics;
+                Information.Machine = FileHeader.Machine;
+                Information.ImageContainsCode = true;
+                Information.ImageFileSize = (uint)Math.Min(FileSize, uint.MaxValue);
+                return true;
             }
             catch (IOException)
             {

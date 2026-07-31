@@ -1167,7 +1167,7 @@ namespace Brovan.Core.Emulation.Guests
             if (string.IsNullOrEmpty(ImageName))
                 ImageName = Path.GetFileName(Instance._binary?.Location ?? string.Empty);
 
-            GuestSessionRegistry.Join(
+            GuestSession.Join(
                 Instance.WinHelper.PID,
                 (uint)Instance._binary.Architecture,
                 ImageName,
@@ -1362,6 +1362,8 @@ namespace Brovan.Core.Emulation.Guests
                 InstallSyntheticLdrData(Instance);
             WinHelper.LdrTracker = new PebLdrTracker(Instance, WinHelper);
             WinHelper.LdrTracker.Install();
+
+            GuestSession.PublishStartup(PEB, ProcessParams);
         }
 
         private ulong BuildProcessParameters32(BinaryEmulator Instance, WinModule MainModule)

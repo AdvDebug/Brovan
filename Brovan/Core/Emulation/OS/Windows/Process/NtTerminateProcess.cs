@@ -70,22 +70,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_SUCCESS;
                     }
 
-                    if (GuestSessionRegistry.RequestTerminate(Process.PID, (uint)ExitCode))
-                        return NTSTATUS.STATUS_SUCCESS;
-
-                    if (Process.SpawnedHost != null && !Process.SpawnedHasExited)
-                    {
-                        try
-                        {
-                            Process.SpawnedHost.Kill();
-                            return NTSTATUS.STATUS_SUCCESS;
-                        }
-                        catch (Exception Ex)
-                        {
-                            Utils.LogError($"[NtTerminateProcess] Failed to stop host process {Process.PID}: {Ex.Message}");
-                            return NTSTATUS.STATUS_ACCESS_DENIED;
-                        }
-                    }
+                    if (Process.Remote != null)
+                        return Process.Remote.Terminate((uint)ExitCode);
                 }
             }
             return Instance.WinUnimplemented;

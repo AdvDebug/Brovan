@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -5,14 +6,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtCreateUserProcess : IWinSyscall
     {
-        private const uint PsCreateSuccess = 4;
+        private const uint PsCreateSuccess = 6;
 
         private const ulong PsAttributeClientId = 3 | 0x10000;
         private const ulong PsAttributeImageName = 5 | 0x20000;
+        private const ulong PsAttributeImageInfo = 6;
 
-        private const int CreateInfoStateOffset = 0x08;
-        private const int CreateInfoSuccessFileHandleOffset = 0x18;
-        private const int CreateInfoSuccessSectionHandleOffset = 0x20;
         private const int MaxAttributes = 32;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -31,12 +30,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             string ImageNameHint = ReadImageNameAttribute(Instance, AttributeList, Is64);
 
-            if (!GuestProcessLauncher.TryLaunch(Instance, ProcessParameters, ImageNameHint, out WinProcess Process, out NTSTATUS Status))
+            if (!GuestProcessLauncher.TryLaunch(Instance, ProcessParameters, ImageNameHint, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status))
                 return Status;
 
-            WinSpawnedThread Thread = new WinSpawnedThread
+            WinRemoteThread Thread = new WinRemoteThread
             {
-                Process = Process,
+                Process = Process.Remote,
                 ThreadId = Process.PID,
             };
 
@@ -51,24 +50,54 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ThreadHandlePtr != 0 && Instance.IsRegionMapped(ThreadHandlePtr, (ulong)PointerSize))
                 Instance._emulator.WriteMemory(ThreadHandlePtr, ThreadHandle, (uint)PointerSize);
 
-            WriteCreateInfoSuccess(Instance, CreateInfo, Is64);
+            WriteCreateInfoSuccess(Instance, CreateInfo, Is64, Process.Remote.PebAddress, Process.Remote.ProcessParameters);
             WriteClientIdAttribute(Instance, AttributeList, Is64, Process.PID, Thread.ThreadId);
+            WriteImageInformationAttribute(Instance, AttributeList, Is64, ImageInformation);
 
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static void WriteCreateInfoSuccess(BinaryEmulator Instance, ulong CreateInfo, bool Is64)
+        private static void WriteCreateInfoSuccess(BinaryEmulator Instance, ulong CreateInfo, bool Is64, ulong PebAddress, ulong ProcessParameters)
         {
-            if (CreateInfo == 0 || !Instance.IsRegionMapped(CreateInfo, 0x58))
+            uint StructSize = Is64 ? 0x58u : 0x48u;
+            uint StateOffset = Is64 ? 0x08u : 0x04u;
+            int ParametersOffset = (Is64 ? 0x28 : 0x18) - (int)StateOffset;
+            int ParametersWow64Offset = (Is64 ? 0x30 : 0x20) - (int)StateOffset;
+            int PebOffset = (Is64 ? 0x38 : 0x28) - (int)StateOffset;
+            int PebWow64Offset = (Is64 ? 0x40 : 0x30) - (int)StateOffset;
+
+            if (CreateInfo == 0 || !Instance.IsRegionMapped(CreateInfo, StructSize))
                 return;
 
-            Instance._emulator.WriteMemory(CreateInfo + CreateInfoStateOffset, PsCreateSuccess, 4);
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(StructSize - StateOffset);
+            Buffer.Clear();
+
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer, PsCreateSuccess);
+            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(ParametersOffset, 8), ProcessParameters);
+            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(PebOffset, 8), PebAddress);
 
             if (!Is64)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(ParametersWow64Offset, 4), (uint)ProcessParameters);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(PebWow64Offset, 4), (uint)PebAddress);
+            }
+
+            Instance.WriteMemory(CreateInfo + StateOffset, Buffer);
+        }
+
+        private static void WriteImageInformationAttribute(BinaryEmulator Instance, ulong AttributeList, bool Is64, SECTION_IMAGE_INFORMATION ImageInformation)
+        {
+            if (!TryFindAttribute(Instance, AttributeList, Is64, PsAttributeImageInfo, out ulong ValuePointer, out ulong Size))
                 return;
 
-            Instance._emulator.WriteMemory(CreateInfo + CreateInfoSuccessFileHandleOffset, 0UL, 8);
-            Instance._emulator.WriteMemory(CreateInfo + CreateInfoSuccessSectionHandleOffset, 0UL, 8);
+            uint StructSize = SECTION_IMAGE_INFORMATION.SizeOf(Is64);
+            if (ValuePointer == 0 || Size < StructSize || !Instance.IsRegionMapped(ValuePointer, StructSize))
+                return;
+
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(StructSize);
+            ImageInformation.WriteTo(Buffer, Is64);
+
+            Instance.WriteMemory(ValuePointer, Buffer);
         }
 
         private static void WriteClientIdAttribute(BinaryEmulator Instance, ulong AttributeList, bool Is64, uint ProcessId, uint ThreadId)
