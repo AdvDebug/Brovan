@@ -1063,10 +1063,12 @@ namespace Brovan.Core.Emulation
             while (remaining > 0)
             {
                 ulong pageBase = current & ~KvmConstants.PageMask;
-                if (!TryLookupPage(pageBase, out _))
+                if (!TryLookupPage(pageBase, out MappedPage page))
                     return false;
-                ulong pageEnd = pageBase + KvmConstants.PageSize;
-                ulong chunk = pageEnd - current;
+                ulong runEnd = TryGetIntactBackingEnd(page, pageBase, out ulong backingEnd)
+                    ? backingEnd
+                    : pageBase + KvmConstants.PageSize;
+                ulong chunk = runEnd - current;
                 if (chunk > remaining) chunk = remaining;
                 current += chunk;
                 remaining -= chunk;
@@ -2672,6 +2674,13 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
+            if (TryGetIntactBackingEnd(page, pageBase, out ulong backingEnd) && accessEnd <= backingEnd)
+            {
+                ptr = (byte*)page.HostPage;
+                offset = (long)(address - pageBase);
+                return true;
+            }
+
             ulong cursor = pageBase + KvmConstants.PageSize;
             while (cursor < accessEnd)
             {
@@ -2685,6 +2694,20 @@ namespace Brovan.Core.Emulation
 
             ptr = (byte*)page.HostPage;
             offset = (long)(address - pageBase);
+            return true;
+        }
+
+        private bool TryGetIntactBackingEnd(MappedPage page, ulong pageBase, out ulong backingEnd)
+        {
+            backingEnd = 0;
+            if (page.OwnedBacking == IntPtr.Zero) return false;
+            if (!_backingAllocations.TryGetValue(page.OwnedBacking, out BackingAllocation allocation)) return false;
+            if (allocation.LivePages != (int)(allocation.Size / KvmConstants.PageSize)) return false;
+
+            ulong hostOffset = (ulong)(page.HostPage.ToInt64() - page.OwnedBacking.ToInt64());
+            if (hostOffset > pageBase || hostOffset >= allocation.Size) return false;
+
+            backingEnd = pageBase - hostOffset + allocation.Size;
             return true;
         }
 

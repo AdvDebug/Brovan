@@ -70,6 +70,9 @@ namespace Brovan.Core.Emulation
         private WhpRegisters _regsCache;
         private bool _regsValid;
         private bool _regsDirty;
+        private readonly WhvRegisterValue[] _xmmCache = new WhvRegisterValue[XmmRegisterCount];
+        private bool _xmmValid;
+        private bool _xmmDirty;
         private WhvRegisterValue _pendingCs;
         private WhvRegisterValue _pendingSs;
         private bool _segmentsDirty;
@@ -1147,10 +1150,12 @@ namespace Brovan.Core.Emulation
             while (remaining > 0)
             {
                 ulong pageBase = current & ~WhpConstants.PageMask;
-                if (!TryLookupPage(pageBase, out _))
+                if (!TryLookupPage(pageBase, out MappedPage page))
                     return false;
-                ulong pageEnd = pageBase + WhpConstants.PageSize;
-                ulong chunk = pageEnd - current;
+                ulong runEnd = TryGetIntactBackingEnd(page, pageBase, out ulong backingEnd)
+                    ? backingEnd
+                    : pageBase + WhpConstants.PageSize;
+                ulong chunk = runEnd - current;
                 if (chunk > remaining) chunk = remaining;
                 current += chunk;
                 remaining -= chunk;
@@ -2311,6 +2316,17 @@ namespace Brovan.Core.Emulation
             return Names;
         }
 
+        private static readonly uint[] GpXmmRegNames = ConcatRegNames(GpRegNames, XmmRegNames);
+        private static readonly uint[] GpSegXmmRegNames = ConcatRegNames(GpRegNamesWithSegments, XmmRegNames);
+
+        private static uint[] ConcatRegNames(uint[] head, uint[] tail)
+        {
+            uint[] Names = new uint[head.Length + tail.Length];
+            Array.Copy(head, Names, head.Length);
+            Array.Copy(tail, 0, Names, head.Length, tail.Length);
+            return Names;
+        }
+
         /// <summary>
         /// Transfers XMM0-15 as 32 qwords, low half of each register first.
         /// </summary>
@@ -2319,42 +2335,67 @@ namespace Brovan.Core.Emulation
             if (Values == null || Values.Length < XmmRegisterCount * 2)
                 return false;
 
-            Span<WhvRegisterValue> Regs = stackalloc WhvRegisterValue[XmmRegisterCount];
-
             if (Write)
             {
                 for (int i = 0; i < XmmRegisterCount; i++)
                 {
-                    Regs[i].Low = Values[i * 2];
-                    Regs[i].High = Values[i * 2 + 1];
+                    _xmmCache[i].Low = Values[i * 2];
+                    _xmmCache[i].High = Values[i * 2 + 1];
                 }
+
+                _xmmValid = true;
+                _xmmDirty = true;
+                return true;
             }
 
-            lock (_vcpuLock)
-            {
-                fixed (uint* Names = XmmRegNames)
-                fixed (WhvRegisterValue* Vals = Regs)
-                {
-                    int Hr = Write
-                        ? WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, Names, XmmRegisterCount, Vals)
-                        : WhpNative.WHvGetVirtualProcessorRegisters(_partition, VpIndex, Names, XmmRegisterCount, Vals);
-                    if (WhpNative.Failed(Hr))
-                        return false;
-                }
-            }
+            if (!_xmmValid && !LoadXmmRegisters())
+                return false;
 
-            if (!Write)
+            for (int i = 0; i < XmmRegisterCount; i++)
             {
-                for (int i = 0; i < XmmRegisterCount; i++)
-                {
-                    Values[i * 2] = Regs[i].Low;
-                    Values[i * 2 + 1] = Regs[i].High;
-                }
+                Values[i * 2] = _xmmCache[i].Low;
+                Values[i * 2 + 1] = _xmmCache[i].High;
             }
 
             return true;
         }
 
+        private unsafe bool LoadXmmRegisters()
+        {
+            lock (_vcpuLock)
+            {
+                fixed (uint* Names = XmmRegNames)
+                fixed (WhvRegisterValue* Vals = _xmmCache)
+                {
+                    int Hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, VpIndex, Names, XmmRegisterCount, Vals);
+                    if (WhpNative.Failed(Hr))
+                        return false;
+                }
+            }
+
+            _xmmValid = true;
+            return true;
+        }
+
+        private unsafe void StoreXmmRegisters()
+        {
+            lock (_vcpuLock)
+            {
+                fixed (uint* Names = XmmRegNames)
+                fixed (WhvRegisterValue* Vals = _xmmCache)
+                {
+                    int Hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, Names, XmmRegisterCount, Vals);
+                    if (WhpNative.Failed(Hr))
+                        throw new WhpException("WHvSetVirtualProcessorRegisters(XMM) failed", Hr);
+                }
+            }
+
+            _xmmDirty = false;
+        }
+
+        // XMM is deliberately not folded into this call. Reading XMM makes WHP extract the full FP
+        // state, which costs far more than the call it would save: a GP load runs on every VM exit,
+        // an XMM read only on a context switch. Merging the two here measured 1.7s -> 16.8s.
         private unsafe void LoadRegisters()
         {
             Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpRegNames.Length];
@@ -2393,8 +2434,11 @@ namespace Brovan.Core.Emulation
         private unsafe void StoreRegisters()
         {
             bool withSegments = _segmentsDirty;
-            uint[] names = withSegments ? GpRegNamesWithSegments : GpRegNames;
-            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpRegNamesWithSegments.Length];
+            bool withXmm = _xmmDirty;
+            uint[] names = withSegments
+                ? (withXmm ? GpSegXmmRegNames : GpRegNamesWithSegments)
+                : (withXmm ? GpXmmRegNames : GpRegNames);
+            Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpSegXmmRegNames.Length];
             values[0] = WhvRegisterValue.FromReg64(_regsCache.Rax);
             values[1] = WhvRegisterValue.FromReg64(_regsCache.Rbx);
             values[2] = WhvRegisterValue.FromReg64(_regsCache.Rcx);
@@ -2421,6 +2465,14 @@ namespace Brovan.Core.Emulation
                 _segmentsDirty = false;
             }
 
+            if (withXmm)
+            {
+                int xmmBase = withSegments ? GpRegNamesWithSegments.Length : GpRegNames.Length;
+                for (int i = 0; i < XmmRegisterCount; i++)
+                    values[xmmBase + i] = _xmmCache[i];
+                _xmmDirty = false;
+            }
+
             lock (_vcpuLock)
             {
                 fixed (uint* n = names)
@@ -2440,10 +2492,20 @@ namespace Brovan.Core.Emulation
             {
                 _regsDirty = false;
                 StoreRegisters();
+                return;
             }
+
+            // _regsCache is only known-live once something has dirtied it, so a lone XMM write
+            // must not ride along a GP store that would push a stale cache into the processor.
+            if (_xmmDirty)
+                StoreXmmRegisters();
         }
 
-        private void InvalidateRegisterCache() => _regsValid = false;
+        private void InvalidateRegisterCache()
+        {
+            _regsValid = false;
+            _xmmValid = false;
+        }
 
         private unsafe void SetSingleRegister(WhvRegisterName name, WhvRegisterValue value)
         {
@@ -2728,6 +2790,13 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
+            if (TryGetIntactBackingEnd(page, pageBase, out ulong backingEnd) && accessEnd <= backingEnd)
+            {
+                ptr = (byte*)page.HostPage;
+                offset = (long)(address - pageBase);
+                return true;
+            }
+
             ulong cursor = pageBase + WhpConstants.PageSize;
             while (cursor < accessEnd)
             {
@@ -2741,6 +2810,20 @@ namespace Brovan.Core.Emulation
 
             ptr = (byte*)page.HostPage;
             offset = (long)(address - pageBase);
+            return true;
+        }
+
+        private bool TryGetIntactBackingEnd(MappedPage page, ulong pageBase, out ulong backingEnd)
+        {
+            backingEnd = 0;
+            if (page.OwnedBacking == IntPtr.Zero) return false;
+            if (!_backingAllocations.TryGetValue(page.OwnedBacking, out BackingAllocation allocation)) return false;
+            if (allocation.LivePages != (int)(allocation.Size / WhpConstants.PageSize)) return false;
+
+            ulong hostOffset = (ulong)(page.HostPage.ToInt64() - page.OwnedBacking.ToInt64());
+            if (hostOffset > pageBase || hostOffset >= allocation.Size) return false;
+
+            backingEnd = pageBase - hostOffset + allocation.Size;
             return true;
         }
 

@@ -1,5 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -15,8 +17,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int CopyChunk = 1 << 20;
 
         private const int StImportMemoryHostPointerInfo = 1000178000;
-        private const int StExternalMemoryHostProperties = 1000178001;
-        private const int StMemoryHostPointerProperties = 1000178002;
+        private const int StMemoryHostPointerProperties = 1000178001;
+        private const int StExternalMemoryHostProperties = 1000178002;
         private const int StPhysicalDeviceProperties2 = 1000059001;
         private const uint HandleTypeHostAllocation = 0x80;
 
@@ -55,9 +57,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                 IntPtr name = Marshal.StringToHGlobalAnsi("vkGetMemoryHostPointerPropertiesEXT");
                 IntPtr fn = BrovVulkApi.vkGetDeviceProcAddr(device, name);
                 Marshal.FreeHGlobal(name);
-                ulong alignment = QueryImportAlignment(pd);
+                ulong alignment = QueryImportAlignment(pd, out uint apiVersion);
                 if (fn != IntPtr.Zero && alignment != 0 && (alignment & (alignment - 1)) == 0)
+                {
                     st.SetDeviceImport(device, new GenState.DeviceImport(fn, alignment));
+                    ImportStats.Record(ImportOutcome.DeviceImportReady, alignment);
+                }
+                else if (fn == IntPtr.Zero)
+                    ImportStats.Record(ImportOutcome.DeviceProcAddrMissing, alignment);
+                else
+                    ImportStats.Record(ImportOutcome.DeviceAlignmentUnusable, apiVersion);
+            }
+            else
+            {
+                ImportStats.Record(ImportOutcome.DeviceExtensionAbsent, 0);
             }
 
             w.WriteU32(st.Register(device, "VkDevice"));
@@ -90,7 +103,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             return p[i] == 0;
         }
 
-        private static ulong QueryImportAlignment(IntPtr pd)
+        private static ulong QueryImportAlignment(IntPtr pd) => QueryImportAlignment(pd, out _);
+
+        private static ulong QueryImportAlignment(IntPtr pd, out uint apiVersion)
         {
             byte* ext = stackalloc byte[24];
             new Span<byte>(ext, 24).Clear();
@@ -100,6 +115,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             *(int*)props2 = StPhysicalDeviceProperties2;
             *(void**)(props2 + 8) = ext;
             BrovVulkApi.vkGetPhysicalDeviceProperties2(pd, (IntPtr)props2);
+            apiVersion = *(uint*)(props2 + 16);
             return *(ulong*)(ext + 16);
         }
 
@@ -117,12 +133,29 @@ namespace Brovan.Core.Emulation.OS.Windows
             IntPtr memory = IntPtr.Zero;
             int rr = -1;
 
-            if (bounceVa != 0 && bounceSize != 0 && st.TryGetDeviceImport(device, out GenState.DeviceImport di))
+            if (bounceVa == 0 || bounceSize == 0)
+            {
+                ImportStats.Record(ImportOutcome.NoGuestBounce, 0);
+            }
+            else if (!st.TryGetDeviceImport(device, out GenState.DeviceImport di))
+            {
+                ImportStats.Record(ImportOutcome.DeviceLacksHostImport, bounceSize);
+            }
+            else
             {
                 ulong size = *(ulong*)(ai + 16);
                 ulong aligned = (size + di.Alignment - 1) & ~(di.Alignment - 1);
                 IntPtr host = aligned != 0 && aligned <= bounceSize ? inst.GetHostPointer(bounceVa, aligned) : IntPtr.Zero;
-                if (host != IntPtr.Zero && ((ulong)host & (di.Alignment - 1)) == 0 && ImportTypeBitsAllow(device, di, host, *(uint*)(ai + 24)))
+
+                if (aligned == 0 || aligned > bounceSize)
+                    ImportStats.Record(ImportOutcome.BounceTooSmall, size);
+                else if (host == IntPtr.Zero)
+                    ImportStats.Record(ImportOutcome.GuestRangeNotResolvable, size);
+                else if (((ulong)host & (di.Alignment - 1)) != 0)
+                    ImportStats.Record(ImportOutcome.HostPointerMisaligned, size);
+                else if (!ImportTypeBitsAllow(device, di, host, *(uint*)(ai + 24)))
+                    ImportStats.Record(ImportOutcome.MemoryTypeNotImportable, size);
+                else
                 {
                     byte* import = stackalloc byte[32];
                     new Span<byte>(import, 32).Clear();
@@ -137,6 +170,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (rr >= 0 && memory != IntPtr.Zero)
                     {
                         imported = 1;
+                        ImportStats.Record(ImportOutcome.Imported, size);
                     }
                     else
                     {
@@ -144,6 +178,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         *(ulong*)(ai + 16) = size;
                         memory = IntPtr.Zero;
                         rr = -1;
+                        ImportStats.Record(ImportOutcome.DriverRejectedImport, size);
                     }
                 }
             }
@@ -248,9 +283,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void SyncAllMappingsToHost(GenState st, BinaryEmulator inst)
         {
+            int copied = 0;
+            ulong bytes = 0;
             foreach (GenState.MapEntry e in st.Mappings)
                 if (!e.Imported && inst.IsRegionMapped(e.GuestVa, e.Size))
+                {
                     CopyGuestToHost(inst, e.GuestVa, e.HostPtr, e.Size);
+                    copied++;
+                    bytes += e.Size;
+                }
+
+            ImportStats.RecordSync(copied, bytes);
         }
 
         private static int SyncRanges(GenReader r, GenState st, BinaryEmulator inst, bool invalidate)
@@ -332,6 +375,97 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!inst.WriteMemory(guestVa + done, new ReadOnlySpan<byte>((byte*)hostPtr + done, chunk)))
                     throw new InvalidOperationException("BrovVulk generic: guest memory write failed.");
                 done += (ulong)chunk;
+            }
+        }
+
+        private enum ImportOutcome
+        {
+            Imported,
+            NoGuestBounce,
+            DeviceLacksHostImport,
+            BounceTooSmall,
+            GuestRangeNotResolvable,
+            HostPointerMisaligned,
+            MemoryTypeNotImportable,
+            DriverRejectedImport,
+            DeviceImportReady,
+            DeviceExtensionAbsent,
+            DeviceProcAddrMissing,
+            DeviceAlignmentUnusable,
+        }
+
+        /// <summary>
+        /// Set BROVVULK_IMPORT_STATS=1 to record why host-pointer import falls back to the copy path,
+        /// and what the fallback costs per queue submit.
+        /// </summary>
+        private static class ImportStats
+        {
+            private const int ReportInterval = 256;
+
+            internal static readonly bool Enabled =
+                string.Equals(Environment.GetEnvironmentVariable("BROVVULK_IMPORT_STATS"), "1", StringComparison.Ordinal);
+
+            private static readonly int[] Counts = new int[Enum.GetValues<ImportOutcome>().Length];
+            private static readonly ulong[] Bytes = new ulong[Enum.GetValues<ImportOutcome>().Length];
+
+            private static long _syncCalls;
+            private static long _syncMappings;
+            private static ulong _syncBytes;
+            private static int _sinceReport;
+
+            internal static void Record(ImportOutcome outcome, ulong size)
+            {
+                if (!Enabled)
+                    return;
+
+                Counts[(int)outcome]++;
+                Bytes[(int)outcome] += size;
+                Tick();
+            }
+
+            internal static void RecordSync(int mappings, ulong bytes)
+            {
+                if (!Enabled)
+                    return;
+
+                _syncCalls++;
+                _syncMappings += mappings;
+                _syncBytes += bytes;
+                Tick();
+            }
+
+            private static void Tick()
+            {
+                if (++_sinceReport < ReportInterval)
+                    return;
+
+                _sinceReport = 0;
+                Report();
+            }
+
+            private static void Report()
+            {
+                StringBuilder sb = new StringBuilder("BrovVulk import stats:");
+                for (int i = 0; i < Counts.Length; i++)
+                {
+                    if (Counts[i] == 0)
+                        continue;
+                    sb.Append(' ').Append((ImportOutcome)i).Append('=').Append(Counts[i]).Append('(');
+                    if (Bytes[i] >= 1UL << 20)
+                        sb.Append(Bytes[i] >> 20).Append(" MB)");
+                    else
+                        sb.Append(Bytes[i]).Append("B)");
+                }
+
+                sb.Append(" | submits=").Append(_syncCalls)
+                  .Append(" mappingsCopied=").Append(_syncMappings)
+                  .Append(" copied=").Append(_syncBytes >> 20).Append(" MB");
+
+                if (_syncCalls != 0)
+                    sb.Append(" avgPerSubmit=").Append((_syncBytes / (ulong)_syncCalls) >> 10).Append(" KB");
+
+                Utils.LogError(sb.ToString());
+                Utils.FlushLog();
             }
         }
     }

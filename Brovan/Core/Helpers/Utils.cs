@@ -144,6 +144,18 @@ namespace Brovan.Core.Helpers
         }
 
         /// <summary>
+        /// Force the buffered log to disk.
+        /// </summary>
+        public static void FlushLog()
+        {
+            lock (LogLock)
+            {
+                _logWriteCount = 0;
+                try { _logWriter?.Flush(); } catch{}
+            }
+        }
+
+        /// <summary>
         /// Prepare the console for virtual terminal processing and Unicode output.
         /// </summary>
         public static void PrepareConsole()
