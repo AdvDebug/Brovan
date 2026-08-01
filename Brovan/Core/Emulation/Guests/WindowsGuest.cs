@@ -309,6 +309,12 @@ namespace Brovan.Core.Emulation.Guests
             if (Obj is WinWorkerFactory Factory)
                 return IsWorkerFactoryReady(Instance, Factory);
 
+            if (Obj is WinIoCompletion Completion)
+            {
+                Instance.MaterializeSignaledWaitPackets(Handle);
+                return Completion.Entries.Count > 0;
+            }
+
             return false;
         }
 

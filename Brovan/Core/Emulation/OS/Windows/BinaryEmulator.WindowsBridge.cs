@@ -436,7 +436,10 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State == null || !State.WorkerFactoryWaitActive)
+                if (State == null)
+                    continue;
+
+                if (!State.WorkerFactoryWaitActive && (Thread.WaitHandles == null || !Thread.WaitHandles.Contains(TargetObjectHandle)))
                     continue;
 
                 if (!TrySatisfyThreadWait(Thread))

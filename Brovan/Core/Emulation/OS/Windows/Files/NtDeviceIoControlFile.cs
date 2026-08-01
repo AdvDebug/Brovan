@@ -111,6 +111,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Ev.Signaled = true;
             }
 
+            if (Status != NTSTATUS.STATUS_PENDING)
+                Instance.WinHelper.QueueFileCompletion(Instance, File, Instance.WinHelper.GetArg(3), Status, Information);
+
             return Status;
         }
 
