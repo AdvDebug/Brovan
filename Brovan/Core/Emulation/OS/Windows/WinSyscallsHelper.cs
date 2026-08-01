@@ -209,6 +209,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.MsgWaitActive = false;
             State.MsgWaitMask = 0;
             State.GetMessageWaitActive = false;
+            State.IoCompletionWaitActive = false;
+            State.IoCompletionHandle = 0;
+            State.IoCompletionKeyContextPtr = 0;
+            State.IoCompletionApcContextPtr = 0;
+            State.IoCompletionIoStatusBlockPtr = 0;
+            State.IoCompletionReservedEntry = null;
 
             if (ClearAlertByThreadId)
             {
@@ -258,6 +264,31 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void WriteIoStatusBlock(ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
         {
             WriteIoStatusBlock(Emulator, IoStatusBlockPtr, Status, Information);
+        }
+
+        /// <summary>
+        /// Queues the completion packet a finished request owes its handle's completion port. Requests that carry
+        /// no APC context are synchronous waits rather than overlapped I/O and queue nothing.
+        /// </summary>
+        public void QueueFileCompletion(BinaryEmulator Instance, WinFile File, ulong ApcContext, NTSTATUS Status, ulong Information)
+        {
+            if (File == null || File.CompletionHandle == 0 || ApcContext == 0)
+                return;
+
+            WinIoCompletion Completion = HandleManager.GetObjectByHandle<WinIoCompletion>(File.CompletionHandle);
+            if (Completion == null)
+                return;
+
+            Completion.Entries.Enqueue(new WinIoCompletionEntry
+            {
+                KeyContext = File.CompletionKey,
+                ApcContext = ApcContext,
+                IoStatus = Status,
+                IoStatusInformation = Information
+            });
+
+            if (Instance.WakeWorkerFactoryWaitersForObject(File.CompletionHandle))
+                Instance._emulator.StopEmulation();
         }
 
         public void WriteIoStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)

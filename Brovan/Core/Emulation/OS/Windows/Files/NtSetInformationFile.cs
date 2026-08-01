@@ -38,13 +38,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
+            FILE_INFORMATION_CLASS InfoClass = (FILE_INFORMATION_CLASS)FileInformationClass;
+
+            if (InfoClass == FILE_INFORMATION_CLASS.FileCompletionInformation)
+                return HandleFileCompletionInformation(Instance, FileObj, IoStatusBlock, FileInformation, Length);
+
             if (FileObj.Device)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
             }
 
-            FILE_INFORMATION_CLASS InfoClass = (FILE_INFORMATION_CLASS)FileInformationClass;
             switch (InfoClass)
             {
                 case FILE_INFORMATION_CLASS.FileBasicInformation:
@@ -70,6 +74,31 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
+        }
+
+        private static NTSTATUS HandleFileCompletionInformation(BinaryEmulator Instance, WinFile FileObj, ulong IoStatusBlock, ulong FileInformation, uint Length)
+        {
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+            if (Length < PointerSize * 2)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            ulong Port = Instance.WinHelper.ReadPointer(FileInformation);
+            ulong Key = Instance.WinHelper.ReadPointer(FileInformation + PointerSize);
+
+            if (Instance.WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(Port) == null)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+            }
+
+            FileObj.CompletionHandle = Port;
+            FileObj.CompletionKey = Key;
+
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         private static NTSTATUS HandleFileBasicInformation(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong IoStatusBlock, ulong FileInformation, uint Length)

@@ -311,6 +311,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         FileAllInformation = 18,
         FileAllocationInformation = 19,
         FileEndOfFileInformation = 20,
+        FileCompletionInformation = 30,
         FileNetworkOpenInformation = 34,
         FileAttributeTagInformation = 35,
         FileNormalizedNameInformation = 48,
@@ -1156,6 +1157,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         public long BasicChangeTime;
         public string OpenId = Guid.NewGuid().ToString("N");
         public List<WinLockFile> Locks = new List<WinLockFile>();
+
+        /// <summary>
+        /// Completion port bound with FileCompletionInformation. Every finished request on this handle queues a
+        /// packet carrying <see cref="CompletionKey"/>, which is how overlapped I/O is collected.
+        /// </summary>
+        public ulong CompletionHandle;
+        public ulong CompletionKey;
 
         public WinDeviceDelegate Handler;
 

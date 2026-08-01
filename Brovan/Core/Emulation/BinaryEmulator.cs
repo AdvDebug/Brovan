@@ -2741,7 +2741,11 @@ namespace Brovan.Core.Emulation
 
             ulong Rip = ReadRegister(IPRegister);
             if ((Settings.Flags & LogFlags.Issues) != 0)
-                TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at 0x{Rip:X}.", LogFlags.Issues);
+            {
+                TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at {(WinHelper != null ? DescribeAddress(Rip) : $"0x{Rip:X}")}.", LogFlags.Issues);
+                if (WinHelper != null)
+                    TraceStackModuleFrames("[-] Invalid memory");
+            }
 
             bool Continue = false;
             if (Settings.InvalidOperationsCallback != null)
