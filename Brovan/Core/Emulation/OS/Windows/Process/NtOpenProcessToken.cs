@@ -7,6 +7,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
+            return Open(Instance, 2);
+        }
+
+        internal static NTSTATUS Open(BinaryEmulator Instance, int TokenHandleArgIndex)
+        {
             bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
 
             ulong ProcessHandle;
@@ -17,7 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 ProcessHandle = Instance.WinHelper.GetArg(0);
                 DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
-                TokenHandlePtr = Instance.WinHelper.GetArg(2);
+                TokenHandlePtr = Instance.WinHelper.GetArg(TokenHandleArgIndex);
 
                 if (TokenHandlePtr == 0 || !Instance.IsRegionMapped(TokenHandlePtr, (uint)Instance.WinHelper.PointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -27,7 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 ProcessHandle = (uint)Instance.WinHelper.GetArg(0);
                 DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
-                TokenHandlePtr = (uint)Instance.WinHelper.GetArg(2);
+                TokenHandlePtr = (uint)Instance.WinHelper.GetArg(TokenHandleArgIndex);
 
                 if (TokenHandlePtr == 0 || !Instance.IsRegionMapped(TokenHandlePtr, 4))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -95,6 +100,5 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             return Mapped;
         }
-
     }
 }

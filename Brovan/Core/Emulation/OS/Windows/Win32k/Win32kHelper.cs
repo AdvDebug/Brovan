@@ -105,6 +105,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public ulong CaptureWindow;
             public bool QuitPosted;
             public ulong QuitExitCode;
+            public int CursorX;
+            public int CursorY;
         }
 
         private sealed class Win32kDeviceContext
@@ -459,13 +461,40 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (HostEventQueue.ConsumeRepaint())
                 InvalidateWindow(Instance, Foreground);
 
+            Win32kState State = GetState(Instance);
             for (int i = 0; i < MaxHostInputEventsPerDrain; i++)
             {
                 if (!HostEventQueue.TryDequeue(out uint Message, out ulong WParam, out ulong LParam))
                     break;
 
+                if (Message >= WM_MOUSEMOVE && Message <= WM_RBUTTONUP)
+                {
+                    State.CursorX = (short)(LParam & 0xFFFF);
+                    State.CursorY = (short)((LParam >> 16) & 0xFFFF);
+                }
+
                 PostMessage(Instance, Foreground, Message, WParam, LParam);
             }
+        }
+
+        /// <summary>
+        /// Screen position of the pointer, tracked from the client-relative coordinates the host window manager
+        /// reports for the foreground window.
+        /// </summary>
+        internal static void GetCursorPosition(BinaryEmulator Instance, out int X, out int Y)
+        {
+            DrainHostEvents(Instance);
+
+            Win32kState State = GetState(Instance);
+            X = State.CursorX;
+            Y = State.CursorY;
+
+            WinWindow Foreground = Instance.WinHelper.GetWindow(Instance.WinHelper.GetForegroundWindow());
+            if (Foreground == null)
+                return;
+
+            X += Foreground.X;
+            Y += Foreground.Y;
         }
 
         internal static bool InvalidateWindow(BinaryEmulator Instance, ulong Hwnd)

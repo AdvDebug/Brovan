@@ -408,6 +408,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
     [GenerateStructSerializer]
     [StructLayout(LayoutKind.Sequential)]
+    public struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    [GenerateStructSerializer]
+    [StructLayout(LayoutKind.Sequential)]
     public struct SYSTEM_BATTERY_STATE
     {
         public bool AcOnLine;
