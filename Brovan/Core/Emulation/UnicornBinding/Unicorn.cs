@@ -41,6 +41,8 @@ namespace Brovan.Core.Emulation
         private readonly List<int> _regionIndex = new List<int>();
         private bool _regionIndexDirty = true;
         private readonly List<IntPtr> _pendingFrees = new List<IntPtr>();
+        private readonly List<MappedRegion> _unmapSurvivors = new List<MappedRegion>();
+        private readonly List<IntPtr> _unmapReleasedBuffers = new List<IntPtr>();
         private List<IntPtr> HooksList = new List<IntPtr>();
 
         private sealed class MappedRegion
@@ -48,6 +50,7 @@ namespace Brovan.Core.Emulation
             public ulong Address;
             public ulong Size;
             public IntPtr Ptr;
+            public IntPtr BufferBase;
         }
 
         private readonly struct RegionAddressComparer : IComparer<int>
@@ -177,7 +180,7 @@ namespace Brovan.Core.Emulation
                     _error = uc_mem_map_ptr(_uc, address, new UIntPtr(size), protection, (IntPtr)ptr);
                     if (_error == UCErrors.UC_ERR_OK)
                     {
-                        _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = (IntPtr)ptr });
+                        _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = (IntPtr)ptr, BufferBase = (IntPtr)ptr });
                         _regionIndexDirty = true;
                         return true;
                     }
@@ -187,7 +190,7 @@ namespace Brovan.Core.Emulation
                 _error = uc_mem_map(_uc, address, new UIntPtr(size), protection);
                 if (_error == UCErrors.UC_ERR_OK)
                 {
-                    _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = IntPtr.Zero });
+                    _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = IntPtr.Zero, BufferBase = IntPtr.Zero });
                     _regionIndexDirty = true;
                     return true;
                 }
@@ -212,22 +215,89 @@ namespace Brovan.Core.Emulation
                 if (_error == UCErrors.UC_ERR_OK)
                 {
                     FlushTlb();
-
-                    for (int i = 0; i < _mappedRegions.Count; i++)
-                    {
-                        if (_mappedRegions[i].Address == address && _mappedRegions[i].Size == size)
-                        {
-                            if (_mappedRegions[i].Ptr != IntPtr.Zero)
-                                _pendingFrees.Add(_mappedRegions[i].Ptr);
-                            _mappedRegions.RemoveAt(i);
-                            _regionIndexDirty = true;
-                            break;
-                        }
-                    }
+                    TrimMappedRegions(address, size);
                     return true;
                 }
             }
             return false;
+        }
+
+        private unsafe void TrimMappedRegions(ulong address, ulong size)
+        {
+            ulong end = address + size;
+            bool changed = false;
+
+            _unmapSurvivors.Clear();
+            _unmapReleasedBuffers.Clear();
+
+            for (int i = _mappedRegions.Count - 1; i >= 0; i--)
+            {
+                MappedRegion Region = _mappedRegions[i];
+                ulong RegionEnd = Region.Address + Region.Size;
+                if (RegionEnd <= address || end <= Region.Address)
+                    continue;
+
+                ulong OverlapStart = Region.Address > address ? Region.Address : address;
+                ulong OverlapEnd = RegionEnd < end ? RegionEnd : end;
+
+                _mappedRegions.RemoveAt(i);
+                changed = true;
+
+                if (OverlapStart > Region.Address)
+                {
+                    _unmapSurvivors.Add(new MappedRegion
+                    {
+                        Address = Region.Address,
+                        Size = OverlapStart - Region.Address,
+                        Ptr = Region.Ptr,
+                        BufferBase = Region.BufferBase
+                    });
+                }
+
+                if (RegionEnd > OverlapEnd)
+                {
+                    IntPtr TailPtr = Region.Ptr == IntPtr.Zero
+                        ? IntPtr.Zero
+                        : (IntPtr)((byte*)Region.Ptr + (OverlapEnd - Region.Address));
+
+                    _unmapSurvivors.Add(new MappedRegion
+                    {
+                        Address = OverlapEnd,
+                        Size = RegionEnd - OverlapEnd,
+                        Ptr = TailPtr,
+                        BufferBase = Region.BufferBase
+                    });
+                }
+
+                if (Region.BufferBase != IntPtr.Zero && !_unmapReleasedBuffers.Contains(Region.BufferBase))
+                    _unmapReleasedBuffers.Add(Region.BufferBase);
+            }
+
+            if (!changed)
+                return;
+
+            for (int i = 0; i < _unmapSurvivors.Count; i++)
+                _mappedRegions.Add(_unmapSurvivors[i]);
+
+            _regionIndexDirty = true;
+
+            for (int i = 0; i < _unmapReleasedBuffers.Count; i++)
+            {
+                IntPtr Buffer = _unmapReleasedBuffers[i];
+                bool StillAliased = false;
+
+                for (int j = 0; j < _mappedRegions.Count; j++)
+                {
+                    if (_mappedRegions[j].BufferBase == Buffer)
+                    {
+                        StillAliased = true;
+                        break;
+                    }
+                }
+
+                if (!StillAliased)
+                    _pendingFrees.Add(Buffer);
+            }
         }
 
         /// <summary>
@@ -1523,11 +1593,16 @@ namespace Brovan.Core.Emulation
                         {
                             unsafe
                             {
+                                _unmapReleasedBuffers.Clear();
                                 foreach (var region in _mappedRegions)
                                 {
-                                    if (region.Ptr != IntPtr.Zero)
-                                        NativeMemory.AlignedFree((void*)region.Ptr);
+                                    if (region.BufferBase != IntPtr.Zero && !_unmapReleasedBuffers.Contains(region.BufferBase))
+                                        _unmapReleasedBuffers.Add(region.BufferBase);
                                 }
+                                foreach (IntPtr buffer in _unmapReleasedBuffers)
+                                    NativeMemory.AlignedFree((void*)buffer);
+                                _unmapReleasedBuffers.Clear();
+                                _unmapSurvivors.Clear();
                                 _mappedRegions.Clear();
                                 _regionIndex.Clear();
                                 _regionIndexDirty = true;
