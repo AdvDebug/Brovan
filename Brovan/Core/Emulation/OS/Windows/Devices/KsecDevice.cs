@@ -15,7 +15,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint IOCTL_KSEC_DECRYPT_MEMORY_CROSS_PROCESS = 0x39001A;
         private const uint IOCTL_KSEC_ENCRYPT_MEMORY_SAME_LOGON = 0x39001E;
         private const uint IOCTL_KSEC_DECRYPT_MEMORY_SAME_LOGON = 0x390022;
-        private const uint IOCTL_KSEC_CLIENT_HANDSHAKE = 0x390400;
+        private const uint IOCTL_KSEC_CNG_REQUEST = 0x390400;
 
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
         {
@@ -59,7 +59,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_SUCCESS;
                     }
 
-                case IOCTL_KSEC_CLIENT_HANDSHAKE:
+                case IOCTL_KSEC_CNG_REQUEST:
+                    if (Data.InputBuffer != null && KsecCngProviders.IsResolveRequest(Data.InputBuffer.AsSpan(0, (int)Math.Min(Data.InputLength, (uint)Data.InputBuffer.Length))))
+                        return KsecCngProviders.Resolve(Instance, ref Data);
+
                     if (Data.OutputBuffer != null && Data.OutputLength > 0)
                     {
                         uint OutN = Math.Min(Data.OutputLength, (uint)Data.OutputBuffer.Length);
