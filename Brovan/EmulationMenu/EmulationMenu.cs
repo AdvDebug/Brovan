@@ -2294,50 +2294,53 @@ namespace Brovan.EmulationMenu
                 return;
             }
 
-            if (Binary.FileFormat == BinaryFormat.PE && Binary.PE.DotNetStatus == DotNetStatus.DotNet)
-            {
-                PrintHighlight("[!] Brovan doesn't currently support emulating .NET CIL instructions.\nthe binary will be treated as a normal PE file in terms of emulation, You can still view .NET Methods, classes, etc.", true);
-            }
-
-            if (Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86)
-            {
-                PrintHighlight("[!] WOW64 support is still experimental, expect missing syscalls and incorrect behaviour.");
-            }
-
             Console.Title = $"Emulating a {Binary.FileFormat}{(Binary.PE.DotNetStatus != DotNetStatus.None ? " (DotNet)" : string.Empty)} File{(Quick ? " in Quick Mode" : string.Empty)}";
 
-            PrintHighlight($"[*] Detected binary format: {Binary.FileFormat} | {Binary.Architecture}", true);
-
-            if (!SilentMode && Binary.IsCorruptedBinary(out string CorruptionReason) != BinaryCorruptionStatus.Clean)
+            if (!SilentMode)
             {
-                PrintHighlight($"[!] The binary might be corrupted {(!string.IsNullOrEmpty(CorruptionReason) ? $"(reason: {CorruptionReason}) " : string.Empty)}do you want to try to load it anyway (Y/N)? ");
-                string Response = Console.ReadLine()?.ToLowerInvariant() ?? string.Empty;
-                if (Response != "y" && Response != "yes")
+                if (Binary.FileFormat == BinaryFormat.PE && Binary.PE.DotNetStatus == DotNetStatus.DotNet)
                 {
-                    Binary.Dispose();
-                    Environment.Exit(-1);
+                    PrintHighlight("[!] Brovan doesn't currently support emulating .NET CIL instructions.\nthe binary will be treated as a normal PE file in terms of emulation, You can still view .NET Methods, classes, etc.", true);
                 }
-            }
 
-            if (BinaryAnalyzer.IsBinaryPacked(Binary))
-                PrintHighlight("[!] The binary looks packed (high entropy).");
-
-            if (Binary.FileFormat == BinaryFormat.PE)
-            {
-                if (Binary.Architecture == BinaryArchitecture.x64 && Binary.PE.OptionalHeader64.DataDirectory[1].VirtualAddress == 0 || Binary.Architecture == BinaryArchitecture.x86 && Binary.PE.OptionalHeader32.DataDirectory[1].VirtualAddress == 0)
+                if (Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86)
                 {
-                    PrintHighlight("[!] The binary's IAT might be missing.");
+                    PrintHighlight("[!] WOW64 support is still experimental, expect missing syscalls and incorrect behaviour.");
                 }
-            }
 
-            if (Binary.FileFormat == BinaryFormat.PE && Binary.PE.Subsystem == System.Reflection.PortableExecutable.Subsystem.Native)
-            {
-                var KernelImport = Binary.PE.ImportFunctions?.Values.FirstOrDefault(Func =>
-                    Func.LibraryName.Equals("ntoskrnl.exe", StringComparison.OrdinalIgnoreCase) ||
-                    Func.LibraryName.EndsWith(".sys", StringComparison.OrdinalIgnoreCase));
+                PrintHighlight($"[*] Detected binary format: {Binary.FileFormat} | {Binary.Architecture}", true);
 
-                if (KernelImport != null && !string.IsNullOrWhiteSpace(KernelImport.Value.LibraryName))
-                    PrintHighlight("[!] Brovan doesn't currently support kernel drivers or services. the binary will be treated as a normal user-mode application.", true);
+                if (Binary.IsCorruptedBinary(out string CorruptionReason) != BinaryCorruptionStatus.Clean)
+                {
+                    PrintHighlight($"[!] The binary might be corrupted {(!string.IsNullOrEmpty(CorruptionReason) ? $"(reason: {CorruptionReason}) " : string.Empty)}do you want to try to load it anyway (Y/N)? ");
+                    string Response = Console.ReadLine()?.ToLowerInvariant() ?? string.Empty;
+                    if (Response != "y" && Response != "yes")
+                    {
+                        Binary.Dispose();
+                        Environment.Exit(-1);
+                    }
+                }
+
+                if (BinaryAnalyzer.IsBinaryPacked(Binary))
+                    PrintHighlight("[!] The binary looks packed (high entropy).");
+
+                if (Binary.FileFormat == BinaryFormat.PE)
+                {
+                    if (Binary.Architecture == BinaryArchitecture.x64 && Binary.PE.OptionalHeader64.DataDirectory[1].VirtualAddress == 0 || Binary.Architecture == BinaryArchitecture.x86 && Binary.PE.OptionalHeader32.DataDirectory[1].VirtualAddress == 0)
+                    {
+                        PrintHighlight("[!] The binary's IAT might be missing.");
+                    }
+                }
+
+                if (Binary.FileFormat == BinaryFormat.PE && Binary.PE.Subsystem == System.Reflection.PortableExecutable.Subsystem.Native)
+                {
+                    var KernelImport = Binary.PE.ImportFunctions?.Values.FirstOrDefault(Func =>
+                        Func.LibraryName.Equals("ntoskrnl.exe", StringComparison.OrdinalIgnoreCase) ||
+                        Func.LibraryName.EndsWith(".sys", StringComparison.OrdinalIgnoreCase));
+
+                    if (KernelImport != null && !string.IsNullOrWhiteSpace(KernelImport.Value.LibraryName))
+                        PrintHighlight("[!] Brovan doesn't currently support kernel drivers or services. the binary will be treated as a normal user-mode application.", true);
+                }
             }
         }
 
@@ -2355,7 +2358,7 @@ namespace Brovan.EmulationMenu
                 Watchpoints.Clear();
                 NextWatchpointId = 1;
                 WatchMemoryHook = null;
-                                GeneralMemoryHookHandle = IntPtr.Zero;
+                GeneralMemoryHookHandle = IntPtr.Zero;
                 PrintHighlight("[*] Loading binary...", true);
                 IsQuickMode = Quick;
                 Binary = new BinaryFile(FilePath, Quick);
