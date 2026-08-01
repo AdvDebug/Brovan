@@ -13,7 +13,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong EventHandle = Instance.WinHelper.GetArg(1);
 
             // ulong ApcRoutine = Instance.WinHelper.GetArg(2); // not used for now
-            // ulong ApcContext = Instance.WinHelper.GetArg(3); // not used for now
+            ulong ApcContext = Instance.WinHelper.GetArg(3);
             ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(4);
             uint IoControlCode = (uint)Instance.WinHelper.GetArg(5);
             ulong InputBufferPtr = Instance.WinHelper.GetArg(6);
@@ -112,7 +112,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             if (Status != NTSTATUS.STATUS_PENDING)
-                Instance.WinHelper.QueueFileCompletion(Instance, File, Instance.WinHelper.GetArg(3), Status, Information);
+                Instance.WinHelper.QueueFileCompletion(Instance, File, ApcContext, Status, Information);
 
             return Status;
         }

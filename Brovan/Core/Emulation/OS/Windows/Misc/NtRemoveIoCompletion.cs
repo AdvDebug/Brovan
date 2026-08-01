@@ -46,7 +46,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Completion.Entries.Count > 0)
             {
                 WinIoCompletionEntry Entry = Completion.Entries.Dequeue();
-                ReleaseWaitPacket(Instance, Entry);
+                Instance.ReleaseWaitCompletionPacket(Entry);
 
                 if (Thread.WaitActive)
                     Instance.WinHelper.ClearWaitState(Thread);
@@ -80,6 +80,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
                 State.WaitReturnRIP = State.WaitResumeRIP + 2;
                 State.WaitAlertable = false;
+                State.IoCompletionWaitActive = true;
+                State.IoCompletionHandle = IoCompletionHandle;
+                State.IoCompletionKeyContextPtr = KeyContextPtr;
+                State.IoCompletionApcContextPtr = ApcContextPtr;
+                State.IoCompletionIoStatusBlockPtr = IoStatusBlockPtr;
+                State.IoCompletionReservedEntry = null;
             }
 
             Thread.State = EmulatedThreadState.Waiting;
@@ -87,19 +93,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteRegister(Instance.IPRegister, State.WaitResumeRIP);
             Instance._emulator.StopEmulation();
             return NTSTATUS.STATUS_PENDING;
-        }
-
-        private static void ReleaseWaitPacket(BinaryEmulator Instance, WinIoCompletionEntry Entry)
-        {
-            if (Entry.WaitCompletionPacketHandle == 0)
-                return;
-
-            WinWaitCompletionPacket Packet = Instance.WinHelper.HandleManager.GetObjectByHandle<WinWaitCompletionPacket>(Entry.WaitCompletionPacketHandle);
-            if (Packet == null)
-                return;
-
-            Packet.Associated = false;
-            Packet.QueuedCompletion = false;
         }
     }
 }

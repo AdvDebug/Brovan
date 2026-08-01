@@ -318,7 +318,7 @@ namespace Brovan.Core.Emulation
 
             long Now = EmulatedTickCount64;
             long BestDelta = long.MaxValue;
-            bool HasWorkerFactoryWaiter = false;
+            bool HasCompletionPacketWaiter = false;
 
             foreach (EmulatedThread Thread in Threads.Values)
             {
@@ -326,15 +326,15 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State != null && State.WorkerFactoryWaitActive)
+                if (State != null && (State.WorkerFactoryWaitActive || State.IoCompletionWaitActive))
                 {
-                    HasWorkerFactoryWaiter = true;
+                    HasCompletionPacketWaiter = true;
                     break;
                 }
             }
 
             WinHelper.HandleManager.SnapshotHandles(WindowsNextTimerHandleSnapshot);
-            if (HasWorkerFactoryWaiter)
+            if (HasCompletionPacketWaiter)
                 WinHelper.HandleManager.SnapshotHandles(WindowsNextTimerPacketSnapshot);
             else
                 WindowsNextTimerPacketSnapshot.Clear();
@@ -359,7 +359,7 @@ namespace Brovan.Core.Emulation
                 }
 
                 bool HasWorkerFactoryTimerWaiter = false;
-                if (HasWorkerFactoryWaiter)
+                if (HasCompletionPacketWaiter)
                 {
                     for (int PacketIndex = 0; PacketIndex < WindowsNextTimerPacketSnapshot.Count; PacketIndex++)
                     {
@@ -439,7 +439,8 @@ namespace Brovan.Core.Emulation
                 if (State == null)
                     continue;
 
-                if (!State.WorkerFactoryWaitActive && (Thread.WaitHandles == null || !Thread.WaitHandles.Contains(TargetObjectHandle)))
+                if (!State.WorkerFactoryWaitActive && !State.IoCompletionWaitActive
+                    && (Thread.WaitHandles == null || !Thread.WaitHandles.Contains(TargetObjectHandle)))
                     continue;
 
                 if (!TrySatisfyThreadWait(Thread))
@@ -491,6 +492,41 @@ namespace Brovan.Core.Emulation
 
                 Packet.QueuedCompletion = true;
             }
+        }
+
+        internal void ReleaseWaitCompletionPacket(WinIoCompletionEntry Entry)
+        {
+            if (Entry == null || Entry.WaitCompletionPacketHandle == 0 || WinHelper == null)
+                return;
+
+            WinWaitCompletionPacket Packet = WinHelper.HandleManager.GetObjectByHandle<WinWaitCompletionPacket>(Entry.WaitCompletionPacketHandle);
+            if (Packet == null)
+                return;
+
+            Packet.Associated = false;
+            Packet.QueuedCompletion = false;
+        }
+
+        private bool TryReserveIoCompletionEntry(WindowsThreadState State)
+        {
+            State.IoCompletionReservedEntry = null;
+
+            if (WinHelper == null)
+                return false;
+
+            WinIoCompletion Completion = WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(State.IoCompletionHandle);
+            if (Completion == null)
+                return false;
+
+            MaterializeSignaledWaitPackets(State.IoCompletionHandle);
+
+            if (Completion.Entries.Count == 0)
+                return false;
+
+            WinIoCompletionEntry Entry = Completion.Entries.Dequeue();
+            ReleaseWaitCompletionPacket(Entry);
+            State.IoCompletionReservedEntry = Entry;
+            return true;
         }
 
         private bool ReserveWorkerFactoryEntries(ulong WorkerFactoryHandle, uint MaxPackets, List<WinIoCompletionEntry> Reserved)
@@ -558,6 +594,23 @@ namespace Brovan.Core.Emulation
                         Thread.WaitSatisfiedIndex = 0;
                         return true;
                     }
+                }
+
+                if (IsEmulatedDeadlineExpired(Thread.WaitDeadline))
+                {
+                    Thread.WaitTimedOut = true;
+                    return true;
+                }
+
+                return false;
+            }
+
+            if (State != null && State.IoCompletionWaitActive)
+            {
+                if (TryReserveIoCompletionEntry(State))
+                {
+                    Thread.WaitSatisfiedIndex = 0;
+                    return true;
                 }
 
                 if (IsEmulatedDeadlineExpired(Thread.WaitDeadline))

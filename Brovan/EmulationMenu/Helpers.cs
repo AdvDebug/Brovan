@@ -2519,6 +2519,9 @@ namespace Brovan
                 if (WindowsState.WorkerFactoryWaitActive)
                     return $"worker-factory 0x{WindowsState.WorkerFactoryHandle:X}";
 
+                if (WindowsState.IoCompletionWaitActive)
+                    return $"io-completion 0x{WindowsState.IoCompletionHandle:X}";
+
                 if (WindowsState.AlertByThreadIdWaitActive)
                     return $"alertbythreadid 0x{WindowsState.AlertByThreadIdAddress:X}";
 

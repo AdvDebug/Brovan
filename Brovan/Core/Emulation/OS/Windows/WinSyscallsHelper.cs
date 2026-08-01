@@ -209,6 +209,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.MsgWaitActive = false;
             State.MsgWaitMask = 0;
             State.GetMessageWaitActive = false;
+            State.IoCompletionWaitActive = false;
+            State.IoCompletionHandle = 0;
+            State.IoCompletionKeyContextPtr = 0;
+            State.IoCompletionApcContextPtr = 0;
+            State.IoCompletionIoStatusBlockPtr = 0;
+            State.IoCompletionReservedEntry = null;
 
             if (ClearAlertByThreadId)
             {

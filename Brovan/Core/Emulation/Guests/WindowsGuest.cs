@@ -331,6 +331,12 @@ namespace Brovan.Core.Emulation.Guests
                 return;
             }
 
+            if (State.IoCompletionWaitActive)
+            {
+                CompleteIoCompletionWait(Instance, Thread, State);
+                return;
+            }
+
             NTSTATUS WaitStatus = State.WaitStatus;
             if (WaitStatus == NTSTATUS.STATUS_PENDING)
                 WaitStatus = NTSTATUS.STATUS_SUCCESS;
@@ -365,6 +371,49 @@ namespace Brovan.Core.Emulation.Guests
             State.MsgWaitActive = false;
             State.MsgWaitMask = 0;
             State.GetMessageWaitActive = false;
+            Thread.WaitTimedOut = false;
+            Thread.WaitSatisfiedIndex = -1;
+
+            if (Instance.CurrentThread == Thread)
+            {
+                Instance.WriteRegister(Registers.UC_X86_REG_RIP, Thread.Context.RIP);
+                Instance.WriteRegister(Registers.UC_X86_REG_RAX, Thread.Context.RAX);
+            }
+        }
+
+        private void CompleteIoCompletionWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
+        {
+            NTSTATUS WaitStatus = NTSTATUS.STATUS_TIMEOUT;
+            WinIoCompletionEntry Entry = State.IoCompletionReservedEntry;
+
+            if (Entry != null && WinHelper != null)
+            {
+                WinHelper.WritePointer(State.IoCompletionKeyContextPtr, Entry.KeyContext);
+                WinHelper.WritePointer(State.IoCompletionApcContextPtr, Entry.ApcContext);
+                WinHelper.WriteIoStatusBlock(Instance, State.IoCompletionIoStatusBlockPtr, Entry.IoStatus, Entry.IoStatusInformation);
+                WaitStatus = NTSTATUS.STATUS_SUCCESS;
+            }
+
+            if (Thread.Context == null)
+                Thread.Context = new CpuContext();
+
+            ulong ResumeRip = State.WaitReturnRIP != 0 ? State.WaitReturnRIP : (State.WaitResumeRIP != 0 ? State.WaitResumeRIP + 2 : Thread.Context.RIP);
+            Thread.Context.RIP = ResumeRip;
+            Thread.Context.RAX = (ulong)(uint)WaitStatus;
+
+            State.IoCompletionWaitActive = false;
+            State.IoCompletionHandle = 0;
+            State.IoCompletionKeyContextPtr = 0;
+            State.IoCompletionApcContextPtr = 0;
+            State.IoCompletionIoStatusBlockPtr = 0;
+            State.IoCompletionReservedEntry = null;
+            State.WaitCompleted = false;
+            State.WaitStatus = WaitStatus;
+            State.WaitResumeRIP = 0;
+            State.WaitReturnRIP = 0;
+            State.WaitAlertable = false;
+            State.WaitObjects = null;
+            State.ApcAlertable = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
 

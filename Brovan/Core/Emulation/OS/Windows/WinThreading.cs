@@ -36,6 +36,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong WorkerFactoryPacketsReturned { get; set; }
         public uint WorkerFactoryMaxPackets { get; set; }
         public List<WinIoCompletionEntry> WorkerFactoryReservedEntries { get; set; } = new();
+        public bool IoCompletionWaitActive { get; set; }
+        public ulong IoCompletionHandle { get; set; }
+        public ulong IoCompletionKeyContextPtr { get; set; }
+        public ulong IoCompletionApcContextPtr { get; set; }
+        public ulong IoCompletionIoStatusBlockPtr { get; set; }
+        public WinIoCompletionEntry IoCompletionReservedEntry { get; set; }
         public ulong WaitResumeRIP { get; set; }
         public ulong WaitReturnRIP { get; set; }
         public bool WaitAlertable { get; set; }
