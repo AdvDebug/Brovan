@@ -166,6 +166,9 @@ namespace Brovan
     internal class GeneralHelper
     {
         public static bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        /// <summary>
+        /// returns true for android too.
+        /// </summary>
         public static bool IsLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
         public static string WindowsLibsPath = Path.Combine(AppContext.BaseDirectory, "WindowsLibs");
 
