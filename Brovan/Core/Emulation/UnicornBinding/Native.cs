@@ -166,7 +166,7 @@ namespace Brovan.Core.Emulation
                 throw new PlatformNotSupportedException("Brovan currently supports resolving unicorn for Windows and Linux only.");
             }
 
-            if (string.Equals(LibName, "vulkan-1.dll", StringComparison.OrdinalIgnoreCase) && GeneralHelper.IsLinux)
+            if (string.Equals(LibName, "vulkan-1.dll", StringComparison.OrdinalIgnoreCase) && (GeneralHelper.IsLinux || Android.AndroidHost.IsActive))
             {
                 if (NativeLibrary.TryLoad("libvulkan.so.1", out IntPtr handle))
                     return handle;
