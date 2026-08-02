@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Solution entry point for the APK. Nothing is compiled here: Brovan/Android/build-apk.sh publishes the
+    emulator for linux-bionic-arm64, cross-builds Unicorn and runs gradle. The script only works on a Linux
+    host (NativeAOT does not cross-compile from Windows to linux-bionic), so a Windows build is a no-op.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <BuildAndroidApk Condition="'$(BuildAndroidApk)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">false</BuildAndroidApk>
+    <BuildAndroidApk Condition="'$(BuildAndroidApk)' == ''">true</BuildAndroidApk>
+    <AndroidBuildScript>$([MSBuild]::NormalizePath($(MSBuildThisFileDirectory), '..', 'Brovan', 'Android', 'build-apk.sh'))</AndroidBuildScript>
+    <AndroidApkOutput>$([MSBuild]::NormalizePath($(MSBuildThisFileDirectory), '..', 'artifacts', 'android', 'brovan-arm64-v8a.apk'))</AndroidApkOutput>
+  </PropertyGroup>
+
+  <Target Name="ReportSkippedAndroidApk" AfterTargets="Build" Condition="'$(BuildAndroidApk)' != 'true'">
+    <Message Importance="normal" Text="[Brovan.Android] APK skipped on this host; build on Linux or pass -p:BuildAndroidApk=true." />
+  </Target>
+
+  <Target Name="BuildAndroidApk" AfterTargets="Build" Condition="'$(BuildAndroidApk)' == 'true'">
+    <Message Importance="high" Text="[Brovan.Android] Building the APK ($(Configuration))..." />
+    <Exec Command="bash &quot;$(AndroidBuildScript)&quot;" IgnoreExitCode="true"
+          EnvironmentVariables="CONFIG=$(Configuration);BROVAN_APK_OUTPUT=$(AndroidApkOutput)">
+      <Output TaskParameter="ExitCode" PropertyName="_AndroidApkExitCode" />
+    </Exec>
+    <!-- 3 is build-apk.sh's "no Android toolchain here"; a desktop Linux checkout should still build. -->
+    <Warning Condition="'$(_AndroidApkExitCode)' == '3'" Text="[Brovan.Android] APK skipped: no Android toolchain on this host (see Brovan/Android/README.md)." />
+    <Error Condition="'$(_AndroidApkExitCode)' != '0' and '$(_AndroidApkExitCode)' != '3'" Text="[Brovan.Android] build-apk.sh failed with exit code $(_AndroidApkExitCode)." />
+    <Message Condition="'$(_AndroidApkExitCode)' == '0'" Importance="high" Text="[Brovan.Android] APK -> $(AndroidApkOutput)" />
+  </Target>
+
+</Project>

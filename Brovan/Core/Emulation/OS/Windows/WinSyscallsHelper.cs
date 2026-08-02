@@ -3364,6 +3364,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopDisplay is GuiThreadManager guiManager)
                 guiManager.EnqueueGdiPrimitive(new GdiPrimitive
                 {
+                    Hwnd = Hwnd,
                     Kind = GdiPrimitiveKind.Line,
                     X1 = X1,
                     Y1 = Y1,
@@ -3379,6 +3380,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopDisplay is GuiThreadManager guiManager)
                 guiManager.EnqueueGdiPrimitive(new GdiPrimitive
                 {
+                    Hwnd = Hwnd,
                     Kind = GdiPrimitiveKind.FillRect,
                     X1 = Left,
                     Y1 = Top,
@@ -3395,6 +3397,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopDisplay is GuiThreadManager guiManager)
                 guiManager.EnqueueGdiPrimitive(new GdiPrimitive
                 {
+                    Hwnd = Hwnd,
                     Kind = Kind,
                     X1 = Left,
                     Y1 = Top,
@@ -3414,6 +3417,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopDisplay is GuiThreadManager guiManager)
                 guiManager.EnqueueGdiPrimitive(new GdiPrimitive
                 {
+                    Hwnd = Hwnd,
                     Kind = Kind,
                     Points = Points,
                     Pen = new GdiPenDescriptor { ColorRef = PenColor, Width = PenWidth },

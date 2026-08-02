@@ -1078,7 +1078,7 @@ namespace Brovan.Generators
                     "                uint hasCi = r.ReadU32();\n" +
                     "                System.IntPtr ci = System.IntPtr.Zero;\n" +
                     "                if (hasCi != 0) ci = BrovVulkGenStruct.Rebuild(" + StructId["VkInstanceCreateInfo"] + ", r, st);\n" +
-                    "                if (Brovan.GeneralHelper.IsLinux && ci != System.IntPtr.Zero)\n" +
+                    "                if ((Brovan.GeneralHelper.IsLinux || Brovan.Android.AndroidHost.IsActive) && ci != System.IntPtr.Zero)\n" +
                     "                {\n" +
                     "                    System.IntPtr extPtr = *(System.IntPtr*)(ci + 56);\n" +
                     "                    uint extCount = *(uint*)(ci + 48);\n" +
@@ -1100,7 +1100,7 @@ namespace Brovan.Generators
                     "                        }\n" +
                     "                        if (sawWin32)\n" +
                     "                        {\n" +
-                    "                            System.IntPtr xcbName = System.Runtime.InteropServices.Marshal.StringToHGlobalAnsi(\"VK_KHR_xcb_surface\");\n" +
+                    "                            System.IntPtr xcbName = System.Runtime.InteropServices.Marshal.StringToHGlobalAnsi(Brovan.Android.AndroidHost.IsActive ? \"VK_KHR_android_surface\" : \"VK_KHR_xcb_surface\");\n" +
                     "                            System.Runtime.InteropServices.Marshal.WriteIntPtr(newArr, (int)(newCount * 8), xcbName);\n" +
                     "                            newCount++;\n" +
                     "                            *(uint*)(ci + 48) = newCount;\n" +
@@ -1118,7 +1118,16 @@ namespace Brovan.Generators
                     "                System.IntPtr vi = st.Lookup(r.ReadU32(), \"VkInstance\");\n" +
                     "                System.IntPtr surf = System.IntPtr.Zero;\n" +
                     "                int rr;\n" +
-                    "                if (Brovan.GeneralHelper.IsLinux)\n" +
+                    "                if (Brovan.Android.AndroidHost.IsActive)\n" +
+                    "                {\n" +
+                    "                    System.IntPtr awin = inst.WinHelper.EnsureHostWindowHandle();\n" +
+                    "                    byte* ci = stackalloc byte[32];\n" +
+                    "                    for (int z = 0; z < 32; z++) ci[z] = 0;\n" +
+                    "                    *(int*)(ci + 0) = " + "1000008000" + ";\n" +
+                    "                    *(void**)(ci + 24) = (void*)awin;\n" +
+                    "                    rr = (int)Brovan.Android.AndroidVulkanWsi.vkCreateAndroidSurfaceKHR(vi, (System.IntPtr)ci, System.IntPtr.Zero, (System.IntPtr)(&surf));\n" +
+                    "                }\n" +
+                    "                else if (Brovan.GeneralHelper.IsLinux)\n" +
                     "                {\n" +
                     "                    System.IntPtr xdpy; System.IntPtr xwin;\n" +
                     "                    inst.WinHelper.EnsureHostXlibSurfaceHandles(out xdpy, out xwin);\n" +

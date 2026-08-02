@@ -208,7 +208,7 @@ namespace Brovan
             }
         }
 
-        private static string[] SplitCommandLine(string CommandLine)
+        internal static string[] SplitCommandLine(string CommandLine)
         {
             List<string> Arguments = new List<string>();
             if (string.IsNullOrWhiteSpace(CommandLine))

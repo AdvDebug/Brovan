@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:theme="@style/Theme.Brovan"
+        android:hardwareAccelerated="true"
+        android:extractNativeLibs="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Its own process: one guest per process, and a Surface swap would invalidate the guest's
+             VkSurfaceKHR, so the activity must not be recreated on configuration changes. -->
+        <activity
+            android:name=".PlayerActivity"
+            android:process=":guest"
+            android:exported="false"
+            android:theme="@style/Theme.Brovan.Player"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:screenOrientation="landscape"
+            android:launchMode="singleTask" />
+    </application>
+</manifest>

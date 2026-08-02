@@ -20,20 +20,20 @@
         <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
     </PropertyGroup>
 
-    <UsingTask TaskName="DisableGuardCF" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <UsingTask TaskName="DisableGuardCF" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
         <ParameterGroup>
             <FilePath ParameterType="System.String" Required="true" />
         </ParameterGroup>
         <Task>
             <Using Namespace="System" />
             <Using Namespace="System.IO" />
-            <Code Type="Fragment" Language="cs"><![CDATA[
+            <Code Type="Fragment" Language="cs">
+                <![CDATA[
                 byte[] Image = File.ReadAllBytes(FilePath);
                 if (Image.Length < 0x40 || Image[0] != (byte)'M' || Image[1] != (byte)'Z')
                     return true;
 
                 int PeHeaderOffset = BitConverter.ToInt32(Image, 0x3C);
-
                 int DllCharacteristicsOffset = PeHeaderOffset + 4 + 20 + 0x46;
                 if (PeHeaderOffset <= 0 || DllCharacteristicsOffset + 2 > Image.Length ||
                     Image[PeHeaderOffset] != (byte)'P' || Image[PeHeaderOffset + 1] != (byte)'E')
@@ -49,7 +49,8 @@
                 Image[DllCharacteristicsOffset + 1] = (byte)(DllCharacteristics >> 8);
                 File.WriteAllBytes(FilePath, Image);
                 Log.LogMessage(MessageImportance.High, "Cleared the GuardCF flag in " + Path.GetFileName(FilePath) + " so Unicorn can run without a CFG-disabling restart.");
-            ]]></Code>
+            ]]>
+            </Code>
         </Task>
     </UsingTask>
 
@@ -66,7 +67,8 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="../Brovan.Generators/Brovan.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+        <ProjectReference Include="../Brovan.Generators/Brovan.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false"
+                          GlobalPropertiesToRemove="PlatformTarget;RuntimeIdentifier;SelfContained;PublishAot;NativeLib;PublishAotUsingRuntimePack" />
     </ItemGroup>
 
     <Import Project="$(ProjectDir)Brovan.Unicorn.targets" />
