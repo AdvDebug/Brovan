@@ -62,3 +62,8 @@ nunit-*.xml
 /Brovan.Graphics/brovvulk-icd/generated
 /VirtualFS
 /Brovan/Properties
+/Brovan/Android/app/.gradle/
+/Brovan/Android/app/**/build/
+/Brovan/Android/app/local.properties
+/Brovan/Android/app/brovan/src/main/jniLibs/
+/*.apk

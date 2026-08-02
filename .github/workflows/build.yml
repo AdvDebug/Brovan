@@ -62,10 +62,70 @@ jobs:
           path: artifacts/packages/*
           retention-days: 14
 
+  android:
+    name: Build Android arm64
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # A .NET 9 SDK is required even though the project targets net8.0: the source generator needs
+      # Roslyn >= 4.10.
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Setup JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      # The NDK version has to match ndkVersion in Brovan/Android/app/brovan/build.gradle; the runner image
+      # preinstalls a newer one that build-apk.sh would otherwise pick.
+      - name: Install the Android NDK and CMake
+        run: |
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "ndk;26.3.11579264" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> "$GITHUB_ENV"
+
+      - name: Cache OpenSSL
+        uses: actions/cache@v4
+        with:
+          path: ~/brovan-toolchain/openssl-3.5.4
+          key: brovan-openssl-3.5.4-android-arm64
+
+      - name: Build OpenSSL for android-arm64
+        run: bash Brovan/Android/build-openssl.sh
+
+      - name: Cache Unicorn
+        uses: actions/cache@v4
+        with:
+          path: Brovan/.cache/unicorn
+          key: brovan-unicorn-android-arm64-${{ hashFiles('Brovan/Brovan.Unicorn.targets') }}
+
+      - name: Build APK
+        run: bash Brovan/Android/build-apk.sh
+
+      - name: Upload CI Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: Brovan Android arm64
+          path: artifacts/android/*.apk
+          retention-days: 14
+
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: [ build, android ]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -80,6 +140,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" release-artifacts/**/*
-            --title "${{ github.ref_name }}"
+          gh release create "${{ github.ref_name }}" release-artifacts/**/* \
+            --title "${{ github.ref_name }}" \
             --generate-notes

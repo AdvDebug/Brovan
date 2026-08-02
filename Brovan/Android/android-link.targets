@@ -1,0 +1,25 @@
+<Project>
+
+  <!--
+    NDK r26 ships lld 17, which promoted "version script assigns a version to an undefined symbol" from a
+    warning to a hard error. ILC unconditionally writes `global: _init; _fini;` into the exports script it
+    generates, and bionic defines neither, so the link fails before any of the brovan_* exports matter.
+
+    Passed to the build with -p:CustomAfterMicrosoftCommonTargets by Android/build-apk.sh only; the RID
+    condition keeps it inert everywhere else.
+  -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-bionic-arm64'">
+    <LinkerArg Include="-Wl,--undefined-version" />
+
+    <!--
+      ILC versions every export as `symbol@@V1.0`, so anything linking against this library records a
+      verneed entry naming it. bionic resolves verneed against DT_SONAME, and ILC never emits one, so the
+      JNI shim dies at dlopen with `cannot find "libBrovan.so" from verneed[0] in DT_NEEDED list`.
+    -->
+    <LinkerArg Include="-Wl,-soname,libBrovan.so" />
+
+    <!-- Android 16 flags 4K-aligned libraries (PageSizeMismatchDialog) and 16K-page devices refuse them. -->
+    <LinkerArg Include="-Wl,-z,max-page-size=16384" />
+  </ItemGroup>
+
+</Project>

@@ -244,10 +244,45 @@ namespace Brovan
 
             string Result = Path.Combine(BasePath, Library);
 
+            if (!IsWindows && !File.Exists(Result))
+            {
+                string Resolved = ResolveShippedLibraryCase(BasePath, Library);
+                if (Resolved != null)
+                    return Resolved;
+            }
+
             if (!File.Exists(Result))
                 PrintHighlight($"[-] Windows library not found: {Result}", true);
 
             return Result;
+        }
+
+        private static readonly Dictionary<string, Dictionary<string, string>> ShippedLibraryIndex = new(StringComparer.Ordinal);
+
+        private static string ResolveShippedLibraryCase(string Directory, string FileName)
+        {
+            Dictionary<string, string> Index;
+
+            lock (ShippedLibraryIndex)
+            {
+                if (!ShippedLibraryIndex.TryGetValue(Directory, out Index))
+                {
+                    Index = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                    try
+                    {
+                        foreach (string Entry in System.IO.Directory.EnumerateFiles(Directory))
+                            Index[Path.GetFileName(Entry)] = Entry;
+                    }
+                    catch (DirectoryNotFoundException)
+                    {
+                    }
+
+                    ShippedLibraryIndex[Directory] = Index;
+                }
+            }
+
+            return Index.TryGetValue(FileName, out string Actual) ? Actual : null;
         }
 
         public static bool DumpApiSetMap()

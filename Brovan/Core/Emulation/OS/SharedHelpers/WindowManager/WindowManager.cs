@@ -228,6 +228,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _screenWidth = FallbackScreenWidth;
                 _screenHeight = FallbackScreenHeight;
 
+                if (Brovan.Android.AndroidHost.IsActive)
+                {
+                    EnsureFromAndroidSurface();
+                    return;
+                }
+
                 if (OperatingSystem.IsLinux())
                 {
                     EnsureFromX11();
@@ -278,6 +284,24 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         }
                     }
                 }
+            }
+        }
+
+        private static void EnsureFromAndroidSurface()
+        {
+            int width = Brovan.Android.AndroidHost.Width;
+            int height = Brovan.Android.AndroidHost.Height;
+            if (width > 0 && height > 0)
+            {
+                _screenWidth = width;
+                _screenHeight = height;
+            }
+
+            uint density = (uint)Brovan.Android.AndroidHost.DensityDpi;
+            if (density >= MinimumDpi && density <= MaximumDpi)
+            {
+                _systemDpi = density;
+                _rawDpi = density;
             }
         }
 
@@ -432,6 +456,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
     public struct GdiPrimitive
     {
+        public ulong Hwnd;
+
         public GdiPrimitiveKind Kind;
         public int X1;
         public int Y1;
@@ -541,7 +567,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         {
             Func<IDisplayConnection> factory;
 
-            if (OperatingSystem.IsWindows())
+            if (Brovan.Android.AndroidHost.IsActive)
+                factory = () => new Brovan.Android.AndroidWinManager();
+            else if (OperatingSystem.IsWindows())
                 factory = () => new WindowsWinManager();
             else if (OperatingSystem.IsLinux())
                 factory = () => new LinuxWinManager();
