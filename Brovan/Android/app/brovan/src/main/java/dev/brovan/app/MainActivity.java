@@ -15,6 +15,8 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
@@ -76,8 +78,24 @@ public class MainActivity extends AppCompatActivity {
             return true;
         });
         navigation.setCheckedItem(R.id.nav_library);
+        insetDrawerHeader(navigation);
 
         show(R.id.nav_library);
+    }
+
+    private void insetDrawerHeader(NavigationView navigation) {
+        View header = navigation.getHeaderView(0);
+        if (header == null) {
+            return;
+        }
+
+        int basePadding = header.getPaddingTop();
+        ViewCompat.setOnApplyWindowInsetsListener(header, (view, insets) -> {
+            int top = insets.getInsets(WindowInsetsCompat.Type.systemBars()).top;
+            view.setPadding(view.getPaddingLeft(), basePadding + top, view.getPaddingRight(),
+                    view.getPaddingBottom());
+            return insets;
+        });
     }
 
     @Override
