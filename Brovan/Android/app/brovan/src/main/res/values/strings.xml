@@ -5,6 +5,7 @@
     <string name="nav_library">Library</string>
     <string name="nav_settings">Settings</string>
     <string name="nav_about">About</string>
+    <string name="nav_windows">Windows files</string>
     <string name="nav_open">Open navigation</string>
     <string name="nav_close">Close navigation</string>
 
@@ -20,7 +21,6 @@
     <string name="settings_graphics">Graphics and input</string>
     <string name="settings_advanced">Advanced</string>
     <string name="settings_controls">On-screen controls</string>
-    <string name="settings_backend">CPU backend</string>
     <string name="settings_network">Network access</string>
     <string name="settings_developer">Developer mode</string>
     <string name="settings_developer_summary">Show the console and emulator trace while a program runs</string>
@@ -29,6 +29,24 @@
     <string name="about_github">https://github.com/AdvDebug</string>
     <string name="about_open_github">Open GitHub</string>
     <string name="about_tagline">Run Windows programs on Android</string>
+
+    <string name="windows_title">Windows system files</string>
+    <string name="windows_installed">Installed. Programs can run.</string>
+    <string name="windows_missing">Not installed. Programs cannot run until these are imported.</string>
+    <string name="windows_notice">Brovan downloads Windows installation media from the Microsoft servers and extracts the system libraries, NLS tables and registry hives it needs. Brovan does not include or redistribute any Microsoft software. Using these files requires a valid Windows license.</string>
+    <string name="windows_licensed">I have a valid Windows license</string>
+    <string name="windows_source">Direct ISO URL (leave empty to ask Microsoft)</string>
+    <string name="windows_open_page">Get the ISO from Microsoft</string>
+    <string name="windows_choose">Choose a downloaded ISO</string>
+    <string name="windows_chosen">Selected: %1$s</string>
+    <string name="windows_sentinel">Microsoft refused the automated link. Download the ISO with the button above, then choose the file.</string>
+    <string name="windows_install">Import</string>
+    <string name="windows_uncompressed">Store uncompressed (faster, needs several GB)</string>
+    <string name="windows_storage">Stored compressed and decompressed in memory as programs read it, so it takes far less space than a plain copy.</string>
+    <string name="windows_working">Contacting Microsoft…</string>
+    <string name="windows_done">Import finished.</string>
+    <string name="windows_failed">Import failed. See the log for details.</string>
+    <string name="windows_needs_license">Confirm you have a Windows license first.</string>
 
     <string name="player_controls">Controls</string>
     <string name="player_windows">Windows</string>

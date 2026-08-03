@@ -6,11 +6,9 @@ import android.content.SharedPreferences;
 /** User-visible run options. */
 final class Settings {
 
-    static final String[] BACKENDS = {"Unicorn", "KVM", "WHP"};
     static final String[] NETWORK_MODES = {"None", "Loopback", "Full"};
 
     private static final String FILE = "brovan";
-    private static final String KEY_BACKEND = "backend";
     private static final String KEY_NETWORK = "network";
     private static final String KEY_DEVELOPER = "developer";
     private static final String KEY_FIT_WINDOW = "fit_window";
@@ -20,14 +18,6 @@ final class Settings {
 
     Settings(Context context) {
         preferences = context.getSharedPreferences(FILE, Context.MODE_PRIVATE);
-    }
-
-    int backend() {
-        return preferences.getInt(KEY_BACKEND, 0);
-    }
-
-    void setBackend(int value) {
-        preferences.edit().putInt(KEY_BACKEND, value).apply();
     }
 
     int network() {

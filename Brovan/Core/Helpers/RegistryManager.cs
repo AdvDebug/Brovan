@@ -5,6 +5,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
+using Brovan.Core.Helpers.WindowsImage;
 
 namespace Brovan.Core.Helpers
 {
@@ -58,6 +59,7 @@ namespace Brovan.Core.Helpers
         private const int MainKeyBlockOffset = MainRootOffset + 0x20;
 
         private readonly SafeFileHandle Handle;
+        private readonly string PackPath;
         private readonly long Length;
 
         private readonly Dictionary<string, HiveKey> PathCache = new(StringComparer.OrdinalIgnoreCase);
@@ -69,6 +71,20 @@ namespace Brovan.Core.Helpers
             this.Handle = Handle ?? throw new ArgumentNullException(nameof(Handle));
             this.Length = Length;
             ValidateRegf();
+        }
+
+        public RegistryHiveReader(string PackPath, long Length)
+        {
+            this.PackPath = PackPath ?? throw new ArgumentNullException(nameof(PackPath));
+            this.Length = Length;
+            ValidateRegf();
+        }
+
+        private int ReadRaw(Span<byte> Buffer, long Offset)
+        {
+            return PackPath == null
+                ? RandomAccess.Read(Handle, Buffer, Offset)
+                : WindowsSystemFiles.Read(PackPath, Offset, Buffer);
         }
 
         public HiveKey GetRootKey()
@@ -793,7 +809,7 @@ namespace Brovan.Core.Helpers
 
             while (Total < Buffer.Length)
             {
-                int Read = RandomAccess.Read(Handle, Buffer.Slice(Total), Offset + Total);
+                int Read = ReadRaw(Buffer.Slice(Total), Offset + Total);
                 if (Read <= 0)
                     throw new InvalidDataException("Failed to read hive data");
 
@@ -809,7 +825,7 @@ namespace Brovan.Core.Helpers
 
             while (Total < Count)
             {
-                int Read = RandomAccess.Read(Handle, Buffer.AsSpan(BufferOffset + Total, Count - Total), Offset + Total);
+                int Read = ReadRaw(Buffer.AsSpan(BufferOffset + Total, Count - Total), Offset + Total);
                 if (Read <= 0)
                     throw new InvalidDataException("Failed to read hive data");
 
@@ -825,7 +841,7 @@ namespace Brovan.Core.Helpers
 
             while (Total < Buffer.Length)
             {
-                int Read = RandomAccess.Read(Handle, Buffer.Slice(Total), Offset + Total);
+                int Read = ReadRaw(Buffer.Slice(Total), Offset + Total);
                 if (Read <= 0)
                     throw new InvalidDataException("Failed to read hive data");
 
@@ -876,6 +892,21 @@ namespace Brovan.Core.Helpers
             string NtMountPoint = ResolveNtMountPoint(HiveFileName);
             if (string.IsNullOrEmpty(NtMountPoint))
                 return null;
+
+            string PackPath = WindowsSystemFiles.TryResolveRegistryHive(HiveFileName);
+            if (PackPath != null)
+            {
+                long PackLength = WindowsSystemFiles.GetLength(PackPath);
+                if (PackLength <= 0)
+                    return null;
+
+                return new Hive
+                {
+                    NtMountPoint = NtMountPoint.TrimEnd('\\'),
+                    Length = PackLength,
+                    Reader = new RegistryHiveReader(PackPath, PackLength),
+                };
+            }
 
             string HivePath = Path.Combine(RootPath, HiveFileName);
             if (!File.Exists(HivePath))

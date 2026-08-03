@@ -11,6 +11,8 @@ using System.Text;
 using System.Threading.Tasks;
 using Brovan.Core.Emulation;
 using Brovan.Core.Helpers;
+using Brovan.Core.Helpers.WindowsImage;
+using Brovan.Core;
 using Microsoft.Win32.SafeHandles;
 using static Brovan.Core.Helpers.BinaryHelpers;
 using static Brovan.Core.Helpers.Utils;
@@ -202,6 +204,24 @@ namespace Brovan
             }
         }
 
+        /// <summary>
+        /// Opens a Windows library that may live either on the host filesystem or inside the compressed pack.
+        /// </summary>
+        public static BinaryFile OpenWindowsLibrary(string Path)
+        {
+            return WindowsSystemFiles.IsPackPath(Path)
+                ? new BinaryFile(WindowsSystemFiles.ReadAll(Path), true)
+                : new BinaryFile(Path, true);
+        }
+
+        public static bool WindowsLibraryExists(string Path)
+        {
+            if (string.IsNullOrWhiteSpace(Path))
+                return false;
+
+            return WindowsSystemFiles.IsPackPath(Path) ? WindowsSystemFiles.FileExists(Path) : File.Exists(Path);
+        }
+
         private delegate IntPtr GetPebPtr();
 
         public static string GetWindowsLibPath(string Library, bool IsWow64 = false, BinaryArchitecture Arch = BinaryArchitecture.x64)
@@ -239,8 +259,17 @@ namespace Brovan
             }
             else
             {
+                bool Wow64View = IsWow64 || Arch == BinaryArchitecture.x86;
+
+                if (WindowsSystemFiles.UsingPack)
+                {
+                    string PackPath = WindowsSystemFiles.TryResolveRelative(Wow64View ? "SysWOW64/" + Library : Library);
+                    if (PackPath != null)
+                        return PackPath;
+                }
+
                 // Linux / non-Windows: use shipped Windows DLLs
-                BasePath = (IsWow64 || Arch == BinaryArchitecture.x86)
+                BasePath = Wow64View
                     ? Path.Combine(WindowsLibsPath, "SysWOW64")
                     : WindowsLibsPath;
             }
@@ -425,6 +454,13 @@ namespace Brovan
             {
                 if (!File.Exists(FilePath))
                 {
+                    // HARDWARE is volatile: the kernel builds it at boot, so installation media never carries one.
+                    if (FilePath.EndsWith("HARDWARE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        PrintHighlight("[!] No HARDWARE hive; programs that read HKLM\\HARDWARE will see an empty key.");
+                        continue;
+                    }
+
                     PrintHighlight($"[-] Missing registry file: {FilePath}");
                     Ok = false;
                     continue;
@@ -999,6 +1035,8 @@ namespace Brovan
             /// </summary>
             static IO()
             {
+                WindowsSystemFiles.Initialize(AppContext.BaseDirectory);
+
                 // Keep the emulator sandboxed by default.
                 EnsureDriveMapping('C', Path.Combine(VirtualFileSystemRoot, "C"));
                 EnsureDriveMapping('E', Path.Combine(VirtualFileSystemRoot, "E"));
@@ -2891,6 +2929,14 @@ namespace Brovan
                 if (string.IsNullOrWhiteSpace(BaseDir) || string.IsNullOrWhiteSpace(WindowsRelative))
                     return null;
 
+                if (WindowsSystemFiles.UsingPack)
+                {
+                    bool Wow64View = BaseDir.EndsWith("SysWOW64", StringComparison.OrdinalIgnoreCase);
+                    string PackName = Wow64View ? "SysWOW64/" + WindowsRelative : WindowsRelative;
+
+                    return WindowsSystemFiles.TryResolveRelative(PackName) ?? TryResolveFromWindowsLibsByLeaf(Path.GetFileName(WindowsRelative));
+                }
+
                 string Candidate = CombineWindowsRelativePath(BaseDir, WindowsRelative);
                 if (string.IsNullOrWhiteSpace(Candidate))
                     return null;
@@ -2936,6 +2982,7 @@ namespace Brovan
                         return;
 
                     WindowsLibsFileIndex = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    WindowsSystemFiles.AddIndexEntries(WindowsLibsFileIndex);
 
                     try
                     {

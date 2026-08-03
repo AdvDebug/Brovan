@@ -950,7 +950,7 @@ namespace Brovan.Core.Emulation
 
         public BinaryFile LoadBinary(string Path)
         {
-            return new BinaryFile(Path, true);
+            return GeneralHelper.OpenWindowsLibrary(Path);
         }
 
         private static bool CanMergeProtectedWinRegions(MemoryRegion Left, MemoryRegion Right)

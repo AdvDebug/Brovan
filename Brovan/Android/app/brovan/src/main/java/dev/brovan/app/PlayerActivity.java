@@ -38,7 +38,6 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private static final String EXTRA_DIRECTORY = "directory";
     private static final String EXTRA_EXECUTABLE = "executable";
     private static final String EXTRA_NAME = "name";
-    private static final String EXTRA_BACKEND = "backend";
     private static final String EXTRA_NETWORK = "network";
     private static final String EXTRA_DEVELOPER = "developer";
     private static final String EXTRA_CONTROLS = "controls";
@@ -62,7 +61,6 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .putExtra(EXTRA_DIRECTORY, program.directory().getAbsolutePath())
                 .putExtra(EXTRA_EXECUTABLE, program.executable().getAbsolutePath())
                 .putExtra(EXTRA_NAME, program.name())
-                .putExtra(EXTRA_BACKEND, settings.backend())
                 .putExtra(EXTRA_NETWORK, settings.network())
                 .putExtra(EXTRA_DEVELOPER, settings.developerMode())
                 .putExtra(EXTRA_CONTROLS, settings.controlScheme());
@@ -119,7 +117,6 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 null,
                 getIntent().getStringExtra(EXTRA_DIRECTORY),
                 null,
-                getIntent().getIntExtra(EXTRA_BACKEND, 0),
                 getIntent().getIntExtra(EXTRA_NETWORK, 1));
 
         if (result != BrovanNative.STATUS_OK) {

@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Net;
 using Brovan.Core.Emulation;
+using Brovan.Core.Helpers.WindowsImage;
 using static Brovan.GeneralHelper;
 
 namespace Brovan
@@ -129,6 +130,15 @@ namespace Brovan
             Console.WriteLine("  --no-hooks        Run the emulator with no hooks. useful when you want maximum performance and want to see some program output.");
             Console.WriteLine("  --backend=<name>  Choose the emulation backend: unicorn (default), kvm (Linux), or whp (Windows Hypervisor Platform).");
             Console.WriteLine("  --cwd <dir>       Directory the emulated program starts in. Defaults to the directory of the binary.");
+            Console.WriteLine("  --install-windows Download Windows installation media from Microsoft and extract the system");
+            Console.WriteLine("                    libraries, NLS tables and registry hives Brovan needs, then exit.");
+            Console.WriteLine("  --windows-iso <p> Use a local ISO/WIM/ESD or a direct URL instead of asking Microsoft for a link.");
+            Console.WriteLine("  --windows-pack    Store the imported files in a block compressed pack that is decompressed in");
+            Console.WriteLine("                    memory on demand, instead of loose files. Intended for small storage devices.");
+            Console.WriteLine("  --windows-image <n>");
+            Console.WriteLine("                    Edition index inside the installation image. Defaults to 1.");
+            Console.WriteLine("  --accept-windows-license");
+            Console.WriteLine("                    Skip the interactive prompt. Using the extracted files needs a Windows license.");
             Console.WriteLine("  --guest-cmdline <s>");
             Console.WriteLine("                    Command line for the emulated program, excluding argv[0], used instead of");
             Console.WriteLine("                    trailing arguments. Both options also accept \"base64:<value>\" so that");
@@ -301,14 +311,49 @@ namespace Brovan
             }
         }
 
+        private static bool TryInstallWindowsSystemFiles(string[] args)
+        {
+            bool Requested = false;
+            WindowsSetupOptions Options = new WindowsSetupOptions();
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                string Arg = args[i];
+
+                if (Arg == "--install-windows")
+                    Requested = true;
+                else if (Arg == "--windows-pack")
+                    Options.BuildPack = true;
+                else if (Arg == "--accept-windows-license")
+                    Options.LicenseAccepted = true;
+                else if (Arg == "--windows-iso" && i + 1 < args.Length)
+                    Options.Media = args[++i];
+                else if (Arg.StartsWith("--windows-iso=", StringComparison.Ordinal))
+                    Options.Media = Arg.Substring("--windows-iso=".Length);
+                else if (Arg == "--windows-image" && i + 1 < args.Length)
+                    int.TryParse(args[++i], out Options.ImageIndex);
+                else if (Arg.StartsWith("--windows-image=", StringComparison.Ordinal))
+                    int.TryParse(Arg.Substring("--windows-image=".Length), out Options.ImageIndex);
+            }
+
+            if (!Requested)
+                return false;
+
+            bool Installed = WindowsSetup.Install(AppContext.BaseDirectory, Options, Message => PrintHighlight(Message), ConfirmWindowsLicense);
+            Environment.Exit(Installed ? 0 : 1);
+            return true;
+        }
+
+        private static bool ConfirmWindowsLicense()
+        {
+            Console.Write("Continue? [y/N] ");
+            string Answer = Console.ReadLine() ?? string.Empty;
+            return Answer.Trim().StartsWith("y", StringComparison.OrdinalIgnoreCase);
+        }
+
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
-            /*if (!IsWindows)
-            {
-                PrintHighlight("[-] Brovan currently supports Windows only. Cross-platform support are not fully supported at the moment.", true);
-                Environment.Exit(-1);
-            }*/
 
             if (args.Length == 0)
             {
@@ -318,11 +363,15 @@ namespace Brovan
 
             SilentMode = HasSilentFlag(args);
 
+            if (TryInstallWindowsSystemFiles(args))
+                return;
+
             bool HardwareBackendRequested = ArgsSpecifyHardwareBackend(args);
 
-            if (!IsWindows && !Directory.Exists(WindowsLibsPath))
+            if (!IsWindows && !Directory.Exists(WindowsLibsPath) && !WindowsSystemFiles.UsingPack)
             {
                 PrintHighlight($"[-] Couldn't find the windows libs directory inside. expected path: {WindowsLibsPath}", true);
+                PrintHighlight("[*] Run Brovan with --install-windows to fetch them from Microsoft's installation media.", true);
                 Environment.Exit(0);
             }
 
@@ -397,7 +446,7 @@ namespace Brovan
             }
 
             string RegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
-            if (!Directory.Exists(RegPath))
+            if (!WindowsSystemFiles.UsingPack && !Directory.Exists(RegPath))
             {
                 if (IsWindows)
                 {
@@ -405,11 +454,11 @@ namespace Brovan
                 }
                 else
                 {
-                    PrintHighlight("[-] Cannot dump Registry because you are not running on Windows. Please dump a windows registry to the emulator's current path with the directory name 'WinReg' from another machine and try again.", true);
+                    PrintHighlight("[-] Cannot dump Registry because you are not running on Windows. Dump one from a Windows machine into a 'WinReg' directory next to the emulator, or run Brovan with --install-windows.", true);
                     Environment.Exit(-1);
                 }
             }
-            else if (!VerifyRegDump(RegPath, true))
+            else if (!WindowsSystemFiles.UsingPack && !VerifyRegDump(RegPath, true))
             {
                 if (IsWindows)
                 {

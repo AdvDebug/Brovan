@@ -4,11 +4,13 @@ import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
@@ -22,11 +24,14 @@ import com.google.android.material.button.MaterialButton;
 import com.google.android.material.materialswitch.MaterialSwitch;
 import com.google.android.material.navigation.NavigationView;
 import com.google.android.material.progressindicator.CircularProgressIndicator;
+import com.google.android.material.progressindicator.LinearProgressIndicator;
+import com.google.android.material.textfield.TextInputEditText;
 import com.google.android.material.snackbar.Snackbar;
 import com.google.android.material.textfield.MaterialAutoCompleteTextView;
 
 import java.io.File;
 
+import dev.brovan.BrovanNative;
 import dev.brovan.input.ControlOverlay;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -36,6 +41,7 @@ public class MainActivity extends AppCompatActivity {
 
     private static final int REQUEST_FOLDER = 1;
     private static final int REQUEST_FILE = 2;
+    private static final int REQUEST_ISO = 3;
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
 
@@ -47,6 +53,8 @@ public class MainActivity extends AppCompatActivity {
     private ProgramAdapter adapter;
     private View emptyState;
     private CircularProgressIndicator progress;
+    private Uri selectedIso;
+    private TextView isoLabel;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -81,7 +89,10 @@ public class MainActivity extends AppCompatActivity {
     private void show(int itemId) {
         content.removeAllViews();
 
-        if (itemId == R.id.nav_settings) {
+        if (itemId == R.id.nav_windows) {
+            toolbar.setTitle(R.string.nav_windows);
+            content.addView(createWindows());
+        } else if (itemId == R.id.nav_settings) {
             toolbar.setTitle(R.string.nav_settings);
             content.addView(createSettings());
         } else if (itemId == R.id.nav_about) {
@@ -118,6 +129,121 @@ public class MainActivity extends AppCompatActivity {
 
         refresh();
         return view;
+    }
+
+    /// Windows system files screen: the only place the emulator is allowed to fetch Microsoft's files.
+    private View createWindows() {
+        View view = LayoutInflater.from(this).inflate(R.layout.screen_windows, content, false);
+
+        TextView status = view.findViewById(R.id.windows_status);
+        MaterialSwitch licensed = view.findViewById(R.id.windows_licensed);
+        MaterialSwitch uncompressed = view.findViewById(R.id.windows_uncompressed);
+        TextInputEditText source = view.findViewById(R.id.windows_source);
+        MaterialButton install = view.findViewById(R.id.windows_install);
+        LinearProgressIndicator bar = view.findViewById(R.id.windows_progress);
+        TextView detail = view.findViewById(R.id.windows_progress_text);
+        MaterialButton openPage = view.findViewById(R.id.windows_open_page);
+        MaterialButton choose = view.findViewById(R.id.windows_choose);
+
+        isoLabel = detail;
+
+        openPage.setOnClickListener(button -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://www.microsoft.com/software-download/windows11")));
+            } catch (ActivityNotFoundException missing) {
+                snack("No browser is available on this device.");
+            }
+        });
+
+        choose.setOnClickListener(button -> pick(new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*"), REQUEST_ISO));
+
+        status.setText(windowsFilesPresent() ? R.string.windows_installed : R.string.windows_missing);
+
+        install.setOnClickListener(button -> {
+            if (!licensed.isChecked()) {
+                snack(getString(R.string.windows_needs_license));
+                return;
+            }
+
+            CharSequence typed = source.getText();
+            String media = typed == null || typed.toString().trim().isEmpty() ? null : typed.toString().trim();
+            Uri iso = selectedIso;
+
+            boolean pack = !uncompressed.isChecked();
+
+            install.setEnabled(false);
+            licensed.setEnabled(false);
+            uncompressed.setEnabled(false);
+            bar.setIndeterminate(true);
+            bar.setVisibility(View.VISIBLE);
+            detail.setVisibility(View.VISIBLE);
+            detail.setText(R.string.windows_working);
+
+            BrovanNative.setInstallListener((filesDone, filesTotal, bytesDone, bytesTotal) -> runOnUiThread(() -> {
+                if (filesTotal <= 0) {
+                    return;
+                }
+
+                if (bar.isIndeterminate()) {
+                    bar.setIndeterminate(false);
+                    bar.setMax(1000);
+                }
+
+                bar.setProgress((int) (filesDone * 1000 / filesTotal), true);
+                detail.setText(String.format(java.util.Locale.US, "%d of %d files, %d of %d MB",
+                        filesDone, filesTotal, bytesDone >> 20, bytesTotal >> 20));
+            }));
+
+            worker.execute(() -> {
+                int result = BrovanNative.init(getFilesDir().getAbsolutePath());
+
+                if (result == BrovanNative.STATUS_OK || result == BrovanNative.STATUS_MISSING_WINDOWS_LIBS
+                        || result == BrovanNative.STATUS_MISSING_REGISTRY) {
+                    ParcelFileDescriptor descriptor = null;
+
+                    try {
+                        int handle = -1;
+
+                        if (iso != null) {
+                            descriptor = getContentResolver().openFileDescriptor(iso, "r");
+                            handle = descriptor == null ? -1 : descriptor.getFd();
+                        }
+
+                        result = BrovanNative.installWindows(handle >= 0 ? null : media, handle, true, pack, 1);
+                    } catch (Exception failure) {
+                        result = BrovanNative.STATUS_FAILED;
+                    } finally {
+                        if (descriptor != null) {
+                            try {
+                                descriptor.close();
+                            } catch (java.io.IOException ignored) {
+                            }
+                        }
+                    }
+                }
+
+                int outcome = result;
+                runOnUiThread(() -> {
+                    BrovanNative.setInstallListener(null);
+                    bar.setVisibility(View.GONE);
+                    install.setEnabled(true);
+                    licensed.setEnabled(true);
+                    uncompressed.setEnabled(true);
+                    detail.setText(outcome == BrovanNative.STATUS_OK ? R.string.windows_done : R.string.windows_failed);
+                    status.setText(windowsFilesPresent() ? R.string.windows_installed : R.string.windows_missing);
+                });
+            });
+        });
+
+        return view;
+    }
+
+    private boolean windowsFilesPresent() {
+        return new File(getFilesDir(), "WindowsLibs.pack").exists()
+                || new File(getFilesDir(), "WindowsLibs").isDirectory();
     }
 
     private int columnCount() {
@@ -167,6 +293,15 @@ public class MainActivity extends AppCompatActivity {
         }
 
         Uri uri = data.getData();
+
+        if (requestCode == REQUEST_ISO) {
+            selectedIso = uri;
+            if (isoLabel != null) {
+                isoLabel.setVisibility(View.VISIBLE);
+                isoLabel.setText(getString(R.string.windows_chosen, uri.getLastPathSegment()));
+            }
+            return;
+        }
         boolean folder = requestCode == REQUEST_FOLDER;
         if (!folder && requestCode != REQUEST_FILE) {
             return;
@@ -237,11 +372,6 @@ public class MainActivity extends AppCompatActivity {
 
     private View createSettings() {
         View view = LayoutInflater.from(this).inflate(R.layout.screen_settings, content, false);
-
-        MaterialAutoCompleteTextView backend = view.findViewById(R.id.backend);
-        backend.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, Settings.BACKENDS));
-        backend.setText(Settings.BACKENDS[settings.backend()], false);
-        backend.setOnItemClickListener((parent, item, position, id) -> settings.setBackend(position));
 
         MaterialAutoCompleteTextView network = view.findViewById(R.id.network);
         network.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, Settings.NETWORK_MODES));

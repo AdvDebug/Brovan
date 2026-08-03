@@ -8,6 +8,7 @@ using System.Threading;
 using Brovan.Core.Emulation;
 using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Helpers;
+using Brovan.Core.Helpers.WindowsImage;
 
 namespace Brovan.Android
 {
@@ -27,6 +28,7 @@ namespace Brovan.Android
         private static int _running;
         private static bool _verbose;
         private static IntPtr _exitSink;
+        private static IntPtr _installProgressSink;
 
         [UnmanagedCallersOnly(EntryPoint = "brovan_init")]
         public static int Init(byte* baseDirectory)
@@ -84,6 +86,9 @@ namespace Brovan.Android
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_exit_sink")]
         public static void SetExitSink(IntPtr sink) => Volatile.Write(ref _exitSink, sink);
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_set_install_progress_sink")]
+        public static void SetInstallProgressSink(IntPtr sink) => Volatile.Write(ref _installProgressSink, sink);
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_verbose")]
         public static void SetVerbose(int enabled) => _verbose = enabled != 0;
 
@@ -107,7 +112,7 @@ namespace Brovan.Android
         }
 
         [UnmanagedCallersOnly(EntryPoint = "brovan_start")]
-        public static int Start(byte* binaryPath, byte* guestCommandLine, byte* workingDirectory, byte* commands, int backend, int networkMode)
+        public static int Start(byte* binaryPath, byte* guestCommandLine, byte* workingDirectory, byte* commands, int networkMode)
         {
             if (Volatile.Read(ref _initialized) == 0)
                 return StatusNotInitialized;
@@ -132,13 +137,6 @@ namespace Brovan.Android
                     ? Array.Empty<string>()
                     : Program.SplitCommandLine(rawArguments);
 
-                EmulationBackendKind backendKind = backend switch
-                {
-                    1 => EmulationBackendKind.Kvm,
-                    2 => EmulationBackendKind.Whp,
-                    _ => EmulationBackendKind.Unicorn,
-                };
-
                 NetworkAccessMode mode = networkMode switch
                 {
                     0 => NetworkAccessMode.None,
@@ -147,7 +145,7 @@ namespace Brovan.Android
                 };
 
                 Thread guestThread = new Thread(() =>
-                    RunGuest(path, rawArguments, arguments, directory, command, backendKind, new NetworkAccessPolicy(mode)))
+                    RunGuest(path, rawArguments, arguments, directory, command, EmulationBackendKind.Unicorn, new NetworkAccessPolicy(mode)))
                 {
                     IsBackground = false,
                     Name = "BrovanGuestMain",
@@ -268,11 +266,14 @@ namespace Brovan.Android
             if (!File.Exists(path))
                 return StatusBinaryNotFound;
 
-            if (!Directory.Exists(GeneralHelper.WindowsLibsPath))
-                return StatusMissingWindowsLibs;
+            if (!WindowsSystemFiles.UsingPack)
+            {
+                if (!Directory.Exists(GeneralHelper.WindowsLibsPath))
+                    return StatusMissingWindowsLibs;
 
-            if (!Directory.Exists(Path.Combine(AppContext.BaseDirectory, "WinReg")))
-                return StatusMissingRegistry;
+                if (!Directory.Exists(Path.Combine(AppContext.BaseDirectory, WindowsSystemFiles.RegistryDirectory)))
+                    return StatusMissingRegistry;
+            }
 
             if (!File.Exists(BinaryEmulator.ApiSetMapPath) && !TryGenerateApiSetMap())
                 return StatusApiSetMapFailed;
@@ -321,6 +322,46 @@ namespace Brovan.Android
                 return;
 
             ((delegate* unmanaged<int, void>)sink)(reason);
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "brovan_install_windows")]
+        public static int InstallWindows(byte* media, int mediaDescriptor, int acceptLicense, int buildPack, int imageIndex)
+        {
+            if (Volatile.Read(ref _initialized) == 0)
+                return StatusNotInitialized;
+
+            if (Volatile.Read(ref _running) != 0)
+                return StatusAlreadyRunning;
+
+            if (acceptLicense == 0)
+                return StatusInvalidArgument;
+
+            WindowsSetupOptions options = new WindowsSetupOptions
+            {
+                Media = media == null ? null : Marshal.PtrToStringUTF8((IntPtr)media),
+                MediaDescriptor = mediaDescriptor,
+                BuildPack = buildPack != 0,
+                LicenseAccepted = true,
+                ImageIndex = imageIndex < 1 ? 1 : imageIndex,
+            };
+
+            bool installed = WindowsSetup.Install(AppContext.BaseDirectory, options,
+                message => AndroidLog.Write(AndroidNative.LogInfo, message), null, ReportInstallProgress);
+
+            if (!installed)
+                return StatusFailed;
+
+            WindowsSystemFiles.Initialize(AppContext.BaseDirectory);
+            return StatusOk;
+        }
+
+        private static void ReportInstallProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal)
+        {
+            IntPtr sink = Volatile.Read(ref _installProgressSink);
+            if (sink == IntPtr.Zero)
+                return;
+
+            ((delegate* unmanaged<long, long, long, long, void>)sink)(filesDone, filesTotal, bytesDone, bytesTotal);
         }
 
         private static bool TryGenerateApiSetMap()

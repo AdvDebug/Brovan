@@ -1624,15 +1624,15 @@ namespace Brovan.Core.Emulation
 
             bool AddSyscallsFromFiles(string NtdllPath, string Win32uPath)
             {
-                if (!File.Exists(NtdllPath))
+                if (!GeneralHelper.WindowsLibraryExists(NtdllPath))
                 {
                     Utils.LogError($"[WinSyscallBuilder] Missing ntdll.dll: {NtdllPath}");
                     Utils.PrintHighlight("[-] Missing ntdll.dll. Syscalls won't work.", true);
                     return false;
                 }
 
-                using BinaryFile Ntdll = new BinaryFile(NtdllPath, true);
-                using BinaryFile Win32u = File.Exists(Win32uPath) ? new BinaryFile(Win32uPath, true) : null;
+                using BinaryFile Ntdll = GeneralHelper.OpenWindowsLibrary(NtdllPath);
+                using BinaryFile Win32u = GeneralHelper.WindowsLibraryExists(Win32uPath) ? GeneralHelper.OpenWindowsLibrary(Win32uPath) : null;
 
                 if (Win32u == null)
                     Utils.PrintHighlight("[-] win32u.dll not found, UI-related syscalls may not work.", true);
@@ -1684,8 +1684,8 @@ namespace Brovan.Core.Emulation
             }
             else
             {
-                string NtdllPath = Path.Combine(GeneralHelper.WindowsLibsPath, "ntdll.dll");
-                string Win32uPath = Path.Combine(GeneralHelper.WindowsLibsPath, "win32u.dll");
+                string NtdllPath = GeneralHelper.GetWindowsLibPath("ntdll.dll");
+                string Win32uPath = GeneralHelper.GetWindowsLibPath("win32u.dll");
 
                 if (!AddSyscallsFromFiles(NtdllPath, Win32uPath))
                     return ToDispatchTable(SyscallDictionary);

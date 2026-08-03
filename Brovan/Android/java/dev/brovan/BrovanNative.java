@@ -49,7 +49,13 @@ public final class BrovanNative {
         void onExit(int reason);
     }
 
+    /** Progress of {@link #installWindows}. Reported from a worker thread, not the main thread. */
+    public interface InstallListener {
+        void onInstallProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal);
+    }
+
     private static volatile Listener listener;
+    private static volatile InstallListener installListener;
 
     static {
         // .NET's crypto shim dlopens libssl.so, and Android provides none. Loading our bundled pair up front
@@ -72,6 +78,10 @@ public final class BrovanNative {
         listener = value;
     }
 
+    public static void setInstallListener(InstallListener value) {
+        installListener = value;
+    }
+
     /**
      * Must be the first call into the emulator. baseDirectory becomes the root the emulator resolves
      * WindowsLibs, WinReg, apisetmap.bin, VirtualFS, sessions and logs against, so it has to be a writable
@@ -79,6 +89,11 @@ public final class BrovanNative {
      */
     public static int init(String baseDirectory) {
         return nativeInit(baseDirectory);
+    }
+
+    public static int installWindows(String media, int mediaDescriptor, boolean acceptLicense, boolean buildPack,
+                                     int imageIndex) {
+        return nativeInstallWindows(media, mediaDescriptor, acceptLicense ? 1 : 0, buildPack ? 1 : 0, imageIndex);
     }
 
     /** Call from surfaceCreated / surfaceChanged. */
@@ -92,8 +107,8 @@ public final class BrovanNative {
     }
 
     public static int start(String binaryPath, String guestCommandLine, String workingDirectory,
-                            String debuggerCommands, int backend, int networkMode) {
-        return nativeStart(binaryPath, guestCommandLine, workingDirectory, debuggerCommands, backend, networkMode);
+                            String debuggerCommands, int networkMode) {
+        return nativeStart(binaryPath, guestCommandLine, workingDirectory, debuggerCommands, networkMode);
     }
 
     /** Enables the emulator's own trace into logcat. Must be called before {@link #start}. */
@@ -194,14 +209,25 @@ public final class BrovanNative {
         }
     }
 
+    @SuppressWarnings("unused")
+    private static void onNativeInstallProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal) {
+        InstallListener current = installListener;
+        if (current != null) {
+            current.onInstallProgress(filesDone, filesTotal, bytesDone, bytesTotal);
+        }
+    }
+
     private static native int nativeInit(String baseDirectory);
+
+    private static native int nativeInstallWindows(String media, int mediaDescriptor, int acceptLicense,
+                                                   int buildPack, int imageIndex);
 
     private static native void nativeSetSurface(Surface surface, int densityDpi);
 
     private static native void nativeClearSurface();
 
     private static native int nativeStart(String binaryPath, String guestCommandLine, String workingDirectory,
-                                          String debuggerCommands, int backend, int networkMode);
+                                          String debuggerCommands, int networkMode);
 
     private static native void nativeSetVerbose(int enabled);
 
