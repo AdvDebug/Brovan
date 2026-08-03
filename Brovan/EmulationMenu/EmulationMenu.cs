@@ -2462,7 +2462,7 @@ namespace Brovan.EmulationMenu
                 {
                     if (Binary.FileFormat == BinaryFormat.PE)
                     {
-                        WinModule MappedMod = Emulator.WinHelper?.WinModules.FirstOrDefault(b => b.Path == Binary.Location);
+                        WinModule MappedMod = Emulator.WinHelper?.WinModules.FirstOrDefault(b => b.Path == Emulator.GuestImagePath);
                         if (MappedMod != null)
                         {
                             MappedMainModuleBase = MappedMod.MappedBase;

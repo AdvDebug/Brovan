@@ -27,6 +27,23 @@ namespace Brovan.Core.Emulation
             }
         }, isThreadSafe: true);
 
+        /// <summary>
+        /// Resolves the path an emulated Windows image is reachable through from inside the guest.
+        /// </summary>
+        /// <param name="Binary">Binary being emulated.</param>
+        /// <param name="Guest">Guest environment the binary runs under, when it is already known.</param>
+        /// <returns>The guest path of the image, which equals the host path on a Windows host.</returns>
+        private static string ResolveGuestImagePath(BinaryFile Binary, IGuestEnvironment Guest = null)
+        {
+            if (string.IsNullOrEmpty(Binary?.Location))
+                return Binary?.Location;
+
+            if (Binary.FileFormat != BinaryFormat.PE && Guest is not Guests.WindowsGuest)
+                return Binary.Location;
+
+            return GeneralHelper.IO.MountWindowsProgramDirectory(Binary.Location, WinSysHelper.CurrentUserProfile);
+        }
+
         internal WindowsGuest WindowsGuest => GetGuest<WindowsGuest>();
         internal WinSysHelper WinHelper => WindowsGuest?.WinHelper;
         internal ulong TEB => WindowsGuest?.GetCurrentTeb(this) ?? 0;

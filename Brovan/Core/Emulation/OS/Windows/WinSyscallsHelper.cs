@@ -1292,11 +1292,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             PPID = GenerateRandomPID();
             string FileName = null;
             BinaryFile Binary = Emulator._binary;
-            if (Binary.Location != null)
+            if (Emulator.GuestImagePath != null)
             {
                 try
                 {
-                    FileName = Path.GetFileName(Binary.Location);
+                    FileName = GeneralHelper.IO.GetWindowsFileName(Emulator.GuestImagePath);
                 }
                 catch
                 {
@@ -1331,7 +1331,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "Registry", Path = "Registry", Status = ProtectionStatus.Full, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "smss.exe", Path = "C:\\Windows\\System32\\smss.exe", Status = ProtectionStatus.LightTCB, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "Memory Compression", Path = "MemCompression", Status = ProtectionStatus.Full, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
-                new WinProcess{ PID = PID, PPID = PPID, Name = FileName, Path = Binary.Location != null ? Binary.Location : null, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = Binary.Architecture, PrimaryToken = new WinToken{SessionId = 1, IsElevated = false, IsRestricted = false, OwningProcessId = PID, OwningThreadId = 0, Type = TokenType.Primary } },
+                new WinProcess{ PID = PID, PPID = PPID, Name = FileName, Path = Emulator.GuestImagePath, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = Binary.Architecture, PrimaryToken = new WinToken{SessionId = 1, IsElevated = false, IsRestricted = false, OwningProcessId = PID, OwningThreadId = 0, Type = TokenType.Primary } },
                 new WinProcess{ PID = PPID, PPID = GenerateRandomPID(), Name = "explorer.exe", Path = "C:\\Windows\\explorer.exe", Status = ProtectionStatus.None, RunningUser = User.Standard, Critical = false, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = FirefoxParent, PPID = PPID, Name = "firefox.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\firefox.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},
                 new WinProcess{ PID = GenerateRandomPID(), PPID = FirefoxParent, Name = "crashhelper.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\crashhelper.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},

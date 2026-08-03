@@ -162,8 +162,8 @@ namespace Brovan.Core.Emulation.Guests
 
             if (!string.IsNullOrEmpty(Binary.Location) && File.Exists(Binary.Location))
             {
-                Module.Name = Path.GetFileName(Binary.Location);
-                Module.Path = Binary.Location;
+                Module.Name = GeneralHelper.IO.GetWindowsFileName(Instance.GuestImagePath);
+                Module.Path = Instance.GuestImagePath;
             }
 
             Module.OriginalBase = Binary.PE.ImageBase;
@@ -225,8 +225,8 @@ namespace Brovan.Core.Emulation.Guests
                 OriginalBase = RequestedBase != 0 ? RequestedBase : MappedBase,
                 SizeOfImage = BlobSize,
                 EntryPoint = GuestEntry,
-                Name = !string.IsNullOrWhiteSpace(Binary.Location) ? Path.GetFileName(Binary.Location) : "blob.bin",
-                Path = Binary.Location
+                Name = !string.IsNullOrWhiteSpace(Instance.GuestImagePath) ? GeneralHelper.IO.GetWindowsFileName(Instance.GuestImagePath) : "blob.bin",
+                Path = Instance.GuestImagePath
             };
 
             PrepareWinEnvironment(Instance, Module);
@@ -1220,7 +1220,7 @@ namespace Brovan.Core.Emulation.Guests
         {
             string ImageName = MainModule?.Name;
             if (string.IsNullOrEmpty(ImageName))
-                ImageName = Path.GetFileName(Instance._binary?.Location ?? string.Empty);
+                ImageName = GeneralHelper.IO.GetWindowsFileName(Instance.GuestImagePath ?? string.Empty);
 
             GuestSession.Join(
                 Instance.WinHelper.PID,
@@ -1236,9 +1236,9 @@ namespace Brovan.Core.Emulation.Guests
 
         private static string ResolveStartupDirectory(BinaryEmulator Instance, string ImagePath)
         {
-            string Directory = Instance.WorkingDirectory;
+            string Directory = GeneralHelper.IO.ToGuestWindowsPath(Instance.WorkingDirectory);
             if (string.IsNullOrWhiteSpace(Directory))
-                Directory = Path.GetDirectoryName(ImagePath);
+                Directory = GeneralHelper.IO.GetWindowsDirectoryName(ImagePath);
 
             if (string.IsNullOrWhiteSpace(Directory))
                 Directory = "C:\\";
@@ -1304,8 +1304,8 @@ namespace Brovan.Core.Emulation.Guests
                 if (IsPeImage || UsesDirectBlobStartup)
                 {
                     string ImagePath = IsPeImage
-                        ? Instance._binary.Location
-                        : (!string.IsNullOrWhiteSpace(Instance._binary.Location) ? Instance._binary.Location : (!string.IsNullOrWhiteSpace(MainModule.Path) ? MainModule.Path : (!string.IsNullOrWhiteSpace(MainModule.Name) ? MainModule.Name : "blob.bin")));
+                        ? Instance.GuestImagePath
+                        : (!string.IsNullOrWhiteSpace(Instance.GuestImagePath) ? Instance.GuestImagePath : (!string.IsNullOrWhiteSpace(MainModule.Path) ? MainModule.Path : (!string.IsNullOrWhiteSpace(MainModule.Name) ? MainModule.Name : "blob.bin")));
                     string CurrentDir = ResolveStartupDirectory(Instance, ImagePath);
                     string DesktopInfo = "Winsta0\\Default";
                     string WindowTitle = ImagePath;
@@ -1423,7 +1423,7 @@ namespace Brovan.Core.Emulation.Guests
 
         private ulong BuildProcessParameters32(BinaryEmulator Instance, WinModule MainModule)
         {
-            string ImagePath = Instance._binary.Location;
+            string ImagePath = Instance.GuestImagePath;
             if (string.IsNullOrWhiteSpace(ImagePath))
                 ImagePath = !string.IsNullOrWhiteSpace(MainModule.Path) ? MainModule.Path : (!string.IsNullOrWhiteSpace(MainModule.Name) ? MainModule.Name : "app.exe");
             string CurrentDir = ResolveStartupDirectory(Instance, ImagePath);

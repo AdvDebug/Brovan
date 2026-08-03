@@ -376,6 +376,11 @@ namespace Brovan.Core.Emulation
         public string WorkingDirectory { get; }
         public string[] ProgramArguments { get; }
 
+        /// <summary>
+        /// Path of the emulated image as the guest sees it, which is not the host path when the host is not Windows.
+        /// </summary>
+        public string GuestImagePath { get; }
+
         public int IPRegister { get; private set; }
         public Arch BackendArch { get; private set; }
         public Mode BackendMode { get; private set; }
@@ -527,6 +532,7 @@ namespace Brovan.Core.Emulation
             BackendArch = Arch.X86;
             BackendMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
             GeneralHelper.IO.Wow64FileRedirect = Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86;
+            GuestImagePath = ResolveGuestImagePath(Binary);
             _emulator = BackendFactory.Create(Settings.BackendKind, BackendArch, BackendMode, Settings.NoHooks);
             _emulator.NoHooks = Settings.NoHooks;
             this.Settings = Settings;
@@ -568,6 +574,7 @@ namespace Brovan.Core.Emulation
             BackendArch = arch;
             BackendMode = mode;
             GeneralHelper.IO.Wow64FileRedirect = Binary?.FileFormat == BinaryFormat.PE && Binary?.Architecture == BinaryArchitecture.x86;
+            GuestImagePath = ResolveGuestImagePath(_binary, Guest);
             _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks);
             this.Settings = Settings;
             Debug = Settings.Debug;

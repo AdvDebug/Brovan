@@ -983,6 +983,7 @@ namespace Brovan
             private static readonly Dictionary<char, string> DriveMappings = new();
             private static readonly HashSet<string> AllowedRoots = new(IsWindows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             private static readonly Dictionary<string, string> LinuxMountMappings = new(StringComparer.Ordinal);
+            private static readonly Dictionary<string, string> WindowsMountMappings = new(StringComparer.OrdinalIgnoreCase);
 
             public static string VirtualFileSystemRoot = Path.Combine(AppContext.BaseDirectory, "VirtualFS");
             public static string LinuxVirtualFileSystemRoot = Path.Combine(VirtualFileSystemRoot, "Linux");
@@ -999,6 +1000,8 @@ namespace Brovan
             {
                 "catroot", "catroot2", "driverstore", "drivers\\etc", "logfiles", "spool"
             };
+
+            private static readonly char[] WindowsPathSeparators = { '\\', '/' };
 
             /// <summary>
             /// Initializes the default sandbox drive mappings and allowed IO roots.
@@ -1865,6 +1868,151 @@ namespace Brovan
             }
 
             /// <summary>
+            /// Sets a host directory mapping for an emulated windows directory.
+            /// </summary>
+            /// <param name="GuestDirectory">absolute emulated windows directory to map (for example "C:\Users\User\Game").</param>
+            /// <param name="HostRoot">host directory root for the emulated directory.</param>
+            /// <returns>returns true when the mapping was registered.</returns>
+            public static bool SetWindowsMountMapping(string GuestDirectory, string HostRoot)
+            {
+                if (!EnsureWindowsMountMapping(GuestDirectory, HostRoot))
+                    return false;
+
+                RefreshAllowedRoots();
+                return true;
+            }
+
+            /// <summary>
+            /// Mounts the host directory that holds an emulated windows program so the guest reaches it through a
+            /// windows path instead of a host path.
+            /// </summary>
+            /// <param name="HostImagePath">host path of the program image.</param>
+            /// <param name="GuestParentDirectory">emulated windows directory the program directory is mounted under.</param>
+            /// <returns>returns the emulated windows path of the program image.</returns>
+            /// <remarks>
+            /// A host that is already a windows machine hands out paths the guest can use as-is, so nothing is mounted there.
+            /// </remarks>
+            public static string MountWindowsProgramDirectory(string HostImagePath, string GuestParentDirectory)
+            {
+                if (string.IsNullOrWhiteSpace(HostImagePath) || IsWindowsRootedPath(HostImagePath))
+                    return HostImagePath;
+
+                string HostDirectory;
+                try
+                {
+                    HostDirectory = Path.GetDirectoryName(Path.GetFullPath(HostImagePath));
+                }
+                catch
+                {
+                    return HostImagePath;
+                }
+
+                if (string.IsNullOrEmpty(HostDirectory))
+                    return HostImagePath;
+
+                string Leaf = SanitizeWindowsPathComponent(Path.GetFileName(HostDirectory));
+                string GuestDirectory = CanonicalizeWindowsAbsolutePath(GuestParentDirectory);
+                if (string.IsNullOrEmpty(GuestDirectory))
+                    return HostImagePath;
+
+                GuestDirectory = CanonicalizeWindowsAbsolutePath(GuestDirectory.TrimEnd('\\') + "\\" + Leaf);
+                if (string.IsNullOrEmpty(GuestDirectory) || !SetWindowsMountMapping(GuestDirectory, HostDirectory))
+                    return HostImagePath;
+
+                return GuestDirectory + "\\" + Path.GetFileName(HostImagePath);
+            }
+
+            /// <summary>
+            /// Translates a host path into the emulated windows path it is reachable through.
+            /// </summary>
+            /// <param name="HostPath">host path to translate.</param>
+            /// <returns>returns the emulated windows path, or null when the host path is not mounted.</returns>
+            public static string ToGuestWindowsPath(string HostPath)
+            {
+                if (string.IsNullOrWhiteSpace(HostPath))
+                    return null;
+
+                if (IsWindowsRootedPath(HostPath))
+                    return HostPath;
+
+                string Full;
+                try
+                {
+                    Full = ResolveSandboxLinks(Path.GetFullPath(HostPath), IncludeFinal: true, EnforceAllowedRoots: false);
+                }
+                catch
+                {
+                    return null;
+                }
+
+                if (string.IsNullOrEmpty(Full))
+                    return null;
+
+                StringComparison Comparison = IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+                lock (DriveMapLock)
+                {
+                    foreach (KeyValuePair<string, string> Pair in WindowsMountMappings)
+                    {
+                        string Root = Pair.Value.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+                        if (string.Equals(Full, Root, Comparison))
+                            return Pair.Key;
+
+                        if (!Full.StartsWith(Root + Path.DirectorySeparatorChar, Comparison))
+                            continue;
+
+                        string Relative = Full.Substring(Root.Length + 1).Replace(Path.DirectorySeparatorChar, '\\');
+                        return Pair.Key + "\\" + Relative;
+                    }
+                }
+
+                return null;
+            }
+
+            /// <summary>
+            /// Returns the file name of an emulated windows path.
+            /// </summary>
+            /// <param name="WinPath">emulated windows path.</param>
+            /// <returns>returns the trailing path component.</returns>
+            /// <remarks>
+            /// <see cref="Path.GetFileName(string)"/> only splits on the host separator, so it returns the whole
+            /// backslash path unchanged on a linux host.
+            /// </remarks>
+            public static string GetWindowsFileName(string WinPath)
+            {
+                if (string.IsNullOrEmpty(WinPath))
+                    return WinPath;
+
+                int Separator = WinPath.LastIndexOfAny(WindowsPathSeparators);
+                return Separator >= 0 ? WinPath.Substring(Separator + 1) : WinPath;
+            }
+
+            /// <summary>
+            /// Returns the directory of an emulated windows path.
+            /// </summary>
+            /// <param name="WinPath">emulated windows path.</param>
+            /// <returns>returns the directory portion, or null when the path has none.</returns>
+            /// <remarks>
+            /// <see cref="Path.GetDirectoryName(string)"/> only splits on the host separator, so it returns an empty
+            /// string for a backslash path on a linux host.
+            /// </remarks>
+            public static string GetWindowsDirectoryName(string WinPath)
+            {
+                if (string.IsNullOrEmpty(WinPath))
+                    return null;
+
+                int Separator = WinPath.LastIndexOfAny(WindowsPathSeparators);
+                if (Separator < 0)
+                    return null;
+
+                if (Separator == 2 && WinPath.Length >= 3 && WinPath[1] == ':')
+                    return WinPath.Substring(0, 3);
+
+                return Separator == 0 ? "\\" : WinPath.Substring(0, Separator);
+            }
+
+            /// <summary>
             /// Resolves an emulated path into an absolute host path that can be used for real IO.
             /// </summary>
             /// <param name="EmulatedPath">emulated path to resolve.</param>
@@ -2115,6 +2263,9 @@ namespace Brovan
                 if (WinPath.Length < 2 || WinPath[1] != ':')
                     return null;
 
+                if (TryResolveWindowsMount(WinPath, out string MountedHostPath))
+                    return GetSandboxedFullPath(MountedHostPath, CreateDirectories, PreserveFinalLink);
+
                 char Drive = char.ToUpperInvariant(WinPath[0]);
                 string DriveRelative = WinPath.Substring(2).TrimStart('\\');
 
@@ -2124,6 +2275,69 @@ namespace Brovan
 
                 string HostPath = CombineWindowsRelativePath(Root, DriveRelative);
                 return GetSandboxedFullPath(HostPath, CreateDirectories, PreserveFinalLink);
+            }
+
+            private static bool TryResolveWindowsMount(string WinPath, out string HostPath)
+            {
+                HostPath = null;
+
+                int BestLength = 0;
+                string BestRoot = null;
+
+                lock (DriveMapLock)
+                {
+                    foreach (KeyValuePair<string, string> Pair in WindowsMountMappings)
+                    {
+                        string Mount = Pair.Key;
+                        if (WinPath.Length < Mount.Length || Mount.Length <= BestLength)
+                            continue;
+
+                        if (WinPath.Length != Mount.Length && WinPath[Mount.Length] != '\\')
+                            continue;
+
+                        if (!WinPath.AsSpan(0, Mount.Length).Equals(Mount.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        BestLength = Mount.Length;
+                        BestRoot = Pair.Value;
+                    }
+                }
+
+                if (BestRoot == null)
+                    return false;
+
+                string Relative = WinPath.Length == BestLength ? string.Empty : WinPath.Substring(BestLength + 1);
+                HostPath = Relative.Length == 0 ? BestRoot : CombineWindowsRelativePath(BestRoot, Relative);
+                return true;
+            }
+
+            private static bool IsWindowsRootedPath(string PathValue)
+            {
+                if (string.IsNullOrEmpty(PathValue))
+                    return false;
+
+                if (PathValue.Length >= 3 && char.IsLetter(PathValue[0]) && PathValue[1] == ':' && (PathValue[2] == '\\' || PathValue[2] == '/'))
+                    return true;
+
+                return PathValue.StartsWith("\\\\", StringComparison.Ordinal);
+            }
+
+            private static string SanitizeWindowsPathComponent(string Component)
+            {
+                if (string.IsNullOrWhiteSpace(Component))
+                    return "Program";
+
+                Span<char> Buffer = stackalloc char[Component.Length];
+                for (int i = 0; i < Component.Length; i++)
+                {
+                    char Value = Component[i];
+                    bool Invalid = Value < ' ' || Value == '<' || Value == '>' || Value == ':' || Value == '"' ||
+                                   Value == '/' || Value == '\\' || Value == '|' || Value == '?' || Value == '*';
+                    Buffer[i] = Invalid ? '_' : Value;
+                }
+
+                string Sanitized = new string(Buffer).Trim().TrimEnd('.');
+                return Sanitized.Length == 0 ? "Program" : Sanitized;
             }
 
             /// <summary>
@@ -2319,6 +2533,45 @@ namespace Brovan
                 {
                     Utils.LogError("[IO] Failed to create drive mapping directory.");
                 }
+            }
+
+            private static bool EnsureWindowsMountMapping(string GuestDirectory, string HostRoot)
+            {
+                string NormalizedGuestDirectory = CanonicalizeWindowsAbsolutePath(GuestDirectory);
+
+                // A drive root belongs to the drive map, and letting one in here would make every mount key need a
+                // trailing-separator special case during lookup.
+                if (string.IsNullOrEmpty(NormalizedGuestDirectory) || NormalizedGuestDirectory.Length <= 3 || string.IsNullOrWhiteSpace(HostRoot))
+                    return false;
+
+                string NormalizedHostRoot;
+                try
+                {
+                    NormalizedHostRoot = ResolveSandboxLinks(Path.GetFullPath(HostRoot), IncludeFinal: true, EnforceAllowedRoots: false);
+                }
+                catch
+                {
+                    return false;
+                }
+
+                if (string.IsNullOrEmpty(NormalizedHostRoot))
+                    return false;
+
+                lock (DriveMapLock)
+                {
+                    WindowsMountMappings[NormalizedGuestDirectory] = NormalizedHostRoot;
+                }
+
+                try
+                {
+                    Directory.CreateDirectory(NormalizedHostRoot);
+                }
+                catch
+                {
+                    Utils.LogError("[IO] Failed to create windows mount mapping directory.");
+                }
+
+                return true;
             }
 
             private static void EnsureLinuxMountMapping(string MountPoint, string HostRoot)
@@ -2585,6 +2838,21 @@ namespace Brovan
                         }
                     }
 
+                    foreach (KeyValuePair<string, string> Pair in WindowsMountMappings)
+                    {
+                        if (string.IsNullOrWhiteSpace(Pair.Value))
+                            continue;
+
+                        try
+                        {
+                            AllowedRoots.Add(Path.GetFullPath(Pair.Value));
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
+                    }
+
                     try
                     {
                         AllowedRoots.Add(Path.GetFullPath(WindowsLibsPath));
@@ -2648,7 +2916,7 @@ namespace Brovan
                 return Resolved;
             }
 
-            private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal)
+            private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, bool EnforceAllowedRoots = true)
             {
                 if (string.IsNullOrWhiteSpace(FullPath))
                     return null;
@@ -2703,7 +2971,7 @@ namespace Brovan
                         return null;
 
                     Current = Resolved;
-                    if (!IsUnderAllowedRoots(Current))
+                    if (EnforceAllowedRoots && !IsUnderAllowedRoots(Current))
                         return null;
                 }
 

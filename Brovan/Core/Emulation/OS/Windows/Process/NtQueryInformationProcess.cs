@@ -270,7 +270,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                         if (CurrentProcess)
                         {
-                            string Path = Instance._binary.Location;
+                            string Path = Instance.GuestImagePath;
                             int PathByteCount = Encoding.Unicode.GetByteCount(Path);
                             Span<byte> PathBytes = Instance.WinHelper.Shared.GetSpan((uint)PathByteCount);
                             Encoding.Unicode.GetBytes(Path.AsSpan(), PathBytes);
