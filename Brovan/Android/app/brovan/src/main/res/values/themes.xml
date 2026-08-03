@@ -13,6 +13,13 @@
         <item name="colorOutline">@color/outline</item>
         <item name="android:statusBarColor">@color/background</item>
         <item name="android:navigationBarColor">@color/background</item>
+        <item name="materialSwitchStyle">@style/Widget.Brovan.Switch</item>
+    </style>
+
+    <style name="Widget.Brovan.Switch" parent="Widget.Material3.CompoundButton.MaterialSwitch">
+        <item name="thumbTint">@color/switch_thumb_tint</item>
+        <item name="trackTint">@color/switch_track_tint</item>
+        <item name="trackDecorationTint">@color/outline</item>
     </style>
 
     <style name="SectionLabel" parent="">
