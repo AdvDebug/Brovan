@@ -112,6 +112,13 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         BrovanNative.setVerbose(developerMode);
         setStatus(getIntent().getStringExtra(EXTRA_NAME));
 
+        // Developer mode leaves the guest at the debugger prompt instead of running it, so the console has to
+        // be up for the "start" that gets it going to be reachable.
+        if (developerMode) {
+            console.setVisibility(View.VISIBLE);
+            append(getString(R.string.player_developer_hint));
+        }
+
         int result = BrovanNative.start(
                 getIntent().getStringExtra(EXTRA_EXECUTABLE),
                 null,

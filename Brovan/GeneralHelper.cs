@@ -11,7 +11,6 @@ using System.Text;
 using System.Threading.Tasks;
 using Brovan.Core.Emulation;
 using Brovan.Core.Helpers;
-using Brovan.Core.Helpers.WindowsImage;
 using Brovan.Core;
 using Microsoft.Win32.SafeHandles;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -204,24 +203,6 @@ namespace Brovan
             }
         }
 
-        /// <summary>
-        /// Opens a Windows library that may live either on the host filesystem or inside the compressed pack.
-        /// </summary>
-        public static BinaryFile OpenWindowsLibrary(string Path)
-        {
-            return WindowsSystemFiles.IsPackPath(Path)
-                ? new BinaryFile(WindowsSystemFiles.ReadAll(Path), true)
-                : new BinaryFile(Path, true);
-        }
-
-        public static bool WindowsLibraryExists(string Path)
-        {
-            if (string.IsNullOrWhiteSpace(Path))
-                return false;
-
-            return WindowsSystemFiles.IsPackPath(Path) ? WindowsSystemFiles.FileExists(Path) : File.Exists(Path);
-        }
-
         private delegate IntPtr GetPebPtr();
 
         public static string GetWindowsLibPath(string Library, bool IsWow64 = false, BinaryArchitecture Arch = BinaryArchitecture.x64)
@@ -232,59 +213,48 @@ namespace Brovan
             if (!Library.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
                 Library += ".dll";
 
+            bool Wow64View = IsWow64 || Arch == BinaryArchitecture.x86;
+
+            string ShippedPath = Wow64View
+                ? Path.Combine(WindowsLibsPath, "SysWOW64")
+                : WindowsLibsPath;
+
             string BasePath;
 
             if (IsWindows)
             {
                 string WindowsDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
 
-                if (Environment.Is64BitOperatingSystem)
-                {
-                    if (IsWow64 || Arch == BinaryArchitecture.x86)
-                    {
-                        // x86 view on x64 OS
-                        BasePath = Path.Combine(WindowsDir, "SysWOW64");
-                    }
-                    else
-                    {
-                        // native x64
-                        BasePath = Path.Combine(WindowsDir, "System32");
-                    }
-                }
-                else
-                {
-                    // 32-bit OS
-                    BasePath = Path.Combine(WindowsDir, "System32");
-                }
+                BasePath = Wow64View && Environment.Is64BitOperatingSystem
+                    ? Path.Combine(WindowsDir, "SysWOW64")
+                    : Path.Combine(WindowsDir, "System32");
             }
             else
             {
-                bool Wow64View = IsWow64 || Arch == BinaryArchitecture.x86;
-
-                if (WindowsSystemFiles.UsingPack)
-                {
-                    string PackPath = WindowsSystemFiles.TryResolveRelative(Wow64View ? "SysWOW64/" + Library : Library);
-                    if (PackPath != null)
-                        return PackPath;
-                }
-
-                // Linux / non-Windows: use shipped Windows DLLs
-                BasePath = Wow64View
-                    ? Path.Combine(WindowsLibsPath, "SysWOW64")
-                    : WindowsLibsPath;
+                BasePath = ShippedPath;
             }
 
             string Result = Path.Combine(BasePath, Library);
 
-            if (!IsWindows && !File.Exists(Result))
-            {
-                string Resolved = ResolveShippedLibraryCase(BasePath, Library);
-                if (Resolved != null)
-                    return Resolved;
-            }
-
             if (!File.Exists(Result))
+            {
+                // The Visual C++ runtimes are not part of Windows, so --install-runtimes puts them in WindowsLibs
+                // even on a Windows host, where System32 only has them once a redistributable has been installed.
+                if (IsWindows)
+                {
+                    string Shipped = Path.Combine(ShippedPath, Library);
+                    if (File.Exists(Shipped))
+                        return Shipped;
+                }
+                else
+                {
+                    string Resolved = ResolveShippedLibraryCase(BasePath, Library);
+                    if (Resolved != null)
+                        return Resolved;
+                }
+
                 PrintHighlight($"[-] Windows library not found: {Result}", true);
+            }
 
             return Result;
         }
@@ -1035,8 +1005,6 @@ namespace Brovan
             /// </summary>
             static IO()
             {
-                WindowsSystemFiles.Initialize(AppContext.BaseDirectory);
-
                 // Keep the emulator sandboxed by default.
                 EnsureDriveMapping('C', Path.Combine(VirtualFileSystemRoot, "C"));
                 EnsureDriveMapping('E', Path.Combine(VirtualFileSystemRoot, "E"));
@@ -1971,7 +1939,18 @@ namespace Brovan
 
                 // this resolve function be called for writes, so i think this is secure when reading or checking files/directories.
                 if (IsWindows)
-                    return GetNativeFullPath(WinPath, CreateDirectories);
+                {
+                    string Native = GetNativeFullPath(WinPath, CreateDirectories);
+
+                    if (!CreateDirectories && !string.IsNullOrEmpty(Native) && !File.Exists(Native) && !Directory.Exists(Native))
+                    {
+                        string Shipped = TryResolveFromWindowsLibs(WinPath);
+                        if (!string.IsNullOrEmpty(Shipped))
+                            return Shipped;
+                    }
+
+                    return Native;
+                }
 
                 string WindowsLibMapped = TryResolveFromWindowsLibs(WinPath);
                 if (!string.IsNullOrEmpty(WindowsLibMapped))
@@ -2929,14 +2908,6 @@ namespace Brovan
                 if (string.IsNullOrWhiteSpace(BaseDir) || string.IsNullOrWhiteSpace(WindowsRelative))
                     return null;
 
-                if (WindowsSystemFiles.UsingPack)
-                {
-                    bool Wow64View = BaseDir.EndsWith("SysWOW64", StringComparison.OrdinalIgnoreCase);
-                    string PackName = Wow64View ? "SysWOW64/" + WindowsRelative : WindowsRelative;
-
-                    return WindowsSystemFiles.TryResolveRelative(PackName) ?? TryResolveFromWindowsLibsByLeaf(Path.GetFileName(WindowsRelative));
-                }
-
                 string Candidate = CombineWindowsRelativePath(BaseDir, WindowsRelative);
                 if (string.IsNullOrWhiteSpace(Candidate))
                     return null;
@@ -2982,7 +2953,6 @@ namespace Brovan
                         return;
 
                     WindowsLibsFileIndex = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    WindowsSystemFiles.AddIndexEntries(WindowsLibsFileIndex);
 
                     try
                     {

@@ -9,7 +9,6 @@ namespace Brovan.Core.Helpers.WindowsImage
     {
         public string? Media;
         public int MediaDescriptor = -1;
-        public bool BuildPack;
         public bool LicenseAccepted;
         public string Locale = "English (United States)";
         public int ImageIndex = 1;
@@ -19,8 +18,26 @@ namespace Brovan.Core.Helpers.WindowsImage
     {
         public const string LicenseNotice =
             "Brovan is about to download Windows installation media from Microsoft's servers and extract the system\n" +
-            "libraries and registry hives it needs to run Windows programs. Brovan does not include or redistribute\n" +
-            "any Microsoft software. Using these files requires a valid Windows license.";
+            "libraries and registry hives it needs to run Windows programs, followed by the Visual C++ runtimes that\n" +
+            "most Windows programs are built against. Brovan does not include or redistribute any Microsoft software.\n" +
+            "Using these files requires a valid Windows license.";
+
+        public static bool InstallRuntimes(string BaseDirectory, bool LicenseAccepted, Action<string> Report, Func<bool>? Confirm, Action<long, long, long, long>? Progress = null)
+        {
+            if (!LicenseAccepted)
+            {
+                Report(VisualCppRuntimeImporter.LicenseNotice);
+
+                if (Confirm == null || !Confirm())
+                {
+                    Report("[-] Aborted; nothing was downloaded.");
+                    return false;
+                }
+            }
+
+            using HttpClient Client = HttpImageDataSource.CreateClient();
+            return VisualCppRuntimeImporter.Import(BaseDirectory, Client, Report, Progress);
+        }
 
         public static bool Install(string BaseDirectory, WindowsSetupOptions Options, Action<string> Report, Func<bool>? Confirm, Action<long, long, long, long>? Progress = null)
         {
@@ -72,10 +89,13 @@ namespace Brovan.Core.Helpers.WindowsImage
 
                 Report($"[*] Media is {Media.Length / (1024 * 1024)} MB; only the parts that are extracted are read.");
 
-                WindowsImageImporter.Import(Media, BaseDirectory, Options.ImageIndex, Options.BuildPack, Report, Progress);
+                WindowsImageImporter.Import(Media, BaseDirectory, Options.ImageIndex, Report, Progress);
 
                 if (Media is HttpImageDataSource Remote)
                     Report($"[*] Transferred {Remote.TransferredBytes / (1024 * 1024)} MB over the network.");
+
+                Client ??= HttpImageDataSource.CreateClient();
+                VisualCppRuntimeImporter.Import(BaseDirectory, Client, Report, Progress);
 
                 return true;
             }

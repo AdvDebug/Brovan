@@ -155,13 +155,14 @@ public class MainActivity extends AppCompatActivity {
 
         TextView status = view.findViewById(R.id.windows_status);
         MaterialSwitch licensed = view.findViewById(R.id.windows_licensed);
-        MaterialSwitch uncompressed = view.findViewById(R.id.windows_uncompressed);
         TextInputEditText source = view.findViewById(R.id.windows_source);
         MaterialButton install = view.findViewById(R.id.windows_install);
         LinearProgressIndicator bar = view.findViewById(R.id.windows_progress);
         TextView detail = view.findViewById(R.id.windows_progress_text);
         MaterialButton openPage = view.findViewById(R.id.windows_open_page);
         MaterialButton choose = view.findViewById(R.id.windows_choose);
+        MaterialButton runtimes = view.findViewById(R.id.windows_runtimes);
+        TextView runtimesStatus = view.findViewById(R.id.windows_runtimes_status);
 
         isoLabel = detail;
 
@@ -180,6 +181,60 @@ public class MainActivity extends AppCompatActivity {
 
         status.setText(windowsFilesPresent() ? R.string.windows_installed : R.string.windows_missing);
 
+        showRuntimeState(runtimesStatus, runtimes);
+
+        runtimes.setOnClickListener(button -> {
+            if (!licensed.isChecked()) {
+                snack(getString(R.string.windows_needs_license));
+                return;
+            }
+
+            runtimes.setEnabled(false);
+            install.setEnabled(false);
+            bar.setIndeterminate(true);
+            bar.setVisibility(View.VISIBLE);
+            detail.setVisibility(View.VISIBLE);
+            detail.setText(R.string.windows_runtimes_working);
+
+            // The package sizes are only known once the Visual Studio manifest is in, so the download runs
+            // indeterminate until the native side reports a byte total.
+            BrovanNative.setInstallListener((filesDone, filesTotal, bytesDone, bytesTotal) -> runOnUiThread(() -> {
+                if (bytesTotal <= 0) {
+                    detail.setText(String.format(java.util.Locale.US, "%d MB", bytesDone >> 20));
+                    return;
+                }
+
+                if (bar.isIndeterminate()) {
+                    bar.setIndeterminate(false);
+                    bar.setMax(1000);
+                }
+
+                bar.setProgress((int) (bytesDone * 1000 / bytesTotal), true);
+                detail.setText(String.format(java.util.Locale.US, "%d of %d MB",
+                        bytesDone >> 20, bytesTotal >> 20));
+            }));
+
+            worker.execute(() -> {
+                int result = BrovanNative.init(getFilesDir().getAbsolutePath());
+
+                if (result == BrovanNative.STATUS_OK || result == BrovanNative.STATUS_MISSING_WINDOWS_LIBS
+                        || result == BrovanNative.STATUS_MISSING_REGISTRY) {
+                    result = BrovanNative.installRuntimes(true);
+                }
+
+                int outcome = result;
+                runOnUiThread(() -> {
+                    BrovanNative.setInstallListener(null);
+                    bar.setVisibility(View.GONE);
+                    runtimes.setEnabled(true);
+                    install.setEnabled(true);
+                    detail.setText(outcome == BrovanNative.STATUS_OK
+                            ? R.string.windows_runtimes_done : R.string.windows_failed);
+                    showRuntimeState(runtimesStatus, runtimes);
+                });
+            });
+        });
+
         install.setOnClickListener(button -> {
             if (!licensed.isChecked()) {
                 snack(getString(R.string.windows_needs_license));
@@ -190,11 +245,9 @@ public class MainActivity extends AppCompatActivity {
             String media = typed == null || typed.toString().trim().isEmpty() ? null : typed.toString().trim();
             Uri iso = selectedIso;
 
-            boolean pack = !uncompressed.isChecked();
-
             install.setEnabled(false);
             licensed.setEnabled(false);
-            uncompressed.setEnabled(false);
+            runtimes.setEnabled(false);
             bar.setIndeterminate(true);
             bar.setVisibility(View.VISIBLE);
             detail.setVisibility(View.VISIBLE);
@@ -230,7 +283,7 @@ public class MainActivity extends AppCompatActivity {
                             handle = descriptor == null ? -1 : descriptor.getFd();
                         }
 
-                        result = BrovanNative.installWindows(handle >= 0 ? null : media, handle, true, pack, 1);
+                        result = BrovanNative.installWindows(handle >= 0 ? null : media, handle, true, 1);
                     } catch (Exception failure) {
                         result = BrovanNative.STATUS_FAILED;
                     } finally {
@@ -249,9 +302,10 @@ public class MainActivity extends AppCompatActivity {
                     bar.setVisibility(View.GONE);
                     install.setEnabled(true);
                     licensed.setEnabled(true);
-                    uncompressed.setEnabled(true);
+                    runtimes.setEnabled(true);
                     detail.setText(outcome == BrovanNative.STATUS_OK ? R.string.windows_done : R.string.windows_failed);
                     status.setText(windowsFilesPresent() ? R.string.windows_installed : R.string.windows_missing);
+                    showRuntimeState(runtimesStatus, runtimes);
                 });
             });
         });
@@ -260,8 +314,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private boolean windowsFilesPresent() {
-        return new File(getFilesDir(), "WindowsLibs.pack").exists()
-                || new File(getFilesDir(), "WindowsLibs").isDirectory();
+        return new File(getFilesDir(), "WindowsLibs").isDirectory();
+    }
+
+    private void showRuntimeState(TextView status, MaterialButton action) {
+        boolean present = new File(getFilesDir(), "WindowsLibs/msvcp140.dll").exists();
+
+        status.setText(present ? R.string.windows_runtimes_installed : R.string.windows_runtimes_missing);
+        action.setText(present ? R.string.windows_runtimes_again : R.string.windows_runtimes);
     }
 
     private int columnCount() {

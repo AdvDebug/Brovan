@@ -266,14 +266,11 @@ namespace Brovan.Android
             if (!File.Exists(path))
                 return StatusBinaryNotFound;
 
-            if (!WindowsSystemFiles.UsingPack)
-            {
-                if (!Directory.Exists(GeneralHelper.WindowsLibsPath))
-                    return StatusMissingWindowsLibs;
+            if (!Directory.Exists(GeneralHelper.WindowsLibsPath))
+                return StatusMissingWindowsLibs;
 
-                if (!Directory.Exists(Path.Combine(AppContext.BaseDirectory, WindowsSystemFiles.RegistryDirectory)))
-                    return StatusMissingRegistry;
-            }
+            if (!Directory.Exists(Path.Combine(AppContext.BaseDirectory, WindowsImageImporter.RegistryDirectory)))
+                return StatusMissingRegistry;
 
             if (!File.Exists(BinaryEmulator.ApiSetMapPath) && !TryGenerateApiSetMap())
                 return StatusApiSetMapFailed;
@@ -288,12 +285,11 @@ namespace Brovan.Android
             {
                 if (_verbose)
                 {
-                    // The verbose path runs the guest only if it is handed a command, then falls into a
-                    // Console.ReadLine loop. An app process has no stdin, so an unparked reader would spin
-                    // returning null forever.
+                    // The verbose path runs the command chain, then falls into a Console.ReadLine loop, so
+                    // handing it nothing leaves the guest loaded at the debugger prompt. An app process has no
+                    // stdin, so an unparked reader would spin returning null forever.
                     Console.SetIn(CommandReader.Instance);
-                    EmulationMenu.EmulationMenu.RunEmulator(path, true, false,
-                        string.IsNullOrEmpty(command) ? "start" : command,
+                    EmulationMenu.EmulationMenu.RunEmulator(path, true, false, command,
                         rawArguments, arguments, policy, false, backend, workingDirectory);
                 }
                 else
@@ -325,7 +321,7 @@ namespace Brovan.Android
         }
 
         [UnmanagedCallersOnly(EntryPoint = "brovan_install_windows")]
-        public static int InstallWindows(byte* media, int mediaDescriptor, int acceptLicense, int buildPack, int imageIndex)
+        public static int InstallWindows(byte* media, int mediaDescriptor, int acceptLicense, int imageIndex)
         {
             if (Volatile.Read(ref _initialized) == 0)
                 return StatusNotInitialized;
@@ -340,7 +336,6 @@ namespace Brovan.Android
             {
                 Media = media == null ? null : Marshal.PtrToStringUTF8((IntPtr)media),
                 MediaDescriptor = mediaDescriptor,
-                BuildPack = buildPack != 0,
                 LicenseAccepted = true,
                 ImageIndex = imageIndex < 1 ? 1 : imageIndex,
             };
@@ -348,11 +343,25 @@ namespace Brovan.Android
             bool installed = WindowsSetup.Install(AppContext.BaseDirectory, options,
                 message => AndroidLog.Write(AndroidNative.LogInfo, message), null, ReportInstallProgress);
 
-            if (!installed)
-                return StatusFailed;
+            return installed ? StatusOk : StatusFailed;
+        }
 
-            WindowsSystemFiles.Initialize(AppContext.BaseDirectory);
-            return StatusOk;
+        [UnmanagedCallersOnly(EntryPoint = "brovan_install_runtimes")]
+        public static int InstallRuntimes(int acceptLicense)
+        {
+            if (Volatile.Read(ref _initialized) == 0)
+                return StatusNotInitialized;
+
+            if (Volatile.Read(ref _running) != 0)
+                return StatusAlreadyRunning;
+
+            if (acceptLicense == 0)
+                return StatusInvalidArgument;
+
+            bool installed = WindowsSetup.InstallRuntimes(AppContext.BaseDirectory, true,
+                message => AndroidLog.Write(AndroidNative.LogInfo, message), null, ReportInstallProgress);
+
+            return installed ? StatusOk : StatusFailed;
         }
 
         private static void ReportInstallProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal)

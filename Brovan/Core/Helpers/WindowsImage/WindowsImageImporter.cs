@@ -11,19 +11,14 @@ namespace Brovan.Core.Helpers.WindowsImage
     /// </summary>
     internal static class WindowsImageImporter
     {
+        public const string RegistryDirectory = "WinReg";
+
         private const string System32Path = "Windows/System32";
         private const string SysWow64Path = "Windows/SysWOW64";
         private const string ConfigPath = "Windows/System32/config";
         private const string DefaultUserHive = "Users/Default/NTUSER.DAT";
 
         private static readonly string[] RegistryHives = { "SOFTWARE", "SYSTEM", "DEFAULT", "SAM", "SECURITY" };
-
-        private interface IImportSink
-        {
-            void Write(string Name, Sha1Hash Hash, ImageDataSource Data);
-
-            void Complete();
-        }
 
         private readonly struct PendingFile
         {
@@ -37,7 +32,7 @@ namespace Brovan.Core.Helpers.WindowsImage
             }
         }
 
-        public static void Import(ImageDataSource Media, string BaseDirectory, int ImageIndex, bool BuildPack, Action<string> Report, Action<long, long, long, long>? Progress = null)
+        public static void Import(ImageDataSource Media, string BaseDirectory, int ImageIndex, Action<string> Report, Action<long, long, long, long>? Progress = null)
         {
             using ImageDataSource Image = OpenWindowsImage(Media, Report);
             using WimReader Reader = new WimReader(Image);
@@ -55,9 +50,9 @@ namespace Brovan.Core.Helpers.WindowsImage
                 CollectDirectory(Contents, SysWow64Path, "SysWOW64/", Files, Report);
 
                 foreach (string Hive in RegistryHives)
-                    CollectFile(Contents, ConfigPath + "/" + Hive, WindowsSystemFiles.RegistryDirectory + "/" + Hive, Files, Report);
+                    CollectFile(Contents, ConfigPath + "/" + Hive, RegistryDirectory + "/" + Hive, Files, Report);
 
-                CollectFile(Contents, DefaultUserHive, WindowsSystemFiles.RegistryDirectory + "/NTUSER.DAT", Files, Report);
+                CollectFile(Contents, DefaultUserHive, RegistryDirectory + "/NTUSER.DAT", Files, Report);
             }
 
             Files.Sort(static (Left, Right) =>
@@ -66,49 +61,37 @@ namespace Brovan.Core.Helpers.WindowsImage
                 return Order != 0 ? Order : Left.Blob.OffsetInResource.CompareTo(Right.Blob.OffsetInResource);
             });
 
-            IImportSink Sink = BuildPack
-                ? new PackSink(Path.Combine(BaseDirectory, WindowsSystemFiles.PackFileName))
-                : new DirectorySink(BaseDirectory);
+            WimResource? Current = null;
+            long Bytes = 0;
+            long Total = 0;
 
-            try
+            for (int i = 0; i < Files.Count; i++)
+                Total += Files[i].Blob.Size;
+
+            for (int i = 0; i < Files.Count; i++)
             {
-                WimResource? Current = null;
-                long Bytes = 0;
-                long Total = 0;
+                PendingFile File = Files[i];
 
-                for (int i = 0; i < Files.Count; i++)
-                    Total += Files[i].Blob.Size;
-
-                for (int i = 0; i < Files.Count; i++)
+                if (!ReferenceEquals(File.Blob.Resource, Current))
                 {
-                    PendingFile File = Files[i];
-
-                    if (!ReferenceEquals(File.Blob.Resource, Current))
-                    {
-                        Reader.ReleaseDecoders();
-                        Current = File.Blob.Resource;
-                    }
-
-                    using (ImageDataSource Data = Reader.OpenBlob(File.Blob))
-                    {
-                        Sink.Write(File.Name, File.Blob.Hash, Data);
-                        Bytes += Data.Length;
-                    }
-
-                    if (((i + 1) % 250) == 0)
-                        Report($"[*] {i + 1} of {Files.Count} files, {Bytes / (1024 * 1024)} MB.");
-
-                    if (Progress != null && (((i + 1) % 16) == 0 || i + 1 == Files.Count))
-                        Progress(i + 1, Files.Count, Bytes, Total);
+                    Reader.ReleaseDecoders();
+                    Current = File.Blob.Resource;
                 }
 
-                Sink.Complete();
-                Report($"[+] Imported {Files.Count} files ({Bytes / (1024 * 1024)} MB uncompressed).");
+                using (ImageDataSource Data = Reader.OpenBlob(File.Blob))
+                {
+                    Extract(BaseDirectory, File.Name, Data);
+                    Bytes += Data.Length;
+                }
+
+                if (((i + 1) % 250) == 0)
+                    Report($"[*] {i + 1} of {Files.Count} files, {Bytes / (1024 * 1024)} MB.");
+
+                if (Progress != null && (((i + 1) % 16) == 0 || i + 1 == Files.Count))
+                    Progress(i + 1, Files.Count, Bytes, Total);
             }
-            finally
-            {
-                (Sink as IDisposable)?.Dispose();
-            }
+
+            Report($"[+] Imported {Files.Count} files ({Bytes / (1024 * 1024)} MB).");
         }
 
         /// <summary>
@@ -188,81 +171,39 @@ namespace Brovan.Core.Helpers.WindowsImage
                    Name.EndsWith(".nls", StringComparison.OrdinalIgnoreCase);
         }
 
-        private sealed class DirectorySink : IImportSink
+        private static void Extract(string BaseDirectory, string Name, ImageDataSource Data)
         {
-            private readonly string BaseDirectory;
+            string Relative = Name.StartsWith(RegistryDirectory + "/", StringComparison.OrdinalIgnoreCase)
+                ? Name
+                : "WindowsLibs/" + Name;
 
-            public DirectorySink(string BaseDirectory)
+            string Target = Path.Combine(BaseDirectory, Relative.Replace('/', Path.DirectorySeparatorChar));
+            string? Parent = Path.GetDirectoryName(Target);
+
+            if (!string.IsNullOrEmpty(Parent))
+                Directory.CreateDirectory(Parent);
+
+            using FileStream Output = new FileStream(Target, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
+
+            byte[] Buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(1 << 20);
+
+            try
             {
-                this.BaseDirectory = BaseDirectory;
-            }
+                long Position = 0;
 
-            public void Write(string Name, Sha1Hash Hash, ImageDataSource Data)
-            {
-                string Relative = Name.StartsWith(WindowsSystemFiles.RegistryDirectory + "/", StringComparison.OrdinalIgnoreCase)
-                    ? Name
-                    : "WindowsLibs/" + Name;
-
-                string Target = Path.Combine(BaseDirectory, Relative.Replace('/', Path.DirectorySeparatorChar));
-                string? Parent = Path.GetDirectoryName(Target);
-
-                if (!string.IsNullOrEmpty(Parent))
-                    Directory.CreateDirectory(Parent);
-
-                using FileStream Output = new FileStream(Target, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
-
-                byte[] Buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(1 << 20);
-
-                try
+                while (Position < Data.Length)
                 {
-                    long Position = 0;
+                    int Count = Data.Read(Position, Buffer.AsSpan(0, (int)Math.Min(Buffer.Length, Data.Length - Position)));
+                    if (Count <= 0)
+                        throw new EndOfStreamException($"'{Name}' ended before its declared length.");
 
-                    while (Position < Data.Length)
-                    {
-                        int Count = Data.Read(Position, Buffer.AsSpan(0, (int)Math.Min(Buffer.Length, Data.Length - Position)));
-                        if (Count <= 0)
-                            throw new EndOfStreamException($"'{Name}' ended before its declared length.");
-
-                        Output.Write(Buffer, 0, Count);
-                        Position += Count;
-                    }
-                }
-                finally
-                {
-                    System.Buffers.ArrayPool<byte>.Shared.Return(Buffer);
+                    Output.Write(Buffer, 0, Count);
+                    Position += Count;
                 }
             }
-
-            public void Complete()
+            finally
             {
-            }
-        }
-
-        private sealed class PackSink : IImportSink, IDisposable
-        {
-            private readonly WindowsPackWriter Writer;
-
-            public PackSink(string Path)
-            {
-                Writer = new WindowsPackWriter(Path);
-            }
-
-            public void Write(string Name, Sha1Hash Hash, ImageDataSource Data)
-            {
-                if (Writer.TryAddDeduplicated(Name, Hash))
-                    return;
-
-                Writer.Add(Name, Hash, Data);
-            }
-
-            public void Complete()
-            {
-                Writer.Complete();
-            }
-
-            public void Dispose()
-            {
-                Writer.Dispose();
+                System.Buffers.ArrayPool<byte>.Shared.Return(Buffer);
             }
         }
     }

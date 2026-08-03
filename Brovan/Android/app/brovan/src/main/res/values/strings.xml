@@ -41,8 +41,15 @@
     <string name="windows_chosen">Selected: %1$s</string>
     <string name="windows_sentinel">Microsoft refused the automated link. Download the ISO with the button above, then choose the file.</string>
     <string name="windows_install">Import</string>
-    <string name="windows_uncompressed">Store uncompressed (faster, needs several GB)</string>
-    <string name="windows_storage">Stored compressed and decompressed in memory as programs read it, so it takes far less space than a plain copy.</string>
+    <string name="windows_storage">The extracted files are stored as they are, so keep several GB of free space available.</string>
+    <string name="windows_runtimes_title">Visual C++ runtimes</string>
+    <string name="windows_runtimes">Get the Visual C++ runtimes</string>
+    <string name="windows_runtimes_again">Update the Visual C++ runtimes</string>
+    <string name="windows_runtimes_installed">Installed. Reinstall to pick up a newer version.</string>
+    <string name="windows_runtimes_missing">Not installed. Programs built with Visual C++ need these.</string>
+    <string name="windows_runtimes_notice">These are not part of Windows, so the import above fetches them separately. Get them on their own when the Windows system files are already installed.</string>
+    <string name="windows_runtimes_working">Downloading the Visual C++ runtimes…</string>
+    <string name="windows_runtimes_done">Visual C++ runtimes installed.</string>
     <string name="windows_working">Contacting Microsoft…</string>
     <string name="windows_done">Import finished.</string>
     <string name="windows_failed">Import failed. See the log for details.</string>
@@ -54,5 +61,6 @@
     <string name="player_redraw">Redraw</string>
     <string name="player_quit">Quit</string>
     <string name="player_command_hint">debugger command</string>
+    <string name="player_developer_hint">[*] Developer mode: the program is loaded but not running. Send \"start\" to run it.</string>
     <string name="player_send">Send</string>
 </resources>

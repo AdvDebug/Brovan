@@ -1624,15 +1624,15 @@ namespace Brovan.Core.Emulation
 
             bool AddSyscallsFromFiles(string NtdllPath, string Win32uPath)
             {
-                if (!GeneralHelper.WindowsLibraryExists(NtdllPath))
+                if (string.IsNullOrWhiteSpace(NtdllPath) || !File.Exists(NtdllPath))
                 {
                     Utils.LogError($"[WinSyscallBuilder] Missing ntdll.dll: {NtdllPath}");
                     Utils.PrintHighlight("[-] Missing ntdll.dll. Syscalls won't work.", true);
                     return false;
                 }
 
-                using BinaryFile Ntdll = GeneralHelper.OpenWindowsLibrary(NtdllPath);
-                using BinaryFile Win32u = GeneralHelper.WindowsLibraryExists(Win32uPath) ? GeneralHelper.OpenWindowsLibrary(Win32uPath) : null;
+                using BinaryFile Ntdll = new BinaryFile(NtdllPath, true);
+                using BinaryFile Win32u = !string.IsNullOrWhiteSpace(Win32uPath) && File.Exists(Win32uPath) ? new BinaryFile(Win32uPath, true) : null;
 
                 if (Win32u == null)
                     Utils.PrintHighlight("[-] win32u.dll not found, UI-related syscalls may not work.", true);

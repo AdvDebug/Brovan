@@ -10,8 +10,9 @@
 #define METHOD(name) Java_dev_brovan_BrovanNative_native##name
 
 extern int brovan_init(const char *baseDirectory);
-extern int brovan_install_windows(const char *media, int mediaDescriptor, int acceptLicense, int buildPack,
+extern int brovan_install_windows(const char *media, int mediaDescriptor, int acceptLicense,
                                   int imageIndex);
+extern int brovan_install_runtimes(int acceptLicense);
 extern void brovan_set_log_sink(void *sink);
 extern void brovan_set_exit_sink(void *sink);
 extern void brovan_set_install_progress_sink(void *sink);
@@ -222,17 +223,24 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
 }
 
 JNIEXPORT jint JNICALL METHOD(InstallWindows)(JNIEnv *env, jclass clazz, jstring media, jint mediaDescriptor,
-                                              jint acceptLicense, jint buildPack, jint imageIndex) {
+                                              jint acceptLicense, jint imageIndex) {
     (void)clazz;
 
     const char *path = media == NULL ? NULL : borrow(env, media);
-    int status = brovan_install_windows(path, mediaDescriptor, acceptLicense, buildPack, imageIndex);
+    int status = brovan_install_windows(path, mediaDescriptor, acceptLicense, imageIndex);
 
     if (path != NULL) {
         release(env, media, path);
     }
 
     return status;
+}
+
+JNIEXPORT jint JNICALL METHOD(InstallRuntimes)(JNIEnv *env, jclass clazz, jint acceptLicense) {
+    (void)env;
+    (void)clazz;
+
+    return brovan_install_runtimes(acceptLicense);
 }
 
 JNIEXPORT void JNICALL METHOD(SetSurface)(JNIEnv *env, jclass clazz, jobject surface, jint densityDpi) {

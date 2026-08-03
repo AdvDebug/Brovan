@@ -1,7 +1,6 @@
 using System;
 using System.IO;
 using static Brovan.Core.Helpers.BinaryHelpers;
-using Brovan.Core.Helpers.WindowsImage;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -36,9 +35,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 string HostPath = EffectiveReadHostPath;
                 if (string.IsNullOrWhiteSpace(HostPath))
                     return 0;
-
-                if (WindowsSystemFiles.IsPackPath(HostPath))
-                    return WindowsSystemFiles.GetLength(HostPath);
 
                 if (!File.Exists(HostPath))
                     return 0;
@@ -80,9 +76,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!string.IsNullOrWhiteSpace(WriteHostPath) && Directory.Exists(WriteHostPath))
                     return false;
 
-                if (WindowsSystemFiles.IsPackPath(ReadHostPath))
-                    return WindowsSystemFiles.FileExists(ReadHostPath);
-
                 return !string.IsNullOrWhiteSpace(ReadHostPath) && File.Exists(ReadHostPath);
             }
         }
@@ -96,9 +89,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (!string.IsNullOrWhiteSpace(WriteHostPath) && File.Exists(WriteHostPath))
                     return false;
-
-                if (WindowsSystemFiles.IsPackPath(ReadHostPath))
-                    return WindowsSystemFiles.DirectoryExists(ReadHostPath);
 
                 return !string.IsNullOrWhiteSpace(ReadHostPath) && Directory.Exists(ReadHostPath);
             }
@@ -119,12 +109,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public byte[] ReadAllBytes()
         {
-            string HostPath = GetReadableFilePath();
-
-            if (WindowsSystemFiles.IsPackPath(HostPath))
-                return WindowsSystemFiles.ReadAll(HostPath);
-
-            return File.ReadAllBytes(HostPath);
+            return File.ReadAllBytes(GetReadableFilePath());
         }
 
         public void WriteAllBytes(byte[] Data)
@@ -185,9 +170,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 throw new ArgumentOutOfRangeException(nameof(position));
 
             string HostPath = GetReadableFilePath();
-
-            if (WindowsSystemFiles.IsPackPath(HostPath))
-                return WindowsSystemFiles.Read(HostPath, position, buffer);
 
             using FileStream Stream = new FileStream(HostPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             if (position >= Stream.Length)
@@ -290,14 +272,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private string GetReadableFilePath()
         {
             string HostPath = EffectiveReadHostPath;
-
-            if (WindowsSystemFiles.IsPackPath(HostPath))
-            {
-                if (!WindowsSystemFiles.FileExists(HostPath))
-                    throw new FileNotFoundException(GuestPath);
-
-                return HostPath;
-            }
 
             if (string.IsNullOrWhiteSpace(HostPath) || !File.Exists(HostPath))
                 throw new FileNotFoundException(GuestPath);

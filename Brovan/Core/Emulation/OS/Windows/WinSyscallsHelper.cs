@@ -3,7 +3,6 @@ using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
-using Brovan.Core.Helpers.WindowsImage;
 using System.Text;
 using System.Buffers.Binary;
 using Brovan.Core.Emulation.OS.SharedHelpers;
@@ -1375,23 +1374,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             hConsoleHandle.Handler = ConsoleServer.Handle;
             ConsoleHandle = HandleManager.AddHandle(hConsoleHandle, AccessMask.GenericRead | AccessMask.GenericWrite);
             List<Hive> Hives = new List<Hive>();
-            if (WindowsSystemFiles.UsingPack)
-            {
-                foreach (string HiveName in WindowsSystemFiles.ListRegistryHives())
-                {
-                    try
-                    {
-                        Hive Loaded = RegManager.LoadHive(HiveName);
-                        if (Loaded != null)
-                            Hives.Add(Loaded);
-                    }
-                    catch
-                    {
-
-                    }
-                }
-            }
-            else if (Directory.Exists(WinRegPath))
+            if (Directory.Exists(WinRegPath))
             {
                 foreach (string HiveFile in Directory.GetFiles(WinRegPath))
                 {

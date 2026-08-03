@@ -75,20 +75,40 @@
             android:layout_marginTop="8dp"
             android:text="@string/windows_choose" />
 
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/windows_uncompressed"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="@string/windows_uncompressed"
-            android:textColor="@color/text_primary" />
-
         <com.google.android.material.button.MaterialButton
             android:id="@+id/windows_install"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
             android:text="@string/windows_install" />
+
+        <TextView style="@style/SectionLabel"
+            android:layout_marginTop="28dp"
+            android:text="@string/windows_runtimes_title" />
+
+        <TextView
+            android:id="@+id/windows_runtimes_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textColor="@color/text_primary"
+            android:textSize="15sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/windows_runtimes_notice"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/windows_runtimes"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/windows_runtimes" />
 
         <com.google.android.material.progressindicator.LinearProgressIndicator
             android:id="@+id/windows_progress"

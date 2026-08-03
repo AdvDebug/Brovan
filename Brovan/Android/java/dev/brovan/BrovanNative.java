@@ -91,9 +91,13 @@ public final class BrovanNative {
         return nativeInit(baseDirectory);
     }
 
-    public static int installWindows(String media, int mediaDescriptor, boolean acceptLicense, boolean buildPack,
-                                     int imageIndex) {
-        return nativeInstallWindows(media, mediaDescriptor, acceptLicense ? 1 : 0, buildPack ? 1 : 0, imageIndex);
+    public static int installWindows(String media, int mediaDescriptor, boolean acceptLicense, int imageIndex) {
+        return nativeInstallWindows(media, mediaDescriptor, acceptLicense ? 1 : 0, imageIndex);
+    }
+
+    /** Downloads only the Visual C++ runtimes, which {@link #installWindows} also does. */
+    public static int installRuntimes(boolean acceptLicense) {
+        return nativeInstallRuntimes(acceptLicense ? 1 : 0);
     }
 
     /** Call from surfaceCreated / surfaceChanged. */
@@ -220,7 +224,9 @@ public final class BrovanNative {
     private static native int nativeInit(String baseDirectory);
 
     private static native int nativeInstallWindows(String media, int mediaDescriptor, int acceptLicense,
-                                                   int buildPack, int imageIndex);
+                                                   int imageIndex);
+
+    private static native int nativeInstallRuntimes(int acceptLicense);
 
     private static native void nativeSetSurface(Surface surface, int densityDpi);
 
