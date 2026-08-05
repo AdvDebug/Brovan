@@ -679,9 +679,8 @@ namespace Brovan.Core.Emulation
         /// </summary>
         internal void TriggerDebugMessage(string Message)
         {
-            if (Debug)
-                if ((Settings.Flags & LogFlags.General) != 0)
-                    TriggerEventMessage($"[DBG] {Message}", LogFlags.General);
+            if (Debug && (Settings.Flags & LogFlags.General) != 0)
+                TriggerEventMessage($"[DBG] {Message}", LogFlags.General);
         }
 
         /// <summary>
@@ -2210,8 +2209,7 @@ namespace Brovan.Core.Emulation
                 if (Thread.State == EmulatedThreadState.Suspended && Thread.SuspendCount == 0)
                 {
                     if (Debug)
-                        if (Debug)
-                            TriggerDebugMessage($"scheduler: resumed suspended tid={Thread.ThreadId}");
+                        TriggerDebugMessage($"scheduler: resumed suspended tid={Thread.ThreadId}");
 
                     Thread.State = EmulatedThreadState.Ready;
                     Changed = true;
@@ -2420,8 +2418,7 @@ namespace Brovan.Core.Emulation
             }
 
             if (Debug)
-                if (Debug)
-                    TriggerDebugMessage($"scheduler: rebuilt queues live={ThreadOrder.Count} queued={InQueue.Count} tick={SchedulerTick}");
+                TriggerDebugMessage($"scheduler: rebuilt queues live={ThreadOrder.Count} queued={InQueue.Count} tick={SchedulerTick}");
         }
 
         public bool RunMlfqScheduler(uint BaseQuantumInstructions = 200000, int Levels = 4, ulong MaxTotalInstructions = 0, uint MaxSlices = 0, long AgingThresholdSlices = 50)
@@ -2464,8 +2461,7 @@ namespace Brovan.Core.Emulation
             bool WakeupScanRequired = true;
 
             if (Debug)
-                if (Debug)
-                    TriggerDebugMessage($"scheduler: start threads={ThreadOrder.Count} levels={Levels} baseQuantum={BaseQuantumInstructions} maxInstructions={MaxTotalInstructions} maxSlices={MaxSlices}");
+                TriggerDebugMessage($"scheduler: start threads={ThreadOrder.Count} levels={Levels} baseQuantum={BaseQuantumInstructions} maxInstructions={MaxTotalInstructions} maxSlices={MaxSlices}");
 
             RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
             SchedulerRefreshRequested = false;
@@ -2490,8 +2486,7 @@ namespace Brovan.Core.Emulation
                     if (ThreadOrderChanged)
                     {
                         if (Debug)
-                            if (Debug)
-                                TriggerDebugMessage($"scheduler: thread list changed old={KnownThreadOrderCount} new={ThreadOrder.Count}");
+                            TriggerDebugMessage($"scheduler: thread list changed old={KnownThreadOrderCount} new={ThreadOrder.Count}");
                         EnsureMlfqRunnableThreadsEnqueued(ReadyQueues, InQueue, Levels, SchedulerTick);
                         KnownThreadOrderCount = ThreadOrder.Count;
                     }
@@ -2499,8 +2494,7 @@ namespace Brovan.Core.Emulation
                     if (WakeupScanRequired || SchedulerRefreshRequested)
                     {
                         if (Debug)
-                            if (Debug)
-                                TriggerDebugMessage($"scheduler: wakeup scan required={WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
+                            TriggerDebugMessage($"scheduler: wakeup scan required={WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
 
                         UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
                         KnownThreadOrderCount = ThreadOrder.Count;
@@ -2523,16 +2517,14 @@ namespace Brovan.Core.Emulation
                         if (!HasLiveMlfqThread())
                         {
                             if (Debug)
-                                if (Debug)
-                                    TriggerDebugMessage($"scheduler: finished no live threads total={Total} slices={Slices}");
+                                TriggerDebugMessage($"scheduler: finished no live threads total={Total} slices={Slices}");
                             return true;
                         }
 
                         if (TryGetNextWaitSleepMs(out int SleepMs, int.MaxValue))
                         {
                             if (Debug)
-                                if (Debug)
-                                    TriggerDebugMessage($"scheduler: no runnable thread, advancing guest time by {SleepMs}ms");
+                                TriggerDebugMessage($"scheduler: no runnable thread, advancing guest time by {SleepMs}ms");
                             if (HasActiveGetMessageWait())
                                 Thread.Sleep(Math.Min(SleepMs, 16));
                             AdvanceEmulatedTimeMilliseconds(SleepMs, AdvanceTimestampCounter: true);
@@ -2550,8 +2542,7 @@ namespace Brovan.Core.Emulation
                         }
 
                         if (Debug)
-                            if (Debug)
-                                TriggerDebugMessage($"scheduler: no runnable thread and no pending wakeup total={Total} slices={Slices}");
+                            TriggerDebugMessage($"scheduler: no runnable thread and no pending wakeup total={Total} slices={Slices}");
                         return true;
                     }
                 }
@@ -2559,11 +2550,9 @@ namespace Brovan.Core.Emulation
                 if (CurrentThreadId != (int)ImmaBeEmulatedOOO.ThreadId)
                 {
                     if ((Settings.Flags & LogFlags.General) != 0)
-                        if ((Settings.Flags & LogFlags.General) != 0)
-                            TriggerEventMessage($"[!] Switching to thread with ID {ImmaBeEmulatedOOO.ThreadId}", LogFlags.General);
+                        TriggerEventMessage($"[!] Switching to thread with ID {ImmaBeEmulatedOOO.ThreadId}", LogFlags.General);
                     if (Debug)
-                        if (Debug)
-                            TriggerDebugMessage($"scheduler: switch {CurrentThreadId} -> {ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} state={ImmaBeEmulatedOOO.State} rip=0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X}");
+                        TriggerDebugMessage($"scheduler: switch {CurrentThreadId} -> {ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} state={ImmaBeEmulatedOOO.State} rip=0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X}");
                 }
 
                 SwitchToThread((int)ImmaBeEmulatedOOO.ThreadId);
@@ -2575,8 +2564,7 @@ namespace Brovan.Core.Emulation
 
                 if (Debug && (Slices < 64 || (Slices & 0xFF) == 0))
                 {
-                    if (Debug)
-                        TriggerDebugMessage($"scheduler: run tid={ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} quantum={QuantumInstructions} priority={ImmaBeEmulatedOOO.EffectivePriority} boost={ImmaBeEmulatedOOO.DynamicBoost} rip=0x{RipBeforeSlice:X}");
+                    TriggerDebugMessage($"scheduler: run tid={ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} quantum={QuantumInstructions} priority={ImmaBeEmulatedOOO.EffectivePriority} boost={ImmaBeEmulatedOOO.DynamicBoost} rip=0x{RipBeforeSlice:X}");
                 }
                 bool State = false;
                 bool SliceRequestedRefresh = false;
@@ -2589,8 +2577,7 @@ namespace Brovan.Core.Emulation
                 catch (Exception ex)
                 {
                     if (Debug)
-                        if (Debug)
-                            TriggerDebugMessage($"scheduler: slice exception tid={ImmaBeEmulatedOOO.ThreadId} {ex.GetType().Name}: {ex.Message}");
+                        TriggerDebugMessage($"scheduler: slice exception tid={ImmaBeEmulatedOOO.ThreadId} {ex.GetType().Name}: {ex.Message}");
 
                     Utils.LogError($"[Scheduler] Thread {ImmaBeEmulatedOOO.ThreadId} terminated by an unhandled {ex.GetType().Name}: {ex.Message}");
 
@@ -2612,8 +2599,7 @@ namespace Brovan.Core.Emulation
                 if (EscapeScheduler)
                 {
                     if (Debug)
-                        if (Debug)
-                            TriggerDebugMessage($"scheduler: escape requested after slice tid={ImmaBeEmulatedOOO.ThreadId}");
+                        TriggerDebugMessage($"scheduler: escape requested after slice tid={ImmaBeEmulatedOOO.ThreadId}");
 
                     EscapeScheduler = false;
                     return true;
@@ -2690,22 +2676,19 @@ namespace Brovan.Core.Emulation
 
                 if (Debug && (Slices <= 64 || (Slices & 0xFF) == 0 || ImmaBeEmulatedOOO.State != StateBeforeSlice || SliceRequestedRefresh || AdvancedEmulatedTime))
                 {
-                    if (Debug)
-                        TriggerDebugMessage($"scheduler: slice tid={ImmaBeEmulatedOOO.ThreadId} {StateBeforeSlice}->{ImmaBeEmulatedOOO.State} work={SchedulerSliceWork} total={Total} rip=0x{RipBeforeSlice:X}->0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X} refresh={SliceRequestedRefresh} advancedTime={AdvancedEmulatedTime} boost={ImmaBeEmulatedOOO.DynamicBoost}");
+                    TriggerDebugMessage($"scheduler: slice tid={ImmaBeEmulatedOOO.ThreadId} {StateBeforeSlice}->{ImmaBeEmulatedOOO.State} work={SchedulerSliceWork} total={Total} rip=0x{RipBeforeSlice:X}->0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X} refresh={SliceRequestedRefresh} advancedTime={AdvancedEmulatedTime} boost={ImmaBeEmulatedOOO.DynamicBoost}");
                 }
 
                 if (MaxTotalInstructions != 0 && Total >= MaxTotalInstructions)
                 {
                     if (Debug)
-                        if (Debug)
-                            TriggerDebugMessage($"scheduler: max instruction budget reached total={Total} slices={Slices}");
+                        TriggerDebugMessage($"scheduler: max instruction budget reached total={Total} slices={Slices}");
                     return true;
                 }
                 if (MaxSlices != 0 && Slices >= MaxSlices)
                 {
                     if (Debug)
-                        if (Debug)
-                            TriggerDebugMessage($"scheduler: max slice budget reached total={Total} slices={Slices}");
+                        TriggerDebugMessage($"scheduler: max slice budget reached total={Total} slices={Slices}");
                     return true;
                 }
             }
