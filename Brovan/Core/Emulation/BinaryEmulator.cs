@@ -1621,6 +1621,24 @@ namespace Brovan.Core.Emulation
             _emulator.StopEmulation();
         }
 
+        private const string ProcessorBrandString = "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz";
+
+        private static void ReadProcessorBrandLeaf(uint Leaf, out uint Eax, out uint Ebx, out uint Ecx, out uint Edx)
+        {
+            Span<byte> Chunk = stackalloc byte[16];
+            int BaseOffset = (int)(Leaf - 0x80000002u) * 16;
+            for (int Index = 0; Index < Chunk.Length; Index++)
+            {
+                int StringIndex = BaseOffset + Index;
+                Chunk[Index] = StringIndex < ProcessorBrandString.Length ? (byte)ProcessorBrandString[StringIndex] : (byte)0;
+            }
+
+            Eax = BinaryPrimitives.ReadUInt32LittleEndian(Chunk);
+            Ebx = BinaryPrimitives.ReadUInt32LittleEndian(Chunk.Slice(4));
+            Ecx = BinaryPrimitives.ReadUInt32LittleEndian(Chunk.Slice(8));
+            Edx = BinaryPrimitives.ReadUInt32LittleEndian(Chunk.Slice(12));
+        }
+
         /// <summary>
         /// CPUD Handler.
         /// </summary>
@@ -1739,24 +1757,9 @@ namespace Brovan.Core.Emulation
                         break;
 
                     case 0x80000002:
-                        out_eax = 0x65746E49;
-                        out_ebx = 0x2952286C;
-                        out_ecx = 0x6F432032;
-                        out_edx = 0x4D542865;
-                        break;
-
                     case 0x80000003:
-                        out_eax = 0x69422029;
-                        out_ebx = 0x49552067;
-                        out_ecx = 0x20203233;
-                        out_edx = 0x2E303047;
-                        break;
-
                     case 0x80000004:
-                        out_eax = 0x0000007A;
-                        out_ebx = 0;
-                        out_ecx = 0;
-                        out_edx = 0;
+                        ReadProcessorBrandLeaf(Leaf, out out_eax, out out_ebx, out out_ecx, out out_edx);
                         break;
 
                     case 0x80000007:
