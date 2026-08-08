@@ -120,6 +120,11 @@ public final class BrovanNative {
         nativeSetVerbose(enabled ? 1 : 0);
     }
 
+    /** Reuses translated guest code between runs. Must be called before {@link #start}. */
+    public static void setJitCache(boolean enabled) {
+        nativeSetJitCache(enabled ? 1 : 0);
+    }
+
     /** Feeds one line to the emulator's debugger prompt. Verbose mode only. */
     public static void sendCommand(String command) {
         nativeSendCommand(command);
@@ -236,6 +241,8 @@ public final class BrovanNative {
                                           String debuggerCommands, int networkMode);
 
     private static native void nativeSetVerbose(int enabled);
+
+    private static native void nativeSetJitCache(int enabled);
 
     private static native void nativeSendCommand(String command);
 

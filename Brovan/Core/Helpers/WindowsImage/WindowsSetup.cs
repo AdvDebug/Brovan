@@ -91,6 +91,9 @@ namespace Brovan.Core.Helpers.WindowsImage
 
                 WindowsImageImporter.Import(Media, BaseDirectory, Options.ImageIndex, Report, Progress);
 
+                if (!WindowsImageImporter.TryWriteApiSetMap(BaseDirectory, Report))
+                    Report("[!] The image had no apisetschema.dll; keeping the existing API set map.");
+
                 if (Media is HttpImageDataSource Remote)
                     Report($"[*] Transferred {Remote.TransferredBytes / (1024 * 1024)} MB over the network.");
 

@@ -130,6 +130,12 @@ namespace Brovan
             Console.WriteLine("  --no-hooks        Run the emulator with no hooks. useful when you want maximum performance and want to see some program output.");
             Console.WriteLine("  --backend=<name>  Choose the emulation backend: unicorn (default), kvm (Linux), or whp (Windows Hypervisor Platform).");
             Console.WriteLine("  --cwd <dir>       Directory the emulated program starts in. Defaults to the directory of the binary.");
+            Console.WriteLine("  --jit-cache[=<dir>]");
+            Console.WriteLine("                    Directory for the persisted Unicorn JIT code cache, which lets a");
+            Console.WriteLine("                    program skip re-translating itself on every launch. Defaults to");
+            Console.WriteLine("                    .jitcache next to Brovan, and is enabled by default.");
+            Console.WriteLine("  --no-jit-cache    Do not reuse or write a persisted JIT code cache.");
+            Console.WriteLine("  --jit-cache-stats Print code cache statistics when the emulated program exits.");
             Console.WriteLine("  --install-windows Download Windows installation media from Microsoft and extract the system");
             Console.WriteLine("                    libraries, NLS tables and registry hives Brovan needs, then the Visual C++");
             Console.WriteLine("                    runtimes, then exit.");
@@ -406,7 +412,21 @@ namespace Brovan
                 return;
             }
 
-            if (!File.Exists(BinaryEmulator.ApiSetMapPath))
+            // Prefer the map from the imported apisetschema.dll over anything else
+            bool ApiSetMapReady = false;
+            if (!File.Exists(BinaryEmulator.ApiSetMapPath) || File.GetLastWriteTimeUtc(Path.Combine(WindowsLibsPath, "apisetschema.dll")) > File.GetLastWriteTimeUtc(BinaryEmulator.ApiSetMapPath))
+            {
+                try
+                {
+                    ApiSetMapReady = WindowsImageImporter.TryWriteApiSetMap(AppContext.BaseDirectory, Message => PrintHighlight(Message, true));
+                }
+                catch (Exception Error)
+                {
+                    PrintHighlight($"[-] Could not read the API set map from apisetschema.dll: \"{Error.Message}\".", true);
+                }
+            }
+
+            if (!ApiSetMapReady && !File.Exists(BinaryEmulator.ApiSetMapPath))
             {
                 if (IsWindows)
                 {
@@ -542,6 +562,15 @@ namespace Brovan
                     case "--no-hooks":
                         NoHooks = true;
                         continue;
+                    case "--no-jit-cache":
+                        UnicornCodeCache.Enabled = false;
+                        continue;
+                    case "--jit-cache-stats":
+                        UnicornCodeCache.PrintStats = true;
+                        continue;
+                    case "--jit-cache":
+                        UnicornCodeCache.Enabled = true;
+                        continue;
                     case "--cwd":
                         if (i + 1 >= args.Length)
                             continue;
@@ -623,6 +652,13 @@ namespace Brovan
                     }
 
                     BackendKind = InlineBackendKind;
+                    continue;
+                }
+
+                if (Arg.StartsWith("--jit-cache=", StringComparison.OrdinalIgnoreCase))
+                {
+                    UnicornCodeCache.Enabled = true;
+                    UnicornCodeCache.CacheDirectory = DecodeArgumentValue(Arg.Substring("--jit-cache=".Length));
                     continue;
                 }
 

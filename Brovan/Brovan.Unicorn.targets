@@ -2,37 +2,236 @@
   <PropertyGroup>
     <UnicornTag>2.1.4</UnicornTag>
     <UnicornCacheDir>$([MSBuild]::NormalizeDirectory($(MSBuildProjectDirectory), '.cache', 'unicorn'))</UnicornCacheDir>
-    <UnicornSrcDir>$(UnicornCacheDir)unicorn-$(UnicornTag)</UnicornSrcDir>
-    <UnicornBuildDir>$(UnicornCacheDir)build</UnicornBuildDir>
+    <UnicornPatchDir>$([MSBuild]::NormalizeDirectory($(MSBuildProjectDirectory), 'native', 'unicorn'))</UnicornPatchDir>
     <UnicornTarball>$(UnicornCacheDir)unicorn-$(UnicornTag).tar.gz</UnicornTarball>
+    <UnicornTarballUrl>https://github.com/unicorn-engine/unicorn/archive/refs/tags/$(UnicornTag).tar.gz</UnicornTarballUrl>
 
     <_UnicornCacheNorm>$([MSBuild]::NormalizePath($(UnicornCacheDir)).TrimEnd('\').TrimEnd('/'))</_UnicornCacheNorm>
-    <_UnicornSrcNorm>$([MSBuild]::NormalizePath($(UnicornSrcDir)).TrimEnd('\').TrimEnd('/'))</_UnicornSrcNorm>
-    <_UnicornBuildNorm>$([MSBuild]::NormalizePath($(UnicornBuildDir)).TrimEnd('\').TrimEnd('/'))</_UnicornBuildNorm>
     <_UnicornTarballNorm>$([MSBuild]::NormalizePath($(UnicornTarball)))</_UnicornTarballNorm>
 
     <UnicornLibName Condition="$([MSBuild]::IsOSPlatform('Windows'))">unicorn.dll</UnicornLibName>
     <UnicornLibName Condition="$([MSBuild]::IsOSPlatform('Linux'))">libunicorn.so</UnicornLibName>
-
-    <UnicornArtifact Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(UnicornBuildDir)\Release\$(UnicornLibName)</UnicornArtifact>
-    <UnicornArtifact Condition="!$([MSBuild]::IsOSPlatform('Windows'))">$(UnicornBuildDir)\$(UnicornLibName)</UnicornArtifact>
-
-    <UnicornTarballUrl>https://github.com/unicorn-engine/unicorn/archive/refs/tags/$(UnicornTag).tar.gz</UnicornTarballUrl>
   </PropertyGroup>
 
-  <Target Name="DownloadUnicornTarball" Condition="!Exists('$(_UnicornTarballNorm)')">
+  <ItemGroup>
+    <UnicornPatchFile Include="$(UnicornPatchDir)patches.manifest" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_uc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_uc_api.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_uc_tcg_decls.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_uc_tcg.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_slots.inc.c" />
+  </ItemGroup>
+
+  <UsingTask TaskName="ApplyUnicornPatches" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <SourceDir ParameterType="System.String" Required="true" />
+      <PatchDir ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Code Type="Fragment" Language="cs"><![CDATA[
+var errors = new List<string>();
+var files = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+var dirty = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+var manifest = Path.Combine(PatchDir, "patches.manifest");
+
+if (!File.Exists(manifest))
+{
+    Log.LogError("Unicorn patch manifest not found: " + manifest);
+    return false;
+}
+
+Func<string, List<string>> load = rel =>
+{
+    List<string> lines;
+    if (files.TryGetValue(rel, out lines)) return lines;
+    var full = Path.Combine(SourceDir, rel.Replace('/', Path.DirectorySeparatorChar));
+    if (!File.Exists(full))
+    {
+        errors.Add("target file missing: " + rel);
+        lines = null;
+    }
+    else
+    {
+        lines = new List<string>(File.ReadAllLines(full));
+    }
+    files[rel] = lines;
+    return lines;
+};
+
+Func<List<string>, string, bool> present = (lines, text) =>
+{
+    var needle = text.Trim();
+    for (int i = 0; i < lines.Count; i++)
+    {
+        if (lines[i].Trim() == needle) return true;
+    }
+    return false;
+};
+
+Func<List<string>, string, int> indexOfAnchor = (lines, anchor) =>
+{
+    for (int i = 0; i < lines.Count; i++)
+    {
+        if (lines[i].Trim() == anchor) return i;
+    }
+    return -1;
+};
+
+int applied = 0, skipped = 0, copied = 0;
+
+foreach (var raw in File.ReadAllLines(manifest))
+{
+    var line = raw.Trim();
+    if (line.Length == 0 || line.StartsWith("#")) continue;
+
+    var f = line.Split('|');
+    var kind = f[0];
+
+    if (kind == "schema" || kind == "validated") continue;
+
+    if (kind == "copy")
+    {
+        var src = Path.Combine(PatchDir, f[1]);
+        var dst = Path.Combine(SourceDir, f[2].Replace('/', Path.DirectorySeparatorChar));
+        if (!File.Exists(src)) { errors.Add("patch source missing: " + f[1]); continue; }
+        Directory.CreateDirectory(Path.GetDirectoryName(dst));
+        if (!File.Exists(dst) || File.ReadAllText(dst) != File.ReadAllText(src))
+        {
+            File.Copy(src, dst, true);
+            copied++;
+        }
+        continue;
+    }
+
+    var rel = f[1];
+    var lines = load(rel);
+    if (lines == null) continue;
+
+    if (kind == "replace-all")
+    {
+        var from = f[2];
+        var to = f[3];
+        bool hit = false, already = false;
+        for (int i = 0; i < lines.Count; i++)
+        {
+            if (lines[i].Contains(to)) { already = true; continue; }
+            if (lines[i].Contains(from)) { lines[i] = lines[i].Replace(from, to); hit = true; }
+        }
+        if (hit) { dirty.Add(rel); applied++; }
+        else if (already) skipped++;
+        else errors.Add("anchor not found in " + rel + ": " + from);
+        continue;
+    }
+
+    var text = f[kind == "append" ? 2 : 3];
+    if (present(lines, text)) { skipped++; continue; }
+
+    if (kind == "append")
+    {
+        lines.Add(text);
+        dirty.Add(rel);
+        applied++;
+        continue;
+    }
+
+    var anchor = f[2];
+    int at = indexOfAnchor(lines, anchor);
+    if (at < 0) { errors.Add("anchor not found in " + rel + ": " + anchor); continue; }
+
+    if (kind == "insert-before") lines.Insert(at, text);
+    else if (kind == "insert-after") lines.Insert(at + 1, text);
+    else if (kind == "insert-in-body")
+    {
+        int brace = -1;
+        for (int i = at; i < lines.Count && i < at + 8; i++)
+        {
+            if (lines[i].Trim() == "{") { brace = i; break; }
+        }
+        if (brace < 0) { errors.Add("no opening brace after anchor in " + rel + ": " + anchor); continue; }
+        lines.Insert(brace + 1, text);
+    }
+    else { errors.Add("unknown rule kind: " + kind); continue; }
+
+    dirty.Add(rel);
+    applied++;
+}
+
+if (errors.Count > 0)
+{
+    foreach (var e in errors) Log.LogError("[Brovan.Unicorn] " + e);
+    Log.LogError("[Brovan.Unicorn] " + errors.Count + " patch anchor(s) failed against unicorn " +
+                 Path.GetFileName(SourceDir.TrimEnd(Path.DirectorySeparatorChar)) +
+                 ". Update Brovan/native/unicorn/patches.manifest.");
+    return false;
+}
+
+foreach (var rel in dirty)
+{
+    var full = Path.Combine(SourceDir, rel.Replace('/', Path.DirectorySeparatorChar));
+    File.WriteAllText(full, string.Join("\n", files[rel].ToArray()) + "\n");
+}
+
+Log.LogMessage(MessageImportance.High,
+    "[Brovan.Unicorn] Patched: " + applied + " edit(s), " + copied + " file(s) copied, " +
+    skipped + " already applied.");
+]]></Code>
+    </Task>
+  </UsingTask>
+
+  <!-- The patch set is part of the cache key: editing a patch has to produce a
+       fresh extraction, because re-running the patcher over an already-patched
+       tree would leave the previous edit behind. -->
+  <Target Name="PrepareUnicorn">
+    <GetFileHash Files="@(UnicornPatchFile)" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="_UnicornPatchHashed" />
+    </GetFileHash>
+
+    <PropertyGroup>
+      <_UnicornPatchHashes>@(_UnicornPatchHashed->'%(FileHash)')</_UnicornPatchHashes>
+      <_UnicornPatchKeyRaw>$([MSBuild]::StableStringHash($(_UnicornPatchHashes)))</_UnicornPatchKeyRaw>
+      <UnicornPatchKey>$(_UnicornPatchKeyRaw.Replace('-', 'n'))</UnicornPatchKey>
+
+      <!-- Left alone when the caller supplied one, so a cross-build (build-apk.sh)
+           can keep its own output tree instead of sharing the host's CMake cache. -->
+      <UnicornSrcDir Condition="'$(UnicornSrcDir)' == ''">$(UnicornCacheDir)unicorn-$(UnicornTag)-$(UnicornPatchKey)</UnicornSrcDir>
+      <UnicornBuildDir Condition="'$(UnicornBuildDir)' == ''">$(UnicornCacheDir)build-$(UnicornTag)-$(UnicornPatchKey)</UnicornBuildDir>
+
+      <_UnicornSrcNorm>$([MSBuild]::NormalizePath($(UnicornSrcDir)).TrimEnd('\').TrimEnd('/'))</_UnicornSrcNorm>
+      <_UnicornBuildNorm>$([MSBuild]::NormalizePath($(UnicornBuildDir)).TrimEnd('\').TrimEnd('/'))</_UnicornBuildNorm>
+      <_UnicornPatchNorm>$([MSBuild]::NormalizePath($(UnicornPatchDir)).TrimEnd('\').TrimEnd('/'))</_UnicornPatchNorm>
+      <UnicornPatchStamp>$(_UnicornSrcNorm)/.brovan-patched</UnicornPatchStamp>
+
+      <UnicornArtifact Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(UnicornBuildDir)\Release\$(UnicornLibName)</UnicornArtifact>
+      <UnicornArtifact Condition="!$([MSBuild]::IsOSPlatform('Windows'))">$(UnicornBuildDir)\$(UnicornLibName)</UnicornArtifact>
+    </PropertyGroup>
+  </Target>
+
+  <!-- Lets build-apk.sh discover the patched source tree instead of guessing its name. -->
+  <Target Name="PrintUnicornPaths" DependsOnTargets="PrepareUnicorn">
+    <Message Text="UNICORN_SRC=$(_UnicornSrcNorm)" Importance="high" />
+    <Message Text="UNICORN_PATCH_KEY=$(UnicornPatchKey)" Importance="high" />
+  </Target>
+
+  <Target Name="DownloadUnicornTarball" DependsOnTargets="PrepareUnicorn" Condition="!Exists('$(_UnicornTarballNorm)')">
     <MakeDir Directories="$(UnicornCacheDir)" />
     <Message Text="[Brovan.Unicorn] Downloading unicorn-engine/unicorn @ $(UnicornTag) ..." Importance="high" />
     <DownloadFile SourceUrl="$(UnicornTarballUrl)" DestinationFolder="$(UnicornCacheDir)" DestinationFileName="unicorn-$(UnicornTag).tar.gz" />
   </Target>
 
-  <Target Name="ExtractUnicornSource" DependsOnTargets="DownloadUnicornTarball" Condition="!Exists('$(_UnicornSrcNorm)\CMakeLists.txt')">
+  <Target Name="ExtractUnicornSource" DependsOnTargets="PrepareUnicorn;DownloadUnicornTarball" Condition="!Exists('$(_UnicornSrcNorm)/CMakeLists.txt')">
     <Message Text="[Brovan.Unicorn] Extracting..." Importance="high" />
     <RemoveDir Directories="$(_UnicornSrcNorm)" />
-    <Exec Command="tar -xzf &quot;$(_UnicornTarballNorm)&quot; -C &quot;$(_UnicornCacheNorm)&quot;" CustomErrorRegularExpression="error" />
+    <MakeDir Directories="$(_UnicornSrcNorm)" />
+    <Exec Command="tar -xzf &quot;$(_UnicornTarballNorm)&quot; --strip-components=1 -C &quot;$(_UnicornSrcNorm)&quot;" CustomErrorRegularExpression="error" />
   </Target>
 
-  <Target Name="BuildUnicorn" DependsOnTargets="ExtractUnicornSource" Inputs="$(_UnicornSrcNorm)\CMakeLists.txt" Outputs="$(UnicornArtifact)">
+  <Target Name="PatchUnicornSource" DependsOnTargets="PrepareUnicorn;ExtractUnicornSource" Condition="!Exists('$(UnicornPatchStamp)')">
+    <Message Text="[Brovan.Unicorn] Applying Brovan patches..." Importance="high" />
+    <ApplyUnicornPatches SourceDir="$(_UnicornSrcNorm)" PatchDir="$(_UnicornPatchNorm)" />
+    <WriteLinesToFile File="$(UnicornPatchStamp)" Lines="$(UnicornPatchKey)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+
+  <Target Name="BuildUnicorn" DependsOnTargets="PrepareUnicorn;PatchUnicornSource" Inputs="$(UnicornPatchStamp)" Outputs="$(UnicornArtifact)">
     <Message Text="[Brovan.Unicorn] Configuring CMake (archs: x86, aarch64)..." Importance="high" />
     <MakeDir Directories="$(UnicornBuildDir)" />
     <Exec Command="cmake -S &quot;$(_UnicornSrcNorm)&quot; -B &quot;$(_UnicornBuildNorm)&quot; -DCMAKE_BUILD_TYPE=Release -DUNICORN_ARCH=&quot;x86;aarch64&quot; -DBUILD_SHARED_LIBS=ON -DUNICORN_LEGACY_STATIC_ARCHIVE=OFF -DUNICORN_FUZZ=OFF -DUNICORN_LOGGING=OFF -DUNICORN_BUILD_TESTS=OFF -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON" CustomErrorRegularExpression="error" />
@@ -41,14 +240,14 @@
     <Message Text="[Brovan.Unicorn] Built $(UnicornLibName) -> $(UnicornArtifact)" Importance="high" />
   </Target>
 
-  <Target Name="EnsureUnicornArtifact" DependsOnTargets="BuildUnicorn" />
+  <Target Name="EnsureUnicornArtifact" DependsOnTargets="PrepareUnicorn;BuildUnicorn" />
 
-  <Target Name="CopyUnicornToBuildOutput" AfterTargets="Build" DependsOnTargets="EnsureUnicornArtifact">
+  <Target Name="CopyUnicornToBuildOutput" AfterTargets="Build" DependsOnTargets="PrepareUnicorn;EnsureUnicornArtifact">
     <Copy SourceFiles="$(UnicornArtifact)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Message Text="[Brovan.Unicorn] Copied $(UnicornLibName) -> $(TargetDir)" Importance="high" />
   </Target>
 
-  <Target Name="CopyUnicornToPublishOutput" AfterTargets="Publish" DependsOnTargets="EnsureUnicornArtifact">
+  <Target Name="CopyUnicornToPublishOutput" AfterTargets="Publish" DependsOnTargets="PrepareUnicorn;EnsureUnicornArtifact">
     <Copy SourceFiles="$(UnicornArtifact)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
     <Message Text="[Brovan.Unicorn] Copied $(UnicornLibName) -> $(PublishDir)" Importance="high" />
   </Target>

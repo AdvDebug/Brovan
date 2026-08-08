@@ -17,6 +17,7 @@ extern void brovan_set_log_sink(void *sink);
 extern void brovan_set_exit_sink(void *sink);
 extern void brovan_set_install_progress_sink(void *sink);
 extern void brovan_set_verbose(int enabled);
+extern void brovan_set_jit_cache(int enabled);
 extern void brovan_set_surface(void *nativeWindow, int width, int height, int densityDpi);
 extern void brovan_clear_surface(void);
 extern int brovan_start(const char *binaryPath, const char *guestCommandLine, const char *workingDirectory,
@@ -291,6 +292,12 @@ JNIEXPORT void JNICALL METHOD(SetVerbose)(JNIEnv *env, jclass clazz, jint enable
     (void)env;
     (void)clazz;
     brovan_set_verbose(enabled);
+}
+
+JNIEXPORT void JNICALL METHOD(SetJitCache)(JNIEnv *env, jclass clazz, jint enabled) {
+    (void)env;
+    (void)clazz;
+    brovan_set_jit_cache(enabled);
 }
 
 JNIEXPORT void JNICALL METHOD(SendCommand)(JNIEnv *env, jclass clazz, jstring command) {

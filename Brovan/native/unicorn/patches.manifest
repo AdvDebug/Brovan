@@ -1,0 +1,62 @@
+# Brovan patch manifest for the Unicorn source tree.
+#
+# Applied by the PatchUnicornSource target in Brovan.Unicorn.targets after the
+# tarball is extracted. Every rule is idempotent and every missing anchor is a
+# hard build error, so a silently unpatched unicorn cannot be produced.
+#
+# Rule syntax, '|' separated:
+#   schema|<n>
+#   validated|<unicorn tags these anchors were checked against>
+#   copy|<file in this directory>|<destination relative to the unicorn root>
+#   insert-after|<file>|<anchor line, trimmed>|<line to insert>
+#   insert-before|<file>|<anchor line, trimmed>|<line to insert>
+#   insert-in-body|<file>|<function signature line>|<line to insert after its '{'>
+#   replace-all|<file>|<exact substring>|<replacement>
+#   append|<file>|<line to append>
+#
+# Anchors are deliberately single lines or whole-file appends: those survive
+# upstream edits to the surrounding code, hunk-based diffs do not.
+
+schema|1
+validated|2.1.4
+
+copy|brovan_uc.h|include/brovan_uc.h
+copy|brovan_uc_api.inc.c|include/brovan_uc_api.inc.c
+copy|brovan_uc_tcg_decls.inc.h|include/brovan_uc_tcg_decls.inc.h
+copy|brovan_uc_tcg.inc.c|include/brovan_uc_tcg.inc.c
+copy|brovan_tcg_slots.inc.c|include/brovan_tcg_slots.inc.c
+copy|brovan_tcg_exitcheck.inc.h|include/brovan_tcg_exitcheck.inc.h
+
+# --- uc_struct gains the brov ops table and the inline-hook switch -----------
+insert-after|include/uc_priv.h|#include "list.h"|#include "brovan_uc.h"
+insert-after|include/uc_priv.h|uc_del_inline_hook_t del_inline_hook;|    BROVAN_UC_FIELDS
+
+# --- TCGContext gains the slot table and the cache counters -----------------
+insert-before|qemu/include/tcg/tcg.h|struct TCGContext {|#include "brovan_uc.h"
+insert-after|qemu/include/tcg/tcg.h|struct uc_struct *uc;|    BROVAN_TCG_FIELDS
+
+# --- uc is pinned in the reservation: it is baked in by tcg_const_ptr(uc) ----
+replace-all|uc.c|uc = calloc(1, sizeof(*uc));|uc = brov_alloc_uc(sizeof(*uc));
+replace-all|uc.c|free(uc);|brov_free_uc(uc);
+append|uc.c|#include "brovan_uc_api.inc.c"
+
+# --- code buffer, slot table, ops install -----------------------------------
+insert-after|qemu/accel/tcg/translate-all.c|#include "uc_priv.h"|#include "brovan_uc_tcg_decls.inc.h"
+replace-all|qemu/accel/tcg/translate-all.c|uc->tcg_ctx = g_malloc(sizeof(TCGContext));|uc->tcg_ctx = brov_alloc_arena(sizeof(TCGContext));
+insert-before|qemu/accel/tcg/translate-all.c|tcg_ctx->code_gen_buffer_size = size_code_gen_buffer(tb_size);|    if (brov_try_alloc_code_gen_buffer(uc, tb_size)) { return; }
+insert-after|qemu/accel/tcg/translate-all.c|uc->tb_flush = uc_tb_flush;|    brov_install(uc);
+replace-all|qemu/accel/tcg/translate-all.c|if (tcg_ctx->initial_buffer) {|if (tcg_ctx->initial_buffer && !brov_owns_code_gen_buffer(uc)) {
+append|qemu/accel/tcg/translate-all.c|#include "brovan_uc_tcg.inc.c"
+
+
+# --- per-block exit poll: load+branch on the fast path, helper on the slow one
+insert-before|qemu/include/exec/gen-icount.h|static inline void gen_tb_start(TCGContext *tcg_ctx, TranslationBlock *tb)|#include "brovan_tcg_exitcheck.inc.h"
+replace-all|qemu/include/exec/gen-icount.h|gen_helper_check_exit_request(tcg_ctx, puc, tmp);|brov_gen_exit_check_start(tcg_ctx, puc, tmp);
+replace-all|qemu/include/exec/gen-icount.h|tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED);|tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED); brov_gen_exit_check_end(tcg_ctx);
+
+# --- helper calls route through the slot table ------------------------------
+insert-before|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)|#include "brovan_tcg_slots.inc.c"
+insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)|    if (brov_tcg_out_call_slot(s, dest)) { return; }
+insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static void tcg_out_jmp(TCGContext *s, tcg_insn_unit *dest)|    if (brov_tcg_out_jmp_slot(s, dest)) { return; }
+insert-before|qemu/tcg/aarch64/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *target)|#include "brovan_tcg_slots.inc.c"
+insert-in-body|qemu/tcg/aarch64/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *target)|    if (brov_tcg_out_call_slot(s, target)) { return; }

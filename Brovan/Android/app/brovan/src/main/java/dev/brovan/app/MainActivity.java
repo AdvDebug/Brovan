@@ -66,6 +66,10 @@ public class MainActivity extends AppCompatActivity {
         library = new Library(this);
         settings = new Settings(this);
 
+        // Refreshes the guest-side files bundled in the APK, so an app update cannot leave
+        // a stale Vulkan shim behind for the new emulator to load.
+        worker.execute(() -> GuestAssets.deploy(this));
+
         drawer = findViewById(R.id.drawer);
         content = findViewById(R.id.content);
         toolbar = findViewById(R.id.toolbar);
@@ -466,6 +470,10 @@ public class MainActivity extends AppCompatActivity {
         controls.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, schemeLabels));
         controls.setText(schemeLabels[settings.controlScheme()], false);
         controls.setOnItemClickListener((parent, item, position, id) -> settings.setControlScheme(position));
+
+        MaterialSwitch jitCache = view.findViewById(R.id.jit_cache);
+        jitCache.setChecked(settings.jitCache());
+        jitCache.setOnCheckedChangeListener((button, checked) -> settings.setJitCache(checked));
 
         MaterialSwitch developer = view.findViewById(R.id.developer);
         developer.setChecked(settings.developerMode());

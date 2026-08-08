@@ -41,6 +41,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private static final String EXTRA_NETWORK = "network";
     private static final String EXTRA_DEVELOPER = "developer";
     private static final String EXTRA_CONTROLS = "controls";
+    private static final String EXTRA_JIT_CACHE = "jit_cache";
 
     private static final int MAX_LINES = 1200;
     private static final int TRIM_CHUNK = 200;
@@ -63,7 +64,8 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .putExtra(EXTRA_NAME, program.name())
                 .putExtra(EXTRA_NETWORK, settings.network())
                 .putExtra(EXTRA_DEVELOPER, settings.developerMode())
-                .putExtra(EXTRA_CONTROLS, settings.controlScheme());
+                .putExtra(EXTRA_CONTROLS, settings.controlScheme())
+                .putExtra(EXTRA_JIT_CACHE, settings.jitCache());
     }
 
     @Override
@@ -110,6 +112,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         }
 
         BrovanNative.setVerbose(developerMode);
+        BrovanNative.setJitCache(getIntent().getBooleanExtra(EXTRA_JIT_CACHE, true));
         setStatus(getIntent().getStringExtra(EXTRA_NAME));
 
         // Developer mode leaves the guest at the debugger prompt instead of running it, so the console has to

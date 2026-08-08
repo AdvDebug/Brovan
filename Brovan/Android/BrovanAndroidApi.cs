@@ -92,6 +92,9 @@ namespace Brovan.Android
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_verbose")]
         public static void SetVerbose(int enabled) => _verbose = enabled != 0;
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_set_jit_cache")]
+        public static void SetJitCache(int enabled) => UnicornCodeCache.Enabled = enabled != 0;
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_surface")]
         public static void SetSurface(IntPtr nativeWindow, int width, int height, int densityDpi)
         {

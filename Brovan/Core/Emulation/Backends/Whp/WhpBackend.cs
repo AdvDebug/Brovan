@@ -166,5 +166,12 @@ namespace Brovan.Core.Emulation
             WhpErrors.Exception => BackendError.Exception,
             _ => BackendError.InternalError,
         };
+
+        // WHP runs guest code on the CPU directly, so there is no translated code to keep.
+        public void RestoreCodeCache() { }
+
+        public void ResolveCodeCache() { }
+
+        public void PersistCodeCache() { }
     }
 }
