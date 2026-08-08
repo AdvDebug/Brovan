@@ -55,9 +55,10 @@ CONFIG="${CONFIG:-Release}"
 API_LEVEL="${API_LEVEL:-26}"
 PUBLISH_DIR="${BROVAN_PUBLISH_DIR:-/tmp/brovan-android-publish}"
 APK_OUTPUT="${BROVAN_APK_OUTPUT:-$REPO_ROOT/artifacts/android/brovan-arm64-v8a.apk}"
-UNICORN_SRC="$REPO_ROOT/Brovan/.cache/unicorn/unicorn-2.1.4"
-UNICORN_BUILD="$REPO_ROOT/Brovan/.cache/unicorn/build-android-arm64"
-UNICORN_ARTIFACT="$UNICORN_BUILD/libunicorn.so"
+# Resolved from Brovan.Unicorn.targets rather than hardcoded: the source tree is named
+# after a hash of Brovan/native/unicorn, so editing a patch moves it.
+UNICORN_SRC=""
+UNICORN_PATCH_KEY=""
 
 # Exit code 3 means "this host has no Android toolchain", which Brovan.Android/Brovan.Android.csproj treats
 # as a skip rather than a build failure. Anything else is a real failure.
@@ -75,11 +76,16 @@ esac
 
 mkdir -p "$JNI_LIBS"
 
-if [ ! -f "$UNICORN_SRC/CMakeLists.txt" ]; then
-    echo "==> Fetching the Unicorn source through Brovan.Unicorn.targets"
-    "$DOTNET" msbuild "$PROJECT" -t:ExtractUnicornSource -nologo -v:minimal || true
-    [ -f "$UNICORN_SRC/CMakeLists.txt" ] || { echo "Unicorn source missing at $UNICORN_SRC" >&2; exit 1; }
-fi
+echo "==> Fetching and patching the Unicorn source through Brovan.Unicorn.targets"
+"$DOTNET" msbuild "$PROJECT" -t:PatchUnicornSource -nologo -v:minimal
+eval "$("$DOTNET" msbuild "$PROJECT" -t:PrintUnicornPaths -nologo -v:minimal \
+    | sed -n 's/^ *\(UNICORN_SRC=\|UNICORN_PATCH_KEY=\)/\1/p')"
+[ -f "$UNICORN_SRC/CMakeLists.txt" ] || { echo "Unicorn source missing at '$UNICORN_SRC'" >&2; exit 1; }
+
+# Keyed on the patch set like the host build, and kept separate from it: sharing one
+# CMake cache between the Windows and WSL views of the same path breaks the configure.
+UNICORN_BUILD="$REPO_ROOT/Brovan/.cache/unicorn/build-android-arm64-$UNICORN_PATCH_KEY"
+UNICORN_ARTIFACT="$UNICORN_BUILD/libunicorn.so"
 
 # Unicorn has to be cross-built before the publish: Brovan.Unicorn.targets copies whatever sits at
 # UnicornArtifact into the publish output, and if that path is empty it configures a host-arch build there
@@ -101,6 +107,22 @@ if [ ! -f "$UNICORN_ARTIFACT" ]; then
     "$CMAKE" --build "$UNICORN_BUILD" --parallel
 fi
 cp "$UNICORN_ARTIFACT" "$JNI_LIBS/libunicorn.so"
+
+# The Vulkan shim is a guest PE, not a host library, so it ships as an asset and the
+# app drops it into the guest's System32 on launch. It is generated from vk.xml
+# alongside the managed marshaller, so it has to travel with the APK that built it.
+echo "==> Building the BrovVulk Vulkan shim"
+SHIM_DIR="$REPO_ROOT/Brovan.Graphics/brovvulk-icd"
+GUEST_ASSETS="$GRADLE_PROJECT/brovan/src/main/assets/virtualfs"
+if [ -f "$SHIM_DIR/obj/generated/brovvulk_gen.c" ]; then
+    sh "$SHIM_DIR/build.sh"
+    mkdir -p "$GUEST_ASSETS/System32" "$GUEST_ASSETS/SysWOW64"
+    cp -f "$SHIM_DIR/bin/vulkan-1.dll" "$GUEST_ASSETS/System32/vulkan-1.dll"
+    [ -f "$SHIM_DIR/bin/x86/vulkan-1.dll" ] && cp -f "$SHIM_DIR/bin/x86/vulkan-1.dll" "$GUEST_ASSETS/SysWOW64/vulkan-1.dll"
+    echo "    packaged vulkan-1.dll into the APK assets"
+else
+    echo "warning: BrovVulk generated sources missing; the APK will ship without the Vulkan shim." >&2
+fi
 
 # .NET's crypto shim aborts the process the moment any OpenSSL-backed primitive is touched
 # ("No usable version of libssl was found"), and Android exposes no libssl to apps. Its probe list includes

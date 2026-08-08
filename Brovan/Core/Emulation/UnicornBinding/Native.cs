@@ -135,6 +135,99 @@ namespace Brovan.Core.Emulation
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl, EntryPoint = "uc_ctl")]
         public static extern UCErrors uc_ctl1_uint(IntPtr uc, int control, uint arg1);
+
+        // Brovan extensions, added to the unicorn tree by Brovan/native/unicorn.
+        // See Brovan/native/unicorn/brovan_uc.h for the layout contract.
+
+        public const uint BROV_CFG_ENABLE_CACHE = 0x1;
+        public const uint BROV_CFG_STRICT_AUDIT = 0x2;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BrovConfig
+        {
+            public uint StructSize;
+            public uint Flags;
+            public ulong ReserveBase;
+            public ulong ReserveSize;
+            public uint SlotCount;
+            public uint Reserved;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BrovCacheInfo
+        {
+            public uint StructSize;
+            public uint LastReason;
+
+            public ulong ReservationBase;
+            public ulong ReservationSize;
+            public ulong CodeGenBuffer;
+            public ulong CodeGenBufferSize;
+            public ulong CodeGenUsed;
+
+            public ulong TbCount;
+            public ulong FlushCount;
+
+            public uint SlotCount;
+            public uint SlotsUsed;
+            public uint SlotsOverflowed;
+            public uint InlineHooksDisabled;
+
+            public ulong LoadCount;
+            public ulong LoadedTbs;
+            public ulong StaleTbs;
+            public ulong SaveCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+        public struct BrovAuditResult
+        {
+            public uint StructSize;
+            public uint HitCount;
+            public ulong FirstOffset;
+            public ulong FirstValue;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string FirstObject;
+        }
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_abi_version(out uint abi);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_configure(ref BrovConfig cfg);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_reservation_info(out ulong reservationBase, out ulong size);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_blob_reservation(byte[] blob, UIntPtr length, out ulong reservationBase, out ulong size);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_last_reason(IntPtr uc, out uint reason);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_cc_info(IntPtr uc, ref BrovCacheInfo info);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_cc_validate(IntPtr uc, ref BrovAuditResult result);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_cc_save(IntPtr uc, out IntPtr blob, out UIntPtr length);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_cc_load(IntPtr uc, byte[] blob, UIntPtr length);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_cc_resolve(IntPtr uc, out uint resolved, out uint remaining);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_cc_free(IntPtr blob);
+
+        public const uint BROV_REG_READABLE = 0x1;
+        public const uint BROV_REG_WRITABLE = 0x2;
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_reg_ptr(IntPtr uc, int regid, out IntPtr ptr, out UIntPtr size, out uint flags);
     }
 
     internal static class NativeLibraryResolver

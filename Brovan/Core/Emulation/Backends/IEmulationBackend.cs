@@ -171,5 +171,23 @@ namespace Brovan.Core.Emulation
         bool RemoveHooks();
 
         bool IsRangeMapped(ulong address, ulong size);
+
+        /// <summary>
+        /// Reuse translated guest code from a previous run. Called once execution is about
+        /// to begin, because a backend that verifies restored code against guest memory
+        /// needs the image mapped first. Backends that do not translate do nothing.
+        /// </summary>
+        void RestoreCodeCache();
+
+        /// <summary>
+        /// Cheap periodic follow-up to <see cref="RestoreCodeCache"/>, called from the
+        /// scheduler while the guest runs. Returns once there is nothing left to do.
+        /// </summary>
+        void ResolveCodeCache();
+
+        /// <summary>
+        /// Persist translated guest code. Called with the guest stopped.
+        /// </summary>
+        void PersistCodeCache();
     }
 }

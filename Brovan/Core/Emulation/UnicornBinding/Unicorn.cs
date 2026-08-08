@@ -793,23 +793,24 @@ namespace Brovan.Core.Emulation
         /// <returns>returns true if successful, otherwise false.</returns>
         public bool WriteRegister(Registers register, ulong value)
         {
-            if (DisposedCheck())
-                return false;
-
-            lock (_registerLock)
-            {
-                _error = uc_reg_write(_uc, register, ref value);
-                return _error == UCErrors.UC_ERR_OK;
-            }
+            return WriteRegister((int)register, value);
         }
 
-        public bool WriteRegister(int Register, ulong Value)
+        public unsafe bool WriteRegister(int Register, ulong Value)
         {
             if (DisposedCheck())
                 return false;
 
             lock (_registerLock)
             {
+                ulong* Slot = DirectRegister(Register, DirectWritable);
+                if (Slot != null)
+                {
+                    *Slot = Value;
+                    _error = UCErrors.UC_ERR_OK;
+                    return true;
+                }
+
                 _error = uc_reg_write_raw(_uc, Register, ref Value);
                 return _error == UCErrors.UC_ERR_OK;
             }
@@ -893,15 +894,7 @@ namespace Brovan.Core.Emulation
         /// <returns>returns the value of the register.</returns>
         public ulong ReadRegister(Registers register)
         {
-            if (DisposedCheck())
-                return 0;
-
-            if (_uc == IntPtr.Zero)
-                throw new InvalidOperationException("Unicorn engine is not initialized.");
-
-            ulong value = 0;
-            _error = uc_reg_read(_uc, register, out value);
-            return value;
+            return ReadRegister((int)register);
         }
 
         /// <summary>
@@ -909,13 +902,20 @@ namespace Brovan.Core.Emulation
         /// </summary>
         /// <param name="Register">Register to read.</param>
         /// <returns>returns the value of the register.</returns>
-        public ulong ReadRegister(int Register)
+        public unsafe ulong ReadRegister(int Register)
         {
             if (DisposedCheck())
                 return 0;
 
             if (_uc == IntPtr.Zero)
                 throw new InvalidOperationException("Unicorn engine is not initialized.");
+
+            ulong* Slot = DirectRegister(Register, DirectReadable);
+            if (Slot != null)
+            {
+                _error = UCErrors.UC_ERR_OK;
+                return *Slot;
+            }
 
             ulong Value = 0;
             _error = uc_reg_read_raw(_uc, Register, out Value);
@@ -1361,6 +1361,208 @@ namespace Brovan.Core.Emulation
 
             _error = uc_ctl1_uint(_uc, Control, Size);
             return _error == UCErrors.UC_ERR_OK;
+        }
+
+        /// <summary>
+        /// Reserve the address range that the TCG code buffer, the slot table and the
+        /// uc struct live in. Must be called before any <see cref="Unicorn"/> instance
+        /// is created: the reservation is what makes a saved code cache reloadable.
+        /// </summary>
+        /// <param name="ReserveBase">Base recorded by a previous run, or 0 to let the OS choose.</param>
+        /// <param name="ReserveSize">Total bytes to reserve, including the header region.</param>
+        /// <param name="EnableCache">Whether saving and loading are wanted this run.</param>
+        /// <param name="StrictAudit">Also flag pointers into the interior of tracked objects.</param>
+        public static bool ConfigureCodeCache(ulong ReserveBase, ulong ReserveSize, bool EnableCache, bool StrictAudit = false)
+        {
+            BrovConfig Config = new BrovConfig
+            {
+                StructSize = (uint)Marshal.SizeOf<BrovConfig>(),
+                Flags = (EnableCache ? BROV_CFG_ENABLE_CACHE : 0u) | (StrictAudit ? BROV_CFG_STRICT_AUDIT : 0u),
+                ReserveBase = ReserveBase,
+                ReserveSize = ReserveSize,
+                SlotCount = 0,
+                Reserved = 0,
+            };
+
+            return brov_configure(ref Config) == UCErrors.UC_ERR_OK;
+        }
+
+        /// <summary>
+        /// Get the base and size of the address reservation actually obtained.
+        /// </summary>
+        public static bool GetCodeCacheReservation(out ulong ReservationBase, out ulong ReservationSize)
+        {
+            return brov_reservation_info(out ReservationBase, out ReservationSize) == UCErrors.UC_ERR_OK;
+        }
+
+        /// <summary>
+        /// Read the reservation a saved blob needs, so it can be requested before uc_open.
+        /// </summary>
+        public static bool GetBlobReservation(byte[] Blob, out ulong ReservationBase, out ulong ReservationSize)
+        {
+            ReservationBase = 0;
+            ReservationSize = 0;
+
+            if (Blob == null || Blob.Length == 0)
+                return false;
+
+            return brov_blob_reservation(Blob, (UIntPtr)Blob.Length, out ReservationBase, out ReservationSize) == UCErrors.UC_ERR_OK;
+        }
+
+        internal bool GetCodeCacheInfo(out BrovCacheInfo Info)
+        {
+            Info = new BrovCacheInfo { StructSize = (uint)Marshal.SizeOf<BrovCacheInfo>() };
+
+            if (DisposedCheck())
+                return false;
+
+            _error = brov_cc_info(_uc, ref Info);
+            return _error == UCErrors.UC_ERR_OK;
+        }
+
+        /// <summary>
+        /// Run the relocation audit without saving. Reports any host pointer baked into
+        /// generated code that a reload could not repoint.
+        /// </summary>
+        internal bool ValidateCodeCache(out BrovAuditResult Result)
+        {
+            Result = new BrovAuditResult { StructSize = (uint)Marshal.SizeOf<BrovAuditResult>() };
+
+            if (DisposedCheck())
+                return false;
+
+            _error = brov_cc_validate(_uc, ref Result);
+            return _error == UCErrors.UC_ERR_OK && Result.HitCount == 0;
+        }
+
+        /// <summary>
+        /// Serialize the TCG code cache. Returns null when the cache cannot be saved;
+        /// <see cref="GetCodeCacheReason"/> says why.
+        /// </summary>
+        public byte[] SaveCodeCache()
+        {
+            if (DisposedCheck())
+                return null;
+
+            _error = brov_cc_save(_uc, out IntPtr Blob, out UIntPtr Length);
+            if (_error != UCErrors.UC_ERR_OK || Blob == IntPtr.Zero)
+                return null;
+
+            try
+            {
+                byte[] Managed = new byte[(int)Length];
+                Marshal.Copy(Blob, Managed, 0, Managed.Length);
+                return Managed;
+            }
+            finally
+            {
+                brov_cc_free(Blob);
+            }
+        }
+
+        /// <summary>
+        /// Restore a previously saved TCG code cache. The guest image must already be
+        /// mapped: every restored block is verified against the guest bytes it was
+        /// translated from.
+        /// </summary>
+        public bool LoadCodeCache(byte[] Blob)
+        {
+            if (DisposedCheck() || Blob == null || Blob.Length == 0)
+                return false;
+
+            _error = brov_cc_load(_uc, Blob, (UIntPtr)Blob.Length);
+            return _error == UCErrors.UC_ERR_OK;
+        }
+
+        /// <summary>
+        /// Register restored blocks whose guest pages were not mapped yet when the cache
+        /// was loaded. Returns false once nothing is left to resolve.
+        /// </summary>
+        public bool ResolveCodeCache(out uint Resolved, out uint Remaining)
+        {
+            Resolved = 0;
+            Remaining = 0;
+
+            if (DisposedCheck())
+                return false;
+
+            _error = brov_cc_resolve(_uc, out Resolved, out Remaining);
+            return _error == UCErrors.UC_ERR_OK && Remaining != 0;
+        }
+
+        public uint GetCodeCacheReason()
+        {
+            if (DisposedCheck())
+                return 0;
+
+            return brov_last_reason(_uc, out uint Reason) == UCErrors.UC_ERR_OK ? Reason : 0;
+        }
+
+        /// <summary>
+        /// Host pointers to register storage inside the guest CPU state, so the common
+        /// 64-bit reads and writes become a load or a store instead of a native call.
+        /// </summary>
+        /// <remarks>
+        /// Only registers Unicorn stores verbatim get an entry, and only those it would
+        /// have written with a plain store get <see cref="DirectWritable"/>. EFLAGS is
+        /// absent because its condition codes are computed lazily, the program counter is
+        /// read-only here because writing it also raises quit_request and flushes
+        /// translated blocks, and nothing is exposed in 16- or 32-bit mode where the same
+        /// storage is reached under different truncation rules.
+        /// </remarks>
+        private const int DirectRegisterCount = 512;
+        private const byte DirectProbed = 0x1;
+        private const byte DirectReadable = 0x2;
+        private const byte DirectWritable = 0x4;
+
+        private IntPtr[] _directRegisters;
+        private byte[] _directRegisterState;
+
+        private byte ProbeDirectRegister(int Register)
+        {
+            IntPtr[] Pointers = _directRegisters;
+            byte[] State = _directRegisterState;
+
+            if (Pointers == null || State == null)
+            {
+                Interlocked.CompareExchange(ref _directRegisters, new IntPtr[DirectRegisterCount], null);
+                Interlocked.CompareExchange(ref _directRegisterState, new byte[DirectRegisterCount], null);
+                Pointers = _directRegisters;
+                State = _directRegisterState;
+            }
+
+            byte Known = Volatile.Read(ref State[Register]);
+            if (Known != 0)
+                return Known;
+
+            byte Result = DirectProbed;
+            if (brov_reg_ptr(_uc, Register, out IntPtr Pointer, out UIntPtr Bytes, out uint Flags) == UCErrors.UC_ERR_OK
+                && Pointer != IntPtr.Zero && (ulong)Bytes == sizeof(ulong))
+            {
+                Pointers[Register] = Pointer;
+
+                if ((Flags & BROV_REG_READABLE) != 0)
+                    Result |= DirectReadable;
+                if ((Flags & BROV_REG_WRITABLE) != 0)
+                    Result |= DirectWritable;
+            }
+
+            Volatile.Write(ref State[Register], Result);
+            return Result;
+        }
+
+        private unsafe ulong* DirectRegister(int Register, byte Access)
+        {
+            if ((uint)Register >= DirectRegisterCount)
+                return null;
+
+            byte[] State = _directRegisterState;
+            byte Known = State != null ? Volatile.Read(ref State[Register]) : (byte)0;
+
+            if (Known == 0)
+                Known = ProbeDirectRegister(Register);
+
+            return (Known & Access) != 0 ? (ulong*)_directRegisters[Register] : null;
         }
 
         /// <summary>

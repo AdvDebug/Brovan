@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using Brovan.Core;
+using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Helpers.WindowsImage
 {
@@ -19,6 +21,58 @@ namespace Brovan.Core.Helpers.WindowsImage
         private const string DefaultUserHive = "Users/Default/NTUSER.DAT";
 
         private static readonly string[] RegistryHives = { "SOFTWARE", "SYSTEM", "DEFAULT", "SAM", "SECURITY" };
+
+        private const string ApiSetSchemaName = "apisetschema.dll";
+        private const string ApiSetSectionName = ".apiset";
+
+        public static bool TryReadApiSetMap(string LibrariesDirectory, out byte[] Map)
+        {
+            Map = Array.Empty<byte>();
+
+            string SchemaPath = Path.Combine(LibrariesDirectory, ApiSetSchemaName);
+            if (!File.Exists(SchemaPath))
+                return false;
+
+            using BinaryFile Schema = new BinaryFile(SchemaPath, true);
+            if (Schema.FileFormat != BinaryFormat.PE || Schema.PE.Sections == null)
+                return false;
+
+            foreach (PortableBinarySection Section in Schema.PE.Sections)
+            {
+                if (!string.Equals(Section.SectionName, ApiSetSectionName, StringComparison.Ordinal))
+                    continue;
+
+                byte[] Data = Schema.GetBinaryData().ToArray();
+                long End = (long)Section.RawOffset + Section.RawSize;
+                if (Section.RawSize == 0 || End > Data.Length)
+                    return false;
+
+                // VirtualSize is the meaningful length; RawSize is padded to file alignment.
+                int Length = Section.VirtualSize != 0 && Section.VirtualSize < Section.RawSize
+                    ? (int)Section.VirtualSize
+                    : (int)Section.RawSize;
+
+                Map = new byte[Length];
+                Array.Copy(Data, (int)Section.RawOffset, Map, 0, Length);
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Writes apisetmap.bin from the imported apisetschema.dll. Returns false when the
+        /// image had no schema to read, leaving the caller's existing map alone.
+        /// </summary>
+        public static bool TryWriteApiSetMap(string BaseDirectory, Action<string> Report)
+        {
+            if (!TryReadApiSetMap(Path.Combine(BaseDirectory, "WindowsLibs"), out byte[] Map))
+                return false;
+
+            File.WriteAllBytes(Path.Combine(BaseDirectory, "apisetmap.bin"), Map);
+            Report?.Invoke($"[+] Wrote apisetmap.bin from the image's apisetschema.dll ({Map.Length} bytes).");
+            return true;
+        }
 
         private readonly struct PendingFile
         {

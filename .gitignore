@@ -67,3 +67,4 @@ nunit-*.xml
 /Brovan/Android/app/local.properties
 /Brovan/Android/app/brovan/src/main/jniLibs/
 /*.apk
+/Brovan/Android/app/brovan/src/main/assets

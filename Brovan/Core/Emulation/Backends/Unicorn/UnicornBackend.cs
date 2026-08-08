@@ -9,8 +9,12 @@ namespace Brovan.Core.Emulation
     {
         public Unicorn Inner { get; }
 
-        public UnicornBackend(Arch arch, Mode mode)
+        public UnicornBackend(Arch arch, Mode mode, string guestImagePath = null, string hostImagePath = null)
         {
+            // Has to precede uc_open. the code cache reserves the address range that the
+            // translation buffer and the uc struct are then carved out of.
+            UnicornCodeCache.Configure(guestImagePath, hostImagePath);
+
             Inner = new Unicorn(arch, mode);
             Arch = arch;
             Mode = mode;
@@ -364,5 +368,11 @@ namespace Brovan.Core.Emulation
         }
 
         private readonly Dictionary<IntPtr, IHookThunk> _liveThunks = new();
+
+        public void RestoreCodeCache() => UnicornCodeCache.TryLoad(Inner);
+
+        public void ResolveCodeCache() => UnicornCodeCache.ResolvePending(Inner);
+
+        public void PersistCodeCache() => UnicornCodeCache.TrySave(Inner);
     }
 }

@@ -13,6 +13,7 @@ final class Settings {
     private static final String KEY_DEVELOPER = "developer";
     private static final String KEY_FIT_WINDOW = "fit_window";
     private static final String KEY_CONTROLS = "controls";
+    private static final String KEY_JIT_CACHE = "jit_cache";
 
     private final SharedPreferences preferences;
 
@@ -50,5 +51,13 @@ final class Settings {
 
     void setFitWindow(boolean value) {
         preferences.edit().putBoolean(KEY_FIT_WINDOW, value).apply();
+    }
+
+    boolean jitCache() {
+        return preferences.getBoolean(KEY_JIT_CACHE, true);
+    }
+
+    void setJitCache(boolean value) {
+        preferences.edit().putBoolean(KEY_JIT_CACHE, value).apply();
     }
 }

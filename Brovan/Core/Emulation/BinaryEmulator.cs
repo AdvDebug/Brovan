@@ -533,7 +533,7 @@ namespace Brovan.Core.Emulation
             BackendMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
             GeneralHelper.IO.Wow64FileRedirect = Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86;
             GuestImagePath = ResolveGuestImagePath(Binary);
-            _emulator = BackendFactory.Create(Settings.BackendKind, BackendArch, BackendMode, Settings.NoHooks);
+            _emulator = BackendFactory.Create(Settings.BackendKind, BackendArch, BackendMode, Settings.NoHooks, GuestImagePath, Binary.Location);
             _emulator.NoHooks = Settings.NoHooks;
             this.Settings = Settings;
             Debug = Settings.Debug;
@@ -575,7 +575,7 @@ namespace Brovan.Core.Emulation
             BackendMode = mode;
             GeneralHelper.IO.Wow64FileRedirect = Binary?.FileFormat == BinaryFormat.PE && Binary?.Architecture == BinaryArchitecture.x86;
             GuestImagePath = ResolveGuestImagePath(_binary, Guest);
-            _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks);
+            _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks, GuestImagePath, _binary?.Location);
             this.Settings = Settings;
             Debug = Settings.Debug;
             RawProgramArguments = Settings.RawProgramArguments ?? string.Empty;
@@ -1640,7 +1640,7 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// CPUD Handler.
+        /// CPUID Handler.
         /// </summary>
         private bool CPUID_Handler()
         {
@@ -2426,6 +2426,7 @@ namespace Brovan.Core.Emulation
 
         public bool RunMlfqScheduler(uint BaseQuantumInstructions = 200000, int Levels = 4, ulong MaxTotalInstructions = 0, uint MaxSlices = 0, long AgingThresholdSlices = 50)
         {
+            _emulator.RestoreCodeCache();
             TrimDeadThreadsFromOrder();
             if (ThreadOrder.Count == 0)
             {
@@ -2472,6 +2473,9 @@ namespace Brovan.Core.Emulation
             while (true)
             {
                 SchedulerTick++;
+
+                if ((SchedulerTick & 0x7) == 0)
+                    _emulator.ResolveCodeCache();
 
                 if (WinHelper != null)
                     OS.Windows.RemoteProcessRequests.Drain(this);
@@ -2828,6 +2832,10 @@ namespace Brovan.Core.Emulation
         public void Start()
         {
             Guest.Start(this);
+
+            // The guest has stopped here. Dispose() is not a reliable hook: the menu's
+            // "exit" command calls Environment.Exit.
+            _emulator.PersistCodeCache();
         }
 
         /// <summary>
@@ -3019,6 +3027,7 @@ namespace Brovan.Core.Emulation
             if (Disposed)
                 return false;
 
+            _emulator.RestoreCodeCache();
             TriggerDebugMessage(() => $"emu: start 0x{StartAddress:X}->0x{EndAddress:X} timeout={Timeout} count={Count}");
             bool Result = _emulator.Emulate(StartAddress, EndAddress, Timeout, Count);
             if (!Result && LogErrors)
@@ -3498,6 +3507,7 @@ namespace Brovan.Core.Emulation
                 if (_emulator != null)
                 {
                     _emulator.StopEmulation();
+                    _emulator.PersistCodeCache();
                     _emulator.Dispose();
                 }
 

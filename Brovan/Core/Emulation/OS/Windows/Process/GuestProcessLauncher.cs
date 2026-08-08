@@ -239,6 +239,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance.Settings.NoHooks)
                 Arguments.Add("--no-hooks");
 
+            if (!UnicornCodeCache.Enabled)
+                Arguments.Add("--no-jit-cache");
+            else if (!string.IsNullOrEmpty(UnicornCodeCache.CacheDirectory))
+                Arguments.Add($"--jit-cache={UnicornCodeCache.CacheDirectory}");
+
             ForwardHostOptions(Arguments);
 
             Arguments.Add("-c");

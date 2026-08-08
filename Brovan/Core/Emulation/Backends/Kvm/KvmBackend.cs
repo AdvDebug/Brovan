@@ -166,5 +166,12 @@ namespace Brovan.Core.Emulation
             KvmErrors.Exception => BackendError.Exception,
             _ => BackendError.InternalError,
         };
+
+        // KVM runs guest code on the CPU directly, so there is no translated code to keep.
+        public void RestoreCodeCache() { }
+
+        public void ResolveCodeCache() { }
+
+        public void PersistCodeCache() { }
     }
 }

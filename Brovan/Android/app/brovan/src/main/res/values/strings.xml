@@ -22,6 +22,8 @@
     <string name="settings_advanced">Advanced</string>
     <string name="settings_controls">On-screen controls</string>
     <string name="settings_network">Network access</string>
+    <string name="settings_jit_cache">JIT code caching</string>
+    <string name="settings_jit_cache_summary">Experimental JIT code caching that can help with performance</string>
     <string name="settings_developer">Developer mode</string>
     <string name="settings_developer_summary">Show the console and emulator trace while a program runs</string>
 
