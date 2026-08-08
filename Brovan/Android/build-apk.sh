@@ -90,7 +90,7 @@ UNICORN_ARTIFACT="$UNICORN_BUILD/libunicorn.so"
 # Unicorn has to be cross-built before the publish: Brovan.Unicorn.targets copies whatever sits at
 # UnicornArtifact into the publish output, and if that path is empty it configures a host-arch build there
 # instead, poisoning the CMake cache for the arm64 configure that follows.
-echo "==> [1/4] Cross-building Unicorn for arm64-v8a"
+echo "==> [1/5] Cross-building Unicorn for arm64-v8a"
 if [ ! -f "$UNICORN_ARTIFACT" ]; then
     "$CMAKE" -S "$UNICORN_SRC" -B "$UNICORN_BUILD" \
         -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
@@ -108,22 +108,6 @@ if [ ! -f "$UNICORN_ARTIFACT" ]; then
 fi
 cp "$UNICORN_ARTIFACT" "$JNI_LIBS/libunicorn.so"
 
-# The Vulkan shim is a guest PE, not a host library, so it ships as an asset and the
-# app drops it into the guest's System32 on launch. It is generated from vk.xml
-# alongside the managed marshaller, so it has to travel with the APK that built it.
-echo "==> Building the BrovVulk Vulkan shim"
-SHIM_DIR="$REPO_ROOT/Brovan.Graphics/brovvulk-icd"
-GUEST_ASSETS="$GRADLE_PROJECT/brovan/src/main/assets/virtualfs"
-if [ -f "$SHIM_DIR/obj/generated/brovvulk_gen.c" ]; then
-    sh "$SHIM_DIR/build.sh"
-    mkdir -p "$GUEST_ASSETS/System32" "$GUEST_ASSETS/SysWOW64"
-    cp -f "$SHIM_DIR/bin/vulkan-1.dll" "$GUEST_ASSETS/System32/vulkan-1.dll"
-    [ -f "$SHIM_DIR/bin/x86/vulkan-1.dll" ] && cp -f "$SHIM_DIR/bin/x86/vulkan-1.dll" "$GUEST_ASSETS/SysWOW64/vulkan-1.dll"
-    echo "    packaged vulkan-1.dll into the APK assets"
-else
-    echo "warning: BrovVulk generated sources missing; the APK will ship without the Vulkan shim." >&2
-fi
-
 # .NET's crypto shim aborts the process the moment any OpenSSL-backed primitive is touched
 # ("No usable version of libssl was found"), and Android exposes no libssl to apps. Its probe list includes
 # the unversioned names, which is what OpenSSL's android targets emit and what Android will package.
@@ -134,7 +118,7 @@ else
     echo "warning: no OpenSSL build at $OPENSSL_BUILD; the guest will abort on first crypto use" >&2
 fi
 
-echo "==> [2/4] Publishing Brovan as a NativeAOT shared library (linux-bionic-arm64)"
+echo "==> [2/5] Publishing Brovan as a NativeAOT shared library (linux-bionic-arm64)"
 NDK_BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 CLANG="$NDK_BIN/aarch64-linux-android$API_LEVEL-clang"
 OBJCOPY="$NDK_BIN/llvm-objcopy"
@@ -166,11 +150,35 @@ PRODUCED="$(find "$PUBLISH_DIR" -maxdepth 1 -name 'Brovan.so' -o -maxdepth 1 -na
 cp "$PRODUCED" "$JNI_LIBS/libBrovan.so"
 file "$JNI_LIBS/libBrovan.so"
 
-echo "==> [3/4] Assembling the APK"
+# The Vulkan shim is a guest PE, not a host library, so it ships as an asset and the app
+# drops it into the guest's System32 on launch. Its C sources come from the Roslyn
+# generator that runs while Brovan compiles, so this has to follow the publish above -
+# on a clean checkout, such as CI, they do not exist before it.
+echo "==> [3/5] Building the BrovVulk Vulkan shim"
+SHIM_DIR="$REPO_ROOT/Brovan.Graphics/brovvulk-icd"
+GUEST_ASSETS="$GRADLE_PROJECT/brovan/src/main/assets/virtualfs"
+
+if [ ! -f "$SHIM_DIR/obj/generated/brovvulk_gen.c" ]; then
+    echo "    generated sources still missing; running the generator on its own"
+    "$DOTNET" build "$PROJECT" -c "$CONFIG" -nologo -v:minimal
+fi
+
+[ -f "$SHIM_DIR/obj/generated/brovvulk_gen.c" ] || {
+    echo "BrovVulk generated sources missing after building Brovan; cannot build the Vulkan shim." >&2
+    exit 1
+}
+
+sh "$SHIM_DIR/build.sh"
+mkdir -p "$GUEST_ASSETS/System32" "$GUEST_ASSETS/SysWOW64"
+cp -f "$SHIM_DIR/bin/vulkan-1.dll" "$GUEST_ASSETS/System32/vulkan-1.dll"
+[ -f "$SHIM_DIR/bin/x86/vulkan-1.dll" ] && cp -f "$SHIM_DIR/bin/x86/vulkan-1.dll" "$GUEST_ASSETS/SysWOW64/vulkan-1.dll"
+echo "    packaged vulkan-1.dll into the APK assets"
+
+echo "==> [4/5] Assembling the APK"
 printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > "$GRADLE_PROJECT/local.properties"
 "$GRADLE" -p "$GRADLE_PROJECT" assembleDebug --no-daemon
 
-echo "==> [4/4] Collecting the APK"
+echo "==> [5/5] Collecting the APK"
 BUILT_APK="$(find "$GRADLE_PROJECT" -path '*/outputs/apk/debug/*.apk' -print | head -1)"
 [ -n "$BUILT_APK" ] || { echo "gradle produced no APK under $GRADLE_PROJECT" >&2; exit 1; }
 mkdir -p "$(dirname "$APK_OUTPUT")"
