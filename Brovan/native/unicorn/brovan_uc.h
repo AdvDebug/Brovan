@@ -11,8 +11,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define BROV_ABI_VERSION 2u
+#define BROV_ABI_VERSION 3u
 #define BROV_BLOB_MAGIC 0x4356524Bu /* "KRVC" */
+
+/* Blocks translated in budget mode carry a decrement the others do not, so a
+ * blob is only interchangeable with a run in the same mode. */
+#define BROV_BLOB_FLAG_BUDGET 0x1u
 
 /* The reservation is laid out [slot table][arena][code gen buffer]. Replaying a
  * single base address therefore pins every object whose address gets baked into
@@ -175,10 +179,12 @@ struct brov_ops {
     int (*load)(struct uc_struct *uc, const void *blob, size_t len);
     int (*resolve)(struct uc_struct *uc, uint32_t *resolved, uint32_t *remaining);
     int (*reg_ptr)(struct uc_struct *uc, int regid, void **ptr, size_t *size, uint32_t *flags);
+    void (*set_budget)(struct uc_struct *uc, int32_t budget);
 };
 
 #define BROVAN_UC_FIELDS                                                       \
     uint32_t brov_last_reason;                                                 \
+    uint32_t brov_budget_mode;                                                 \
     struct brov_ops brov;
 
 #define BROVAN_TCG_FIELDS                                                      \
@@ -197,7 +203,8 @@ struct brov_ops {
     void *brov_pending;                                                        \
     uint64_t brov_pending_count;                                               \
     uint64_t brov_pending_flush;                                               \
-    struct TCGLabel *brov_exitreq_label;
+    struct TCGLabel *brov_exitreq_label;                                       \
+    struct TCGOp *brov_budget_insns;
 
 /* The slot table is interned during code generation (inside the tcg.c
  * translation unit) and rebuilt after a load (inside translate-all.c). Both
@@ -262,5 +269,6 @@ uint64_t brov_hash_bytes(const void *data, size_t len, uint64_t seed);
 bool brov_cache_requested(void);
 bool brov_strict_audit(void);
 bool brov_commit_rwx(void *addr, uint64_t size);
+void brov_arm_budget(struct uc_struct *uc, size_t count);
 
 #endif /* BROVAN_UC_H */

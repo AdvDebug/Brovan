@@ -640,6 +640,7 @@ static int brov_save_impl(struct uc_struct *uc, void **blob_out, size_t *len_out
     hdr.magic = BROV_BLOB_MAGIC;
     hdr.abi = BROV_ABI_VERSION;
     hdr.header_bytes = (uint32_t)sizeof(hdr);
+    hdr.flags = uc->brov_budget_mode ? BROV_BLOB_FLAG_BUDGET : 0u;
     hdr.layout_fingerprint = brov_layout_fingerprint();
     hdr.host_fingerprint = brov_host_fingerprint(uc);
     hdr.target_arch = (uint32_t)uc->arch;
@@ -826,6 +827,10 @@ static int brov_load_impl(struct uc_struct *uc, const void *blob, size_t len)
         goto reject;
     }
     if (hdr->target_arch != (uint32_t)uc->arch || hdr->target_mode != (uint32_t)uc->mode) {
+        reason = BROV_REASON_TARGET;
+        goto reject;
+    }
+    if (((hdr->flags & BROV_BLOB_FLAG_BUDGET) != 0) != (uc->brov_budget_mode != 0)) {
         reason = BROV_REASON_TARGET;
         goto reject;
     }
@@ -1221,6 +1226,11 @@ static int brov_reg_ptr_impl(struct uc_struct *uc, int regid, void **ptr, size_t
 }
 #endif
 
+static void brov_set_budget_impl(struct uc_struct *uc, int32_t budget)
+{
+    cpu_neg(uc->cpu)->brov_insn_budget = budget;
+}
+
 static void brov_install(struct uc_struct *uc)
 {
     uc->brov.info = brov_info_impl;
@@ -1229,4 +1239,9 @@ static void brov_install(struct uc_struct *uc)
     uc->brov.load = brov_load_impl;
     uc->brov.resolve = brov_resolve_impl;
     uc->brov.reg_ptr = brov_reg_ptr_impl;
+    uc->brov.set_budget = brov_set_budget_impl;
+
+    /* Starts on so that the first uc_emu_start() does not have to flush the
+     * blocks a restored cache just installed. */
+    uc->brov_budget_mode = 1;
 }

@@ -16,6 +16,12 @@
 #
 # Anchors are deliberately single lines or whole-file appends: those survive
 # upstream edits to the surrounding code, hunk-based diffs do not.
+#
+# Two properties of the applier to write rules against:
+#   - '|' is the field separator, so no rule text may contain one.
+#   - the "already applied" test looks for the inserted line anywhere in the
+#     file, not next to the anchor, so an inserted line that also occurs
+#     elsewhere is silently skipped. Make inserted lines distinctive.
 
 schema|1
 validated|2.1.4
@@ -26,6 +32,9 @@ copy|brovan_uc_tcg_decls.inc.h|include/brovan_uc_tcg_decls.inc.h
 copy|brovan_uc_tcg.inc.c|include/brovan_uc_tcg.inc.c
 copy|brovan_tcg_slots.inc.c|include/brovan_tcg_slots.inc.c
 copy|brovan_tcg_exitcheck.inc.h|include/brovan_tcg_exitcheck.inc.h
+copy|brovan_tcg_budget.inc.h|include/brovan_tcg_budget.inc.h
+copy|brovan_mem_hooks.inc.h|include/brovan_mem_hooks.inc.h
+copy|brovan_notdirty.inc.h|include/brovan_notdirty.inc.h
 
 # --- uc_struct gains the brov ops table and the inline-hook switch -----------
 insert-after|include/uc_priv.h|#include "list.h"|#include "brovan_uc.h"
@@ -52,7 +61,23 @@ append|qemu/accel/tcg/translate-all.c|#include "brovan_uc_tcg.inc.c"
 # --- per-block exit poll: load+branch on the fast path, helper on the slow one
 insert-before|qemu/include/exec/gen-icount.h|static inline void gen_tb_start(TCGContext *tcg_ctx, TranslationBlock *tb)|#include "brovan_tcg_exitcheck.inc.h"
 replace-all|qemu/include/exec/gen-icount.h|gen_helper_check_exit_request(tcg_ctx, puc, tmp);|brov_gen_exit_check_start(tcg_ctx, puc, tmp);
-replace-all|qemu/include/exec/gen-icount.h|tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED);|tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED); brov_gen_exit_check_end(tcg_ctx);
+replace-all|qemu/include/exec/gen-icount.h|tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED);|brov_gen_exit_check_end(tcg_ctx, num_insns); tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED);
+
+# --- instruction budget: a per-block decrement instead of a code hook --------
+insert-after|qemu/include/exec/cpu-defs.h|IcountDecr icount_decr;|    int32_t brov_insn_budget;
+insert-after|qemu/accel/tcg/tcg-runtime.c|#include <uc_priv.h>|#include "brovan_tcg_budget.inc.h"
+insert-after|qemu/accel/tcg/tcg-runtime.c|void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {|    brov_budget_expired((struct uc_struct *)p);
+insert-after|qemu/accel/tcg/cpu-exec.c|#include "uc_priv.h"|#include "brovan_tcg_budget.inc.h"
+insert-before|qemu/accel/tcg/cpu-exec.c|insns_left = cpu_neg(cpu)->icount_decr.u32;|    brov_budget_expired(cpu->uc);
+insert-after|uc.c|uc->emu_count = count;|    brov_arm_budget(uc, count);
+
+# --- guest stores keep the inline TLB path unless a hook can see them --------
+insert-before|qemu/include/exec/exec-all.h|static inline bool uc_mem_hook_installed(struct uc_struct *uc, hwaddr paddr)|#include "brovan_mem_hooks.inc.h"
+insert-in-body|qemu/include/exec/exec-all.h|static inline bool uc_mem_hook_installed(struct uc_struct *uc, hwaddr paddr)|    return brov_mem_hook_needs_slow_path(uc, paddr);
+insert-after|qemu/accel/tcg/cputlb.c|#include <glib_compat.h>|#include "brovan_notdirty.inc.h"
+insert-in-body|qemu/accel/tcg/cputlb.c|static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,|    if (brov_notdirty_promote(cpu, mem_vaddr, tlbe)) { tlb_set_dirty(cpu, mem_vaddr); }
+insert-before|uc.c|if (remove_exec) {|    uc->tcg_flush_tlb(uc); /* brov: a cached TLB entry may predate these perms */
+replace-all|uc.c|if (count > 0 && uc->count_hook == 0) {|if (count > 0 && uc->count_hook == 0 && !uc->brov_budget_mode) {
 
 # --- helper calls route through the slot table ------------------------------
 insert-before|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)|#include "brovan_tcg_slots.inc.c"

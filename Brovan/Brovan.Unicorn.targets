@@ -20,6 +20,10 @@
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_uc_tcg_decls.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_uc_tcg.inc.c" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_slots.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_exitcheck.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_budget.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_mem_hooks.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_notdirty.inc.h" />
   </ItemGroup>
 
   <UsingTask TaskName="ApplyUnicornPatches" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
@@ -88,6 +92,17 @@ foreach (var raw in File.ReadAllLines(manifest))
     var kind = f[0];
 
     if (kind == "schema" || kind == "validated") continue;
+
+    // '|' is the field separator, so rule text cannot contain one. Without this
+    // check a stray '|' silently truncates the replacement to the empty string,
+    // which then matches every line and makes the rule a no-op.
+    var expected = kind == "copy" || kind == "append" ? 3 : 4;
+    if (f.Length != expected)
+    {
+        errors.Add(kind + " rule has " + f.Length + " fields, expected " + expected +
+                   " (rule text must not contain '|'): " + line);
+        continue;
+    }
 
     if (kind == "copy")
     {

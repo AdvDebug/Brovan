@@ -298,7 +298,7 @@ namespace Brovan.Android
                 else
                 {
                     EmulationMenu.EmulationMenu.RunEmulator(path, true, true, command,
-                        rawArguments, arguments, policy, false, backend, workingDirectory);
+                        rawArguments, arguments, policy, true, backend, workingDirectory);
                 }
             }
             catch (Exception exception)

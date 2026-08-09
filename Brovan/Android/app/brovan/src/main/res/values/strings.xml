@@ -25,7 +25,7 @@
     <string name="settings_jit_cache">JIT code caching</string>
     <string name="settings_jit_cache_summary">Experimental JIT code caching that can help with performance</string>
     <string name="settings_developer">Developer mode</string>
-    <string name="settings_developer_summary">Show the console and emulator trace while a program runs</string>
+    <string name="settings_developer_summary">Show the console and emulator trace while a program runs. Enables the analysis hooks, which makes programs run slower.</string>
 
     <string name="about_author">AdvDebug</string>
     <string name="about_github">https://github.com/AdvDebug</string>

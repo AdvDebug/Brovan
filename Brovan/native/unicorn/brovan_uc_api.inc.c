@@ -339,6 +339,53 @@ void *brov_alloc_arena(size_t size)
     return p ? p : g_malloc0(size);
 }
 
+/* Picks between Unicorn's per-instruction count hook and the per-block budget,
+ * and programs the counter for this uc_emu_start(). Exactness is only
+ * observable through an embedder code hook, and that path already pays the
+ * per-instruction preamble the budget exists to avoid, so it keeps the hook. */
+void brov_arm_budget(struct uc_struct *uc, size_t count)
+{
+    int foreign_code_hooks;
+    uint32_t want;
+    static int disabled = -1;
+
+    if (disabled < 0) {
+        /* Kill switch: the budget changes when a slice ends and how the guest
+         * PC is recovered, so keep a way to fall back to Unicorn's own counting
+         * without a rebuild. */
+        disabled = getenv("BROVAN_NO_BUDGET") != NULL;
+    }
+
+    if (disabled || !uc->brov.set_budget) {
+        if (uc->brov_budget_mode) {
+            uc->brov_budget_mode = 0;
+            uc->tb_flush(uc);
+        }
+        return;
+    }
+
+    foreign_code_hooks = uc->hooks_count[UC_HOOK_CODE_IDX] - (uc->count_hook ? 1 : 0);
+    want = foreign_code_hooks > 0 ? 0u : 1u;
+
+    if (want != uc->brov_budget_mode) {
+        uc->brov_budget_mode = want;
+        uc->tb_flush(uc);
+    }
+
+    if (!want) {
+        return;
+    }
+
+    if (uc->count_hook) {
+        uc_hook_del(uc, uc->count_hook);
+        uc->count_hook = 0;
+        uc->tb_flush(uc);
+    }
+
+    uc->brov.set_budget(uc, count > 0 && count < (size_t)INT32_MAX ? (int32_t)count
+                                                                  : INT32_MAX);
+}
+
 UNICORN_EXPORT
 uc_err brov_abi_version(uint32_t *abi)
 {
