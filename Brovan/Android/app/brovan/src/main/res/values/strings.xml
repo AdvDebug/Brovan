@@ -17,34 +17,34 @@
     <string name="setup_mark_done">✓</string>
     <string name="setup_mark_todo">•</string>
 
-    <string name="setup_welcome_title">Let’s get started</string>
-    <string name="setup_welcome_body">Brovan runs real Windows programs on this phone. Four short steps and you are ready to play.</string>
-    <string name="setup_welcome_programs">Real Windows programs</string>
-    <string name="setup_welcome_programs_body">Games and desktop apps run unmodified, from the folder they shipped in.</string>
+    <string name="setup_welcome_title">Get started</string>
+    <string name="setup_welcome_body">Brovan runs Windows programs on this phone. Do these four steps before you play.</string>
+    <string name="setup_welcome_programs">Windows programs</string>
+    <string name="setup_welcome_programs_body">Games and desktop programs run from their own folder. Brovan does not change them.</string>
     <string name="setup_welcome_graphics">Vulkan graphics</string>
-    <string name="setup_welcome_graphics_body">Drawing is handed to the phone’s own GPU driver instead of being emulated.</string>
+    <string name="setup_welcome_graphics_body">The phone\'s own GPU driver draws the graphics. Brovan does not emulate them.</string>
     <string name="setup_welcome_controls">Touch controls</string>
-    <string name="setup_welcome_controls_body">A joystick, D-pad or trackpad stands in for the keyboard and mouse.</string>
+    <string name="setup_welcome_controls_body">A joystick, D-pad or touchpad replaces the keyboard and mouse.</string>
 
     <string name="setup_windows_title">Windows system files</string>
-    <string name="setup_windows_body">Brovan runs real Windows programs, so it needs the real system libraries, NLS tables and registry hives. It fetches Windows installation media from Microsoft and extracts only those. Nothing Microsoft ships is bundled with Brovan, so a valid Windows license is required.</string>
+    <string name="setup_windows_body">Windows programs need the Windows system libraries, NLS tables and registry hives. Brovan downloads the Windows installation media from Microsoft and extracts only these files. It does not include or redistribute software from Microsoft, so you need a valid Windows license.</string>
     <string name="setup_windows_state_missing">Not installed</string>
     <string name="setup_windows_state_installed">Installed</string>
 
     <string name="setup_runtimes_title">Visual C++ runtimes</string>
-    <string name="setup_runtimes_body">Most games and desktop programs are built with Visual C++ and stop at a missing-DLL error without these. They are not part of Windows, so they are downloaded separately.</string>
-    <string name="setup_runtimes_note">Skip this if you only run programs that carry their own libraries.</string>
+    <string name="setup_runtimes_body">Many programs use Visual C++. These programs stop with a missing DLL error if the runtimes are not installed. The runtimes are not part of Windows, so Brovan downloads them separately.</string>
+    <string name="setup_runtimes_note">If your programs include their own libraries, you can skip this step.</string>
 
     <string name="setup_program_title">Your first program</string>
-    <string name="setup_program_body">Add the folder holding the program and everything it ships with. Brovan copies it into its own storage and runs it from there, so the program finds its files where it expects them.</string>
-    <string name="setup_program_note">You can add more at any time from the library.</string>
-    <string name="setup_program_none">Nothing added yet</string>
+    <string name="setup_program_body">Add the folder that contains the program and all its files. Brovan copies the folder into its own storage and runs the program from there.</string>
+    <string name="setup_program_note">You can add more programs later from the library.</string>
+    <string name="setup_program_none">No programs yet</string>
     <string name="setup_program_count">%1$d in your library</string>
 
     <string name="setup_ready_title">Ready to play</string>
-    <string name="setup_ready_body">Everything Brovan needs is in place. Open your library and press play.</string>
+    <string name="setup_ready_body">Brovan is ready. Open the library and start a program.</string>
     <string name="setup_almost_title">Almost there</string>
-    <string name="setup_almost_body">Brovan works once the steps below are done. Come back any time through Get started in the menu.</string>
+    <string name="setup_almost_body">Do the steps below to make Brovan ready. You can also do them later from the menu.</string>
     <string name="setup_ready_windows">Windows system files</string>
     <string name="setup_ready_runtimes">Visual C++ runtimes</string>
     <string name="setup_ready_program">A program in your library</string>
@@ -52,20 +52,20 @@
     <string name="setup_progress_files">%1$d of %2$d files · %3$d of %4$d MB</string>
     <string name="setup_progress_bytes">%1$d of %2$d MB</string>
     <string name="setup_progress_downloaded">%1$d MB</string>
-    <string name="setup_no_browser">No browser is available on this device.</string>
-    <string name="setup_no_picker">No file picker is available on this device.</string>
-    <string name="setup_no_executable">No .exe found in that folder.</string>
+    <string name="setup_no_browser">No browser on this device.</string>
+    <string name="setup_no_picker">No file picker on this device.</string>
+    <string name="setup_no_executable">No .exe in that folder.</string>
     <string name="setup_import_failed">Import failed: %1$s</string>
 
     <string name="setup_device">This device</string>
     <string name="setup_device_storage">%1$s free for Brovan</string>
-    <string name="setup_device_storage_low">Not much room left. The Windows files alone need around %1$s.</string>
+    <string name="setup_device_storage_low">Free space is low. The Windows files need about %1$s.</string>
     <string name="setup_device_vulkan">Vulkan graphics available</string>
-    <string name="setup_device_no_vulkan">No Vulkan graphics. Programs that draw in 3D will not run.</string>
+    <string name="setup_device_no_vulkan">No Vulkan graphics. Programs that draw in 3D do not run.</string>
     <string name="setup_device_android">Android %1$s on %2$s</string>
 
     <string name="library_empty_title">No programs yet</string>
-    <string name="library_empty_body">Add a folder containing a Windows program and everything it needs. Brovan copies it into its own storage so the program can find its files.</string>
+    <string name="library_empty_body">Add the folder that contains a Windows program and all its files. Brovan copies the folder into its own storage.</string>
     <string name="library_add_title">Add a program</string>
     <string name="library_add_folder">Add folder</string>
     <string name="library_add_file">Add single .exe</string>
@@ -73,31 +73,37 @@
     <string name="library_remove">Remove</string>
     <string name="library_pick_executable">Choose the program to launch</string>
 
+    <string name="settings_title">Settings</string>
+    <string name="settings_subtitle">These settings apply to all programs.</string>
     <string name="settings_graphics">Graphics and input</string>
     <string name="settings_advanced">Advanced</string>
+    <string name="settings_fit_window">Fit the window to the screen</string>
+    <string name="settings_fit_window_summary">Scale the window up to fill the screen. If off, the window keeps its own size.</string>
+    <string name="settings_network_summary">How much network access programs get.</string>
     <string name="settings_controls">On-screen controls</string>
     <string name="settings_network">Network access</string>
-    <string name="settings_jit_cache">JIT code caching</string>
-    <string name="settings_jit_cache_summary">Experimental JIT code caching that can help with performance</string>
-    <string name="settings_pointer">Touch on the game picture</string>
-    <string name="settings_edit_controls">Customize the on-screen controls</string>
-    <string name="settings_edit_controls_summary">Place your own buttons, joysticks and touchpads, and bind each one to a key. Saving switches the control scheme to your layout.</string>
+    <string name="settings_jit_cache">JIT code cache</string>
+    <string name="settings_jit_cache_summary">Keeps translated code for the next start, so programs start quicker. Experimental.</string>
+    <string name="settings_pointer">Touch behaviour</string>
+    <string name="settings_edit_controls">Edit the on-screen controls</string>
+    <string name="settings_edit_controls_summary">Put your own buttons, joysticks and touchpads on the screen. Give a key to each one. When you save, Brovan uses your layout.</string>
     <string name="settings_developer">Developer mode</string>
+    <string name="settings_developer_summary">Shows the console and emulator trace while a program runs. Programs run slower.</string>
     <string name="settings_dxvk">Direct3D games</string>
-    <string name="settings_dxvk_summary">DXVK translates Direct3D 8 to 11 into Vulkan, which is what this phone can actually run. Games that draw with Direct3D need it; everything else is unaffected.</string>
+    <string name="settings_dxvk_summary">This phone draws with Vulkan only. DXVK changes Direct3D 8 to 11 into Vulkan. Games that use Direct3D need it. Other programs are not affected.</string>
     <string name="settings_dxvk_version">DXVK version</string>
     <string name="settings_dxvk_version_latest">Latest release</string>
-    <string name="settings_dxvk_install">Get DXVK</string>
+    <string name="settings_dxvk_install">Install DXVK</string>
     <string name="settings_dxvk_install_again">Reinstall DXVK</string>
-    <string name="settings_dxvk_installed">%1$s installed.</string>
-    <string name="settings_dxvk_missing">Not installed. Direct3D games will not start.</string>
+    <string name="settings_dxvk_installed">DXVK %1$s installed.</string>
+    <string name="settings_dxvk_missing">Not installed. Direct3D games do not start.</string>
     <string name="settings_dxvk_working">Downloading DXVK…</string>
     <string name="settings_dxvk_done">DXVK installed.</string>
     <string name="settings_dxvk_failed">Download failed. Check the connection and try again.</string>
-    <string name="settings_dxvk_offline">Could not reach GitHub, so only the latest release can be chosen.</string>
+    <string name="settings_dxvk_offline">Cannot reach GitHub. Only the latest release is available.</string>
 
     <string name="controls_title">Edit controls</string>
-    <string name="controls_hint">Drag a control to move it. Tap one to change its key or size.</string>
+    <string name="controls_hint">Drag a control to move it. Tap it to change the key or size.</string>
     <string name="controls_selected">Selected: %1$s</string>
     <string name="controls_size">Size</string>
     <string name="controls_delete">Delete</string>
@@ -118,7 +124,6 @@
     <string name="controls_right">Right: %1$s</string>
     <string name="controls_mouse_left">Left click</string>
     <string name="controls_mouse_right">Right click</string>
-    <string name="settings_developer_summary">Show the console and emulator trace while a program runs. Enables the analysis hooks, which makes programs run slower.</string>
 
     <string name="about_author">AdvDebug</string>
     <string name="about_github">https://github.com/AdvDebug</string>
@@ -127,28 +132,28 @@
 
     <string name="windows_title">Windows system files</string>
     <string name="windows_installed">Installed. Programs can run.</string>
-    <string name="windows_missing">Not installed. Programs cannot run until these are imported.</string>
-    <string name="windows_notice">Brovan downloads Windows installation media from the Microsoft servers and extracts the system libraries, NLS tables and registry hives it needs. Brovan does not include or redistribute any Microsoft software. Using these files requires a valid Windows license.</string>
+    <string name="windows_missing">Not installed. Programs cannot run until you import these files.</string>
+    <string name="windows_notice">Brovan downloads the Windows installation media from the Microsoft servers and extracts only the system libraries, NLS tables and registry hives. It does not include or redistribute software from Microsoft. You need a valid Windows license for these files.</string>
     <string name="windows_licensed">I have a valid Windows license</string>
     <string name="windows_source">Direct ISO URL (leave empty to ask Microsoft)</string>
-    <string name="windows_open_page">Get the ISO from Microsoft</string>
+    <string name="windows_open_page">Download the ISO from Microsoft</string>
     <string name="windows_choose">Choose a downloaded ISO</string>
     <string name="windows_chosen">Selected: %1$s</string>
-    <string name="windows_sentinel">Microsoft refused the automated link. Download the ISO with the button above, then choose the file.</string>
+    <string name="windows_sentinel">Microsoft refused the automatic link. Download the ISO with the button above, then choose the file.</string>
     <string name="windows_install">Import</string>
-    <string name="windows_storage">The extracted files are stored as they are, so keep several GB of free space available.</string>
+    <string name="windows_storage">The extracted files are stored uncompressed. Keep several GB of free space.</string>
     <string name="windows_runtimes_title">Visual C++ runtimes</string>
-    <string name="windows_runtimes">Get the Visual C++ runtimes</string>
+    <string name="windows_runtimes">Install the Visual C++ runtimes</string>
     <string name="windows_runtimes_again">Update the Visual C++ runtimes</string>
-    <string name="windows_runtimes_installed">Installed. Reinstall to pick up a newer version.</string>
-    <string name="windows_runtimes_missing">Not installed. Programs built with Visual C++ need these.</string>
-    <string name="windows_runtimes_notice">These are not part of Windows, so the import above fetches them separately. Get them on their own when the Windows system files are already installed.</string>
+    <string name="windows_runtimes_installed">Installed. Reinstall for a newer version.</string>
+    <string name="windows_runtimes_missing">Not installed. Programs that use Visual C++ need these files.</string>
+    <string name="windows_runtimes_notice">The runtimes are not part of Windows, so the import above downloads them separately. If the Windows system files are installed, you can download only the runtimes.</string>
     <string name="windows_runtimes_working">Downloading the Visual C++ runtimes…</string>
     <string name="windows_runtimes_done">Visual C++ runtimes installed.</string>
     <string name="windows_working">Contacting Microsoft…</string>
     <string name="windows_done">Import finished.</string>
-    <string name="windows_failed">Import failed. See the log for details.</string>
-    <string name="windows_needs_license">Confirm you have a Windows license first.</string>
+    <string name="windows_failed">Import failed. See the log.</string>
+    <string name="windows_needs_license">Confirm your Windows license first.</string>
 
     <string name="player_controls">Controls</string>
     <string name="player_pointer">Touch behaviour</string>

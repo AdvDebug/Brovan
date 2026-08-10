@@ -10,7 +10,7 @@ import java.util.concurrent.Executor;
 
 import dev.brovan.BrovanNative;
 
-/** The Microsoft downloads, shared by the setup wizard and the Windows files screen. */
+/** The prerequisite downloads, shared by the setup wizard, the Windows files screen and settings. */
 final class WindowsInstall {
 
     interface Listener {
@@ -57,6 +57,10 @@ final class WindowsInstall {
 
     static void runtimes(Activity activity, Executor worker, Listener listener) {
         run(activity, worker, listener, () -> BrovanNative.installRuntimes(true));
+    }
+
+    static void dxvk(Activity activity, Executor worker, String version, Listener listener) {
+        run(activity, worker, listener, () -> BrovanNative.installDxvk(version));
     }
 
     private static void run(Activity activity, Executor worker, Listener listener, Step step) {
