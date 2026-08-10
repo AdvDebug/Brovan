@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
@@ -461,6 +462,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private nuint _whitePixel;
         private nuint _blackPixel;
         private uint _modifierState;
+        private byte[]? _virtualKeyToKeycode;
         private bool _disposed;
 
         private int _gcFunction;
@@ -648,7 +650,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                             ? (system ? WM_SYSKEYDOWN : WM_KEYDOWN)
                             : (system ? WM_SYSKEYUP : WM_KEYUP);
 
-                        HostEventQueue.Enqueue(message, virtualKey, BuildKeyLParam(key.Keycode, virtualKey, down, altHeld));
+                        HostEventQueue.Enqueue(message, virtualKey, BuildKeyLParam(virtualKey, down, altHeld));
                         return;
                     }
 
@@ -760,12 +762,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return keys;
         }
 
-        private static ulong BuildKeyLParam(uint keycode, uint virtualKey, bool down, bool altHeld)
+        private static ulong BuildKeyLParam(uint virtualKey, bool down, bool altHeld)
         {
-            ulong lParam = 1;
-            lParam |= (ulong)(keycode & 0xFF) << 16;
+            uint scanCode = Win32kHelper.MapVirtualKey(virtualKey, Win32kHelper.MapVirtualKeyToScanCodeEx);
 
-            if (IsExtendedKey(virtualKey))
+            ulong lParam = 1;
+            lParam |= (ulong)(scanCode & 0xFF) << 16;
+
+            if ((scanCode & 0xFF00) == Win32kHelper.ExtendedScanCodePrefix)
                 lParam |= 1UL << 24;
 
             if (altHeld)
@@ -775,31 +779,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 lParam |= (1UL << 30) | (1UL << 31);
 
             return lParam;
-        }
-
-        private static bool IsExtendedKey(uint virtualKey)
-        {
-            switch (virtualKey)
-            {
-                case 0x21: // VK_PRIOR
-                case 0x22: // VK_NEXT
-                case 0x23: // VK_END
-                case 0x24: // VK_HOME
-                case 0x25: // VK_LEFT
-                case 0x26: // VK_UP
-                case 0x27: // VK_RIGHT
-                case 0x28: // VK_DOWN
-                case 0x2C: // VK_SNAPSHOT
-                case 0x2D: // VK_INSERT
-                case 0x2E: // VK_DELETE
-                case 0x6F: // VK_DIVIDE
-                case 0x90: // VK_NUMLOCK
-                case 0xA3: // VK_RCONTROL
-                case 0xA5: // VK_RMENU
-                    return true;
-                default:
-                    return false;
-            }
         }
 
         private IntPtr LookupKeysym(byte keycode)
@@ -879,11 +858,37 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
         }
 
+        private byte VirtualKeyToKeycode(uint virtualKey)
+        {
+            if (virtualKey > byte.MaxValue)
+                return 0;
+
+            byte[]? map = _virtualKeyToKeycode;
+            if (map == null)
+            {
+                map = new byte[256];
+                for (int keycode = byte.MaxValue; keycode >= 8; keycode--)
+                {
+                    uint mapped = KeysymToVirtualKey(LookupKeysym((byte)keycode));
+                    if (mapped != 0 && mapped <= byte.MaxValue)
+                        map[mapped] = (byte)keycode;
+                }
+
+                _virtualKeyToKeycode = map;
+            }
+
+            return map[virtualKey];
+        }
+
         public unsafe bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character)
         {
             character = '\0';
 
-            if (_xDisplay == IntPtr.Zero || scanCode == 0)
+            if (_xDisplay == IntPtr.Zero)
+                return false;
+
+            byte keycode = VirtualKeyToKeycode(virtualKey);
+            if (keycode == 0)
                 return false;
 
             X11.XEvent synthetic = default;
@@ -891,7 +896,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             key.Type = X11.KeyPress;
             key.Display = _xDisplay;
             key.State = _modifierState;
-            key.Keycode = scanCode & 0xFF;
+            key.Keycode = keycode;
 
             foreach (KeyValuePair<IntPtr, LinuxWindow> entry in _windows)
             {
