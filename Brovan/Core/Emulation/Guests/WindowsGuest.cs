@@ -29,7 +29,7 @@ namespace Brovan.Core.Emulation.Guests
         public ulong ProcessParams { get; internal set; }
         public ulong ApiSetMap { get; internal set; }
         public ulong WowSyscallGate { get; internal set; }
-        public ulong X86Gdt { get; internal set; }
+        public ulong GuestGdt { get; internal set; }
 
         private const uint GdtCodeIndex = 4;
         private const uint GdtDataIndex = 5;
@@ -38,6 +38,10 @@ namespace Brovan.Core.Emulation.Guests
         private const ulong GdtDataSelector = GdtDataIndex << 3;
         private const ulong GdtFsSelector = GdtFsIndex << 3;
         private const uint GdtSize = 0x1000;
+        private const byte GdtCodeAccess = 0x9B;
+        private const byte GdtDataAccess = 0x93;
+        private const byte GdtGranularityDefault = 0xC;
+        private const byte GdtGranularityLongMode = 0xA;
 
         private const uint Wow64InfoOffset = 0x490;
         private const uint Wow64TlsWow64InfoOffset = 0xE10 + 10 * 4;
@@ -257,10 +261,16 @@ namespace Brovan.Core.Emulation.Guests
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
                 Instance._emulator.WriteRegister(Registers.UC_X86_REG_GS_BASE, Teb);
+
+                if (GuestGdt != 0)
+                {
+                    Instance._emulator.WriteRegister(Registers.UC_X86_REG_CS, GdtCodeSelector);
+                    Instance._emulator.WriteRegister(Registers.UC_X86_REG_SS, GdtDataSelector);
+                }
             }
-            else if (X86Gdt != 0)
+            else if (GuestGdt != 0)
             {
-                Instance._emulator.WriteMemory(X86Gdt + GdtFsIndex * 8, MakeSegmentDescriptor(Teb, 0xFFF, 0x93, 0x4), 8);
+                Instance._emulator.WriteMemory(GuestGdt + GdtFsIndex * 8, MakeSegmentDescriptor(Teb, 0xFFF, GdtDataAccess, 0x4), 8);
                 Instance._emulator.WriteRegister(Registers.UC_X86_REG_CS, GdtCodeSelector);
                 Instance._emulator.WriteRegister(Registers.UC_X86_REG_SS, GdtDataSelector);
                 Instance._emulator.WriteRegister(Registers.UC_X86_REG_DS, GdtDataSelector);
@@ -1272,6 +1282,8 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(ApiSetMap, ApiSetMapBlob);
             }
 
+            InstallGdt(Instance);
+
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
                 Instance._emulator.WriteMemory(PEB + 0x0, (byte)0, 1);
@@ -1371,8 +1383,6 @@ namespace Brovan.Core.Emulation.Guests
             }
             else
             {
-                InstallX86Gdt(Instance);
-
                 Instance._emulator.WriteMemory(PEB + 0x0, (byte)0, 1);
                 Instance._emulator.WriteMemory(PEB + 0x1, (byte)0, 1);
                 Instance._emulator.WriteMemory(PEB + 0x2, (byte)0, 1);
@@ -1607,23 +1617,29 @@ namespace Brovan.Core.Emulation.Guests
             return Descriptor;
         }
 
-        private void InstallX86Gdt(BinaryEmulator Instance)
+        private void InstallGdt(BinaryEmulator Instance)
         {
-            if (X86Gdt != 0)
+            if (GuestGdt != 0)
+                return;
+
+            bool LongMode = Instance._binary.Architecture == BinaryArchitecture.x64;
+            if (LongMode && Instance.Settings.BackendKind != EmulationBackendKind.Unicorn)
                 return;
 
             ulong Gdt = Instance.MapUniqueAddress(GdtSize, MemoryProtection.ReadWrite);
             if (Gdt == 0)
                 return;
 
+            byte CodeGranularity = LongMode ? GdtGranularityLongMode : GdtGranularityDefault;
+
             Instance._emulator.WriteMemoryByte(Gdt, 0, GdtSize);
-            Instance._emulator.WriteMemory(Gdt + GdtCodeIndex * 8, MakeSegmentDescriptor(0, 0xFFFFF, 0x9B, 0xC), 8);
-            Instance._emulator.WriteMemory(Gdt + GdtDataIndex * 8, MakeSegmentDescriptor(0, 0xFFFFF, 0x93, 0xC), 8);
+            Instance._emulator.WriteMemory(Gdt + GdtCodeIndex * 8, MakeSegmentDescriptor(0, 0xFFFFF, GdtCodeAccess, CodeGranularity), 8);
+            Instance._emulator.WriteMemory(Gdt + GdtDataIndex * 8, MakeSegmentDescriptor(0, 0xFFFFF, GdtDataAccess, GdtGranularityDefault), 8);
 
             if (!Instance._emulator.WriteGdtr(Gdt, GdtSize - 1))
                 return;
 
-            X86Gdt = Gdt;
+            GuestGdt = Gdt;
         }
 
         private void InstallWow64SystemDllInitBlock(BinaryEmulator Instance)

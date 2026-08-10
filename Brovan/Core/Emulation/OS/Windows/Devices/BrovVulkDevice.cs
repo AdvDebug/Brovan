@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -64,6 +65,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Reader.Reset(Input, 8, (int)PayloadLen);
                 Writer.Reset();
                 int Result;
+                IntPtr PreviousDpiContext = HostDisplayMetrics.EnterWindowDpiContext(Win32k.Win32kDpi.GetHostAwareness(Instance));
                 try
                 {
                     if (Id == BatchId)
@@ -93,6 +95,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Writer.Reset();
                     Result = VK_ERROR_INITIALIZATION_FAILED;
                 }
+                finally
+                {
+                    HostDisplayMetrics.LeaveWindowDpiContext(PreviousDpiContext);
+                }
+
                 OutBytes = Writer.Finish(Result);
             }
 

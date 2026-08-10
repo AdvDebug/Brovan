@@ -35,6 +35,39 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         public int PenWidth;
     }
 
+    internal readonly struct Win32kKeyMapping
+    {
+        public readonly byte ScanCode;
+        public readonly bool Extended;
+        public readonly byte VirtualKey;
+        public readonly byte SidedVirtualKey;
+        public readonly char Character;
+        public readonly char ShiftedCharacter;
+
+        public Win32kKeyMapping(byte ScanCode, bool Extended, byte VirtualKey, byte SidedVirtualKey, char Character, char ShiftedCharacter)
+        {
+            this.ScanCode = ScanCode;
+            this.Extended = Extended;
+            this.VirtualKey = VirtualKey;
+            this.SidedVirtualKey = SidedVirtualKey;
+            this.Character = Character;
+            this.ShiftedCharacter = ShiftedCharacter;
+        }
+    }
+
+    internal struct Win32kBitmap
+    {
+        public int Width;
+        public int Height;
+        public ushort Planes;
+        public ushort BitsPerPixel;
+        public int Stride;
+        public ulong BitsAddress;
+        public uint BitsSize;
+        public bool DibSection;
+        public bool TopDown;
+    }
+
     internal static class Win32kHelper
     {
         internal const uint ERROR_INVALID_PARAMETER = 87;
@@ -43,6 +76,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal const byte PenHandleType = 0x30;
         internal const byte BrushHandleType = 0x10;
+        internal const byte BitmapHandleType = 0x05;
 
         internal const uint WM_NULL = 0x0000;
         internal const uint WM_DESTROY = 0x0002;
@@ -93,6 +127,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const int MSG64_SIZE = 48;
         private const int PAINTSTRUCT64_SIZE = 72;
         private const int MaxWindowTextBytes = 0x1000;
+        private const long MaxBitmapBytes = 0x40000000;
+        private const uint BitmapCopyChunkBytes = 0x10000;
 
         private static readonly ConditionalWeakTable<BinaryEmulator, Win32kState> States = new();
 
@@ -101,6 +137,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly Queue<Win32kMessage> MessageQueue = new();
             public readonly Dictionary<ulong, Win32kDeviceContext> DeviceContexts = new();
             public readonly Dictionary<ulong, Win32kPenBrush> PenBrushObjects = new();
+            public readonly Dictionary<ulong, Win32kBitmap> Bitmaps = new();
             public ulong NextDeviceContext = FirstDeviceContextHandle;
             public ulong CaptureWindow;
             public bool QuitPosted;
@@ -231,9 +268,372 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return new Win32kPenBrush { IsPen = IsPen, ColorRef = 0x00000000, PenWidth = 1 };
         }
 
+        internal static bool TryGetPenBrush(BinaryEmulator Instance, ulong Handle, out Win32kPenBrush PenBrush)
+        {
+            if (Handle != 0)
+                return GetState(Instance).PenBrushObjects.TryGetValue(Handle, out PenBrush);
+
+            PenBrush = default;
+            return false;
+        }
+
         internal static bool RemovePenBrush(BinaryEmulator Instance, ulong Handle)
         {
             return GetState(Instance).PenBrushObjects.Remove(Handle);
+        }
+
+        internal const uint MapVirtualKeyToScanCode = 0;
+        internal const uint MapVirtualScanCodeToKey = 1;
+        internal const uint MapVirtualKeyToChar = 2;
+        internal const uint MapVirtualScanCodeToKeyEx = 3;
+        internal const uint MapVirtualKeyToScanCodeEx = 4;
+
+        internal const byte VkBack = 0x08;
+        internal const byte VkTab = 0x09;
+        internal const byte VkReturn = 0x0D;
+        internal const byte VkShift = 0x10;
+        internal const byte VkControl = 0x11;
+        internal const byte VkMenu = 0x12;
+        internal const byte VkPause = 0x13;
+        internal const byte VkCapital = 0x14;
+        internal const byte VkEscape = 0x1B;
+        internal const byte VkSpace = 0x20;
+        internal const byte VkPrior = 0x21;
+        internal const byte VkNext = 0x22;
+        internal const byte VkEnd = 0x23;
+        internal const byte VkHome = 0x24;
+        internal const byte VkLeft = 0x25;
+        internal const byte VkUp = 0x26;
+        internal const byte VkRight = 0x27;
+        internal const byte VkDown = 0x28;
+        internal const byte VkSnapshot = 0x2C;
+        internal const byte VkInsert = 0x2D;
+        internal const byte VkDelete = 0x2E;
+        internal const byte VkLWin = 0x5B;
+        internal const byte VkRWin = 0x5C;
+        internal const byte VkApps = 0x5D;
+        internal const byte VkNumpad0 = 0x60;
+        internal const byte VkMultiply = 0x6A;
+        internal const byte VkAdd = 0x6B;
+        internal const byte VkSubtract = 0x6D;
+        internal const byte VkDecimal = 0x6E;
+        internal const byte VkDivide = 0x6F;
+        internal const byte VkF1 = 0x70;
+        internal const byte VkNumLock = 0x90;
+        internal const byte VkScroll = 0x91;
+        internal const byte VkLShift = 0xA0;
+        internal const byte VkRShift = 0xA1;
+        internal const byte VkLControl = 0xA2;
+        internal const byte VkRControl = 0xA3;
+        internal const byte VkLMenu = 0xA4;
+        internal const byte VkRMenu = 0xA5;
+        internal const byte VkOem1 = 0xBA;
+        internal const byte VkOemPlus = 0xBB;
+        internal const byte VkOemComma = 0xBC;
+        internal const byte VkOemMinus = 0xBD;
+        internal const byte VkOemPeriod = 0xBE;
+        internal const byte VkOem2 = 0xBF;
+        internal const byte VkOem3 = 0xC0;
+        internal const byte VkOem4 = 0xDB;
+        internal const byte VkOem5 = 0xDC;
+        internal const byte VkOem6 = 0xDD;
+        internal const byte VkOem7 = 0xDE;
+        internal const byte VkOem102 = 0xE2;
+
+        internal const uint ExtendedScanCodePrefix = 0xE000;
+
+        /// <summary>
+        /// US layout, set 1 scan codes. Non-extended rows come first so a virtual-key lookup resolves to the
+        /// main-keyboard scan code the way MapVirtualKey does (VK_RETURN to 0x1C, not to the numpad's 0xE01C).
+        /// </summary>
+        private static readonly Win32kKeyMapping[] KeyMappings =
+        {
+            new(0x01, false, VkEscape, VkEscape, '\x1B', '\x1B'),
+            new(0x02, false, (byte)'1', (byte)'1', '1', '!'),
+            new(0x03, false, (byte)'2', (byte)'2', '2', '@'),
+            new(0x04, false, (byte)'3', (byte)'3', '3', '#'),
+            new(0x05, false, (byte)'4', (byte)'4', '4', '$'),
+            new(0x06, false, (byte)'5', (byte)'5', '5', '%'),
+            new(0x07, false, (byte)'6', (byte)'6', '6', '^'),
+            new(0x08, false, (byte)'7', (byte)'7', '7', '&'),
+            new(0x09, false, (byte)'8', (byte)'8', '8', '*'),
+            new(0x0A, false, (byte)'9', (byte)'9', '9', '('),
+            new(0x0B, false, (byte)'0', (byte)'0', '0', ')'),
+            new(0x0C, false, VkOemMinus, VkOemMinus, '-', '_'),
+            new(0x0D, false, VkOemPlus, VkOemPlus, '=', '+'),
+            new(0x0E, false, VkBack, VkBack, '\b', '\b'),
+            new(0x0F, false, VkTab, VkTab, '\t', '\t'),
+            new(0x10, false, (byte)'Q', (byte)'Q', 'q', 'Q'),
+            new(0x11, false, (byte)'W', (byte)'W', 'w', 'W'),
+            new(0x12, false, (byte)'E', (byte)'E', 'e', 'E'),
+            new(0x13, false, (byte)'R', (byte)'R', 'r', 'R'),
+            new(0x14, false, (byte)'T', (byte)'T', 't', 'T'),
+            new(0x15, false, (byte)'Y', (byte)'Y', 'y', 'Y'),
+            new(0x16, false, (byte)'U', (byte)'U', 'u', 'U'),
+            new(0x17, false, (byte)'I', (byte)'I', 'i', 'I'),
+            new(0x18, false, (byte)'O', (byte)'O', 'o', 'O'),
+            new(0x19, false, (byte)'P', (byte)'P', 'p', 'P'),
+            new(0x1A, false, VkOem4, VkOem4, '[', '{'),
+            new(0x1B, false, VkOem6, VkOem6, ']', '}'),
+            new(0x1C, false, VkReturn, VkReturn, '\r', '\r'),
+            new(0x1D, false, VkControl, VkLControl, '\0', '\0'),
+            new(0x1E, false, (byte)'A', (byte)'A', 'a', 'A'),
+            new(0x1F, false, (byte)'S', (byte)'S', 's', 'S'),
+            new(0x20, false, (byte)'D', (byte)'D', 'd', 'D'),
+            new(0x21, false, (byte)'F', (byte)'F', 'f', 'F'),
+            new(0x22, false, (byte)'G', (byte)'G', 'g', 'G'),
+            new(0x23, false, (byte)'H', (byte)'H', 'h', 'H'),
+            new(0x24, false, (byte)'J', (byte)'J', 'j', 'J'),
+            new(0x25, false, (byte)'K', (byte)'K', 'k', 'K'),
+            new(0x26, false, (byte)'L', (byte)'L', 'l', 'L'),
+            new(0x27, false, VkOem1, VkOem1, ';', ':'),
+            new(0x28, false, VkOem7, VkOem7, '\'', '"'),
+            new(0x29, false, VkOem3, VkOem3, '`', '~'),
+            new(0x2A, false, VkShift, VkLShift, '\0', '\0'),
+            new(0x2B, false, VkOem5, VkOem5, '\\', '|'),
+            new(0x2C, false, (byte)'Z', (byte)'Z', 'z', 'Z'),
+            new(0x2D, false, (byte)'X', (byte)'X', 'x', 'X'),
+            new(0x2E, false, (byte)'C', (byte)'C', 'c', 'C'),
+            new(0x2F, false, (byte)'V', (byte)'V', 'v', 'V'),
+            new(0x30, false, (byte)'B', (byte)'B', 'b', 'B'),
+            new(0x31, false, (byte)'N', (byte)'N', 'n', 'N'),
+            new(0x32, false, (byte)'M', (byte)'M', 'm', 'M'),
+            new(0x33, false, VkOemComma, VkOemComma, ',', '<'),
+            new(0x34, false, VkOemPeriod, VkOemPeriod, '.', '>'),
+            new(0x35, false, VkOem2, VkOem2, '/', '?'),
+            new(0x36, false, VkShift, VkRShift, '\0', '\0'),
+            new(0x37, false, VkMultiply, VkMultiply, '*', '*'),
+            new(0x38, false, VkMenu, VkLMenu, '\0', '\0'),
+            new(0x39, false, VkSpace, VkSpace, ' ', ' '),
+            new(0x3A, false, VkCapital, VkCapital, '\0', '\0'),
+            new(0x3B, false, VkF1 + 0, VkF1 + 0, '\0', '\0'),
+            new(0x3C, false, VkF1 + 1, VkF1 + 1, '\0', '\0'),
+            new(0x3D, false, VkF1 + 2, VkF1 + 2, '\0', '\0'),
+            new(0x3E, false, VkF1 + 3, VkF1 + 3, '\0', '\0'),
+            new(0x3F, false, VkF1 + 4, VkF1 + 4, '\0', '\0'),
+            new(0x40, false, VkF1 + 5, VkF1 + 5, '\0', '\0'),
+            new(0x41, false, VkF1 + 6, VkF1 + 6, '\0', '\0'),
+            new(0x42, false, VkF1 + 7, VkF1 + 7, '\0', '\0'),
+            new(0x43, false, VkF1 + 8, VkF1 + 8, '\0', '\0'),
+            new(0x44, false, VkF1 + 9, VkF1 + 9, '\0', '\0'),
+            new(0x45, false, VkNumLock, VkNumLock, '\0', '\0'),
+            new(0x46, false, VkScroll, VkScroll, '\0', '\0'),
+            new(0x47, false, VkNumpad0 + 7, VkNumpad0 + 7, '7', '7'),
+            new(0x48, false, VkNumpad0 + 8, VkNumpad0 + 8, '8', '8'),
+            new(0x49, false, VkNumpad0 + 9, VkNumpad0 + 9, '9', '9'),
+            new(0x4A, false, VkSubtract, VkSubtract, '-', '-'),
+            new(0x4B, false, VkNumpad0 + 4, VkNumpad0 + 4, '4', '4'),
+            new(0x4C, false, VkNumpad0 + 5, VkNumpad0 + 5, '5', '5'),
+            new(0x4D, false, VkNumpad0 + 6, VkNumpad0 + 6, '6', '6'),
+            new(0x4E, false, VkAdd, VkAdd, '+', '+'),
+            new(0x4F, false, VkNumpad0 + 1, VkNumpad0 + 1, '1', '1'),
+            new(0x50, false, VkNumpad0 + 2, VkNumpad0 + 2, '2', '2'),
+            new(0x51, false, VkNumpad0 + 3, VkNumpad0 + 3, '3', '3'),
+            new(0x52, false, VkNumpad0 + 0, VkNumpad0 + 0, '0', '0'),
+            new(0x53, false, VkDecimal, VkDecimal, '.', '.'),
+            new(0x56, false, VkOem102, VkOem102, '\\', '|'),
+            new(0x57, false, VkF1 + 10, VkF1 + 10, '\0', '\0'),
+            new(0x58, false, VkF1 + 11, VkF1 + 11, '\0', '\0'),
+            new(0x45, false, VkPause, VkPause, '\0', '\0'),
+            new(0x1C, true, VkReturn, VkReturn, '\r', '\r'),
+            new(0x1D, true, VkControl, VkRControl, '\0', '\0'),
+            new(0x35, true, VkDivide, VkDivide, '/', '/'),
+            new(0x37, true, VkSnapshot, VkSnapshot, '\0', '\0'),
+            new(0x38, true, VkMenu, VkRMenu, '\0', '\0'),
+            new(0x47, true, VkHome, VkHome, '\0', '\0'),
+            new(0x48, true, VkUp, VkUp, '\0', '\0'),
+            new(0x49, true, VkPrior, VkPrior, '\0', '\0'),
+            new(0x4B, true, VkLeft, VkLeft, '\0', '\0'),
+            new(0x4D, true, VkRight, VkRight, '\0', '\0'),
+            new(0x4F, true, VkEnd, VkEnd, '\0', '\0'),
+            new(0x50, true, VkDown, VkDown, '\0', '\0'),
+            new(0x51, true, VkNext, VkNext, '\0', '\0'),
+            new(0x52, true, VkInsert, VkInsert, '\0', '\0'),
+            new(0x53, true, VkDelete, VkDelete, '\0', '\0'),
+            new(0x5B, true, VkLWin, VkLWin, '\0', '\0'),
+            new(0x5C, true, VkRWin, VkRWin, '\0', '\0'),
+            new(0x5D, true, VkApps, VkApps, '\0', '\0'),
+        };
+
+        internal static uint MapVirtualKey(uint Code, uint MapType)
+        {
+            switch (MapType)
+            {
+                case MapVirtualKeyToScanCode:
+                case MapVirtualKeyToScanCodeEx:
+                {
+                    for (int i = 0; i < KeyMappings.Length; i++)
+                    {
+                        Win32kKeyMapping Mapping = KeyMappings[i];
+                        if (Mapping.VirtualKey != Code && Mapping.SidedVirtualKey != Code)
+                            continue;
+
+                        if (MapType == MapVirtualKeyToScanCodeEx && Mapping.Extended)
+                            return ExtendedScanCodePrefix | Mapping.ScanCode;
+
+                        return Mapping.ScanCode;
+                    }
+
+                    return 0;
+                }
+
+                case MapVirtualScanCodeToKey:
+                case MapVirtualScanCodeToKeyEx:
+                {
+                    bool Extended = (Code & 0xFF00) == ExtendedScanCodePrefix;
+                    byte ScanCode = (byte)Code;
+
+                    for (int i = 0; i < KeyMappings.Length; i++)
+                    {
+                        Win32kKeyMapping Mapping = KeyMappings[i];
+                        if (Mapping.ScanCode != ScanCode || Mapping.Extended != Extended)
+                            continue;
+
+                        return MapType == MapVirtualScanCodeToKeyEx ? Mapping.SidedVirtualKey : Mapping.VirtualKey;
+                    }
+
+                    return 0;
+                }
+
+                case MapVirtualKeyToChar:
+                {
+                    if (!TryGetKeyMapping(Code, out Win32kKeyMapping Mapping) || Mapping.Character == '\0')
+                        return 0;
+
+                    return char.ToUpperInvariant(Mapping.Character);
+                }
+            }
+
+            return 0;
+        }
+
+        internal static bool TryTranslateKey(uint VirtualKey, bool Shift, bool CapsLock, bool Control, out char Character)
+        {
+            Character = '\0';
+            if (!TryGetKeyMapping(VirtualKey, out Win32kKeyMapping Mapping))
+                return false;
+
+            char Translated = Shift ? Mapping.ShiftedCharacter : Mapping.Character;
+            if (Translated == '\0')
+                return false;
+
+            if (CapsLock && char.IsAsciiLetter(Mapping.Character))
+                Translated = Shift ? Mapping.Character : Mapping.ShiftedCharacter;
+
+            if (Control)
+            {
+                if (!char.IsAsciiLetter(Translated))
+                    return false;
+
+                Translated = (char)(char.ToUpperInvariant(Translated) - 'A' + 1);
+            }
+
+            Character = Translated;
+            return true;
+        }
+
+        private static bool TryGetKeyMapping(uint VirtualKey, out Win32kKeyMapping Mapping)
+        {
+            for (int i = 0; i < KeyMappings.Length; i++)
+            {
+                if (KeyMappings[i].VirtualKey == VirtualKey || KeyMappings[i].SidedVirtualKey == VirtualKey)
+                {
+                    Mapping = KeyMappings[i];
+                    return true;
+                }
+            }
+
+            Mapping = default;
+            return false;
+        }
+
+        /// <summary>
+        /// Byte length of one scanline. GDI pads plain bitmaps to a WORD and DIB sections to a DWORD.
+        /// </summary>
+        internal static int GetBitmapStride(int Width, int Planes, int BitsPerPixel, bool DibSection)
+        {
+            long Bits = (long)Width * Planes * BitsPerPixel;
+            if (Bits <= 0 || Bits > int.MaxValue)
+                return 0;
+
+            return DibSection ? (int)(((Bits + 31) / 32) * 4) : (int)(((Bits + 15) / 16) * 2);
+        }
+
+        internal static ulong CreateBitmap(BinaryEmulator Instance, int Width, int Height, ushort Planes, ushort BitsPerPixel, bool DibSection, bool TopDown)
+        {
+            int Stride = GetBitmapStride(Width, Planes, BitsPerPixel, DibSection);
+            if (Width <= 0 || Height <= 0 || Planes == 0 || BitsPerPixel == 0 || Stride == 0)
+                return 0;
+
+            long TotalBytes = (long)Stride * Height;
+            if (TotalBytes > MaxBitmapBytes)
+                return 0;
+
+            ulong Handle = Instance.WinHelper.AllocateGdiHandle(BitmapHandleType);
+            if (Handle == 0)
+                return 0;
+
+            ulong BitsAddress = Instance.MapUniqueAddress((ulong)TotalBytes, MemoryProtection.ReadWrite);
+            if (BitsAddress == 0)
+            {
+                Instance.WinHelper.FreeGdiHandle(Handle);
+                return 0;
+            }
+
+            GetState(Instance).Bitmaps[Handle] = new Win32kBitmap
+            {
+                Width = Width,
+                Height = Height,
+                Planes = Planes,
+                BitsPerPixel = BitsPerPixel,
+                Stride = Stride,
+                BitsAddress = BitsAddress,
+                BitsSize = (uint)TotalBytes,
+                DibSection = DibSection,
+                TopDown = TopDown,
+            };
+            return Handle;
+        }
+
+        internal static bool CopyBitmapBitsIn(BinaryEmulator Instance, in Win32kBitmap Bitmap, ulong SourceAddress)
+        {
+            if (SourceAddress == 0 || !Instance.IsRegionMapped(SourceAddress, Bitmap.BitsSize))
+                return false;
+
+            Span<byte> Chunk = Instance.WinHelper.Shared.GetSpan(BitmapCopyChunkBytes);
+            for (uint Copied = 0; Copied < Bitmap.BitsSize;)
+            {
+                int Size = (int)Math.Min(BitmapCopyChunkBytes, Bitmap.BitsSize - Copied);
+                Span<byte> Slice = Chunk.Slice(0, Size);
+                if (!Instance.ReadMemory(SourceAddress + Copied, Slice, (uint)Size))
+                    return false;
+
+                if (!Instance.WriteMemory(Bitmap.BitsAddress + Copied, Slice))
+                    return false;
+
+                Copied += (uint)Size;
+            }
+
+            return true;
+        }
+
+        internal static bool TryGetBitmap(BinaryEmulator Instance, ulong Handle, out Win32kBitmap Bitmap)
+        {
+            if (Handle != 0)
+                return GetState(Instance).Bitmaps.TryGetValue(Handle, out Bitmap);
+
+            Bitmap = default;
+            return false;
+        }
+
+        internal static bool RemoveBitmap(BinaryEmulator Instance, ulong Handle)
+        {
+            Win32kState State = GetState(Instance);
+            if (!State.Bitmaps.Remove(Handle, out Win32kBitmap Bitmap))
+                return false;
+
+            Instance.UnmapMemoryRegion(Bitmap.BitsAddress);
+            return true;
         }
 
         internal static bool PostMessage(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam)

@@ -2654,7 +2654,15 @@ namespace Brovan.Core.Emulation
                 if (ImmaBeEmulatedOOO.Context?.RIP == 0)
                 {
                     if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
+                    {
                         ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context?.RAX);
+
+                        if (WinHelper != null)
+                        {
+                            TriggerEventMessage($"[-] Thread {ImmaBeEmulatedOOO.ThreadId} jumped to a NULL address from 0x{RipBeforeSlice:X}.", LogFlags.Issues);
+                            TraceStackModuleFrames("[-] NULL call");
+                        }
+                    }
 
                     ImmaBeEmulatedOOO.State = EmulatedThreadState.Terminated;
                 }

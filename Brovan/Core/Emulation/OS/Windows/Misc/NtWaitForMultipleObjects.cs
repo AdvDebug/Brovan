@@ -113,6 +113,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (int i = 0; i < Count; i++)
             {
                 ulong H = Instance.WinHelper.ReadPointer(HandlesPtr + (ulong)i * HandleSize);
+                if (Instance.WinHelper.HandleManager.GetObjectByHandle(H) == null)
+                    return NTSTATUS.STATUS_INVALID_HANDLE;
+
                 Handles.Add(H);
             }
 

@@ -1205,26 +1205,18 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
+        private const Hooks RequiredHookTypes =
+            Hooks.UC_HOOK_MEM_READ_UNMAPPED | Hooks.UC_HOOK_MEM_WRITE_UNMAPPED | Hooks.UC_HOOK_MEM_FETCH_UNMAPPED |
+            Hooks.UC_HOOK_MEM_READ_PROT | Hooks.UC_HOOK_MEM_WRITE_PROT | Hooks.UC_HOOK_MEM_FETCH_PROT |
+            Hooks.UC_HOOK_INSN_INVALID | Hooks.UC_HOOK_INTR;
+
         /// <summary>
         /// Make sure that the hook is a whitelisted hook when <see cref="NoHooks"/> are enabled.
         /// </summary>
         /// <returns>returns true if the hook is whitelisted, otherwise false.</returns>
         private static bool IsWhitelistedHookType(Hooks hook)
         {
-            switch (hook)
-            {
-                case Hooks.UC_HOOK_MEM_FETCH_PROT:
-                case Hooks.UC_HOOK_MEM_FETCH_UNMAPPED:
-                case Hooks.UC_HOOK_MEM_READ_PROT:
-                case Hooks.UC_HOOK_MEM_READ_UNMAPPED:
-                case Hooks.UC_HOOK_MEM_WRITE_PROT:
-                case Hooks.UC_HOOK_MEM_WRITE_UNMAPPED:
-                case Hooks.UC_HOOK_INSN_INVALID:
-                    return true;
-
-                default:
-                    return false;
-            }
+            return (hook & RequiredHookTypes) != 0;
         }
 
         /// <summary>

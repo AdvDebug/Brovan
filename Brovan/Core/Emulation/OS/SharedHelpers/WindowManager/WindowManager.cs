@@ -166,6 +166,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private static readonly object Sync = new();
         private static readonly IntPtr PerMonitorAwareV2 = new(-4);
+        private static readonly IntPtr SystemAware = new(-2);
+        private static readonly IntPtr Unaware = new(-1);
 
         private static uint _systemDpi;
         private static uint _rawDpi;
@@ -173,6 +175,49 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static int _screenHeight;
 
         public static bool VirtualizesUnawareWindows => OperatingSystem.IsWindows();
+
+        /// <summary>
+        /// Adopts the DPI awareness the host window was created with. Awareness is per thread on Windows, and a
+        /// thread that leaves it at the process default reads window rectangles back DPI-virtualized - so a host
+        /// API that reports the window's own size (a Vulkan surface's currentExtent, for one) would answer with
+        /// scaled pixels that no longer match the window the guest asked for. Returns the previous context to
+        /// hand back to <see cref="LeaveWindowDpiContext"/>.
+        /// </summary>
+        public static IntPtr EnterWindowDpiContext(DpiAwareness Awareness)
+        {
+            if (!OperatingSystem.IsWindows())
+                return IntPtr.Zero;
+
+            IntPtr Context = Awareness switch
+            {
+                DpiAwareness.PerMonitor => PerMonitorAwareV2,
+                DpiAwareness.System => SystemAware,
+                _ => Unaware,
+            };
+
+            try
+            {
+                return NativeWinImports.SetThreadDpiAwarenessContext(Context);
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
+        }
+
+        public static void LeaveWindowDpiContext(IntPtr Previous)
+        {
+            if (!OperatingSystem.IsWindows() || Previous == IntPtr.Zero)
+                return;
+
+            try
+            {
+                NativeWinImports.SetThreadDpiAwarenessContext(Previous);
+            }
+            catch
+            {
+            }
+        }
 
         public static uint SystemDpi
         {

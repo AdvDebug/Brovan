@@ -9,6 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             ulong Handle = Instance.WinHelper.GetArg(0);
             Win32kHelper.RemovePenBrush(Instance, Handle);
+            Win32kHelper.RemoveBitmap(Instance, Handle);
             bool Deleted = Instance.WinHelper.FreeGdiHandle(Handle);
             Instance.SetRawSyscallReturn(Deleted ? 1ul : 0ul);
             return NTSTATUS.STATUS_SUCCESS;
