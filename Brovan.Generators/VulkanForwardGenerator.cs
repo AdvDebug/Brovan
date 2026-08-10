@@ -642,6 +642,7 @@ namespace Brovan.Generators
             "vkGetPhysicalDeviceFormatProperties2",
             "vkGetPhysicalDeviceImageFormatProperties2",
             "vkGetPhysicalDeviceQueueFamilyProperties2",
+            "vkGetPhysicalDeviceSparseImageFormatProperties2",
             "vkGetPhysicalDeviceSurfaceCapabilities2KHR",
             "vkGetPhysicalDeviceSurfaceFormats2KHR",
             "vkGetPhysicalDeviceToolProperties",
@@ -664,6 +665,7 @@ namespace Brovan.Generators
         {
             "VK_KHR_surface",
             "VK_KHR_win32_surface",
+            "VK_KHR_get_physical_device_properties2",
             "VK_KHR_get_surface_capabilities2",
             "VK_KHR_swapchain",
             "VK_KHR_image_format_list",
