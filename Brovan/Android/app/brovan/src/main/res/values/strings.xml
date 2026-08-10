@@ -9,6 +9,61 @@
     <string name="nav_open">Open navigation</string>
     <string name="nav_close">Close navigation</string>
 
+    <string name="setup_step_of">Step %1$d of %2$d</string>
+    <string name="setup_skip">Skip</string>
+    <string name="setup_back">Back</string>
+    <string name="setup_continue">Continue</string>
+    <string name="setup_finish">Finish</string>
+    <string name="setup_mark_done">✓</string>
+    <string name="setup_mark_todo">•</string>
+
+    <string name="setup_welcome_title">Let’s get started</string>
+    <string name="setup_welcome_body">Brovan runs real Windows programs on this phone. Four short steps and you are ready to play.</string>
+    <string name="setup_welcome_programs">Real Windows programs</string>
+    <string name="setup_welcome_programs_body">Games and desktop apps run unmodified, from the folder they shipped in.</string>
+    <string name="setup_welcome_graphics">Vulkan graphics</string>
+    <string name="setup_welcome_graphics_body">Drawing is handed to the phone’s own GPU driver instead of being emulated.</string>
+    <string name="setup_welcome_controls">Touch controls</string>
+    <string name="setup_welcome_controls_body">A joystick, D-pad or trackpad stands in for the keyboard and mouse.</string>
+
+    <string name="setup_windows_title">Windows system files</string>
+    <string name="setup_windows_body">Brovan runs real Windows programs, so it needs the real system libraries, NLS tables and registry hives. It fetches Windows installation media from Microsoft and extracts only those. Nothing Microsoft ships is bundled with Brovan, so a valid Windows license is required.</string>
+    <string name="setup_windows_state_missing">Not installed</string>
+    <string name="setup_windows_state_installed">Installed</string>
+
+    <string name="setup_runtimes_title">Visual C++ runtimes</string>
+    <string name="setup_runtimes_body">Most games and desktop programs are built with Visual C++ and stop at a missing-DLL error without these. They are not part of Windows, so they are downloaded separately.</string>
+    <string name="setup_runtimes_note">Skip this if you only run programs that carry their own libraries.</string>
+
+    <string name="setup_program_title">Your first program</string>
+    <string name="setup_program_body">Add the folder holding the program and everything it ships with. Brovan copies it into its own storage and runs it from there, so the program finds its files where it expects them.</string>
+    <string name="setup_program_note">You can add more at any time from the library.</string>
+    <string name="setup_program_none">Nothing added yet</string>
+    <string name="setup_program_count">%1$d in your library</string>
+
+    <string name="setup_ready_title">Ready to play</string>
+    <string name="setup_ready_body">Everything Brovan needs is in place. Open your library and press play.</string>
+    <string name="setup_almost_title">Almost there</string>
+    <string name="setup_almost_body">Brovan works once the steps below are done. Come back any time through Get started in the menu.</string>
+    <string name="setup_ready_windows">Windows system files</string>
+    <string name="setup_ready_runtimes">Visual C++ runtimes</string>
+    <string name="setup_ready_program">A program in your library</string>
+
+    <string name="setup_progress_files">%1$d of %2$d files · %3$d of %4$d MB</string>
+    <string name="setup_progress_bytes">%1$d of %2$d MB</string>
+    <string name="setup_progress_downloaded">%1$d MB</string>
+    <string name="setup_no_browser">No browser is available on this device.</string>
+    <string name="setup_no_picker">No file picker is available on this device.</string>
+    <string name="setup_no_executable">No .exe found in that folder.</string>
+    <string name="setup_import_failed">Import failed: %1$s</string>
+
+    <string name="setup_device">This device</string>
+    <string name="setup_device_storage">%1$s free for Brovan</string>
+    <string name="setup_device_storage_low">Not much room left. The Windows files alone need around %1$s.</string>
+    <string name="setup_device_vulkan">Vulkan graphics available</string>
+    <string name="setup_device_no_vulkan">No Vulkan graphics. Programs that draw in 3D will not run.</string>
+    <string name="setup_device_android">Android %1$s on %2$s</string>
+
     <string name="library_empty_title">No programs yet</string>
     <string name="library_empty_body">Add a folder containing a Windows program and everything it needs. Brovan copies it into its own storage so the program can find its files.</string>
     <string name="library_add_title">Add a program</string>
@@ -24,7 +79,33 @@
     <string name="settings_network">Network access</string>
     <string name="settings_jit_cache">JIT code caching</string>
     <string name="settings_jit_cache_summary">Experimental JIT code caching that can help with performance</string>
+    <string name="settings_pointer">Touch on the game picture</string>
+    <string name="settings_edit_controls">Customize the on-screen controls</string>
+    <string name="settings_edit_controls_summary">Place your own buttons, joysticks and touchpads, and bind each one to a key. Saving switches the control scheme to your layout.</string>
     <string name="settings_developer">Developer mode</string>
+
+    <string name="controls_title">Edit controls</string>
+    <string name="controls_hint">Drag a control to move it. Tap one to change its key or size.</string>
+    <string name="controls_selected">Selected: %1$s</string>
+    <string name="controls_size">Size</string>
+    <string name="controls_delete">Delete</string>
+    <string name="controls_add">Add</string>
+    <string name="controls_save">Save</string>
+    <string name="controls_preset">Preset</string>
+    <string name="controls_preset_title">Start from a built-in layout</string>
+    <string name="controls_add_button">Key button</string>
+    <string name="controls_add_joystick">Joystick</string>
+    <string name="controls_add_dpad">D-pad</string>
+    <string name="controls_add_touchpad">Mouse touchpad</string>
+    <string name="controls_add_mouse">Mouse click button</string>
+    <string name="controls_pick_key">Assign a key</string>
+    <string name="controls_key">Key: %1$s</string>
+    <string name="controls_up">Up: %1$s</string>
+    <string name="controls_down">Down: %1$s</string>
+    <string name="controls_left">Left: %1$s</string>
+    <string name="controls_right">Right: %1$s</string>
+    <string name="controls_mouse_left">Left click</string>
+    <string name="controls_mouse_right">Right click</string>
     <string name="settings_developer_summary">Show the console and emulator trace while a program runs. Enables the analysis hooks, which makes programs run slower.</string>
 
     <string name="about_author">AdvDebug</string>
@@ -58,6 +139,7 @@
     <string name="windows_needs_license">Confirm you have a Windows license first.</string>
 
     <string name="player_controls">Controls</string>
+    <string name="player_pointer">Touch behaviour</string>
     <string name="player_windows">Windows</string>
     <string name="player_console">Console</string>
     <string name="player_redraw">Redraw</string>

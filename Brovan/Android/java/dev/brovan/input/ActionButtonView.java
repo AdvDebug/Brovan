@@ -7,26 +7,24 @@ import android.graphics.Paint;
 import android.view.MotionEvent;
 import android.view.View;
 
-/** Round hold-to-press button bound to one key. */
+/** Round hold-to-press button. What the press means is the overlay's business, not this view's. */
 public class ActionButtonView extends View {
 
     public interface Listener {
-        void onPressed(VirtualKey key, boolean down);
+        void onPressed(boolean down);
     }
 
     private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-    private final VirtualKey key;
-    private final String label;
-
+    private String label;
     private Listener listener;
     private boolean pressed;
+    private int pointerId = MotionEvent.INVALID_POINTER_ID;
 
-    public ActionButtonView(Context context, VirtualKey key, String label) {
+    public ActionButtonView(Context context, String label) {
         super(context);
-        this.key = key;
         this.label = label;
 
         fillPaint.setColor(Color.argb(70, 255, 255, 255));
@@ -35,6 +33,11 @@ public class ActionButtonView extends View {
         ringPaint.setStrokeWidth(3f);
         textPaint.setColor(Color.argb(220, 255, 255, 255));
         textPaint.setTextAlign(Paint.Align.CENTER);
+    }
+
+    public void setLabel(String value) {
+        label = value;
+        invalidate();
     }
 
     public void setListener(Listener listener) {
@@ -51,20 +54,45 @@ public class ActionButtonView extends View {
         canvas.drawCircle(centreX, centreY, radius, fillPaint);
         canvas.drawCircle(centreX, centreY, radius, ringPaint);
 
-        textPaint.setTextSize(radius * 0.7f);
+        textPaint.setTextSize(textSize(radius));
         float baseline = centreY - (textPaint.descent() + textPaint.ascent()) / 2f;
         canvas.drawText(label, centreX, baseline, textPaint);
     }
 
+    /** Long labels such as "Page down" have to shrink or they spill out of the circle. */
+    private float textSize(float radius) {
+        float size = radius * 0.7f;
+        if (label.length() <= 2) {
+            return size;
+        }
+
+        return Math.max(radius * 0.26f, size * 2f / label.length());
+    }
+
+    /** Tracks the finger that pressed it, so another finger elsewhere cannot release the button. */
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                updatePressed(true);
+            case MotionEvent.ACTION_POINTER_DOWN:
+                if (pointerId == MotionEvent.INVALID_POINTER_ID) {
+                    pointerId = event.getPointerId(event.getActionIndex());
+                    updatePressed(true);
+                }
                 return true;
 
             case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                if (event.getPointerId(event.getActionIndex()) != pointerId) {
+                    return true;
+                }
+
+                pointerId = MotionEvent.INVALID_POINTER_ID;
+                updatePressed(false);
+                return true;
+
             case MotionEvent.ACTION_CANCEL:
+                pointerId = MotionEvent.INVALID_POINTER_ID;
                 updatePressed(false);
                 return true;
 
@@ -82,7 +110,7 @@ public class ActionButtonView extends View {
         invalidate();
 
         if (listener != null) {
-            listener.onPressed(key, value);
+            listener.onPressed(value);
         }
     }
 }

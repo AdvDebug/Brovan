@@ -35,6 +35,8 @@ public class JoystickView extends View {
     private float knobX;
     private float knobY;
     private boolean active;
+    private boolean cross;
+    private int pointerId = MotionEvent.INVALID_POINTER_ID;
 
     public JoystickView(Context context) {
         super(context);
@@ -57,11 +59,22 @@ public class JoystickView extends View {
         this.right = right;
     }
 
+    /** Draws as a four-way cross instead of a stick; the touch handling is the same either way. */
+    public void setCross(boolean value) {
+        cross = value;
+        invalidate();
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
         float centreX = getWidth() / 2f;
         float centreY = getHeight() / 2f;
         float radius = Math.min(centreX, centreY) - 6f;
+
+        if (cross) {
+            drawCross(canvas, centreX, centreY, radius);
+            return;
+        }
 
         canvas.drawCircle(centreX, centreY, radius, basePaint);
         canvas.drawCircle(centreX, centreY, radius, ringPaint);
@@ -71,27 +84,80 @@ public class JoystickView extends View {
         canvas.drawCircle(x, y, radius * 0.38f, knobPaint);
     }
 
+    private void drawCross(Canvas canvas, float centreX, float centreY, float radius) {
+        float arm = radius * 0.42f;
+
+        for (int index = 0; index < 4; index++) {
+            boolean horizontal = index >= 2;
+            float direction = index % 2 == 0 ? -1f : 1f;
+            float offsetX = horizontal ? direction * (radius - arm) : 0f;
+            float offsetY = horizontal ? 0f : direction * (radius - arm);
+
+            boolean lit = active && (horizontal
+                    ? Math.abs(knobX) >= DEAD_ZONE && Math.signum(knobX) == direction
+                    : Math.abs(knobY) >= DEAD_ZONE && Math.signum(knobY) == direction);
+
+            basePaint.setAlpha(lit ? 150 : 70);
+            canvas.drawCircle(centreX + offsetX, centreY + offsetY, arm, basePaint);
+            canvas.drawCircle(centreX + offsetX, centreY + offsetY, arm, ringPaint);
+        }
+    }
+
+    /**
+     * Follows the one finger that grabbed the stick. Without the pointer id, a second finger anywhere in
+     * the same gesture arrives here as well and the knob jumps to whichever pointer moved last.
+     */
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-            case MotionEvent.ACTION_MOVE:
+            case MotionEvent.ACTION_POINTER_DOWN: {
+                if (pointerId != MotionEvent.INVALID_POINTER_ID) {
+                    return true;
+                }
+
+                int index = event.getActionIndex();
+                pointerId = event.getPointerId(index);
                 active = true;
-                track(event.getX(), event.getY());
+                track(event.getX(index), event.getY(index));
                 return true;
+            }
+
+            case MotionEvent.ACTION_MOVE: {
+                int index = event.findPointerIndex(pointerId);
+                if (index < 0) {
+                    return true;
+                }
+
+                track(event.getX(index), event.getY(index));
+                return true;
+            }
 
             case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                if (event.getPointerId(event.getActionIndex()) != pointerId) {
+                    return true;
+                }
+
+                release();
+                return true;
+
             case MotionEvent.ACTION_CANCEL:
-                active = false;
-                knobX = 0f;
-                knobY = 0f;
-                emit(EnumSet.noneOf(VirtualKey.class));
-                invalidate();
+                release();
                 return true;
 
             default:
                 return super.onTouchEvent(event);
         }
+    }
+
+    private void release() {
+        pointerId = MotionEvent.INVALID_POINTER_ID;
+        active = false;
+        knobX = 0f;
+        knobY = 0f;
+        emit(EnumSet.noneOf(VirtualKey.class));
+        invalidate();
     }
 
     private void track(float touchX, float touchY) {

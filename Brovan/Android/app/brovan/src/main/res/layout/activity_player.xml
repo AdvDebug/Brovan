@@ -5,15 +5,20 @@
     android:layout_height="match_parent"
     android:background="@android:color/black">
 
-    <dev.brovan.BrovanSurfaceView
-        android:id="@+id/surface"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
-
+    <!-- The surface is a child of the overlay, not a sibling: a ViewGroup hands every further pointer of
+         a gesture to whichever child already owns one, so a full-screen sibling overlay swallows every
+         touch for as long as a control is held. Inside it, each control and the surface are separate
+         touch targets and split motion events keep them independent. -->
     <dev.brovan.input.ControlOverlay
         android:id="@+id/controls"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent">
+
+        <dev.brovan.BrovanSurfaceView
+            android:id="@+id/surface"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+    </dev.brovan.input.ControlOverlay>
 
     <LinearLayout
         android:id="@+id/console"

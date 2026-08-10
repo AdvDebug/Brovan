@@ -20,6 +20,17 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".SetupActivity"
+            android:exported="false" />
+
+        <!-- Landscape like the player, so a layout is placed on the screen shape it will be used on. -->
+        <activity
+            android:name=".ControlsActivity"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode" />
+
         <!-- Its own process: one guest per process, and a Surface swap would invalidate the guest's
              VkSurfaceKHR, so the activity must not be recreated on configuration changes. -->
         <activity

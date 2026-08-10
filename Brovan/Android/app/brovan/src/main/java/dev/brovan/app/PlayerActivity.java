@@ -26,7 +26,9 @@ import java.util.List;
 
 import dev.brovan.BrovanNative;
 import dev.brovan.BrovanSurfaceView;
+
 import dev.brovan.GuestWindow;
+import dev.brovan.input.ControlLayout;
 import dev.brovan.input.ControlOverlay;
 
 /**
@@ -42,6 +44,8 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private static final String EXTRA_DEVELOPER = "developer";
     private static final String EXTRA_CONTROLS = "controls";
     private static final String EXTRA_JIT_CACHE = "jit_cache";
+    private static final String EXTRA_LAYOUT = "layout";
+    private static final String EXTRA_POINTER = "pointer";
 
     private static final int MAX_LINES = 1200;
     private static final int TRIM_CHUNK = 200;
@@ -65,7 +69,9 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .putExtra(EXTRA_NETWORK, settings.network())
                 .putExtra(EXTRA_DEVELOPER, settings.developerMode())
                 .putExtra(EXTRA_CONTROLS, settings.controlScheme())
-                .putExtra(EXTRA_JIT_CACHE, settings.jitCache());
+                .putExtra(EXTRA_JIT_CACHE, settings.jitCache())
+                .putExtra(EXTRA_LAYOUT, settings.controlLayout())
+                .putExtra(EXTRA_POINTER, settings.pointerMode());
     }
 
     @Override
@@ -79,8 +85,12 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         controls = findViewById(R.id.controls);
         console = findViewById(R.id.console);
 
+        controls.setCustomLayout(ControlLayout.fromJson(getIntent().getStringExtra(EXTRA_LAYOUT)));
         int scheme = getIntent().getIntExtra(EXTRA_CONTROLS, 0);
         controls.apply(ControlOverlay.Scheme.values()[scheme]);
+
+        surface.setPointerMode(BrovanSurfaceView.PointerMode.values()[
+                getIntent().getIntExtra(EXTRA_POINTER, 0)]);
         status = findViewById(R.id.status);
         log = findViewById(R.id.log);
         logScroll = findViewById(R.id.log_scroll);
@@ -141,6 +151,9 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         labels.add(getString(R.string.player_controls));
         actions.add(this::showControlSchemes);
 
+        labels.add(getString(R.string.player_pointer));
+        actions.add(this::showPointerModes);
+
         labels.add(getString(R.string.player_windows));
         actions.add(this::showWindows);
 
@@ -173,6 +186,24 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .setSingleChoiceItems(labels, controls.scheme().ordinal(), (dialog, index) -> {
                     controls.apply(schemes[index]);
                     settings.setControlScheme(index);
+                    dialog.dismiss();
+                })
+                .show();
+    }
+
+    private void showPointerModes() {
+        BrovanSurfaceView.PointerMode[] modes = BrovanSurfaceView.PointerMode.values();
+        CharSequence[] labels = new CharSequence[modes.length];
+        for (int i = 0; i < modes.length; i++) {
+            labels[i] = modes[i].label();
+        }
+
+        int current = getIntent().getIntExtra(EXTRA_POINTER, 0);
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.player_pointer)
+                .setSingleChoiceItems(labels, current, (dialog, index) -> {
+                    surface.setPointerMode(modes[index]);
+                    getIntent().putExtra(EXTRA_POINTER, index);
                     dialog.dismiss();
                 })
                 .show();

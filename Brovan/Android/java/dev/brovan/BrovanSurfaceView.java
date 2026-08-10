@@ -7,6 +7,8 @@ import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 
+import dev.brovan.input.PointerState;
+
 /**
  * Feeds the emulator its Surface and turns touch and key events into the Win32 messages the guest expects.
  *
@@ -17,7 +19,38 @@ import android.view.SurfaceView;
  */
 public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Callback {
 
+    /** How a finger on the guest picture is turned into pointer input. */
+    public enum PointerMode {
+        DRAG("Touch drags with the button held"),
+        HOVER("Touch moves the cursor, tap clicks"),
+        TRACKPAD("Whole screen is a trackpad");
+
+        private final String label;
+
+        PointerMode(String label) {
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+    }
+
+    private static final int TAP_SLOP = 40;
+    private static final int TAP_TIMEOUT_MS = 400;
+    private static final float TRACKPAD_SPEED = 1.6f;
+
+    private PointerMode mode = PointerMode.DRAG;
+
     private int buttons;
+    private float cursorX;
+    private float cursorY;
+    private float lastX;
+    private float lastY;
+    private float travelled;
+    private long downAt;
+    private boolean secondFinger;
+    private int pointerId = MotionEvent.INVALID_POINTER_ID;
 
     public BrovanSurfaceView(Context context) {
         super(context);
@@ -52,28 +85,121 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
         BrovanNative.clearSurface();
     }
 
+    public void setPointerMode(PointerMode value) {
+        mode = value;
+    }
+
+    @Override
+    protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight);
+        cursorX = width / 2f;
+        cursorY = height / 2f;
+    }
+
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        int x = (int) event.getX();
-        int y = (int) event.getY();
-
         switch (event.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN:
-                buttons |= BrovanNative.MK_LBUTTON;
-                BrovanNative.injectPointer(BrovanNative.POINTER_MOVE, BrovanNative.BUTTON_LEFT, x, y, buttons);
-                BrovanNative.injectPointer(BrovanNative.POINTER_DOWN, BrovanNative.BUTTON_LEFT, x, y, buttons);
+            case MotionEvent.ACTION_DOWN: {
+                int index = event.getActionIndex();
+                pointerId = event.getPointerId(index);
+                lastX = event.getX(index);
+                lastY = event.getY(index);
+                travelled = 0f;
+                downAt = event.getEventTime();
+                secondFinger = false;
+
+                if (mode != PointerMode.TRACKPAD) {
+                    cursorX = lastX;
+                    cursorY = lastY;
+                }
+
+                move();
+
+                if (mode == PointerMode.DRAG) {
+                    buttons |= BrovanNative.MK_LBUTTON;
+                    inject(BrovanNative.POINTER_DOWN);
+                }
+
                 return true;
-            case MotionEvent.ACTION_MOVE:
-                BrovanNative.injectPointer(BrovanNative.POINTER_MOVE, BrovanNative.BUTTON_LEFT, x, y, buttons);
+            }
+
+            case MotionEvent.ACTION_POINTER_DOWN:
+                // A second finger means the gesture is a right click, so whatever the first one started
+                // has to be let go of before it turns into a drag.
+                secondFinger = true;
+                releaseLeft();
                 return true;
-            case MotionEvent.ACTION_UP:
+
+            case MotionEvent.ACTION_MOVE: {
+                int index = event.findPointerIndex(pointerId);
+                if (index < 0) {
+                    return true;
+                }
+
+                float dx = event.getX(index) - lastX;
+                float dy = event.getY(index) - lastY;
+                lastX = event.getX(index);
+                lastY = event.getY(index);
+                travelled += Math.abs(dx) + Math.abs(dy);
+
+                if (mode == PointerMode.TRACKPAD) {
+                    cursorX = clamp(cursorX + dx * TRACKPAD_SPEED, getWidth());
+                    cursorY = clamp(cursorY + dy * TRACKPAD_SPEED, getHeight());
+                } else {
+                    cursorX = lastX;
+                    cursorY = lastY;
+                }
+
+                move();
+                return true;
+            }
+
+            case MotionEvent.ACTION_UP: {
+                boolean tapped = travelled < TAP_SLOP && event.getEventTime() - downAt < TAP_TIMEOUT_MS;
+                pointerId = MotionEvent.INVALID_POINTER_ID;
+                releaseLeft();
+
+                if (secondFinger) {
+                    if (tapped) {
+                        PointerState.click(BrovanNative.BUTTON_RIGHT);
+                    }
+                } else if (mode != PointerMode.DRAG && tapped) {
+                    PointerState.click(BrovanNative.BUTTON_LEFT);
+                }
+
+                return true;
+            }
+
             case MotionEvent.ACTION_CANCEL:
-                buttons &= ~BrovanNative.MK_LBUTTON;
-                BrovanNative.injectPointer(BrovanNative.POINTER_UP, BrovanNative.BUTTON_LEFT, x, y, buttons);
+                pointerId = MotionEvent.INVALID_POINTER_ID;
+                releaseLeft();
                 return true;
+
             default:
                 return super.onTouchEvent(event);
         }
+    }
+
+    private void move() {
+        PointerState.moved((int) cursorX, (int) cursorY);
+        inject(BrovanNative.POINTER_MOVE);
+    }
+
+    private void releaseLeft() {
+        if ((buttons & BrovanNative.MK_LBUTTON) == 0) {
+            return;
+        }
+
+        buttons &= ~BrovanNative.MK_LBUTTON;
+        inject(BrovanNative.POINTER_UP);
+    }
+
+    private void inject(int action) {
+        BrovanNative.injectPointer(action, BrovanNative.BUTTON_LEFT, (int) cursorX, (int) cursorY, buttons);
+    }
+
+    private static float clamp(float value, int limit) {
+        return Math.max(0f, Math.min(value, limit));
     }
 
     @Override

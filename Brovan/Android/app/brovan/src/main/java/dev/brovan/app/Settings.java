@@ -14,6 +14,9 @@ final class Settings {
     private static final String KEY_FIT_WINDOW = "fit_window";
     private static final String KEY_CONTROLS = "controls";
     private static final String KEY_JIT_CACHE = "jit_cache";
+    private static final String KEY_SETUP_DISMISSED = "setup_dismissed";
+    private static final String KEY_CONTROL_LAYOUT = "control_layout";
+    private static final String KEY_POINTER = "pointer";
 
     private final SharedPreferences preferences;
 
@@ -59,5 +62,31 @@ final class Settings {
 
     void setJitCache(boolean value) {
         preferences.edit().putBoolean(KEY_JIT_CACHE, value).apply();
+    }
+
+    /** The custom control arrangement, as written by the editor. Empty until the user saves one. */
+    String controlLayout() {
+        return preferences.getString(KEY_CONTROL_LAYOUT, "");
+    }
+
+    void setControlLayout(String json) {
+        preferences.edit().putString(KEY_CONTROL_LAYOUT, json).apply();
+    }
+
+    int pointerMode() {
+        return preferences.getInt(KEY_POINTER, 0);
+    }
+
+    void setPointerMode(int value) {
+        preferences.edit().putInt(KEY_POINTER, value).apply();
+    }
+
+    /** Keeps the get-started screen from taking over the launcher once the user has chosen to leave it. */
+    boolean setupDismissed() {
+        return preferences.getBoolean(KEY_SETUP_DISMISSED, false);
+    }
+
+    void setSetupDismissed(boolean value) {
+        preferences.edit().putBoolean(KEY_SETUP_DISMISSED, value).apply();
     }
 }

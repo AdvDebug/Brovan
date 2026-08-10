@@ -16,8 +16,8 @@ import dev.brovan.BrovanNative;
 public class TouchpadView extends View {
 
     private static final float SPEED = 1.6f;
-    private static final int TAP_SLOP = 12;
-    private static final int TAP_TIMEOUT_MS = 220;
+    private static final int TAP_SLOP = 40;
+    private static final int TAP_TIMEOUT_MS = 400;
 
     private final Paint hintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
@@ -27,6 +27,7 @@ public class TouchpadView extends View {
     private float lastY;
     private float travelled;
     private long downAt;
+    private int pointerId = MotionEvent.INVALID_POINTER_ID;
 
     public TouchpadView(Context context) {
         super(context);
@@ -38,8 +39,19 @@ public class TouchpadView extends View {
     @Override
     protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
         super.onSizeChanged(width, height, oldWidth, oldHeight);
-        cursorX = width / 2f;
-        cursorY = height / 2f;
+        cursorX = surfaceWidth() / 2f;
+        cursorY = surfaceHeight() / 2f;
+    }
+
+    /// The cursor moves across the whole guest window, not just the pad it is driven from.
+    private int surfaceWidth() {
+        View parent = (View) getParent();
+        return parent == null ? getWidth() : parent.getWidth();
+    }
+
+    private int surfaceHeight() {
+        View parent = (View) getParent();
+        return parent == null ? getHeight() : parent.getHeight();
     }
 
     @Override
@@ -51,30 +63,54 @@ public class TouchpadView extends View {
     public boolean onTouchEvent(MotionEvent event) {
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                lastX = event.getX();
-                lastY = event.getY();
+            case MotionEvent.ACTION_POINTER_DOWN: {
+                if (pointerId != MotionEvent.INVALID_POINTER_ID) {
+                    return true;
+                }
+
+                int index = event.getActionIndex();
+                pointerId = event.getPointerId(index);
+                lastX = event.getX(index);
+                lastY = event.getY(index);
                 travelled = 0f;
                 downAt = event.getEventTime();
                 return true;
+            }
 
             case MotionEvent.ACTION_MOVE: {
-                float dx = (event.getX() - lastX) * SPEED;
-                float dy = (event.getY() - lastY) * SPEED;
-                lastX = event.getX();
-                lastY = event.getY();
+                int index = event.findPointerIndex(pointerId);
+                if (index < 0) {
+                    return true;
+                }
+
+                float dx = (event.getX(index) - lastX) * SPEED;
+                float dy = (event.getY(index) - lastY) * SPEED;
+                lastX = event.getX(index);
+                lastY = event.getY(index);
                 travelled += Math.abs(dx) + Math.abs(dy);
 
-                cursorX = clamp(cursorX + dx, getWidth());
-                cursorY = clamp(cursorY + dy, getHeight());
+                cursorX = clamp(cursorX + dx, surfaceWidth());
+                cursorY = clamp(cursorY + dy, surfaceHeight());
+                PointerState.moved((int) cursorX, (int) cursorY);
                 BrovanNative.injectPointer(BrovanNative.POINTER_MOVE, BrovanNative.BUTTON_LEFT,
                         (int) cursorX, (int) cursorY, 0);
                 return true;
             }
 
             case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                if (event.getPointerId(event.getActionIndex()) != pointerId) {
+                    return true;
+                }
+
+                pointerId = MotionEvent.INVALID_POINTER_ID;
                 if (travelled < TAP_SLOP && event.getEventTime() - downAt < TAP_TIMEOUT_MS) {
                     click();
                 }
+                return true;
+
+            case MotionEvent.ACTION_CANCEL:
+                pointerId = MotionEvent.INVALID_POINTER_ID;
                 return true;
 
             default:
@@ -83,10 +119,8 @@ public class TouchpadView extends View {
     }
 
     private void click() {
-        int x = (int) cursorX;
-        int y = (int) cursorY;
-        BrovanNative.injectPointer(BrovanNative.POINTER_DOWN, BrovanNative.BUTTON_LEFT, x, y, BrovanNative.MK_LBUTTON);
-        BrovanNative.injectPointer(BrovanNative.POINTER_UP, BrovanNative.BUTTON_LEFT, x, y, 0);
+        PointerState.moved((int) cursorX, (int) cursorY);
+        PointerState.click(BrovanNative.BUTTON_LEFT);
     }
 
     private static float clamp(float value, int limit) {

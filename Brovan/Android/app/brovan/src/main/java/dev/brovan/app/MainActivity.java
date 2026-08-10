@@ -4,7 +4,6 @@ import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.ParcelFileDescriptor;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.ArrayAdapter;
@@ -34,6 +33,7 @@ import com.google.android.material.textfield.MaterialAutoCompleteTextView;
 import java.io.File;
 
 import dev.brovan.BrovanNative;
+import dev.brovan.BrovanSurfaceView;
 import dev.brovan.input.ControlOverlay;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -49,6 +49,7 @@ public class MainActivity extends AppCompatActivity {
 
     private Library library;
     private Settings settings;
+    private NavigationView navigation;
     private DrawerLayout drawer;
     private FrameLayout content;
     private MaterialToolbar toolbar;
@@ -57,6 +58,7 @@ public class MainActivity extends AppCompatActivity {
     private CircularProgressIndicator progress;
     private Uri selectedIso;
     private TextView isoLabel;
+    private int currentScreen;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -75,16 +77,29 @@ public class MainActivity extends AppCompatActivity {
         toolbar = findViewById(R.id.toolbar);
         toolbar.setNavigationOnClickListener(view -> drawer.open());
 
-        NavigationView navigation = findViewById(R.id.navigation);
+        navigation = findViewById(R.id.navigation);
         navigation.setNavigationItemSelectedListener(item -> {
             show(item.getItemId());
             drawer.close();
             return true;
         });
-        navigation.setCheckedItem(R.id.nav_library);
         insetDrawerHeader(navigation);
 
-        show(R.id.nav_library);
+        openScreen(R.id.nav_library);
+
+        if (savedInstanceState == null && !windowsFilesPresent() && !settings.setupDismissed()) {
+            startActivity(new Intent(this, SetupActivity.class));
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+
+        // The wizard can import a program, so the library it hands back to is a screen behind.
+        if (currentScreen == R.id.nav_library && adapter != null) {
+            refresh();
+        }
     }
 
     private void insetDrawerHeader(NavigationView navigation) {
@@ -108,8 +123,15 @@ public class MainActivity extends AppCompatActivity {
         worker.shutdownNow();
     }
 
+    private void openScreen(int itemId) {
+        navigation.setCheckedItem(itemId);
+        show(itemId);
+    }
+
     private void show(int itemId) {
         content.removeAllViews();
+
+        currentScreen = itemId;
 
         if (itemId == R.id.nav_windows) {
             toolbar.setTitle(R.string.nav_windows);
@@ -193,49 +215,26 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
-            runtimes.setEnabled(false);
-            install.setEnabled(false);
-            bar.setIndeterminate(true);
-            bar.setVisibility(View.VISIBLE);
-            detail.setVisibility(View.VISIBLE);
-            detail.setText(R.string.windows_runtimes_working);
+            startInstall(bar, detail, R.string.windows_runtimes_working, install, runtimes);
+            WindowsInstall.runtimes(this, worker, new WindowsInstall.Listener() {
+                @Override
+                public void onProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal) {
+                    // The package sizes are only known once the Visual Studio manifest is in, so the download
+                    // runs indeterminate until the native side reports a byte total.
+                    if (bytesTotal <= 0) {
+                        detail.setText(getString(R.string.setup_progress_downloaded, bytesDone >> 20));
+                        return;
+                    }
 
-            // The package sizes are only known once the Visual Studio manifest is in, so the download runs
-            // indeterminate until the native side reports a byte total.
-            BrovanNative.setInstallListener((filesDone, filesTotal, bytesDone, bytesTotal) -> runOnUiThread(() -> {
-                if (bytesTotal <= 0) {
-                    detail.setText(String.format(java.util.Locale.US, "%d MB", bytesDone >> 20));
-                    return;
+                    advance(bar, bytesDone, bytesTotal);
+                    detail.setText(getString(R.string.setup_progress_bytes, bytesDone >> 20, bytesTotal >> 20));
                 }
 
-                if (bar.isIndeterminate()) {
-                    bar.setIndeterminate(false);
-                    bar.setMax(1000);
-                }
-
-                bar.setProgress((int) (bytesDone * 1000 / bytesTotal), true);
-                detail.setText(String.format(java.util.Locale.US, "%d of %d MB",
-                        bytesDone >> 20, bytesTotal >> 20));
-            }));
-
-            worker.execute(() -> {
-                int result = BrovanNative.init(getFilesDir().getAbsolutePath());
-
-                if (result == BrovanNative.STATUS_OK || result == BrovanNative.STATUS_MISSING_WINDOWS_LIBS
-                        || result == BrovanNative.STATUS_MISSING_REGISTRY) {
-                    result = BrovanNative.installRuntimes(true);
-                }
-
-                int outcome = result;
-                runOnUiThread(() -> {
-                    BrovanNative.setInstallListener(null);
-                    bar.setVisibility(View.GONE);
-                    runtimes.setEnabled(true);
-                    install.setEnabled(true);
-                    detail.setText(outcome == BrovanNative.STATUS_OK
-                            ? R.string.windows_runtimes_done : R.string.windows_failed);
+                @Override
+                public void onFinished(int result) {
+                    finishInstall(bar, detail, result, R.string.windows_runtimes_done, install, runtimes);
                     showRuntimeState(runtimesStatus, runtimes);
-                });
+                }
             });
         });
 
@@ -247,82 +246,71 @@ public class MainActivity extends AppCompatActivity {
 
             CharSequence typed = source.getText();
             String media = typed == null || typed.toString().trim().isEmpty() ? null : typed.toString().trim();
-            Uri iso = selectedIso;
 
-            install.setEnabled(false);
             licensed.setEnabled(false);
-            runtimes.setEnabled(false);
-            bar.setIndeterminate(true);
-            bar.setVisibility(View.VISIBLE);
-            detail.setVisibility(View.VISIBLE);
-            detail.setText(R.string.windows_working);
-
-            BrovanNative.setInstallListener((filesDone, filesTotal, bytesDone, bytesTotal) -> runOnUiThread(() -> {
-                if (filesTotal <= 0) {
-                    return;
-                }
-
-                if (bar.isIndeterminate()) {
-                    bar.setIndeterminate(false);
-                    bar.setMax(1000);
-                }
-
-                bar.setProgress((int) (filesDone * 1000 / filesTotal), true);
-                detail.setText(String.format(java.util.Locale.US, "%d of %d files, %d of %d MB",
-                        filesDone, filesTotal, bytesDone >> 20, bytesTotal >> 20));
-            }));
-
-            worker.execute(() -> {
-                int result = BrovanNative.init(getFilesDir().getAbsolutePath());
-
-                if (result == BrovanNative.STATUS_OK || result == BrovanNative.STATUS_MISSING_WINDOWS_LIBS
-                        || result == BrovanNative.STATUS_MISSING_REGISTRY) {
-                    ParcelFileDescriptor descriptor = null;
-
-                    try {
-                        int handle = -1;
-
-                        if (iso != null) {
-                            descriptor = getContentResolver().openFileDescriptor(iso, "r");
-                            handle = descriptor == null ? -1 : descriptor.getFd();
-                        }
-
-                        result = BrovanNative.installWindows(handle >= 0 ? null : media, handle, true, 1);
-                    } catch (Exception failure) {
-                        result = BrovanNative.STATUS_FAILED;
-                    } finally {
-                        if (descriptor != null) {
-                            try {
-                                descriptor.close();
-                            } catch (java.io.IOException ignored) {
-                            }
-                        }
+            startInstall(bar, detail, R.string.windows_working, install, runtimes);
+            WindowsInstall.windows(this, worker, media, selectedIso, new WindowsInstall.Listener() {
+                @Override
+                public void onProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal) {
+                    if (filesTotal <= 0) {
+                        return;
                     }
+
+                    advance(bar, filesDone, filesTotal);
+                    detail.setText(getString(R.string.setup_progress_files,
+                            filesDone, filesTotal, bytesDone >> 20, bytesTotal >> 20));
                 }
 
-                int outcome = result;
-                runOnUiThread(() -> {
-                    BrovanNative.setInstallListener(null);
-                    bar.setVisibility(View.GONE);
-                    install.setEnabled(true);
+                @Override
+                public void onFinished(int result) {
                     licensed.setEnabled(true);
-                    runtimes.setEnabled(true);
-                    detail.setText(outcome == BrovanNative.STATUS_OK ? R.string.windows_done : R.string.windows_failed);
+                    finishInstall(bar, detail, result, R.string.windows_done, install, runtimes);
                     status.setText(windowsFilesPresent() ? R.string.windows_installed : R.string.windows_missing);
                     showRuntimeState(runtimesStatus, runtimes);
-                });
+                }
             });
         });
 
         return view;
     }
 
+    private void startInstall(LinearProgressIndicator bar, TextView detail, int messageId,
+                              MaterialButton... actions) {
+        for (MaterialButton action : actions) {
+            action.setEnabled(false);
+        }
+
+        bar.setIndeterminate(true);
+        bar.setVisibility(View.VISIBLE);
+        detail.setVisibility(View.VISIBLE);
+        detail.setText(messageId);
+    }
+
+    private void finishInstall(LinearProgressIndicator bar, TextView detail, int result, int doneId,
+                               MaterialButton... actions) {
+        for (MaterialButton action : actions) {
+            action.setEnabled(true);
+        }
+
+        bar.setVisibility(View.GONE);
+        detail.setText(result == BrovanNative.STATUS_OK ? getString(doneId) : getString(R.string.windows_failed));
+    }
+
+    private void advance(LinearProgressIndicator bar, long done, long total) {
+        if (bar.isIndeterminate()) {
+            bar.setIndeterminate(false);
+            bar.setMax(1000);
+        }
+
+        bar.setProgressCompat((int) (done * 1000 / total), true);
+    }
+
     private boolean windowsFilesPresent() {
-        return new File(getFilesDir(), "WindowsLibs").isDirectory();
+        return WindowsInstall.filesPresent(this);
     }
 
     private void showRuntimeState(TextView status, MaterialButton action) {
-        boolean present = new File(getFilesDir(), "WindowsLibs/msvcp140.dll").exists();
+        boolean present = WindowsInstall.runtimesPresent(this);
 
         status.setText(present ? R.string.windows_runtimes_installed : R.string.windows_runtimes_missing);
         action.setText(present ? R.string.windows_runtimes_again : R.string.windows_runtimes);
@@ -470,6 +458,20 @@ public class MainActivity extends AppCompatActivity {
         controls.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, schemeLabels));
         controls.setText(schemeLabels[settings.controlScheme()], false);
         controls.setOnItemClickListener((parent, item, position, id) -> settings.setControlScheme(position));
+
+        BrovanSurfaceView.PointerMode[] pointers = BrovanSurfaceView.PointerMode.values();
+        String[] pointerLabels = new String[pointers.length];
+        for (int i = 0; i < pointers.length; i++) {
+            pointerLabels[i] = pointers[i].label();
+        }
+
+        MaterialAutoCompleteTextView pointer = view.findViewById(R.id.pointer);
+        pointer.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, pointerLabels));
+        pointer.setText(pointerLabels[settings.pointerMode()], false);
+        pointer.setOnItemClickListener((parent, item, position, id) -> settings.setPointerMode(position));
+
+        view.findViewById(R.id.edit_controls).setOnClickListener(button ->
+                startActivity(new Intent(this, ControlsActivity.class)));
 
         MaterialSwitch jitCache = view.findViewById(R.id.jit_cache);
         jitCache.setChecked(settings.jitCache());
