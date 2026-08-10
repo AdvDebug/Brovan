@@ -43,6 +43,9 @@ namespace Brovan.Core.Helpers
         private static StreamWriter? _logWriter;
         private static int _logWriteCount;
         private static bool _logShutdownHooked;
+        private static bool? _outputRedirected;
+
+        private static bool OutputRedirected => _outputRedirected ??= Console.IsOutputRedirected;
 
         /// <summary>
         /// Suppresses Brovan host output while leaving guest console writes untouched.
@@ -240,9 +243,9 @@ namespace Brovan.Core.Helpers
             }
 
             string Text = Message.Substring(Prefix.Length).TrimStart();
-            bool UseAnsi = PrefixColor == null && PrefixTextColor != null && !Console.IsOutputRedirected;
+            bool UseAnsi = PrefixColor == null && PrefixTextColor != null && !OutputRedirected;
 
-            if (!HidePrefix)
+            if (!HidePrefix || OutputRedirected)
             {
                 if (UseAnsi)
                 {
@@ -250,11 +253,15 @@ namespace Brovan.Core.Helpers
                     Console.Write(Prefix + " ");
                     Console.Write("\x1b[0m");
                 }
-                else if (PrefixColor.HasValue)
+                else if (PrefixColor.HasValue && !OutputRedirected)
                 {
                     Console.ForegroundColor = PrefixColor.Value;
                     Console.Write(Prefix + " ");
                     Console.ResetColor();
+                }
+                else
+                {
+                    Console.Write(Prefix + " ");
                 }
             }
 

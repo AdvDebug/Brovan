@@ -83,6 +83,18 @@
     <string name="settings_edit_controls">Customize the on-screen controls</string>
     <string name="settings_edit_controls_summary">Place your own buttons, joysticks and touchpads, and bind each one to a key. Saving switches the control scheme to your layout.</string>
     <string name="settings_developer">Developer mode</string>
+    <string name="settings_dxvk">Direct3D games</string>
+    <string name="settings_dxvk_summary">DXVK translates Direct3D 8 to 11 into Vulkan, which is what this phone can actually run. Games that draw with Direct3D need it; everything else is unaffected.</string>
+    <string name="settings_dxvk_version">DXVK version</string>
+    <string name="settings_dxvk_version_latest">Latest release</string>
+    <string name="settings_dxvk_install">Get DXVK</string>
+    <string name="settings_dxvk_install_again">Reinstall DXVK</string>
+    <string name="settings_dxvk_installed">%1$s installed.</string>
+    <string name="settings_dxvk_missing">Not installed. Direct3D games will not start.</string>
+    <string name="settings_dxvk_working">Downloading DXVK…</string>
+    <string name="settings_dxvk_done">DXVK installed.</string>
+    <string name="settings_dxvk_failed">Download failed. Check the connection and try again.</string>
+    <string name="settings_dxvk_offline">Could not reach GitHub, so only the latest release can be chosen.</string>
 
     <string name="controls_title">Edit controls</string>
     <string name="controls_hint">Drag a control to move it. Tap one to change its key or size.</string>

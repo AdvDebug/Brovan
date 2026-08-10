@@ -131,10 +131,7 @@ namespace Brovan.Android
                 return;
 
             lock (_pending)
-            {
-                for (int i = 0; i < value.Length; i++)
-                    AppendLocked(value[i]);
-            }
+                AppendLocked(value.AsSpan());
         }
 
         public override void WriteLine(string value)
@@ -147,6 +144,41 @@ namespace Brovan.Android
         {
             lock (_pending)
                 EmitLocked();
+        }
+
+        private void AppendLocked(ReadOnlySpan<char> value)
+        {
+            while (!value.IsEmpty)
+            {
+                int Break = value.IndexOf('\n');
+                ReadOnlySpan<char> Chunk = Break < 0 ? value : value.Slice(0, Break);
+
+                if (Chunk.IndexOf('\r') < 0)
+                {
+                    while (!Chunk.IsEmpty)
+                    {
+                        int Room = MaximumLineLength - _pending.Length;
+                        ReadOnlySpan<char> Part = Chunk.Length <= Room ? Chunk : Chunk.Slice(0, Room);
+
+                        _pending.Append(Part);
+                        Chunk = Chunk.Slice(Part.Length);
+
+                        if (_pending.Length >= MaximumLineLength)
+                            EmitLocked();
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < Chunk.Length; i++)
+                        AppendLocked(Chunk[i]);
+                }
+
+                if (Break < 0)
+                    return;
+
+                EmitLocked();
+                value = value.Slice(Break + 1);
+            }
         }
 
         private void AppendLocked(char value)

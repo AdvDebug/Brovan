@@ -9,8 +9,12 @@
     <color name="text_primary">#FFE6EDF3</color>
     <color name="text_secondary">#FF95A1B2</color>
 
+    <!-- One per marker the emulator prefixes its output with: [!!] [-] [!] [+] [*] [#] [$] [/]. -->
     <color name="log_error">#FFF2707A</color>
     <color name="log_warn">#FFE8C36B</color>
     <color name="log_ok">#FF5BD68A</color>
+    <color name="log_trace">#FF8FBF9E</color>
     <color name="log_info">#FF6FB6F1</color>
+    <color name="log_special">#FFC792EA</color>
+    <color name="log_command">#FFFF8C00</color>
 </resources>

@@ -3,6 +3,8 @@ package dev.brovan.app;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.Spannable;
 import android.text.SpannableString;
 import android.text.SpannableStringBuilder;
@@ -49,8 +51,11 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
 
     private static final int MAX_LINES = 1200;
     private static final int TRIM_CHUNK = 200;
+    private static final long FLUSH_DELAY_MS = 80;
 
     private final ArrayDeque<CharSequence> lines = new ArrayDeque<>();
+    private final ArrayDeque<CharSequence> pending = new ArrayDeque<>();
+    private final Handler ui = new Handler(Looper.getMainLooper());
 
     private BrovanSurfaceView surface;
     private ControlOverlay controls;
@@ -60,6 +65,16 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private TextView log;
     private ScrollView logScroll;
     private boolean developerMode;
+    private boolean flushScheduled;
+    private boolean logStale;
+    private int logColorError;
+    private int logColorOk;
+    private int logColorWarn;
+    private int logColorTrace;
+    private int logColorInfo;
+    private int logColorSpecial;
+    private int logColorCommand;
+    private int logColorText;
 
     static Intent intentFor(Context context, Program program, Settings settings) {
         return new Intent(context, PlayerActivity.class)
@@ -94,6 +109,15 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         status = findViewById(R.id.status);
         log = findViewById(R.id.log);
         logScroll = findViewById(R.id.log_scroll);
+
+        logColorError = ContextCompat.getColor(this, R.color.log_error);
+        logColorOk = ContextCompat.getColor(this, R.color.log_ok);
+        logColorWarn = ContextCompat.getColor(this, R.color.log_warn);
+        logColorTrace = ContextCompat.getColor(this, R.color.log_trace);
+        logColorInfo = ContextCompat.getColor(this, R.color.log_info);
+        logColorSpecial = ContextCompat.getColor(this, R.color.log_special);
+        logColorCommand = ContextCompat.getColor(this, R.color.log_command);
+        logColorText = ContextCompat.getColor(this, R.color.text_primary);
 
         developerMode = getIntent().getBooleanExtra(EXTRA_DEVELOPER, false);
 
@@ -237,6 +261,12 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         if (visible) {
             surface.requestFocus();
             BrovanNative.requestRepaint();
+            return;
+        }
+
+        if (logStale) {
+            rebuildLog();
+            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         }
     }
 
@@ -261,38 +291,101 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         runOnUiThread(() -> status.setText(value));
     }
 
+    /**
+     * A trace line arrives on an emulator thread, so the text is styled there and only the batch is handed
+     * to the UI thread. One append and one scroll per window keeps a chatty guest from turning every line
+     * into a layout pass, which is what made the whole app crawl in developer mode.
+     */
     private void append(String line) {
+        CharSequence styled = style(line);
+
+        synchronized (pending) {
+            pending.addLast(styled);
+            while (pending.size() > MAX_LINES) {
+                pending.removeFirst();
+            }
+
+            if (flushScheduled) {
+                return;
+            }
+
+            flushScheduled = true;
+        }
+
+        ui.postDelayed(this::flushLog, FLUSH_DELAY_MS);
+    }
+
+    private void flushLog() {
+        SpannableStringBuilder batch = new SpannableStringBuilder();
+
+        synchronized (pending) {
+            flushScheduled = false;
+
+            for (CharSequence entry : pending) {
+                lines.addLast(entry);
+                batch.append(entry).append('\n');
+            }
+
+            pending.clear();
+        }
+
+        if (batch.length() == 0) {
+            return;
+        }
+
+        // Nothing is on screen while the console is hidden, so the history is kept and the text view is
+        // rebuilt from it the next time it is opened.
+        if (console.getVisibility() != View.VISIBLE) {
+            trim();
+            logStale = true;
+            return;
+        }
+
+        if (lines.size() > MAX_LINES || logStale) {
+            trim();
+            rebuildLog();
+        } else {
+            log.append(batch);
+        }
+
+        logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+    }
+
+    private void trim() {
+        while (lines.size() > MAX_LINES) {
+            for (int i = 0; i < TRIM_CHUNK && !lines.isEmpty(); i++) {
+                lines.removeFirst();
+            }
+        }
+    }
+
+    private void rebuildLog() {
+        SpannableStringBuilder builder = new SpannableStringBuilder();
+        for (CharSequence entry : lines) {
+            builder.append(entry).append('\n');
+        }
+
+        log.setText(builder);
+        logStale = false;
+    }
+
+    private CharSequence style(String line) {
         SpannableString styled = new SpannableString(line);
         styled.setSpan(new ForegroundColorSpan(colorFor(line)), 0, line.length(),
                 Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-
-        runOnUiThread(() -> {
-            lines.addLast(styled);
-            if (lines.size() > MAX_LINES) {
-                for (int i = 0; i < TRIM_CHUNK && !lines.isEmpty(); i++) {
-                    lines.removeFirst();
-                }
-
-                SpannableStringBuilder builder = new SpannableStringBuilder();
-                for (CharSequence entry : lines) {
-                    builder.append(entry).append("\n");
-                }
-                log.setText(builder);
-            } else {
-                log.append(styled);
-                log.append("\n");
-            }
-
-            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
-        });
+        return styled;
     }
 
+    /** Mirrors the markers the emulator colours its own console output with. */
     private int colorFor(String line) {
-        if (line.startsWith("[-]") || line.startsWith("[!!]")) return ContextCompat.getColor(this, R.color.log_error);
-        if (line.startsWith("[+]")) return ContextCompat.getColor(this, R.color.log_ok);
-        if (line.startsWith("[!]")) return ContextCompat.getColor(this, R.color.log_warn);
-        if (line.startsWith("[#]")) return ContextCompat.getColor(this, R.color.log_info);
-        return ContextCompat.getColor(this, R.color.text_primary);
+        if (line.startsWith("[!!]") || line.startsWith("[-]")) return logColorError;
+        if (line.startsWith("[!]")) return logColorWarn;
+        if (line.startsWith("[+]")) return logColorOk;
+        if (line.startsWith("[*]")) return logColorTrace;
+        if (line.startsWith("[#]")) return logColorInfo;
+        if (line.startsWith("[$]")) return logColorSpecial;
+        if (line.startsWith("[/]")) return logColorCommand;
+        return logColorText;
     }
 
     @Override
@@ -326,6 +419,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        ui.removeCallbacksAndMessages(null);
 
         // The emulator refuses a second guest in the same process, so the process goes with the activity.
         if (isFinishing()) {

@@ -35,6 +35,8 @@ import java.io.File;
 import dev.brovan.BrovanNative;
 import dev.brovan.BrovanSurfaceView;
 import dev.brovan.input.ControlOverlay;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -485,7 +487,86 @@ public class MainActivity extends AppCompatActivity {
         fit.setChecked(settings.fitWindow());
         fit.setOnCheckedChangeListener((button, checked) -> settings.setFitWindow(checked));
 
+        bindDxvk(view);
+
         return view;
+    }
+
+    private void bindDxvk(View view) {
+        TextView status = view.findViewById(R.id.dxvk_status);
+        MaterialAutoCompleteTextView version = view.findViewById(R.id.dxvk_version);
+        MaterialButton install = view.findViewById(R.id.dxvk_install);
+        LinearProgressIndicator bar = view.findViewById(R.id.dxvk_progress);
+        TextView detail = view.findViewById(R.id.dxvk_progress_text);
+
+        showDxvkState(status, install);
+        showDxvkVersions(version, Collections.emptyList());
+
+        // The release list needs the network, so the picker starts with the stored choice and grows once
+        // GitHub answers. Picking nothing still works: an empty version installs the newest release.
+        worker.execute(() -> {
+            List<String> tags = Dxvk.versions();
+            runOnUiThread(() -> {
+                if (version.isAttachedToWindow()) {
+                    showDxvkVersions(version, tags);
+                    if (tags.isEmpty()) {
+                        detail.setVisibility(View.VISIBLE);
+                        detail.setText(R.string.settings_dxvk_offline);
+                    }
+                }
+            });
+        });
+
+        install.setOnClickListener(button -> {
+            startInstall(bar, detail, R.string.settings_dxvk_working, install);
+            WindowsInstall.dxvk(this, worker, settings.dxvkVersion(), new WindowsInstall.Listener() {
+                @Override
+                public void onProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal) {
+                    if (bytesTotal <= 0) {
+                        detail.setText(getString(R.string.setup_progress_downloaded, bytesDone >> 20));
+                        return;
+                    }
+
+                    advance(bar, bytesDone, bytesTotal);
+                    detail.setText(getString(R.string.setup_progress_bytes, bytesDone >> 20, bytesTotal >> 20));
+                }
+
+                @Override
+                public void onFinished(int result) {
+                    install.setEnabled(true);
+                    bar.setVisibility(View.GONE);
+                    detail.setText(result == BrovanNative.STATUS_OK
+                            ? getString(R.string.settings_dxvk_done)
+                            : getString(R.string.settings_dxvk_failed));
+                    showDxvkState(status, install);
+                }
+            });
+        });
+    }
+
+    private void showDxvkVersions(MaterialAutoCompleteTextView picker, List<String> tags) {
+        List<String> labels = new ArrayList<>();
+        labels.add(getString(R.string.settings_dxvk_version_latest));
+
+        String chosen = settings.dxvkVersion();
+        if (!chosen.isEmpty() && !tags.contains(chosen)) {
+            labels.add(chosen);
+        }
+        labels.addAll(tags);
+
+        picker.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, labels));
+        picker.setText(chosen.isEmpty() ? labels.get(0) : chosen, false);
+        picker.setOnItemClickListener((parent, item, position, id) ->
+                settings.setDxvkVersion(position == 0 ? Dxvk.LATEST : labels.get(position)));
+    }
+
+    private void showDxvkState(TextView status, MaterialButton action) {
+        String installed = Dxvk.installedVersion(this);
+
+        status.setText(installed.isEmpty()
+                ? getString(R.string.settings_dxvk_missing)
+                : getString(R.string.settings_dxvk_installed, installed));
+        action.setText(installed.isEmpty() ? R.string.settings_dxvk_install : R.string.settings_dxvk_install_again);
     }
 
     private View createAbout() {

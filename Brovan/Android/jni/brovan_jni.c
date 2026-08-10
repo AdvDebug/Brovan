@@ -2,6 +2,7 @@
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <string.h>
@@ -13,6 +14,7 @@ extern int brovan_init(const char *baseDirectory);
 extern int brovan_install_windows(const char *media, int mediaDescriptor, int acceptLicense,
                                   int imageIndex);
 extern int brovan_install_runtimes(int acceptLicense);
+extern int brovan_install_dxvk(const char *version);
 extern void brovan_set_log_sink(void *sink);
 extern void brovan_set_exit_sink(void *sink);
 extern void brovan_set_install_progress_sink(void *sink);
@@ -39,11 +41,23 @@ static jclass g_callbacks;
 static jmethodID g_onLog;
 static jmethodID g_onExit;
 static jmethodID g_onInstallProgress;
+static pthread_key_t g_attachment_key;
+static int g_attachment_key_ready;
 
 typedef struct {
     JNIEnv *env;
     int attached;
 } Attachment;
+
+/* ART aborts a thread that exits while still attached, so a thread kept attached across calls must
+   detach from here. */
+static void detach_at_thread_exit(void *value) {
+    (void)value;
+
+    if (g_vm != NULL) {
+        (*g_vm)->DetachCurrentThread(g_vm);
+    }
+}
 
 static Attachment attach(void) {
     Attachment attachment = {NULL, 0};
@@ -58,10 +72,17 @@ static Attachment attach(void) {
 
     /* Guest and emulator threads are created by the .NET runtime and are unknown to the JVM until
        attached; any JNI call from them without this crashes the process. */
-    if ((*g_vm)->AttachCurrentThread(g_vm, &attachment.env, NULL) == JNI_OK) {
-        attachment.attached = 1;
+    if ((*g_vm)->AttachCurrentThread(g_vm, &attachment.env, NULL) != JNI_OK) {
+        return attachment;
     }
 
+    /* Developer mode sends thousands of trace lines down this path, and an attach/detach pair per line
+       costs far more than the call itself, so the attachment is kept for the life of the thread. */
+    if (g_attachment_key_ready && pthread_setspecific(g_attachment_key, attachment.env) == 0) {
+        return attachment;
+    }
+
+    attachment.attached = 1;
     return attachment;
 }
 
@@ -149,6 +170,7 @@ static jstring read_into_string(JNIEnv *env, int (*reader)(char *, int), int cap
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
     g_vm = vm;
+    g_attachment_key_ready = pthread_key_create(&g_attachment_key, detach_at_thread_exit) == 0;
     return JNI_VERSION_1_6;
 }
 
@@ -244,6 +266,19 @@ JNIEXPORT jint JNICALL METHOD(InstallRuntimes)(JNIEnv *env, jclass clazz, jint a
     return brovan_install_runtimes(acceptLicense);
 }
 
+JNIEXPORT jint JNICALL METHOD(InstallDxvk)(JNIEnv *env, jclass clazz, jstring version) {
+    (void)clazz;
+
+    const char *tag = version == NULL ? NULL : borrow(env, version);
+    int status = brovan_install_dxvk(tag);
+
+    if (tag != NULL) {
+        release(env, version, tag);
+    }
+
+    return status;
+}
+
 JNIEXPORT void JNICALL METHOD(SetSurface)(JNIEnv *env, jclass clazz, jobject surface, jint densityDpi) {
     (void)clazz;
 
@@ -292,6 +327,10 @@ JNIEXPORT void JNICALL METHOD(SetVerbose)(JNIEnv *env, jclass clazz, jint enable
     (void)env;
     (void)clazz;
     brovan_set_verbose(enabled);
+
+    /* Only the developer console reads the log sink. Dropping it otherwise keeps the emulator from
+       encoding and marshalling every line it writes for a listener that discards them. */
+    brovan_set_log_sink(enabled ? (void *)&on_log : NULL);
 }
 
 JNIEXPORT void JNICALL METHOD(SetJitCache)(JNIEnv *env, jclass clazz, jint enabled) {

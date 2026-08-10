@@ -367,6 +367,22 @@ namespace Brovan.Android
             return installed ? StatusOk : StatusFailed;
         }
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_install_dxvk")]
+        public static int InstallDxvk(byte* version)
+        {
+            if (Volatile.Read(ref _initialized) == 0)
+                return StatusNotInitialized;
+
+            if (Volatile.Read(ref _running) != 0)
+                return StatusAlreadyRunning;
+
+            bool installed = DxvkImporter.Import(AppContext.BaseDirectory,
+                version == null ? null : Marshal.PtrToStringUTF8((IntPtr)version),
+                message => AndroidLog.Write(AndroidNative.LogInfo, message), ReportInstallProgress);
+
+            return installed ? StatusOk : StatusFailed;
+        }
+
         private static void ReportInstallProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal)
         {
             IntPtr sink = Volatile.Read(ref _installProgressSink);

@@ -100,6 +100,14 @@ public final class BrovanNative {
         return nativeInstallRuntimes(acceptLicense ? 1 : 0);
     }
 
+    /**
+     * Downloads a DXVK release from GitHub and installs its libraries into the emulated System32 and
+     * SysWOW64, where they take the place of Direct3D. An empty version takes the newest release.
+     */
+    public static int installDxvk(String version) {
+        return nativeInstallDxvk(version == null ? "" : version);
+    }
+
     /** Call from surfaceCreated / surfaceChanged. */
     public static void setSurface(Surface surface, int densityDpi) {
         nativeSetSurface(surface, densityDpi);
@@ -232,6 +240,8 @@ public final class BrovanNative {
                                                    int imageIndex);
 
     private static native int nativeInstallRuntimes(int acceptLicense);
+
+    private static native int nativeInstallDxvk(String version);
 
     private static native void nativeSetSurface(Surface surface, int densityDpi);
 

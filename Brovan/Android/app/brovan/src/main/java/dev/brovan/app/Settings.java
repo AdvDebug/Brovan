@@ -17,6 +17,7 @@ final class Settings {
     private static final String KEY_SETUP_DISMISSED = "setup_dismissed";
     private static final String KEY_CONTROL_LAYOUT = "control_layout";
     private static final String KEY_POINTER = "pointer";
+    private static final String KEY_DXVK_VERSION = "dxvk_version";
 
     private final SharedPreferences preferences;
 
@@ -79,6 +80,15 @@ final class Settings {
 
     void setPointerMode(int value) {
         preferences.edit().putInt(KEY_POINTER, value).apply();
+    }
+
+    /** The DXVK release tag to download, or {@link Dxvk#LATEST} for whichever is newest at that moment. */
+    String dxvkVersion() {
+        return preferences.getString(KEY_DXVK_VERSION, Dxvk.LATEST);
+    }
+
+    void setDxvkVersion(String value) {
+        preferences.edit().putString(KEY_DXVK_VERSION, value).apply();
     }
 
     /** Keeps the get-started screen from taking over the launcher once the user has chosen to leave it. */
