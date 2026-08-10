@@ -2264,7 +2264,7 @@ namespace Brovan
                     return null;
 
                 if (TryResolveWindowsMount(WinPath, out string MountedHostPath))
-                    return GetSandboxedFullPath(MountedHostPath, CreateDirectories, PreserveFinalLink);
+                    return GetSandboxedFullPath(ResolveExistingHostCase(MountedHostPath), CreateDirectories, PreserveFinalLink);
 
                 char Drive = char.ToUpperInvariant(WinPath[0]);
                 string DriveRelative = WinPath.Substring(2).TrimStart('\\');
@@ -2274,8 +2274,91 @@ namespace Brovan
                     return null;
 
                 string HostPath = CombineWindowsRelativePath(Root, DriveRelative);
-                return GetSandboxedFullPath(HostPath, CreateDirectories, PreserveFinalLink);
+                return GetSandboxedFullPath(ResolveExistingHostCase(HostPath), CreateDirectories, PreserveFinalLink);
             }
+
+            private static readonly EnumerationOptions CaseInsensitiveComponentSearch = new EnumerationOptions
+            {
+                MatchCasing = MatchCasing.CaseInsensitive,
+                MatchType = MatchType.Simple,
+                RecurseSubdirectories = false,
+                ReturnSpecialDirectories = false,
+                IgnoreInaccessible = true,
+            };
+
+            /// <summary>
+            /// Rewrites the components of a host path to the casing the host filesystem actually uses.
+            /// </summary>
+            private static string ResolveExistingHostCase(string HostPath)
+            {
+                if (IsWindows || string.IsNullOrEmpty(HostPath))
+                    return HostPath;
+
+                if (File.Exists(HostPath) || Directory.Exists(HostPath))
+                    return HostPath;
+
+                string Root = Path.GetPathRoot(HostPath);
+                if (string.IsNullOrEmpty(Root))
+                    return HostPath;
+
+                string Relative = HostPath.Substring(Root.Length);
+                if (Relative.Length == 0)
+                    return HostPath;
+
+                string[] Components = Relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string Resolved = Root;
+                bool Rewritten = false;
+
+                for (int i = 0; i < Components.Length; i++)
+                {
+                    string Component = Components[i];
+                    if (Component.Length == 0)
+                        continue;
+
+                    string Candidate = Path.Combine(Resolved, Component);
+                    if (File.Exists(Candidate) || Directory.Exists(Candidate))
+                    {
+                        Resolved = Candidate;
+                        continue;
+                    }
+
+                    string Match = FindHostEntryIgnoringCase(Resolved, Component);
+                    if (Match == null)
+                    {
+                        for (int j = i; j < Components.Length; j++)
+                        {
+                            if (Components[j].Length != 0)
+                                Resolved = Path.Combine(Resolved, Components[j]);
+                        }
+
+                        return Rewritten ? Resolved : HostPath;
+                    }
+
+                    Resolved = Match;
+                    Rewritten = true;
+                }
+
+                return Rewritten ? Resolved : HostPath;
+            }
+
+            private static string FindHostEntryIgnoringCase(string Directory, string Component)
+            {
+                if (Component.IndexOfAny(WildcardCharacters) >= 0)
+                    return null;
+
+                try
+                {
+                    foreach (string Entry in System.IO.Directory.EnumerateFileSystemEntries(Directory, Component, CaseInsensitiveComponentSearch))
+                        return Entry;
+                }
+                catch
+                {
+                }
+
+                return null;
+            }
+
+            private static readonly char[] WildcardCharacters = { '*', '?' };
 
             private static bool TryResolveWindowsMount(string WinPath, out string HostPath)
             {
