@@ -197,6 +197,11 @@ namespace Brovan.Android
             {
             }
 
+            // Touch input has no pointer to move; the guest's own cursor position is authoritative here.
+            public void WarpCursor(int clientX, int clientY)
+            {
+            }
+
             public void Show() => Visible = true;
 
             public void Hide() => Visible = false;

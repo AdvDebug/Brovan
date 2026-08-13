@@ -508,18 +508,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                 case TOKEN_INFORMATION_CLASS.TokenPrivateNameSpace:
-                    {
-                        uint RequiredSize = 8;
-                        WriteReturnLength(RequiredSize);
-
-                        if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
-
-                        if (!Instance._emulator.WriteMemory(TokenInformation, 0u, 4))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
+                    return WriteUInt32Info(0);
 
                 default:
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;

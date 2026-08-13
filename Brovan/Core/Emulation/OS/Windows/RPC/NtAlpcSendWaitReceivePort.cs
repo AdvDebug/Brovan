@@ -8,6 +8,17 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal sealed class NtAlpcSendWaitReceivePort : IWinSyscall
     {
         private const int PortMessageHeaderSize = 0x28;
+
+        private const uint AlpcMessageSecurityAttribute = 0x80000000;
+        private const uint AlpcMessageViewAttribute = 0x40000000;
+        private const uint AlpcMessageContextAttribute = 0x20000000;
+        private const uint AlpcMessageHandleAttribute = 0x10000000;
+
+        private const int AlpcAttributeHeaderSize = 8;
+        private const int AlpcSecurityAttributeSize = 24;
+        private const int AlpcViewAttributeSize = 32;
+        private const int AlpcContextAttributeSize = 32;
+        private const int AlpcHandleAttributeSize = 24;
         private const int OffPmDataLength = 0x00;
         private const int OffPmTotalLength = 0x02;
         private const int OffPmMessageId = 0x18;
@@ -76,27 +87,39 @@ namespace Brovan.Core.Emulation.OS.Windows
                 SendBytes = Instance.ReadMemory(SendMessagePtr, SendTotalLength);
             }
 
+            uint AllocatedAttributes = 0;
             if (ReceiveMessageAttributesPtr != 0 && Instance.IsRegionMapped(ReceiveMessageAttributesPtr, 8))
             {
-                Instance._emulator.WriteMemory(ReceiveMessageAttributesPtr + 0, 0u);
+                AllocatedAttributes = Instance._emulator.ReadMemoryUInt(ReceiveMessageAttributesPtr);
+                Instance._emulator.WriteMemory(ReceiveMessageAttributesPtr + 0, AllocatedAttributes);
                 Instance._emulator.WriteMemory(ReceiveMessageAttributesPtr + 4, 0u);
             }
 
             if (SendBytes != null && (Instance.Settings.Flags & LogFlags.General) != 0)
-                Instance.TriggerEventMessage($"[+] ALPC send \"{Port.Name}\" len=0x{SendBytes.Length:X}", LogFlags.General);
+                Instance.TriggerEventMessage($"[+] ALPC send \"{Port.Name}\" len=0x{SendBytes.Length:X} reply={(ReceiveMessagePtr != 0 ? "yes" : "no")}", LogFlags.General);
+
+            if (SendBytes == null && ReceiveMessagePtr != 0 && (Instance.Settings.Flags & LogFlags.General) != 0)
+                Instance.TriggerEventMessage($"[+] ALPC receive-only on \"{Port.Name}\"", LogFlags.General);
 
             if (ReceiveMessagePtr != 0)
             {
                 byte[] ReplyBytes = null;
+                PortReply Reply = null;
                 if (SendBytes != null && Port.Handler != null)
                 {
-                    Port.Handler(Port, SendBytes, out byte[] HandlerReply, Instance);
-                    ReplyBytes = HandlerReply ?? SendBytes;
+                    Reply = new PortReply();
+                    Port.ReceivedHandles = ReadHandleAttribute(Instance, SendMessageAttributesPtr);
+                    Port.Handler(Port, SendBytes, Reply, Instance);
+                    ReplyBytes = Reply.Data ?? SendBytes;
                 }
                 else if (SendBytes != null)
                 {
                     ReplyBytes = SendBytes;
                 }
+
+                Port.DeliveredHandles = Reply?.Handles;
+                if (Port.DeliveredHandles != null)
+                    PublishHandleAttribute(Instance, ReceiveMessageAttributesPtr, AllocatedAttributes, Port.DeliveredHandles.Count);
 
                 ulong WriteLength = (ulong)(ReplyBytes?.Length ?? PortMessageHeaderSize);
                 if (WriteLength > ReceiveBufferLength)
@@ -154,6 +177,58 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_TIMEOUT;
 
             return NTSTATUS.STATUS_TIMEOUT;
+        }
+
+        /// <summary>
+        /// Announces handles that travel with the reply.
+        /// </summary>
+        private static void PublishHandleAttribute(BinaryEmulator Instance, ulong AttributesPtr, uint AllocatedAttributes, int HandleCount)
+        {
+            if (AttributesPtr == 0 || HandleCount <= 0 || (AllocatedAttributes & AlpcMessageHandleAttribute) == 0)
+                return;
+
+            ulong Offset = AlpcAttributeHeaderSize;
+            if ((AllocatedAttributes & AlpcMessageSecurityAttribute) != 0)
+                Offset += AlpcSecurityAttributeSize;
+            if ((AllocatedAttributes & AlpcMessageViewAttribute) != 0)
+                Offset += AlpcViewAttributeSize;
+            if ((AllocatedAttributes & AlpcMessageContextAttribute) != 0)
+                Offset += AlpcContextAttributeSize;
+
+            if (!Instance.IsRegionMapped(AttributesPtr + Offset, AlpcHandleAttributeSize))
+                return;
+
+            Instance._emulator.WriteMemory(AttributesPtr + 4, AlpcMessageHandleAttribute);
+            Instance._emulator.WriteMemory(AttributesPtr + Offset + 0x00, 0u);
+            Instance._emulator.WriteMemory(AttributesPtr + Offset + 0x08, 0UL, 8);
+            Instance._emulator.WriteMemory(AttributesPtr + Offset + 0x10, (uint)HandleCount);
+        }
+
+        private static List<ulong> ReadHandleAttribute(BinaryEmulator Instance, ulong AttributesPtr)
+        {
+            if (AttributesPtr == 0 || !Instance.IsRegionMapped(AttributesPtr, AlpcAttributeHeaderSize))
+                return null;
+
+            uint ValidAttributes = Instance._emulator.ReadMemoryUInt(AttributesPtr + 4);
+            if ((ValidAttributes & AlpcMessageHandleAttribute) == 0)
+                return null;
+
+            ulong Offset = AlpcAttributeHeaderSize;
+            if ((ValidAttributes & AlpcMessageSecurityAttribute) != 0)
+                Offset += AlpcSecurityAttributeSize;
+            if ((ValidAttributes & AlpcMessageViewAttribute) != 0)
+                Offset += AlpcViewAttributeSize;
+            if ((ValidAttributes & AlpcMessageContextAttribute) != 0)
+                Offset += AlpcContextAttributeSize;
+
+            if (!Instance.IsRegionMapped(AttributesPtr + Offset, AlpcHandleAttributeSize))
+                return null;
+
+            ulong Handle = Instance._emulator.ReadMemoryULong(AttributesPtr + Offset + 0x08);
+            if (Handle == 0)
+                return null;
+
+            return new List<ulong> { Handle };
         }
 
         private static void FinalizeReplyHeader(Span<byte> Reply, ushort TotalLength)

@@ -42,7 +42,15 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
                 if (RegKey == null)
+                {
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    {
+                        IHandleObject Existing = Instance.WinHelper.HandleManager.GetObjectByHandle(KeyHandle);
+                        Instance.TriggerEventMessage($"[!] NtQueryKey: handle 0x{KeyHandle:X} is {(Existing == null ? "unknown" : Existing.ObjectType + " \"" + Existing.ObjectId + "\"")}, not a registry key (class {KeyInformationClass}).", LogFlags.Syscall);
+                    }
+
                     return NTSTATUS.STATUS_INVALID_HANDLE;
+                }
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtQueryKey Running with the FullPath: {RegKey.FullPath}", LogFlags.Syscall);

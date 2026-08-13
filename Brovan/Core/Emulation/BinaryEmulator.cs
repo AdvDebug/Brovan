@@ -395,6 +395,12 @@ namespace Brovan.Core.Emulation
         private ulong _timestampCounter = 0x100000000UL;
 
         private const ulong TscCyclesPerInstruction = 3;
+
+        /// <summary>
+        /// How long the scheduler blocks in one go when no guest thread can run.
+        /// </summary>
+        private const int IdleWaitSliceMs = 5;
+
         private const ulong TscCyclesPerMillisecond = 3_000_000UL;
         private const ulong RdtscReadCycles = 60;
         private const ulong RdtscpReadCycles = 90;
@@ -452,6 +458,26 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
+        /// The performance counter, on the same timebase as <see cref="EmulatedTickCount64"/> and at finer
+        /// resolution than it.
+        /// </summary>
+        internal ulong GetEmulatedPerformanceCounter()
+        {
+            const long QpcFrequency = OS.Windows.KuserSharedDataManager.QpcFrequency;
+
+            long HostTicks = _wallClock.ElapsedTicks;
+            long HostFrequency = System.Diagnostics.Stopwatch.Frequency;
+            long Elapsed = HostFrequency == QpcFrequency
+                ? HostTicks
+                : (long)((decimal)HostTicks * QpcFrequency / HostFrequency);
+
+            long Skew = Volatile.Read(ref _emulatedTimeSkewMilliseconds);
+            long SkewCounts = Skew > long.MaxValue / (QpcFrequency / 1000) ? long.MaxValue : Skew * (QpcFrequency / 1000);
+
+            return unchecked((ulong)(Elapsed > long.MaxValue - SkewCounts ? long.MaxValue : Elapsed + SkewCounts));
+        }
+
+        /// <summary>
         /// Advances guest time for a wait that was not served in real time.
         /// </summary>
         internal void AdvanceEmulatedTimeMilliseconds(long Milliseconds, bool AdvanceTimestampCounter = false)
@@ -474,6 +500,10 @@ namespace Brovan.Core.Emulation
                 else
                     _timestampCounter += Ticks * TscCyclesPerMillisecond;
             }
+
+            // A skew jump is the one moment the page is guaranteed stale, and the guest usually reads it
+            // immediately afterwards: the wait it was serving has just come due.
+            WinHelper?.KuserSharedData?.RefreshIfUnhooked();
         }
 
         /// <summary>
@@ -2246,7 +2276,11 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 long Delta = Thread.WaitDeadline - Now;
-                if (Delta > 0 && Delta < BestDelta)
+
+                if (Delta <= 0)
+                    return true;
+
+                if (Delta < BestDelta)
                     BestDelta = Delta;
             }
 
@@ -2531,19 +2565,17 @@ namespace Brovan.Core.Emulation
                         if (TryGetNextWaitSleepMs(out int SleepMs, int.MaxValue))
                         {
                             if (Debug)
-                                TriggerDebugMessage($"scheduler: no runnable thread, advancing guest time by {SleepMs}ms");
-                            if (HasActiveGetMessageWait())
-                                Thread.Sleep(Math.Min(SleepMs, 16));
-                            AdvanceEmulatedTimeMilliseconds(SleepMs, AdvanceTimestampCounter: true);
+                                TriggerDebugMessage($"scheduler: no runnable thread, waiting up to {SleepMs}ms");
+                            Thread.Sleep(Math.Min(SleepMs, IdleWaitSliceMs));
+                            WinHelper?.KuserSharedData?.RefreshIfUnhooked();
                             WakeupScanRequired = true;
                             continue;
                         }
 
                         if (HasActiveGetMessageWait())
                         {
-                            const int MessagePumpPollMs = 10;
-                            Thread.Sleep(MessagePumpPollMs);
-                            AdvanceEmulatedTimeMilliseconds(MessagePumpPollMs, AdvanceTimestampCounter: true);
+                            Thread.Sleep(IdleWaitSliceMs);
+                            WinHelper?.KuserSharedData?.RefreshIfUnhooked();
                             WakeupScanRequired = true;
                             continue;
                         }
@@ -2625,30 +2657,20 @@ namespace Brovan.Core.Emulation
                 ImmaBeEmulatedOOO.InstructionsExecuted += SchedulerSliceWork;
                 Total += SchedulerSliceWork;
                 AdvanceTimestampCounter(SchedulerSliceWork);
-                bool AdvancedEmulatedTime = false;
+
+                bool TimedWaitRescanDue = false;
                 if (SchedulerSliceWork > 1)
                 {
                     PendingSchedulerTimeCycles += (ulong)SchedulerSliceWork * TscCyclesPerInstruction;
                     if (PendingSchedulerTimeCycles >= SchedulerCyclesPerMillisecond)
                     {
-                        ulong TimeBudgetMs = PendingSchedulerTimeCycles / SchedulerCyclesPerMillisecond;
-                        int MaxAdvanceMs = TimeBudgetMs > int.MaxValue ? int.MaxValue : (int)TimeBudgetMs;
-
-                        if (TryGetNextWaitSleepMs(out int SliceSleepMs, MaxAdvanceMs))
-                        {
-                            AdvanceEmulatedTimeMilliseconds(SliceSleepMs);
-                            AdvancedEmulatedTime = true;
-                            ulong ConsumedCycles = (ulong)SliceSleepMs * SchedulerCyclesPerMillisecond;
-                            PendingSchedulerTimeCycles = ConsumedCycles >= PendingSchedulerTimeCycles ? 0 : PendingSchedulerTimeCycles - ConsumedCycles;
-                        }
-                        else
-                        {
-                            PendingSchedulerTimeCycles = 0;
-                        }
+                        PendingSchedulerTimeCycles = 0;
+                        TimedWaitRescanDue = true;
                     }
                 }
 
                 Slices++;
+                WinHelper?.KuserSharedData?.RefreshIfUnhooked();
                 ImmaBeEmulatedOOO.LastRunTick = SchedulerTick;
 
                 if (ImmaBeEmulatedOOO.Context?.RIP == 0)
@@ -2687,11 +2709,11 @@ namespace Brovan.Core.Emulation
                     KnownThreadOrderCount = ThreadOrder.Count;
                 }
 
-                WakeupScanRequired = SliceRequestedRefresh || AdvancedEmulatedTime || ThreadOrder.Count != KnownThreadOrderCount || ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting;
+                WakeupScanRequired = SliceRequestedRefresh || TimedWaitRescanDue || ThreadOrder.Count != KnownThreadOrderCount || ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting;
 
-                if (Debug && (Slices <= 64 || (Slices & 0xFF) == 0 || ImmaBeEmulatedOOO.State != StateBeforeSlice || SliceRequestedRefresh || AdvancedEmulatedTime))
+                if (Debug && (Slices <= 64 || (Slices & 0xFF) == 0 || ImmaBeEmulatedOOO.State != StateBeforeSlice || SliceRequestedRefresh || TimedWaitRescanDue))
                 {
-                    TriggerDebugMessage($"scheduler: slice tid={ImmaBeEmulatedOOO.ThreadId} {StateBeforeSlice}->{ImmaBeEmulatedOOO.State} work={SchedulerSliceWork} total={Total} rip=0x{RipBeforeSlice:X}->0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X} refresh={SliceRequestedRefresh} advancedTime={AdvancedEmulatedTime} boost={ImmaBeEmulatedOOO.DynamicBoost}");
+                    TriggerDebugMessage($"scheduler: slice tid={ImmaBeEmulatedOOO.ThreadId} {StateBeforeSlice}->{ImmaBeEmulatedOOO.State} work={SchedulerSliceWork} total={Total} rip=0x{RipBeforeSlice:X}->0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X} refresh={SliceRequestedRefresh} rescanDue={TimedWaitRescanDue} boost={ImmaBeEmulatedOOO.DynamicBoost}");
                 }
 
                 if (MaxTotalInstructions != 0 && Total >= MaxTotalInstructions)

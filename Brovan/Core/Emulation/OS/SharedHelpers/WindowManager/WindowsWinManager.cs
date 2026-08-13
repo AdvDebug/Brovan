@@ -853,6 +853,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 }
             }
 
+            public void WarpCursor(int clientX, int clientY)
+            {
+                EnsureAlive();
+
+                POINT Point = new POINT { X = clientX, Y = clientY };
+                if (ClientToScreen(_hwnd, ref Point))
+                    SetCursorPos(Point.X, Point.Y);
+            }
+
             public void Present()
             {
                 EnsureAlive();
@@ -980,6 +989,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             public int X;
             public int Y;
         }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetCursorPos(int X, int Y);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT

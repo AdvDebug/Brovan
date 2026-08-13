@@ -103,6 +103,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial int XFlush(IntPtr display);
 
         [LibraryImport("libX11.so.6")]
+        public static partial int XWarpPointer(IntPtr display, IntPtr sourceWindow, IntPtr destinationWindow,
+            int sourceX, int sourceY, uint sourceWidth, uint sourceHeight, int destinationX, int destinationY);
+
+        [LibraryImport("libX11.so.6")]
         public static partial int XSync(IntPtr display, [MarshalAs(UnmanagedType.I4)] int discard);
 
         [LibraryImport("libX11.so.6")]
@@ -1584,6 +1588,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     _manager.ApplyDecorations(_window, _decorated);
                     X11.XFlush(_display);
                 }
+            }
+
+            public void WarpCursor(int clientX, int clientY)
+            {
+                EnsureAlive();
+
+                X11.XWarpPointer(_display, IntPtr.Zero, _window, 0, 0, 0, 0, clientX, clientY);
+                X11.XFlush(_display);
             }
 
             public void Present()

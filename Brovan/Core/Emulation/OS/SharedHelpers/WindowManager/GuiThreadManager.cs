@@ -12,6 +12,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         RenderText,
         GdiPrimitive,
         CreateWindow,
+        WarpCursor,
         Shutdown,
     }
 
@@ -139,6 +140,17 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 Utils.LogError($"[GuiThreadManager] CreateWindow failed: {ex.Message}");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Moves the host pointer to a point in the window's client area.
+        /// </summary>
+        public void EnqueueWarpCursor(int clientX, int clientY)
+        {
+            if (_disposed)
+                return;
+
+            Submit(new GuiCommand { Kind = GuiCommandKind.WarpCursor, X = clientX, Y = clientY });
         }
 
         public void EnqueuePresent(string title, int width, int height, bool visible, WindowState state)
@@ -393,6 +405,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 case GuiCommandKind.CreateWindow:
                     ExecuteCreateWindow((CreateWindowRequest)command.Request);
+                    return;
+
+                case GuiCommandKind.WarpCursor:
+                    window?.WarpCursor(command.X, command.Y);
                     return;
 
                 case GuiCommandKind.Shutdown:

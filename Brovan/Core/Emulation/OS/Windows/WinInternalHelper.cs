@@ -170,32 +170,44 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Handle == 0;
         }
 
+        private bool TryGetEntry(ulong Handle, out ulong Key, out HandleEntry Entry)
+        {
+            if (HandleTable.TryGetValue(Handle, out Entry))
+            {
+                Key = Handle;
+                return true;
+            }
+
+            Key = Handle & ~3UL;
+            return Key != Handle && HandleTable.TryGetValue(Key, out Entry);
+        }
+
         public ObjectHandleFlags GetHandleFlags(ulong Handle)
         {
-            if (HandleTable.TryGetValue(Handle, out HandleEntry Entry))
+            if (TryGetEntry(Handle, out _, out HandleEntry Entry))
                 return Entry.Flags;
             return ObjectHandleFlags.None;
         }
 
         public bool SetHandleFlags(ulong Handle, ObjectHandleFlags Flags)
         {
-            if (!HandleTable.TryGetValue(Handle, out HandleEntry Entry))
+            if (!TryGetEntry(Handle, out ulong Key, out HandleEntry Entry))
                 return false;
             Entry.Flags = Flags;
-            HandleTable[Handle] = Entry;
+            HandleTable[Key] = Entry;
             return true;
         }
 
         public T? GetObjectByHandle<T>(ulong Handle) where T : class, IHandleObject
         {
-            if (HandleTable.TryGetValue(Handle, out HandleEntry Entry) && Entry.Object is T typedObj)
+            if (TryGetEntry(Handle, out _, out HandleEntry Entry) && Entry.Object is T typedObj)
                 return typedObj;
             return null;
         }
 
         public IHandleObject? GetObjectByHandle(ulong Handle)
         {
-            if (HandleTable.TryGetValue(Handle, out HandleEntry Entry))
+            if (TryGetEntry(Handle, out _, out HandleEntry Entry))
                 return Entry.Object;
             return null;
         }
@@ -223,25 +235,25 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public AccessMask GetPermissionsByHandle(ulong Handle)
         {
-            if (HandleTable.TryGetValue(Handle, out HandleEntry Entry))
+            if (TryGetEntry(Handle, out _, out HandleEntry Entry))
                 return Entry.Permissions;
             return AccessMask.None;
         }
 
         public bool TryGetHandle(ulong Handle, out HandleEntry Entry)
         {
-            return HandleTable.TryGetValue(Handle, out Entry);
+            return TryGetEntry(Handle, out _, out Entry);
         }
 
         public bool TryRemoveHandle(ulong Handle, out HandleEntry Entry)
         {
-            if (!HandleTable.TryGetValue(Handle, out Entry))
+            if (!TryGetEntry(Handle, out ulong Key, out Entry))
                 return false;
-            HandleTable.Remove(Handle);
+            HandleTable.Remove(Key);
             IHandleObject obj = Entry.Object;
             if (ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
             {
-                Handles.Remove(Handle);
+                Handles.Remove(Key);
                 if (Handles.Count == 0)
                     ObjectIdToHandles.Remove(obj.ObjectId);
             }
@@ -250,14 +262,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool RemoveHandle(ulong Handle)
         {
-            if (!HandleTable.TryGetValue(Handle, out HandleEntry Entry))
+            if (!TryGetEntry(Handle, out ulong Key, out HandleEntry Entry))
                 return false;
             IHandleObject obj = Entry.Object;
-            HandleTable.Remove(Handle);
+            HandleTable.Remove(Key);
 
             if (ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
             {
-                Handles.Remove(Handle);
+                Handles.Remove(Key);
 
                 if (Handles.Count == 0)
                     ObjectIdToHandles.Remove(obj.ObjectId);
@@ -284,19 +296,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool HandleExists(ulong Handle)
         {
-            return HandleTable.ContainsKey(Handle);
+            return TryGetEntry(Handle, out _, out _);
         }
 
         public bool HandleExists(ulong Handle, HandleType type)
         {
-            if (!HandleTable.TryGetValue(Handle, out HandleEntry Entry))
+            if (!TryGetEntry(Handle, out _, out HandleEntry Entry))
                 return false;
             return Entry.Object != null && Entry.Object.ObjectType == type;
         }
 
         public bool CheckAccess(ulong Handle, AccessMask RequiredAccess)
         {
-            if (!HandleTable.TryGetValue(Handle, out HandleEntry Entry))
+            if (!TryGetEntry(Handle, out _, out HandleEntry Entry))
                 return false;
             AccessMask GrantedAccess = Entry.Permissions;
 
@@ -340,6 +352,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly BinaryEmulator Emulator;
         private MemoryHookCallback ReadHook;
         private bool Installed;
+        private bool RefreshedOnRead;
 
         private long LastUpdateTimestamp;
 
@@ -360,7 +373,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             BaseInterruptTime = ReadKsystemTimeFromBuffer(Page, OffsetInterruptTime);
             LastUpdateTimestamp = 0;
 
-            if (!Emulator._emulator.MapMmio(Emulator.KUSER_SHARED_DATA, PageSize, FillTimeFields, IgnoreWrite))
+            RefreshedOnRead = Emulator._emulator.MapMmio(Emulator.KUSER_SHARED_DATA, PageSize, FillTimeFields, IgnoreWrite);
+            if (!RefreshedOnRead)
             {
                 if (!Emulator.IsRegionMapped(Emulator.KUSER_SHARED_DATA, PageSize) &&
                     Emulator.MapMemoryRegion(Emulator.KUSER_SHARED_DATA, PageSize, MemoryProtection.Read) == 0)
@@ -369,11 +383,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 ReadHook = OnRead;
-                if (Emulator._emulator.AddMemoryHook(Emulator.KUSER_SHARED_DATA,
-                        Emulator.KUSER_SHARED_DATA + (PageSize - 1), BackendHookType.MemoryRead, ReadHook) == IntPtr.Zero)
-                {
-                    Utils.LogError($"[KUSER_MANAGER] No way to keep KUSER_SHARED_DATA current: {Emulator.GetLastError()}");
-                }
+                RefreshedOnRead = Emulator._emulator.AddMemoryHook(Emulator.KUSER_SHARED_DATA,
+                    Emulator.KUSER_SHARED_DATA + (PageSize - 1), BackendHookType.MemoryRead, ReadHook) != IntPtr.Zero;
             }
 
             if (!Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA, Page))
@@ -391,6 +402,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             UpdateDynamicFields(false);
             return true;
+        }
+
+        /// <summary>
+        /// Brings the clock fields forward when no hooks/MMIO are installed.
+        /// </summary>
+        public void RefreshIfUnhooked()
+        {
+            if (RefreshedOnRead)
+                return;
+
+            UpdateDynamicFields(false);
         }
 
         private void FillTimeFields(ulong Offset, Span<byte> Destination)
@@ -1049,6 +1071,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal static class Win32kMessageOnlyParent
     {
         public const ulong HwndMessage = 0xFFFFFFFFFFFFFFFDUL;
+        private const ulong HwndMessage32 = 0xFFFFFFFDUL;
+
+        public static bool IsHwndMessage(ulong Hwnd) => Hwnd == HwndMessage || Hwnd == HwndMessage32;
 
         public static WinWindow Ensure(BinaryEmulator Instance)
         {

@@ -597,6 +597,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         void Present();
 
+        void WarpCursor(int clientX, int clientY);
+
         IntPtr NativeHandle { get; }
 
         void Show();
