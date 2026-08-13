@@ -133,6 +133,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             ApplySharedSectionToPeb(Instance, Section.BackingAddress);
+
+            // The PEB keeps pointers into the shared section for the lifetime of the process, so it counts
+            // as a view of its own. a guest that opens and closes the section handle must not free it.
+            Section.MappedViewCount++;
             return true;
         }
 
@@ -181,6 +185,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Instance.WinHelper.WritePointer(BaseAddressPtr, Base);
                 Instance.WinHelper.WritePointer(ViewSizePtr, Size);
+                Section.MappedViewCount++;
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtMapViewOfSection: SharedSection Base=0x{Base:X}, Size=0x{Size:X}", LogFlags.Syscall);
@@ -294,6 +299,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Instance.WinHelper.WritePointer(ViewSizePtr, ReturnedSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            Section.MappedViewCount++;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtMapViewOfSection: Section=0x{SectionHandle:X}, Base=0x{ReturnedBase:X}, Size=0x{ReturnedSize:X}, Image={Section.IsImage}, Prot=0x{Win32Protect:X}", LogFlags.Syscall);

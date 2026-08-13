@@ -15,8 +15,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong ClassVersionPtr = Instance.WinHelper.GetArg(2);
             ulong WindowNamePtr = Instance.WinHelper.GetArg(3);
             ulong StyleArg = Instance.WinHelper.GetArg(4);
+            const int UseDefaultPosition = unchecked((int)0x80000000);
+
             int x = unchecked((int)Instance.WinHelper.GetArg(5));
             int y = unchecked((int)Instance.WinHelper.GetArg(6));
+
+            if (x == UseDefaultPosition)
+                x = 0;
+
+            if (y == UseDefaultPosition)
+                y = 0;
             int width = unchecked((int)Instance.WinHelper.GetArg(7));
             int height = unchecked((int)Instance.WinHelper.GetArg(8));
             ulong ParentHwnd = Instance.WinHelper.GetArg(9);
@@ -24,7 +32,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong InstanceHandle = Instance.WinHelper.GetArg(11);
             ulong CreateParam = Instance.WinHelper.GetArg(12);
 
-            if (ParentHwnd != 0 && Instance.WinHelper.GetWindow(ParentHwnd) == null)
+            if (Win32kMessageOnlyParent.IsHwndMessage(ParentHwnd))
+            {
+                Win32kMessageOnlyParent.Ensure(Instance);
+                ParentHwnd = Win32kMessageOnlyParent.HwndMessage;
+            }
+            else if (ParentHwnd != 0 && Instance.WinHelper.GetWindow(ParentHwnd) == null)
             {
                 Instance.SetLastWinError(ERROR_INVALID_WINDOW_HANDLE);
                 Instance.SetRawSyscallReturn(0);

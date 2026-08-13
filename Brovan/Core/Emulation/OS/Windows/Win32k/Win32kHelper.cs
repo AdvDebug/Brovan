@@ -897,6 +897,21 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Y += Foreground.Y;
         }
 
+        internal static void SetCursorPosition(BinaryEmulator Instance, int X, int Y)
+        {
+            DrainHostEvents(Instance);
+
+            WinWindow Foreground = Instance.WinHelper.GetWindow(Instance.WinHelper.GetForegroundWindow());
+            int ClientX = Foreground == null ? X : X - Foreground.X;
+            int ClientY = Foreground == null ? Y : Y - Foreground.Y;
+
+            Win32kState State = GetState(Instance);
+            State.CursorX = ClientX;
+            State.CursorY = ClientY;
+
+            Instance.WinHelper.WarpHostCursor(ClientX, ClientY);
+        }
+
         internal static bool InvalidateWindow(BinaryEmulator Instance, ulong Hwnd)
         {
             if (Hwnd == 0)

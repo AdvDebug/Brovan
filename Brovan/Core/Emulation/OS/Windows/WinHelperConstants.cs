@@ -883,6 +883,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         TimerQueryState = 0x00000001,
         TimerModifyState = 0x00000002,
         TimerAllAccess = StandardRightsRequired | Synchronize | TimerQueryState | TimerModifyState,
+        EventAllAccess = StandardRightsRequired | Synchronize | 0x3,
         StandardRightsRequired = Delete | ReadControl | WriteDAC | WriteOwner,
         StandardRightsAll = StandardRightsRequired | Synchronize,
         ProcessTerminate = 0x00000001,
@@ -1345,6 +1346,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WindowsFileStream FileStream;
         public ulong BackingAddress;
         public ulong ImageSectionId;
+        public int MappedViewCount;
         public bool IsImage => ((Attributes & 0x01000000) != 0);
         public bool Initialized;
 
@@ -1692,13 +1694,22 @@ namespace Brovan.Core.Emulation.OS.Windows
         public HandleType ObjectType => HandleType.FileHandle;
     }
 
+    public sealed class PortReply
+    {
+        public byte[] Data;
+        public List<ulong> Handles;
+
+        public void AttachHandle(ulong Handle)
+        {
+            Handles ??= new List<ulong>();
+            Handles.Add(Handle);
+        }
+    }
+
     /// <summary>
     /// Per-port ALPC/LPC message handler.
-    /// Receives the raw send-payload bytes (everything after the PORT_MESSAGE header),
-    /// may mutate them, and writes the server reply into <paramref name="ReplyData"/>.
-    /// Returns the NTSTATUS to surface to the caller.
     /// </summary>
-    public delegate NTSTATUS PortAlpcHandler(WinPort Port, byte[] SendData, out byte[] ReplyData, BinaryEmulator Instance);
+    public delegate NTSTATUS PortAlpcHandler(WinPort Port, byte[] SendData, PortReply Reply, BinaryEmulator Instance);
 
     public sealed class WinPort : IHandleObject
     {
@@ -1708,6 +1719,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// Optional per-port message handler invoked by NtAlpcSendWaitReceivePort.
         /// </summary>
         public PortAlpcHandler Handler;
+
+        /// <summary>
+        /// Handles delivered with the reply the client last received, waiting to be claimed through
+        /// NtAlpcQueryInformationMessage(AlpcMessageHandleInformation).
+        /// </summary>
+        public List<ulong> DeliveredHandles;
+
+        /// <summary>
+        /// Handles the client attached to the message being dispatched, in the order the handle
+        /// attribute listed them.
+        /// </summary>
+        public List<ulong> ReceivedHandles;
+
         public string ObjectId => Name;
         public HandleType ObjectType => HandleType.PortHandle;
     }

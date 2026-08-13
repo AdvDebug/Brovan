@@ -46,10 +46,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[!] NtOpenKeyEx: no key \"{KeyPath}\".", LogFlags.Syscall);
+
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
-
-            return Instance.WinUnimplemented;
         }
     }
 }

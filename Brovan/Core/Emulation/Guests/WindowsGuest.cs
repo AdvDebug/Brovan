@@ -913,7 +913,7 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(Teb + 0x68, (uint)0u);
             Instance._emulator.WriteMemory(Teb + 0x108, (uint)0x0409u);
             Instance._emulator.WriteMemory(Teb + 0x1760, (uint)0u);
-            Instance._emulator.WriteMemory(Teb + 0x179C, (uint)1u);
+            Instance._emulator.WriteMemory(Teb + 0x179C, (uint)0u);
             Instance._emulator.WriteMemory(Teb + 0x17A0, (ulong)0ul);
             ushort SameTebFlags = 0;
             if (InitialThread)
@@ -1169,7 +1169,7 @@ namespace Brovan.Core.Emulation.Guests
                 if (string.IsNullOrEmpty(Name))
                     continue;
 
-                if (!Name.StartsWith("DXVK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VK_", StringComparison.OrdinalIgnoreCase))
+                if (!Name.StartsWith("DXVK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("SDL_", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 Env[Name] = HostVariable.Value as string ?? string.Empty;

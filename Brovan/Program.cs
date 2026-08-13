@@ -142,6 +142,10 @@ namespace Brovan
             Console.WriteLine("  --install-runtimes");
             Console.WriteLine("                    Download only the Visual C++ runtimes into WindowsLibs, then exit. Useful when");
             Console.WriteLine("                    the Windows system files are already in place.");
+            Console.WriteLine("  --install-dxvk[=<tag>]");
+            Console.WriteLine("                    Download a DXVK release from GitHub into the emulated System32 and SysWOW64,");
+            Console.WriteLine("                    then exit. Direct3D 8 to 11 programs are translated to Vulkan through it.");
+            Console.WriteLine("                    Defaults to the newest release; pass a release tag such as v2.7.1 to pin one.");
             Console.WriteLine("  --windows-iso <p> Use a local ISO/WIM/ESD or a direct URL instead of asking Microsoft for a link.");
             Console.WriteLine("  --windows-image <n>");
             Console.WriteLine("                    Edition index inside the installation image. Defaults to 1.");
@@ -323,6 +327,8 @@ namespace Brovan
         {
             bool Requested = false;
             bool RuntimesOnly = false;
+            bool DxvkRequested = false;
+            string DxvkVersion = null;
             WindowsSetupOptions Options = new WindowsSetupOptions();
 
             for (int i = 0; i < args.Length; i++)
@@ -333,6 +339,13 @@ namespace Brovan
                     Requested = true;
                 else if (Arg == "--install-runtimes")
                     RuntimesOnly = true;
+                else if (Arg == "--install-dxvk")
+                    DxvkRequested = true;
+                else if (Arg.StartsWith("--install-dxvk=", StringComparison.Ordinal))
+                {
+                    DxvkRequested = true;
+                    DxvkVersion = Arg.Substring("--install-dxvk=".Length);
+                }
                 else if (Arg == "--accept-windows-license")
                     Options.LicenseAccepted = true;
                 else if (Arg == "--windows-iso" && i + 1 < args.Length)
@@ -345,12 +358,19 @@ namespace Brovan
                     int.TryParse(Arg.Substring("--windows-image=".Length), out Options.ImageIndex);
             }
 
-            if (!Requested && !RuntimesOnly)
+            if (!Requested && !RuntimesOnly && !DxvkRequested)
                 return false;
 
-            bool Installed = Requested
-                ? WindowsSetup.Install(AppContext.BaseDirectory, Options, Message => PrintHighlight(Message), ConfirmWindowsLicense)
-                : WindowsSetup.InstallRuntimes(AppContext.BaseDirectory, Options.LicenseAccepted, Message => PrintHighlight(Message), ConfirmWindowsLicense);
+            bool Installed = true;
+
+            if (Requested)
+                Installed = WindowsSetup.Install(AppContext.BaseDirectory, Options, Message => PrintHighlight(Message), ConfirmWindowsLicense);
+            else if (RuntimesOnly)
+                Installed = WindowsSetup.InstallRuntimes(AppContext.BaseDirectory, Options.LicenseAccepted, Message => PrintHighlight(Message), ConfirmWindowsLicense);
+
+            if (DxvkRequested && Installed)
+                Installed = DxvkImporter.Import(AppContext.BaseDirectory, DxvkVersion, Message => PrintHighlight(Message));
+
             Environment.Exit(Installed ? 0 : 1);
             return true;
         }

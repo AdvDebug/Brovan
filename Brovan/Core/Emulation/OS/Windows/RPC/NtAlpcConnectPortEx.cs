@@ -23,7 +23,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
             if (!Instance.WinHelper.WinPorts.Any(Port => string.Equals(Port.Name, PortName, StringComparison.OrdinalIgnoreCase)))
+            {
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[!] NtAlpcConnectPortEx: no port \"{PortName}\".", LogFlags.Syscall);
+
                 return NTSTATUS.STATUS_ACCESS_DENIED;
+            }
 
             return NtAlpcConnectPort.Connect(Instance, PortHandlePtr, PortName);
         }

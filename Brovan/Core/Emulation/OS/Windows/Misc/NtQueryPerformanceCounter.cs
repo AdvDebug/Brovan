@@ -12,7 +12,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (PerformanceCounterPtr == 0 || !Instance.IsRegionMapped(PerformanceCounterPtr, 8))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance._emulator.WriteMemory(PerformanceCounterPtr, WinSysHelper.QueryPerformanceCounterValue(), 8);
+            Instance._emulator.WriteMemory(PerformanceCounterPtr, Instance.GetEmulatedPerformanceCounter(), 8);
 
             if (PerformanceFrequencyPtr != 0)
             {

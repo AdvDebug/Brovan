@@ -1102,19 +1102,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinModule> MappedImageViews = new List<WinModule>();
         private readonly Dictionary<string, int> ImageViewCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal KuserSharedDataManager KuserSharedData;
-
-        /// <summary>
-        /// Current performance counter, in the units <see cref="KuserSharedDataManager.QpcFrequency"/> claims.
-        /// </summary>
-        internal static ulong QueryPerformanceCounterValue()
-        {
-            long Ticks = System.Diagnostics.Stopwatch.GetTimestamp();
-            long HostFrequency = System.Diagnostics.Stopwatch.Frequency;
-            if (HostFrequency == KuserSharedDataManager.QpcFrequency)
-                return (ulong)Ticks;
-
-            return (ulong)((decimal)Ticks * KuserSharedDataManager.QpcFrequency / HostFrequency);
-        }
         internal HandleManager HandleManager = new HandleManager();
         private static string WinRegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
         public RegistryManager RegManager = new RegistryManager(WinRegPath);
@@ -1435,6 +1422,38 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Handler = RPC.Ports.CsrssPortHandler.Handle
                 });
             }
+
+            foreach (string AudioPort in RPC.Ports.AudioSrvPortHandler.PortNames)
+            {
+                WinPorts.Add(new WinPort
+                {
+                    Name = AudioPort,
+                    Handler = RPC.Ports.AudioSrvPortHandler.Handle
+                });
+            }
+
+            // The kernel publishes these under \KernelObjects on every system. ntdll's commit-condition
+            // path and CreateMemoryResourceNotification open them by name and expect them to exist.
+            foreach (string ConditionName in new[]
+            {
+                "\\KernelObjects\\MaximumCommitCondition",
+                "\\KernelObjects\\LowCommitCondition",
+                "\\KernelObjects\\HighCommitCondition",
+                "\\KernelObjects\\LowMemoryCondition",
+                "\\KernelObjects\\HighMemoryCondition",
+                "\\KernelObjects\\LowNonPagedPoolCondition",
+                "\\KernelObjects\\HighNonPagedPoolCondition",
+                "\\KernelObjects\\LowPagedPoolCondition",
+                "\\KernelObjects\\HighPagedPoolCondition",
+                "\\KernelObjects\\MemoryErrors",
+            })
+            {
+                CreateEventHandle(ConditionName, 0, false, AccessMask.StandardRightsAll);
+            }
+
+            // services.exe signals this once the SCM is up. A caller that does not find it creates its own
+            // and waits for a service controller that never arrives. winmm's audio path fast fails on that
+            CreateEventHandle("\\Sessions\\1\\BaseNamedObjects\\Global\\SvcctrlStartEvent_A3752DX", 0, true, AccessMask.EventAllAccess);
         }
 
         public enum ExceptionType
@@ -1514,10 +1533,45 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return UnmappedAny;
             }
 
+            WinSection? ViewSection = FindSectionByBackingAddress(BaseAddress);
+            if (ViewSection != null)
+            {
+                if (ViewSection.MappedViewCount > 0)
+                    ViewSection.MappedViewCount--;
+
+                ReleaseSectionIfUnreferenced(ViewSection);
+                return true;
+            }
+
             if (!Emulator.TryFindMemoryRegion(BaseAddress, out MemoryRegion ViewRegion))
                 return false;
 
             return Emulator.UnmapMemoryRegion(ViewRegion.BaseAddress);
+        }
+
+        private WinSection? FindSectionByBackingAddress(ulong Address)
+        {
+            for (int Index = 0; Index < WinSections.Count; Index++)
+            {
+                WinSection Section = WinSections[Index];
+                if (Section.BackingAddress != 0 && Address >= Section.BackingAddress && Address - Section.BackingAddress < Section.Size)
+                    return Section;
+            }
+
+            return null;
+        }
+
+        private void ReleaseSectionIfUnreferenced(WinSection Section)
+        {
+            if (Section.BackingAddress == 0 || Section.MappedViewCount != 0)
+                return;
+
+            if (HandleManager.GetHandlesByObjectId(Section.ObjectId).Count != 0)
+                return;
+
+            Emulator.UnmapMemoryRegion(Section.BackingAddress);
+            Section.BackingAddress = 0;
+            WinSections.Remove(Section);
         }
 
         /// <summary>
@@ -3035,7 +3089,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Peb == 0)
                 return;
 
-            GdiHandleTableAddress = Emulator.ReadMemoryULong(Peb + 0xF8);
+            ulong Table = Emulator.ReadMemoryULong(Peb + 0xF8);
+            GdiHandleTableAddress = Table != 0 && Emulator.IsRegionMapped(Table, GdiHandleEntryCount * GdiHandleEntrySize)
+                ? Table
+                : 0;
         }
 
         public bool EnsureUserSharedInfo(out ulong ServerInfo, out ulong HandleTable, out uint EntrySize)
@@ -3911,8 +3968,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x00, Window.Hwnd, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x08, Window.ClientWindowAddress, 8);
 
-            int OuterLeft = Window.X == unchecked((int)0x80000000) ? 0 : Window.X;
-            int OuterTop = Window.Y == unchecked((int)0x80000000) ? 0 : Window.Y;
+            int OuterLeft = Window.X;
+            int OuterTop = Window.Y;
             int OuterWidth = (int)Window.Width;
             int OuterHeight = (int)Window.Height;
             int OuterRight = OuterLeft + OuterWidth;
@@ -4247,8 +4304,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Presents the current foreground Win32k window through the host window manager.
+        /// Moves the host pointer to a point in the desktop window's client area, for guests that re-centre
+        /// the cursor themselves.
         /// </summary>
+        public void WarpHostCursor(int ClientX, int ClientY)
+        {
+            if (DesktopDisplay is GuiThreadManager GuiManager)
+                GuiManager.EnqueueWarpCursor(ClientX, ClientY);
+        }
+
         public void PresentDesktop()
         {
             try
@@ -4733,6 +4797,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (First.Equals(".DEFAULT", StringComparison.OrdinalIgnoreCase))
                     return "\\Registry\\User\\.DEFAULT" + Tail;
 
+                if (First.EndsWith("_Classes", StringComparison.OrdinalIgnoreCase))
+                    return "\\Registry\\Machine\\SOFTWARE\\Classes" + Tail;
+
                 if (First.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase))
                     return $"\\Registry\\User\\{CurrentUserSid}{Tail}";
 
@@ -5139,9 +5206,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             SetSyntheticRegistryStringTrusted(PropertyBag, "ThisPCPolicy", 1, "Show", KeyCache, DefaultHive);
         }
 
+        /// <summary>
+        /// We don't support CoreMessagingRegistrar right now, so this is a workaround.
+        /// </summary>
+        private const string UnclaimedActivatableClassNamespace = "\\WindowsRuntime\\ActivatableClassId\\Windows.Gaming.Input.";
+
         private bool IsRegistryPathDeleted(string NtPath)
         {
             if (string.IsNullOrEmpty(NtPath))
+                return true;
+
+            if (NtPath.Contains(UnclaimedActivatableClassNamespace, StringComparison.OrdinalIgnoreCase))
                 return true;
 
             NtPath = NormalizeKeyPath(NtPath);
@@ -5323,27 +5398,34 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        public bool TryEnumerateRegistrySubKey(WinRegKey RegKey, int Index, out string Name)
+        public bool TryCollectRegistrySubKeyNames(WinRegKey RegKey, out List<string> Names)
         {
-            Name = null;
+            Names = null;
 
-            if (RegKey == null || Index < 0)
+            if (RegKey == null)
                 return false;
 
             string NtPath = NormalizeNtRegistryPath(RegKey.FullPath);
             if (string.IsNullOrEmpty(NtPath) || IsRegistryPathDeleted(NtPath))
                 return false;
 
-            List<string> Names = new List<string>();
+            Names = new List<string>();
             AddVirtualRegistrySubKeys(NtPath, Names);
 
             if (RegKey.Hive != null && RegKey.Hive.Reader != null && RegKey.HasParsedKey)
             {
-                for (int i = 0; RegKey.Hive.Reader.TryEnumerateSubKey(RegKey.ParsedKey, i, out string SubKeyName); i++)
+                RegistryHiveReader.HiveKey Parsed = RegKey.ParsedKey;
+                bool Enumerated = RegKey.Hive.Reader.TryGetSubKeyNames(ref Parsed, out Dictionary<string, int> SubKeyNames);
+                RegKey.ParsedKey = Parsed;
+
+                if (Enumerated)
                 {
-                    string ChildFullPath = NormalizeKeyPath(NtPath + "\\" + SubKeyName);
-                    if (!DeletedRegistryKeys.Contains(ChildFullPath))
-                        Names.Add(SubKeyName);
+                    foreach (string SubKeyName in SubKeyNames.Keys)
+                    {
+                        string ChildFullPath = NormalizeKeyPath(NtPath + "\\" + SubKeyName);
+                        if (!DeletedRegistryKeys.Contains(ChildFullPath))
+                            Names.Add(SubKeyName);
+                    }
                 }
             }
 
@@ -5356,10 +5438,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Names.Add(ChildName);
             }
 
-            if (Index >= Names.Count)
+            Names.Sort(StringComparer.OrdinalIgnoreCase);
+            return true;
+        }
+
+        public bool TryEnumerateRegistrySubKey(WinRegKey RegKey, int Index, out string Name)
+        {
+            Name = null;
+
+            if (Index < 0 || !TryCollectRegistrySubKeyNames(RegKey, out List<string> Names) || Index >= Names.Count)
                 return false;
 
-            Names.Sort(StringComparer.OrdinalIgnoreCase);
             Name = Names[Index];
             return true;
         }
@@ -5415,10 +5504,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryQueryRegistryKeyHeader(RegKey, out SubKeyCount, out ValueCount, out Name))
                 return false;
 
-            for (int i = 0; TryEnumerateRegistrySubKey(RegKey, i, out string SubKeyName); i++)
+            if (TryCollectRegistrySubKeyNames(RegKey, out List<string> SubKeyNames))
             {
-                if (!string.IsNullOrEmpty(SubKeyName) && SubKeyName.Length > MaxSubKeyNameChars)
-                    MaxSubKeyNameChars = SubKeyName.Length;
+                foreach (string SubKeyName in SubKeyNames)
+                {
+                    if (!string.IsNullOrEmpty(SubKeyName) && SubKeyName.Length > MaxSubKeyNameChars)
+                        MaxSubKeyNameChars = SubKeyName.Length;
+                }
             }
 
             if (TryGetRegistryValues(RegKey, out List<ValueNode> Values))
@@ -5483,8 +5575,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(Name) && RegKey.Hive != null && RegKey.Hive.Reader != null && RegKey.HasParsedKey)
                 RegKey.Hive.Reader.TryQueryKeyHeader(RegKey.ParsedKey, out _, out _, out Name);
 
-            for (int i = 0; TryEnumerateRegistrySubKey(RegKey, i, out _); i++)
-                SubKeyCount++;
+            if (TryCollectRegistrySubKeyNames(RegKey, out List<string> SubKeyNames))
+                SubKeyCount = SubKeyNames.Count;
 
             if (TryGetRegistryValues(RegKey, out List<ValueNode> Values))
                 ValueCount = Values.Count;
@@ -5917,6 +6009,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void CloseHandle(ulong Handle)
         {
+            WinSection? ClosingSection = null;
+            IHandleObject? ClosingSyncObject = null;
+
             if (HandleManager.TryGetHandle(Handle, out HandleEntry Entry))
             {
                 if (Entry.Object != null && Entry.Object.ObjectType == HandleType.FileHandle)
@@ -5930,11 +6025,44 @@ namespace Brovan.Core.Emulation.OS.Windows
                             ApplyDeleteOnClose(Closing);
                     }
                 }
+                else if (Entry.Object != null && Entry.Object.ObjectType == HandleType.SectionHandle)
+                {
+                    ClosingSection = Entry.Object as WinSection;
+                }
+                else
+                {
+                    ClosingSyncObject = Entry.Object;
+                }
             }
 
             if (HandleManager.TryRemoveHandle(Handle, out _))
             {
                 RemoveWinHandle(Handle);
+            }
+
+            ForgetNamedSyncObjectIfUnreferenced(ClosingSyncObject);
+
+            if (ClosingSection != null)
+                ReleaseSectionIfUnreferenced(ClosingSection);
+        }
+
+        /// <summary>
+        /// Removes an object if it is not referenced anymore.
+        /// </summary>
+        private void ForgetNamedSyncObjectIfUnreferenced(IHandleObject? Object)
+        {
+            if (Object == null || HandleManager.GetHandlesByObjectId(Object.ObjectId).Count != 0)
+                return;
+
+            switch (Object)
+            {
+                case WinSemaphore Semaphore:
+                    WinSemaphores.Remove(Semaphore);
+                    break;
+
+                case WinMutex Mutex:
+                    WinMutexes.Remove(Mutex);
+                    break;
             }
         }
 

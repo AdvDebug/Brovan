@@ -60,6 +60,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Instance.WinHelper.TryGetRegistryValue(RegKey, ValueName, out ValueNode Value))
             {
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[!] NtQueryValueKey: \"{RegKey.FullPath}\" has no value \"{ValueName}\".", LogFlags.Syscall);
+
                 Instance._emulator.WriteMemory(ResultLengthPtr, 0u);
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
@@ -72,7 +75,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             switch (KeyValueInformationClass)
             {
                 case KEY_VALUE_INFORMATION_CLASS.KeyValuePartialInformation:
-                case KEY_VALUE_INFORMATION_CLASS.KeyValuePartialInformationAlign64:
                     {
                         uint HeaderSize = 12;
                         uint Required = HeaderSize + DataLen;
@@ -104,7 +106,50 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
 
                         if (Length < Required)
+                        {
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[!] NtQueryValueKey: \"{RegKey.FullPath}\" value \"{ValueName}\" needs {Required} bytes, got {Length}.", LogFlags.Syscall);
+
                             return Length < HeaderSize ? NTSTATUS.STATUS_BUFFER_TOO_SMALL : NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                        }
+
+                        return NTSTATUS.STATUS_SUCCESS;
+                    }
+
+                case KEY_VALUE_INFORMATION_CLASS.KeyValuePartialInformationAlign64:
+                    {
+                        uint HeaderSize = 8;
+                        uint Required = HeaderSize + DataLen;
+
+                        Instance._emulator.WriteMemory(ResultLengthPtr, Required);
+
+                        if (Length == 0)
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+
+                        if (Length >= HeaderSize)
+                        {
+                            if (!Instance._emulator.WriteMemory(KeyValueInformationPtr + 0, (uint)Value.Type))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            if (!Instance._emulator.WriteMemory(KeyValueInformationPtr + 4, DataLen))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            uint WritableDataLength = Math.Min(DataLen, Length - HeaderSize);
+                            if (WritableDataLength != 0)
+                            {
+                                ulong DataOut = KeyValueInformationPtr + HeaderSize;
+                                if (!Instance._emulator.WriteMemory(DataOut, DataBytes.AsSpan(0, (int)WritableDataLength)))
+                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                            }
+                        }
+
+                        if (Length < Required)
+                        {
+                            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                                Instance.TriggerEventMessage($"[!] NtQueryValueKey: \"{RegKey.FullPath}\" value \"{ValueName}\" needs {Required} bytes, got {Length}.", LogFlags.Syscall);
+
+                            return Length < HeaderSize ? NTSTATUS.STATUS_BUFFER_TOO_SMALL : NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                        }
 
                         return NTSTATUS.STATUS_SUCCESS;
                     }

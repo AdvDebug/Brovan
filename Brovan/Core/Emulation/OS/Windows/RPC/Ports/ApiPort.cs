@@ -88,21 +88,21 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             ElfrReportEventExA = 26
         }
 
-        public static NTSTATUS Handle(WinPort Port, byte[] SendData, out byte[] ReplyData, BinaryEmulator Instance)
+        public static NTSTATUS Handle(WinPort Port, byte[] SendData, PortReply Reply, BinaryEmulator Instance)
         {
             if (SendData == null || SendData.Length < PmHeaderSize)
             {
-                ReplyData = BuildMinimalReply();
+                Reply.Data = BuildMinimalReply();
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
             if (IsCsrApiPort(Port?.Name))
             {
-                ReplyData = HandleCsrPort(Port, SendData, Instance);
+                Reply.Data = HandleCsrPort(Port, SendData, Instance);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            ReplyData = HandleGenericRpcPort(Port, SendData, Instance);
+            Reply.Data = HandleGenericRpcPort(Port, SendData, Instance);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -203,10 +203,26 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return RpcReply;
             }
 
+            if (LrpcPacket.TryParse(SendData, out LrpcMessage Message))
+            {
+                if (Message.Type == LrpcMessageType.Bind)
+                    return LrpcPacket.BuildBindAccept(Message, out _);
+
+                if (Message.Type == LrpcMessageType.Request)
+                {
+                    if ((Instance.Settings.Flags & LogFlags.General) != 0)
+                        Instance.TriggerEventMessage($"[!] No server for proc {Message.ProcNumber} on \"{Port?.Name}\"; faulting.", LogFlags.General);
+
+                    return LrpcPacket.BuildFault(Message, RpcSProcnumOutOfRange);
+                }
+            }
+
             byte[] Reply = (byte[])SendData.Clone();
             PreparePortReply(Reply);
             return Reply;
         }
+
+        private const uint RpcSProcnumOutOfRange = 1745;
 
         private static void HandleCsrSrvConnect(byte[] Reply, BinaryEmulator Instance)
         {

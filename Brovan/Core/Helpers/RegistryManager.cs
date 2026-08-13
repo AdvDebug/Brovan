@@ -244,24 +244,9 @@ namespace Brovan.Core.Helpers
             if (Key.SubKeyBlockOffset <= 0)
                 return false;
 
-            int ItemAbs = MainRootOffset + Key.SubKeyBlockOffset;
-            EnsureInBounds(ItemAbs, 0x0C);
-
-            string BlockType = ReadAscii(ItemAbs + 4, 2);
-
-            if (BlockType.Length != 2 || (BlockType[1] != 'f' && BlockType[1] != 'h'))
+            if (!TryFindSubKeyOffset(Key.SubKeyBlockOffset, ref Index, 0, out int Offset))
                 return false;
 
-            short Count = ReadI16(ItemAbs + 0x06);
-            if (Index >= Count)
-                return false;
-
-            int EntriesAbs = ItemAbs + 0x08;
-            EnsureInBounds(EntriesAbs, Count * 8);
-
-            int EntryAbs = EntriesAbs + (Index * 8);
-
-            int Offset = ReadI32(EntryAbs);
             int SubKeyAbs = MainRootOffset + Offset;
 
             EnsureInBounds(SubKeyAbs, 0x60);
@@ -277,6 +262,67 @@ namespace Brovan.Core.Helpers
 
             Name = ReadNameUtf8(NameOffset, NameLen);
             return true;
+        }
+
+        /// <summary>
+        /// Resolves the Index'th "nk" offset in a subkey list, descending through "ri" index roots and
+        /// decrementing Index by the size of each sublist it skips.
+        /// </summary>
+        private bool TryFindSubKeyOffset(int BlockOffset, ref int Index, int Depth, out int Offset)
+        {
+            const int MaxIndexDepth = 4;
+
+            Offset = 0;
+
+            if (BlockOffset <= 0 || Depth > MaxIndexDepth)
+                return false;
+
+            int ItemAbs = MainRootOffset + BlockOffset;
+            EnsureInBounds(ItemAbs, 0x0C);
+
+            string BlockType = ReadAscii(ItemAbs + 4, 2);
+            if (BlockType.Length != 2)
+                return false;
+
+            bool Hashed = BlockType[0] == 'l' && (BlockType[1] == 'f' || BlockType[1] == 'h');
+            bool IndexRoot = BlockType == "ri";
+
+            if (!Hashed && !IndexRoot && BlockType != "li")
+                return false;
+
+            int EntrySize = Hashed ? 8 : 4;
+            int Count = (ushort)ReadI16(ItemAbs + 0x06);
+            int EntriesAbs = ItemAbs + 0x08;
+
+            EnsureInBounds(EntriesAbs, Count * EntrySize);
+
+            if (!IndexRoot)
+            {
+                if (Index >= Count)
+                {
+                    Index -= Count;
+                    return false;
+                }
+
+                Offset = ReadI32(EntriesAbs + (Index * EntrySize));
+                return true;
+            }
+
+            for (int i = 0; i < Count; i++)
+            {
+                if (TryFindSubKeyOffset(ReadI32(EntriesAbs + (i * EntrySize)), ref Index, Depth + 1, out Offset))
+                    return true;
+            }
+
+            return false;
+        }
+
+        public bool TryGetSubKeyNames(ref HiveKey Key, out Dictionary<string, int> Names)
+        {
+            EnsureSubKeysParsed(ref Key);
+
+            Names = Key.SubKeys;
+            return Names != null;
         }
 
         public bool TryQueryKeyHeader(HiveKey Key, out int SubKeyCount, out int ValueCount, out string Name)
@@ -610,33 +656,47 @@ namespace Brovan.Core.Helpers
 
             Dictionary<string, int> SubKeys = new(StringComparer.OrdinalIgnoreCase);
 
-            if (Key.SubKeyBlockOffset <= 0)
-            {
-                Key.SubKeys = SubKeys;
-                return;
-            }
+            CollectSubKeys(Key.SubKeyBlockOffset, SubKeys, 0);
 
-            int ItemAbs = MainRootOffset + Key.SubKeyBlockOffset;
+            Key.SubKeys = SubKeys;
+        }
+
+        private void CollectSubKeys(int BlockOffset, Dictionary<string, int> SubKeys, int Depth)
+        {
+            const int MaxIndexDepth = 4;
+
+            if (BlockOffset <= 0 || Depth > MaxIndexDepth)
+                return;
+
+            int ItemAbs = MainRootOffset + BlockOffset;
             EnsureInBounds(ItemAbs, 0x0C);
 
             string BlockType = ReadAscii(ItemAbs + 4, 2);
-
-            if (BlockType.Length != 2 || (BlockType[1] != 'f' && BlockType[1] != 'h'))
-            {
-                Key.SubKeys = SubKeys;
+            if (BlockType.Length != 2)
                 return;
-            }
 
-            short Count = ReadI16(ItemAbs + 0x06);
+            bool Hashed = BlockType[0] == 'l' && (BlockType[1] == 'f' || BlockType[1] == 'h');
+            bool IndexRoot = BlockType == "ri";
+
+            if (!Hashed && !IndexRoot && BlockType != "li")
+                return;
+
+            int EntrySize = Hashed ? 8 : 4;
+            int Count = (ushort)ReadI16(ItemAbs + 0x06);
             int EntriesAbs = ItemAbs + 0x08;
 
-            EnsureInBounds(EntriesAbs, Count * 8);
+            EnsureInBounds(EntriesAbs, Count * EntrySize);
 
             for (int i = 0; i < Count; i++)
             {
-                int EntryAbs = EntriesAbs + (i * 8);
+                int Offset = ReadI32(EntriesAbs + (i * EntrySize));
 
-                int Offset = ReadI32(EntryAbs);
+                if (IndexRoot)
+                {
+                    CollectSubKeys(Offset, SubKeys, Depth + 1);
+                    continue;
+                }
+
                 int SubKeyAbs = MainRootOffset + Offset;
 
                 EnsureInBounds(SubKeyAbs, 0x60);
@@ -655,8 +715,6 @@ namespace Brovan.Core.Helpers
                 if (!SubKeys.ContainsKey(SubKeyName))
                     SubKeys.Add(SubKeyName, Offset);
             }
-
-            Key.SubKeys = SubKeys;
         }
 
         private byte[] ReadValueData(RawHiveValue Raw)

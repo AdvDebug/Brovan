@@ -115,6 +115,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (StructSerializer.WriteStruct(Instance, ClientViewPtr, ClientView) != WriteStructResult.Ok)
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+                // CsrClientConnectToServer closes the section handle as soon as the connect returns and
+                // keeps using this view, so the port view has to hold the section alive on its own.
+                PortSection.MappedViewCount++;
+
                 if (ServerViewPtr != 0)
                 {
                     if (!Instance.IsRegionMapped(ServerViewPtr, 0x18))
