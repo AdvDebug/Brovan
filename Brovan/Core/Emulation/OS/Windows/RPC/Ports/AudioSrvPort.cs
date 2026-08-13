@@ -40,6 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             public uint StreamFlags;
             public ulong ControlBlock;
             public ulong SectionHandle;
+            public ulong ServerSectionHandle;
             public uint RingBytes;
             public uint PeriodFrames;
             public string HandlePortName;
@@ -315,7 +316,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (TryGetStream(Cookie, out AudioStream Stream))
             {
                 Log(Instance, $"stream {Stream.Id} released after {Stream.Engine?.RenderedBytes ?? 0} bytes rendered.");
-                Stream.Engine?.Dispose();
+
+                bool EngineStopped = Stream.Engine?.Stop() ?? true;
+                if (EngineStopped && Stream.ServerSectionHandle != 0)
+                    Instance.WinHelper.CloseHandle(Stream.ServerSectionHandle);
+
+                RemoveHandlePort(Instance, Stream);
                 Streams.Remove(Stream.Id);
             }
 
@@ -420,6 +426,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Stream.SectionHandle = Instance.WinHelper.CreateSectionHandle(
                 null, SectionSize, PageReadWrite, 0, null, Backing, AccessMask.StandardRightsAll).Handle;
 
+            HoldServerSectionReference(Instance, Stream);
+
             // The engine walks the ring from a host thread, so it needs a host pointer into the section
             // rather than the emulator's memory accessors, which are only safe from the guest thread.
             IntPtr Host = Instance.GetHostPointer(Backing, SectionSize);
@@ -437,6 +445,17 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return true;
         }
 
+        private static void HoldServerSectionReference(BinaryEmulator Instance, AudioStream Stream)
+        {
+            WinSection Section = Instance.WinHelper.GetSectionByHandle(Stream.SectionHandle, AccessMask.StandardRightsAll);
+            if (Section == null)
+                return;
+
+            WinHandle ServerHandle = Instance.WinHelper.HandleManager.AddHandle(Section, AccessMask.StandardRightsAll);
+            Instance.WinHelper.AddWinHandle(ServerHandle);
+            Stream.ServerSectionHandle = ServerHandle.Handle;
+        }
+
         private static void PublishHandlePort(BinaryEmulator Instance, AudioStream Stream)
         {
             Stream.HandlePortName = HandlePortPrefix + Stream.Id;
@@ -449,6 +468,19 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             Instance.WriteMemory(Stream.ControlBlock + OffHandlePortName,
                 Encoding.Unicode.GetBytes(Stream.HandlePortName + "\0"));
+        }
+
+        private static void RemoveHandlePort(BinaryEmulator Instance, AudioStream Stream)
+        {
+            if (Stream.HandlePortName == null)
+                return;
+
+            List<WinPort> Ports = Instance.WinHelper.WinPorts;
+            for (int Index = Ports.Count - 1; Index >= 0; Index--)
+            {
+                if (string.Equals(Ports[Index].Name, Stream.HandlePortName, StringComparison.OrdinalIgnoreCase))
+                    Ports.RemoveAt(Index);
+            }
         }
 
         private static NTSTATUS HandleEventPortMessage(WinPort Port, byte[] SendData, PortReply Reply, BinaryEmulator Instance)
@@ -487,9 +519,14 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private static uint FramesForDuration(ulong DurationHns)
         {
-            ulong Frames = DurationHns * MixSampleRate / HundredNanosecondsPerSecond;
             uint MaxFrames = MaxRingBytes / MixBlockAlign;
-            return Frames == 0 ? 1 : (uint)Math.Min(Frames, MaxFrames);
+            ulong MaxDurationHns = (ulong)MaxFrames * HundredNanosecondsPerSecond / MixSampleRate;
+
+            if (DurationHns >= MaxDurationHns)
+                return MaxFrames;
+
+            ulong Frames = DurationHns * MixSampleRate / HundredNanosecondsPerSecond;
+            return Frames == 0 ? 1 : (uint)Frames;
         }
 
         private static uint RingBytesForDuration(ulong DurationHns)

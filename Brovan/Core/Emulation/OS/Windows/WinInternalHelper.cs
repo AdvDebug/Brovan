@@ -178,6 +178,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
             }
 
+            // NT ignores the low two bits of a handle (OBJ_HANDLE_TAGBITS).
+            // user mode stores flags there, ntdll's loader lock and RPC among others. Handle values are allocated four apart, so masking
+            // cannot alias two live handles.
             Key = Handle & ~3UL;
             return Key != Handle && HandleTable.TryGetValue(Key, out Entry);
         }

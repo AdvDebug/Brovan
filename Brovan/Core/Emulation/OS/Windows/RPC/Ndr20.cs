@@ -214,9 +214,10 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             if (ActualCount > MaxCount)
                 return false;
 
-            int Bytes = checked((int)ActualCount * 2);
-            if (Position + Bytes > Data.Length)
+            if (ActualCount > (uint)(Data.Length - Position) / 2)
                 return false;
+
+            int Bytes = (int)ActualCount * 2;
 
             Value = Encoding.Unicode.GetString(Data.Slice(Position, Bytes)).TrimEnd('\0');
             Position += (Bytes + 3) & ~3;

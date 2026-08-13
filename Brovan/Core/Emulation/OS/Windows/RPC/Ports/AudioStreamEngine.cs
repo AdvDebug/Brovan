@@ -4,7 +4,7 @@ using Brovan.Core.Emulation.OS.SharedHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 {
-    internal sealed class AudioStreamEngine : IDisposable
+    internal sealed class AudioStreamEngine
     {
         private const int IdleSleepMilliseconds = 5;
         private const int ChunkMilliseconds = 10;
@@ -18,6 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private readonly IntPtr Block;
         private readonly uint BufferStart;
         private readonly uint RingBytes;
+        private readonly int BlockAlign;
         private readonly IAudioSink Sink;
         private readonly byte[] Chunk;
         private readonly byte[] Silence;
@@ -37,6 +38,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             this.Block = Block;
             this.BufferStart = BufferStart;
             this.RingBytes = RingBytes;
+            BlockAlign = Format.BlockAlign;
 
             Sink = AudioSinkFactory.Create(Format, out string SinkBackend);
             Backend = SinkBackend;
@@ -59,40 +61,51 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         {
             byte* Base = (byte*)Block;
 
-            while (!Stopping)
+            // The sink is torn down here rather than in Dispose so that no host device buffer is freed
+            // while this thread is still inside Sink.Write.
+            try
             {
-                if ((*(uint*)(Base + OffVolatileFlags) & FlagRunning) == 0)
+                while (!Stopping)
                 {
-                    Thread.Sleep(IdleSleepMilliseconds);
-                    continue;
-                }
+                    if ((*(uint*)(Base + OffVolatileFlags) & FlagRunning) == 0)
+                    {
+                        Thread.Sleep(IdleSleepMilliseconds);
+                        continue;
+                    }
 
-                long Written = Interlocked.CompareExchange(ref *(long*)(Base + OffClientCursor), 0, 0);
-                long Read = *(long*)(Base + OffServerCursor);
-                long Available = Written - Read;
+                    long Written = Interlocked.CompareExchange(ref *(long*)(Base + OffClientCursor), 0, 0);
+                    long Read = *(long*)(Base + OffServerCursor);
+                    long Available = Written - Read;
 
-                // Feed the device anyway when the guest is behind, both to keep it from underrunning and
-                // because the write is what advances real time for this loop.
-                if (Available <= 0)
-                {
-                    Sink.Write(Silence);
+                    int Take = (int)Math.Min(Available, Chunk.Length);
+                    Take -= Take % BlockAlign;
+
+                    // Feed the device anyway when the guest is behind, both to keep it from underrunning and
+                    // because the write is what advances real time for this loop.
+                    if (Take <= 0)
+                    {
+                        Sink.Write(Silence);
+                        SignalPeriod();
+                        continue;
+                    }
+
+                    int Offset = (int)(Read % RingBytes);
+                    int Contiguous = Math.Min(Take, (int)RingBytes - Offset);
+
+                    new ReadOnlySpan<byte>(Base + BufferStart + Offset, Contiguous).CopyTo(Chunk);
+                    if (Contiguous < Take)
+                        new ReadOnlySpan<byte>(Base + BufferStart, Take - Contiguous).CopyTo(Chunk.AsSpan(Contiguous));
+
+                    Sink.Write(Chunk.AsSpan(0, Take));
+
+                    Interlocked.Exchange(ref *(long*)(Base + OffServerCursor), Read + Take);
+                    RenderedBytes += Take;
                     SignalPeriod();
-                    continue;
                 }
-
-                int Take = (int)Math.Min(Available, Chunk.Length);
-                int Offset = (int)(Read % RingBytes);
-                int Contiguous = Math.Min(Take, (int)RingBytes - Offset);
-
-                new ReadOnlySpan<byte>(Base + BufferStart + Offset, Contiguous).CopyTo(Chunk);
-                if (Contiguous < Take)
-                    new ReadOnlySpan<byte>(Base + BufferStart, Take - Contiguous).CopyTo(Chunk.AsSpan(Contiguous));
-
-                Sink.Write(Chunk.AsSpan(0, Take));
-
-                Interlocked.Exchange(ref *(long*)(Base + OffServerCursor), Read + Take);
-                RenderedBytes += Take;
-                SignalPeriod();
+            }
+            finally
+            {
+                Sink.Dispose();
             }
         }
 
@@ -103,14 +116,14 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 Event.Signaled = true;
         }
 
-        public void Dispose()
+        /// <summary>
+        /// Returns false when the worker is still running, which means the guest memory it renders from
+        /// must stay mapped.
+        /// </summary>
+        public bool Stop()
         {
-            if (Stopping)
-                return;
-
             Stopping = true;
-            Worker.Join(StopTimeoutMilliseconds);
-            Sink.Dispose();
+            return Worker.Join(StopTimeoutMilliseconds);
         }
     }
 }
