@@ -903,6 +903,30 @@ namespace Brovan
         }
 
         private static Stream Stdout = null;
+        private static Stream Stdin = null;
+
+        /// <summary>
+        /// Reads raw bytes from the host standard input stream. Used when the host stdin is redirected and the
+        /// guest expects pipe semantics rather than line-edited console input.
+        /// </summary>
+        /// <returns>The number of bytes read, or zero at end of input.</returns>
+        public static int ConsoleRead(Span<byte> Destination)
+        {
+            if (Destination.Length == 0)
+                return 0;
+
+            if (Stdin == null)
+                Stdin = Console.OpenStandardInput();
+
+            try
+            {
+                return Stdin.Read(Destination);
+            }
+            catch (IOException)
+            {
+                return 0;
+            }
+        }
 
         /// <summary>
         /// Writes guest-controlled console output to the host console using the selected safety policy.
