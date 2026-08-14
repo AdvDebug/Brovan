@@ -101,6 +101,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_CLOSE = 0x0010;
         private const uint WM_ERASEBKGND = 0x0014;
         private const uint WM_SIZE = 0x0005;
+        private const uint WM_MOVE = 0x0003;
+        private const uint SIZE_MINIMIZED = 1;
+        private const uint SIZE_MAXIMIZED = 2;
+        private const uint SIZE_MAXSHOW = 3;
+        private const uint SIZE_MAXHIDE = 4;
         private const uint WM_PAINT = 0x000F;
         private const uint WM_SHOWWINDOW = 0x0018;
         private const uint WM_SETTEXT = 0x000C;
@@ -920,8 +925,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         HostEventQueue.Enqueue(msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam));
                         break;
 
-                    case WM_PAINT:
                     case WM_SIZE:
+                        TrackHostResize(unchecked((uint)(long)wParam), unchecked((ulong)(long)lParam));
+                        HostEventQueue.MarkRepaint();
+                        break;
+
+                    case WM_MOVE:
+                        HostEventQueue.Enqueue(WM_MOVE, 0, unchecked((ulong)(long)lParam));
+                        break;
+
+                    case WM_PAINT:
                     case WM_SHOWWINDOW:
                         HostEventQueue.MarkRepaint();
                         break;
@@ -945,6 +958,28 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 }
 
                 return DefWindowProcW(_hwnd, msg, wParam, lParam);
+            }
+
+            private void TrackHostResize(uint sizeType, ulong lParam)
+            {
+                if (sizeType == SIZE_MAXHIDE || sizeType == SIZE_MAXSHOW)
+                    return;
+
+                int width = (int)(lParam & 0xFFFF);
+                int height = (int)((lParam >> 16) & 0xFFFF);
+                bool iconic = sizeType == SIZE_MINIMIZED || width <= 0 || height <= 0;
+
+                _state = iconic ? WindowState.Minimized
+                    : sizeType == SIZE_MAXIMIZED ? WindowState.Maximized
+                    : WindowState.Normal;
+
+                if (!iconic)
+                {
+                    _width = width;
+                    _height = height;
+                }
+
+                HostEventQueue.Enqueue(WM_SIZE, sizeType, lParam);
             }
 
             private void EnsureAlive()

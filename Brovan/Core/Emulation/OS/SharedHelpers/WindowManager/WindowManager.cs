@@ -7,6 +7,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
     internal static class HostEventQueue
     {
         private const uint WM_CLOSE = 0x0010;
+        private const uint WM_SIZE = 0x0005;
+        private const uint WM_MOVE = 0x0003;
         private const uint WM_MOUSEMOVE = 0x0200;
         private const int InitialCapacity = 256;
 
@@ -71,10 +73,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         {
             lock (InputSync)
             {
-                if (message == WM_MOUSEMOVE && _count != 0)
+                if ((message == WM_MOUSEMOVE || message == WM_SIZE || message == WM_MOVE) && _count != 0)
                 {
                     ref HostEvent tail = ref _input[(_head + _count - 1) & (_input.Length - 1)];
-                    if (tail.Message == WM_MOUSEMOVE)
+                    if (tail.Message == message)
                     {
                         tail.WParam = wParam;
                         tail.LParam = lParam;

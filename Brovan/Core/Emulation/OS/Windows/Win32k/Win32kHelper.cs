@@ -80,6 +80,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal const uint WM_NULL = 0x0000;
         internal const uint WM_DESTROY = 0x0002;
+        internal const uint WM_SIZE = 0x0005;
+        internal const uint WM_MOVE = 0x0003;
+        internal const uint WM_WINDOWPOSCHANGED = 0x0047;
+        internal const uint SIZE_MINIMIZED = 1;
+        internal const uint SIZE_MAXIMIZED = 2;
         internal const uint WM_CLOSE = 0x0010;
         internal const uint WM_QUIT = 0x0012;
         internal const uint WM_ERASEBKGND = 0x0014;
@@ -862,6 +867,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 InvalidateWindow(Instance, Foreground);
 
             Win32kState State = GetState(Instance);
+            bool GeometryChanged = false;
             for (int i = 0; i < MaxHostInputEventsPerDrain; i++)
             {
                 if (!HostEventQueue.TryDequeue(out uint Message, out ulong WParam, out ulong LParam))
@@ -872,9 +878,86 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     State.CursorX = (short)(LParam & 0xFFFF);
                     State.CursorY = (short)((LParam >> 16) & 0xFFFF);
                 }
+                else if (Message == WM_SIZE)
+                {
+                    ApplyHostResize(Instance, Foreground, WParam, LParam);
+                    GeometryChanged = true;
+                }
+                else if (Message == WM_MOVE)
+                {
+                    ApplyHostMove(Instance, Foreground, LParam);
+                    GeometryChanged = true;
+                }
 
                 PostMessage(Instance, Foreground, Message, WParam, LParam);
             }
+
+            if (GeometryChanged)
+            {
+                WinWindow Resized = Instance.WinHelper.GetWindow(Foreground);
+                if (Resized != null)
+                    Resized.PendingWindowPosChanged = true;
+            }
+        }
+
+        internal static bool TryDeliverWindowPosChanged(BinaryEmulator Instance, ulong SyscallResult)
+        {
+            ulong Hwnd = Instance.WinHelper.GetForegroundWindow();
+            if (Hwnd == 0)
+                return false;
+
+            WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
+            if (Window == null || !Window.PendingWindowPosChanged || Window.WndProc == 0)
+                return false;
+
+            ulong WindowPos = Instance.WinHelper.EnsureWindowPosStruct(Window);
+            if (WindowPos == 0)
+            {
+                Window.PendingWindowPosChanged = false;
+                return false;
+            }
+
+            if (!Instance.WinHelper.BeginGuestCall(Window.WndProc, Hwnd, WM_WINDOWPOSCHANGED, 0, WindowPos, SyscallResult))
+                return false;
+
+            Window.PendingWindowPosChanged = false;
+            return true;
+        }
+
+        private static void ApplyHostMove(BinaryEmulator Instance, ulong Hwnd, ulong LParam)
+        {
+            WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
+            if (Window == null)
+                return;
+
+            Window.X = (short)(LParam & 0xFFFF);
+            Window.Y = (short)((LParam >> 16) & 0xFFFF);
+            Instance.WinHelper.MaterializeUserWindow(Window);
+        }
+
+        private static void ApplyHostResize(BinaryEmulator Instance, ulong Hwnd, ulong WParam, ulong LParam)
+        {
+            WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
+            if (Window == null)
+                return;
+
+            uint Width = (uint)(LParam & 0xFFFF);
+            uint Height = (uint)((LParam >> 16) & 0xFFFF);
+
+            // A frame with no client area is iconic whatever it calls itself, and its restore size has to survive:
+            // only the client rectangle the guest reads back collapses, so the size pushed back at the host on the
+            // next present is still the one to restore to.
+            Window.Minimized = WParam == SIZE_MINIMIZED || Width == 0 || Height == 0;
+            Window.Maximized = WParam == SIZE_MAXIMIZED;
+
+            if (!Window.Minimized)
+            {
+                Window.Width = Width;
+                Window.Height = Height;
+            }
+
+            Window.Dirty = true;
+            Instance.WinHelper.MaterializeUserWindow(Window);
         }
 
         /// <summary>

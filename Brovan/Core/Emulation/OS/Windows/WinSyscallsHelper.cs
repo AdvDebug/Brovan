@@ -3975,14 +3975,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             int OuterRight = OuterLeft + OuterWidth;
             int OuterBottom = OuterTop + OuterHeight;
 
+            // user32 answers GetClientRect from rcClient without a syscall, and win32k leaves that rectangle empty
+            // while a window is iconic. Renderers test it to stop drawing at a size their surface no longer has.
+            int ClientRight = Window.Minimized ? OuterLeft : OuterRight;
+            int ClientBottom = Window.Minimized ? OuterTop : OuterBottom;
+
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x58, (uint)OuterLeft, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x5C, (uint)OuterTop, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x60, (uint)OuterRight, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x64, (uint)OuterBottom, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x68, (uint)OuterLeft, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x6C, (uint)OuterTop, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x70, (uint)OuterRight, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x74, (uint)OuterBottom, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x70, (uint)ClientRight, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x74, (uint)ClientBottom, 4);
 
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x78, Window.WndProc, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x80, ClassObject, 8);
@@ -3991,6 +3996,58 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xE0, 0UL, 8);
 
             Win32kDpi.ApplyWindowContext(Emulator, Window.ClientWindowAddress);
+        }
+
+        /// <summary>
+        /// Publishes the window's current frame geometry as a WINDOWPOS and returns its guest address, for use as
+        /// the lParam of a posted WM_WINDOWPOSCHANGED.
+        /// </summary>
+        public ulong EnsureWindowPosStruct(WinWindow Window)
+        {
+            const uint SWP_NOZORDER = 0x0004;
+            const uint SWP_NOACTIVATE = 0x0010;
+
+            if (Window == null)
+                return 0;
+
+            bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;
+            uint StructSize = Is64 ? 0x28u : 0x1Cu;
+
+            if (Window.WindowPosAddress == 0 || !Emulator.IsRegionMapped(Window.WindowPosAddress, StructSize))
+            {
+                ulong Address = Emulator.MapUniqueAddress(StructSize, MemoryProtection.ReadWrite);
+                if (Address == 0)
+                    return 0;
+
+                Window.WindowPosAddress = Address;
+            }
+
+            Span<byte> Data = Shared.GetSpan(StructSize);
+            Data.Slice(0, (int)StructSize).Clear();
+
+            if (Is64)
+            {
+                WriteU64(Data, 0x00, Window.Hwnd);
+                WriteU32(Data, 0x10, (uint)Window.X);
+                WriteU32(Data, 0x14, (uint)Window.Y);
+                WriteU32(Data, 0x18, Window.Width);
+                WriteU32(Data, 0x1C, Window.Height);
+                WriteU32(Data, 0x20, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            else
+            {
+                WriteU32(Data, 0x00, (uint)Window.Hwnd);
+                WriteU32(Data, 0x08, (uint)Window.X);
+                WriteU32(Data, 0x0C, (uint)Window.Y);
+                WriteU32(Data, 0x10, Window.Width);
+                WriteU32(Data, 0x14, Window.Height);
+                WriteU32(Data, 0x18, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+
+            if (!Emulator._emulator.WriteMemory(Window.WindowPosAddress, Data.Slice(0, (int)StructSize)))
+                return 0;
+
+            return Window.WindowPosAddress;
         }
 
         private ulong EnsureUserClassObject(WinWindow Window)

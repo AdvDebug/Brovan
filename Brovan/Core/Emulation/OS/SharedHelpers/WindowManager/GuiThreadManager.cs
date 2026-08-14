@@ -452,12 +452,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private bool ApplyPendingPresent()
         {
             PresentState present;
+            PresentState applied;
+            bool hasApplied;
             lock (_presentSync)
             {
                 if (!_hasPendingPresent)
                     return false;
 
                 present = _pendingPresent;
+                applied = _appliedPresent;
+                hasApplied = _hasAppliedPresent;
                 _hasPendingPresent = false;
             }
 
@@ -465,20 +469,23 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (window == null)
                 return false;
 
-            if (!string.Equals(window.Title, present.Title, StringComparison.Ordinal))
+            if (!hasApplied || !string.Equals(applied.Title, present.Title, StringComparison.Ordinal))
                 window.Title = present.Title;
 
-            if (present.Width > 0 && window.Width != present.Width)
-                window.Width = present.Width;
-
-            if (present.Height > 0 && window.Height != present.Height)
-                window.Height = present.Height;
-
-            if (window.Visible != present.Visible)
+            if ((!hasApplied || applied.Visible != present.Visible) && window.Visible != present.Visible)
                 window.Visible = present.Visible;
 
-            if (window.State != present.State)
+            if ((!hasApplied || applied.State != present.State) && window.State != present.State)
                 window.State = present.State;
+
+            if (present.State == WindowState.Normal)
+            {
+                if (present.Width > 0 && (!hasApplied || applied.Width != present.Width) && window.Width != present.Width)
+                    window.Width = present.Width;
+
+                if (present.Height > 0 && (!hasApplied || applied.Height != present.Height) && window.Height != present.Height)
+                    window.Height = present.Height;
+            }
 
             lock (_presentSync)
             {

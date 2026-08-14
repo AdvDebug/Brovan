@@ -17,6 +17,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 Instance.SetLastWinError(0);
+                if (Message.Message != Win32kHelper.WM_QUIT && Win32kHelper.TryDeliverWindowPosChanged(Instance, 1))
+                    return NTSTATUS.STATUS_SUCCESS;
+
                 Instance.SetRawSyscallReturn(Message.Message == Win32kHelper.WM_QUIT ? 0ul : 1ul);
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -68,6 +71,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 Instance.SetLastWinError(0);
+                if (Message.Message != Win32kHelper.WM_QUIT && Win32kHelper.TryDeliverWindowPosChanged(Instance, 1))
+                    return NTSTATUS.STATUS_SUCCESS;
+
                 Instance.SetRawSyscallReturn(Message.Message == Win32kHelper.WM_QUIT ? 0ul : 1ul);
                 return NTSTATUS.STATUS_SUCCESS;
             }

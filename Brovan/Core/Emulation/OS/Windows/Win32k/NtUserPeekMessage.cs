@@ -23,6 +23,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, Win32kHelper.RemoveFlagSet(Flags), out Win32kMessage Message))
             {
                 Instance.SetLastWinError(0);
+                if (Win32kHelper.TryDeliverWindowPosChanged(Instance, 0))
+                    return NTSTATUS.STATUS_SUCCESS;
+
                 Instance.SetBooleanSyscallReturn(false);
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -31,6 +34,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             Instance.SetLastWinError(0);
+            if (Win32kHelper.TryDeliverWindowPosChanged(Instance, 1))
+                return NTSTATUS.STATUS_SUCCESS;
+
             Instance.SetBooleanSyscallReturn(true);
             return NTSTATUS.STATUS_SUCCESS;
         }

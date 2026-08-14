@@ -82,6 +82,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial int XSelectInput(IntPtr display, IntPtr window, long eventMask);
 
         [LibraryImport("libX11.so.6")]
+        public static partial int XTranslateCoordinates(IntPtr display, IntPtr sourceWindow, IntPtr destinationWindow, int sourceX, int sourceY, out int destinationX, out int destinationY, out IntPtr child);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XGetWindowProperty(IntPtr display, IntPtr window, IntPtr property, long offset, long length, [MarshalAs(UnmanagedType.I4)] int delete, IntPtr requestedType, out IntPtr actualType, out int actualFormat, out ulong itemCount, out ulong bytesAfter, out IntPtr data);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XFree(IntPtr data);
+
+        [LibraryImport("libX11.so.6")]
         public static partial int XPending(IntPtr display);
 
         [LibraryImport("libX11.so.6")]
@@ -211,6 +220,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public const int FocusOut = 10;
         public const int Expose = 12;
         public const int ConfigureNotify = 22;
+        public const int PropertyNotify = 28;
         public const int ClientMessage = 33;
 
         public const long KeyPressMask = 1L << 0;
@@ -223,6 +233,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public const long SubstructureNotifyMask = 1L << 19;
         public const long SubstructureRedirectMask = 1L << 20;
         public const long FocusChangeMask = 1L << 21;
+        public const long PropertyChangeMask = 1L << 22;
 
         public const uint ShiftMask = 1 << 0;
         public const uint ControlMask = 1 << 2;
@@ -298,6 +309,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             [FieldOffset(52)] public int Y;
             [FieldOffset(56)] public int Width;
             [FieldOffset(60)] public int Height;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        public struct XPropertyEvent
+        {
+            [FieldOffset(0)] public int Type;
+            [FieldOffset(32)] public IntPtr Window;
+            [FieldOffset(40)] public IntPtr Atom;
         }
 
         [StructLayout(LayoutKind.Explicit)]
@@ -406,6 +425,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
     internal sealed class LinuxWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport, IGdiRenderSupport, IKeyboardTranslateSupport
     {
         private const uint WM_SIZE = 0x0005;
+        private const uint WM_MOVE = 0x0003;
+        private const uint SIZE_RESTORED = 0;
+        private const uint SIZE_MINIMIZED = 1;
+        private const uint SIZE_MAXIMIZED = 2;
         private const uint WM_SETFOCUS = 0x0007;
         private const uint WM_KILLFOCUS = 0x0008;
         private const uint WM_KEYDOWN = 0x0100;
@@ -442,9 +465,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             X11.KeyPressMask | X11.KeyReleaseMask |
             X11.ButtonPressMask | X11.ButtonReleaseMask |
             X11.PointerMotionMask | X11.ExposureMask |
-            X11.StructureNotifyMask | X11.FocusChangeMask;
+            X11.StructureNotifyMask | X11.FocusChangeMask | X11.PropertyChangeMask;
 
         private const int StackPointLimit = 128;
+        private const int NetWmStateAtomLimit = 32;
         private const int EFD_CLOEXEC = 0x80000;
         private const int EFD_NONBLOCK = 0x800;
 
@@ -481,6 +505,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private IntPtr _netWmStateFullscreen;
         private IntPtr _netWmStateMaximizedVert;
         private IntPtr _netWmStateMaximizedHorz;
+        private IntPtr _netWmStateHidden;
         private IntPtr _motifWmHints;
         private IntPtr _utf8String;
 
@@ -538,6 +563,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             _netWmStateFullscreen = X11.XInternAtom(_xDisplay, "_NET_WM_STATE_FULLSCREEN", 0);
             _netWmStateMaximizedVert = X11.XInternAtom(_xDisplay, "_NET_WM_STATE_MAXIMIZED_VERT", 0);
             _netWmStateMaximizedHorz = X11.XInternAtom(_xDisplay, "_NET_WM_STATE_MAXIMIZED_HORZ", 0);
+            _netWmStateHidden = X11.XInternAtom(_xDisplay, "_NET_WM_STATE_HIDDEN", 0);
             _motifWmHints = X11.XInternAtom(_xDisplay, "_MOTIF_WM_HINTS", 0);
             _utf8String = X11.XInternAtom(_xDisplay, "UTF8_STRING", 0);
 
@@ -682,11 +708,25 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 case X11.ConfigureNotify:
                     {
                         ref X11.XConfigureEvent configure = ref Unsafe.As<X11.XEvent, X11.XConfigureEvent>(ref nativeEvent);
-                        if (TryGetWindow(configure.Window, out LinuxWindow? window))
-                            window?.OnConfigured(configure.Width, configure.Height);
+                        TryGetWindow(configure.Window, out LinuxWindow? window);
+                        window?.OnConfigured(configure.Width, configure.Height);
 
-                        HostEventQueue.Enqueue(WM_SIZE, 0, MakeLParam(configure.Width, configure.Height));
+                        // A reparenting window manager makes ConfigureNotify's coordinates relative to the frame
+                        // it inserted, so the client's screen origin has to be resolved against the root instead.
+                        if (X11.XTranslateCoordinates(_xDisplay, configure.Window, X11.XRootWindow(_xDisplay, _screen), 0, 0, out int rootX, out int rootY, out _) != 0)
+                            HostEventQueue.Enqueue(WM_MOVE, 0, MakeLParam(rootX, rootY));
+
+                        HostEventQueue.Enqueue(WM_SIZE, window is { Maximized: true } ? SIZE_MAXIMIZED : SIZE_RESTORED, MakeLParam(configure.Width, configure.Height));
                         HostEventQueue.MarkRepaint();
+                        return;
+                    }
+
+                case X11.PropertyNotify:
+                    {
+                        ref X11.XPropertyEvent property = ref Unsafe.As<X11.XEvent, X11.XPropertyEvent>(ref nativeEvent);
+                        if (property.Atom == _netWmState && TryGetWindow(property.Window, out LinuxWindow? stateWindow) && stateWindow != null)
+                            ReportWindowState(stateWindow, property.Window);
+
                         return;
                     }
 
@@ -747,6 +787,57 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static ulong MakeLParam(int low, int high)
         {
             return (ulong)(uint)(((high & 0xFFFF) << 16) | (low & 0xFFFF));
+        }
+
+        private void ReportWindowState(LinuxWindow window, IntPtr handle)
+        {
+            ReadNetWmState(handle, out bool Hidden, out bool Maximized);
+            if (!window.OnStateChanged(Hidden, Maximized))
+                return;
+
+            if (Hidden)
+                HostEventQueue.Enqueue(WM_SIZE, SIZE_MINIMIZED, 0);
+            else
+                HostEventQueue.Enqueue(WM_SIZE, Maximized ? SIZE_MAXIMIZED : SIZE_RESTORED, MakeLParam(window.Width, window.Height));
+
+            HostEventQueue.MarkRepaint();
+        }
+
+        private void ReadNetWmState(IntPtr handle, out bool Hidden, out bool Maximized)
+        {
+            Hidden = false;
+            Maximized = false;
+
+            if (_netWmState == IntPtr.Zero)
+                return;
+
+            if (X11.XGetWindowProperty(_xDisplay, handle, _netWmState, 0, NetWmStateAtomLimit, 0, IntPtr.Zero, out _, out int Format, out ulong Count, out _, out IntPtr Data) != 0)
+                return;
+
+            if (Data == IntPtr.Zero)
+                return;
+
+            // A format of 32 means an array of long, not of int32, on LP64.
+            if (Format == 32)
+            {
+                bool Vertical = false;
+                bool Horizontal = false;
+
+                for (ulong i = 0; i < Count; i++)
+                {
+                    IntPtr Atom = Marshal.ReadIntPtr(Data, (int)(i * (ulong)IntPtr.Size));
+                    if (Atom == _netWmStateHidden)
+                        Hidden = true;
+                    else if (Atom == _netWmStateMaximizedVert)
+                        Vertical = true;
+                    else if (Atom == _netWmStateMaximizedHorz)
+                        Horizontal = true;
+                }
+
+                Maximized = Vertical && Horizontal;
+            }
+
+            X11.XFree(Data);
         }
 
         private static uint StateToMouseKeys(uint state)
@@ -1491,6 +1582,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private bool _visible;
             private bool _decorated;
             private WindowState _state;
+            private bool _hidden;
+            private bool _maximized;
             private readonly bool _resizable;
 
             internal LinuxWindow(LinuxWinManager manager, IntPtr display, IntPtr window, WindowOptions options)
@@ -1640,6 +1733,19 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 _width = Math.Max(width, 1);
                 _height = Math.Max(height, 1);
+            }
+
+            internal bool Maximized => _maximized;
+
+            internal bool OnStateChanged(bool hidden, bool maximized)
+            {
+                if (_hidden == hidden && _maximized == maximized)
+                    return false;
+
+                _hidden = hidden;
+                _maximized = maximized;
+                _state = hidden ? WindowState.Minimized : maximized ? WindowState.Maximized : WindowState.Normal;
+                return true;
             }
 
             private void Resize()
