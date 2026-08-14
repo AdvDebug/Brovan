@@ -379,7 +379,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IpEndPoint == null)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!IsEndpointAllowed(Instance, IpEndPoint))
+            if (!Instance.Settings.GetNetworkPolicy().IsLocalBindAllowed(IpEndPoint))
                 return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
 
             try

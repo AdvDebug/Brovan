@@ -25,7 +25,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (FileHandle == (ulong)Instance.WinHelper.STD_IN.Handle)
+            if (FileHandle == (ulong)Instance.WinHelper.STD_IN.Handle || Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp)?.ConsoleKind == ConsoleObjectKind.Input)
                 return HandleStdIn(Instance, IoStatusBlockPtr, BufferPtr, Length);
 
             if (Length == 0)
@@ -146,14 +146,35 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            string Line = Console.ReadLine() ?? string.Empty;
-            Line += "\r\n";
+            int ToWrite;
+            if (Console.IsInputRedirected)
+            {
+                Span<byte> Raw = Instance.WinHelper.Shared.GetSpan(Length);
+                ToWrite = GeneralHelper.ConsoleRead(Raw.Slice(0, (int)Length));
+                if (ToWrite != 0)
+                    Instance._emulator.WriteMemory(BufferPtr, Raw.Slice(0, ToWrite));
+            }
+            else
+            {
+                string Line = Console.ReadLine();
+                if (Line == null)
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
+                    return NTSTATUS.STATUS_END_OF_FILE;
+                }
 
-            int CharCount = (int)Math.Min((uint)Line.Length, Length);
-            Span<byte> Data = Instance.WinHelper.Shared.GetSpan((uint)CharCount);
-            int ToWrite = Encoding.ASCII.GetBytes(Line.AsSpan(0, CharCount), Data);
+                Line += "\r\n";
+                int CharCount = (int)Math.Min((uint)Line.Length, Length);
+                Span<byte> Data = Instance.WinHelper.Shared.GetSpan((uint)CharCount);
+                ToWrite = Encoding.ASCII.GetBytes(Line.AsSpan(0, CharCount), Data);
+                Instance._emulator.WriteMemory(BufferPtr, Data.Slice(0, ToWrite));
+            }
 
-            Instance._emulator.WriteMemory(BufferPtr, Data.Slice(0, ToWrite));
+            if (ToWrite == 0)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
+                return NTSTATUS.STATUS_END_OF_FILE;
+            }
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)ToWrite);
 

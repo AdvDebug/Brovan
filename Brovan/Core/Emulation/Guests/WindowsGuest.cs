@@ -1197,7 +1197,8 @@ namespace Brovan.Core.Emulation.Guests
                 WinFile Console = new WinFile
                 {
                     Device = true,
-                    Path = "\\Device\\ConDrv",
+                    Path = "\\Device\\ConDrv\\Connect",
+                    ConsoleKind = ConsoleObjectKind.Connect,
                     Handler = ConsoleServer.Handle
                 };
                 WinHelper.ConsoleHandle = WinHelper.HandleManager.AddHandle(Console, AccessMask.GenericRead | AccessMask.GenericWrite);
@@ -1205,23 +1206,13 @@ namespace Brovan.Core.Emulation.Guests
 
             if (WinHelper.STD_IN == null)
             {
-                WinFile StdIn = new WinFile
-                {
-                    Device = true,
-                    Path = "\\Device\\ConDrv",
-                    Handler = ConsoleServer.Handle
-                };
+                WinFile StdIn = WinSysHelper.CreateStandardHandleFile(ConsoleObjectKind.Input);
                 WinHelper.STD_IN = WinHelper.HandleManager.AddHandle(StdIn, AccessMask.FileReadData);
             }
 
             if (WinHelper.STD_OUT == null)
             {
-                WinFile StdOut = new WinFile
-                {
-                    Device = true,
-                    Path = "\\Device\\ConDrv",
-                    Handler = ConsoleServer.Handle
-                };
+                WinFile StdOut = WinSysHelper.CreateStandardHandleFile(ConsoleObjectKind.Output);
                 WinHelper.STD_OUT = WinHelper.HandleManager.AddHandle(StdOut, AccessMask.FileWriteData);
             }
         }

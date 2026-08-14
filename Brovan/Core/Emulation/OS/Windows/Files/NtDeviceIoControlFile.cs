@@ -59,6 +59,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             DeviceData Data = new DeviceData();
+            Data.File = File;
 
             if (InputBufferPtr != 0 && InputBufferLength != 0)
             {

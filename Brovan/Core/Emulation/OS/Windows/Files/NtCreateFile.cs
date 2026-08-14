@@ -57,7 +57,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (IsConsoleRelativeObject(ObjectName, RootDirectoryHandle, Instance) || IsConsolePath(RawPath))
             {
-                ulong HandleValue = Instance.WinHelper.ConsoleHandle.Handle;
+                ulong HandleValue = OpenConsoleObject(Instance, RawPath, (AccessMask)DesiredAccess);
                 Instance._emulator.WriteMemory(FileHandlePtr, HandleValue);
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
                 return NTSTATUS.STATUS_SUCCESS;
@@ -134,7 +134,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (IsConsoleRelativeObject(ObjectName, RootDirectoryHandle, Instance) || IsConsolePath(RawPath))
             {
-                uint HandleValue = (uint)Instance.WinHelper.ConsoleHandle.Handle;
+                uint HandleValue = (uint)OpenConsoleObject(Instance, RawPath, (AccessMask)DesiredAccess);
                 Instance._emulator.WriteMemory(FileHandlePtr, HandleValue);
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
                 return NTSTATUS.STATUS_SUCCESS;
@@ -588,6 +588,36 @@ namespace Brovan.Core.Emulation.OS.Windows
         private bool IsConsoleRelativeObject(string Path, uint RootDirectoryHandle, BinaryEmulator Instance)
         {
             return IsConsoleRelativeObject(Path, (ulong)RootDirectoryHandle, Instance);
+        }
+
+        private static ulong OpenConsoleObject(BinaryEmulator Instance, string Path, AccessMask DesiredAccess)
+        {
+            string P = (Path ?? string.Empty).Trim();
+
+            if (P.StartsWith("\\??\\", StringComparison.OrdinalIgnoreCase))
+                P = P.Substring(4);
+
+            if (P.StartsWith("\\Device\\ConDrv\\", StringComparison.OrdinalIgnoreCase))
+                P = P.Substring("\\Device\\ConDrv\\".Length);
+
+            ConsoleObjectKind Kind;
+            if (P.Equals("CONIN$", StringComparison.OrdinalIgnoreCase) || P.Equals("CurrentIn", StringComparison.OrdinalIgnoreCase) || P.Equals("Input", StringComparison.OrdinalIgnoreCase))
+                Kind = ConsoleObjectKind.Input;
+            else if (P.Equals("CONOUT$", StringComparison.OrdinalIgnoreCase) || P.Equals("CurrentOut", StringComparison.OrdinalIgnoreCase) || P.Equals("Output", StringComparison.OrdinalIgnoreCase) || P.Equals("Screen", StringComparison.OrdinalIgnoreCase))
+                Kind = ConsoleObjectKind.Output;
+            else
+                return Instance.WinHelper.ConsoleHandle.Handle;
+
+            WinFile Object = new WinFile
+            {
+                Device = true,
+                Path = Kind == ConsoleObjectKind.Input ? "\\Device\\ConDrv\\CurrentIn" : "\\Device\\ConDrv\\CurrentOut",
+                ConsoleKind = Kind,
+                Handler = ConsoleServer.Handle
+            };
+
+            AccessMask Granted = DesiredAccess != 0 ? DesiredAccess : AccessMask.GenericRead | AccessMask.GenericWrite;
+            return Instance.WinHelper.HandleManager.AddHandle(Object, Granted).Handle;
         }
 
         private bool IsConsolePath(string Path)

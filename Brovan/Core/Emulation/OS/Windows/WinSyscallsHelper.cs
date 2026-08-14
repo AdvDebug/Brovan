@@ -1087,6 +1087,23 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinHandle STD_OUT;
         public WinHandle STD_IN;
         public WinHandle ConsoleHandle;
+        public readonly ConsoleState ConsoleState = new ConsoleState();
+
+        public static WinFile CreateStandardHandleFile(ConsoleObjectKind Kind)
+        {
+            bool Redirected = Kind == ConsoleObjectKind.Input ? Console.IsInputRedirected : Console.IsOutputRedirected;
+
+            if (Redirected)
+                return new WinFile() { Device = true, Path = "\\Device\\NamedPipe\\Brovan" };
+
+            return new WinFile()
+            {
+                Device = true,
+                Path = Kind == ConsoleObjectKind.Input ? "\\Device\\ConDrv\\CurrentIn" : "\\Device\\ConDrv\\CurrentOut",
+                ConsoleKind = Kind,
+                Handler = ConsoleServer.Handle
+            };
+        }
         public uint CurrentPriority = 0x8; // Default priority (Normal), changes only if the program changed it explicitly.
         public User CurrentUser = User.Standard;
         public string CurrentUserSid = "S-1-5-21-1000-1000-1000-1001";
@@ -1295,10 +1312,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui))
             {
-                WinFile STDIN = new WinFile() { Device = true, Path = "\\Device\\ConDrv" };
-                WinFile STDOUT = new WinFile() { Device = true, Path = "\\Device\\ConDrv" };
-                STD_IN = HandleManager.AddHandle(STDIN, AccessMask.FileReadData);
-                STD_OUT = HandleManager.AddHandle(STDOUT, AccessMask.FileWriteData);
+                STD_IN = HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Input), AccessMask.FileReadData);
+                STD_OUT = HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Output), AccessMask.FileWriteData);
             }
             else
             {
@@ -1357,7 +1372,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             // Prepare Devices
             WinFile hConsoleHandle = new WinFile();
             hConsoleHandle.Device = true;
-            hConsoleHandle.Path = "\\Device\\ConDrv";
+            hConsoleHandle.Path = "\\Device\\ConDrv\\Connect";
+            hConsoleHandle.ConsoleKind = ConsoleObjectKind.Connect;
             hConsoleHandle.Handler = ConsoleServer.Handle;
             ConsoleHandle = HandleManager.AddHandle(hConsoleHandle, AccessMask.GenericRead | AccessMask.GenericWrite);
             List<Hive> Hives = new List<Hive>();

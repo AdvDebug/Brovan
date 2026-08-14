@@ -15,6 +15,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const uint FILE_DEVICE_DISK = 0x00000007;
         private const uint FILE_DEVICE_CONSOLE = 0x00000050;
+        private const uint FILE_DEVICE_NAMED_PIPE = 0x00000011;
         private const uint FILE_CASE_SENSITIVE_SEARCH = 0x00000001;
         private const uint FILE_CASE_PRESERVED_NAMES = 0x00000002;
         private const uint FILE_UNICODE_ON_DISK = 0x00000004;
@@ -137,7 +138,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_TOO_SMALL, 0, Is64Bit);
             }
 
-            uint DeviceType = IsConsoleHandle(Instance, FileHandle, FileObj) ? FILE_DEVICE_CONSOLE : FILE_DEVICE_DISK;
+            uint DeviceType = FILE_DEVICE_DISK;
+            if (IsConsoleHandle(Instance, FileHandle, FileObj))
+                DeviceType = FILE_DEVICE_CONSOLE;
+            else if (FileObj.Device && FileObj.Path != null && FileObj.Path.StartsWith("\\Device\\NamedPipe", System.StringComparison.OrdinalIgnoreCase))
+                DeviceType = FILE_DEVICE_NAMED_PIPE;
 
             Instance._emulator.WriteMemory(FsInfoBuffer + 0x0, DeviceType);
             Instance._emulator.WriteMemory(FsInfoBuffer + 0x4, 0u);
@@ -183,16 +188,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool IsConsoleHandle(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj)
         {
-            if (Instance.WinHelper.STD_OUT != null && FileHandle == Instance.WinHelper.STD_OUT.Handle)
+            if (FileObj.ConsoleKind != ConsoleObjectKind.None)
                 return true;
 
-            if (Instance.WinHelper.STD_IN != null && FileHandle == Instance.WinHelper.STD_IN.Handle)
-                return true;
-
-            if (Instance.WinHelper.ConsoleHandle != null && FileHandle == Instance.WinHelper.ConsoleHandle.Handle)
-                return true;
-
-            return FileObj.Device && string.Equals(FileObj.Path, "\\Device\\ConDrv", System.StringComparison.OrdinalIgnoreCase);
+            return FileObj.Device && FileObj.Path != null && FileObj.Path.StartsWith("\\Device\\ConDrv", System.StringComparison.OrdinalIgnoreCase);
         }
     }
 }

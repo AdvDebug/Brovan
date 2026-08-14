@@ -197,6 +197,17 @@ namespace Brovan.Core.Emulation
             return Mode == NetworkAccessMode.Full;
         }
 
+        public bool IsLocalBindAllowed(EndPoint EndPointValue)
+        {
+            if (!HasAnyAccess())
+                return false;
+
+            if (EndPointValue is IPEndPoint IpEndPoint && (IpEndPoint.Address.Equals(IPAddress.Any) || IpEndPoint.Address.Equals(IPAddress.IPv6Any)))
+                return true;
+
+            return IsEndpointAllowed(EndPointValue);
+        }
+
         private static IPAddress NormalizeAddress(IPAddress Address)
         {
             if (Address.IsIPv4MappedToIPv6)

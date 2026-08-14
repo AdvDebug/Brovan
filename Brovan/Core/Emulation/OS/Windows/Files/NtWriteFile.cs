@@ -33,16 +33,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            ulong StdOut = Instance.WinHelper.STD_OUT.Handle;
-            if (FileHandle == StdOut)
-                return HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
-
             WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             if (FileObj == null)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
+
+            if (FileObj.ConsoleKind == ConsoleObjectKind.Output || FileHandle == Instance.WinHelper.STD_OUT.Handle)
+                return HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
 
             if (FileObj.Device)
             {

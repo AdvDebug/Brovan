@@ -16,6 +16,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint InputLength;
         public uint OutputLength;
         public ulong Information;
+        public WinFile File;
+    }
+
+    public enum ConsoleObjectKind : byte
+    {
+        None = 0,
+        Connect,
+        Input,
+        Output
     }
 
     [StructLayout(LayoutKind.Explicit, Pack = 1)]
@@ -1165,6 +1174,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public ulong CompletionHandle;
         public ulong CompletionKey;
+
+        public ConsoleObjectKind ConsoleKind;
 
         public WinDeviceDelegate Handler;
 

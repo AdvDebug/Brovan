@@ -315,7 +315,11 @@ namespace Brovan.Core.Emulation
 
         private void EnsureCanBindEndpoint(EndPoint? endPoint)
         {
-            EnsureCanAccessEndpoint(endPoint);
+            if (endPoint == null)
+                return;
+
+            if (!_policy.IsLocalBindAllowed(endPoint))
+                throw new SecurityException("The local endpoint is not whitelisted.");
         }
 
         private void EnsureCurrentRemoteAllowed()
