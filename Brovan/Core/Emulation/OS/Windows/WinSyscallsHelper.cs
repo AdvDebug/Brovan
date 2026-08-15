@@ -1,4 +1,4 @@
-using static Brovan.Core.Helpers.BinaryHelpers;
+﻿using static Brovan.Core.Helpers.BinaryHelpers;
 using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -2828,38 +2828,41 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public ulong GetPrimaryMonitorHandle()
         {
-            ulong Monitor = EnsureUserPrimaryMonitor();
-            if (Monitor == 0)
-                return 0;
+            return EnsureUserPrimaryMonitor() == 0 ? 0 : UserPrimaryMonitorHandle;
+        }
 
+        private bool RegisterUserPrimaryMonitorHandle(ulong Monitor)
+        {
             if (UserPrimaryMonitorHandle != 0)
-                return UserPrimaryMonitorHandle;
+                return true;
 
             if (!EnsureUserSharedInfo(out _, out ulong HandleTable, out uint EntrySize))
-                return 0;
+                return false;
 
             ulong Handle = AllocateUserHandle();
             if (Handle == 0)
-                return 0;
+                return false;
 
             ushort Index = (ushort)(Handle & 0xFFFF);
             ushort Uniq = (ushort)((Handle >> 16) & 0x7FFF);
+
+            ulong ThreadInfo = EnsureCurrentUserThreadInfo();
 
             ulong Entry = HandleTable + (ulong)Index * EntrySize;
             Span<byte> Data = Shared.GetSpan(0x20);
             Data.Slice(0, 0x20).Clear();
             WriteU64(Data, 0x00, Monitor);
-            WriteU64(Data, 0x08, EnsureCurrentUserThreadInfo());
+            WriteU64(Data, 0x08, ThreadInfo);
             WriteU64(Data, 0x10, UserDesktopOwnerAddress);
             Data[0x18] = UserHandleTypeMonitor;
             Data[0x19] = 0;
             WriteU16(Data, 0x1A, Uniq);
 
             if (!Emulator._emulator.WriteMemory(Entry, Data.Slice(0, 0x20)))
-                return 0;
+                return false;
 
             UserPrimaryMonitorHandle = Handle;
-            return UserPrimaryMonitorHandle;
+            return true;
         }
 
         public bool TryGetPrimaryMonitorRect(out int Left, out int Top, out int Right, out int Bottom)
@@ -3715,10 +3718,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!WriteZeroMemory(Monitor, (uint)UserPrimaryMonitorSize))
                 return 0;
 
-            if (!WriteUserPrimaryMonitorInfo(Monitor))
-                return 0;
-
             UserPrimaryMonitorAddress = Monitor;
+            RegisterUserPrimaryMonitorHandle(Monitor);
+            WriteUserPrimaryMonitorInfo(Monitor);
+
             return UserPrimaryMonitorAddress;
         }
 
@@ -3730,7 +3733,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             UserPrimaryMonitorInfo MonitorInfo = new UserPrimaryMonitorInfo
             {
-                Header = 1UL,
+                Header = UserPrimaryMonitorHandle,
                 MonitorLeft = 0,
                 MonitorTop = 0,
                 MonitorRight = Width,
@@ -4969,7 +4972,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             SetSyntheticRegistryDwordTrusted(ProfileListKey, "RefCount", 0, KeyCache, DefaultHive);
 
             InitializeSyntheticWindowsVersionRegistryDefaults(KeyCache, DefaultHive);
-            InitializeSyntheticKnownFolderDescriptions(UserProfile, KeyCache, DefaultHive);
+            InitializeSyntheticKnownFolderDescriptions(KeyCache, DefaultHive);
 
             string KnownFolderSettings = "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\KnownFolderSettings";
             AddSyntheticRegistryKeyTrusted(KnownFolderSettings, KeyCache, DefaultHive);
@@ -4979,6 +4982,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             AddSyntheticDirectory(UserProfile);
             AddSyntheticDirectory(UserProfile + "\\AppData");
             AddSyntheticDirectory(UserProfile + "\\AppData\\Local");
+            AddSyntheticDirectory(UserProfile + "\\AppData\\LocalLow");
             AddSyntheticDirectory(UserProfile + "\\AppData\\Roaming");
             AddSyntheticDirectory(UserProfile + "\\Desktop");
             AddSyntheticDirectory(UserProfile + "\\Documents");
@@ -5239,12 +5243,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 DeletedValues.Remove(ValueName);
         }
 
-        private void InitializeSyntheticKnownFolderDescriptions(string UserProfile, Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        private void InitializeSyntheticKnownFolderDescriptions(Dictionary<string, bool> KeyCache, Hive DefaultHive)
         {
             const string Root = "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FolderDescriptions";
             AddSyntheticRegistryKeyTrusted(Root, KeyCache, DefaultHive);
 
-            AddSyntheticKnownFolder(Root, "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Profile", string.Empty, UserProfile, 4, KeyCache, DefaultHive);
+            AddSyntheticKnownFolder(Root, "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Profile", string.Empty, string.Empty, 2, KeyCache, DefaultHive);
             AddSyntheticKnownFolder(Root, "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}", "Local AppData", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "AppData\\Local", 4, KeyCache, DefaultHive);
             AddSyntheticKnownFolder(Root, "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}", "Roaming AppData", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "AppData\\Roaming", 4, KeyCache, DefaultHive);
             AddSyntheticKnownFolder(Root, "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}", "Documents", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Documents", 4, KeyCache, DefaultHive);

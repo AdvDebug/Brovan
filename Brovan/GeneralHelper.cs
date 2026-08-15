@@ -2900,9 +2900,11 @@ namespace Brovan
                         return Root;
                 }
 
-                // Create a default mapping on demand.
+                // Create a default mapping on demand. The new root has to reach AllowedRoots straight away or
+                // every write through it is sandboxed out
                 string DefaultRoot = Path.Combine(VirtualFileSystemRoot, DriveLetter.ToString());
                 EnsureDriveMapping(DriveLetter, DefaultRoot);
+                RefreshAllowedRoots();
                 return DefaultRoot;
             }
 

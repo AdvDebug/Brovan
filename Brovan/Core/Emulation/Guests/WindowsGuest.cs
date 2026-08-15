@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -844,6 +844,10 @@ namespace Brovan.Core.Emulation.Guests
 
             ExceptionInformation ExceptionInfo = Info ?? new ExceptionInformation();
             ExceptionInfo.Status = Status;
+
+            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                Instance.TriggerEventMessage($"[-] Dispatching exception 0x{(uint)Status:X8} to thread {ThreadId} at 0x{Instance.ReadRegister(Instance.IPRegister):X} (fault address 0x{ExceptionInfo.Address:X}).", LogFlags.Issues);
+
             Thread.State = EmulatedThreadState.Exception;
             State.DispatchException = true;
             State.ExceptionInformation = ExceptionInfo;
@@ -872,6 +876,46 @@ namespace Brovan.Core.Emulation.Guests
                 Instance.WriteRegister32(Registers.UC_X86_REG_EAX, (uint)Status);
         }
 
+        private const ulong StackGuardPages = 3;
+        private const ulong InitialStackCommitPages = 4;
+
+        private static ulong AllocateGuardedThreadStack(BinaryEmulator Instance, ulong StackSize, out ulong StackLimit)
+        {
+            const uint PAGE_READWRITE = 0x04;
+            const uint PAGE_GUARD = 0x100;
+            const ulong AllocationGranularity = 0x10000;
+
+            StackLimit = 0;
+
+            ulong GuardSize = StackGuardPages * PageSize;
+            ulong CommitSize = InitialStackCommitPages * PageSize;
+            ulong Reserve = Instance.AlignToPageSize(StackSize);
+
+            // Deliberately not allocate. its finder starts at 4 GB for x64 guests,
+            // which puts the stack nowhere near the rest of the address space Brovan hands out.
+            if (Instance.WinHelper != null && Reserve > GuardSize + CommitSize &&
+                Instance.TryFindFreeBaseAddress(Reserve, AllocationGranularity, Instance.BaseAddress, Instance.MaxAddress, out ulong Base) &&
+                Instance.ReserveMemory(Base, Reserve, PAGE_READWRITE))
+            {
+                ulong CommitBase = Base + Reserve - CommitSize;
+                if (Instance.CommitMemory(CommitBase, CommitSize, PAGE_READWRITE) &&
+                    Instance.CommitMemory(CommitBase - GuardSize, GuardSize, PAGE_READWRITE | PAGE_GUARD))
+                {
+                    StackLimit = CommitBase;
+                    return Base;
+                }
+
+                Instance.ReleaseMemory(Base);
+            }
+
+            return Instance.AllocateThreadStack(StackSize);
+        }
+
+        private static ulong EffectiveStackLimit(EmulatedThread Thread)
+        {
+            return Thread.StackLimit != 0 ? Thread.StackLimit : Thread.StackAddress;
+        }
+
         public ulong AllocateAndInitializeTEB(BinaryEmulator Instance, EmulatedThread Thread, uint CreateFlags = 0, bool InitialThread = false)
         {
             ulong Teb = Instance.MapUniqueAddress(0x2000, MemoryProtection.ReadWrite);
@@ -880,7 +924,8 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemoryByte(Teb, 0, 0x2000);
                 Instance._emulator.WriteMemory(Teb + 0x0, 0xFFFFFFFFu);
                 Instance._emulator.WriteMemory(Teb + 0x4, (uint)(Thread.StackAddress + Thread.StackSize));
-                Instance._emulator.WriteMemory(Teb + 0x8, (uint)Thread.StackAddress);
+                Instance._emulator.WriteMemory(Teb + 0x8, (uint)EffectiveStackLimit(Thread));
+                Instance._emulator.WriteMemory(Teb + 0xE0C, (uint)Thread.StackAddress);
                 Instance._emulator.WriteMemory(Teb + 0x18, (uint)Teb);
                 Instance._emulator.WriteMemory(Teb + 0x20, WinHelper.PID);
                 Instance._emulator.WriteMemory(Teb + 0x24, Thread.ThreadId);
@@ -902,7 +947,8 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemoryByte(Teb, 0, 0x2000);
             Instance._emulator.WriteMemory(Teb, ulong.MaxValue, 8);
             Instance._emulator.WriteMemory(Teb + 0x8, Thread.StackAddress + Thread.StackSize);
-            Instance._emulator.WriteMemory(Teb + 0x10, Thread.StackAddress);
+            Instance._emulator.WriteMemory(Teb + 0x10, EffectiveStackLimit(Thread));
+            Instance._emulator.WriteMemory(Teb + 0x1478, Thread.StackAddress, 8);
             Instance._emulator.WriteMemory(Teb + 0x18, 0UL, 8);
             Instance._emulator.WriteMemory(Teb + 0x20, 0UL, 8);
             Instance._emulator.WriteMemory(Teb + 0x28, 0UL, 8);
@@ -982,7 +1028,8 @@ namespace Brovan.Core.Emulation.Guests
                 StartAddress = StartAddress,
                 Parameter = Parameter,
                 StackSize = ThreadStackSize,
-                StackAddress = Instance.AllocateThreadStack(ThreadStackSize),
+                StackAddress = AllocateGuardedThreadStack(Instance, ThreadStackSize, out ulong ThreadStackLimit),
+                StackLimit = ThreadStackLimit,
                 GuestState = new WindowsThreadState()
             };
 
@@ -1010,7 +1057,6 @@ namespace Brovan.Core.Emulation.Guests
             Thread.Context.RIP = StartAddress;
             Thread.Context.RSP = InitialStack;
             Thread.Context.RFLAGS = 0x202;
-            Thread.Context.MXCSR = Instance.ReadRegister(Registers.UC_X86_REG_MXCSR);
             Thread.Context.CS = Instance.ReadRegister(Registers.UC_X86_REG_CS);
             Thread.Context.DS = Instance.ReadRegister(Registers.UC_X86_REG_DS);
             Thread.Context.ES = Instance.ReadRegister(Registers.UC_X86_REG_ES);
@@ -1057,7 +1103,8 @@ namespace Brovan.Core.Emulation.Guests
                 StartAddress = StartAddress,
                 Parameter = Parameter,
                 StackSize = ThreadStackSize,
-                StackAddress = Instance.AllocateThreadStack(ThreadStackSize),
+                StackAddress = AllocateGuardedThreadStack(Instance, ThreadStackSize, out ulong ThreadStackLimit),
+                StackLimit = ThreadStackLimit,
                 GuestState = new WindowsThreadState()
             };
 
@@ -1067,7 +1114,6 @@ namespace Brovan.Core.Emulation.Guests
             State.Teb = AllocateAndInitializeTEB(Instance, Thread, CreateFlags, InitialThread);
 
             Thread.Context.RIP = LdrInitializeThunk;
-            Thread.Context.MXCSR = Instance.ReadRegister(Registers.UC_X86_REG_MXCSR);
             Thread.Context.CS = Instance.ReadRegister(Registers.UC_X86_REG_CS);
             Thread.Context.DS = Instance.ReadRegister(Registers.UC_X86_REG_DS);
             Thread.Context.ES = Instance.ReadRegister(Registers.UC_X86_REG_ES);
@@ -1169,7 +1215,7 @@ namespace Brovan.Core.Emulation.Guests
                 if (string.IsNullOrEmpty(Name))
                     continue;
 
-                if (!Name.StartsWith("DXVK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("SDL_", StringComparison.OrdinalIgnoreCase))
+                if (!Name.StartsWith("DXVK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("SDL_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("MONO_", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 Env[Name] = HostVariable.Value as string ?? string.Empty;

@@ -14,28 +14,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             {
                 ulong ProcessHandle = Instance.WinHelper.GetArg(0);
-                ulong BaseAddressPtr = Instance.WinHelper.GetArg(1);
-                ulong BufferPtr = Instance.WinHelper.GetArg(2);
+                ulong BaseAddress = Instance.WinHelper.GetArg(1);
+                ulong Buffer = Instance.WinHelper.GetArg(2);
                 ulong NumberOfBytesToRead = Instance.WinHelper.GetArg(3);
             current_process:
                 if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
                 {
-                    if (BaseAddressPtr == 0)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                    if (!Instance.IsRegionMapped(BaseAddressPtr, sizeof(ulong)))
-                        return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
-
-                    if (BufferPtr == 0 || !Instance.IsRegionMapped(BufferPtr, sizeof(ulong)))
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                    if (NumberOfBytesToRead == 0)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                    ulong BaseAddress = Instance.WinHelper.ReadPointer(BaseAddressPtr);
-                    ulong Buffer = Instance.WinHelper.ReadPointer(BufferPtr);
-
-                    if (BaseAddress == 0)
+                    if (BaseAddress == 0 || Buffer == 0 || NumberOfBytesToRead == 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                     if (Instance.IsRegionFreed(BaseAddress, true))
@@ -43,9 +28,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     if (!Instance.IsRegionMapped(BaseAddress, NumberOfBytesToRead))
                         return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
-
-                    if (Buffer == 0)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                     if (Instance.IsRegionFreed(Buffer, true))
                     {
@@ -63,6 +45,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     if (!Instance.WriteMemory(Buffer, value))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    ulong LocalBytesReadPtr = Instance.WinHelper.GetArg(4);
+                    if (LocalBytesReadPtr != 0)
+                    {
+                        uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+                        if (Instance.IsRegionMapped(LocalBytesReadPtr, PointerSize))
+                            Instance._emulator.WriteMemory(LocalBytesReadPtr, (ulong)value.Length, PointerSize);
+                    }
 
                     return NTSTATUS.STATUS_SUCCESS;
                 }
@@ -84,8 +74,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Process.Remote == null)
                         return NTSTATUS.STATUS_INVALID_CID;
 
-                    ulong RemoteAddress = BaseAddressPtr;
-                    ulong LocalBuffer = BufferPtr;
+                    ulong RemoteAddress = BaseAddress;
+                    ulong LocalBuffer = Buffer;
                     ulong BytesReadPtr = Instance.WinHelper.GetArg(4);
 
                     if (RemoteAddress == 0 || LocalBuffer == 0 || NumberOfBytesToRead == 0)

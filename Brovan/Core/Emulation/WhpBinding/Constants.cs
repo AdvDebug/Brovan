@@ -124,6 +124,8 @@ namespace Brovan.Core.Emulation
         Cr8 = 0x00000020,
 
         Xmm0 = 0x00001000,
+        FpControlStatus = 0x00001018,
+        XmmControlStatus = 0x00001019,
 
         Dr0 = 0x00000021,
         Dr1 = 0x00000022,

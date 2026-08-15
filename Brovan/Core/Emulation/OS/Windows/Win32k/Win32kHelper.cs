@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Brovan.Core.Emulation.OS.SharedHelpers;
@@ -72,6 +72,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         internal const uint ERROR_INVALID_PARAMETER = 87;
         internal const uint ERROR_CALL_NOT_IMPLEMENTED = 120;
+        internal const uint ERROR_INSUFFICIENT_BUFFER = 122;
         internal const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
 
         internal const byte PenHandleType = 0x30;

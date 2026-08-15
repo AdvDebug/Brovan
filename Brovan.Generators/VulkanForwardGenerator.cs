@@ -656,6 +656,8 @@ namespace Brovan.Generators
             "vkGetDeviceImageMemoryRequirements",
             "vkGetPipelineCacheData",
             "vkCmdBindIndexBuffer2",
+            "vkCmdBindDescriptorSets2",
+            "vkCmdPushConstants2",
             "vkGetRenderingAreaGranularity",
             "vkGetDeviceImageSubresourceLayout",
             "vkGetImageSubresourceLayout2",
@@ -683,6 +685,9 @@ namespace Brovan.Generators
             "VK_EXT_non_seamless_cube_map",
             "VK_KHR_maintenance5",
             "VK_KHR_pipeline_library",
+            "VK_KHR_load_store_op_none",
+            "VK_EXT_load_store_op_none",
+            "VK_KHR_maintenance6",
         };
 
         private const double MaxCoreVersion = 1.3;
@@ -1110,6 +1115,18 @@ namespace Brovan.Generators
                     "                        }\n" +
                     "                    }\n" +
                     "                }\n" +
+                    "                if (ci != System.IntPtr.Zero)\n" +
+                    "                {\n" +
+                    "                    // The host loader only exports the promoted names of commands like\n" +
+                    "                    // vkCmdBindIndexBuffer2, and its device dispatch slot for them stays NULL unless the\n" +
+                    "                    // instance asks for the core version they were promoted in. Guests target older\n" +
+                    "                    // versions and reach those commands through the KHR alias, which the loader does not\n" +
+                    "                    // export, so raise the host instance to the loader's own version.\n" +
+                    "                    System.IntPtr ai = *(System.IntPtr*)(ci + 24);\n" +
+                    "                    uint loaderVersion = 0;\n" +
+                    "                    if (ai != System.IntPtr.Zero && BrovVulkApi.vkEnumerateInstanceVersion((System.IntPtr)(&loaderVersion)) >= 0 && loaderVersion > *(uint*)(ai + 44))\n" +
+                    "                        *(uint*)(ai + 44) = loaderVersion;\n" +
+                    "                }\n" +
                     "                System.IntPtr vki = System.IntPtr.Zero;\n" +
                     "                int rr = (int)BrovVulkApi.vkCreateInstance(ci, System.IntPtr.Zero, (System.IntPtr)(&vki));\n" +
                     "                if (rr >= 0 && vki == System.IntPtr.Zero) rr = -3;\n" +
@@ -1460,7 +1477,7 @@ namespace Brovan.Generators
                     "    bvk_w_u64(bvk_bsize);\n" +
                     "    unsigned char bvk_out[32]; unsigned int bvk_outLen = 0;\n" +
                     "    int bvk_r = bvk_rq_send(BVK_vkAllocateMemory, bvk_out, sizeof(bvk_out), &bvk_outLen);\n" +
-                    "    if (bvk_r == 0 && pMemory && bvk_outLen >= 8)\n" +
+                    "    if (bvk_r >= 0 && pMemory && bvk_outLen >= 8)\n" +
                     "    {\n" +
                     "        uint32_t bvk_id; memcpy(&bvk_id, bvk_out + 4, 4);\n" +
                     "        *pMemory = (VkDeviceMemory)(uintptr_t)bvk_id;\n" +
@@ -1551,7 +1568,7 @@ namespace Brovan.Generators
                     "    bvk_w_u32((uint32_t)(uintptr_t)instance);\n" +
                     "    unsigned char bvk_out[64]; unsigned int bvk_outLen = 0;\n" +
                     "    int bvk_r = bvk_rq_send(BVK_vkCreateWin32SurfaceKHR, bvk_out, sizeof(bvk_out), &bvk_outLen);\n" +
-                    "    if (bvk_r == 0 && pSurface && bvk_outLen >= 8) { uint32_t id; memcpy(&id, bvk_out + 4, 4); *pSurface = (VkSurfaceKHR)(uintptr_t)id; }\n" +
+                    "    if (bvk_r >= 0 && pSurface && bvk_outLen >= 8) { uint32_t id; memcpy(&id, bvk_out + 4, 4); *pSurface = (VkSurfaceKHR)(uintptr_t)id; }\n" +
                     "    return (VkResult)bvk_r;\n" +
                     "}\n";
             if (c.Name == "vkEnumerateInstanceExtensionProperties" || c.Name == "vkEnumerateDeviceExtensionProperties")
@@ -1589,7 +1606,7 @@ namespace Brovan.Generators
                     "    {\n" +
                     "        unsigned char bvk_out[32]; unsigned int bvk_outLen = 0;\n" +
                     "        int bvk_r = bvk_rq_send(BVK_vkGetPipelineCacheData, bvk_out, sizeof(bvk_out), &bvk_outLen);\n" +
-                    "        if (bvk_r == 0 && bvk_outLen >= 12) { uint64_t n; memcpy(&n, bvk_out + 4, 8); *pDataSize = (size_t)n; }\n" +
+                    "        if (bvk_r >= 0 && bvk_outLen >= 12) { uint64_t n; memcpy(&n, bvk_out + 4, 8); *pDataSize = (size_t)n; }\n" +
                     "        return (VkResult)bvk_r;\n" +
                     "    }\n" +
                     "    uint64_t bvk_cap = (uint64_t)*pDataSize + 16;\n" +
@@ -1730,39 +1747,40 @@ namespace Brovan.Generators
                     i++;
                     continue;
                 }
+                
                 string kind = ParamKind(m, p);
                 if (kind == "ScalarOut")
                 {
                     int w = ScalarWidth(m, p.Type);
-                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + ").Append(w).Append(") { bvk_r_scalar(").Append(p.Name).Append(", bvk_out + bvk_off, (int)sizeof(*").Append(p.Name).Append("), ").Append(w).Append("); bvk_off += ").Append(w).Append("; }\n");
+                    b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + ").Append(w).Append(") { bvk_r_scalar(").Append(p.Name).Append(", bvk_out + bvk_off, (int)sizeof(*").Append(p.Name).Append("), ").Append(w).Append("); bvk_off += ").Append(w).Append("; }\n");
                 }
                 else if (kind == "HandleOut")
                 {
-                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + 4) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; *").Append(p.Name).Append(" = (").Append(p.Type).Append(")(uintptr_t)id; }\n");
+                    b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + 4) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; *").Append(p.Name).Append(" = (").Append(p.Type).Append(")(uintptr_t)id; }\n");
                 }
                 else if (IsStructLenHandleArrayOut(m, p))
                 {
-                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(") for (uint32_t k = 0; k < ").Append(StructLenGuestExpr(p.Length)).Append("; k++) { if (bvk_outLen >= bvk_off + 4) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; ").Append(p.Name).Append("[k] = (").Append(p.Type).Append(")(uintptr_t)id; } }\n");
+                    b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(") for (uint32_t k = 0; k < ").Append(StructLenGuestExpr(p.Length)).Append("; k++) { if (bvk_outLen >= bvk_off + 4) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; ").Append(p.Name).Append("[k] = (").Append(p.Type).Append(")(uintptr_t)id; } }\n");
                 }
                 else if (kind == "ArrayOut" && m.Handles.ContainsKey(p.Type) && ParamLenIndex(c, p, i) >= 0)
                 {
-                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(") for (uint32_t k = 0; k < (uint32_t)").Append(p.Length).Append("; k++) { if (bvk_outLen >= bvk_off + 4) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; ").Append(p.Name).Append("[k] = (").Append(p.Type).Append(")(uintptr_t)id; } }\n");
+                    b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(") for (uint32_t k = 0; k < (uint32_t)").Append(p.Length).Append("; k++) { if (bvk_outLen >= bvk_off + 4) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; ").Append(p.Name).Append("[k] = (").Append(p.Type).Append(")(uintptr_t)id; } }\n");
                 }
                 else if (kind == "ArrayOut" && m.Handles.ContainsKey(p.Type))
                 {
-                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + 4) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; ").Append(p.Name).Append("[0] = (").Append(p.Type).Append(")(uintptr_t)id; }\n");
+                    b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + 4) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; ").Append(p.Name).Append("[0] = (").Append(p.Type).Append(")(uintptr_t)id; }\n");
                 }
                 else if (kind == "StructOut")
                 {
                     if (StructId.ContainsKey(p.Type))
-                        b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(") bvk_off += bvk_deser_body(").Append(StructId[p.Type]).Append(", (unsigned char*)").Append(p.Name).Append(", bvk_out + bvk_off);\n");
+                        b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(") bvk_off += bvk_deser_body(").Append(StructId[p.Type]).Append(", (unsigned char*)").Append(p.Name).Append(", bvk_out + bvk_off);\n");
                     else
-                        b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(") { memcpy(").Append(p.Name).Append(", bvk_out + bvk_off, sizeof(*").Append(p.Name).Append(")); bvk_off += (unsigned int)sizeof(*").Append(p.Name).Append("); }\n");
+                        b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(") { memcpy(").Append(p.Name).Append(", bvk_out + bvk_off, sizeof(*").Append(p.Name).Append(")); bvk_off += (unsigned int)sizeof(*").Append(p.Name).Append("); }\n");
                 }
                 else if (kind == "ChainOut")
                 {
                     int baseSid = StructId[p.Type];
-                    b.Append("    if (bvk_r == 0 && ").Append(p.Name).Append(") { bvk_off += bvk_deser_body(").Append(baseSid).Append(", (unsigned char*)").Append(p.Name).Append(", bvk_out + bvk_off); void *bvk_pn = *(void**)((char*)").Append(p.Name).Append(" + BVK_PNEXT_OFF); while (bvk_pn) { int bvk_sd = bvk_pnext_sid(*(const uint32_t*)bvk_pn); if (bvk_sd >= 0) bvk_off += bvk_deser_body(bvk_sd, (unsigned char*)bvk_pn, bvk_out + bvk_off); bvk_pn = *(void**)((char*)bvk_pn + BVK_PNEXT_OFF); } }\n");
+                    b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(") { bvk_off += bvk_deser_body(").Append(baseSid).Append(", (unsigned char*)").Append(p.Name).Append(", bvk_out + bvk_off); void *bvk_pn = *(void**)((char*)").Append(p.Name).Append(" + BVK_PNEXT_OFF); while (bvk_pn) { int bvk_sd = bvk_pnext_sid(*(const uint32_t*)bvk_pn); if (bvk_sd >= 0) bvk_off += bvk_deser_body(bvk_sd, (unsigned char*)bvk_pn, bvk_out + bvk_off); bvk_pn = *(void**)((char*)bvk_pn + BVK_PNEXT_OFF); } }\n");
                 }
                 else if (kind == "VoidOut" && c.Params.Any(x => x.Name == p.Length))
                 {
@@ -1770,13 +1788,13 @@ namespace Brovan.Generators
                 }
             }
             if (c.Name == "vkGetPhysicalDeviceMemoryProperties")
-                b.Append("    if (bvk_r == 0 && pMemoryProperties) bvk_note_memprops(pMemoryProperties);\n");
+                b.Append("    if (bvk_r >= 0 && pMemoryProperties) bvk_note_memprops(pMemoryProperties);\n");
             else if (c.Name == "vkGetPhysicalDeviceMemoryProperties2")
-                b.Append("    if (bvk_r == 0 && pMemoryProperties) bvk_note_memprops(&pMemoryProperties->memoryProperties);\n");
+                b.Append("    if (bvk_r >= 0 && pMemoryProperties) bvk_note_memprops(&pMemoryProperties->memoryProperties);\n");
             if (Ret64(c))
             {
                 b.Append("    uint64_t bvk_rv = 0;\n");
-                b.Append("    if (bvk_r == 0 && bvk_outLen >= bvk_off + 8) memcpy(&bvk_rv, bvk_out + bvk_off, 8);\n");
+                b.Append("    if (bvk_r >= 0 && bvk_outLen >= bvk_off + 8) memcpy(&bvk_rv, bvk_out + bvk_off, 8);\n");
                 b.Append("    return (").Append(c.Ret).Append(")bvk_rv;\n");
             }
             else if (c.Ret != "void")

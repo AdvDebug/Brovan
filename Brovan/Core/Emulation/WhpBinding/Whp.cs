@@ -70,7 +70,7 @@ namespace Brovan.Core.Emulation
         private WhpRegisters _regsCache;
         private bool _regsValid;
         private bool _regsDirty;
-        private readonly WhvRegisterValue[] _xmmCache = new WhvRegisterValue[XmmRegisterCount];
+        private readonly WhvRegisterValue[] _xmmCache = new WhvRegisterValue[VectorRegisterCount];
         private bool _xmmValid;
         private bool _xmmDirty;
         private WhvRegisterValue _pendingCs;
@@ -2306,18 +2306,24 @@ namespace Brovan.Core.Emulation
 
         internal const int XmmRegisterCount = 16;
 
-        private static readonly uint[] XmmRegNames = BuildXmmRegNames();
+        private const int FpControlSlot = XmmRegisterCount;
+        private const int XmmControlSlot = XmmRegisterCount + 1;
+        private const int VectorRegisterCount = XmmRegisterCount + 2;
 
-        private static uint[] BuildXmmRegNames()
+        private static readonly uint[] VectorRegNames = BuildVectorRegNames();
+
+        private static uint[] BuildVectorRegNames()
         {
-            uint[] Names = new uint[XmmRegisterCount];
+            uint[] Names = new uint[VectorRegisterCount];
             for (int i = 0; i < XmmRegisterCount; i++)
                 Names[i] = (uint)WhvRegisterName.Xmm0 + (uint)i;
+            Names[FpControlSlot] = (uint)WhvRegisterName.FpControlStatus;
+            Names[XmmControlSlot] = (uint)WhvRegisterName.XmmControlStatus;
             return Names;
         }
 
-        private static readonly uint[] GpXmmRegNames = ConcatRegNames(GpRegNames, XmmRegNames);
-        private static readonly uint[] GpSegXmmRegNames = ConcatRegNames(GpRegNamesWithSegments, XmmRegNames);
+        private static readonly uint[] GpXmmRegNames = ConcatRegNames(GpRegNames, VectorRegNames);
+        private static readonly uint[] GpSegXmmRegNames = ConcatRegNames(GpRegNamesWithSegments, VectorRegNames);
 
         private static uint[] ConcatRegNames(uint[] head, uint[] tail)
         {
@@ -2337,13 +2343,15 @@ namespace Brovan.Core.Emulation
 
             if (Write)
             {
+                if (!_xmmValid && !LoadXmmRegisters())
+                    return false;
+
                 for (int i = 0; i < XmmRegisterCount; i++)
                 {
                     _xmmCache[i].Low = Values[i * 2];
                     _xmmCache[i].High = Values[i * 2 + 1];
                 }
 
-                _xmmValid = true;
                 _xmmDirty = true;
                 return true;
             }
@@ -2364,10 +2372,10 @@ namespace Brovan.Core.Emulation
         {
             lock (_vcpuLock)
             {
-                fixed (uint* Names = XmmRegNames)
+                fixed (uint* Names = VectorRegNames)
                 fixed (WhvRegisterValue* Vals = _xmmCache)
                 {
-                    int Hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, VpIndex, Names, XmmRegisterCount, Vals);
+                    int Hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, VpIndex, Names, VectorRegisterCount, Vals);
                     if (WhpNative.Failed(Hr))
                         return false;
                 }
@@ -2381,10 +2389,10 @@ namespace Brovan.Core.Emulation
         {
             lock (_vcpuLock)
             {
-                fixed (uint* Names = XmmRegNames)
+                fixed (uint* Names = VectorRegNames)
                 fixed (WhvRegisterValue* Vals = _xmmCache)
                 {
-                    int Hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, Names, XmmRegisterCount, Vals);
+                    int Hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, Names, VectorRegisterCount, Vals);
                     if (WhpNative.Failed(Hr))
                         throw new WhpException("WHvSetVirtualProcessorRegisters(XMM) failed", Hr);
                 }
@@ -2468,7 +2476,7 @@ namespace Brovan.Core.Emulation
             if (withXmm)
             {
                 int xmmBase = withSegments ? GpRegNamesWithSegments.Length : GpRegNames.Length;
-                for (int i = 0; i < XmmRegisterCount; i++)
+                for (int i = 0; i < VectorRegisterCount; i++)
                     values[xmmBase + i] = _xmmCache[i];
                 _xmmDirty = false;
             }
@@ -2584,6 +2592,8 @@ namespace Brovan.Core.Emulation
                 case Registers.UC_X86_REG_CR4: SetSingleRegister(WhvRegisterName.Cr4, WhvRegisterValue.FromReg64(value)); return true;
                 case Registers.UC_X86_REG_CR8: SetSingleRegister(WhvRegisterName.Cr8, WhvRegisterValue.FromReg64(value)); return true;
                 case Registers.UC_X86_REG_MSR: SetSingleRegister(WhvRegisterName.Efer, WhvRegisterValue.FromReg64(value)); return true;
+                case Registers.UC_X86_REG_FPCW:
+                case Registers.UC_X86_REG_MXCSR: return WriteFpControl(register, value);
                 default: return false;
             }
         }
@@ -2612,8 +2622,38 @@ namespace Brovan.Core.Emulation
                 case Registers.UC_X86_REG_CR4: value = GetSingleRegister(WhvRegisterName.Cr4).Low; return true;
                 case Registers.UC_X86_REG_CR8: value = GetSingleRegister(WhvRegisterName.Cr8).Low; return true;
                 case Registers.UC_X86_REG_MSR: value = GetSingleRegister(WhvRegisterName.Efer).Low; return true;
+                case Registers.UC_X86_REG_FPCW:
+                case Registers.UC_X86_REG_MXCSR: return ReadFpControl(register, out value);
                 default: value = 0; return false;
             }
+        }
+
+        // Both registers carry unrelated state in the rest of their 128 bits (FpStatus/FpTag/LastFpOp/LastFpRip,
+        // LastFpRdp/XmmStatusControlMask), so a write is a read-modify-write of the cached value.
+        private bool WriteFpControl(Registers register, ulong value)
+        {
+            if (!_xmmValid && !LoadXmmRegisters())
+                return false;
+
+            if (register == Registers.UC_X86_REG_FPCW)
+                _xmmCache[FpControlSlot].Low = (_xmmCache[FpControlSlot].Low & ~0xFFFFUL) | (ushort)value;
+            else
+                _xmmCache[XmmControlSlot].High = (_xmmCache[XmmControlSlot].High & ~0xFFFFFFFFUL) | (uint)value;
+
+            _xmmDirty = true;
+            return true;
+        }
+
+        private bool ReadFpControl(Registers register, out ulong value)
+        {
+            value = 0;
+            if (!_xmmValid && !LoadXmmRegisters())
+                return false;
+
+            value = register == Registers.UC_X86_REG_FPCW
+                ? (ushort)_xmmCache[FpControlSlot].Low
+                : (uint)_xmmCache[XmmControlSlot].High;
+            return true;
         }
 
         private ushort SegmentSelector(WhvRegisterName name) => (ushort)(GetSingleRegister(name).High >> 32);

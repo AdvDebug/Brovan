@@ -1054,14 +1054,66 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        internal bool TryHandleGuardPageViolation(BackendMemoryAccessType Type, ulong Address)
+        private EmulatedThread FindThreadStackContaining(ulong Address)
         {
+            EmulatedThread Current = CurrentThread;
+            if (Current != null && Current.StackLimit != 0 &&
+                Address >= Current.StackAddress && Address < Current.StackAddress + Current.StackSize)
+            {
+                return Current;
+            }
+
+            return null;
+        }
+
+        private bool GrowThreadStack(EmulatedThread Thread, MemoryRegion GuardBlock)
+        {
+            const uint PAGE_READWRITE = 0x04;
+            const uint PAGE_GUARD = 0x100;
+
+            ulong BlockSize = AlignUp(GuardBlock.Size, PageSize);
+            ulong NextGuard = GuardBlock.BaseAddress - BlockSize;
+
+            if (GuardBlock.BaseAddress < BlockSize || NextGuard < Thread.StackAddress)
+                return false;
+
+            if (!ProtectWinMemoryRange(GuardBlock.BaseAddress, BlockSize, GuardBlock.Protections, PAGE_READWRITE))
+                return false;
+
+            if (!CommitMemory(NextGuard, BlockSize, PAGE_READWRITE | PAGE_GUARD))
+                return false;
+
+            Thread.StackLimit = GuardBlock.BaseAddress;
+
+            ulong Teb = WinEmulatedThread.GetState(Thread).Teb;
+            if (Teb != 0)
+            {
+                if (_binary.Architecture == BinaryArchitecture.x64)
+                    _emulator.WriteMemory(Teb + 0x10, Thread.StackLimit, 8);
+                else
+                    _emulator.WriteMemory(Teb + 0x8, (uint)Thread.StackLimit);
+            }
+
+            return true;
+        }
+
+        internal bool TryHandleGuardPageViolation(BackendMemoryAccessType Type, ulong Address, out bool Resume)
+        {
+            Resume = false;
+
             WindowsGuest GuestEnvironment = WindowsGuest;
             if (GuestEnvironment == null || Guest == null || Guest.Os != GuestOsKind.Windows || !IsGuardFaultType(Type))
                 return false;
 
             if (!TryFindMemoryRegion(Address, out MemoryRegion GuardedRegion) || !HasGuardProtection(GuardedRegion.SpecialProtections))
                 return false;
+
+            EmulatedThread StackOwner = FindThreadStackContaining(Address);
+            if (StackOwner != null && GrowThreadStack(StackOwner, GuardedRegion))
+            {
+                Resume = true;
+                return true;
+            }
 
             ulong PageBase = Address & ~(PageSize - 1);
             if (!_emulator.SetMemoryProtection(PageBase, PageSize, GuardedRegion.Protections))
@@ -1116,18 +1168,23 @@ namespace Brovan.Core.Emulation
 
             ReplaceMemoryRegions(MergeProtectedWinRegions(NewRegions));
 
+            NTSTATUS Status = StackOwner != null
+                ? NTSTATUS.STATUS_STACK_OVERFLOW
+                : NTSTATUS.STATUS_GUARD_PAGE_VIOLATION;
+
             ExceptionInformation Info = new ExceptionInformation
             {
                 Address = Address,
                 Type = MapGuardAccessType(Type),
-                Status = NTSTATUS.STATUS_GUARD_PAGE_VIOLATION
+                Status = Status
             };
 
-            GuestEnvironment.QueueUserModeException(this, NTSTATUS.STATUS_GUARD_PAGE_VIOLATION, Info);
+            GuestEnvironment.QueueUserModeException(this, Status, Info);
             return true;
         }
 
-        private bool ProtectWinMemoryRange(ulong Address, ulong Size, MemoryProtection Protection, uint WinProtect = 0)
+        private bool ProtectWinMemoryRange(ulong Address, ulong Size, MemoryProtection Protection, uint WinProtect = 0,
+            SpecialProtections Special = SpecialProtections.None)
         {
             if (Size == 0)
                 return true;
@@ -1138,7 +1195,7 @@ namespace Brovan.Core.Emulation
             if (AlignedSize == 0)
                 return true;
 
-            if (!_emulator.SetMemoryProtection(AlignedBase, AlignedSize, Protection))
+            if (!_emulator.SetMemoryProtection(AlignedBase, AlignedSize, GetGuardedHostProtection(Protection, Special)))
                 return false;
 
             uint EffectiveWinProtect = WinProtect != 0 ? WinProtect : (WinHelper != null ? (uint)WinHelper.ConvertInternalToWinProtect(Protection) : 0);
@@ -1174,7 +1231,7 @@ namespace Brovan.Core.Emulation
                     Middle.RequestedSize = Middle.Size;
                     Middle.Protections = Protection;
                     Middle.Protect = EffectiveWinProtect;
-                    Middle.SpecialProtections = SpecialProtections.None;
+                    Middle.SpecialProtections = Special;
                     NewRegions.Add(Middle);
                 }
 
@@ -1654,15 +1711,32 @@ namespace Brovan.Core.Emulation
 
         public bool CommitMemory(ulong BaseAddress, ulong Size, uint Protect)
         {
-            Size = AlignUp(Size, PageSize);
-            if (IsRegionCommitted(BaseAddress, Size))
-                return true;
+            ulong AlignedBase = BaseAddress & ~(PageSize - 1);
+            ulong AlignedEnd = AlignUp(GetRangeEnd(BaseAddress, Size), PageSize);
+            Size = AlignedEnd - AlignedBase;
+            BaseAddress = AlignedBase;
 
-            if (!TryFindMemoryRegion(BaseAddress, out MemoryRegion Region) ||
-                !Region.IsReserved ||
-                BaseAddress + Size > Region.BaseAddress + Region.Size ||
-                WinHelper == null)
+            if (Size == 0 || WinHelper == null)
                 return false;
+
+            if (!TryFindMemoryRegion(BaseAddress, out MemoryRegion Region) || !Region.IsReserved)
+            {
+                if (!IsRegionMapped(BaseAddress, Size))
+                    return false;
+
+                MemoryProtection MappedProt = WinHelper.ConvertWinProtectToInternal(Protect);
+                SpecialProtections MappedSpecial = (Protect & 0x100) != 0 ? SpecialProtections.Guard : SpecialProtections.None;
+                if (ProtectWinMemoryRange(BaseAddress, Size, MappedProt, Protect, MappedSpecial))
+                    return true;
+
+                return false;
+            }
+
+            if (!TryCommitSpanningRange(BaseAddress, Size, Protect, out bool SingleRegion))
+                return false;
+
+            if (!SingleRegion)
+                return true;
 
             MemoryProtection NewProt = WinHelper.ConvertWinProtectToInternal(Protect);
             SpecialProtections Special = (Protect & 0x100) != 0 ? SpecialProtections.Guard : SpecialProtections.None;
@@ -1734,6 +1808,98 @@ namespace Brovan.Core.Emulation
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Handles the cases where a range that runs past the end of the
+        /// region holding its start, or one whose pages are already committed. Commits page-run by page-run
+        /// and then applies the requested protection across the whole range in one pass.
+        /// </summary>
+        private bool TryCommitSpanningRange(ulong BaseAddress, ulong Size, uint Protect, out bool SingleRegion)
+        {
+            SingleRegion = false;
+
+            ulong End = BaseAddress + Size;
+            ulong AllocationBase = 0;
+            bool AnyUncommitted = false;
+
+            for (ulong Cursor = BaseAddress; Cursor < End;)
+            {
+                if (!TryFindMemoryRegion(Cursor, out MemoryRegion Part) || !Part.IsReserved)
+                    return false;
+
+                // TryFindMemoryRegion can hand back a region that ends at or before the address. without
+                // this the walk never advances.
+                if (GetRangeEnd(Part.BaseAddress, Part.Size) <= Cursor)
+                    return false;
+
+                ulong PartBase = Part.AllocationBase != 0 ? Part.AllocationBase : Part.BaseAddress;
+                if (AllocationBase == 0)
+                    AllocationBase = PartBase;
+                else if (PartBase != AllocationBase)
+                    return false;
+
+                if (!Part.IsCommitted)
+                    AnyUncommitted = true;
+
+                Cursor = GetRangeEnd(Part.BaseAddress, Part.Size);
+            }
+
+            if (AllocationBase == 0)
+                return false;
+
+
+            if (TryFindMemoryRegion(BaseAddress, out MemoryRegion Whole) && !Whole.IsCommitted &&
+                End <= GetRangeEnd(Whole.BaseAddress, Whole.Size))
+            {
+                SingleRegion = true;
+                return true;
+            }
+
+            MemoryProtection NewProt = WinHelper.ConvertWinProtectToInternal(Protect);
+            SpecialProtections Special = (Protect & 0x100) != 0 ? SpecialProtections.Guard : SpecialProtections.None;
+
+            if (AnyUncommitted)
+            {
+                for (ulong Cursor = BaseAddress; Cursor < End;)
+                {
+                    if (!TryFindMemoryRegion(Cursor, out MemoryRegion Part) || GetRangeEnd(Part.BaseAddress, Part.Size) <= Cursor)
+                        return false;
+
+                    ulong PartEnd = Math.Min(GetRangeEnd(Part.BaseAddress, Part.Size), End);
+
+                    if (!Part.IsCommitted && !_emulator.MapMemory(Cursor, PartEnd - Cursor, GetGuardedHostProtection(NewProt, Special)))
+                        return false;
+
+                    Cursor = PartEnd;
+                }
+            }
+
+            if (!ProtectWinMemoryRange(BaseAddress, Size, NewProt, Protect, Special))
+                return false;
+
+            MarkRangeCommitted(BaseAddress, Size);
+            return true;
+        }
+
+        private void MarkRangeCommitted(ulong BaseAddress, ulong Size)
+        {
+            ulong End = BaseAddress + Size;
+            List<MemoryRegion> Updated = new List<MemoryRegion>(_memory.Count);
+
+            foreach (MemoryRegion Region in EnumerateMemoryRegionsByBase())
+            {
+                MemoryRegion Copy = Region;
+                if (Region.BaseAddress >= BaseAddress && GetRangeEnd(Region.BaseAddress, Region.Size) <= End)
+                {
+                    Copy.IsCommitted = true;
+                    Copy.Flags = AllocationType.Commited;
+                }
+
+                Updated.Add(Copy);
+            }
+
+            ReplaceMemoryRegions(MergeProtectedWinRegions(Updated));
         }
 
         private static bool CanMergeWindowsMemoryRegions(MemoryRegion Left, MemoryRegion Right)

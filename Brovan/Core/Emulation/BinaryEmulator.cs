@@ -676,6 +676,9 @@ namespace Brovan.Core.Emulation
                 Builder.AppendLine($"R15: 0x{ReadRegister(Registers.UC_X86_REG_R15):X16}");
                 Builder.AppendLine($"RIP: 0x{ReadRegister(Registers.UC_X86_REG_RIP):X16}");
                 Builder.AppendLine($"EFLAGS: 0x{ReadRegister(Registers.UC_X86_REG_RFLAGS):X8}");
+                Builder.AppendLine($"MXCSR: 0x{ReadRegister(Registers.UC_X86_REG_MXCSR):X8}");
+                Builder.AppendLine($"FPCW: 0x{ReadRegister(Registers.UC_X86_REG_FPCW):X4}");
+                Builder.AppendLine($"FPSW: 0x{ReadRegister(Registers.UC_X86_REG_FPSW):X4}");
             }
             else if (_binary.Architecture == BinaryArchitecture.x86)
             {
@@ -1970,6 +1973,8 @@ namespace Brovan.Core.Emulation
             if (t == null || t.Context == null) return;
             ReadGprBatch(t.Context);
             _emulator.ReadXmmRegisters(t.Context.Xmm);
+            t.Context.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
+            t.Context.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
         }
 
         public bool ReadGprBatch(CpuContext c)
@@ -2025,6 +2030,8 @@ namespace Brovan.Core.Emulation
 
             WriteGprBatch(t.Context);
             _emulator.WriteXmmRegisters(t.Context.Xmm);
+            WriteRegister(Registers.UC_X86_REG_MXCSR, t.Context.MXCSR);
+            WriteRegister(Registers.UC_X86_REG_FPCW, t.Context.FPCW);
             Guest.OnThreadContextLoaded(this, t);
         }
 
@@ -2771,16 +2778,23 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            if (TryHandleGuardPageViolation(Type, Address))
+            if (TryHandleGuardPageViolation(Type, Address, out bool ResumeAfterGuard))
             {
                 SchedulerRefreshRequested = true;
+
+                if (ResumeAfterGuard)
+                    _emulator.StopEmulation();
+
                 return false;
             }
 
             ulong Rip = ReadRegister(IPRegister);
             if ((Settings.Flags & LogFlags.Issues) != 0)
             {
-                TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at {(WinHelper != null ? DescribeAddress(Rip) : $"0x{Rip:X}")}.", LogFlags.Issues);
+                string RegionInfo = TryFindMemoryRegion(Address, out MemoryRegion FaultRegion)
+                    ? $" [region 0x{FaultRegion.BaseAddress:X}+0x{FaultRegion.Size:X} prot={FaultRegion.Protections} win=0x{FaultRegion.Protect:X} special={FaultRegion.SpecialProtections} reserved={FaultRegion.IsReserved} committed={FaultRegion.IsCommitted}]"
+                    : " [no region]";
+                TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at {(WinHelper != null ? DescribeAddress(Rip) : $"0x{Rip:X}")}.{RegionInfo}", LogFlags.Issues);
                 if (WinHelper != null)
                     TraceStackModuleFrames("[-] Invalid memory");
             }

@@ -2444,6 +2444,9 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
+            if (register == Registers.UC_X86_REG_FPCW || register == Registers.UC_X86_REG_MXCSR)
+                return TransferFpControl(register, ref value, true);
+
             if (!IsSregRegister(register)) return false;
 
             if (!TryApplySregWrite(ref GetSpecialRegistersRef(), register, value)) return false;
@@ -2459,13 +2462,39 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
+            value = 0;
+
+            if (register == Registers.UC_X86_REG_FPCW || register == Registers.UC_X86_REG_MXCSR)
+                return TransferFpControl(register, ref value, false);
+
             if (!IsSregRegister(register))
-            {
-                value = 0;
                 return false;
-            }
 
             return TryApplySregRead(ref GetSpecialRegistersRef(), register, out value);
+        }
+
+        private unsafe bool TransferFpControl(Registers register, ref ulong value, bool Write)
+        {
+            LinuxKvmFpu Fpu = default;
+
+            lock (_vcpuLock)
+            {
+                if (KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoGetFpu, (IntPtr)(&Fpu)) < 0)
+                    return false;
+
+                if (!Write)
+                {
+                    value = register == Registers.UC_X86_REG_FPCW ? Fpu.Fcw : Fpu.Mxcsr;
+                    return true;
+                }
+
+                if (register == Registers.UC_X86_REG_FPCW)
+                    Fpu.Fcw = (ushort)value;
+                else
+                    Fpu.Mxcsr = (uint)value;
+
+                return KvmNative.ioctl(_vcpuFd, KvmConstants.KvmIoSetFpu, (IntPtr)(&Fpu)) >= 0;
+            }
         }
 
         private static bool IsSregRegister(Registers register) => register switch

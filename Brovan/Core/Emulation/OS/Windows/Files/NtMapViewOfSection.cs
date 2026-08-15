@@ -286,13 +286,33 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ReturnedSize == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            ReturnedBase = Section.BackingAddress + SectionOffset;
+            bool ReserveOnlyView = Section.BackingAddress == 0 && !Section.IsImage;
+            if (ReserveOnlyView)
+            {
+                ulong ViewBase = RequestedBase;
+                if (ViewBase == 0 &&
+                    !Instance.TryFindFreeBaseAddress(ReturnedSize, 0x10000, Instance.BaseAddress, Instance.MaxAddress, out ViewBase))
+                    return NTSTATUS.STATUS_NO_MEMORY;
+
+                if (!Instance.ReserveMemory(ViewBase, ReturnedSize, Section.Protection))
+                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+                if (Section.BackingAddress == 0 && SectionOffset == 0)
+                    Section.BackingAddress = ViewBase;
+
+                ReturnedBase = ViewBase;
+            }
+            else
+            {
+                ReturnedBase = Section.BackingAddress + SectionOffset;
+            }
 
             if (RequestedBase != 0 && RequestedBase != ReturnedBase)
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
             MemoryProtection Protection = Instance.WinHelper.ConvertWinProtectToInternal(Win32Protect);
-            Instance._emulator.SetMemoryProtection(ReturnedBase, ReturnedSize, Protection);
+            if (!ReserveOnlyView)
+                Instance._emulator.SetMemoryProtection(ReturnedBase, ReturnedSize, Protection);
 
             if (!Instance.WinHelper.WritePointer(BaseAddressPtr, ReturnedBase))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

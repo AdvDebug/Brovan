@@ -10,7 +10,8 @@ namespace Brovan.Core.Emulation
         public ulong R8, R9, R10, R11, R12, R13, R14, R15;
         public ulong RIP;
         public ulong RFLAGS;
-        public ulong MXCSR;
+        public ulong MXCSR = 0x1F80;
+        public ulong FPCW = 0x027F;
         public ulong CS, DS, ES, FS, GS, SS;
         public ulong DR0, DR1, DR2, DR3, DR6, DR7;
         public readonly ulong[] Xmm = new ulong[32];
@@ -33,6 +34,7 @@ namespace Brovan.Core.Emulation
 
         public ulong StackAddress;
         public ulong StackSize;
+        public ulong StackLimit;
 
         public ulong StartAddress;
         public ulong Parameter;

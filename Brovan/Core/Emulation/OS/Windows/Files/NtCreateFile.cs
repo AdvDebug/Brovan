@@ -204,6 +204,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
             bool FileExists = Stream.ExistsAsFile;
 
+            IsDirectory = IsDirectory || (DirectoryExists && (CreateOptions & FILE_NON_DIRECTORY_FILE) == 0);
+
             if (IsDirectory && FileExists)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_NOT_A_DIRECTORY, 0);
@@ -268,6 +270,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
             bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
             bool FileExists = Stream.ExistsAsFile;
+
+            IsDirectory = IsDirectory || (DirectoryExists && (CreateOptions & FILE_NON_DIRECTORY_FILE) == 0);
 
             if (IsDirectory && FileExists)
             {

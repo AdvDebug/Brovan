@@ -6,6 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtCreateSection : IWinSyscall
     {
         private const uint SEC_IMAGE = 0x01000000;
+        private const uint SEC_RESERVE = 0x04000000;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -72,11 +73,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
-            if (Size > uint.MaxValue)
+            bool IsReserveOnly = (AllocationAttributes & SEC_RESERVE) != 0 && FileHandle == 0;
+
+            if (Size > uint.MaxValue && !IsReserveOnly)
                 return NTSTATUS.STATUS_NO_MEMORY;
 
             ulong BackingAddress = 0;
-            if (!IsImage)
+            if (!IsImage && !IsReserveOnly)
             {
                 BackingAddress = Instance.MapUniqueAddress((uint)Size, MemoryProtection.ReadWrite);
                 if (BackingAddress == 0)
