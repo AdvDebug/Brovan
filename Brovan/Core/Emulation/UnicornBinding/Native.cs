@@ -136,6 +136,9 @@ namespace Brovan.Core.Emulation
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl, EntryPoint = "uc_ctl")]
         public static extern UCErrors uc_ctl1_uint(IntPtr uc, int control, uint arg1);
 
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl, EntryPoint = "uc_ctl")]
+        public static extern UCErrors uc_ctl2_ulong(IntPtr uc, int control, ulong arg1, ulong arg2);
+
         // Brovan extensions, added to the unicorn tree by Brovan/native/unicorn.
         // See Brovan/native/unicorn/brovan_uc.h for the layout contract.
 

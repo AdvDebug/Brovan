@@ -1,4 +1,4 @@
-﻿using static Brovan.Core.Helpers.BinaryHelpers;
+using static Brovan.Core.Helpers.BinaryHelpers;
 using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -1500,6 +1500,53 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        /// <summary>
+        /// Whether the address lies in a mapped view of a section.
+        /// </summary>
+        public bool IsSectionViewAddress(ulong Address)
+        {
+            for (int Index = 0; Index < WinSections.Count; Index++)
+            {
+                WinSection Section = WinSections[Index];
+                if (Section == null)
+                    continue;
+
+                if (Section.BackingAddress != 0 && Address >= Section.BackingAddress && Address - Section.BackingAddress < Section.Size)
+                    return true;
+
+                if (Section.IsViewAddress(Address))
+                    return true;
+            }
+
+            return false;
+        }
+
+        public void MirrorCommitToSectionAliases(ulong Address, ulong Size)
+        {
+            for (int Index = 0; Index < WinSections.Count; Index++)
+            {
+                WinSection Section = WinSections[Index];
+                if (Section?.Views == null || Section.Views.Count < 2)
+                    continue;
+
+                if (!Section.TryFindOwningView(Address, Size, out ulong SectionOffset))
+                    continue;
+
+                for (int ViewIndex = 0; ViewIndex < Section.Views.Count; ViewIndex++)
+                {
+                    WinSectionView Alias = Section.Views[ViewIndex];
+                    if (!Alias.IsAlias || SectionOffset < Alias.Offset || SectionOffset - Alias.Offset + Size > Alias.Size)
+                        continue;
+
+                    ulong AliasAddress = Alias.Base + (SectionOffset - Alias.Offset);
+                    uint AliasProtect = (uint)ConvertInternalToWinProtect(Alias.Protection);
+                    Emulator.MapSharedMemoryRange(AliasAddress, Address, Size, Alias.Protection, AliasProtect, Alias.Base);
+                }
+
+                return;
+            }
+        }
+
         public bool UnmapViewOfSection(ulong BaseAddress)
         {
             if (BaseAddress == 0)
@@ -1549,6 +1596,26 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return UnmappedAny;
             }
 
+            // A section that keeps its storage in the views themselves has to forget the range as it goes
+            // away, or a later view of the same section offset would alias pages that are no longer mapped.
+            for (int Index = 0; Index < WinSections.Count; Index++)
+            {
+                WinSection Section = WinSections[Index];
+                if (Section == null || !Section.RemoveViewContaining(BaseAddress, out WinSectionView Removed))
+                    continue;
+
+                if (Section.MappedViewCount > 0)
+                    Section.MappedViewCount--;
+
+                if (Section.BackingAddress == Removed.Base)
+                    Section.BackingAddress = 0;
+
+                bool UnmappedView = Emulator.UnmapMemoryRuns(Removed.Base, Removed.Size);
+
+                ReleaseSectionIfUnreferenced(Section);
+                return UnmappedView;
+            }
+
             WinSection? ViewSection = FindSectionByBackingAddress(BaseAddress);
             if (ViewSection != null)
             {
@@ -1579,14 +1646,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void ReleaseSectionIfUnreferenced(WinSection Section)
         {
-            if (Section.BackingAddress == 0 || Section.MappedViewCount != 0)
+            if (Section.MappedViewCount != 0)
                 return;
 
             if (HandleManager.GetHandlesByObjectId(Section.ObjectId).Count != 0)
                 return;
 
-            Emulator.UnmapMemoryRegion(Section.BackingAddress);
-            Section.BackingAddress = 0;
+            if (Section.BackingAddress != 0)
+            {
+                Emulator.UnmapMemoryRegion(Section.BackingAddress);
+                Section.BackingAddress = 0;
+            }
+
             WinSections.Remove(Section);
         }
 

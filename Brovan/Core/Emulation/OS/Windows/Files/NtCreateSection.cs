@@ -81,7 +81,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong BackingAddress = 0;
             if (!IsImage && !IsReserveOnly)
             {
-                BackingAddress = Instance.MapUniqueAddress((uint)Size, MemoryProtection.ReadWrite);
+                BackingAddress = Instance.MapWinUniqueAddress(Size, MemoryProtection.ReadWrite,
+                    SpecialProtections.None, AllocationType.Commited);
                 if (BackingAddress == 0)
                     return NTSTATUS.STATUS_NO_MEMORY;
 

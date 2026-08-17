@@ -91,8 +91,19 @@ namespace Brovan.Core.Emulation
         BackendError GetLastError();
 
         bool MapMemory(ulong address, ulong size, MemoryProtection protection);
+
+        /// <summary>
+        /// Maps memory that is already backed by <paramref name="hostPointer"/>, so the same host pages are
+        /// visible at more than one guest address.
+        /// </summary>
+        bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, IntPtr hostPointer);
         bool UnmapMemory(ulong address, ulong size);
         bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection);
+
+        /// <summary>
+        /// Discards any cached translation of the range. Only a translating backend has work to do here.
+        /// </summary>
+        bool InvalidateCodeRange(ulong address, ulong size) => true;
 
         bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write) => false;
 

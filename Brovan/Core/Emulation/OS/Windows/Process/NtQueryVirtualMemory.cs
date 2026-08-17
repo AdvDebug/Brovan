@@ -14,6 +14,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong MemFree = 0x00010000UL;
 
         private const ulong MemPrivate = 0x00020000UL;
+        private const ulong MemMapped = 0x00040000UL;
         private const ulong MemImage = 0x01000000UL;
 
         private const ulong PageGuard = 0x00000100UL;
@@ -73,7 +74,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     ulong QueryAddress = AlignDownPage(Address);
 
-                    bool HasRegion = Instance.TryFindMemoryRegion(QueryAddress, out MemoryRegion Region);
+                    bool HasRegion = Instance.TryFindMemoryRegion(QueryAddress, out MemoryRegion Region) &&
+                                     QueryAddress >= Region.BaseAddress &&
+                                     QueryAddress < Region.BaseAddress + BinaryEmulator.AlignUp(Region.Size, 0x1000);
 
                     MemoryRegion Freed = default;
                     bool HasFreed = false;
@@ -101,7 +104,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Region.Flags.HasFlag(AllocationType.Reserved) ||
                             (!IsCommitted && Region.BaseAddress != 0);
 
-                        Info.BaseAddress = Region.BaseAddress;
+                        // NT answers from the queried page, not from the start of the run holding it
+                        Info.BaseAddress = QueryAddress;
 
                         ulong AllocationBase = Region.AllocationBase != 0 ? Region.AllocationBase : Region.BaseAddress;
                         Info.AllocationBase = AllocationBase;
@@ -111,7 +115,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Info.AllocationProtect = (uint)AllocationProtect;
 
                         Info.PartitionId = 0;
-                        Info.RegionSize = Region.Size;
+
+                        Info.RegionSize = Region.BaseAddress + BinaryEmulator.AlignUp(Region.Size, 0x1000) - QueryAddress;
 
                         if (IsCommitted)
                             Info.State = (uint)MemCommit;
@@ -133,7 +138,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Info.Protect = 0;
                         }
 
-                        Info.Type = IsImage ? (uint)MemImage : (uint)MemPrivate;
+                        Info.Type = IsImage ? (uint)MemImage
+                            : Instance.WinHelper.IsSectionViewAddress(Region.BaseAddress) ? (uint)MemMapped
+                            : (uint)MemPrivate;
                     }
                     else
                     {
@@ -142,8 +149,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                         if (HasFreed)
                         {
-                            FreeBase = Freed.BaseAddress;
-                            FreeSize = Freed.Size;
+                            FreeBase = QueryAddress;
+                            FreeSize = Freed.BaseAddress + Freed.Size - QueryAddress;
                         }
                         else
                         {

@@ -204,6 +204,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
             bool FileExists = Stream.ExistsAsFile;
 
+            // With neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE the caller takes whatever is
+            // there. CreateFile(FILE_FLAG_BACKUP_SEMANTICS) directory handle exactly that way
             IsDirectory = IsDirectory || (DirectoryExists && (CreateOptions & FILE_NON_DIRECTORY_FILE) == 0);
 
             if (IsDirectory && FileExists)
@@ -320,6 +322,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static NTSTATUS PreparePathForDisposition(string Path, bool IsDirectory, bool Exists, uint CreateDisposition, out uint Information)
         {
             Information = FILE_OPENED_INFORMATION;
+
+            if (!Exists && !ParentDirectoryExists(Path))
+                return NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
 
             if (IsDirectory)
             {
@@ -540,6 +545,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return false;
+        }
+
+        internal static bool ParentDirectoryExists(string Path)
+        {
+            string Value = NormalizeNtObjectPath(Path).Replace('/', '\\').TrimEnd('\\');
+            if (Value.Length < 3 || !char.IsLetter(Value[0]) || Value[1] != ':' || Value[2] != '\\')
+                return true;
+
+            int Separator = Value.LastIndexOf('\\');
+            if (Separator <= 2)
+                return true;
+
+            return WindowsFileStream.FromGuestPath(Value.Substring(0, Separator)).ExistsAsDirectory;
         }
 
         private static bool IsDriveRootPath(string Path)

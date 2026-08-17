@@ -52,6 +52,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (BaseAddress == 0)
                     return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
+                // Both MEM_DECOMMIT and MEM_RELEASE fail inside a view, SEC_RESERVE and SEC_COMMIT alike. which was
+                // the actual host behavior
+                if (Instance.WinHelper.IsSectionViewAddress(BaseAddress))
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
                 if (Release)
                 {
                     if (RegionSize != 0)
@@ -138,6 +143,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (BaseAddress == 0)
                     return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+
+                if (Instance.WinHelper.IsSectionViewAddress(BaseAddress))
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                 if (Release)
                 {

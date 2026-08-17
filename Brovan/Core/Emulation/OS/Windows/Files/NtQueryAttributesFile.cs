@@ -44,7 +44,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                         Instance.TriggerEventMessage($"[!] NtQueryAttributesFile: file not found: Name=\"{Name}\", FullName=\"{FullName}\", SyntheticDir=\"{EmulatedPath}\".", LogFlags.Syscall);
-                    return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+                    return NtCreateFile.ParentDirectoryExists(EmulatedPath)
+                        ? NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND
+                        : NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
                 }
 
                 FillSyntheticDirectoryInformation(Instance, FileInformationPtr);

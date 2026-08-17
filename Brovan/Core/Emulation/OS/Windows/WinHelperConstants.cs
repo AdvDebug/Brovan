@@ -1347,6 +1347,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         public HandleType ObjectType => HandleType.SemaphoreHandle;
     }
 
+    public struct WinSectionView
+    {
+        public ulong Offset;
+        public ulong Base;
+        public ulong Size;
+        public bool IsAlias;
+        public MemoryProtection Protection;
+    }
+
     public class WinSection : IHandleObject
     {
         public string Name;
@@ -1360,6 +1369,111 @@ namespace Brovan.Core.Emulation.OS.Windows
         public int MappedViewCount;
         public bool IsImage => ((Attributes & 0x01000000) != 0);
         public bool Initialized;
+
+        /// <summary>
+        /// Storage of the ranges that have been mapped, for sections too large or too sparse to keep all of
+        /// their storage in one <see cref="BackingAddress"/> range.
+        /// </summary>
+        public List<WinSectionView> Views;
+
+        // Only ever widened. A stale-wide range costs a walk that finds nothing, narrowing would miss a view
+        private ulong ViewLow = ulong.MaxValue;
+        private ulong ViewHigh;
+
+        public bool IsViewAddress(ulong Address)
+        {
+            if (Views == null || Address < ViewLow || Address >= ViewHigh)
+                return false;
+
+            for (int Index = 0; Index < Views.Count; Index++)
+            {
+                WinSectionView View = Views[Index];
+                if (Address >= View.Base && Address - View.Base < View.Size)
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Returns the address holding the section's storage for [Offset, Offset+Size), or 0 when nothing
+        /// backs that range yet.
+        /// </summary>
+        public ulong FindViewStorage(ulong Offset, ulong Size, out bool Tracked)
+        {
+            if (Views != null)
+            {
+                for (int Index = 0; Index < Views.Count; Index++)
+                {
+                    WinSectionView View = Views[Index];
+                    if (View.IsAlias)
+                        continue;
+
+                    if (Offset >= View.Offset && Offset - View.Offset + Size <= View.Size)
+                    {
+                        Tracked = true;
+                        return View.Base + (Offset - View.Offset);
+                    }
+                }
+            }
+
+            Tracked = false;
+            return BackingAddress != 0 ? BackingAddress + Offset : 0;
+        }
+
+        public void AddView(ulong Offset, ulong Base, ulong Size, bool IsAlias, MemoryProtection Protection)
+        {
+            Views ??= new List<WinSectionView>();
+            Views.Add(new WinSectionView { Offset = Offset, Base = Base, Size = Size, IsAlias = IsAlias, Protection = Protection });
+
+            if (Base < ViewLow)
+                ViewLow = Base;
+
+            if (Base + Size > ViewHigh)
+                ViewHigh = Base + Size;
+        }
+
+        /// <summary>
+        /// Maps an address inside a view that owns its storage back to the section offset it holds.
+        /// </summary>
+        public bool TryFindOwningView(ulong Address, ulong Size, out ulong Offset)
+        {
+            if (Views != null)
+            {
+                for (int Index = 0; Index < Views.Count; Index++)
+                {
+                    WinSectionView View = Views[Index];
+                    if (View.IsAlias || Address < View.Base || Address - View.Base + Size > View.Size)
+                        continue;
+
+                    Offset = View.Offset + (Address - View.Base);
+                    return true;
+                }
+            }
+
+            Offset = 0;
+            return false;
+        }
+
+        public bool RemoveViewContaining(ulong Address, out WinSectionView Removed)
+        {
+            if (Views != null && Address >= ViewLow && Address < ViewHigh)
+            {
+                for (int Index = 0; Index < Views.Count; Index++)
+                {
+                    WinSectionView View = Views[Index];
+                    if (Address >= View.Base && Address - View.Base < View.Size)
+                    {
+                        Views.RemoveAt(Index);
+                        Removed = View;
+                        return true;
+                    }
+                }
+            }
+
+            Removed = default;
+            return false;
+        }
 
         public WindowsFileStream GetFileStream(bool CreateWriteDirectories = false)
         {

@@ -400,8 +400,11 @@ namespace Brovan.Core.Emulation
         public bool IsX64Guest => BackendArch == Arch.X86 && BackendMode == Mode.MODE_64;
         public bool IsArchX86Guest => BackendArch == Arch.X86;
         public readonly ulong BaseAddress = 0x10000000UL; // Base Start
+
         public ulong MaxAddress => IsArchX86Guest && _binary.FileFormat == BinaryFormat.PE
-            ? (_binary.PE.Characteristics.HasFlag(System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) ? 0xBFFF0000UL : 0x7FFF0000UL)
+            ? (IsX86Guest
+                ? (_binary.PE.Characteristics.HasFlag(System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) ? 0xBFFF0000UL : 0x7FFF0000UL)
+                : 0x7FFFFFFEFFFFUL)
             : 0x7FFFFFFFFUL;
         private ulong _timestampCounter = 0x100000000UL;
 
@@ -1383,30 +1386,35 @@ namespace Brovan.Core.Emulation
             ulong AlignedSize = AlignToPageSize(Size);
             while (CurrentAddress + AlignedSize < MaxAddress)
             {
-                if (!IsRegionMapped(CurrentAddress, AlignedSize))
+                if (TryFindOverlappingMemoryRegion(CurrentAddress, AlignedSize, out MemoryRegion Occupied))
                 {
-                    if (_emulator.MapMemory(CurrentAddress, AlignedSize, Protection))
-                    {
-                        ConsumeFreedMemoryRange(CurrentAddress, AlignedSize);
-
-                        MemoryRegion Region = new MemoryRegion()
-                        {
-                            BaseAddress = CurrentAddress,
-                            Size = Size,
-                            InitialProtections = Protection,
-                            Protections = Protection,
-                        };
-
-                        if (Size < AlignedSize)
-                        {
-                            Region.PoisonedMemory = (CurrentAddress + Size, CurrentAddress + AlignedSize);
-                        }
-
-                        AddMemoryRegion(Region);
-                        TriggerDebugMessage(() => $"memory: mapped unique base=0x{CurrentAddress:X} size=0x{Size:X} aligned=0x{AlignedSize:X} prot={Protection}");
-                        return CurrentAddress;
-                    }
+                    ulong NextAddress = AlignToPageSize(GetRangeEnd(Occupied.BaseAddress, Occupied.Size));
+                    CurrentAddress = NextAddress > CurrentAddress ? NextAddress : CurrentAddress + 0x1000;
+                    continue;
                 }
+
+                if (_emulator.MapMemory(CurrentAddress, AlignedSize, Protection))
+                {
+                    ConsumeFreedMemoryRange(CurrentAddress, AlignedSize);
+
+                    MemoryRegion Region = new MemoryRegion()
+                    {
+                        BaseAddress = CurrentAddress,
+                        Size = Size,
+                        InitialProtections = Protection,
+                        Protections = Protection,
+                    };
+
+                    if (Size < AlignedSize)
+                    {
+                        Region.PoisonedMemory = (CurrentAddress + Size, CurrentAddress + AlignedSize);
+                    }
+
+                    AddMemoryRegion(Region);
+                    TriggerDebugMessage(() => $"memory: mapped unique base=0x{CurrentAddress:X} size=0x{Size:X} aligned=0x{AlignedSize:X} prot={Protection}");
+                    return CurrentAddress;
+                }
+
                 CurrentAddress += AlignedSize;
             }
 

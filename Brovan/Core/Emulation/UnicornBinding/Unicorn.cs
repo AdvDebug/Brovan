@@ -158,13 +158,28 @@ namespace Brovan.Core.Emulation
             return _error;
         }
 
-        /// <summary>
-        /// Map an emulated memory.
-        /// </summary>
-        /// <param name="address">Address for the mapped memory.</param>
-        /// <param name="size">Size of the mapped memory.</param>
-        /// <param name="protection">Protection(s) for the mapped memory.</param>
-        /// <returns>returns true if successfully mapped, otherwise false.</returns>
+        public bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, IntPtr hostPointer)
+        {
+            if (hostPointer == IntPtr.Zero)
+                return false;
+
+            lock (_mapsLock)
+            {
+                if (DisposedCheck())
+                    return false;
+
+                IntPtr OwnerBuffer = FindBufferBase(hostPointer);
+
+                _error = uc_mem_map_ptr(_uc, address, new UIntPtr(size), protection, hostPointer);
+                if (_error != UCErrors.UC_ERR_OK)
+                    return false;
+
+                _mappedRegions.Add(new MappedRegion { Address = address, Size = size, Ptr = hostPointer, BufferBase = OwnerBuffer });
+                _regionIndexDirty = true;
+                return true;
+            }
+        }
+
         public unsafe bool MapMemory(ulong address, ulong size, MemoryProtection protection)
         {
             lock (_mapsLock)
@@ -220,6 +235,24 @@ namespace Brovan.Core.Emulation
                 }
             }
             return false;
+        }
+
+        private unsafe IntPtr FindBufferBase(IntPtr hostPointer)
+        {
+            byte* Target = (byte*)hostPointer;
+
+            for (int i = 0; i < _mappedRegions.Count; i++)
+            {
+                MappedRegion Region = _mappedRegions[i];
+                if (Region.Ptr == IntPtr.Zero || Region.BufferBase == IntPtr.Zero)
+                    continue;
+
+                byte* Start = (byte*)Region.Ptr;
+                if (Target >= Start && Target < Start + Region.Size)
+                    return Region.BufferBase;
+            }
+
+            return IntPtr.Zero;
         }
 
         private unsafe void TrimMappedRegions(ulong address, ulong size)
@@ -1327,6 +1360,28 @@ namespace Brovan.Core.Emulation
             _error = uc_ctl0(_uc, control);
 
             return _error == UCErrors.UC_ERR_OK;
+        }
+
+        // TCG keys block invalidation on ram_addr, so two mappings of the same host pages do not
+        // invalidate each other.
+        public bool InvalidateCodeRange(ulong address, ulong size)
+        {
+            if (size == 0)
+                return true;
+
+            lock (_mapsLock)
+            {
+                if (DisposedCheck())
+                    return false;
+
+                const int UC_CTL_TB_REMOVE_CACHE = 9;
+                const int UC_CTL_IO_WRITE = 1;
+
+                int control = UC_CTL_TB_REMOVE_CACHE | (2 << 26) | (UC_CTL_IO_WRITE << 30);
+
+                _error = uc_ctl2_ulong(_uc, control, address, address + size);
+                return _error == UCErrors.UC_ERR_OK;
+            }
         }
 
         public bool SetTlbMode(UcTlbType mode)

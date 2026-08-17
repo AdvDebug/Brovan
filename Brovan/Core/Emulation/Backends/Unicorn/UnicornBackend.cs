@@ -29,10 +29,15 @@ namespace Brovan.Core.Emulation
 
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
             => Inner.MapMemory(address, size, protection);
+
+        public bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, System.IntPtr hostPointer)
+            => Inner.MapMemoryShared(address, size, protection, hostPointer);
         public bool UnmapMemory(ulong address, ulong size)
             => Inner.UnmapMemory(address, size);
         public bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection)
             => Inner.SetMemoryProtection(address, size, protection);
+        public bool InvalidateCodeRange(ulong address, ulong size)
+            => Inner.InvalidateCodeRange(address, size);
 
         public bool WriteMemory(ulong address, byte[] value, uint length = 0)
             => Inner.WriteMemory(address, value, length);

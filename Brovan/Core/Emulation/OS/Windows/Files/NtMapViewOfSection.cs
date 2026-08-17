@@ -286,33 +286,62 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ReturnedSize == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            bool ReserveOnlyView = Section.BackingAddress == 0 && !Section.IsImage;
+            ulong ExistingStorage = Section.FindViewStorage(SectionOffset, ReturnedSize, out bool TrackedStorage);
+
+            // A SEC_RESERVE section has no backing store. the view is a reservation and the guest commits
+            // into it with NtAllocateVirtualMemory. Measured on the my actual host. the fresh
+            // view reads back as MEM_RESERVE carrying the section's page protection
+            bool ReserveOnlyView = ExistingStorage == 0 && !Section.IsImage;
             if (ReserveOnlyView)
             {
+                // Honour the requested base. a caller that picks its own addresses fails the check below,
+                // answers that by querying and retrying forever, and leaks a reservation each time.
                 ulong ViewBase = RequestedBase;
                 if (ViewBase == 0 &&
                     !Instance.TryFindFreeBaseAddress(ReturnedSize, 0x10000, Instance.BaseAddress, Instance.MaxAddress, out ViewBase))
                     return NTSTATUS.STATUS_NO_MEMORY;
 
-                if (!Instance.ReserveMemory(ViewBase, ReturnedSize, Section.Protection))
+                // AllocationProtect is the view's protection, not the section.
+                if (!Instance.ReserveMemory(ViewBase, ReturnedSize, Win32Protect != 0 ? Win32Protect : Section.Protection))
                     return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
-                if (Section.BackingAddress == 0 && SectionOffset == 0)
+                // Only a view that spans the whole section may stand in as the section's backing range.
+                // latching a partial one makes every address above it look like part of this section.
+                if (Section.BackingAddress == 0 && SectionOffset == 0 && ReturnedSize >= Section.Size)
                     Section.BackingAddress = ViewBase;
 
+                Section.AddView(SectionOffset, ViewBase, ReturnedSize, false, Instance.WinHelper.ConvertWinProtectToInternal(Section.Protection));
                 ReturnedBase = ViewBase;
             }
             else
             {
-                ReturnedBase = Section.BackingAddress + SectionOffset;
+                ReturnedBase = ExistingStorage;
             }
 
-            if (RequestedBase != 0 && RequestedBase != ReturnedBase)
+            bool AliasView = !ReserveOnlyView && RequestedBase != ReturnedBase && (TrackedStorage || RequestedBase != 0);
+            if (AliasView)
+            {
+                ulong AliasBase = RequestedBase;
+                if (AliasBase == 0 &&
+                    !Instance.TryFindFreeBaseAddress(ReturnedSize, 0x10000, Instance.BaseAddress, Instance.MaxAddress, out AliasBase))
+                    return NTSTATUS.STATUS_NO_MEMORY;
+
+                if (Instance.IsRegionMapped(AliasBase, ReturnedSize))
+                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+                MemoryProtection ViewProtection = Instance.WinHelper.ConvertWinProtectToInternal(Win32Protect);
+                if (!Instance.MapSharedMemoryRange(AliasBase, ReturnedBase, ReturnedSize, ViewProtection, Win32Protect != 0 ? Win32Protect : Section.Protection))
+                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+                Section.AddView(SectionOffset, AliasBase, ReturnedSize, true, ViewProtection);
+                ReturnedBase = AliasBase;
+            }
+            else if (RequestedBase != 0 && RequestedBase != ReturnedBase)
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
             MemoryProtection Protection = Instance.WinHelper.ConvertWinProtectToInternal(Win32Protect);
-            if (!ReserveOnlyView)
-                Instance._emulator.SetMemoryProtection(ReturnedBase, ReturnedSize, Protection);
+            if (!ReserveOnlyView && !AliasView)
+                Instance.ProtectViewRange(ReturnedBase, ReturnedSize, Protection, Win32Protect);
 
             if (!Instance.WinHelper.WritePointer(BaseAddressPtr, ReturnedBase))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

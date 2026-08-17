@@ -111,6 +111,7 @@ namespace Brovan.Core.Emulation
         {
             public IntPtr HostPage;
             public IntPtr OwnedBacking;
+            public bool IsAlias;
             public KvmMemoryPermission Permissions;
         }
 
@@ -118,6 +119,7 @@ namespace Brovan.Core.Emulation
         {
             public ulong Size;
             public int LivePages;
+            public int AliasPages;
         }
 
         private struct InstalledSlot
@@ -191,6 +193,46 @@ namespace Brovan.Core.Emulation
         }
 
         public KvmErrors GetLastError() => _error;
+
+        public bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, IntPtr hostPointer)
+        {
+            if (DisposedCheck() || hostPointer == IntPtr.Zero) return false;
+
+            if ((address & KvmConstants.PageMask) != 0 || (size & KvmConstants.PageMask) != 0)
+            {
+                _error = KvmErrors.InvalidArgument;
+                return false;
+            }
+
+            KvmMemoryPermission perm = TranslateProtection(protection);
+            long backingAddr = hostPointer.ToInt64();
+            IntPtr backing = FindBackingAllocation(hostPointer);
+
+            for (ulong off = 0; off < size; off += KvmConstants.PageSize)
+            {
+                ulong guest = address + off;
+
+                // Referenced before the replaced page is released, so the last reference cannot drop mid-loop.
+                if (backing != IntPtr.Zero && _backingAllocations.TryGetValue(backing, out BackingAllocation allocation))
+                    allocation.AliasPages++;
+
+                if (_mappedPages.TryGetValue(guest, out MappedPage previous))
+                    ReleaseBacking(previous);
+
+                SetMappedPage(guest, new MappedPage
+                {
+                    HostPage = new IntPtr(backingAddr + (long)off),
+                    OwnedBacking = backing,
+                    IsAlias = true,
+                    Permissions = perm,
+                });
+                EnsureVirtualMapping(guest);
+            }
+
+            RebuildMappings();
+            _error = KvmErrors.Ok;
+            return true;
+        }
 
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
         {
@@ -1201,10 +1243,29 @@ namespace Brovan.Core.Emulation
             if (page.OwnedBacking == IntPtr.Zero) return;
             if (!_backingAllocations.TryGetValue(page.OwnedBacking, out BackingAllocation allocation)) return;
 
-            if (--allocation.LivePages > 0) return;
+            if (page.IsAlias)
+                allocation.AliasPages--;
+            else
+                allocation.LivePages--;
+
+            if (allocation.LivePages > 0 || allocation.AliasPages > 0) return;
 
             FreeBackingMemory(page.OwnedBacking, allocation.Size);
             _backingAllocations.Remove(page.OwnedBacking);
+        }
+
+        private IntPtr FindBackingAllocation(IntPtr hostPointer)
+        {
+            long target = hostPointer.ToInt64();
+
+            foreach (KeyValuePair<IntPtr, BackingAllocation> entry in _backingAllocations)
+            {
+                long start = entry.Key.ToInt64();
+                if (target >= start && (ulong)(target - start) < entry.Value.Size)
+                    return entry.Key;
+            }
+
+            return IntPtr.Zero;
         }
 
         private unsafe ref LinuxKvmRun GetRunRef()
@@ -2729,7 +2790,7 @@ namespace Brovan.Core.Emulation
         private bool TryGetIntactBackingEnd(MappedPage page, ulong pageBase, out ulong backingEnd)
         {
             backingEnd = 0;
-            if (page.OwnedBacking == IntPtr.Zero) return false;
+            if (page.OwnedBacking == IntPtr.Zero || page.IsAlias) return false;
             if (!_backingAllocations.TryGetValue(page.OwnedBacking, out BackingAllocation allocation)) return false;
             if (allocation.LivePages != (int)(allocation.Size / KvmConstants.PageSize)) return false;
 

@@ -24,6 +24,9 @@ namespace Brovan.Core.Emulation
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
             => Inner.MapMemory(address, size, protection);
 
+        public bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, System.IntPtr hostPointer)
+            => Inner.MapMemoryShared(address, size, protection, hostPointer);
+
         public bool UnmapMemory(ulong address, ulong size)
             => Inner.UnmapMemory(address, size);
 

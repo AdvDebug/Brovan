@@ -869,7 +869,6 @@ namespace Brovan.Core.Emulation.Guests
 
         public void SetLastWinErrorRegister(BinaryEmulator Instance, NTSTATUS Status)
         {
-            SetLastWinError(Instance, (uint)Status);
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
                 Instance.WriteRegister(Registers.UC_X86_REG_RAX, (ulong)Status);
             else
@@ -1215,7 +1214,7 @@ namespace Brovan.Core.Emulation.Guests
                 if (string.IsNullOrEmpty(Name))
                     continue;
 
-                if (!Name.StartsWith("DXVK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("SDL_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("MONO_", StringComparison.OrdinalIgnoreCase))
+                if (!Name.StartsWith("DXVK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("SDL_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("MONO_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("DOTNET_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("COMPlus_", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 Env[Name] = HostVariable.Value as string ?? string.Empty;

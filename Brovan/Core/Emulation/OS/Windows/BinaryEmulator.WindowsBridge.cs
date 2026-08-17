@@ -1183,6 +1183,32 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        // NT reports a view's protection as both Protect and AllocationProtect
+        public bool ProtectViewRange(ulong BaseAddress, ulong Size, MemoryProtection Protection, uint WinProtect)
+        {
+            if (!ProtectWinMemoryRange(BaseAddress, Size, Protection, WinProtect))
+                return false;
+
+            if (WinProtect == 0)
+                return true;
+
+            List<MemoryRegion> Covered = new List<MemoryRegion>();
+            AddOverlappingMemoryRegions(BaseAddress, Size, Covered);
+
+            for (int Index = 0; Index < Covered.Count; Index++)
+            {
+                MemoryRegion Region = Covered[Index];
+                if (Region.AllocationProtect == WinProtect)
+                    continue;
+
+                RemoveMemoryRegion(Region);
+                Region.AllocationProtect = WinProtect;
+                AddMemoryRegion(Region);
+            }
+
+            return true;
+        }
+
         private bool ProtectWinMemoryRange(ulong Address, ulong Size, MemoryProtection Protection, uint WinProtect = 0,
             SpecialProtections Special = SpecialProtections.None)
         {
@@ -1709,6 +1735,167 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        /// <summary>
+        /// Registers a second guest mapping of host pages that another region already owns, so a section can
+        /// be visible at more than one address.
+        /// </summary>
+        public bool MapSharedMemoryRegion(ulong BaseAddress, ulong Size, MemoryProtection Protection, IntPtr HostPointer, uint AllocationProtect, ulong AllocationBase)
+        {
+            ulong AlignedSize = AlignUp(Size, PageSize);
+            if (AlignedSize == 0 || WinHelper == null)
+                return false;
+
+            if (!_emulator.MapMemoryShared(BaseAddress, AlignedSize, Protection, HostPointer))
+                return false;
+
+            ConsumeFreedMemoryRange(BaseAddress, AlignedSize);
+            CarveMemoryRange(BaseAddress, AlignedSize);
+
+            uint WinProtect = (uint)WinHelper.ConvertInternalToWinProtect(Protection);
+            AddMemoryRegion(new MemoryRegion
+            {
+                BaseAddress = BaseAddress,
+                Size = AlignedSize,
+                RequestedSize = AlignedSize,
+                AllocationBase = AllocationBase != 0 ? AllocationBase : BaseAddress,
+                AllocationProtect = AllocationProtect != 0 ? AllocationProtect : WinProtect,
+                Protect = WinProtect,
+                IsReserved = true,
+                IsCommitted = true,
+                InitialProtections = Protection,
+                Protections = Protection,
+                SpecialProtections = SpecialProtections.None,
+                Flags = AllocationType.Commited
+            });
+
+            return true;
+        }
+
+        /// <summary>
+        /// Maps [Address, Address+Size) a second time at Alias.
+        /// </summary>
+        public bool MapSharedMemoryRange(ulong Alias, ulong Address, ulong Size, MemoryProtection Protection, uint AllocationProtect, ulong AllocationBase = 0)
+        {
+            ulong AlignedSize = AlignUp(Size, PageSize);
+            if (AlignedSize == 0 || WinHelper == null)
+                return false;
+
+            if (AllocationBase == 0)
+                AllocationBase = Alias;
+
+            for (ulong Offset = 0; Offset < AlignedSize;)
+            {
+                IntPtr HostPages = GetHostPointer(Address + Offset, PageSize);
+
+                if (HostPages == IntPtr.Zero)
+                {
+                    ulong Gap = PageSize;
+                    while (Offset + Gap < AlignedSize && GetHostPointer(Address + Offset + Gap, PageSize) == IntPtr.Zero)
+                        Gap += PageSize;
+
+                    ReserveSharedMemoryRegion(Alias + Offset, Gap, AllocationProtect, AllocationBase);
+                    Offset += Gap;
+                    continue;
+                }
+
+                ulong Run = PageSize;
+                while (Offset + Run < AlignedSize && GetHostPointer(Address + Offset, Run + PageSize) != IntPtr.Zero)
+                    Run += PageSize;
+
+                if (!MapSharedMemoryRegion(Alias + Offset, Run, Protection, HostPages, AllocationProtect, AllocationBase))
+                {
+                    UnmapMemoryRuns(Alias, AlignedSize);
+                    return false;
+                }
+
+                Offset += Run;
+            }
+
+            return true;
+        }
+
+        private void ReserveSharedMemoryRegion(ulong BaseAddress, ulong Size, uint AllocationProtect, ulong AllocationBase)
+        {
+            if (TryFindMemoryRegionByBase(BaseAddress, out _, out MemoryRegion Existing) && Existing.Size == Size)
+                return;
+
+            ConsumeFreedMemoryRange(BaseAddress, Size);
+            CarveMemoryRange(BaseAddress, Size);
+
+            AddMemoryRegion(new MemoryRegion
+            {
+                BaseAddress = BaseAddress,
+                Size = Size,
+                RequestedSize = Size,
+                AllocationBase = AllocationBase,
+                AllocationProtect = AllocationProtect,
+                Protect = AllocationProtect,
+                IsReserved = true,
+                IsCommitted = false,
+                InitialProtections = WinHelper.ConvertWinProtectToInternal(AllocationProtect),
+                Protections = MemoryProtection.None,
+                SpecialProtections = SpecialProtections.None,
+                Flags = AllocationType.Reserved
+            });
+        }
+
+        private void CarveMemoryRange(ulong BaseAddress, ulong Size)
+        {
+            ulong End = GetRangeEnd(BaseAddress, Size);
+            List<MemoryRegion> Overlapping = new List<MemoryRegion>();
+            AddOverlappingMemoryRegions(BaseAddress, Size, Overlapping);
+
+            for (int Index = 0; Index < Overlapping.Count; Index++)
+            {
+                MemoryRegion Region = Overlapping[Index];
+                ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
+
+                RemoveMemoryRegion(Region);
+
+                if (Region.BaseAddress < BaseAddress)
+                {
+                    MemoryRegion Head = Region;
+                    Head.Size = BaseAddress - Region.BaseAddress;
+                    Head.RequestedSize = Head.Size;
+                    Head.PoisonedMemory = default;
+                    AddMemoryRegion(Head);
+                }
+
+                if (RegionEnd > End)
+                {
+                    MemoryRegion Tail = Region;
+                    Tail.BaseAddress = End;
+                    Tail.Size = RegionEnd - End;
+                    Tail.RequestedSize = Tail.Size;
+                    Tail.PoisonedMemory = default;
+                    AddMemoryRegion(Tail);
+                }
+            }
+        }
+
+        public bool UnmapMemoryRuns(ulong BaseAddress, ulong Size)
+        {
+            bool UnmappedAny = false;
+
+            for (ulong Offset = 0; Offset < Size;)
+            {
+                ulong Address = BaseAddress + Offset;
+                if (!TryFindMemoryRegion(Address, out MemoryRegion Run) || Run.BaseAddress != Address || Run.Size == 0)
+                {
+                    Offset += PageSize;
+                    continue;
+                }
+
+                ulong RunSize = AlignUp(Run.Size, PageSize);
+                if (UnmapMemoryRegion(Address))
+                    UnmappedAny = true;
+
+                Offset += RunSize;
+            }
+
+            return UnmappedAny;
+        }
+
         public bool CommitMemory(ulong BaseAddress, ulong Size, uint Protect)
         {
             ulong AlignedBase = BaseAddress & ~(PageSize - 1);
@@ -1721,6 +1908,9 @@ namespace Brovan.Core.Emulation
 
             if (!TryFindMemoryRegion(BaseAddress, out MemoryRegion Region) || !Region.IsReserved)
             {
+                // A view of an ordinary SEC_COMMIT section is backed the moment it is mapped, so it is not
+                // carried as "reserved". Committing over memory that is already backed is a protection
+                // change on the host, not an error.
                 if (!IsRegionMapped(BaseAddress, Size))
                     return false;
 
@@ -1736,7 +1926,10 @@ namespace Brovan.Core.Emulation
                 return false;
 
             if (!SingleRegion)
+            {
+                WinHelper.MirrorCommitToSectionAliases(BaseAddress, Size);
                 return true;
+            }
 
             MemoryProtection NewProt = WinHelper.ConvertWinProtectToInternal(Protect);
             SpecialProtections Special = (Protect & 0x100) != 0 ? SpecialProtections.Guard : SpecialProtections.None;
@@ -1807,6 +2000,7 @@ namespace Brovan.Core.Emulation
                 });
             }
 
+            WinHelper.MirrorCommitToSectionAliases(BaseAddress, Size);
             return true;
         }
 
@@ -1847,7 +2041,6 @@ namespace Brovan.Core.Emulation
 
             if (AllocationBase == 0)
                 return false;
-
 
             if (TryFindMemoryRegion(BaseAddress, out MemoryRegion Whole) && !Whole.IsCommitted &&
                 End <= GetRangeEnd(Whole.BaseAddress, Whole.Size))
@@ -2121,36 +2314,40 @@ namespace Brovan.Core.Emulation
             ulong AlignedSize = AlignToPageSize(Size);
             while (CurrentAddress + AlignedSize < MaxAddress)
             {
-                if (!IsRegionMapped(CurrentAddress, AlignedSize))
+                if (TryFindOverlappingMemoryRegion(CurrentAddress, AlignedSize, out MemoryRegion Occupied))
                 {
-                    if (_emulator.MapMemory(CurrentAddress, AlignedSize, GetGuardedHostProtection(Protection, Special)))
+                    ulong NextAddress = AlignToPageSize(GetRangeEnd(Occupied.BaseAddress, Occupied.Size));
+                    CurrentAddress = NextAddress > CurrentAddress ? NextAddress : CurrentAddress + PageSize;
+                    continue;
+                }
+
+                if (_emulator.MapMemory(CurrentAddress, AlignedSize, GetGuardedHostProtection(Protection, Special)))
+                {
+                    ConsumeFreedMemoryRange(CurrentAddress, AlignedSize);
+
+                    uint WinProtect = WinHelper != null ? (uint)WinHelper.ConvertInternalToWinProtect(Protection) : 0;
+
+                    MemoryRegion Region = new MemoryRegion
                     {
-                        ConsumeFreedMemoryRange(CurrentAddress, AlignedSize);
+                        BaseAddress = CurrentAddress,
+                        Size = Size,
+                        RequestedSize = Size,
+                        AllocationBase = CurrentAddress,
+                        AllocationProtect = WinProtect,
+                        Protect = WinProtect,
+                        IsReserved = true,
+                        IsCommitted = true,
+                        InitialProtections = Protection,
+                        Protections = Protection,
+                        SpecialProtections = Special,
+                        Flags = Flags
+                    };
 
-                        uint WinProtect = WinHelper != null ? (uint)WinHelper.ConvertInternalToWinProtect(Protection) : 0;
+                    if (Size < AlignedSize)
+                        Region.PoisonedMemory = (CurrentAddress + Size, CurrentAddress + AlignedSize);
 
-                        MemoryRegion Region = new MemoryRegion
-                        {
-                            BaseAddress = CurrentAddress,
-                            Size = Size,
-                            RequestedSize = Size,
-                            AllocationBase = CurrentAddress,
-                            AllocationProtect = WinProtect,
-                            Protect = WinProtect,
-                            IsReserved = true,
-                            IsCommitted = true,
-                            InitialProtections = Protection,
-                            Protections = Protection,
-                            SpecialProtections = Special,
-                            Flags = Flags
-                        };
-
-                        if (Size < AlignedSize)
-                            Region.PoisonedMemory = (CurrentAddress + Size, CurrentAddress + AlignedSize);
-
-                        AddMemoryRegion(Region);
-                        return CurrentAddress;
-                    }
+                    AddMemoryRegion(Region);
+                    return CurrentAddress;
                 }
 
                 CurrentAddress += AlignedSize;

@@ -14,6 +14,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) && !Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            if (Length != 0)
+                Instance._emulator.InvalidateCodeRange(BaseAddress, Length);
+
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtFlushInstructionCache: base=0x{BaseAddress:X}, length=0x{Length:X}", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
