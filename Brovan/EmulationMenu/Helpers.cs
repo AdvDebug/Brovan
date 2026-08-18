@@ -875,7 +875,7 @@ namespace Brovan
             }
         }
 
-        internal static string ReadDebuggerCommandLine(string Prompt)
+        internal static string? ReadDebuggerCommandLine(string Prompt)
         {
             MoveToDebuggerCommandPrompt();
             if (DebuggerPromptTop < 0)
@@ -883,7 +883,11 @@ namespace Brovan
                 Console.ForegroundColor = ConsoleColor.Cyan;
                 Console.Write(Prompt);
                 Console.ForegroundColor = ConsoleColor.White;
-                string Result = Console.ReadLine()?.Trim() ?? string.Empty;
+                string? Line = Console.ReadLine();
+                if (Line == null)
+                    return null;
+
+                string Result = Line.Trim();
                 AddDebuggerCommandHistory(Result);
                 return Result;
             }
@@ -896,7 +900,17 @@ namespace Brovan
             while (true)
             {
                 RenderDebuggerCommandPrompt(Prompt, Input, CursorIndex);
-                ConsoleKeyInfo Key = Console.ReadKey(true);
+
+                ConsoleKeyInfo Key;
+                try
+                {
+                    Key = Console.ReadKey(true);
+                }
+                catch (InvalidOperationException)
+                {
+                    ClearDebuggerCommandPromptLine();
+                    return null;
+                }
 
                 if (Key.Key == ConsoleKey.Enter)
                 {

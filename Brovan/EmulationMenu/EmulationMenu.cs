@@ -2554,7 +2554,7 @@ namespace Brovan.EmulationMenu
                     if (Exiting)
                         break;
 
-                    string Input;
+                    string? Input;
                     if (DebuggerStopDisplayActive)
                     {
                         Input = ReadDebuggerCommandLine("Brovan Emulator > ");
@@ -2576,6 +2576,17 @@ namespace Brovan.EmulationMenu
                         Console.Write("> ");
                         Console.ForegroundColor = ConsoleColor.White;
                         Input = Console.ReadLine()?.Trim();
+                    }
+
+                    if (Input == null)
+                    {
+                        ClearDebuggerCommandPromptLine();
+                        Console.WriteLine();
+                        PrintHighlight("[-] Standard input is closed, the command prompt cannot read commands. Exiting.", true);
+                        Console.ResetColor();
+                        Console.ForegroundColor = ConsoleColor.White;
+                        Console.BackgroundColor = ConsoleColor.Black;
+                        Environment.Exit(0);
                     }
 
                     if (string.IsNullOrWhiteSpace(Input))
