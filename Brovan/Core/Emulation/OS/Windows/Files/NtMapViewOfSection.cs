@@ -228,8 +228,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 try
                 {
                     Image = Instance.LoadBinary(SectionHostPath);
-                    if (Image.FileFormat != BinaryFormat.PE || Image.Architecture != Instance._binary.Architecture)
+                    if (Image.FileFormat != BinaryFormat.PE)
                         return NTSTATUS.STATUS_INVALID_IMAGE_FORMAT;
+
+                    // NT maps an image built for another machine and reports it in the status. Only the
+                    // loader refuses the mismatch.
+                    bool MachineMismatch = Image.Architecture != Instance._binary.Architecture;
 
                     ulong ImageSize = Instance.AlignToPageSize(Image.PE.SizeOfImage != 0 ? Image.PE.SizeOfImage : (uint)Image.BinarySize);
                     Section.Size = ImageSize;
@@ -262,7 +266,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance.WinHelper.WritePointer(ViewSizePtr, ReturnedSize))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    NTSTATUS Status = NTSTATUS.STATUS_SUCCESS;
+                    NTSTATUS Status = MachineMismatch ? NTSTATUS.STATUS_IMAGE_MACHINE_TYPE_MISMATCH : NTSTATUS.STATUS_SUCCESS;
 
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                         Instance.TriggerEventMessage(

@@ -1576,7 +1576,7 @@ namespace Brovan.Core.Emulation
 
         public WinModule LoadWinLibrary(BinaryFile Library, bool TriggerMessage, bool AddToModuleList = true, ulong RequestedBase = 0, bool MapBySections = false)
         {
-            if (Library.FileFormat != BinaryFormat.PE || Library.Architecture != _binary.Architecture)
+            if (Library.FileFormat != BinaryFormat.PE)
                 throw new InvalidOperationException("Emulator tried to load a non-valid PE library.");
 
             ulong ImageSize = AlignToPageSize(Library.PE.SizeOfImage != 0 ? Library.PE.SizeOfImage : (uint)Library.BinarySize);
