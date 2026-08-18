@@ -1374,7 +1374,9 @@ namespace Brovan.Generators
                     if (spi < 0)
                         return null;
                     b.Append("                uint ").Append(local).Append("n = r.ReadU32();\n");
-                    b.Append("                if (p").Append(spi).Append(" != System.IntPtr.Zero) *(uint*)(p").Append(spi).Append(" + BrovVulkLayout.MemberOffset[\"").Append(c.Params[spi].Type).Append(".").Append(fld).Append("\"]) = ").Append(local).Append("n;\n");
+                    // The field also sizes input arrays that RebuildAt has already checked against it.
+                    b.Append("                if (p").Append(spi).Append(" == System.IntPtr.Zero) { if (").Append(local).Append("n != 0) throw new System.InvalidOperationException(\"BrovVulk generic: array count mismatch.\"); }\n");
+                    b.Append("                else if (").Append(local).Append("n != *(uint*)(p").Append(spi).Append(" + BrovVulkLayout.MemberOffset[\"").Append(c.Params[spi].Type).Append(".").Append(fld).Append("\"])) throw new System.InvalidOperationException(\"BrovVulk generic: array count mismatch.\");\n");
                     b.Append("                System.IntPtr ").Append(local).Append(" = ").Append(local).Append("n > 0 ? st.Alloc(BrovVulkGenStruct.CheckedBytes(").Append(local).Append("n, 8)) : System.IntPtr.Zero;\n");
                     callArgs.Add(local);
                     if (vkRes)
@@ -1747,7 +1749,7 @@ namespace Brovan.Generators
                     i++;
                     continue;
                 }
-                
+
                 string kind = ParamKind(m, p);
                 if (kind == "ScalarOut")
                 {

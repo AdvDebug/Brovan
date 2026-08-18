@@ -19,6 +19,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private readonly uint BufferStart;
         private readonly uint RingBytes;
         private readonly int BlockAlign;
+        private readonly int MaxTake;
         private readonly IAudioSink Sink;
         private readonly byte[] Chunk;
         private readonly byte[] Silence;
@@ -47,6 +48,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Chunk = new byte[ChunkBytes];
             Silence = new byte[ChunkBytes];
 
+            // A ring shorter than one chunk is legal. the buffer duration comes from the client.
+            MaxTake = (int)Math.Min((uint)ChunkBytes, RingBytes);
+
             Worker = new Thread(Run)
             {
                 IsBackground = true,
@@ -61,6 +65,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         {
             byte* Base = (byte*)Block;
 
+            // The guest maps the control block writable, so the cursor is published there, never read back.
+            long Read = 0;
+
             // The sink is torn down here rather than in Dispose so that no host device buffer is freed
             // while this thread is still inside Sink.Write.
             try
@@ -74,10 +81,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     }
 
                     long Written = Interlocked.CompareExchange(ref *(long*)(Base + OffClientCursor), 0, 0);
-                    long Read = *(long*)(Base + OffServerCursor);
                     long Available = Written - Read;
 
-                    int Take = (int)Math.Min(Available, Chunk.Length);
+                    int Take = (int)Math.Min(Available, MaxTake);
                     Take -= Take % BlockAlign;
 
                     // Feed the device anyway when the guest is behind, both to keep it from underrunning and
@@ -98,7 +104,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
                     Sink.Write(Chunk.AsSpan(0, Take));
 
-                    Interlocked.Exchange(ref *(long*)(Base + OffServerCursor), Read + Take);
+                    Read += Take;
+                    Interlocked.Exchange(ref *(long*)(Base + OffServerCursor), Read);
                     RenderedBytes += Take;
                     SignalPeriod();
                 }
