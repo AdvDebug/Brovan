@@ -215,10 +215,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const int ArenaCap = 1 << 20;
 
+        private const ulong WholeSize = ulong.MaxValue;
+
         private readonly Dictionary<uint, (IntPtr Ptr, string Type)> _handles = new Dictionary<uint, (IntPtr, string)>();
         private readonly Dictionary<uint, MapEntry> _mappings = new Dictionary<uint, MapEntry>();
         private readonly HashSet<uint> _importedMem = new HashSet<uint>();
         private readonly Dictionary<IntPtr, DeviceImport> _deviceImports = new Dictionary<IntPtr, DeviceImport>();
+        private readonly Dictionary<IntPtr, uint> _layoutSets = new Dictionary<IntPtr, uint>();
+        private readonly Dictionary<IntPtr, ulong> _bufferSizes = new Dictionary<IntPtr, ulong>();
         private uint _next = 1;
 
         private IntPtr _arena;
@@ -266,9 +270,47 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void Forget(uint id)
         {
+            if (_handles.TryGetValue(id, out (IntPtr Ptr, string Type) e))
+            {
+                if (e.Type == "VkPipelineLayout")
+                    _layoutSets.Remove(e.Ptr);
+                else if (e.Type == "VkBuffer")
+                    _bufferSizes.Remove(e.Ptr);
+            }
+
             _handles.Remove(id);
             _mappings.Remove(id);
             _importedMem.Remove(id);
+        }
+
+        public void SetPipelineLayoutSets(IntPtr layout, uint setLayoutCount)
+        {
+            if (layout != IntPtr.Zero)
+                _layoutSets[layout] = setLayoutCount;
+        }
+
+        public void CheckDescriptorSetRange(IntPtr layout, uint firstSet, uint setCount)
+        {
+            if (!_layoutSets.TryGetValue(layout, out uint declared))
+                return;
+
+            if ((ulong)firstSet + setCount > declared)
+                throw new InvalidOperationException($"BrovVulk generic: descriptor sets {firstSet}+{setCount} exceed the pipeline layout's {declared}.");
+        }
+
+        public void SetBufferSize(IntPtr buffer, ulong size)
+        {
+            if (buffer != IntPtr.Zero)
+                _bufferSizes[buffer] = size;
+        }
+
+        public void CheckBufferRange(IntPtr buffer, ulong offset, ulong range)
+        {
+            if (buffer == IntPtr.Zero || !_bufferSizes.TryGetValue(buffer, out ulong size))
+                return;
+
+            if (offset > size || (range != WholeSize && range > size - offset))
+                throw new InvalidOperationException($"BrovVulk generic: descriptor range {offset}+{range} exceeds the buffer's {size} bytes.");
         }
 
         public bool HasMapping(uint id) => _mappings.ContainsKey(id);

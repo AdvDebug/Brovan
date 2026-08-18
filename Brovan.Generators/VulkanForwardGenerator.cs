@@ -1429,6 +1429,41 @@ namespace Brovan.Generators
 
             if (c.Name == "vkDestroyDevice" || c.Name == "vkDestroyInstance")
                 post.Add("                st.ClearMappings();");
+
+            // The driver indexes its own per-layout descriptor state by firstSet with no bound check of
+            // its own, so the set count the layout was built with has to be kept and enforced here.
+            if (c.Name.StartsWith("vkCmdBindDescriptorSets", StringComparison.Ordinal))
+            {
+                int layoutIdx = c.Params.FindIndex(x => x.Name == "layout");
+                int firstIdx = c.Params.FindIndex(x => x.Name == "firstSet");
+                int countIdx = c.Params.FindIndex(x => x.Name == "descriptorSetCount");
+                int infoIdx = c.Params.FindIndex(x => ParamKind(m, x) == "StructIn" && StructId.ContainsKey(x.Type));
+
+                if (layoutIdx >= 0 && firstIdx >= 0 && countIdx >= 0)
+                    b.Append("                st.CheckDescriptorSetRange(p").Append(layoutIdx).Append(", p").Append(firstIdx).Append(", p").Append(countIdx).Append(");\n");
+                else if (infoIdx >= 0)
+                {
+                    string t = c.Params[infoIdx].Type;
+                    b.Append("                if (p").Append(infoIdx).Append(" != System.IntPtr.Zero) st.CheckDescriptorSetRange(*(System.IntPtr*)(p").Append(infoIdx)
+                     .Append(" + BrovVulkLayout.MemberOffset[\"").Append(t).Append(".layout\"]), *(uint*)(p").Append(infoIdx)
+                     .Append(" + BrovVulkLayout.MemberOffset[\"").Append(t).Append(".firstSet\"]), *(uint*)(p").Append(infoIdx)
+                     .Append(" + BrovVulkLayout.MemberOffset[\"").Append(t).Append(".descriptorSetCount\"]));\n");
+                }
+            }
+
+            if (c.Name == "vkCreatePipelineLayout" || c.Name == "vkCreateBuffer")
+            {
+                int outIdx = c.Params.FindIndex(x => ParamKind(m, x) == "HandleOut");
+                int infoIdx = c.Params.FindIndex(x => ParamKind(m, x) == "StructIn" && StructId.ContainsKey(x.Type));
+                if (outIdx >= 0 && infoIdx >= 0)
+                {
+                    string t = c.Params[infoIdx].Type;
+                    post.Add(c.Name == "vkCreateBuffer"
+                        ? "                if (rr >= 0 && p" + infoIdx + " != System.IntPtr.Zero) st.SetBufferSize(p" + outIdx + ", *(ulong*)(p" + infoIdx + " + BrovVulkLayout.MemberOffset[\"" + t + ".size\"]));"
+                        : "                if (rr >= 0 && p" + infoIdx + " != System.IntPtr.Zero) st.SetPipelineLayoutSets(p" + outIdx + ", *(uint*)(p" + infoIdx + " + BrovVulkLayout.MemberOffset[\"" + t + ".setLayoutCount\"]));");
+                }
+            }
+
             StringBuilder head = new StringBuilder();
             head.Append("            case ").Append(id).Append(":\n            {\n");
             if (c.Name == "vkQueueSubmit" || c.Name == "vkQueueSubmit2")
@@ -2082,6 +2117,21 @@ namespace Brovan.Generators
                 gs.Append("};\n");
             }
             sm.AppendLine("        };");
+
+            int DbiSid = -1, DbiBuffer = 0, DbiOffset = 0, DbiRange = 0;
+            if (StructId.TryGetValue("VkDescriptorBufferInfo", out int DbiId))
+            {
+                Layout DbiLay = ComputeLayout(m, "VkDescriptorBufferInfo", cache);
+                if (DbiLay.Offsets.TryGetValue("buffer", out DbiBuffer)
+                    && DbiLay.Offsets.TryGetValue("offset", out DbiOffset)
+                    && DbiLay.Offsets.TryGetValue("range", out DbiRange))
+                    DbiSid = DbiId;
+            }
+
+            sm.AppendLine("        internal const int DescriptorBufferInfoSid = " + DbiSid + ";");
+            sm.AppendLine("        internal const int DescriptorBufferInfoBuffer = " + DbiBuffer + ";");
+            sm.AppendLine("        internal const int DescriptorBufferInfoOffset = " + DbiOffset + ";");
+            sm.AppendLine("        internal const int DescriptorBufferInfoRange = " + DbiRange + ";");
             sm.AppendLine("    }");
             sm.AppendLine("}");
             spc.AddSource("BrovVulkStructMeta.g.cs", SourceText.From(sm.ToString(), Encoding.UTF8));
