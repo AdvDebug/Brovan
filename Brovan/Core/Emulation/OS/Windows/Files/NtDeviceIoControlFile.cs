@@ -6,6 +6,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtDeviceIoControlFile : IWinSyscall
     {
+        private const uint LargeObjectThreshold = 85000;
+
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 
@@ -67,9 +70,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             DeviceData Data = new DeviceData();
             Data.File = File;
 
+            byte[] RentedInput = null;
             if (InputBufferPtr != 0 && InputBufferLength != 0)
             {
-                Data.InputBuffer = Instance.ReadMemory(InputBufferPtr, InputBufferLength);
+                byte[] InputBuffer;
+                if (InputBufferLength >= LargeObjectThreshold)
+                {
+                    RentedInput = ArrayPool<byte>.Shared.Rent((int)InputBufferLength);
+                    InputBuffer = RentedInput;
+                }
+                else
+                {
+                    InputBuffer = new byte[InputBufferLength];
+                }
+
+                Span<byte> InputSpan = InputBuffer.AsSpan(0, (int)InputBufferLength);
+                if (!Instance.ReadMemory(InputBufferPtr, InputSpan))
+                    InputSpan.Clear();
+
+                Data.InputBuffer = InputBuffer;
                 Data.InputLength = InputBufferLength;
             }
 
@@ -106,8 +125,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            if (RentedOutput != null && Status != NTSTATUS.STATUS_PENDING)
-                ArrayPool<byte>.Shared.Return(RentedOutput);
+            if (Status != NTSTATUS.STATUS_PENDING)
+            {
+                if (RentedOutput != null)
+                    ArrayPool<byte>.Shared.Return(RentedOutput);
+
+                if (RentedInput != null)
+                    ArrayPool<byte>.Shared.Return(RentedInput);
+            }
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, Information);
 

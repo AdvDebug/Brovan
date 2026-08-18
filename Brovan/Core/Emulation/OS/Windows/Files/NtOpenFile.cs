@@ -69,9 +69,26 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Path = Path.Replace('/', '\\').TrimEnd('\0');
 
-            bool Exists = IsDirectory ? IsDriveRootPath(Path) || GeneralHelper.IO.DirectoryExists(Path, BinaryFormat.PE) : GeneralHelper.IO.FileExists(Path, BinaryFormat.PE);
+            bool DirectoryExists = IsDriveRootPath(Path) || GeneralHelper.IO.DirectoryExists(Path, BinaryFormat.PE);
+
+            // With neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE the caller takes whatever is there,
+            // which is how SetFileAttributes opens a directory
+            IsDirectory = IsDirectory || (DirectoryExists && (OpenOptions & FILE_NON_DIRECTORY_FILE) == 0);
+
+            bool Exists = IsDirectory ? DirectoryExists : GeneralHelper.IO.FileExists(Path, BinaryFormat.PE);
             if (!Exists)
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+
+            bool DeleteOnClose = (OpenOptions & NtCreateFile.FILE_DELETE_ON_CLOSE) != 0;
+            if (DeleteOnClose)
+            {
+                if (!NtCreateFile.HasDeleteAccess((AccessMask)DesiredAccess))
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                using WindowsFileStream Probe = WindowsFileStream.FromGuestPath(Path);
+                if (Probe.IsReadOnly)
+                    return NTSTATUS.STATUS_CANNOT_DELETE;
+            }
 
             WinFile FileObj = new WinFile
             {
@@ -80,7 +97,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Real = true,
                 Directory = IsDirectory,
                 Position = 0,
-                Handler = null
+                Handler = null,
+                DeletePending = DeleteOnClose
             };
 
             Instance.WinHelper.WinFiles.Add(FileObj);

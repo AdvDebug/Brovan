@@ -7,6 +7,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const uint FILE_DIRECTORY_FILE = 0x00000001;
         private const uint FILE_NON_DIRECTORY_FILE = 0x00000040;
+        internal const uint FILE_DELETE_ON_CLOSE = 0x00001000;
 
         private const uint FILE_SUPERSEDE = 0;
         private const uint FILE_OPEN = 1;
@@ -200,6 +201,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
             }
 
+            bool DeleteOnClose = (CreateOptions & FILE_DELETE_ON_CLOSE) != 0;
+            if (DeleteOnClose && !HasDeleteAccess(Permissions))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            }
+
             WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
             bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
             bool FileExists = Stream.ExistsAsFile;
@@ -220,6 +228,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
             }
 
+            if (DeleteOnClose && Stream.IsReadOnly)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_CANNOT_DELETE, 0);
+                return NTSTATUS.STATUS_CANNOT_DELETE;
+            }
+
             NTSTATUS Status = PreparePathForDisposition(Path, IsDirectory, IsDirectory ? DirectoryExists : FileExists, CreateDisposition, out uint Information);
 
             if (Status != NTSTATUS.STATUS_SUCCESS)
@@ -238,7 +252,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Directory = IsDirectory,
                 Position = 0,
                 Handler = null,
-                FileStream = Stream
+                FileStream = Stream,
+                DeletePending = DeleteOnClose
             };
 
             Instance.WinHelper.WinFiles.Add(FileObj);
@@ -269,6 +284,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
             }
 
+            bool DeleteOnClose = (CreateOptions & FILE_DELETE_ON_CLOSE) != 0;
+            if (DeleteOnClose && !HasDeleteAccess(Permissions))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            }
+
             WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
             bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
             bool FileExists = Stream.ExistsAsFile;
@@ -285,6 +307,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
                 return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
+            }
+
+            if (DeleteOnClose && Stream.IsReadOnly)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_CANNOT_DELETE, 0);
+                return NTSTATUS.STATUS_CANNOT_DELETE;
             }
 
             NTSTATUS Status = PreparePathForDisposition(Path, IsDirectory, IsDirectory ? DirectoryExists : FileExists, CreateDisposition, out uint Information);
@@ -305,7 +333,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Directory = IsDirectory,
                 Position = 0,
                 Handler = null,
-                FileStream = Stream
+                FileStream = Stream,
+                DeletePending = DeleteOnClose
             };
 
             Instance.WinHelper.WinFiles.Add(FileObj);
@@ -431,11 +460,29 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        /// <summary>
+        /// Reports whether the granted access allows FILE_DELETE_ON_CLOSE, which NT accepts only with DELETE.
+        /// </summary>
+        internal static bool HasDeleteAccess(AccessMask Permissions)
+        {
+            if ((Permissions & AccessMask.MaximumAllowed) != 0)
+                return true;
+
+            if ((Permissions & AccessMask.GenericAll) == AccessMask.GenericAll)
+                return true;
+
+            if ((Permissions & AccessMask.FileAllAccess) == AccessMask.FileAllAccess)
+                return true;
+
+            return (Permissions & AccessMask.Delete) == AccessMask.Delete;
+        }
+
         private static bool CreateOrTruncateFile(string Path)
         {
             try
             {
-                WindowsFileStream.FromGuestPath(Path, true).Truncate();
+                using WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path, true);
+                Stream.Truncate();
                 return true;
             }
             catch
@@ -448,7 +495,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             try
             {
-                WindowsFileStream.FromGuestPath(Path, true).CreateDirectory();
+                using WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path, true);
+                Stream.CreateDirectory();
                 return true;
             }
             catch

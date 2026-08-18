@@ -48,10 +48,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case IOCTL_KSEC_ENCRYPT_MEMORY_SAME_LOGON:
                 case IOCTL_KSEC_DECRYPT_MEMORY_SAME_LOGON:
                     {
-                        byte[] Source = (Data.InputBuffer != null && Data.InputBuffer.Length > 0) ? Data.InputBuffer : Data.OutputBuffer;
+                        byte[] Source = (Data.InputBuffer != null && Data.InputLength > 0) ? Data.InputBuffer : Data.OutputBuffer;
                         if (Data.OutputBuffer != null && Source != null)
                         {
-                            int Count = Math.Min(Data.OutputBuffer.Length, Source.Length);
+                            uint SourceLength = ReferenceEquals(Source, Data.OutputBuffer) ? Data.OutputLength : Data.InputLength;
+                            int Count = (int)Math.Min(Data.OutputLength, SourceLength);
                             if (!ReferenceEquals(Source, Data.OutputBuffer))
                                 Array.Copy(Source, Data.OutputBuffer, Count);
                             Data.Information = (uint)Count;

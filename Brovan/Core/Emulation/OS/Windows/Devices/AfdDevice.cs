@@ -372,7 +372,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (_socket == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            if (Data.InputBuffer == null || Data.InputBuffer.Length < 4 + 16)
+            if (Data.InputBuffer == null || Data.InputLength < 4 + 16)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             IPEndPoint? IpEndPoint = ParseSockaddr(Data.InputBuffer, 4);
@@ -399,7 +399,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (_socket == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            if (Data.InputBuffer == null || Data.InputBuffer.Length < 24 + 16)
+            if (Data.InputBuffer == null || Data.InputLength < 24 + 16)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             IPEndPoint? IpEndPoint = ParseSockaddr(Data.InputBuffer, 24);
@@ -428,7 +428,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
             }
 
-            if (Data.InputBuffer == null || Data.InputBuffer.Length < 8)
+            if (Data.InputBuffer == null || Data.InputLength < 8)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             int Backlog = (int)ReadU32(Data.InputBuffer, 4);
@@ -496,7 +496,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             int MinSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 16 : 12;
-            if (Data.InputBuffer.Length < MinSize)
+            if (Data.InputLength < MinSize)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             int Sequence = BitConverter.ToInt32(Data.InputBuffer, 4);
@@ -531,7 +531,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             int PtrSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
             int HeaderSize = PtrSize + 4 + 4 + 4;
-            if (Data.InputBuffer.Length < HeaderSize)
+            if (Data.InputLength < HeaderSize)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             ulong WsaBufArrayPtr = ReadPtr(Instance, Data.InputBuffer, 0);
@@ -592,7 +592,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             int PtrSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
             int HeaderSize = PtrSize + 4 + 4 + 4;
-            if (Data.InputBuffer.Length < HeaderSize)
+            if (Data.InputLength < HeaderSize)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             ulong WsaBufArrayPtr = ReadPtr(Instance, Data.InputBuffer, 0);
@@ -698,7 +698,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             int EntrySize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 16 : 12;
             int Needed = HeaderSize + (int)Count * EntrySize;
 
-            if (Data.InputBuffer.Length < Needed || Data.OutputBuffer.Length < Needed)
+            if (Data.InputLength < Needed || Data.OutputBuffer.Length < Needed)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             int OutIndex = 0;

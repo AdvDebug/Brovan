@@ -41,20 +41,22 @@ namespace Brovan.Core.Emulation.OS.Windows
         private NTSTATUS HandleGenIoctl(ref DeviceData Data, BinaryEmulator Instance)
         {
             byte[] Input = Data.InputBuffer;
-            if (Input == null || Input.Length < 8)
+            // InputBuffer can be pooled, so only InputLength bounds the guest data.
+            uint InputLength = Input == null ? 0 : Math.Min(Data.InputLength, (uint)Input.Length);
+            if (Input == null || InputLength < 8)
             {
                 if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
-                    Instance.TriggerEventMessage($"[BrovVulk] rejected IOCTL with a {(Input == null ? -1 : Input.Length)} byte input buffer.", LogFlags.Issues);
+                    Instance.TriggerEventMessage($"[BrovVulk] rejected IOCTL with a {(Input == null ? -1 : (int)InputLength)} byte input buffer.", LogFlags.Issues);
 
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
             uint Id = BinaryPrimitives.ReadUInt32LittleEndian(Input.AsSpan(0, 4));
             uint PayloadLen = BinaryPrimitives.ReadUInt32LittleEndian(Input.AsSpan(4, 4));
-            if (PayloadLen > (uint)(Input.Length - 8) || PayloadLen > MaxGenPayload)
+            if (PayloadLen > InputLength - 8 || PayloadLen > MaxGenPayload)
             {
                 if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
-                    Instance.TriggerEventMessage($"[BrovVulk] rejected command {Id} with payload length {PayloadLen} in a {Input.Length} byte input buffer.", LogFlags.Issues);
+                    Instance.TriggerEventMessage($"[BrovVulk] rejected command {Id} with payload length {PayloadLen} in a {InputLength} byte input buffer.", LogFlags.Issues);
 
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }

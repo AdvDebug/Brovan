@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using Microsoft.Win32.SafeHandles;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -10,8 +11,14 @@ namespace Brovan.Core.Emulation.OS.Windows
     public sealed class WindowsFileStream : Stream
     {
         private const int CopyBufferSize = 81920;
+        private const FileShare ShareMode = FileShare.ReadWrite | FileShare.Delete;
 
         private long PositionValue;
+
+        private readonly object HandleLock = new object();
+        private SafeFileHandle CachedHandle;
+        private string CachedHandlePath;
+        private bool CachedHandleWritable;
 
         public string GuestPath { get; }
         public string ReadHostPath { get; }
@@ -32,14 +39,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             get
             {
-                string HostPath = EffectiveReadHostPath;
-                if (string.IsNullOrWhiteSpace(HostPath))
-                    return 0;
-
-                if (!File.Exists(HostPath))
-                    return 0;
-
-                return new FileInfo(HostPath).Length;
+                lock (HandleLock)
+                {
+                    SafeFileHandle Handle = AcquireReadHandle();
+                    return Handle == null ? 0 : RandomAccess.GetLength(Handle);
+                }
             }
         }
 
@@ -77,6 +81,83 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return false;
 
                 return !string.IsNullOrWhiteSpace(ReadHostPath) && File.Exists(ReadHostPath);
+            }
+        }
+
+        public bool IsReadOnly
+        {
+            get
+            {
+                string HostPath = EffectiveReadHostPath;
+                if (string.IsNullOrWhiteSpace(HostPath))
+                    return false;
+
+                try
+                {
+                    return (File.GetAttributes(HostPath) & FileAttributes.ReadOnly) != 0;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        private const FileAttributes SettableAttributes =
+            FileAttributes.ReadOnly | FileAttributes.Hidden | FileAttributes.System | FileAttributes.Archive;
+
+        /// <summary>
+        /// Stores the settable FILE_BASIC_INFORMATION attributes on the VFS copy, materializing it first so the
+        /// read layer is never changed. Returns false when there is nothing to apply them to.
+        /// </summary>
+        public bool TryApplyAttributes(FileAttributes Attributes)
+        {
+            if (string.IsNullOrWhiteSpace(WriteHostPath))
+                return false;
+
+            FileAttributes Wanted = Attributes & SettableAttributes;
+
+            try
+            {
+                string ReadPath = EffectiveReadHostPath;
+                if (string.IsNullOrWhiteSpace(ReadPath))
+                    return false;
+
+                // Skip materializing the VFS copy when the entry already carries these attributes.
+                if ((File.GetAttributes(ReadPath) & SettableAttributes) == Wanted)
+                    return true;
+            }
+            catch
+            {
+                return false;
+            }
+
+            try
+            {
+                if (ExistsAsDirectory)
+                {
+                    Directory.CreateDirectory(WriteHostPath);
+                }
+                else if (ExistsAsFile)
+                {
+                    lock (HandleLock)
+                    {
+                        CloseCachedHandle();
+                        EnsureWriteStore(true);
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+
+                FileAttributes Current = File.GetAttributes(WriteHostPath);
+                File.SetAttributes(WriteHostPath, (Current & ~SettableAttributes) | Wanted);
+                return true;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -169,14 +250,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (position < 0)
                 throw new ArgumentOutOfRangeException(nameof(position));
 
-            string HostPath = GetReadableFilePath();
+            lock (HandleLock)
+            {
+                SafeFileHandle Handle = AcquireReadHandle();
+                if (Handle == null)
+                    throw new FileNotFoundException(GuestPath);
 
-            using FileStream Stream = new FileStream(HostPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            if (position >= Stream.Length)
-                return 0;
+                if (position >= RandomAccess.GetLength(Handle))
+                    return 0;
 
-            Stream.Seek(position, SeekOrigin.Begin);
-            return Stream.Read(buffer);
+                return RandomAccess.Read(Handle, buffer, position);
+            }
         }
 
         public override void Write(byte[] buffer, int offset, int count)
@@ -199,24 +283,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (position < 0)
                 throw new ArgumentOutOfRangeException(nameof(position));
 
-            EnsureWriteStore(true);
-
-            using FileStream Stream = new FileStream(WriteHostPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
-            Stream.Seek(position, SeekOrigin.Begin);
-            Stream.Write(buffer);
-            Stream.Flush();
+            lock (HandleLock)
+            {
+                RandomAccess.Write(AcquireWriteHandle(), buffer, position);
+            }
         }
 
         public void WriteAppend(byte[] buffer, int offset, int count)
         {
             ValidateBuffer(buffer, offset, count);
-            EnsureWriteStore(true);
 
-            using FileStream Stream = new FileStream(WriteHostPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
-            Stream.Seek(0, SeekOrigin.End);
-            Stream.Write(buffer, offset, count);
-            Stream.Flush();
-            PositionValue = Stream.Position;
+            lock (HandleLock)
+            {
+                SafeFileHandle Handle = AcquireWriteHandle();
+                long End = RandomAccess.GetLength(Handle);
+                RandomAccess.Write(Handle, buffer.AsSpan(offset, count), End);
+                PositionValue = End + count;
+            }
         }
 
         public override long Seek(long offset, SeekOrigin origin)
@@ -277,6 +360,60 @@ namespace Brovan.Core.Emulation.OS.Windows
                 throw new FileNotFoundException(GuestPath);
 
             return HostPath;
+        }
+
+        private SafeFileHandle AcquireReadHandle()
+        {
+            string HostPath = EffectiveReadHostPath;
+            if (string.IsNullOrWhiteSpace(HostPath))
+            {
+                CloseCachedHandle();
+                return null;
+            }
+
+            if (CachedHandle != null && string.Equals(CachedHandlePath, HostPath, StringComparison.Ordinal))
+                return CachedHandle;
+
+            CloseCachedHandle();
+            if (!File.Exists(HostPath))
+                return null;
+
+            CachedHandle = File.OpenHandle(HostPath, FileMode.Open, FileAccess.Read, ShareMode);
+            CachedHandlePath = HostPath;
+            CachedHandleWritable = false;
+            return CachedHandle;
+        }
+
+        private SafeFileHandle AcquireWriteHandle()
+        {
+            EnsureWriteStore(true);
+
+            if (CachedHandle != null && CachedHandleWritable && string.Equals(CachedHandlePath, WriteHostPath, StringComparison.Ordinal))
+                return CachedHandle;
+
+            CloseCachedHandle();
+            CachedHandle = File.OpenHandle(WriteHostPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, ShareMode);
+            CachedHandlePath = WriteHostPath;
+            CachedHandleWritable = true;
+            return CachedHandle;
+        }
+
+        private void CloseCachedHandle()
+        {
+            CachedHandle?.Dispose();
+            CachedHandle = null;
+            CachedHandlePath = null;
+            CachedHandleWritable = false;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            lock (HandleLock)
+            {
+                CloseCachedHandle();
+            }
+
+            base.Dispose(disposing);
         }
 
         private void EnsureWriteStore(bool CopyExisting)

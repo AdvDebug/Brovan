@@ -216,6 +216,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_FILE_IS_A_DIRECTORY = 0xC00000BA,
         STATUS_NOT_SAME_DEVICE = 0xC00000D4,
         STATUS_NOT_A_DIRECTORY = 0xC0000103,
+        STATUS_CANNOT_DELETE = 0xC0000121,
         STATUS_INVALID_LOCK_RANGE = 0xC00001A1,
         STATUS_MUTANT_NOT_OWNED = 0xC0000046,
         STATUS_SEMAPHORE_LIMIT_EXCEEDED = 0xC0000047,
@@ -1185,9 +1186,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return null;
 
             if (FileStream == null || !string.Equals(FileStream.GuestPath, Path, StringComparison.OrdinalIgnoreCase))
+            {
+                FileStream?.Dispose();
                 FileStream = WindowsFileStream.FromGuestPath(Path, CreateWriteDirectories);
+            }
 
             return FileStream;
+        }
+
+        public void ReleaseFileStream()
+        {
+            FileStream?.Dispose();
+            FileStream = null;
         }
 
         public string ObjectId => $"FILE_{OpenId}";
@@ -1481,9 +1491,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return null;
 
             if (FileStream == null || !string.Equals(FileStream.GuestPath, Path, StringComparison.OrdinalIgnoreCase))
+            {
+                FileStream?.Dispose();
                 FileStream = WindowsFileStream.FromGuestPath(Path, CreateWriteDirectories);
+            }
 
             return FileStream;
+        }
+
+        public void ReleaseFileStream()
+        {
+            FileStream?.Dispose();
+            FileStream = null;
         }
 
         public string MappedImageCanonicalPath;

@@ -1658,6 +1658,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Section.BackingAddress = 0;
             }
 
+            Section.ReleaseFileStream();
             WinSections.Remove(Section);
         }
 
@@ -4723,6 +4724,43 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Handle;
         }
 
+        /// <summary>
+        /// Drops the cached host file handles for a guest path so the host name can be renamed or removed.
+        /// </summary>
+        public void ReleaseFileStreams(string GuestPath, bool IncludeChildren)
+        {
+            if (string.IsNullOrEmpty(GuestPath))
+                return;
+
+            string Prefix = null;
+            if (IncludeChildren)
+                Prefix = GuestPath.EndsWith("\\", StringComparison.Ordinal) ? GuestPath : GuestPath + "\\";
+
+            foreach (WinFile FileObj in WinFiles)
+            {
+                if (FileObj == null || string.IsNullOrEmpty(FileObj.Path))
+                    continue;
+
+                if (string.Equals(FileObj.Path, GuestPath, StringComparison.OrdinalIgnoreCase)
+                    || (Prefix != null && FileObj.Path.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase)))
+                {
+                    FileObj.ReleaseFileStream();
+                }
+            }
+
+            foreach (WinSection Section in WinSections)
+            {
+                if (Section == null || string.IsNullOrEmpty(Section.Path))
+                    continue;
+
+                if (string.Equals(Section.Path, GuestPath, StringComparison.OrdinalIgnoreCase)
+                    || (Prefix != null && Section.Path.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase)))
+                {
+                    Section.ReleaseFileStream();
+                }
+            }
+        }
+
         public WinFile? GetFileByHandle(ulong Handle, AccessMask Purpose)
         {
             if (!HandleManager.TryGetHandle(Handle, out HandleEntry Entry))
@@ -6165,12 +6203,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Entry.Object != null && Entry.Object.ObjectType == HandleType.FileHandle)
                 {
                     WinFile Closing = Entry.Object as WinFile;
-                    if (Closing != null && Closing.DeletePending && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
+                    if (Closing != null && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
                     {
                         List<ulong> HandlesForObject = HandleManager.GetHandlesByObjectId(Closing.ObjectId);
                         HandlesForObject.Remove(Handle);
                         if (HandlesForObject.Count == 0)
-                            ApplyDeleteOnClose(Closing);
+                        {
+                            if (Closing.DeletePending)
+                                ApplyDeleteOnClose(Closing);
+                            else
+                                Closing.ReleaseFileStream();
+                        }
                     }
                 }
                 else if (Entry.Object != null && Entry.Object.ObjectType == HandleType.SectionHandle)
@@ -6214,11 +6257,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        private static void ClearReadOnlyAttribute(string HostPath)
+        {
+            try
+            {
+                FileAttributes Attributes = File.GetAttributes(HostPath);
+                if ((Attributes & FileAttributes.ReadOnly) != 0)
+                    File.SetAttributes(HostPath, Attributes & ~FileAttributes.ReadOnly);
+            }
+            catch
+            {
+            }
+        }
+
         private void ApplyDeleteOnClose(WinFile Target)
         {
             try
             {
-                Target.FileStream = null;
+                ReleaseFileStreams(Target.Path, Target.Directory);
                 string VirtualPath = GeneralHelper.IO.ResolveVirtualHostPath(Target.Path, BinaryFormat.PE);
                 if (string.IsNullOrEmpty(VirtualPath))
                     return;
@@ -6226,10 +6282,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Target.Directory)
                 {
                     if (Directory.Exists(VirtualPath))
+                    {
+                        ClearReadOnlyAttribute(VirtualPath);
                         Directory.Delete(VirtualPath, false);
+                    }
                 }
                 else if (File.Exists(VirtualPath))
                 {
+                    ClearReadOnlyAttribute(VirtualPath);
                     File.Delete(VirtualPath);
                 }
 

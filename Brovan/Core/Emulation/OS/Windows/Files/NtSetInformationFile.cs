@@ -15,6 +15,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static uint GetFileRenameInformationHeaderSize(BinaryEmulator Instance) => Instance.WinHelper.PointerSize == 8 ? 0x14u : 0x0Cu;
 
         private const uint FILE_DISPOSITION_DELETE = 0x00000001;
+        private const uint FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE = 0x00000010;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -126,6 +127,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ApplyBasicInformation(FileObj, Attributes, CreationTime, LastAccessTime, LastWriteTime, ChangeTime);
 
+            // A zero attribute field means "leave the attributes alone".
+            if (Attributes != 0)
+                FileObj.GetFileStream(true)?.TryApplyAttributes((FileAttributes)Attributes);
+
             foreach (WinFile OtherFile in Instance.WinHelper.WinFiles)
             {
                 if (OtherFile == null)
@@ -206,6 +211,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_OBJECT_NAME_COLLISION;
             }
 
+            Instance.WinHelper.ReleaseFileStreams(TargetPath, FileObj.Directory);
+            Instance.WinHelper.ReleaseFileStreams(SourcePath, FileObj.Directory);
+
             if (TargetExists && !DeleteExistingVirtualPath(TargetPath, FileObj.Directory))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
@@ -247,7 +255,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            FileObj.DeletePending = Data[0] != 0;
+            bool Delete = Data[0] != 0;
+            if (Delete && FileObj.GetFileStream()?.IsReadOnly == true)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_CANNOT_DELETE, 0);
+                return NTSTATUS.STATUS_CANNOT_DELETE;
+            }
+
+            FileObj.DeletePending = Delete;
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileDispositionInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -267,7 +282,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             uint Flags = ReadUInt32(Instance, FileInformation + 0x00);
-            FileObj.DeletePending = (Flags & FILE_DISPOSITION_DELETE) != 0;
+            bool Delete = (Flags & FILE_DISPOSITION_DELETE) != 0;
+
+            if (Delete
+                && (Flags & FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE) == 0
+                && FileObj.GetFileStream()?.IsReadOnly == true)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_CANNOT_DELETE, 0);
+                return NTSTATUS.STATUS_CANNOT_DELETE;
+            }
+
+            FileObj.DeletePending = Delete;
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileDispositionInformationExSize);
             return NTSTATUS.STATUS_SUCCESS;
@@ -447,8 +472,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return true;
                 }
 
-                WindowsFileStream SourceStream = WindowsFileStream.FromGuestPath(SourcePath);
-                WindowsFileStream TargetStream = WindowsFileStream.FromGuestPath(TargetPath, true);
+                using WindowsFileStream SourceStream = WindowsFileStream.FromGuestPath(SourcePath);
+                using WindowsFileStream TargetStream = WindowsFileStream.FromGuestPath(TargetPath, true);
                 byte[] Data = SourceStream.ExistsAsFile ? SourceStream.ReadAllBytes() : Array.Empty<byte>();
                 TargetStream.WriteAllBytes(Data);
 

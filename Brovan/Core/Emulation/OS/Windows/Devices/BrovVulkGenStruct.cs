@@ -59,26 +59,112 @@ namespace Brovan.Core.Emulation.OS.Windows
                         *(IntPtr*)fp = r.ReadU32() != 0 ? Rebuild(d.Sub, r, st) : IntPtr.Zero;
                         break;
                     case BvkMK.StructArray:
+                    {
+                        uint n = r.ReadU32();
+                        VerifyArrayLen(dst, d, n);
+                        if (n > 0)
+                        {
+                            int esz = BrovVulkStructMeta.Sizes[d.Sub];
+                            int bytes = CheckedBytes(n, esz);
+                            IntPtr arr = st.Alloc(bytes);
+                            for (uint k = 0; k < n; k++)
+                                RebuildAt(d.Sub, r, st, arr + (int)(k * (uint)esz));
+                            *(IntPtr*)fp = arr;
+                        }
+                        else *(IntPtr*)fp = IntPtr.Zero;
+                        break;
+                    }
+                    case BvkMK.HandleArray:
+                    {
+                        uint n = r.ReadU32();
+                        VerifyArrayLen(dst, d, n);
+                        if (n > 0)
+                        {
+                            IntPtr arr = st.Alloc(CheckedBytes(n, 8));
+                            for (uint k = 0; k < n; k++)
+                                *(IntPtr*)(arr + (int)(k * 8)) = st.Lookup(r.ReadU32(), d.HandleType);
+                            *(IntPtr*)fp = arr;
+                        }
+                        else *(IntPtr*)fp = IntPtr.Zero;
+                        break;
+                    }
+                    case BvkMK.ScalarArray:
+                    {
+                        uint n = r.ReadU32();
+                        VerifyArrayLen(dst, d, n);
+                        if (n > 0)
+                        {
+                            int bytes = CheckedBytes(n, d.Size);
+                            IntPtr arr = st.Alloc(bytes);
+                            r.CopyInto(arr, (uint)bytes);
+                            *(IntPtr*)fp = arr;
+                        }
+                        else *(IntPtr*)fp = IntPtr.Zero;
+                        break;
+                    }
+                    case BvkMK.StringZ:
+                    {
+                        uint l = r.ReadU32();
+                        if (l > 0)
+                        {
+                            IntPtr s = st.Alloc(CheckedBytes(l, 1) + 1);
+                            r.CopyInto(s, l);
+                            *(IntPtr*)fp = s;
+                        }
+                        else *(IntPtr*)fp = IntPtr.Zero;
+                        break;
+                    }
+                    case BvkMK.StringArray:
+                    {
+                        uint n = r.ReadU32();
+                        VerifyArrayLen(dst, d, n);
+                        if (n > 0)
+                        {
+                            IntPtr arr = st.Alloc(CheckedBytes(n, 8));
+                            for (uint k = 0; k < n; k++)
+                            {
+                                uint l = r.ReadU32();
+                                IntPtr s = st.Alloc(CheckedBytes(l, 1) + 1);
+                                if (l > 0) r.CopyInto(s, l);
+                                *(IntPtr*)(arr + (int)(k * 8)) = s;
+                            }
+                            *(IntPtr*)fp = arr;
+                        }
+                        else *(IntPtr*)fp = IntPtr.Zero;
+                        break;
+                    }
+                    case BvkMK.BlobPtr:
+                    {
+                        uint n = r.ReadU32();
+                        ulong declared = d.Size == 8 ? *(ulong*)(dst + d.LenOffset) : *(uint*)(dst + d.LenOffset);
+                        if (n != 0 && n != declared)
+                            throw new InvalidOperationException("BrovVulk generic: blob length mismatch.");
+                        if (n > 0)
+                        {
+                            IntPtr s = st.Alloc(CheckedBytes(n, 1));
+                            r.CopyInto(s, n);
+                            *(IntPtr*)fp = s;
+                        }
+                        else *(IntPtr*)fp = IntPtr.Zero;
+                        break;
+                    }
+                    case BvkMK.SelectArray:
+                    {
+                        uint dt = *(uint*)(dst + d.SelOffset);
+                        if (dt < 32 && (d.SelMask & (1u << (int)dt)) != 0)
                         {
                             uint n = r.ReadU32();
-                            VerifyArrayLen(dst, d, n);
-                            if (n > 0)
+                            if (n != *(uint*)(dst + d.LenOffset))
+                                throw new InvalidOperationException("BrovVulk generic: descriptor array length mismatch.");
+                            if (n > 0 && d.Sub >= 0)
                             {
                                 int esz = BrovVulkStructMeta.Sizes[d.Sub];
-                                int bytes = CheckedBytes(n, esz);
-                                IntPtr arr = st.Alloc(bytes);
+                                IntPtr arr = st.Alloc(CheckedBytes(n, esz));
                                 for (uint k = 0; k < n; k++)
                                     RebuildAt(d.Sub, r, st, arr + (int)(k * (uint)esz));
                                 *(IntPtr*)fp = arr;
                             }
-                            else *(IntPtr*)fp = IntPtr.Zero;
-                            break;
-                        }
-                    case BvkMK.HandleArray:
-                        {
-                            uint n = r.ReadU32();
-                            VerifyArrayLen(dst, d, n);
-                            if (n > 0)
+                            else if (n > 0)
                             {
                                 IntPtr arr = st.Alloc(CheckedBytes(n, 8));
                                 for (uint k = 0; k < n; k++)
@@ -86,109 +172,23 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 *(IntPtr*)fp = arr;
                             }
                             else *(IntPtr*)fp = IntPtr.Zero;
-                            break;
                         }
-                    case BvkMK.ScalarArray:
-                        {
-                            uint n = r.ReadU32();
-                            VerifyArrayLen(dst, d, n);
-                            if (n > 0)
-                            {
-                                int bytes = CheckedBytes(n, d.Size);
-                                IntPtr arr = st.Alloc(bytes);
-                                r.CopyInto(arr, (uint)bytes);
-                                *(IntPtr*)fp = arr;
-                            }
-                            else *(IntPtr*)fp = IntPtr.Zero;
-                            break;
-                        }
-                    case BvkMK.StringZ:
-                        {
-                            uint l = r.ReadU32();
-                            if (l > 0)
-                            {
-                                IntPtr s = st.Alloc(CheckedBytes(l, 1) + 1);
-                                r.CopyInto(s, l);
-                                *(IntPtr*)fp = s;
-                            }
-                            else *(IntPtr*)fp = IntPtr.Zero;
-                            break;
-                        }
-                    case BvkMK.StringArray:
-                        {
-                            uint n = r.ReadU32();
-                            VerifyArrayLen(dst, d, n);
-                            if (n > 0)
-                            {
-                                IntPtr arr = st.Alloc(CheckedBytes(n, 8));
-                                for (uint k = 0; k < n; k++)
-                                {
-                                    uint l = r.ReadU32();
-                                    IntPtr s = st.Alloc(CheckedBytes(l, 1) + 1);
-                                    if (l > 0) r.CopyInto(s, l);
-                                    *(IntPtr*)(arr + (int)(k * 8)) = s;
-                                }
-                                *(IntPtr*)fp = arr;
-                            }
-                            else *(IntPtr*)fp = IntPtr.Zero;
-                            break;
-                        }
-                    case BvkMK.BlobPtr:
-                        {
-                            uint n = r.ReadU32();
-                            ulong declared = d.Size == 8 ? *(ulong*)(dst + d.LenOffset) : *(uint*)(dst + d.LenOffset);
-                            if (n != 0 && n != declared)
-                                throw new InvalidOperationException("BrovVulk generic: blob length mismatch.");
-                            if (n > 0)
-                            {
-                                IntPtr s = st.Alloc(CheckedBytes(n, 1));
-                                r.CopyInto(s, n);
-                                *(IntPtr*)fp = s;
-                            }
-                            else *(IntPtr*)fp = IntPtr.Zero;
-                            break;
-                        }
-                    case BvkMK.SelectArray:
-                        {
-                            uint dt = *(uint*)(dst + d.SelOffset);
-                            if (dt < 32 && (d.SelMask & (1u << (int)dt)) != 0)
-                            {
-                                uint n = r.ReadU32();
-                                if (n != *(uint*)(dst + d.LenOffset))
-                                    throw new InvalidOperationException("BrovVulk generic: descriptor array length mismatch.");
-                                if (n > 0 && d.Sub >= 0)
-                                {
-                                    int esz = BrovVulkStructMeta.Sizes[d.Sub];
-                                    IntPtr arr = st.Alloc(CheckedBytes(n, esz));
-                                    for (uint k = 0; k < n; k++)
-                                        RebuildAt(d.Sub, r, st, arr + (int)(k * (uint)esz));
-                                    *(IntPtr*)fp = arr;
-                                }
-                                else if (n > 0)
-                                {
-                                    IntPtr arr = st.Alloc(CheckedBytes(n, 8));
-                                    for (uint k = 0; k < n; k++)
-                                        *(IntPtr*)(arr + (int)(k * 8)) = st.Lookup(r.ReadU32(), d.HandleType);
-                                    *(IntPtr*)fp = arr;
-                                }
-                                else *(IntPtr*)fp = IntPtr.Zero;
-                            }
-                            else *(IntPtr*)fp = IntPtr.Zero;
-                            break;
-                        }
+                        else *(IntPtr*)fp = IntPtr.Zero;
+                        break;
+                    }
                     case BvkMK.PNext:
+                    {
+                        uint has = r.ReadU32();
+                        if (has != 0)
                         {
-                            uint has = r.ReadU32();
-                            if (has != 0)
-                            {
-                                int psid = (int)r.ReadU32();
-                                if (psid < 0 || psid >= BrovVulkStructMeta.PNext.Length || !BrovVulkStructMeta.PNext[psid])
-                                    throw new InvalidOperationException("BrovVulk generic: pNext sid not allowed.");
-                                *(IntPtr*)fp = Rebuild(psid, r, st);
-                            }
-                            else *(IntPtr*)fp = IntPtr.Zero;
-                            break;
+                            int psid = (int)r.ReadU32();
+                            if (psid < 0 || psid >= BrovVulkStructMeta.PNext.Length || !BrovVulkStructMeta.PNext[psid])
+                                throw new InvalidOperationException("BrovVulk generic: pNext sid not allowed.");
+                            *(IntPtr*)fp = Rebuild(psid, r, st);
                         }
+                        else *(IntPtr*)fp = IntPtr.Zero;
+                        break;
+                    }
                     case BvkMK.Ignore:
                         break;
                 }
