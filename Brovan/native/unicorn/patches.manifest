@@ -85,3 +85,14 @@ insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TC
 insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static void tcg_out_jmp(TCGContext *s, tcg_insn_unit *dest)|    if (brov_tcg_out_jmp_slot(s, dest)) { return; }
 insert-before|qemu/tcg/aarch64/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *target)|#include "brovan_tcg_slots.inc.c"
 insert-in-body|qemu/tcg/aarch64/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *target)|    if (brov_tcg_out_call_slot(s, target)) { return; }
+
+# --- softmmu TLB sizing -----------------------------------------------------
+replace-all|qemu/include/exec/cpu-defs.h|#define CPU_TLB_DYN_MIN_BITS 6|#define CPU_TLB_DYN_MIN_BITS 14
+replace-all|qemu/include/exec/cpu-defs.h|#define CPU_TLB_DYN_DEFAULT_BITS 8|#define CPU_TLB_DYN_DEFAULT_BITS 14
+
+# --- the SSE register file is aligned for vector access ---------------------
+replace-all|qemu/target/i386/cpu.h|ZMMReg xmm_regs[CPU_NB_REGS == 8 ? 8 : 32];|QEMU_ALIGN(16, ZMMReg) xmm_regs[CPU_NB_REGS == 8 ? 8 : 32];
+replace-all|qemu/target/i386/cpu.h|ZMMReg xmm_t0;|QEMU_ALIGN(16, ZMMReg) xmm_t0;
+
+# --- MXCSR.FZ reaches the SSE status, not the x87 one -----------------------
+replace-all|qemu/target/i386/fpu_helper.c|set_flush_to_zero((mxcsr & SSE_FZ) ? 1 : 0, &env->fp_status);|set_flush_to_zero((mxcsr & SSE_FZ) ? 1 : 0, &env->sse_status);
