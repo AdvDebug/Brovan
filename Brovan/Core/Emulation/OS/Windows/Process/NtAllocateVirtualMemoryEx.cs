@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -14,16 +14,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             ulong AlignedSize = BinaryEmulator.AlignUp(Size, PageSize);
 
-            ulong Candidate = IsX64 ? 0x0000000100000000UL : 0x00100000UL;
-            Candidate = BinaryEmulator.AlignUp(Candidate, AllocationGranularity);
+            ulong MinAddress = IsX64 ? 0x0000000100000000UL : 0x00100000UL;
+            MinAddress = BinaryEmulator.AlignUp(MinAddress, AllocationGranularity);
 
-            for (int Index = 0; Index < 0x200000; Index++)
-            {
-                if (!Instance.IsRegionInUse(Candidate, AlignedSize))
-                    return Candidate;
-
-                Candidate = BinaryEmulator.AlignUp(Candidate + AllocationGranularity, AllocationGranularity);
-            }
+            if (Instance.TryFindFreeBaseAddress(AlignedSize, AllocationGranularity, MinAddress, Instance.MaxAddress, out ulong Result))
+                return Result;
 
             return 0;
         }
@@ -172,6 +167,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
+            if (RegionSize == 0 || BaseAddress > ulong.MaxValue - RegionSize)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
             if (!Reserve && Commit && BaseAddress == 0)
                 Reserve = true;
 
@@ -183,8 +181,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                BaseAddress = BinaryEmulator.AlignUp(BaseAddress, Reserve ? AllocationGranularity : PageSize);
+                // The requested range stays covered: the base rounds down, the end rounds up.
+                ulong Alignment = Reserve ? AllocationGranularity : PageSize;
+                ulong RequestedEnd = BaseAddress + RegionSize;
+                BaseAddress &= ~(Alignment - 1);
+                RegionSize = BinaryEmulator.AlignUp(RequestedEnd, PageSize) - BaseAddress;
             }
+
+            if (BaseAddress > Instance.MaxAddress || RegionSize - 1 > Instance.MaxAddress - BaseAddress)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             if (Reserve)
             {

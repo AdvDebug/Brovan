@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading;
 using System.Buffers;
 using Brovan.Core.Emulation;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation
 {
@@ -42,6 +43,7 @@ namespace Brovan.Core.Emulation
 
         private readonly Dictionary<ulong, MappedPage> _mappedPages = new();
         private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
+        private ulong _backingBytes;
         private readonly HashSet<ulong> _trappedPages = new();
         private readonly Dictionary<ulong, IntPtr> _pageTableViews = new();
 
@@ -258,7 +260,12 @@ namespace Brovan.Core.Emulation
 
             if (canBatch && size > 0)
             {
-                IntPtr backing = AllocateBackingMemory(size);
+                if (!TryAllocateBackingMemory(size, out IntPtr backing))
+                {
+                    _error = KvmErrors.NoMemory;
+                    return false;
+                }
+
                 long backingAddr = backing.ToInt64();
                 _backingAllocations[backing] = new BackingAllocation
                 {
@@ -295,7 +302,13 @@ namespace Brovan.Core.Emulation
 
                 if (page.HostPage == IntPtr.Zero)
                 {
-                    IntPtr backing = AllocateBackingMemory(KvmConstants.PageSize);
+                    if (!TryAllocateBackingMemory(KvmConstants.PageSize, out IntPtr backing))
+                    {
+                        RebuildMappings();
+                        _error = KvmErrors.NoMemory;
+                        return false;
+                    }
+
                     _backingAllocations[backing] = new BackingAllocation
                     {
                         Size = KvmConstants.PageSize,
@@ -1225,18 +1238,35 @@ namespace Brovan.Core.Emulation
             FlushRegisterCache();
         }
 
-        private unsafe IntPtr AllocateBackingMemory(ulong size)
+        private unsafe bool TryAllocateBackingMemory(ulong size, out IntPtr pointer)
         {
-            IntPtr ptr = KvmNative.mmap(IntPtr.Zero, (UIntPtr)size,
+            pointer = KvmNative.mmap(IntPtr.Zero, (UIntPtr)size,
                 KvmNative.PROT_READ | KvmNative.PROT_WRITE,
                 KvmNative.MAP_PRIVATE | KvmNative.MAP_ANONYMOUS, -1, 0);
-            if (ptr == KvmNative.MAP_FAILED)
+
+            if (pointer == KvmNative.MAP_FAILED)
+            {
+                pointer = IntPtr.Zero;
+                Utils.LogError($"[Kvm] Host backing mapping of 0x{size:X} bytes failed with {Marshal.GetLastWin32Error()}. Live backing 0x{_backingBytes:X} bytes in {_backingAllocations.Count} allocations.");
+                return false;
+            }
+
+            _backingBytes += size;
+            return true;
+        }
+
+        private unsafe IntPtr AllocateBackingMemory(ulong size)
+        {
+            if (!TryAllocateBackingMemory(size, out IntPtr ptr))
                 throw new KvmException("mmap failed", Marshal.GetLastWin32Error());
             return ptr;
         }
 
-        private static unsafe void FreeBackingMemory(IntPtr ptr, ulong size)
-            => KvmNative.munmap(ptr, (UIntPtr)size);
+        private unsafe void FreeBackingMemory(IntPtr ptr, ulong size)
+        {
+            KvmNative.munmap(ptr, (UIntPtr)size);
+            _backingBytes -= size;
+        }
 
         private void ReleaseBacking(MappedPage page)
         {

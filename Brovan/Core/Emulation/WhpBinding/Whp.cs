@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Buffers;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation
 {
@@ -31,6 +32,7 @@ namespace Brovan.Core.Emulation
 
         private readonly Dictionary<ulong, MappedPage> _mappedPages = new();
         private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
+        private ulong _backingBytes;
         private readonly Dictionary<ulong, bool> _trappedPages = new();
         private readonly Dictionary<ulong, IntPtr> _pageTableViews = new();
 
@@ -293,7 +295,12 @@ namespace Brovan.Core.Emulation
 
             if (canBatch && size > 0)
             {
-                IntPtr backing = AllocateBackingMemory(size);
+                if (!TryAllocateBackingMemory(size, out IntPtr backing))
+                {
+                    _error = WhpErrors.NoMemory;
+                    return false;
+                }
+
                 long backingAddr = backing.ToInt64();
                 _backingAllocations[backing] = new BackingAllocation
                 {
@@ -330,7 +337,13 @@ namespace Brovan.Core.Emulation
 
                 if (page.HostPage == IntPtr.Zero)
                 {
-                    IntPtr backing = AllocateBackingMemory(WhpConstants.PageSize);
+                    if (!TryAllocateBackingMemory(WhpConstants.PageSize, out IntPtr backing))
+                    {
+                        RebuildMappings();
+                        _error = WhpErrors.NoMemory;
+                        return false;
+                    }
+
                     _backingAllocations[backing] = new BackingAllocation
                     {
                         Size = WhpConstants.PageSize,
@@ -1320,17 +1333,33 @@ namespace Brovan.Core.Emulation
             FlushRegisterCache();
         }
 
+        private bool TryAllocateBackingMemory(ulong size, out IntPtr pointer)
+        {
+            pointer = WhpNative.VirtualAlloc(IntPtr.Zero, (UIntPtr)size,
+                WhpNative.MEM_COMMIT | WhpNative.MEM_RESERVE, WhpNative.PAGE_READWRITE);
+
+            if (pointer == IntPtr.Zero)
+            {
+                Utils.LogError($"[Whp] Host backing commit of 0x{size:X} bytes failed with {Marshal.GetLastWin32Error()}. Live backing 0x{_backingBytes:X} bytes in {_backingAllocations.Count} allocations.");
+                return false;
+            }
+
+            _backingBytes += size;
+            return true;
+        }
+
         private IntPtr AllocateBackingMemory(ulong size)
         {
-            IntPtr ptr = WhpNative.VirtualAlloc(IntPtr.Zero, (UIntPtr)size,
-                WhpNative.MEM_COMMIT | WhpNative.MEM_RESERVE, WhpNative.PAGE_READWRITE);
-            if (ptr == IntPtr.Zero)
+            if (!TryAllocateBackingMemory(size, out IntPtr ptr))
                 throw new WhpException("VirtualAlloc failed", Marshal.GetLastWin32Error());
             return ptr;
         }
 
-        private static void FreeBackingMemory(IntPtr ptr, ulong size)
-            => WhpNative.VirtualFree(ptr, UIntPtr.Zero, WhpNative.MEM_RELEASE);
+        private void FreeBackingMemory(IntPtr ptr, ulong size)
+        {
+            WhpNative.VirtualFree(ptr, UIntPtr.Zero, WhpNative.MEM_RELEASE);
+            _backingBytes -= size;
+        }
 
         private void ReleaseBacking(MappedPage page)
         {

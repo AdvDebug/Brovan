@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -30,6 +30,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     [StructLayout(LayoutKind.Explicit, Pack = 1)]
     public struct UserSharedDisplayInfo
     {
+        // MonitorFromWindow takes its fast path only while this reads 1.
         [FieldOffset(0x00)]
         public uint Type;
 
@@ -139,6 +140,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_ALREADY_REGISTERED = 0xC0000718,
         STATUS_END_OF_FILE = 0xC0000011,
         STATUS_NO_MEMORY = 0xC0000017,
+        STATUS_COMMITMENT_LIMIT = 0xC000012D,
         STATUS_CONFLICTING_ADDRESSES = 0xC0000018,
         STATUS_UNABLE_TO_FREE_VM = 0xC000001A,
         STATUS_ILLEGAL_INSTRUCTION = 0xC000001D,

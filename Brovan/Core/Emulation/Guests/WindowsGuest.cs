@@ -731,6 +731,10 @@ namespace Brovan.Core.Emulation.Guests
                 Utils.LogError($"[-] [TryHandleWinSyscall] ERROR: {ex.Message}\nStackTrace:\n\n{ex.StackTrace}");
                 if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                     Instance.TriggerEventMessage($"[-] Error while handling a Windows Syscall: {ex.Message}", LogFlags.Issues);
+
+                // Leaving the return register untouched reads as STATUS_SUCCESS to the caller
+                Instance.SuppressSyscallStatusWrite = false;
+                SetLastWinErrorRegister(Instance, NTSTATUS.STATUS_UNSUCCESSFUL);
                 return true;
             }
         }

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Reflection.PortableExecutable;
 using System.Text;
 using System.Net;
@@ -401,11 +401,20 @@ namespace Brovan.Core.Emulation
         public bool IsArchX86Guest => BackendArch == Arch.X86;
         public readonly ulong BaseAddress = 0x10000000UL; // Base Start
 
-        public ulong MaxAddress => IsArchX86Guest && _binary.FileFormat == BinaryFormat.PE
-            ? (IsX86Guest
-                ? (_binary.PE.Characteristics.HasFlag(System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) ? 0xBFFF0000UL : 0x7FFF0000UL)
-                : 0x7FFFFFFEFFFFUL)
-            : 0x7FFFFFFFFUL;
+        public ulong MaxAddress
+        {
+            get
+            {
+                ulong Limit = IsArchX86Guest && _binary.FileFormat == BinaryFormat.PE
+                    ? (IsX86Guest
+                        ? (_binary.PE.Characteristics.HasFlag(System.Reflection.PortableExecutable.Characteristics.LargeAddressAware) ? 0xBFFF0000UL : 0x7FFF0000UL)
+                        : 0x7FFFFFFEFFFFUL)
+                    : 0x7FFFFFFFFUL;
+
+                ulong Mappable = _emulator != null ? _emulator.MaxMappableAddress : ulong.MaxValue;
+                return Limit < Mappable ? Limit : Mappable;
+            }
+        }
         private ulong _timestampCounter = 0x100000000UL;
 
         private const ulong TscCyclesPerInstruction = 3;

@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Brovan.Core.Emulation.OS.Windows;
@@ -70,6 +70,7 @@ namespace Brovan.Core.Emulation
         private WinModule _lastSectionLookupModule;
         private readonly byte[] _instructionDisasmBuffer = new byte[16];
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsTimerHandleSnapshot = new();
+        private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsHandleScratch = new();
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsNextTimerHandleSnapshot = new();
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsNextTimerPacketSnapshot = new();
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsWakePacketSnapshot = new();
@@ -305,6 +306,9 @@ namespace Brovan.Core.Emulation
             return !WasSignaled;
         }
 
+        private long WindowsTimerSnapshotVersion = -1;
+        private long WindowsMaterializePacketVersion = -1;
+
         internal bool RefreshWindowsTimersAndWakeWaiters()
         {
             bool WokeThread = false;
@@ -312,7 +316,25 @@ namespace Brovan.Core.Emulation
             if (WinHelper == null)
                 return false;
 
-            WinHelper.HandleManager.SnapshotHandles(WindowsTimerHandleSnapshot);
+            // The scheduler calls this on every slice. Snapshotting the whole handle table each time costs more
+            // than the timer work itself once a guest holds a few thousand handles, so keep the timers-only view
+            // and rebuild it when the table changes.
+            long Version = WinHelper.HandleManager.Version;
+            if (Version != WindowsTimerSnapshotVersion)
+            {
+                WinHelper.HandleManager.SnapshotHandles(WindowsHandleScratch);
+                WindowsTimerHandleSnapshot.Clear();
+
+                for (int i = 0; i < WindowsHandleScratch.Count; i++)
+                {
+                    if (WindowsHandleScratch[i].Value is WinTimer)
+                        WindowsTimerHandleSnapshot.Add(WindowsHandleScratch[i]);
+                }
+
+                WindowsHandleScratch.Clear();
+                WindowsTimerSnapshotVersion = Version;
+            }
+
             for (int i = 0; i < WindowsTimerHandleSnapshot.Count; i++)
             {
                 KeyValuePair<ulong, IHandleObject> Pair = WindowsTimerHandleSnapshot[i];
@@ -481,7 +503,24 @@ namespace Brovan.Core.Emulation
             if (Completion == null)
                 return;
 
-            WinHelper.HandleManager.SnapshotHandles(WindowsMaterializePacketSnapshot);
+            // Reached once per worker-factory waiter per scheduler slice, so the packets-only view is kept and
+            // rebuilt on a handle-table change rather than copying every handle each time.
+            long PacketVersion = WinHelper.HandleManager.Version;
+            if (PacketVersion != WindowsMaterializePacketVersion)
+            {
+                WinHelper.HandleManager.SnapshotHandles(WindowsHandleScratch);
+                WindowsMaterializePacketSnapshot.Clear();
+
+                for (int i = 0; i < WindowsHandleScratch.Count; i++)
+                {
+                    if (WindowsHandleScratch[i].Value is WinWaitCompletionPacket)
+                        WindowsMaterializePacketSnapshot.Add(WindowsHandleScratch[i]);
+                }
+
+                WindowsHandleScratch.Clear();
+                WindowsMaterializePacketVersion = PacketVersion;
+            }
+
             for (int i = 0; i < WindowsMaterializePacketSnapshot.Count; i++)
             {
                 KeyValuePair<ulong, IHandleObject> Pair = WindowsMaterializePacketSnapshot[i];
@@ -1934,7 +1973,10 @@ namespace Brovan.Core.Emulation
             MemoryProtection NewProt = WinHelper.ConvertWinProtectToInternal(Protect);
             SpecialProtections Special = (Protect & 0x100) != 0 ? SpecialProtections.Guard : SpecialProtections.None;
             if (!_emulator.MapMemory(BaseAddress, Size, GetGuardedHostProtection(NewProt, Special)))
+            {
+                Utils.LogError($"[CommitMemory] Host backing allocation failed for 0x{Size:X} bytes at 0x{BaseAddress:X}.");
                 return false;
+            }
 
             MemoryProtection AllocationProt = WinHelper.ConvertWinProtectToInternal(Region.AllocationProtect);
 
@@ -2501,21 +2543,6 @@ namespace Brovan.Core.Emulation
         private void InstructionHandler(ulong Address, uint Size)
         {
             Instruction++;
-            if (Size == 2)
-            {
-                Span<byte> Data = stackalloc byte[2];
-                if (ReadMemory(Address, Data, 2) && Data[0] == 0x48 && Data[1] == 0xCF)
-                {
-                    ulong RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-                    ulong NewRIP = ReadMemoryULong(RSP + 0x0);
-                    ulong NewRFlags = ReadMemoryULong(RSP + 0x10);
-                    ulong NewRSP = ReadMemoryULong(RSP + 0x18);
-                    _emulator.WriteRegister(IPRegister, NewRIP);
-                    _emulator.WriteRegister(Registers.UC_X86_REG_EFLAGS, NewRFlags);
-                    _emulator.WriteRegister(Registers.UC_X86_REG_RSP, NewRSP);
-                }
-            }
-
             _timestampCounter += TscCyclesPerInstruction;
 
             EmulatedThread Thread = CurrentThread;

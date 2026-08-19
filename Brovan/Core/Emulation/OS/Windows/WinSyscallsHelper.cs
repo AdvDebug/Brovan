@@ -1,4 +1,4 @@
-using static Brovan.Core.Helpers.BinaryHelpers;
+﻿using static Brovan.Core.Helpers.BinaryHelpers;
 using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -1242,6 +1242,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int Win32ClientInfoActiveWindowSlot = 8;
         private const int Win32ClientInfoActiveWindowPointerSlot = 9;
         private const ulong UserSharedInfoMirrorSize = 0x1B54;
+
+        private const ulong UserServerInfoSize = 0x2000;
         private const ulong UserMessageBitmaskSize = 0x80;
         private ulong UserMessageBitmask1Address;
         private ulong UserMessageBitmask2Address;
@@ -3658,12 +3660,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (UserServerInfoAddress != 0 && Emulator.IsRegionMapped(UserServerInfoAddress, UserSharedInfoMirrorSize))
                 return UserServerInfoAddress;
 
-            const ulong Size = 0x2000;
-            ulong Address = Emulator.MapUniqueAddress(Size, MemoryProtection.ReadWrite);
+            ulong Address = Emulator.MapUniqueAddress(UserServerInfoSize, MemoryProtection.ReadWrite);
             if (Address == 0)
                 return 0;
 
-            if (!WriteZeroMemory(Address, (uint)Size))
+            if (!WriteZeroMemory(Address, (uint)UserServerInfoSize))
                 return 0;
 
             Emulator._emulator.WriteMemory(Address + 0x08, (ulong)UserHandleEntryCount, 8);
@@ -3707,7 +3708,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             WriteWin32ClientInfoSlot(Teb, Win32ClientInfoPDeskInfoSlot, DesktopInfo);
-            WriteWin32ClientInfoSlot(Teb, Win32ClientInfoDesktopSlot, DesktopInfo);
+            WriteWin32ClientInfoSlot(Teb, Win32ClientInfoDesktopSlot, EnsureUserClientDesktop());
         }
 
         public void SetThreadWindowContext(WinWindow Window)
@@ -3878,6 +3879,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return PrimaryDisplayFrequency;
+        }
+
+        private ulong UserClientDesktopAddress;
+
+        private ulong EnsureUserClientDesktop()
+        {
+            if (UserClientDesktopAddress != 0 && Emulator.IsRegionMapped(UserClientDesktopAddress, 8))
+                return UserClientDesktopAddress;
+
+            if (EnsureUserDesktopInfo() == 0)
+                return 0;
+
+            ulong Address = Emulator.MapUniqueAddress(0x1000, MemoryProtection.ReadWrite);
+            if (Address == 0 || !WriteZeroMemory(Address, 0x1000))
+                return 0;
+
+            Emulator._emulator.WriteMemory(Address, UserDesktopOwnerAddress, 8);
+            UserClientDesktopAddress = Address;
+            return UserClientDesktopAddress;
         }
 
         public ulong EnsureUserDesktopInfo()
@@ -4051,6 +4071,51 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Window.ClientWindowAddress;
         }
 
+        private const int UserWindowExStyleOffset = 0x18;
+        private const int UserWindowStyleOffset = 0x1C;
+        private const int UserWindowFnidOffset = 0x2A;
+        private const int UserWindowParentOffset = 0x30;
+        private const uint UserWindowStateVisible = 0x800;
+        private const ushort UserFnidDesktop = 0x29D;
+        private const uint UserWindowStyleVisible = 0x10000000;
+        private const uint UserWindowStyleClipChildren = 0x02000000;
+
+        private ulong UserDesktopWindowAddress;
+
+        private ulong EnsureUserDesktopWindowObject()
+        {
+            if (UserDesktopWindowAddress != 0 && Emulator.IsRegionMapped(UserDesktopWindowAddress, UserWindowObjectSize))
+                return UserDesktopWindowAddress;
+
+            ulong Address = Emulator.MapUniqueAddress(UserWindowObjectSize, MemoryProtection.ReadWrite);
+            if (Address == 0)
+                return 0;
+
+            if (!WriteZeroMemory(Address, (uint)UserWindowObjectSize))
+                return 0;
+
+            UserDesktopWindowAddress = Address;
+
+            Emulator._emulator.WriteMemory(Address + 0x08, Address, 8);
+            Emulator._emulator.WriteMemory(Address + UserWindowExStyleOffset, UserWindowStateVisible, 4);
+            Emulator._emulator.WriteMemory(Address + UserWindowStyleOffset, UserWindowStyleVisible | UserWindowStyleClipChildren, 4);
+            Emulator._emulator.WriteMemory(Address + (ulong)UserWindowFnidOffset, UserFnidDesktop, 2);
+
+            if (TryGetPrimaryMonitorRect(out int Left, out int Top, out int Right, out int Bottom))
+            {
+                for (int Field = 0; Field < 2; Field++)
+                {
+                    ulong Rect = Address + (ulong)(0x58 + Field * 0x10);
+                    Emulator._emulator.WriteMemory(Rect + 0x00, (uint)Left, 4);
+                    Emulator._emulator.WriteMemory(Rect + 0x04, (uint)Top, 4);
+                    Emulator._emulator.WriteMemory(Rect + 0x08, (uint)Right, 4);
+                    Emulator._emulator.WriteMemory(Rect + 0x0C, (uint)Bottom, 4);
+                }
+            }
+
+            return UserDesktopWindowAddress;
+        }
+
         private void RefreshUserWindowObject(WinWindow Window)
         {
             ulong ClassObject = EnsureUserClassObject(Window);
@@ -4058,6 +4123,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x00, Window.Hwnd, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x08, Window.ClientWindowAddress, 8);
+
+            uint Style = Window.Visible ? Window.Style | UserWindowStyleVisible : Window.Style & ~UserWindowStyleVisible;
+            uint ExStyleWithState = Window.ExStyle | (Window.Visible ? UserWindowStateVisible : 0u);
+
+            ulong ParentObject = 0;
+            if (Window.ParentHwnd != 0 && WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow ParentWindow))
+                ParentObject = ParentWindow.ClientWindowAddress;
+
+            if (ParentObject == 0)
+                ParentObject = EnsureUserDesktopWindowObject();
+
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + UserWindowExStyleOffset, ExStyleWithState, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + UserWindowStyleOffset, Style, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowParentOffset, ParentObject, 8);
 
             int OuterLeft = Window.X;
             int OuterTop = Window.Y;
@@ -4461,11 +4540,58 @@ namespace Brovan.Core.Emulation.OS.Windows
                 GuiManager.EnqueueWarpCursor(ClientX, ClientY);
         }
 
+        private int UserForegroundWindowOffset = -1;
+
+        private bool TryGetForegroundWindowOffset(out int Offset)
+        {
+            Offset = UserForegroundWindowOffset;
+            if (Offset >= 0)
+                return true;
+
+            WinModule Win32u = WinModules.FirstOrDefault(m => m != null && m.Name != null && m.Name.Equals("win32u.dll", StringComparison.OrdinalIgnoreCase));
+            if (Win32u == null)
+                return false;
+
+            ulong Stub = GetExportAddress(Win32u, "ABI_Get_ForegroundWindow");
+            if (Stub == 0 || !Emulator.IsRegionMapped(Stub, 8))
+                return false;
+
+            // x64: mov rax, [rcx+disp32]
+            // x86: mov eax, [ecx+disp32]
+            uint Lead = Emulator.ReadMemoryUInt(Stub);
+            ulong Displacement;
+            if (Emulator._binary.Architecture == BinaryArchitecture.x64 && (Lead & 0x00FFFFFF) == 0x00818B48)
+                Displacement = Stub + 3;
+            else if ((Lead & 0x0000FFFF) == 0x0000818B)
+                Displacement = Stub + 2;
+            else
+                return false;
+
+            Offset = (int)Emulator.ReadMemoryUInt(Displacement);
+            if (Offset < 0 || (ulong)Offset + 8 > UserServerInfoSize)
+                return false;
+
+            UserForegroundWindowOffset = Offset;
+            return true;
+        }
+
+        private void PublishForegroundWindow()
+        {
+            ulong ServerInfo = EnsureUserServerInfo();
+            if (ServerInfo == 0 || !TryGetForegroundWindowOffset(out int Offset))
+                return;
+
+            ulong Foreground = GetForegroundWindow();
+            uint Width = Emulator._binary.Architecture == BinaryArchitecture.x64 ? 8u : 4u;
+            Emulator._emulator.WriteMemory(ServerInfo + (ulong)Offset, Foreground, Width);
+        }
+
         public void PresentDesktop()
         {
             try
             {
                 EnsureDesktopWindow();
+                PublishForegroundWindow();
                 if (DesktopDisplay is not GuiThreadManager guiManager)
                     return;
 

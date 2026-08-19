@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 
 namespace Brovan.Core.Emulation
 {
@@ -89,6 +89,12 @@ namespace Brovan.Core.Emulation
         bool NoHooks { get; set; }
 
         BackendError GetLastError();
+
+        /// <summary>
+        /// Highest guest address the backend can map. Hypervisor backends are bound by the partition's
+        /// guest physical address space, which is narrower than the guest's own address space.
+        /// </summary>
+        ulong MaxMappableAddress { get; }
 
         bool MapMemory(ulong address, ulong size, MemoryProtection protection);
 

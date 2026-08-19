@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -92,7 +92,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong MinAddress = IsX64 ? 0x0000000100000000UL : 0x00100000UL;
             MinAddress = BinaryEmulator.AlignUp(MinAddress, AllocationGranularity);
 
-            if (Instance.TryFindFreeBaseAddress(AlignedSize, AllocationGranularity, MinAddress, ulong.MaxValue, out ulong Result))
+            if (Instance.TryFindFreeBaseAddress(AlignedSize, AllocationGranularity, MinAddress, Instance.MaxAddress, out ulong Result))
                 return Result;
 
             return 0;
@@ -210,6 +210,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             RegionSize = BinaryEmulator.AlignUp(RegionSize, PageSize);
 
+            if (RegionSize == 0 || BaseAddress > ulong.MaxValue - RegionSize)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
             if (!Reserve && Commit && BaseAddress == 0)
                 Reserve = true;
 
@@ -221,14 +224,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                BaseAddress = BinaryEmulator.AlignUp(BaseAddress, Reserve ? AllocationGranularity : PageSize);
+                // The requested range stays covered: the base rounds down, the end rounds up.
+                ulong Alignment = Reserve ? AllocationGranularity : PageSize;
+                ulong RequestedEnd = BaseAddress + RegionSize;
+                BaseAddress &= ~(Alignment - 1);
+                RegionSize = BinaryEmulator.AlignUp(RequestedEnd, PageSize) - BaseAddress;
             }
+
+            if (BaseAddress > Instance.MaxAddress || RegionSize - 1 > Instance.MaxAddress - BaseAddress)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             if (Reserve && !Instance.ReserveMemory(BaseAddress, RegionSize, Protect))
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
             if (Commit && !Instance.CommitMemory(BaseAddress, RegionSize, Protect))
-                return NTSTATUS.STATUS_NO_MEMORY;
+            {
+                return Instance.GetLastError() == BackendError.OutOfMemory
+                    ? NTSTATUS.STATUS_COMMITMENT_LIMIT
+                    : NTSTATUS.STATUS_NO_MEMORY;
+            }
 
             return NTSTATUS.STATUS_SUCCESS;
         }

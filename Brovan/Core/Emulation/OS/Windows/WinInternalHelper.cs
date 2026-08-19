@@ -137,6 +137,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
 
             HandleTable[handle] = new HandleEntry { Object = obj, Permissions = Permissions, Flags = ObjectHandleFlags.None };
+            Version++;
 
             if (!ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
             {
@@ -198,6 +199,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             Entry.Flags = Flags;
             HandleTable[Key] = Entry;
+            Version++;
             return true;
         }
 
@@ -253,6 +255,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryGetEntry(Handle, out ulong Key, out Entry))
                 return false;
             HandleTable.Remove(Key);
+            Version++;
             IHandleObject obj = Entry.Object;
             if (ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
             {
@@ -269,6 +272,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             IHandleObject obj = Entry.Object;
             HandleTable.Remove(Key);
+            Version++;
 
             if (ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
             {
@@ -287,6 +291,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             foreach (var kv in HandleTable) Result.Add(new KeyValuePair<ulong, IHandleObject>(kv.Key, kv.Value.Object));
             return Result;
         }
+
+        /// <summary>
+        /// Bumped whenever the table gains or loses an entry, so callers that keep a filtered view of the
+        /// handles can tell that their copy is still good without walking the table.
+        /// </summary>
+        public long Version { get; private set; }
 
         public void SnapshotHandles(List<KeyValuePair<ulong, IHandleObject>> Destination)
         {

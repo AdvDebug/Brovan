@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -22,6 +22,9 @@ namespace Brovan.Core.Emulation
         public bool NoHooks { get => Inner.NoHooks; set => Inner.NoHooks = value; }
 
         public BackendError GetLastError() => TranslateError(Inner.GetLastError());
+
+        // Guest pages must stay below the internal page tables, which the partition maps above them.
+        public ulong MaxMappableAddress => KvmConstants.InternalPageTableBase - 1;
 
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
             => Inner.MapMemory(address, size, protection);
