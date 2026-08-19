@@ -60,6 +60,7 @@ public class MainActivity extends AppCompatActivity {
     private CircularProgressIndicator progress;
     private Uri selectedIso;
     private TextView isoLabel;
+    private FileBrowser files;
     private int currentScreen;
 
     @Override
@@ -102,6 +103,11 @@ public class MainActivity extends AppCompatActivity {
         if (currentScreen == R.id.nav_library && adapter != null) {
             refresh();
         }
+
+        // A program that ran between the two visits has written to the same storage.
+        if (currentScreen == R.id.nav_files && files != null) {
+            files.refresh();
+        }
     }
 
     private void insetDrawerHeader(NavigationView navigation) {
@@ -134,10 +140,15 @@ public class MainActivity extends AppCompatActivity {
         content.removeAllViews();
 
         currentScreen = itemId;
+        files = null;
 
         if (itemId == R.id.nav_windows) {
             toolbar.setTitle(R.string.nav_windows);
             content.addView(createWindows());
+        } else if (itemId == R.id.nav_files) {
+            toolbar.setTitle(R.string.nav_files);
+            files = new FileBrowser(this, worker);
+            content.addView(files.create(content));
         } else if (itemId == R.id.nav_settings) {
             toolbar.setTitle(R.string.nav_settings);
             content.addView(createSettings());
@@ -359,6 +370,13 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == FileBrowser.REQUEST_IMPORT || requestCode == FileBrowser.REQUEST_EXPORT) {
+            if (resultCode == RESULT_OK && files != null) {
+                files.onPicked(requestCode, data);
+            }
+            return;
+        }
 
         if (resultCode != RESULT_OK || data == null || data.getData() == null) {
             return;
@@ -590,6 +608,10 @@ public class MainActivity extends AppCompatActivity {
     public void onBackPressed() {
         if (drawer.isOpen()) {
             drawer.close();
+            return;
+        }
+
+        if (files != null && files.goUp()) {
             return;
         }
 

@@ -153,7 +153,7 @@ final class Library {
         }
     }
 
-    private static void copyFile(Context context, Uri source, File destination) throws IOException {
+    static void copyFile(Context context, Uri source, File destination) throws IOException {
         try (InputStream input = context.getContentResolver().openInputStream(source);
              OutputStream output = new FileOutputStream(destination)) {
             if (input == null) {
@@ -204,7 +204,7 @@ final class Library {
         return dot > 0 ? name.substring(0, dot) : name;
     }
 
-    private static void delete(File file) {
+    static void delete(File file) {
         File[] children = file.listFiles();
         if (children != null) {
             for (File child : children) {

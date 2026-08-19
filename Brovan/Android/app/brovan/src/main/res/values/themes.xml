@@ -71,6 +71,22 @@
         <item name="android:background">@color/outline</item>
     </style>
 
+    <style name="PathSegment" parent="">
+        <item name="android:paddingStart">4dp</item>
+        <item name="android:paddingTop">14dp</item>
+        <item name="android:paddingEnd">4dp</item>
+        <item name="android:paddingBottom">6dp</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:textColor">@color/accent</item>
+        <item name="android:textSize">13sp</item>
+    </style>
+
+    <style name="PathSeparator" parent="PathSegment">
+        <item name="android:paddingStart">0dp</item>
+        <item name="android:paddingEnd">0dp</item>
+        <item name="android:textColor">@color/text_secondary</item>
+    </style>
+
     <style name="Theme.Brovan.Player" parent="Theme.Brovan">
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:statusBarColor" tools:targetApi="21">@android:color/black</item>

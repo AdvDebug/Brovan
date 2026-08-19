@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <HorizontalScrollView
+            android:id="@+id/path_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/path"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
+
+        <TextView
+            android:id="@+id/files_summary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:textColor="@color/text_secondary"
+            android:textSize="12sp" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox.Dense"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_marginTop="12dp"
+            android:layout_marginEnd="16dp"
+            android:hint="@string/files_filter">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/files_filter"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:imeOptions="actionSearch"
+                android:inputType="text"
+                android:maxLines="1"
+                android:textColor="@color/text_primary" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="12dp"
+            android:background="@color/outline" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/entries"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:paddingBottom="96dp"
+            android:scrollbars="vertical" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/files_empty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center"
+        android:paddingStart="48dp"
+        android:paddingEnd="48dp"
+        android:text="@string/files_empty"
+        android:textColor="@color/text_secondary"
+        android:textSize="14sp"
+        android:visibility="gone" />
+
+    <com.google.android.material.progressindicator.CircularProgressIndicator
+        android:id="@+id/files_progress"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:indeterminate="true"
+        android:visibility="gone" />
+
+    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+        android:id="@+id/files_add"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="20dp"
+        android:text="@string/files_add_title"
+        app:icon="@drawable/ic_add" />
+</FrameLayout>
