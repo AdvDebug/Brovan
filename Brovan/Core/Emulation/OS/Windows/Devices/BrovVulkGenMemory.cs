@@ -52,6 +52,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (rr < 0)
                 return rr;
 
+            st.SetDevicePhysical(device, pd);
+
             if (importCapable)
             {
                 IntPtr name = Marshal.StringToHGlobalAnsi("vkGetMemoryHostPointerPropertiesEXT");

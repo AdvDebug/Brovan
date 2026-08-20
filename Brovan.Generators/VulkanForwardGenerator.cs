@@ -1464,6 +1464,8 @@ namespace Brovan.Generators
                 }
             }
 
+            EmitWsiHooks(c, b, check, post);
+
             StringBuilder head = new StringBuilder();
             head.Append("            case ").Append(id).Append(":\n            {\n");
             if (c.Name == "vkQueueSubmit" || c.Name == "vkQueueSubmit2")
@@ -1491,6 +1493,106 @@ namespace Brovan.Generators
                 head.Append("                return rr;\n            }\n");
             }
             return head.ToString();
+        }
+
+        private static string Arg(Command c, string name)
+        {
+            int i = c.Params.FindIndex(x => x.Name == name);
+            return i < 0 ? null : "p" + i;
+        }
+
+        private static void EmitWsiHooks(Command c, StringBuilder b, List<string> check, List<string> post)
+        {
+            string pd = Arg(c, "physicalDevice");
+            string surface = Arg(c, "surface");
+            string info = Arg(c, "pSurfaceInfo");
+
+            switch (c.Name)
+            {
+                case "vkGetPhysicalDeviceSurfaceSupportKHR":
+                case "vkGetPhysicalDeviceSurfaceFormatsKHR":
+                case "vkGetPhysicalDeviceSurfacePresentModesKHR":
+                    if (pd != null && surface != null)
+                        post.Add("                st.Wsi.NoteSurface(" + pd + ", " + surface + ");");
+                    return;
+
+                case "vkGetPhysicalDeviceSurfaceFormats2KHR":
+                    if (pd != null && info != null)
+                        post.Add("                if (" + info + " != System.IntPtr.Zero) st.Wsi.NoteSurface(" + pd
+                            + ", *(System.IntPtr*)(" + info + " + BrovVulkLayout.MemberOffset[\"VkPhysicalDeviceSurfaceInfo2KHR.surface\"]));");
+                    return;
+
+                case "vkGetPhysicalDeviceSurfaceCapabilitiesKHR":
+                {
+                    string caps = Arg(c, "pSurfaceCapabilities");
+                    if (pd != null && surface != null && caps != null)
+                        check.Add("                if (rr >= 0) st.Wsi.NormalizeCapabilities(" + pd + ", " + surface + ", " + caps + ");");
+                    return;
+                }
+
+                case "vkGetPhysicalDeviceSurfaceCapabilities2KHR":
+                {
+                    string caps = Arg(c, "pSurfaceCapabilities");
+                    if (pd != null && info != null && caps != null)
+                        check.Add("                if (rr >= 0) st.Wsi.NormalizeCapabilities2(" + pd + ", " + info + ", " + caps + ");");
+                    return;
+                }
+
+                case "vkCreateSwapchainKHR":
+                {
+                    string ci = Arg(c, "pCreateInfo");
+                    string dev = Arg(c, "device");
+                    string outp = Arg(c, "pSwapchain");
+                    if (ci == null || dev == null || outp == null)
+                        return;
+                    b.Append("                BrovVulkWsi.SwapchainPlan wsiPlan = st.Wsi.ReconcileSwapchain(").Append(dev).Append(", ").Append(ci).Append(", st, inst);\n");
+                    post.Add("                if (rr >= 0) st.Wsi.NoteSwapchain(" + outp + ", wsiPlan);");
+                    return;
+                }
+
+                case "vkGetSwapchainImagesKHR":
+                {
+                    string swapchain = Arg(c, "swapchain");
+                    int countIdx = c.Params.FindIndex(x => x.Name == "pSwapchainImageCount");
+                    if (swapchain != null && countIdx >= 0)
+                        post.Add("                if (rr >= 0) st.Wsi.NoteSwapchainImages(" + swapchain + ", p" + countIdx + "a, p" + countIdx + "c);");
+                    return;
+                }
+
+                case "vkCreateImageView":
+                {
+                    string ci = Arg(c, "pCreateInfo");
+                    if (ci != null)
+                        b.Append("                st.Wsi.ReconcileImageView(").Append(ci).Append(");\n");
+                    return;
+                }
+
+                case "vkCreateRenderPass":
+                case "vkCreateRenderPass2":
+                {
+                    string ci = Arg(c, "pCreateInfo");
+                    if (ci != null)
+                        b.Append("                st.Wsi.ReconcileRenderPass(").Append(ci).Append(", ")
+                         .Append(c.Name == "vkCreateRenderPass2" ? "true" : "false").Append(");\n");
+                    return;
+                }
+
+                case "vkAcquireNextImageKHR":
+                {
+                    string swapchain = Arg(c, "swapchain");
+                    if (swapchain != null)
+                        check.Add("                rr = st.Wsi.FilterAcquireResult(rr, " + swapchain + ");");
+                    return;
+                }
+
+                case "vkQueuePresentKHR":
+                {
+                    string present = Arg(c, "pPresentInfo");
+                    if (present != null)
+                        check.Add("                rr = st.Wsi.FilterPresentResult(rr, " + present + ");");
+                    return;
+                }
+            }
         }
 
         private static string EmitGuestTrampoline(Model m, Command c)

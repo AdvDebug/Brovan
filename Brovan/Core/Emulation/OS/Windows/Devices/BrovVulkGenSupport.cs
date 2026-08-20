@@ -165,7 +165,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             List<(string Name, uint Version)> keep = new List<(string, uint)>();
             foreach ((string name, uint ver) in advertised)
             {
-                string hostName = Brovan.GeneralHelper.IsLinux && name == "VK_KHR_win32_surface" ? "VK_KHR_xcb_surface" : name;
+                string hostName = name != "VK_KHR_win32_surface" ? name
+                    : Brovan.Android.AndroidHost.IsActive ? "VK_KHR_android_surface"
+                    : Brovan.GeneralHelper.IsLinux ? "VK_KHR_xcb_surface"
+                    : name;
                 if (host.TryGetValue(hostName, out uint hv))
                     keep.Add((name, Math.Min(ver, hv)));
             }
@@ -221,9 +224,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<uint, MapEntry> _mappings = new Dictionary<uint, MapEntry>();
         private readonly HashSet<uint> _importedMem = new HashSet<uint>();
         private readonly Dictionary<IntPtr, DeviceImport> _deviceImports = new Dictionary<IntPtr, DeviceImport>();
+        private readonly Dictionary<IntPtr, IntPtr> _devicePhysical = new Dictionary<IntPtr, IntPtr>();
         private readonly Dictionary<IntPtr, uint> _layoutSets = new Dictionary<IntPtr, uint>();
         private readonly Dictionary<IntPtr, ulong> _bufferSizes = new Dictionary<IntPtr, ulong>();
         private uint _next = 1;
+
+        public readonly BrovVulkWsi Wsi = new BrovVulkWsi();
 
         private IntPtr _arena;
         private int _arenaUsed;
@@ -276,6 +282,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     _layoutSets.Remove(e.Ptr);
                 else if (e.Type == "VkBuffer")
                     _bufferSizes.Remove(e.Ptr);
+                else if (e.Type == "VkDevice")
+                    _devicePhysical.Remove(e.Ptr);
+                else if (e.Type == "VkSwapchainKHR" || e.Type == "VkSurfaceKHR")
+                    Wsi.Forget(e.Ptr, e.Type);
             }
 
             _handles.Remove(id);
@@ -322,6 +332,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void SetDeviceImport(IntPtr device, DeviceImport import) => _deviceImports[device] = import;
 
         public bool TryGetDeviceImport(IntPtr device, out DeviceImport import) => _deviceImports.TryGetValue(device, out import);
+
+        public void SetDevicePhysical(IntPtr device, IntPtr physicalDevice)
+        {
+            if (device != IntPtr.Zero && physicalDevice != IntPtr.Zero)
+                _devicePhysical[device] = physicalDevice;
+        }
+
+        public bool TryGetDevicePhysical(IntPtr device, out IntPtr physicalDevice) => _devicePhysical.TryGetValue(device, out physicalDevice);
 
         public void AddMapping(uint id, IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size, bool imported) =>
             _mappings[id] = new MapEntry(hostPtr, guestVa, mapOffset, size, imported);
