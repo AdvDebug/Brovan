@@ -17,7 +17,7 @@
 
 Brovan is an interactive x86_64 emulator that gives you full control over how programs execute. It can be used to reverse engineer binaries, trace API and system calls, capture network traffic, or run software in an isolated environment without executing it directly on your host CPU.
 
-It is designed to support as much software as possible while remaining a safe, efficient, and high-performance option for running software across Windows and Linux. Brovan is still in early development, so it is not yet fully mature or reliable.
+It is designed to support as much software as possible while remaining a safe, efficient, and high-performance option for running Windows and Linux software across Windows, Linux and Android. Brovan is still in early development, so it is not yet fully mature or reliable.
 
 Supported backends:
 * **Unicorn Engine** for cross-platform emulation
