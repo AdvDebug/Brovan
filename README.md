@@ -61,7 +61,7 @@ Supported backends:
 
 ### Gaming & Graphics (Brovvulk)
 
-Brovan can render guest graphical applications through its Brovvulk translation subsystem. Here is a sample game i had (Deltarune), but it can work on many other games:
+Brovan can render guest graphical applications through its Brovvulk (Brovan<->Vulkan) translation subsystem. Here is a sample game i had (Deltarune), but it can work on many other games:
 
 <div align="center">
 
