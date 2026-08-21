@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Brovan.Core;
 using static Brovan.Core.Helpers.Utils;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -1183,7 +1183,8 @@ namespace Brovan.EmulationMenu
                     break;
 
                 case "start":
-                    Emulator.Start();
+                    RunGuestCode(Emulator.Start);
+                    CompleteRequestedPause();
                     if (!SilentMode)
                         Console.WriteLine($"Ran {Emulator.Instruction} instructions.");
                     Emulator.Instruction = 0;
@@ -1195,7 +1196,7 @@ namespace Brovan.EmulationMenu
 
                     if (Emulator.Guest is GenericGuest)
                     {
-                        Emulator._emulator.Emulate(Emulator._emulator.ReadRegister(Emulator.IPRegister), 0, 0, 0);
+                        RunGuestCode(() => Emulator._emulator.Emulate(Emulator._emulator.ReadRegister(Emulator.IPRegister), 0, 0, 0));
                         break;
                     }
 
@@ -1225,7 +1226,8 @@ namespace Brovan.EmulationMenu
                         }
                     }
 
-                    Emulator.RunMlfqScheduler();
+                    RunGuestCode(() => Emulator.RunMlfqScheduler());
+                    CompleteRequestedPause();
                     if (!SilentMode)
                         Console.WriteLine($"Ran {Emulator.Instruction} instructions.");
                     Emulator.Instruction = 0;
@@ -1408,7 +1410,7 @@ namespace Brovan.EmulationMenu
                             break;
                         }
 
-                        Emulator.StartEmulation(CurrentIp, 0);
+                        RunGuestCode(() => Emulator.StartEmulation(CurrentIp, 0));
                         break;
                     }
 
@@ -1834,9 +1836,11 @@ namespace Brovan.EmulationMenu
                             break;
 
                         if (Emulator.Threads.Count > 0)
-                            Emulator.RunMlfqScheduler();
+                            RunGuestCode(() => Emulator.RunMlfqScheduler());
                         else
-                            Emulator.StartEmulation(Emulator.ReadRegister(Emulator.IPRegister), 0);
+                            RunGuestCode(() => Emulator.StartEmulation(Emulator.ReadRegister(Emulator.IPRegister), 0));
+
+                        CompleteRequestedPause();
                         break;
                     }
                 case "map":

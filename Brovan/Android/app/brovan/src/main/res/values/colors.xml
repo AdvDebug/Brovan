@@ -17,4 +17,19 @@
     <color name="log_info">#FF6FB6F1</color>
     <color name="log_special">#FFC792EA</color>
     <color name="log_command">#FFFF8C00</color>
+
+    <!-- One per token kind the emulator's own disassembly colouring uses. -->
+    <color name="asm_address">#FF7D8590</color>
+    <color name="asm_bytes">#FF636E7B</color>
+    <color name="asm_mnemonic">#FF79C0FF</color>
+    <color name="asm_register">#FFE8C36B</color>
+    <color name="asm_immediate">#FFC792EA</color>
+    <color name="asm_label">#FF5BD68A</color>
+    <color name="asm_memory">#FF56B6C2</color>
+    <color name="asm_separator">#FF636E7B</color>
+
+    <color name="debug_current">#332F81F7</color>
+    <color name="debug_breakpoint">#FFF2707A</color>
+    <color name="debug_value">#FFE6EDF3</color>
+    <color name="debug_value_zero">#FF6E7681</color>
 </resources>

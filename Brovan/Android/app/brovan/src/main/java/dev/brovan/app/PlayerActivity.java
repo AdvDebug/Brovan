@@ -37,7 +37,7 @@ import dev.brovan.input.ControlOverlay;
  * Runs one program full screen. It lives in its own process, so quitting reclaims everything the emulator
  * allocated and the next launch starts from a clean state.
  */
-public class PlayerActivity extends AppCompatActivity implements BrovanNative.Listener {
+public class PlayerActivity extends AppCompatActivity implements BrovanNative.Listener, DebuggerView.Listener {
 
     private static final String EXTRA_DIRECTORY = "directory";
     private static final String EXTRA_EXECUTABLE = "executable";
@@ -60,7 +60,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private BrovanSurfaceView surface;
     private ControlOverlay controls;
     private Settings settings;
-    private View console;
+    private DebuggerView debugger;
     private TextView status;
     private TextView log;
     private ScrollView logScroll;
@@ -98,7 +98,8 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         settings = new Settings(this);
         surface = findViewById(R.id.surface);
         controls = findViewById(R.id.controls);
-        console = findViewById(R.id.console);
+        debugger = findViewById(R.id.debugger);
+        debugger.setListener(this);
 
         controls.setCustomLayout(ControlLayout.fromJson(getIntent().getStringExtra(EXTRA_LAYOUT)));
         int scheme = getIntent().getIntExtra(EXTRA_CONTROLS, 0);
@@ -120,6 +121,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         logColorText = ContextCompat.getColor(this, R.color.text_primary);
 
         developerMode = getIntent().getBooleanExtra(EXTRA_DEVELOPER, false);
+        debugger.setDeveloperMode(developerMode);
 
         FloatingActionButton menu = findViewById(R.id.menu);
         menu.setOnClickListener(view -> showMenu());
@@ -130,7 +132,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
             if (!text.isEmpty()) {
                 append("[/] > " + text);
                 command.setText("");
-                BrovanNative.sendCommand(text);
+                debugger.send(text);
             }
         });
 
@@ -149,10 +151,10 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         BrovanNative.setJitCache(getIntent().getBooleanExtra(EXTRA_JIT_CACHE, true));
         setStatus(getIntent().getStringExtra(EXTRA_NAME));
 
-        // Developer mode leaves the guest at the debugger prompt instead of running it, so the console has to
-        // be up for the "start" that gets it going to be reachable.
+        // Developer mode leaves the guest at the debugger prompt instead of running it, so the debugger has
+        // to be up for the "start" that gets it going to be reachable.
         if (developerMode) {
-            console.setVisibility(View.VISIBLE);
+            debugger.setVisibility(View.VISIBLE);
             append(getString(R.string.player_developer_hint));
         }
 
@@ -185,8 +187,8 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         actions.add(BrovanNative::requestRepaint);
 
         if (developerMode) {
-            labels.add(getString(R.string.player_console));
-            actions.add(this::toggleConsole);
+            labels.add(getString(R.string.player_debugger));
+            actions.add(this::toggleDebugger);
         }
 
         labels.add(getString(R.string.player_quit));
@@ -249,15 +251,15 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .setTitle(R.string.player_windows)
                 .setItems(labels, (dialog, index) -> {
                     BrovanNative.selectWindow(windows.get(index).hwnd());
-                    console.setVisibility(View.GONE);
+                    debugger.setVisibility(View.GONE);
                     surface.requestFocus();
                 })
                 .show();
     }
 
-    private void toggleConsole() {
-        boolean visible = console.getVisibility() == View.VISIBLE;
-        console.setVisibility(visible ? View.GONE : View.VISIBLE);
+    private void toggleDebugger() {
+        boolean visible = debugger.getVisibility() == View.VISIBLE;
+        debugger.setVisibility(visible ? View.GONE : View.VISIBLE);
         if (visible) {
             surface.requestFocus();
             BrovanNative.requestRepaint();
@@ -283,7 +285,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
 
     private void fail(String message) {
         append("[-] " + message);
-        console.setVisibility(View.VISIBLE);
+        debugger.setVisibility(View.VISIBLE);
         setStatus(message);
     }
 
@@ -333,9 +335,9 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
             return;
         }
 
-        // Nothing is on screen while the console is hidden, so the history is kept and the text view is
-        // rebuilt from it the next time it is opened.
-        if (console.getVisibility() != View.VISIBLE) {
+        // Nothing is on screen while another debugger tab is up, so the history is kept and the text view
+        // is rebuilt from it the next time the log is opened.
+        if (!debugger.isLogVisible()) {
             trim();
             logStale = true;
             return;
@@ -396,6 +398,11 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     }
 
     @Override
+    public void onDebuggerMessage(String line) {
+        append(line);
+    }
+
+    @Override
     public void onExit(int reason) {
         append(reason == 0 ? "[*] The program closed." : "[-] The program stopped unexpectedly.");
         setStatus(reason == 0 ? "Finished" : "Stopped");
@@ -408,8 +415,8 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
 
     @Override
     public void onBackPressed() {
-        if (console.getVisibility() == View.VISIBLE) {
-            toggleConsole();
+        if (debugger.getVisibility() == View.VISIBLE) {
+            toggleDebugger();
             return;
         }
 

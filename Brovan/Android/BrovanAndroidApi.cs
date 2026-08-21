@@ -181,6 +181,27 @@ namespace Brovan.Android
             }, nameof(SendCommand));
         }
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_debug_pause")]
+        public static void DebugPause() => Guard(Helpers.RequestDebuggerPause, nameof(DebugPause));
+
+        [UnmanagedCallersOnly(EntryPoint = "brovan_debug_query")]
+        public static int DebugQuery(byte* request, byte* buffer, int capacity)
+        {
+            if (buffer == null || capacity <= 0)
+                return StatusInvalidArgument;
+
+            try
+            {
+                string text = AndroidDebugQuery.Run(Marshal.PtrToStringUTF8((IntPtr)request));
+                return WriteUtf8Records(text, buffer, capacity);
+            }
+            catch (Exception exception)
+            {
+                AndroidLog.Write(AndroidNative.LogError, $"[brovan_debug_query] {exception}");
+                return StatusFailed;
+            }
+        }
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_request_close")]
         public static void RequestClose() => Guard(HostEventQueue.RequestClose, nameof(RequestClose));
 
@@ -432,6 +453,31 @@ namespace Brovan.Android
                 return StatusInvalidArgument;
 
             int written = Encoding.UTF8.GetBytes(value.AsSpan(), destination);
+            destination[written] = 0;
+            return written;
+        }
+
+        private static int WriteUtf8Records(string value, byte* buffer, int capacity)
+        {
+            Span<byte> destination = new Span<byte>(buffer, capacity);
+            destination[0] = 0;
+
+            if (string.IsNullOrEmpty(value))
+                return 0;
+
+            // Debugger output is unbounded, so what does not fit is dropped at a record boundary rather
+            // than failing the whole query.
+            int length = value.Length;
+            while (length > 0 && Encoding.UTF8.GetByteCount(value.AsSpan(0, length)) + 1 > capacity)
+            {
+                int newline = value.LastIndexOf('\n', Math.Max(length - 2, 0));
+                length = newline < 0 ? 0 : newline + 1;
+            }
+
+            if (length <= 0)
+                return 0;
+
+            int written = Encoding.UTF8.GetBytes(value.AsSpan(0, length), destination);
             destination[written] = 0;
             return written;
         }

@@ -186,6 +186,7 @@ namespace Brovan
             ulong CurrentIp = Emulator.ReadRegister(Emulator.IPRegister);
             bool PreviousSuppression = BreakpointsSuppressed;
             BreakpointsSuppressed = PreviousSuppression || SuppressBreakpoints;
+            GuestExecuting = true;
 
             try
             {
@@ -197,6 +198,7 @@ namespace Brovan
             }
             finally
             {
+                GuestExecuting = false;
                 BreakpointsSuppressed = PreviousSuppression;
             }
         }
@@ -1278,6 +1280,48 @@ namespace Brovan
 
             TempStepHookHandle = IntPtr.Zero;
             TempStepTarget = 0;
+        }
+
+        /// <summary>
+        /// Runs guest code and marks the emulator as busy for as long as it does.
+        /// </summary>
+        internal static void RunGuestCode(Action Run)
+        {
+            GuestExecuting = true;
+            try
+            {
+                Run();
+            }
+            finally
+            {
+                GuestExecuting = false;
+            }
+        }
+
+        /// <summary>
+        /// Asks the scheduler to give control back after the running slice.
+        /// </summary>
+        internal static void RequestDebuggerPause()
+        {
+            if (Emulator == null || DebuggerPaused)
+                return;
+
+            DebuggerPauseRequested = true;
+            Emulator.EscapeScheduler = true;
+        }
+
+        /// <summary>
+        /// Turns a requested pause into a debugger stop. Runs where the scheduler returned, so nothing is
+        /// executing any more and the ordinary stop path applies.
+        /// </summary>
+        internal static void CompleteRequestedPause()
+        {
+            if (!DebuggerPauseRequested || Emulator == null)
+                return;
+
+            DebuggerPauseRequested = false;
+            PauseDebugger();
+            ShowDebuggerStopContext("Paused", Emulator.ReadRegister(Emulator.IPRegister));
         }
 
         internal static void PauseDebugger()

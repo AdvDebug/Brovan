@@ -265,7 +265,7 @@ namespace Brovan
         private static ulong _lastLinuxAddressModuleStart = 0;
         private static ulong _lastLinuxAddressModuleEnd = 0;
 
-        private static WinModule FindModuleByAddress(ulong Address)
+        internal static WinModule FindModuleByAddress(ulong Address)
         {
             if (Emulator?.WinHelper?.WinModules == null)
                 return null;

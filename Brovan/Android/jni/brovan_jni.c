@@ -35,6 +35,8 @@ extern void brovan_inject_focus(int focused);
 extern int brovan_get_window_title(char *buffer, int capacity);
 extern int brovan_list_windows(char *buffer, int capacity);
 extern void brovan_select_window(unsigned long long hwnd);
+extern int brovan_debug_query(const char *request, char *buffer, int capacity);
+extern void brovan_debug_pause(void);
 
 static JavaVM *g_vm;
 static jclass g_callbacks;
@@ -408,4 +410,36 @@ JNIEXPORT jstring JNICALL METHOD(ListWindows)(JNIEnv *env, jclass clazz) {
 JNIEXPORT jstring JNICALL METHOD(GetWindowTitle)(JNIEnv *env, jclass clazz) {
     (void)clazz;
     return read_into_string(env, brovan_get_window_title, 512);
+}
+
+JNIEXPORT void JNICALL METHOD(DebugPause)(JNIEnv *env, jclass clazz) {
+    (void)env;
+    (void)clazz;
+    brovan_debug_pause();
+}
+
+JNIEXPORT jstring JNICALL METHOD(DebugQuery)(JNIEnv *env, jclass clazz, jstring request) {
+    (void)clazz;
+
+    const char *text = borrow(env, request);
+    if (text == NULL) {
+        return (*env)->NewStringUTF(env, "");
+    }
+
+    /* Region and disassembly listings are the large ones; anything past this is dropped by the emulator
+       at a record boundary. */
+    const int capacity = 256 * 1024;
+    char *buffer = malloc((size_t)capacity);
+    if (buffer == NULL) {
+        release(env, request, text);
+        return (*env)->NewStringUTF(env, "");
+    }
+
+    buffer[0] = '\0';
+    brovan_debug_query(text, buffer, capacity);
+    release(env, request, text);
+
+    jstring result = (*env)->NewStringUTF(env, buffer);
+    free(buffer);
+    return result;
 }

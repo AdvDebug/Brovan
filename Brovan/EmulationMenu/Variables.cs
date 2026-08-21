@@ -86,6 +86,9 @@ namespace Brovan
         public readonly Dictionary<int, MemoryWatchpoint> Watchpoints = new();
         public int NextWatchpointId = 1;
         public bool Paused;
+        public bool PauseRequested;
+        // Read from the app's debugger views on another thread, which must never see a stale false.
+        public volatile bool GuestExecuting;
         public readonly Dictionary<uint, EmulatedThreadState> PausedThreadStates = new();
         public readonly Dictionary<uint, int> PausedThreadExitCodes = new();
         public readonly List<int> PausedThreadOrder = new();
@@ -189,6 +192,8 @@ namespace Brovan
         public static Dictionary<int, MemoryWatchpoint> Watchpoints => Debugger.Watchpoints;
         public static int NextWatchpointId { get => Debugger.NextWatchpointId; set => Debugger.NextWatchpointId = value; }
         public static bool DebuggerPaused { get => Debugger.Paused; set => Debugger.Paused = value; }
+        public static bool DebuggerPauseRequested { get => Debugger.PauseRequested; set => Debugger.PauseRequested = value; }
+        public static bool GuestExecuting { get => Debugger.GuestExecuting; set => Debugger.GuestExecuting = value; }
         public static Dictionary<uint, EmulatedThreadState> DebuggerPausedThreadStates => Debugger.PausedThreadStates;
         public static Dictionary<uint, int> DebuggerPausedThreadExitCodes => Debugger.PausedThreadExitCodes;
         public static List<int> DebuggerPausedThreadOrder => Debugger.PausedThreadOrder;

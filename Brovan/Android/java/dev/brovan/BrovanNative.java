@@ -54,6 +54,8 @@ public final class BrovanNative {
         void onInstallProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal);
     }
 
+    private static final String[] NO_RECORDS = new String[0];
+
     private static volatile Listener listener;
     private static volatile InstallListener installListener;
 
@@ -210,6 +212,19 @@ public final class BrovanNative {
         return nativeGetWindowTitle();
     }
 
+    public static void debugPause() {
+        nativeDebugPause();
+    }
+
+    public static String[] debugQuery(String request) {
+        String raw = nativeDebugQuery(request);
+        if (raw == null || raw.isEmpty()) {
+            return NO_RECORDS;
+        }
+
+        return raw.split("\n");
+    }
+
     @SuppressWarnings("unused")
     private static void onNativeLog(String line) {
         Listener current = listener;
@@ -275,4 +290,8 @@ public final class BrovanNative {
     private static native void nativeSelectWindow(long hwnd);
 
     private static native String nativeGetWindowTitle();
+
+    private static native void nativeDebugPause();
+
+    private static native String nativeDebugQuery(String request);
 }

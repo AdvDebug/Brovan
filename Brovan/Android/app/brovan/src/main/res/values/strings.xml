@@ -196,10 +196,42 @@
     <string name="player_controls">Controls</string>
     <string name="player_pointer">Touch behaviour</string>
     <string name="player_windows">Windows</string>
-    <string name="player_console">Console</string>
     <string name="player_redraw">Redraw</string>
     <string name="player_quit">Quit</string>
     <string name="player_command_hint">debugger command</string>
-    <string name="player_developer_hint">[*] Developer mode: the program is loaded but not running. Send \"start\" to run it.</string>
+    <string name="player_developer_hint">[*] Developer mode: the program is loaded but not running. Run starts it.</string>
     <string name="player_send">Send</string>
+    <string name="player_debugger">Debugger</string>
+
+    <string name="debug_run">Run</string>
+    <string name="debug_continue">Continue</string>
+    <string name="debug_pause">Pause</string>
+    <string name="debug_step">Step</string>
+    <string name="debug_step_over">Step over</string>
+    <string name="debug_goto">Go to</string>
+    <string name="debug_refresh">Refresh</string>
+
+    <string name="debug_tab_log">Log</string>
+    <string name="debug_tab_disassembly">Disassembly</string>
+    <string name="debug_tab_registers">Registers</string>
+    <string name="debug_tab_stack">Call stack</string>
+    <string name="debug_tab_threads">Threads</string>
+    <string name="debug_tab_modules">Modules</string>
+    <string name="debug_tab_memory">Memory</string>
+    <string name="debug_tab_breakpoints">Breakpoints</string>
+    <string name="debug_tab_regions">Regions</string>
+
+    <string name="debug_state_loaded">Loaded</string>
+    <string name="debug_state_running">Running</string>
+    <string name="debug_state_paused">Paused</string>
+    <string name="debug_state_stopped">Stopped</string>
+
+    <string name="debug_goto_title">Go to address</string>
+    <string name="debug_goto_hint">address, module!export or symbol</string>
+    <string name="debug_goto_failed">[-] Could not resolve %1$s.</string>
+    <string name="debug_empty">Nothing to show.</string>
+    <string name="debug_pause_first">Pause the program to inspect it.</string>
+    <string name="debug_pausing">Breaking after the running slice…</string>
+    <string name="debug_not_started">The program is loaded and waiting. Run starts it.</string>
+    <string name="debug_stats">%1$d threads · %2$d modules · %3$s instructions</string>
 </resources>
