@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using System.Xml;
 using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -142,7 +142,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 WindowsThreadState ThreadState = WinEmulatedThread.TryGetState(Thread);
                 if (ThreadState != null)
-                    ApplyThreadContext(Instance, ThreadState.Teb);
+                    ApplyThreadContext(Instance, ThreadState.NativeTeb != 0 ? ThreadState.NativeTeb : ThreadState.Teb);
             }
 
             Instance.WinHelper?.RefreshDisplayDependentState();

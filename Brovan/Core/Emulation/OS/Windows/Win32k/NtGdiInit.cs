@@ -15,15 +15,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             const ulong GdiSharedHandleTableOffset32 = 0x94;
             const ulong GdiSharedMemorySize64 = 0x1811B0;
             const ulong GdiSharedMemoryObjectsOffset64 = 0x1800B0;
-            if (Instance._binary.Architecture != BinaryArchitecture.x64)
-            {
-                if (Instance.PEB != 0)
-                    Instance._emulator.WriteMemory(Instance.PEB + GdiSharedHandleTableOffset32, 0u);
 
+            ulong NativePeb = Instance.NativePEB;
+            if (NativePeb == 0)
                 return NTSTATUS.STATUS_WAIT_1;
-            }
 
-            ulong GdiSharedHandleTable = Instance.ReadMemoryULong(Instance.PEB + GdiSharedHandleTableOffset64);
+            ulong GdiSharedHandleTable = Instance.ReadMemoryULong(NativePeb + GdiSharedHandleTableOffset64);
             if (GdiSharedHandleTable == 0)
             {
                 GdiSharedHandleTable = Instance.MapUniqueAddress(GdiSharedMemorySize64, MemoryProtection.ReadWrite);
@@ -32,7 +29,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
                 Instance._emulator.WriteMemory(GdiSharedHandleTable + GdiSharedMemoryObjectsOffset64 + (0x12UL * 8), 1UL, 8);
                 Instance._emulator.WriteMemory(GdiSharedHandleTable + GdiSharedMemoryObjectsOffset64 + (0x13UL * 8), 1UL, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + GdiSharedHandleTableOffset64, GdiSharedHandleTable, 8);
+                Instance._emulator.WriteMemory(NativePeb + GdiSharedHandleTableOffset64, GdiSharedHandleTable, 8);
+
+                // The SysWOW64 gdi32 reads the table through the native PEB, the 32-bit field is kept for anything that still looks there.
+                if (Instance._binary.Architecture != BinaryArchitecture.x64 && Instance.PEB != 0)
+                    Instance._emulator.WriteMemory(Instance.PEB + GdiSharedHandleTableOffset32, (uint)GdiSharedHandleTable);
             }
 
             return NTSTATUS.STATUS_WAIT_1;

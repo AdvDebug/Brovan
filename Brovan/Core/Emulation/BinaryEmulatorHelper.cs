@@ -1659,6 +1659,10 @@ namespace Brovan.Core.Emulation
 
                 if (!AddSyscallsFromFiles(NtdllPath, Win32uPath))
                     return ToDispatchTable(SyscallDictionary);
+
+                RegisterSyscall(0x2000, nameof(Wow64UserConnectToServer), false);
+                RegisterSyscall(0x300B, nameof(Wow64BasepNlsGetUserInfo), false);
+                RegisterSyscall(0x300F, nameof(Wow64BasepCreateActCtx), false);
             }
             else if (GeneralHelper.IsWindows)
             {

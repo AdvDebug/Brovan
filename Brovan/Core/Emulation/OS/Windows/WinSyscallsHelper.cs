@@ -945,6 +945,68 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
+        /// Writes the process list in the SYSTEM_PROCESS_INFORMATION layout of the guest architecture.
+        /// </summary>
+        /// <param name="Buffer">Guest buffer the list goes to.</param>
+        /// <param name="BufferLength">Bytes the caller offered.</param>
+        /// <param name="RequiredLength">Bytes the whole list takes.</param>
+        /// <returns>False when the buffer is too small, and nothing was written.</returns>
+        public bool TryWriteProcessInformationList(ulong Buffer, uint BufferLength, out uint RequiredLength)
+        {
+            bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;
+            uint HeaderSize = Is64 ? 0x100u : 0xB8u;
+            uint ThreadSize = Is64 ? 0x50u : 0x40u;
+            uint EntrySize = HeaderSize + ThreadSize;
+            ulong BasePriorityOffset = Is64 ? 0x48UL : 0x40UL;
+            ulong ProcessIdOffset = Is64 ? 0x50UL : 0x44UL;
+            ulong ParentProcessIdOffset = Is64 ? 0x58UL : 0x48UL;
+            const ulong ImageNameOffset = 0x38;
+
+            List<WinProcess> Processes = WinProcesses ?? new List<WinProcess>();
+            RequiredLength = (uint)Processes.Count * EntrySize;
+
+            if (BufferLength < RequiredLength)
+                return false;
+
+            WriteZeroMemory(Buffer, RequiredLength);
+
+            ulong Current = Buffer;
+            for (int i = 0; i < Processes.Count; i++)
+            {
+                WinProcess Process = Processes[i];
+
+                Emulator._emulator.WriteMemory(Current + 0x00, i == Processes.Count - 1 ? 0u : EntrySize);
+                Emulator._emulator.WriteMemory(Current + 0x04, 1u);
+
+                ulong ImageName = Current + ImageNameOffset;
+                if (!string.IsNullOrEmpty(Process.Name) && Process.Status != ProtectionStatus.Unaccessible)
+                {
+                    if (Is64)
+                        SetUnicodeString(ImageName, Process.Name);
+                    else
+                        SetUnicodeString32((uint)ImageName, Process.Name);
+                }
+
+                if (Is64)
+                {
+                    Emulator._emulator.WriteMemory(Current + BasePriorityOffset, 8u);
+                    Emulator._emulator.WriteMemory(Current + ProcessIdOffset, (ulong)Process.PID, 8);
+                    Emulator._emulator.WriteMemory(Current + ParentProcessIdOffset, (ulong)Process.PPID, 8);
+                }
+                else
+                {
+                    Emulator._emulator.WriteMemory(Current + BasePriorityOffset, 8u);
+                    Emulator._emulator.WriteMemory(Current + ProcessIdOffset, Process.PID);
+                    Emulator._emulator.WriteMemory(Current + ParentProcessIdOffset, Process.PPID);
+                }
+
+                Current += EntrySize;
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// Gets a x64 argument based on the index.
         /// </summary>
         /// <param name="Index">Index to read from. starting from 0.</param>
@@ -1105,6 +1167,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
         }
         public uint CurrentPriority = 0x8; // Default priority (Normal), changes only if the program changed it explicitly.
+        public uint DefaultHardErrorMode = 1; // Hard error reporting is on until the program turns it off.
         public User CurrentUser = User.Standard;
         public string CurrentUserSid = "S-1-5-21-1000-1000-1000-1001";
         public const string CurrentUserName = "User";
@@ -1171,6 +1234,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     uint ESP = Emulator._emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
                     _argCacheArgBase = X86GateArgs ? ESP + 8u : ESP + 4u;
+                    RefreshWow64FileRedirect();
                 }
                 return;
             }
@@ -1190,6 +1254,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             _argCacheR9 = Vals[3];
             _argCacheRSP = Vals[4];
             _argCacheValid = true;
+        }
+
+        // RtlWow64EnableFsRedirectionEx writes it, and ntdll turns redirection off through it
+        private const ulong TebWow64FsRedirectSlotOffset = 0x1480 + 8 * 8;
+
+        private void RefreshWow64FileRedirect()
+        {
+            ulong Teb = Emulator.NativeTEB;
+            GeneralHelper.IO.Wow64FileRedirect = Teb == 0 || Emulator.ReadMemoryUInt(Teb + TebWow64FsRedirectSlotOffset) == 0;
         }
 
         /// <summary>
@@ -1244,6 +1317,29 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong UserSharedInfoMirrorSize = 0x1B54;
 
         private const ulong UserServerInfoSize = 0x2000;
+
+        private const ulong UserServerInfoWindowExtraOffset = 0x148;
+        private static readonly ushort[] UserServerInfoWindowExtraBytes =
+        {
+            0x50, // Scrollbar.
+            0x00, // Icon title.
+            0x18, // Menu.
+            0x00, // Desktop.
+            0x00, // Default window procedure.
+            0x04, // Message-only window.
+            0x00, // Task switch window.
+            0x08, // Button.
+            0x08, // Combo box.
+            0x08, // Combo list box.
+            0x1E, // Dialog.
+            0x08, // Edit.
+            0x08, // List box.
+            0x00, // MDI client.
+            0x08, // Static.
+            0x08, // IME.
+            0x08, // Ghost.
+        };
+
         private const ulong UserMessageBitmaskSize = 0x80;
         private ulong UserMessageBitmask1Address;
         private ulong UserMessageBitmask2Address;
@@ -2737,17 +2833,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (_cachedFnDWORDOPTINLPMSG != 0)
                 return _cachedFnDWORDOPTINLPMSG;
 
+            const uint FN_DWORDOPTINLPMSG_INDEX = 4;
+            _cachedFnDWORDOPTINLPMSG = GetKernelCallbackEntry(FN_DWORDOPTINLPMSG_INDEX);
+            return _cachedFnDWORDOPTINLPMSG;
+        }
+
+        /// <summary>
+        /// Reads one entry of the kernel callback table user32 publishes in the PEB.
+        /// </summary>
+        /// <param name="Index">Index of the entry.</param>
+        /// <returns>The callback address, or zero while the table is not published.</returns>
+        public ulong GetKernelCallbackEntry(uint Index)
+        {
             ulong Peb = Emulator.PEB;
             if (Peb == 0)
                 return 0;
 
-            ulong KernelCallbackTable = Emulator.ReadMemoryULong(Peb + 0x58);
-            if (KernelCallbackTable == 0)
+            bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;
+            ulong Table = Is64 ? Emulator.ReadMemoryULong(Peb + 0x58) : Emulator.ReadMemoryUInt(Peb + 0x2C);
+            if (Table == 0)
                 return 0;
 
-            const uint FN_DWORDOPTINLPMSG_INDEX = 4;
-            _cachedFnDWORDOPTINLPMSG = Emulator.ReadMemoryULong(KernelCallbackTable + FN_DWORDOPTINLPMSG_INDEX * 8);
-            return _cachedFnDWORDOPTINLPMSG;
+            return Is64
+                ? Emulator.ReadMemoryULong(Table + (ulong)Index * 8)
+                : Emulator.ReadMemoryUInt(Table + (ulong)Index * 4);
         }
 
         public bool InvokeUserCallback(ulong CallbackIndex, ulong ArgumentBuffer, ulong ArgumentBufferSize)
@@ -3178,7 +3287,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (GdiHandleTableAddress != 0 && Emulator.IsRegionMapped(GdiHandleTableAddress, GdiHandleEntryCount * GdiHandleEntrySize))
                 return;
 
-            ulong Peb = Emulator.PEB;
+            ulong Peb = Emulator.NativePEB;
             if (Peb == 0)
                 return;
 
@@ -3368,7 +3477,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void FlushGdiBatch()
         {
-            ulong Teb = Emulator.TEB;
+            ulong Teb = Emulator.NativeTEB;
             if (Teb == 0)
                 return;
 
@@ -3669,6 +3778,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Emulator._emulator.WriteMemory(Address + 0x08, (ulong)UserHandleEntryCount, 8);
 
+            for (int i = 0; i < UserServerInfoWindowExtraBytes.Length; i++)
+                Emulator._emulator.WriteMemory(Address + UserServerInfoWindowExtraOffset + (ulong)(i * 2), UserServerInfoWindowExtraBytes[i], 2);
+
             UserServerInfoAddress = Address;
             return UserServerInfoAddress;
         }
@@ -3699,16 +3811,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread == null)
                 return;
 
-            ulong Teb = WinEmulatedThread.GetState(Thread).Teb;
-            if (Teb == 0)
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (State.Teb == 0)
                 return;
 
             ulong DesktopInfo = EnsureUserDesktopInfo();
             if (DesktopInfo == 0)
                 return;
 
-            WriteWin32ClientInfoSlot(Teb, Win32ClientInfoPDeskInfoSlot, DesktopInfo);
-            WriteWin32ClientInfoSlot(Teb, Win32ClientInfoDesktopSlot, EnsureUserClientDesktop());
+            WriteWin32ClientInfoSlot(State, Win32ClientInfoPDeskInfoSlot, DesktopInfo);
+            WriteWin32ClientInfoSlot(State, Win32ClientInfoDesktopSlot, EnsureUserClientDesktop());
         }
 
         public void SetThreadWindowContext(WinWindow Window)
@@ -3732,29 +3844,31 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread == null)
                 return;
 
-            ulong Teb = WinEmulatedThread.GetState(Thread).Teb;
-            if (Teb == 0)
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (State.Teb == 0)
                 return;
 
             EnsureUserClientThreadInfo(Thread, 0);
-            WriteWin32ClientInfoSlot(Teb, Win32ClientInfoActiveWindowSlot, ActiveHandle);
-            WriteWin32ClientInfoSlot(Teb, Win32ClientInfoActiveWindowPointerSlot, ActiveWindowPointer);
+            WriteWin32ClientInfoSlot(State, Win32ClientInfoActiveWindowSlot, ActiveHandle);
+            WriteWin32ClientInfoSlot(State, Win32ClientInfoActiveWindowPointerSlot, ActiveWindowPointer);
         }
 
-        private void WriteWin32ClientInfoSlot(ulong Teb, int Slot, ulong Value)
+        private void WriteWin32ClientInfoSlot(WindowsThreadState State, int Slot, ulong Value)
         {
-            if (Teb == 0)
+            if (State == null || State.Teb == 0)
                 return;
 
             if (Emulator._binary.Architecture == BinaryArchitecture.x64)
             {
-                Emulator._emulator.WriteMemory(Teb + Win32ClientInfoX64Base + ((ulong)Slot * 8UL), Value, 8);
+                Emulator._emulator.WriteMemory(State.Teb + Win32ClientInfoX64Base + ((ulong)Slot * 8UL), Value, 8);
                 return;
             }
 
-            Emulator._emulator.WriteMemory(Teb + Win32ClientInfoX86Base + ((ulong)Slot * 4UL), (uint)Value, 4);
+            Emulator._emulator.WriteMemory(State.Teb + Win32ClientInfoX86Base + ((ulong)Slot * 4UL), (uint)Value, 4);
 
-            Emulator._emulator.WriteMemory(Teb + Win32ClientInfoX64Base + ((ulong)Slot * 8UL), Value, 8);
+            // The SysWOW64 user32 reads CLIENTINFO out of the native TEB, where the 32-bit one keeps its OpenGL dispatch table.
+            ulong NativeTeb = State.NativeTeb != 0 ? State.NativeTeb : State.Teb;
+            Emulator._emulator.WriteMemory(NativeTeb + Win32ClientInfoX64Base + ((ulong)Slot * 8UL), Value, 8);
         }
 
         private ulong ComputeUserSharedDelta(ulong ServerInfo, ulong HandleTable, ulong DisplayInfo)
@@ -3997,9 +4111,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             ulong ThreadInfo = State.Win32ThreadInfo;
             ulong Teb = State.Teb;
+            ulong NativeTeb = State.NativeTeb != 0 ? State.NativeTeb : Teb;
 
-            if (ThreadInfo == 0 && Teb != 0)
-                ThreadInfo = Emulator.ReadMemoryULong(Teb + 0x78);
+            if (ThreadInfo == 0 && NativeTeb != 0)
+                ThreadInfo = Emulator.ReadMemoryULong(NativeTeb + 0x78);
 
             if (ThreadInfo == 0 && Teb != 0)
             {
@@ -4027,8 +4142,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     uint ThreadInfo32 = (uint)ThreadInfo;
                     Emulator._emulator.WriteMemory(Teb + 0x40, ThreadInfo32, 4);
-                    Emulator._emulator.WriteMemory(Teb + 0x78, ThreadInfo32, 4);
-                    Emulator._emulator.WriteMemory(Teb + 0x7C, 0u, 4);
+                    Emulator._emulator.WriteMemory(NativeTeb + 0x78, ThreadInfo, 8);
                 }
 
                 EnsureUserClientThreadInfo(Thread, ThreadInfo);
@@ -4136,6 +4250,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + UserWindowExStyleOffset, ExStyleWithState, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + UserWindowStyleOffset, Style, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowFnidOffset, Window.Fnid, 2);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowParentOffset, ParentObject, 8);
 
             int OuterLeft = Window.X;

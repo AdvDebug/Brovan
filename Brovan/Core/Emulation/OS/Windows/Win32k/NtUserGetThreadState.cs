@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -102,10 +102,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return;
             }
 
-            uint ThreadInfo32 = (uint)ThreadInfo;
-            Instance._emulator.WriteMemory(WinEmulatedThread.GetState(Thread).Teb + 0x40, ThreadInfo32);
-            Instance._emulator.WriteMemory(WinEmulatedThread.GetState(Thread).Teb + 0x78, ThreadInfo32);
-            Instance._emulator.WriteMemory(WinEmulatedThread.GetState(Thread).Teb + 0x7C, 0u);
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            Instance._emulator.WriteMemory(State.Teb + 0x40, (uint)ThreadInfo);
+            Instance._emulator.WriteMemory(State.NativeTeb != 0 ? State.NativeTeb + 0x78 : State.Teb + 0x78, ThreadInfo, 8);
             Instance.WinHelper.EnsureUserClientThreadInfo(Thread, ThreadInfo);
         }
     }

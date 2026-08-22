@@ -20,6 +20,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public int ImpersonationTokenHandle { get; set; }
         public ulong Teb { get; set; }
+
+        // The 64-bit TEB a WOW64 thread also owns. SysWOW64 modules reach it through WowTebOffset and use x64 offsets in it.
+        public ulong NativeTeb { get; set; }
         public WinToken ImpersonationToken { get; set; }
         public ulong ExceptionFunc { get; set; }
         public bool ApcAlertable { get; set; }

@@ -139,6 +139,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                             SetReturnLength(sizeof(uint));
                             return NTSTATUS.STATUS_SUCCESS;
                         }
+                    case PROCESSINFOCLASS.ProcessDefaultHardErrorMode:
+                        {
+                            if (OutBufferLength < sizeof(uint))
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                            if (!Instance.IsRegionMapped(OutBufferPtr, sizeof(uint)))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            if (!Instance.WinHelper.WriteUInt32(OutBufferPtr, Instance.WinHelper.DefaultHardErrorMode))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            SetReturnLength(sizeof(uint));
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
                     case PROCESSINFOCLASS.ProcessDebugPort:
                         if (OutBufferLength >= (ulong)Instance.WinHelper.PointerSize)
                         {
@@ -418,7 +432,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return QueryProcessImageFileNameWin32(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
                     case (PROCESSINFOCLASS)52:
                         {
-                            uint StructSize = 0x20;
+                            // PROCESS_MITIGATION_POLICY_INFORMATION: policy id in, policy value out. 8 bytes on both architectures.
+                            const uint StructSize = 8;
 
                             if (OutBufferLength < StructSize)
                             {
@@ -429,27 +444,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (!Instance.IsRegionMapped(OutBufferPtr, StructSize))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                            uint Policy = (uint)(Instance.ReadMemoryULong(OutBufferPtr) & 0xFFFFFFFF);
+                            uint Policy = Instance.ReadMemoryUInt(OutBufferPtr);
 
                             Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
                             WriteUInt32(Buffer, 0, Policy);
 
-                            uint UnionFlags = 0;
-                            uint UnionExtra = 0;
+                            uint PolicyValue = Policy == 0 ? 1u : 0u;
 
-                            if (Policy == 0)
-                            {
-                                UnionFlags = 1;
-                                UnionExtra = 0;
-                            }
-                            else if (Policy == 2)
-                            {
-                                UnionFlags = 0;
-                                UnionExtra = 0;
-                            }
-
-                            WriteUInt32(Buffer, 4, UnionFlags);
-                            WriteUInt32(Buffer, 8, UnionExtra);
+                            WriteUInt32(Buffer, 4, PolicyValue);
 
                             if (!Instance.WriteMemory(OutBufferPtr, Buffer))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

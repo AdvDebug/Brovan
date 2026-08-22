@@ -22,8 +22,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             switch (InfoClass)
             {
-                case PROCESSINFOCLASS.ProcessDebugPort:
                 case PROCESSINFOCLASS.ProcessDefaultHardErrorMode:
+                    if (ProcessInformationLength >= sizeof(uint) && Instance.IsRegionMapped(ProcessInformation, sizeof(uint)))
+                        Instance.WinHelper.DefaultHardErrorMode = Instance.ReadMemoryUInt(ProcessInformation);
+
+                    return NTSTATUS.STATUS_SUCCESS;
+
+                case PROCESSINFOCLASS.ProcessDebugPort:
                 case PROCESSINFOCLASS.ProcessAffinityMask:
                 case PROCESSINFOCLASS.ProcessPriorityBoost:
                 case PROCESSINFOCLASS.ProcessDebugFlags:

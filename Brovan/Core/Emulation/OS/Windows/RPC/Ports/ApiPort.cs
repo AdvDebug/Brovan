@@ -288,21 +288,36 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             TryReadClientConnectData(Reply, out uint ServerId, out ulong ConnectionInfo, out uint ConnectionInfoSize);
 
-            if (!Instance.WinHelper.EnsureUserSharedInfo(out ulong psi, out ulong aheList, out uint entrySize))
+            Span<byte> Data = stackalloc byte[UserConnectTotalSize];
+            if (!TryBuildUserConnect(Instance, ConnectionInfo, ConnectionInfoSize, Data))
                 return;
+
+            uint UserConnectWriteSize = Math.Max(ConnectionInfoSize, (uint)Data.Length);
+            TryWriteClientConnectData(Reply, Instance, Data, ServerId, ConnectionInfo, UserConnectWriteSize);
+        }
+
+        private const int UserConnectHeaderSize = 0x08;
+        private const int UserConnectSharedInfoSize = 0x238;
+        public const int UserConnectTotalSize = UserConnectHeaderSize + UserConnectSharedInfoSize;
+
+        /// <summary>
+        /// Fills a USERCONNECT reply for the user server
+        /// </summary>
+        public static bool TryBuildUserConnect(BinaryEmulator Instance, ulong ConnectionInfo, uint ConnectionInfoSize, Span<byte> Data)
+        {
+            if (Data.Length < UserConnectTotalSize)
+                return false;
+
+            if (!Instance.WinHelper.EnsureUserSharedInfo(out ulong psi, out ulong aheList, out uint entrySize))
+                return false;
 
             ulong DisplayInfo = Instance.WinHelper.EnsureUserDesktopInfo();
             if (DisplayInfo == 0)
-                return;
+                return false;
 
             if (!Instance.WinHelper.EnsureUserMessageBitmasks(out ulong Bitmask1, out ulong Bitmask2))
-                return;
+                return false;
 
-            const int UserConnectHeaderSize = 0x08;
-            const int UserConnectSharedInfoSize = 0x238;
-            const int UserConnectTotalSize = UserConnectHeaderSize + UserConnectSharedInfoSize;
-
-            Span<byte> Data = stackalloc byte[UserConnectTotalSize];
             Data.Clear();
 
             if (ConnectionInfo != 0 && ConnectionInfoSize >= (uint)UserConnectHeaderSize && Instance.IsRegionMapped(ConnectionInfo, (ulong)UserConnectHeaderSize))
@@ -322,8 +337,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             WriteU32(Data, UserConnectHeaderSize + 0x228, 0x3FFu);
             WriteU64(Data, UserConnectHeaderSize + 0x230, Bitmask2);
 
-            uint UserConnectWriteSize = Math.Max(ConnectionInfoSize, (uint)Data.Length);
-            TryWriteClientConnectData(Reply, Instance, Data, ServerId, ConnectionInfo, UserConnectWriteSize);
+            return true;
         }
 
         private static void HandleCsrSrvApi(byte[] Reply, uint ApiIndex, BinaryEmulator Instance)
@@ -809,7 +823,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return addr;
         }
 
-        private static ulong GetOrAllocActivationContextData(BinaryEmulator Instance)
+        public static ulong GetOrAllocActivationContextData(BinaryEmulator Instance)
         {
             if (_fakeActivationContextData != 0 && Instance.IsRegionMapped(_fakeActivationContextData, MinimalActivationContextDataSize))
                 return _fakeActivationContextData;

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -399,67 +399,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     case SYSTEM_INFORMATION_CLASS.SystemProcessInformation:
                         {
-                            List<WinProcess> Processes = Instance.WinHelper.WinProcesses;
-                            if (Processes == null)
-                                Processes = new List<WinProcess>();
-
-                            ulong EntrySize = 0x70;
-                            ulong RequiredLength = (ulong)Processes.Count * EntrySize;
-
-                            if (SystemInformationLength < RequiredLength)
-                            {
-                                if (ReturnLengthPtr != 0)
-                                {
-                                    if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
-                                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                                    Instance._emulator.WriteMemory(ReturnLengthPtr, (uint)RequiredLength);
-                                }
-
-                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
-
-                            Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, (uint)RequiredLength);
-
-                            ulong Current = SystemInformationPtr;
-
-                            for (int i = 0; i < Processes.Count; i++)
-                            {
-                                WinProcess P = Processes[i];
-
-                                uint NextEntryOffset = (i == Processes.Count - 1) ? 0 : (uint)EntrySize;
-
-                                Instance._emulator.WriteMemory(Current + 0x00, NextEntryOffset);
-                                Instance._emulator.WriteMemory(Current + 0x04, 1u);
-
-                                ulong ImageNameField = Current + 0x38; // ImageName field which contains the process name.
-
-                                if (!string.IsNullOrEmpty(P.Name) && P.Status != ProtectionStatus.Unaccessible)
-                                    Instance.WinHelper.SetUnicodeString(ImageNameField, P.Name);
-                                else
-                                {
-                                    Instance._emulator.WriteMemory(ImageNameField + 0x00, (ushort)0, 2);
-                                    Instance._emulator.WriteMemory(ImageNameField + 0x02, (ushort)0, 2);
-                                    Instance._emulator.WriteMemory(ImageNameField + 0x08, 0UL);
-                                }
-
-                                Instance._emulator.WriteMemory(Current + 0x48, 8);
-
-                                Instance._emulator.WriteMemory(Current + 0x50, (ulong)P.PID); // UniqueProcessId
-                                Instance._emulator.WriteMemory(Current + 0x58, (ulong)P.PPID); // InheritedFromUniqueProcessId
-
-                                Current += EntrySize;
-                            }
+                            bool Written = Instance.WinHelper.TryWriteProcessInformationList(SystemInformationPtr, (uint)SystemInformationLength, out uint RequiredLength);
 
                             if (ReturnLengthPtr != 0)
                             {
                                 if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                                Instance._emulator.WriteMemory(ReturnLengthPtr, (uint)RequiredLength);
+                                Instance._emulator.WriteMemory(ReturnLengthPtr, RequiredLength);
                             }
 
-                            return NTSTATUS.STATUS_SUCCESS;
+                            return Written ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                         }
 
                     case SYSTEM_INFORMATION_CLASS.SystemProcessorInformation:

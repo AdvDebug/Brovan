@@ -36,17 +36,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            ulong Peb = Instance.PEB;
-            ulong KernelCallbackTable = Peb != 0 ? Instance.ReadMemoryULong(Peb + 0x58) : 0;
-            if (KernelCallbackTable == 0)
-            {
-                ulong FallbackResult = Win32kHelper.DispatchMessage(Instance, Message);
-                Instance.SetRawSyscallReturn(FallbackResult);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
             const uint FN_DWORDOPTINLPMSG_INDEX = 4;
-            ulong Callback = Instance.ReadMemoryULong(KernelCallbackTable + FN_DWORDOPTINLPMSG_INDEX * 8);
+            ulong Callback = Instance.WinHelper.GetKernelCallbackEntry(FN_DWORDOPTINLPMSG_INDEX);
             if (Callback == 0)
             {
                 ulong FallbackResult = Win32kHelper.DispatchMessage(Instance, Message);

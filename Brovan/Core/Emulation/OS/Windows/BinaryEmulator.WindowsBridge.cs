@@ -47,7 +47,25 @@ namespace Brovan.Core.Emulation
         internal WindowsGuest WindowsGuest => GetGuest<WindowsGuest>();
         internal WinSysHelper WinHelper => WindowsGuest?.WinHelper;
         internal ulong TEB => WindowsGuest?.GetCurrentTeb(this) ?? 0;
+
+        /// <summary>
+        /// The TEB seen with x64 offsets. Same as <see cref="TEB"/> for a 64-bit guest, the extra WOW64 one for a 32-bit guest.
+        /// </summary>
+        internal ulong NativeTEB => WindowsGuest?.GetCurrentNativeTeb(this) ?? 0;
+        
         internal ulong PEB => WindowsGuest?.PEB ?? 0;
+
+        /// <summary>
+        /// The PEB seen with x64 offsets. Same as <see cref="PEB"/> for a 64-bit guest, the extra WOW64 one for a 32-bit guest.
+        /// </summary>
+        internal ulong NativePEB
+        {
+            get
+            {
+                ulong Native = WindowsGuest?.NativePEB ?? 0;
+                return Native != 0 ? Native : PEB;
+            }
+        }
         internal ulong ProcessParams => WindowsGuest?.ProcessParams ?? 0;
         internal ulong ApiSetMap => WindowsGuest?.ApiSetMap ?? 0;
 

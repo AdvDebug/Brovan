@@ -26,6 +26,9 @@ namespace Brovan.Core.Emulation.Guests
 
         public ulong StackSize { get; private set; }
         public ulong PEB { get; internal set; }
+
+        // The 64-bit PEB a WOW64 process also owns. SysWOW64 modules reach it through the TEB and read it with x64 offsets.
+        public ulong NativePEB { get; internal set; }
         public ulong ProcessParams { get; internal set; }
         public ulong ApiSetMap { get; internal set; }
         public ulong WowSyscallGate { get; internal set; }
@@ -45,6 +48,9 @@ namespace Brovan.Core.Emulation.Guests
 
         private const uint Wow64InfoOffset = 0x490;
         private const uint Wow64TlsWow64InfoOffset = 0xE10 + 10 * 4;
+        private const uint TebWowTebOffset32 = 0xFDC;
+        private const uint TebWowTebOffset64 = 0x180C;
+        private const uint NativeTebWow64InfoSlotOffset = 0x1480 + 10 * 8;
         private const uint PageSize = 0x1000;
         public ulong LdrInitializeThunk { get; internal set; }
         public ulong RtlUserThreadStart { get; internal set; }
@@ -94,6 +100,20 @@ namespace Brovan.Core.Emulation.Guests
                 return 0;
 
             return State.Teb;
+        }
+
+        /// <summary>
+        /// Returns the TEB the running thread is seen through with x64 offsets.
+        /// </summary>
+        /// <param name="Instance">The emulator instance.</param>
+        /// <returns>The native TEB, or the only TEB for a 64-bit guest.</returns>
+        public ulong GetCurrentNativeTeb(BinaryEmulator Instance)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Instance.CurrentThread);
+            if (State == null)
+                return 0;
+
+            return State.NativeTeb != 0 ? State.NativeTeb : State.Teb;
         }
 
         public void Initialize(BinaryEmulator Instance, BinaryFile Binary)
@@ -924,32 +944,10 @@ namespace Brovan.Core.Emulation.Guests
 
         public ulong AllocateAndInitializeTEB(BinaryEmulator Instance, EmulatedThread Thread, uint CreateFlags = 0, bool InitialThread = false)
         {
-            ulong Teb = Instance.MapUniqueAddress(0x2000, MemoryProtection.ReadWrite);
             if (Instance._binary.Architecture != BinaryArchitecture.x64)
-            {
-                Instance._emulator.WriteMemoryByte(Teb, 0, 0x2000);
-                Instance._emulator.WriteMemory(Teb + 0x0, 0xFFFFFFFFu);
-                Instance._emulator.WriteMemory(Teb + 0x4, (uint)(Thread.StackAddress + Thread.StackSize));
-                Instance._emulator.WriteMemory(Teb + 0x8, (uint)EffectiveStackLimit(Thread));
-                Instance._emulator.WriteMemory(Teb + 0xE0C, (uint)Thread.StackAddress);
-                Instance._emulator.WriteMemory(Teb + 0x18, (uint)Teb);
-                Instance._emulator.WriteMemory(Teb + 0x20, WinHelper.PID);
-                Instance._emulator.WriteMemory(Teb + 0x24, Thread.ThreadId);
-                Instance._emulator.WriteMemory(Teb + 0x30, (uint)PEB);
-                Instance._emulator.WriteMemory(Teb + 0x34, 0u);
-                if (WowSyscallGate != 0)
-                    Instance._emulator.WriteMemory(Teb + 0xC0, (uint)WowSyscallGate);
+                return AllocateAndInitializeWow64TEB(Instance, Thread);
 
-                Instance._emulator.WriteMemory(Teb + Wow64InfoOffset, PageSize, 4);
-                Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x04, 0u);
-                Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x08, 0u);
-                Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x0C, 0u);
-                Instance._emulator.WriteMemory(Teb + Wow64TlsWow64InfoOffset, (uint)(Teb + Wow64InfoOffset));
-
-                Win32kDpi.ApplyThreadContext(Instance, Teb);
-                return Teb;
-            }
-
+            ulong Teb = Instance.MapUniqueAddress(0x2000, MemoryProtection.ReadWrite);
             Instance._emulator.WriteMemoryByte(Teb, 0, 0x2000);
             Instance._emulator.WriteMemory(Teb, ulong.MaxValue, 8);
             Instance._emulator.WriteMemory(Teb + 0x8, Thread.StackAddress + Thread.StackSize);
@@ -980,6 +978,68 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(Teb + 0x180C, (uint)0u);
 
             Win32kDpi.ApplyThreadContext(Instance, Teb);
+            return Teb;
+        }
+
+        /// <summary>
+        /// Allocates the pair of TEBs a WOW64 thread owns and fills both views of it.
+        /// </summary>
+        /// <param name="Instance">The emulator instance.</param>
+        /// <param name="Thread">The thread the TEBs belong to.</param>
+        /// <returns>Address of the 32-bit TEB.</returns>
+        private ulong AllocateAndInitializeWow64TEB(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            // The native TEB sits one WowTebOffset below the 32-bit one, the way a WOW64 process lays them out.
+            const ulong TebSize = 0x2000;
+
+            ulong NativeTeb = Instance.MapUniqueAddress(TebSize * 2, MemoryProtection.ReadWrite);
+            if (NativeTeb == 0)
+                return 0;
+
+            ulong Teb = NativeTeb + TebSize;
+            Instance._emulator.WriteMemoryByte(NativeTeb, 0, (int)(TebSize * 2));
+
+            ulong StackBase = Thread.StackAddress + Thread.StackSize;
+            ulong StackLimit = EffectiveStackLimit(Thread);
+
+            Instance._emulator.WriteMemory(Teb + 0x0, 0xFFFFFFFFu);
+            Instance._emulator.WriteMemory(Teb + 0x4, (uint)StackBase);
+            Instance._emulator.WriteMemory(Teb + 0x8, (uint)StackLimit);
+            Instance._emulator.WriteMemory(Teb + 0xE0C, (uint)Thread.StackAddress);
+            Instance._emulator.WriteMemory(Teb + 0x18, (uint)Teb);
+            Instance._emulator.WriteMemory(Teb + 0x20, WinHelper.PID);
+            Instance._emulator.WriteMemory(Teb + 0x24, Thread.ThreadId);
+            Instance._emulator.WriteMemory(Teb + 0x30, (uint)PEB);
+            Instance._emulator.WriteMemory(Teb + 0x34, 0u);
+            Instance._emulator.WriteMemory(Teb + TebWowTebOffset32, unchecked((uint)-(long)TebSize), 4);
+            if (WowSyscallGate != 0)
+                Instance._emulator.WriteMemory(Teb + 0xC0, (uint)WowSyscallGate);
+
+            Instance._emulator.WriteMemory(Teb + Wow64InfoOffset, PageSize, 4);
+            Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x04, 1u);
+            Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x08, 0u);
+            Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x0C, 0u);
+
+            Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x20, (ushort)0x8664, 2);
+            Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x22, (ushort)0x014C, 2);
+
+            Instance._emulator.WriteMemory(NativeTeb + 0x08, StackBase, 8);
+            Instance._emulator.WriteMemory(NativeTeb + 0x10, StackLimit, 8);
+            Instance._emulator.WriteMemory(NativeTeb + 0x30, NativeTeb, 8);
+            Instance._emulator.WriteMemory(NativeTeb + 0x40, (ulong)WinHelper.PID, 8);
+            Instance._emulator.WriteMemory(NativeTeb + 0x48, (ulong)Thread.ThreadId, 8);
+            Instance._emulator.WriteMemory(NativeTeb + 0x60, NativePEB, 8);
+            Instance._emulator.WriteMemory(NativeTeb + 0x1478, Thread.StackAddress, 8);
+            Instance._emulator.WriteMemory(NativeTeb + TebWowTebOffset64, (uint)TebSize, 4);
+
+            // The WOW64 TLS slots live in the native TEB. The 32-bit ones belong to the program.
+            Instance._emulator.WriteMemory(NativeTeb + NativeTebWow64InfoSlotOffset, Teb + Wow64InfoOffset, 8);
+
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State != null)
+                State.NativeTeb = NativeTeb;
+
+            Win32kDpi.ApplyThreadContext(Instance, NativeTeb);
             return Teb;
         }
 
@@ -1456,6 +1516,8 @@ namespace Brovan.Core.Emulation.Guests
                     Instance._emulator.WriteMemory(PEB + 0x88, 0u);
                     Instance._emulator.WriteMemory(PEB + 0x8C, 16u);
                 }
+
+                InitializeNativePeb(Instance, MainModule);
             }
 
             WinHelper.AddModule(MainModule, true);
@@ -1472,6 +1534,23 @@ namespace Brovan.Core.Emulation.Guests
             WinHelper.LdrTracker.Install();
 
             GuestSession.PublishStartup(PEB, ProcessParams);
+        }
+
+        private void InitializeNativePeb(BinaryEmulator Instance, WinModule MainModule)
+        {
+            NativePEB = Instance.MapUniqueAddress(0x2000, MemoryProtection.ReadWrite);
+            if (NativePEB == 0)
+                return;
+
+            Instance._emulator.WriteMemoryByte(NativePEB, 0, 0x2000);
+            Instance._emulator.WriteMemory(NativePEB + 0x10, MainModule.MappedBase, 8);
+            Instance._emulator.WriteMemory(NativePEB + 0x68, ApiSetMap, 8);
+            Instance._emulator.WriteMemory(NativePEB + 0xB8, (uint)Environment.ProcessorCount, 4);
+            Instance._emulator.WriteMemory(NativePEB + 0x118, WindowsVersionInfo.MajorVersion, 4);
+            Instance._emulator.WriteMemory(NativePEB + 0x11C, WindowsVersionInfo.MinorVersion, 4);
+            Instance._emulator.WriteMemory(NativePEB + 0x120, WindowsVersionInfo.BuildNumberShort, 2);
+            Instance._emulator.WriteMemory(NativePEB + 0x122, (ushort)0, 2);
+            Instance._emulator.WriteMemory(NativePEB + 0x124, WindowsVersionInfo.PlatformIdWin32Nt, 4);
         }
 
         private ulong BuildProcessParameters32(BinaryEmulator Instance, WinModule MainModule)

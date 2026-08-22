@@ -1575,6 +1575,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<ulong> Children = new();
 
         public ulong WndProc;
+        public ushort Fnid;
         public bool Dirty = true;
 
 

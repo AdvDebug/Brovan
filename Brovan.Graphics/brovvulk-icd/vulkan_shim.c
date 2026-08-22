@@ -1,4 +1,4 @@
-#ifndef _WIN32_WINNT
+﻿#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601
 #endif
 #include <windows.h>
@@ -300,9 +300,18 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
         }
         case 5:
         {
-            const void* const* p = *(const void* const* const*)fp;
+            const unsigned char* p = *(const unsigned char* const*)fp;
             uint32_t n = *(const uint32_t*)(s + d->lenOffset);
-            if (p) { bvk_w_u32(n); for (uint32_t k = 0; k < n; k++) bvk_w_u32((uint32_t)(uintptr_t)p[k]); }
+            if (p)
+            {
+                size_t esz = d->nsize > 0 ? (size_t)d->nsize : sizeof(void*);
+                bvk_w_u32(n);
+                for (uint32_t k = 0; k < n; k++)
+                {
+                    const unsigned char* e = p + (size_t)k * esz;
+                    bvk_w_u32(esz == 8 ? (uint32_t)(*(const uint64_t*)e) : (uint32_t)(uintptr_t)(*(void* const*)e));
+                }
+            }
             else bvk_w_u32(0);
             break;
         }

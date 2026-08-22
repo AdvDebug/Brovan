@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.InteropServices;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -82,7 +82,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                         {
                             IntPtr arr = st.Alloc(CheckedBytes(n, 8));
                             for (uint k = 0; k < n; k++)
-                                *(IntPtr*)(arr + (int)(k * 8)) = st.Lookup(r.ReadU32(), d.HandleType);
+                            {
+                                IntPtr h = st.Lookup(r.ReadU32(), d.HandleType);
+
+                                if (h == IntPtr.Zero && !d.Optional)
+                                    throw new InvalidOperationException($"BrovVulk generic: null {d.HandleType} in a required array.");
+
+                                *(IntPtr*)(arr + (int)(k * 8)) = h;
+                            }
                             *(IntPtr*)fp = arr;
                         }
                         else *(IntPtr*)fp = IntPtr.Zero;
