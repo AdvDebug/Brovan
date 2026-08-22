@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <android/bitmap.h>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
@@ -18,6 +19,7 @@ extern int brovan_install_dxvk(const char *version);
 extern void brovan_set_log_sink(void *sink);
 extern void brovan_set_exit_sink(void *sink);
 extern void brovan_set_install_progress_sink(void *sink);
+extern void brovan_set_text_sink(void *sink);
 extern void brovan_set_verbose(int enabled);
 extern void brovan_set_jit_cache(int enabled);
 extern void brovan_set_surface(void *nativeWindow, int width, int height, int densityDpi);
@@ -43,6 +45,8 @@ static jclass g_callbacks;
 static jmethodID g_onLog;
 static jmethodID g_onExit;
 static jmethodID g_onInstallProgress;
+static jmethodID g_onTextMetrics;
+static jmethodID g_onTextBitmap;
 static pthread_key_t g_attachment_key;
 static int g_attachment_key_ready;
 
@@ -144,6 +148,108 @@ static void on_exit_guest(int reason) {
     detach(attachment);
 }
 
+#define TEXT_FIELD_COUNT 8
+
+/* Mirrors AndroidText.TextRequest. */
+typedef struct {
+    unsigned char *coverage;
+    int capacity;
+    int width;
+    int height;
+    int ascent;
+    int descent;
+    int leading;
+    int average;
+    int maximum;
+    int padding;
+} BrovanText;
+
+static int copy_coverage(JNIEnv *env, jstring text, BrovanText *request) {
+    jobject bitmap = (*env)->CallStaticObjectMethod(env, g_callbacks, g_onTextBitmap, text);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        return 0;
+    }
+
+    if (bitmap == NULL) {
+        return 0;
+    }
+
+    AndroidBitmapInfo info;
+    void *pixels = NULL;
+    int copied = 0;
+
+    if (AndroidBitmap_getInfo(env, bitmap, &info) == ANDROID_BITMAP_RESULT_SUCCESS &&
+        info.format == ANDROID_BITMAP_FORMAT_A_8 &&
+        (int)info.width >= request->width && (int)info.height >= request->height &&
+        AndroidBitmap_lockPixels(env, bitmap, &pixels) == ANDROID_BITMAP_RESULT_SUCCESS) {
+
+        for (int row = 0; row < request->height; row++) {
+            memcpy(request->coverage + (size_t)row * (size_t)request->width,
+                   (unsigned char *)pixels + (size_t)row * (size_t)info.stride,
+                   (size_t)request->width);
+        }
+
+        AndroidBitmap_unlockPixels(env, bitmap);
+        copied = 1;
+    }
+
+    (*env)->DeleteLocalRef(env, bitmap);
+    return copied;
+}
+
+/* A NULL text asks for the font metrics alone, and a NULL coverage buffer for a measurement. Filling the
+   dimensions and reporting failure is how a buffer that is too small asks the caller to grow it. */
+static int on_text(const char *utf8, BrovanText *request) {
+    if (request == NULL || g_callbacks == NULL || g_onTextMetrics == NULL || g_onTextBitmap == NULL) {
+        return 0;
+    }
+
+    Attachment attachment = attach();
+    JNIEnv *env = attachment.env;
+    if (env == NULL) {
+        return 0;
+    }
+
+    int result = 0;
+    jstring text = utf8 == NULL ? NULL : (*env)->NewStringUTF(env, utf8);
+    jintArray fields = (*env)->CallStaticObjectMethod(env, g_callbacks, g_onTextMetrics, text);
+
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        fields = NULL;
+    }
+
+    if (fields != NULL) {
+        jint values[TEXT_FIELD_COUNT];
+        (*env)->GetIntArrayRegion(env, fields, 0, TEXT_FIELD_COUNT, values);
+        (*env)->DeleteLocalRef(env, fields);
+
+        request->width = values[0];
+        request->height = values[1];
+        request->ascent = values[2];
+        request->descent = values[3];
+        request->leading = values[4];
+        request->average = values[5];
+        request->maximum = values[6];
+        request->padding = values[7];
+
+        if (request->coverage == NULL) {
+            result = 1;
+        } else if (request->width > 0 && request->height > 0 &&
+                   (long long)request->capacity >= (long long)request->width * (long long)request->height) {
+            result = copy_coverage(env, text, request);
+        }
+    }
+
+    if (text != NULL) {
+        (*env)->DeleteLocalRef(env, text);
+    }
+
+    detach(attachment);
+    return result;
+}
+
 /* Borrowed UTF-8 view of a jstring; release() must be called with the same jstring. */
 static const char *borrow(JNIEnv *env, jstring value) {
     return value == NULL ? NULL : (*env)->GetStringUTFChars(env, value, NULL);
@@ -223,6 +329,9 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
         g_onLog = (*env)->GetStaticMethodID(env, clazz, "onNativeLog", "(Ljava/lang/String;)V");
         g_onExit = (*env)->GetStaticMethodID(env, clazz, "onNativeExit", "(I)V");
         g_onInstallProgress = (*env)->GetStaticMethodID(env, clazz, "onNativeInstallProgress", "(JJJJ)V");
+        g_onTextMetrics = (*env)->GetStaticMethodID(env, clazz, "onNativeTextMetrics", "(Ljava/lang/String;)[I");
+        g_onTextBitmap = (*env)->GetStaticMethodID(env, clazz, "onNativeRasterizeText",
+                                                   "(Ljava/lang/String;)Landroid/graphics/Bitmap;");
         (*env)->ExceptionClear(env);
     }
 
@@ -240,6 +349,7 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
         brovan_set_log_sink((void *)&on_log);
         brovan_set_exit_sink((void *)&on_exit_guest);
         brovan_set_install_progress_sink((void *)&on_install_progress);
+        brovan_set_text_sink((void *)&on_text);
     } else {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "brovan_init failed: %d", status);
     }

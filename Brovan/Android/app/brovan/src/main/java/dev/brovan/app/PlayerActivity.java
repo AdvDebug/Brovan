@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.text.Spannable;
 import android.text.SpannableString;
 import android.text.SpannableStringBuilder;
@@ -46,6 +47,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private static final String EXTRA_DEVELOPER = "developer";
     private static final String EXTRA_CONTROLS = "controls";
     private static final String EXTRA_JIT_CACHE = "jit_cache";
+    private static final String EXTRA_SUSTAINED = "sustained";
     private static final String EXTRA_LAYOUT = "layout";
     private static final String EXTRA_POINTER = "pointer";
 
@@ -85,6 +87,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .putExtra(EXTRA_DEVELOPER, settings.developerMode())
                 .putExtra(EXTRA_CONTROLS, settings.controlScheme())
                 .putExtra(EXTRA_JIT_CACHE, settings.jitCache())
+                .putExtra(EXTRA_SUSTAINED, settings.sustainedPerformance())
                 .putExtra(EXTRA_LAYOUT, settings.controlLayout())
                 .putExtra(EXTRA_POINTER, settings.pointerMode());
     }
@@ -93,6 +96,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        applySustainedPerformance();
         setContentView(R.layout.activity_player);
 
         settings = new Settings(this);
@@ -167,6 +171,17 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
 
         if (result != BrovanNative.STATUS_OK) {
             fail(describe(result));
+        }
+    }
+
+    private void applySustainedPerformance() {
+        if (!getIntent().getBooleanExtra(EXTRA_SUSTAINED, false)) {
+            return;
+        }
+
+        PowerManager power = getSystemService(PowerManager.class);
+        if (power != null && power.isSustainedPerformanceModeSupported()) {
+            getWindow().setSustainedPerformanceMode(true);
         }
     }
 

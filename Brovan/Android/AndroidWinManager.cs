@@ -4,16 +4,21 @@ using Brovan.Core.Emulation.OS.SharedHelpers;
 
 namespace Brovan.Android
 {
-    internal sealed class AndroidWinManager : IDisplayConnection, IGdiRenderSupport
+    internal sealed class AndroidWinManager : IDisplayConnection, IGdiRenderSupport, ITextRenderSupport, ITextMetricsSupport
     {
         private const int EFD_CLOEXEC = 0x80000;
         private const int EFD_NONBLOCK = 0x800;
+
+        private const uint WM_SIZE = 0x0005;
+        private const uint SIZE_RESTORED = 0;
 
         private static AndroidWinManager _current;
 
         private readonly AndroidGdiSurface _gdi = new();
 
         private int _wakeFd = -1;
+        private int _publishedWidth;
+        private int _publishedHeight;
 
         private AndroidWindow _window;
         private volatile bool _disposed;
@@ -53,14 +58,55 @@ namespace Brovan.Android
 
         public void PumpEvents()
         {
-            if (!_disposed)
-                _gdi.Flush();
+            if (_disposed)
+                return;
+
+            PublishSurfaceSize();
+            _gdi.Flush();
+        }
+
+        // The Surface carries no resize stream of its own, so the guest window would keep the size the guest
+        // asked for while the Vulkan surface reports the Surface.
+        private void PublishSurfaceSize()
+        {
+            int width = AndroidHost.Width;
+            int height = AndroidHost.Height;
+
+            if (width <= 0 || height <= 0 || (width == _publishedWidth && height == _publishedHeight))
+                return;
+
+            _publishedWidth = width;
+            _publishedHeight = height;
+
+            HostEventQueue.Enqueue(WM_SIZE, SIZE_RESTORED, MakeLParam(width, height));
+            HostEventQueue.MarkRepaint();
+        }
+
+        private static ulong MakeLParam(int low, int high)
+        {
+            return (ulong)(uint)(((high & 0xFFFF) << 16) | (low & 0xFFFF));
         }
 
         public void ExecuteGdiPrimitive(IntPtr windowHandle, GdiPrimitive primitive)
         {
             if (!_disposed)
                 _gdi.Execute(primitive);
+        }
+
+        public void RenderText(IntPtr windowHandle, ulong hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        {
+            if (!_disposed)
+                _gdi.DrawText(hwnd, text, x, y, rectLeft, rectTop, rectRight, rectBottom, options);
+        }
+
+        public bool MeasureText(string text, out int width, out int height)
+        {
+            return AndroidText.Measure(text, out width, out height);
+        }
+
+        public bool GetTextMetrics(out TextMetricsData metrics)
+        {
+            return AndroidText.GetMetrics(out metrics);
         }
 
         public void InvalidateSurface()

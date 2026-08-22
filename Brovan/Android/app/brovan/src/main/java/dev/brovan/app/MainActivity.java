@@ -497,6 +497,10 @@ public class MainActivity extends AppCompatActivity {
         jitCache.setChecked(settings.jitCache());
         jitCache.setOnCheckedChangeListener((button, checked) -> settings.setJitCache(checked));
 
+        MaterialSwitch sustained = view.findViewById(R.id.sustained);
+        sustained.setChecked(settings.sustainedPerformance());
+        sustained.setOnCheckedChangeListener((button, checked) -> settings.setSustainedPerformance(checked));
+
         MaterialSwitch developer = view.findViewById(R.id.developer);
         developer.setChecked(settings.developerMode());
         developer.setOnCheckedChangeListener((button, checked) -> settings.setDeveloperMode(checked));

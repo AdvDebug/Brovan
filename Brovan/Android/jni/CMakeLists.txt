@@ -11,7 +11,7 @@ if(NOT EXISTS "${BROVAN_LIB}")
     message(FATAL_ERROR "libBrovan.so not found at ${BROVAN_LIB}; publish Brovan for linux-bionic-arm64 first")
 endif()
 
-target_link_libraries(brovan_jni "${BROVAN_LIB}" android log)
+target_link_libraries(brovan_jni "${BROVAN_LIB}" android jnigraphics log)
 
 # Android 16 warns about 4K-aligned libraries and 16K-page devices reject them outright.
 target_link_options(brovan_jni PRIVATE "-Wl,-z,max-page-size=16384")

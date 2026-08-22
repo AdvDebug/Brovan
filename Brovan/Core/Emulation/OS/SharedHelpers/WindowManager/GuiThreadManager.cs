@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,6 +20,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
     {
         public GuiCommandKind Kind;
         public uint TextOptions;
+        public ulong Hwnd;
         public int X;
         public int Y;
         public int RectLeft;
@@ -187,6 +188,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             Submit(new GuiCommand
             {
                 Kind = GuiCommandKind.RenderText,
+                Hwnd = hwnd,
                 Text = text,
                 X = x,
                 Y = y,
@@ -391,6 +393,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     {
                         _textRender.RenderText(
                             window.NativeHandle,
+                            command.Hwnd,
                             command.Text,
                             command.X,
                             command.Y,

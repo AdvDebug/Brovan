@@ -107,7 +107,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 const int MaxYieldAdvanceMs = 16;
                 if (TryGetYieldTimeAdvanceMs(Instance, Thread, MaxYieldAdvanceMs, out int AdvanceMs) && AdvanceMs > 0)
-                    Instance.AdvanceEmulatedTimeMilliseconds(AdvanceMs, AdvanceTimestampCounter: true);
+                    Instance.AdvanceEmulatedTimeMilliseconds(AdvanceMs);
 
                 Instance._emulator.WriteRegister(Instance.IPRegister, NextRip);
                 Thread.State = EmulatedThreadState.Ready;

@@ -8,6 +8,8 @@ namespace Brovan.Android
     {
         private const int DefaultBackground = unchecked((int)0xFFFFFFFF);
 
+        private const uint EtoClipped = 0x0004;
+
         private const int MaximumWindows = 32;
 
         private sealed class WindowBuffer
@@ -34,6 +36,40 @@ namespace Brovan.Android
                 Draw(target, primitive);
                 target.Dirty = true;
                 _lastDrawn = primitive.Hwnd;
+            }
+        }
+
+        public void DrawText(ulong hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        {
+            if (string.IsNullOrEmpty(text))
+                return;
+
+            lock (_sync)
+            {
+                WindowBuffer target = Resolve(hwnd);
+                if (target == null)
+                    return;
+
+                if (!AndroidText.Rasterize(text, out AndroidTextBitmap bitmap))
+                    return;
+
+                int left = 0;
+                int top = 0;
+                int right = target.Width;
+                int bottom = target.Height;
+
+                if ((options & EtoClipped) != 0 && rectRight > rectLeft && rectBottom > rectTop)
+                {
+                    left = Math.Max(left, rectLeft);
+                    top = Math.Max(top, rectTop);
+                    right = Math.Min(right, rectRight);
+                    bottom = Math.Min(bottom, rectBottom);
+                }
+
+                // TA_TOP: the reference point is the top of the cell, not the baseline.
+                Blend(target, bitmap, x - bitmap.Padding, y - bitmap.Padding, left, top, right, bottom);
+                target.Dirty = true;
+                _lastDrawn = hwnd;
             }
         }
 
@@ -159,6 +195,41 @@ namespace Brovan.Android
             finally
             {
                 AndroidNative.NativeWindowUnlockAndPost(window);
+            }
+        }
+
+        private static void Blend(WindowBuffer target, in AndroidTextBitmap bitmap, int left, int top, int clipLeft, int clipTop, int clipRight, int clipBottom)
+        {
+            int firstRow = Math.Max(0, clipTop - top);
+            int lastRow = Math.Min(bitmap.Height, clipBottom - top);
+            int firstColumn = Math.Max(0, clipLeft - left);
+            int lastColumn = Math.Min(bitmap.Width, clipRight - left);
+
+            for (int row = firstRow; row < lastRow; row++)
+            {
+                int source = row * bitmap.Width;
+                int destination = ((top + row) * target.Width) + left;
+
+                for (int column = firstColumn; column < lastColumn; column++)
+                {
+                    int coverage = bitmap.Coverage[source + column];
+                    if (coverage == 0)
+                        continue;
+
+                    if (coverage == 0xFF)
+                    {
+                        target.Pixels[destination + column] = unchecked((int)0xFF000000);
+                        continue;
+                    }
+
+                    int pixel = target.Pixels[destination + column];
+                    int remaining = 255 - coverage;
+                    int red = ((pixel & 0xFF) * remaining) / 255;
+                    int green = (((pixel >> 8) & 0xFF) * remaining) / 255;
+                    int blue = (((pixel >> 16) & 0xFF) * remaining) / 255;
+
+                    target.Pixels[destination + column] = unchecked((int)0xFF000000) | (blue << 16) | (green << 8) | red;
+                }
             }
         }
 

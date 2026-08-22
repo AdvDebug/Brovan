@@ -350,17 +350,28 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int OffsetNtMajorVersion = 0x26C;
         private const int OffsetNtMinorVersion = 0x270;
         private const int OffsetProcessorFeatures = 0x274;
+        private const int OffsetCyclesPerYield = 0x2D6;
         private const int OffsetXStateConfiguration = 0x3D8;
         private const int OffsetQpcFrequency = 0x300;
+        private const int OffsetQpcBias = 0x3B8;
         private const int OffsetQpcData = 0x3C6;
+
+        // QpcData bit 0 lets ntdll answer QueryPerformanceCounter in user mode, bit 1 sends it through the
+        // hypervisor shared page rather than a bare RDTSC. The remaining bits pick a serialising fence and
+        // RDTSCP, neither of which buys anything against an emulated counter.
+        private const byte QpcBypassThroughSharedPage = 0x03;
         private const int OffsetSystemCallX86 = 0x300;
         private const int OffsetSystemCallX64 = 0x308;
+
+        // 62 is what my desktop machine currently publishes
+        private const ushort DefaultCyclesPerYield = 62;
 
         internal const long QpcFrequency = 10_000_000;
         private const int OffsetTickCountQuad = 0x320;
         private const int OffsetCookie = 0x330;
 
         private const ulong HundredNsPerDefaultTick = 156_250UL;
+        private const uint TickCountMultiplier = (uint)((HundredNsPerDefaultTick << 24) / 10_000UL);
 
         private readonly BinaryEmulator Emulator;
         private MemoryHookCallback ReadHook;
@@ -370,6 +381,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         private long LastUpdateTimestamp;
 
         private ulong BaseInterruptTime;
+
+        /// <summary>
+        /// Guest address of the reference timestamp page ntdll reads through
+        /// <c>RtlpHypervisorSharedUserVa</c>, or zero when the guest has to use the syscall.
+        /// </summary>
+        public ulong HypervisorSharedPage { get; private set; }
+
+        private bool UsesSharedPage => Emulator._emulator.TimestampCounterIsEmulated;
+
+        private static readonly ulong SharedPageMultiplier = (ulong)(((((UInt128)1) << 64)
+            + BinaryEmulator.TscTicksPerQpcTick - 1) / BinaryEmulator.TscTicksPerQpcTick);
 
         public KuserSharedDataManager(BinaryEmulator Emulator)
         {
@@ -408,7 +430,34 @@ namespace Brovan.Core.Emulation.OS.Windows
             Installed = true;
 
             Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + (ulong)GetSystemCallOffset(), 0u, 4);
+            InstallHypervisorSharedPage();
             UpdateDynamicFields(true);
+        }
+
+        private void InstallHypervisorSharedPage()
+        {
+            if (!UsesSharedPage)
+                return;
+
+            ulong Address = Emulator.KUSER_SHARED_DATA + PageSize;
+            if (!Emulator.IsRegionMapped(Address, PageSize) &&
+                Emulator.MapMemoryRegion(Address, PageSize, MemoryProtection.Read) == 0)
+            {
+                Utils.LogError($"[KUSER_MANAGER] Failed to map the hypervisor shared page: {Emulator.GetLastError()}");
+                return;
+            }
+
+            byte[] Page = new byte[PageSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(0, 4), 1);
+            BinaryPrimitives.WriteUInt64LittleEndian(Page.AsSpan(8, 8), SharedPageMultiplier);
+
+            if (!Emulator._emulator.WriteMemory(Address, Page))
+            {
+                Utils.LogError($"[KUSER_MANAGER] Failed to write the hypervisor shared page: {Emulator.GetLastError()}");
+                return;
+            }
+
+            HypervisorSharedPage = Address;
         }
 
         private bool OnRead(BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value)
@@ -515,9 +564,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteUInt32(Page, OffsetNtMinorVersion, WindowsVersionInfo.MinorVersion);
                 WriteUInt32(Page, OffsetCookie, (uint)RandomNumberGenerator.GetInt32(int.MaxValue));
 
-                Page[OffsetQpcData] = 0;
-                Page[OffsetQpcData + 1] = 0;
-
                 WriteUInt32(Page, OffsetQpcFrequency, unchecked((uint)QpcFrequency));
                 WriteUInt32(Page, OffsetQpcFrequency + 4, unchecked((uint)(QpcFrequency >> 32)));
             }
@@ -532,6 +578,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 Random random = new Random();
+
+                void WriteUInt16(int Offset, ushort Value)
+                {
+                    if (Offset < 0 || Offset + 2 > Page.Length)
+                        return;
+
+                    BinaryPrimitives.WriteUInt16LittleEndian(Page.AsSpan(Offset, 2), Value);
+                }
 
                 void WriteUInt32(int Offset, uint Value)
                 {
@@ -597,7 +651,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 // ActiveProcessorCount
                 WriteUInt32(0x03C0, unchecked((uint)Environment.ProcessorCount));
+
+                WriteUInt16(OffsetCyclesPerYield, DefaultCyclesPerYield);
             }
+
+            BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(OffsetTickCountMultiplier, 4), TickCountMultiplier);
+
+            Page[OffsetQpcData] = UsesSharedPage ? QpcBypassThroughSharedPage : (byte)0;
+            Page[OffsetQpcData + 1] = 0;
+
+            Array.Clear(Page, OffsetQpcBias, 8);
 
             string SystemRoot = "C:\\Windows";
             Array.Clear(Page, OffsetNtSystemRoot, Math.Min(Page.Length - OffsetNtSystemRoot, 520));

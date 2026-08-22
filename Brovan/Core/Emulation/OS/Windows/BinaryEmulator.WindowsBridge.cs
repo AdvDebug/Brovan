@@ -2543,7 +2543,6 @@ namespace Brovan.Core.Emulation
         private void InstructionHandler(ulong Address, uint Size)
         {
             Instruction++;
-            _timestampCounter += TscCyclesPerInstruction;
 
             EmulatedThread Thread = CurrentThread;
             WinSysHelper Helper = WinHelper;

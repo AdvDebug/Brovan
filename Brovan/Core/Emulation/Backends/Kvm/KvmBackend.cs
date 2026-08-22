@@ -26,6 +26,8 @@ namespace Brovan.Core.Emulation
         // Guest pages must stay below the internal page tables, which the partition maps above them.
         public ulong MaxMappableAddress => KvmConstants.InternalPageTableBase - 1;
 
+        public bool TimestampCounterIsEmulated => false;
+
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
             => Inner.MapMemory(address, size, protection);
 

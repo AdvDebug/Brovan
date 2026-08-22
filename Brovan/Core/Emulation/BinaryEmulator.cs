@@ -365,8 +365,8 @@ namespace Brovan.Core.Emulation
         private InstructionHookCallback Privileged;
         private InterruptHookCallback Interrupt;
         private InstructionBoolHookCallback CPUID;
-        private InstructionHookCallback RDTSC;
-        private InstructionHookCallback RDTSCP;
+        private InstructionBoolHookCallback RDTSC;
+        private InstructionBoolHookCallback RDTSCP;
         private MemoryHookCallback InvalidMemory;
         private InstructionHookCallback InvalidInstruction;
         private MemoryHookCallback SnapMonitor;
@@ -415,18 +415,16 @@ namespace Brovan.Core.Emulation
                 return Limit < Mappable ? Limit : Mappable;
             }
         }
-        private ulong _timestampCounter = 0x100000000UL;
-
-        private const ulong TscCyclesPerInstruction = 3;
-
         /// <summary>
         /// How long the scheduler blocks in one go when no guest thread can run.
         /// </summary>
         private const int IdleWaitSliceMs = 5;
 
         private const ulong TscCyclesPerMillisecond = 3_000_000UL;
-        private const ulong RdtscReadCycles = 60;
-        private const ulong RdtscpReadCycles = 90;
+
+        internal const ulong TscTicksPerQpcTick =
+            TscCyclesPerMillisecond / (ulong)(OS.Windows.KuserSharedDataManager.QpcFrequency / 1000);
+
         private readonly long EmulatedSystemTimeBaseFileTimeUtc = DateTime.UtcNow.ToFileTimeUtc();
 
         private readonly System.Diagnostics.Stopwatch _wallClock = System.Diagnostics.Stopwatch.StartNew();
@@ -503,7 +501,7 @@ namespace Brovan.Core.Emulation
         /// <summary>
         /// Advances guest time for a wait that was not served in real time.
         /// </summary>
-        internal void AdvanceEmulatedTimeMilliseconds(long Milliseconds, bool AdvanceTimestampCounter = false)
+        internal void AdvanceEmulatedTimeMilliseconds(long Milliseconds)
         {
             if (Milliseconds <= 0)
                 return;
@@ -514,15 +512,6 @@ namespace Brovan.Core.Emulation
                 return;
 
             Interlocked.Add(ref _emulatedTimeSkewMilliseconds, AppliedMilliseconds);
-
-            if (AdvanceTimestampCounter)
-            {
-                ulong Ticks = (ulong)AppliedMilliseconds;
-                if (Ticks > (ulong.MaxValue - _timestampCounter) / TscCyclesPerMillisecond)
-                    _timestampCounter = ulong.MaxValue;
-                else
-                    _timestampCounter += Ticks * TscCyclesPerMillisecond;
-            }
 
             // A skew jump is the one moment the page is guaranteed stale, and the guest usually reads it
             // immediately afterwards: the wait it was serving has just come due.
@@ -1650,7 +1639,9 @@ namespace Brovan.Core.Emulation
             TriggerDebugMessage(() => $"cpu: interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}");
             try
             {
-                Guest.TryHandleInterrupt(this, interrupt_number);
+                // An unhandled vector leaves IP on the faulting instruction, which re-faults forever.
+                if (!Guest.TryHandleInterrupt(this, interrupt_number) && (Settings.Flags & LogFlags.Issues) != 0)
+                    TriggerEventMessage($"[-] Unhandled CPU interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}.", LogFlags.Issues);
             }
             catch (Exception ex)
             {
@@ -1852,16 +1843,16 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private void AdvanceTimestampCounter(uint Instructions)
+        internal ulong GetEmulatedTimestampCounter()
         {
-            _timestampCounter += ((ulong)Instructions * TscCyclesPerInstruction);
+            ulong Counter = GetEmulatedPerformanceCounter();
+            return Counter > ulong.MaxValue / TscTicksPerQpcTick ? ulong.MaxValue : Counter * TscTicksPerQpcTick;
         }
 
-        private void RDTSC_Handler()
+        private bool RDTSC_Handler()
         {
             ulong IP = ReadRegister(IPRegister);
-            _timestampCounter += RdtscReadCycles;
-            ulong ticks = _timestampCounter;
+            ulong ticks = GetEmulatedTimestampCounter();
 
             if (_binary.Architecture == BinaryArchitecture.x64)
             {
@@ -1876,14 +1867,14 @@ namespace Brovan.Core.Emulation
 
             if ((Settings.Flags & LogFlags.RDTSC) != 0)
                 TriggerEventMessage($"[+] RDTSC Instruction Executed at 0x{IP:X}.", LogFlags.RDTSC);
-            StopAfterSyntheticInstruction(IP + 2);
+
+            return true;
         }
 
-        private void RDTSCP_Handler()
+        private bool RDTSCP_Handler()
         {
             ulong IP = ReadRegister(IPRegister);
-            _timestampCounter += RdtscpReadCycles;
-            ulong ticks = _timestampCounter;
+            ulong ticks = GetEmulatedTimestampCounter();
 
             if (_binary.Architecture == BinaryArchitecture.x64)
             {
@@ -1900,7 +1891,8 @@ namespace Brovan.Core.Emulation
 
             if ((Settings.Flags & LogFlags.RDTSCP) != 0)
                 TriggerEventMessage($"[+] RDTSCP Instruction Executed at 0x{IP:X}.", LogFlags.RDTSCP);
-            StopAfterSyntheticInstruction(IP + 3);
+
+            return true;
         }
 
         internal ulong AllocateThreadStack(ulong StackSize)
@@ -2527,8 +2519,8 @@ namespace Brovan.Core.Emulation
             ulong Total = 0;
             uint Slices = 0;
             long SchedulerTick = 0;
-            ulong PendingSchedulerTimeCycles = 0;
-            const ulong SchedulerCyclesPerMillisecond = TscCyclesPerMillisecond;
+            ulong PendingSchedulerInstructions = 0;
+            const ulong SchedulerRescanInstructions = 1_000_000;
             long AgingThresholdBudget = AgingThresholdSlices <= 0 ? 0 : AgingThresholdSlices;
             int KnownThreadOrderCount = ThreadOrder.Count;
             bool WakeupScanRequired = true;
@@ -2691,15 +2683,14 @@ namespace Brovan.Core.Emulation
 
                 ImmaBeEmulatedOOO.InstructionsExecuted += SchedulerSliceWork;
                 Total += SchedulerSliceWork;
-                AdvanceTimestampCounter(SchedulerSliceWork);
 
                 bool TimedWaitRescanDue = false;
                 if (SchedulerSliceWork > 1)
                 {
-                    PendingSchedulerTimeCycles += (ulong)SchedulerSliceWork * TscCyclesPerInstruction;
-                    if (PendingSchedulerTimeCycles >= SchedulerCyclesPerMillisecond)
+                    PendingSchedulerInstructions += SchedulerSliceWork;
+                    if (PendingSchedulerInstructions >= SchedulerRescanInstructions)
                     {
-                        PendingSchedulerTimeCycles = 0;
+                        PendingSchedulerInstructions = 0;
                         TimedWaitRescanDue = true;
                     }
                 }
@@ -2855,11 +2846,11 @@ namespace Brovan.Core.Emulation
                     Utils.LogError($"Couldn't add the CPUID hook: {_emulator.GetLastError()}.");
 
                 RDTSC = RDTSC_Handler;
-                if (_emulator.AddInstructionHook(BackendInstructionHook.Rdtsc, RDTSC) == IntPtr.Zero)
+                if (_emulator.AddInstructionBoolHook(BackendInstructionHook.Rdtsc, RDTSC) == IntPtr.Zero)
                     Utils.LogError($"Couldn't add the RDTSC hook: {_emulator.GetLastError()}.");
 
                 RDTSCP = RDTSCP_Handler;
-                if (_emulator.AddInstructionHook(BackendInstructionHook.Rdtscp, RDTSCP) == IntPtr.Zero)
+                if (_emulator.AddInstructionBoolHook(BackendInstructionHook.Rdtscp, RDTSCP) == IntPtr.Zero)
                     Utils.LogError($"Couldn't add the RDTSCP hook: {_emulator.GetLastError()}.");
 
                 Privileged = PrivilegedInstructionHandler;

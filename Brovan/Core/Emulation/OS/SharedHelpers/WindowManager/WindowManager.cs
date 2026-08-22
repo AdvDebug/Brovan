@@ -470,7 +470,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
     public interface ITextRenderSupport
     {
-        void RenderText(IntPtr windowHandle, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options);
+        void RenderText(IntPtr windowHandle, ulong hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options);
     }
 
     public enum GdiPrimitiveKind

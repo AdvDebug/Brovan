@@ -14,6 +14,7 @@ final class Settings {
     private static final String KEY_FIT_WINDOW = "fit_window";
     private static final String KEY_CONTROLS = "controls";
     private static final String KEY_JIT_CACHE = "jit_cache";
+    private static final String KEY_SUSTAINED = "sustained";
     private static final String KEY_SETUP_DISMISSED = "setup_dismissed";
     private static final String KEY_CONTROL_LAYOUT = "control_layout";
     private static final String KEY_POINTER = "pointer";
@@ -63,6 +64,15 @@ final class Settings {
 
     void setJitCache(boolean value) {
         preferences.edit().putBoolean(KEY_JIT_CACHE, value).apply();
+    }
+
+    /** Trades peak clocks for a rate the device can hold once it is warm. */
+    boolean sustainedPerformance() {
+        return preferences.getBoolean(KEY_SUSTAINED, false);
+    }
+
+    void setSustainedPerformance(boolean value) {
+        preferences.edit().putBoolean(KEY_SUSTAINED, value).apply();
     }
 
     /** The custom control arrangement, as written by the editor. Empty until the user saves one. */

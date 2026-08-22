@@ -62,5 +62,8 @@ namespace Brovan.Android
 
         [LibraryImport("libc", EntryPoint = "free")]
         public static partial void Free(IntPtr pointer);
+
+        [LibraryImport("libc", EntryPoint = "sched_setaffinity", SetLastError = true)]
+        public static unsafe partial int SchedSetAffinity(int thread, nuint maskSize, ulong* mask);
     }
 }

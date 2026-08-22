@@ -42,6 +42,29 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
+                    case SYSTEM_INFORMATION_CLASS.SystemHypervisorSharedPageInformation:
+                        {
+                            ulong Page = Instance.WinHelper.KuserSharedData.HypervisorSharedPage;
+                            if (Page == 0)
+                                return NTSTATUS.STATUS_NOT_SUPPORTED;
+
+                            uint RequiredLength = (uint)Instance.WinHelper.PointerSize;
+
+                            if (ReturnLengthPtr != 0)
+                            {
+                                if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                Instance._emulator.WriteMemory(ReturnLengthPtr, RequiredLength);
+                            }
+
+                            if (SystemInformationLength < RequiredLength)
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                            Instance.WinHelper.WritePointer(SystemInformationPtr, Page);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
                     case SYSTEM_INFORMATION_CLASS.SystemBuildVersionInformation:
                         {
                             const uint RequiredLength = WindowsVersionInfo.BuildVersionInformationLength;

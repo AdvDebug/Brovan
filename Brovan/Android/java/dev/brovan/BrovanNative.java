@@ -1,5 +1,10 @@
 package dev.brovan;
 
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Typeface;
 import android.view.Surface;
 
 import java.util.ArrayList;
@@ -55,6 +60,20 @@ public final class BrovanNative {
     }
 
     private static final String[] NO_RECORDS = new String[0];
+
+    /** The cell of the default GDI font, which is what the emulator falls back to when text cannot be measured. */
+    private static final float TEXT_SIZE_PIXELS = 16f;
+
+    /** Slack around a run so antialiased edges and overhang are not clipped. */
+    private static final int TEXT_PADDING = 2;
+
+    private static final int TEXT_MAXIMUM_WIDTH = 4096;
+    private static final int TEXT_FIELD_COUNT = 8;
+
+    private static final Object TEXT_LOCK = new Object();
+    private static Paint textPaint;
+    private static Bitmap textBitmap;
+    private static Canvas textCanvas;
 
     private static volatile Listener listener;
     private static volatile InstallListener installListener;
@@ -247,6 +266,85 @@ public final class BrovanNative {
         if (current != null) {
             current.onInstallProgress(filesDone, filesTotal, bytesDone, bytesTotal);
         }
+    }
+
+    /**
+     * Font metrics and the size of the bitmap {@link #onNativeRasterizeText} would produce, as
+     * width, height, ascent, descent, leading, average width, maximum width, padding. A null text asks for
+     * the font metrics alone. Called from emulator threads.
+     */
+    @SuppressWarnings("unused")
+    private static int[] onNativeTextMetrics(String text) {
+        int[] fields = new int[TEXT_FIELD_COUNT];
+
+        synchronized (TEXT_LOCK) {
+            Paint paint = textPaint();
+            Paint.FontMetricsInt metrics = paint.getFontMetricsInt();
+            int ascent = -metrics.ascent;
+
+            if (text != null && !text.isEmpty()) {
+                fields[0] = advanceOf(paint, text) + (TEXT_PADDING * 2);
+                fields[1] = ascent + metrics.descent + (TEXT_PADDING * 2);
+            }
+
+            fields[2] = ascent;
+            fields[3] = metrics.descent;
+            fields[4] = metrics.leading;
+            fields[5] = Math.max(1, Math.round(paint.measureText("x")));
+            fields[6] = Math.max(1, Math.round(paint.measureText("W")));
+            fields[7] = TEXT_PADDING;
+        }
+
+        return fields;
+    }
+
+    /**
+     * Draws the run into a reused ALPHA_8 bitmap, its left edge and baseline placed the way
+     * {@link #onNativeTextMetrics} describes.
+     */
+    @SuppressWarnings("unused")
+    private static Bitmap onNativeRasterizeText(String text) {
+        if (text == null || text.isEmpty()) {
+            return null;
+        }
+
+        synchronized (TEXT_LOCK) {
+            Paint paint = textPaint();
+            Paint.FontMetricsInt metrics = paint.getFontMetricsInt();
+            int ascent = -metrics.ascent;
+            int width = advanceOf(paint, text) + (TEXT_PADDING * 2);
+            int height = ascent + metrics.descent + (TEXT_PADDING * 2);
+
+            if (width <= 0 || height <= 0) {
+                return null;
+            }
+
+            if (textBitmap == null || textBitmap.getWidth() < width || textBitmap.getHeight() < height) {
+                textBitmap = Bitmap.createBitmap(Math.max(width, textBitmap == null ? 0 : textBitmap.getWidth()),
+                                                 Math.max(height, textBitmap == null ? 0 : textBitmap.getHeight()),
+                                                 Bitmap.Config.ALPHA_8);
+                textCanvas = new Canvas(textBitmap);
+            }
+
+            textBitmap.eraseColor(Color.TRANSPARENT);
+            textCanvas.drawText(text, TEXT_PADDING, TEXT_PADDING + ascent, paint);
+            return textBitmap;
+        }
+    }
+
+    private static int advanceOf(Paint paint, String text) {
+        return Math.min((int) Math.ceil(paint.measureText(text)), TEXT_MAXIMUM_WIDTH);
+    }
+
+    private static Paint textPaint() {
+        if (textPaint == null) {
+            textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            textPaint.setTypeface(Typeface.DEFAULT);
+            textPaint.setTextSize(TEXT_SIZE_PIXELS);
+            textPaint.setColor(Color.BLACK);
+        }
+
+        return textPaint;
     }
 
     private static native int nativeInit(String baseDirectory);

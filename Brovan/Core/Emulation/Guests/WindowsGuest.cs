@@ -791,6 +791,9 @@ namespace Brovan.Core.Emulation.Guests
         {
             switch (InterruptNumber)
             {
+                case 0:
+                    QueueUserModeException(Instance, NTSTATUS.STATUS_INTEGER_DIVIDE_BY_ZERO);
+                    return true;
                 case 1:
                     QueueUserModeException(Instance, NTSTATUS.STATUS_SINGLE_STEP);
                     return true;

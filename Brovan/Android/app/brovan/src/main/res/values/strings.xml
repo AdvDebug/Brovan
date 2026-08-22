@@ -85,6 +85,8 @@
     <string name="settings_network">Network access</string>
     <string name="settings_jit_cache">JIT code cache</string>
     <string name="settings_jit_cache_summary">Keeps translated code for the next start, so programs start quicker. Experimental.</string>
+    <string name="settings_sustained">Sustained performance</string>
+    <string name="settings_sustained_summary">Holds a steady speed on long runs instead of a fast start that slows down as the device gets hot. Peak speed is lower.</string>
     <string name="settings_pointer">Touch behaviour</string>
     <string name="settings_edit_controls">Edit the on-screen controls</string>
     <string name="settings_edit_controls_summary">Put your own buttons, joysticks and touchpads on the screen. Give a key to each one. When you save, Brovan uses your layout.</string>

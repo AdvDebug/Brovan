@@ -96,6 +96,12 @@ namespace Brovan.Core.Emulation
         /// </summary>
         ulong MaxMappableAddress { get; }
 
+        /// <summary>
+        /// True when every RDTSC the guest executes reaches the instruction hook, so the emulator decides
+        /// what the guest reads. A backend that runs the instruction on the real CPU returns the host TSC.
+        /// </summary>
+        bool TimestampCounterIsEmulated { get; }
+
         bool MapMemory(ulong address, ulong size, MemoryProtection protection);
 
         /// <summary>

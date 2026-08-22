@@ -29,6 +29,8 @@ namespace Brovan.Core.Emulation
 
         public ulong MaxMappableAddress => ulong.MaxValue;
 
+        public bool TimestampCounterIsEmulated => true;
+
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
             => Inner.MapMemory(address, size, protection);
 

@@ -89,6 +89,9 @@ namespace Brovan.Android
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_install_progress_sink")]
         public static void SetInstallProgressSink(IntPtr sink) => Volatile.Write(ref _installProgressSink, sink);
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_set_text_sink")]
+        public static void SetTextSink(IntPtr sink) => AndroidText.SetSink(sink);
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_verbose")]
         public static void SetVerbose(int enabled) => _verbose = enabled != 0;
 
@@ -148,7 +151,10 @@ namespace Brovan.Android
                 };
 
                 Thread guestThread = new Thread(() =>
-                    RunGuest(path, rawArguments, arguments, directory, command, EmulationBackendKind.Unicorn, new NetworkAccessPolicy(mode)))
+                {
+                    AndroidHost.PinToPerformanceCores();
+                    RunGuest(path, rawArguments, arguments, directory, command, EmulationBackendKind.Unicorn, new NetworkAccessPolicy(mode));
+                })
                 {
                     IsBackground = false,
                     Name = "BrovanGuestMain",
