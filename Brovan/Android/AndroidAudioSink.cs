@@ -38,6 +38,12 @@ namespace Brovan.Android
         private static extern int AAudioStream_write(IntPtr Stream, void* Buffer, int Frames, long TimeoutNanoseconds);
 
         [DllImport("libaaudio.so")]
+        private static extern long AAudioStream_getFramesWritten(IntPtr Stream);
+
+        [DllImport("libaaudio.so")]
+        private static extern long AAudioStream_getFramesRead(IntPtr Stream);
+
+        [DllImport("libaaudio.so")]
         private static extern int AAudioStream_close(IntPtr Stream);
 
         private readonly int BlockAlign;
@@ -67,6 +73,23 @@ namespace Brovan.Android
 
             AAudioStream_requestStart(Stream);
         }
+
+        public int QueuedBytes
+        {
+            get
+            {
+                if (Stream == IntPtr.Zero)
+                    return 0;
+
+                long Frames = AAudioStream_getFramesWritten(Stream) - AAudioStream_getFramesRead(Stream);
+                if (Frames <= 0)
+                    return 0;
+
+                return (int)Math.Min(Frames * BlockAlign, int.MaxValue);
+            }
+        }
+
+        public void WaitForProgress(int TimeoutMilliseconds) => System.Threading.Thread.Sleep(TimeoutMilliseconds);
 
         public void Write(ReadOnlySpan<byte> Samples)
         {

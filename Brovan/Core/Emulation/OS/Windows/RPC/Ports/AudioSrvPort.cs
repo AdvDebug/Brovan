@@ -74,6 +74,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private const uint RingBufferOffset = 0x200;
         private const uint DefaultBufferHns = 10_000_000;
+        private const uint MinimumBufferHns = 1_500_000;
         private const uint DefaultDevicePeriodHns = 100_000;
         private const uint MinimumDevicePeriodHns = 30_000;
         private const string HandlePortPrefix = "\\BaseNamedObjects\\AudioEngineDuplicateHandleApiPort";
@@ -290,8 +291,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (BufferHns == 0)
                 BufferHns = DefaultBufferHns;
 
+            if (BufferHns < MinimumBufferHns)
+                BufferHns = MinimumBufferHns;
+
             Stream.RingBytes = RingBytesForDuration(BufferHns);
-            Stream.PeriodFrames = FramesForDuration(PeriodHns != 0 ? PeriodHns : BufferHns);
+            Stream.PeriodFrames = FramesForDuration(PeriodHns != 0 ? PeriodHns : DefaultDevicePeriodHns);
             Stream.ShareMode = ShareMode;
 
             if (!TryCreateSharedBuffer(Instance, Stream))

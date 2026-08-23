@@ -10,6 +10,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
     public interface IAudioSink : IDisposable
     {
         void Write(ReadOnlySpan<byte> Samples);
+
+        /// <summary>
+        /// Bytes handed to the device that it has not played yet.
+        /// </summary>
+        int QueuedBytes { get; }
+
+        /// <summary>
+        /// Blocks until the device has played some of what is queued, or the timeout expires.
+        /// </summary>
+        void WaitForProgress(int TimeoutMilliseconds);
     }
 
     public readonly struct AudioSinkFormat
@@ -87,6 +97,17 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (BehindMs > 0)
                 Thread.Sleep((int)Math.Min(BehindMs, 100));
         }
+
+        public int QueuedBytes
+        {
+            get
+            {
+                long Played = Elapsed.ElapsedMilliseconds * Format.BytesPerSecond / 1000;
+                return (int)Math.Clamp(WrittenBytes - Played, 0, int.MaxValue);
+            }
+        }
+
+        public void WaitForProgress(int TimeoutMilliseconds) => Thread.Sleep(TimeoutMilliseconds);
 
         public void Dispose()
         {

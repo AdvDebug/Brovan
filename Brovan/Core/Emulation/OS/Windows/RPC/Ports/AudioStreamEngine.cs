@@ -8,6 +8,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
     {
         private const int IdleSleepMilliseconds = 5;
         private const int ChunkMilliseconds = 10;
+        private const int StarveWaitMilliseconds = 4;
+        private const int QueueFloorMilliseconds = 20;
         private const int StopTimeoutMilliseconds = 200;
         private const int OffClientCursor = 0x018;
         private const int OffServerCursor = 0x020;
@@ -20,6 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private readonly uint RingBytes;
         private readonly int BlockAlign;
         private readonly int MaxTake;
+        private readonly int QueueFloorBytes;
         private readonly IAudioSink Sink;
         private readonly byte[] Chunk;
         private readonly byte[] Silence;
@@ -50,6 +53,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             // A ring shorter than one chunk is legal. the buffer duration comes from the client.
             MaxTake = (int)Math.Min((uint)ChunkBytes, RingBytes);
+            QueueFloorBytes = Format.BytesPerSecond * QueueFloorMilliseconds / 1000;
 
             Worker = new Thread(Run)
             {
@@ -81,13 +85,26 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     }
 
                     long Written = Interlocked.CompareExchange(ref *(long*)(Base + OffClientCursor), 0, 0);
+
+                    // IAudioClient::Reset zeroes both cursors client side and tells the server nothing.
+                    if (Written < Read)
+                    {
+                        Read = Written;
+                        Interlocked.Exchange(ref *(long*)(Base + OffServerCursor), Read);
+                    }
+
                     long Available = Written - Read;
 
                     int Take = (int)Math.Min(Available, MaxTake);
                     Take -= Take % BlockAlign;
 
-                    // Feed the device anyway when the guest is behind, both to keep it from underrunning and
-                    // because the write is what advances real time for this loop.
+                    if (Take < MaxTake && Sink.QueuedBytes > QueueFloorBytes)
+                    {
+                        SignalPeriod();
+                        Sink.WaitForProgress(StarveWaitMilliseconds);
+                        continue;
+                    }
+
                     if (Take <= 0)
                     {
                         Sink.Write(Silence);

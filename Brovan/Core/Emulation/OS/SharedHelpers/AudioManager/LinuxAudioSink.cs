@@ -25,6 +25,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static extern int snd_pcm_recover(IntPtr Pcm, int Error, int Silent);
 
         [DllImport("libasound.so.2")]
+        private static extern int snd_pcm_delay(IntPtr Pcm, out nint Frames);
+
+        [DllImport("libasound.so.2")]
+        private static extern int snd_pcm_wait(IntPtr Pcm, int TimeoutMilliseconds);
+
+        [DllImport("libasound.so.2")]
         private static extern int snd_pcm_close(IntPtr Pcm);
 
         private readonly int BlockAlign;
@@ -43,6 +49,23 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 Pcm = IntPtr.Zero;
                 throw new InvalidOperationException("snd_pcm_set_params failed.");
             }
+        }
+
+        public int QueuedBytes
+        {
+            get
+            {
+                if (Pcm == IntPtr.Zero || snd_pcm_delay(Pcm, out nint Frames) < 0 || Frames <= 0)
+                    return 0;
+
+                return (int)Math.Min((long)Frames * BlockAlign, int.MaxValue);
+            }
+        }
+
+        public void WaitForProgress(int TimeoutMilliseconds)
+        {
+            if (Pcm != IntPtr.Zero)
+                snd_pcm_wait(Pcm, TimeoutMilliseconds);
         }
 
         public void Write(ReadOnlySpan<byte> Samples)

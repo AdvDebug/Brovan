@@ -80,6 +80,29 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
         }
 
+        public int QueuedBytes
+        {
+            get
+            {
+                int Total = 0;
+
+                for (int Index = 0; Index < BufferCount; Index++)
+                {
+                    WaveHdr* Header = (WaveHdr*)Headers + Index;
+                    if ((Volatile.Read(ref Header->Flags) & WhdrDone) == 0)
+                        Total += (int)Header->BufferLength;
+                }
+
+                return Total;
+            }
+        }
+
+        public void WaitForProgress(int TimeoutMilliseconds)
+        {
+            if (!Disposed)
+                BufferDone.WaitOne(TimeoutMilliseconds);
+        }
+
         public void Write(ReadOnlySpan<byte> Samples)
         {
             int Offset = 0;
