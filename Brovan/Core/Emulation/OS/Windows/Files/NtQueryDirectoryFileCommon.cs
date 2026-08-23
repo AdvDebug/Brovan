@@ -51,7 +51,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DirectoryHandle.DirectoryEntries == null || RestartScan || MaskChanged)
             {
                 string EffectiveMask = MaskProvided ? Mask : (DirectoryHandle.DirectoryMask ?? string.Empty);
-                DirectoryHandle.DirectoryEntries = ScanDirectory(HostPath, EffectiveMask);
+                DirectoryHandle.DirectoryEntries = ScanDirectory(HostPath, GeneralHelper.IO.ResolveNativeHostPath(DirectoryHandle.Path), EffectiveMask);
                 DirectoryHandle.DirectoryIndex = 0;
                 DirectoryHandle.DirectoryMask = EffectiveMask;
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -203,9 +203,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(Address + 0x0C, FileNameBytes);
         }
 
-        private static List<WinDirectoryEntry> ScanDirectory(string HostPath, string Mask)
+        private static List<WinDirectoryEntry> ScanDirectory(string HostPath, string NativePath, string Mask)
         {
             List<WinDirectoryEntry> Entries = new List<WinDirectoryEntry>();
+            HashSet<string> Seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             try
             {
@@ -231,15 +232,29 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             catch { }
 
+            AddDirectoryContents(Entries, Seen, HostPath, Mask);
+
+            // The overlay shadows the host directory rather than replacing it, so both have to be listed.
+            if (!string.IsNullOrEmpty(NativePath) &&
+                !string.Equals(NativePath, HostPath, StringComparison.OrdinalIgnoreCase) &&
+                Directory.Exists(NativePath))
+                AddDirectoryContents(Entries, Seen, NativePath, Mask);
+
+            Entries.Sort((A, B) => string.Compare(A.Name, B.Name, StringComparison.OrdinalIgnoreCase));
+            return Entries;
+        }
+
+        private static void AddDirectoryContents(List<WinDirectoryEntry> Entries, HashSet<string> Seen, string DirectoryPath, string Mask)
+        {
             IEnumerable<string> FileSystemEntries;
 
             try
             {
-                FileSystemEntries = Directory.EnumerateFileSystemEntries(HostPath);
+                FileSystemEntries = Directory.EnumerateFileSystemEntries(DirectoryPath);
             }
             catch
             {
-                return Entries;
+                return;
             }
 
             foreach (string CurrentPath in FileSystemEntries)
@@ -249,6 +264,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
 
                 if (!MatchesMask(Name, Mask))
+                    continue;
+
+                if (!Seen.Add(Name))
                     continue;
 
                 bool IsDirectory = Directory.Exists(CurrentPath);
@@ -293,8 +311,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 });
             }
 
-            Entries.Sort((A, B) => string.Compare(A.Name, B.Name, StringComparison.OrdinalIgnoreCase));
-            return Entries;
         }
 
         private static bool MatchesMask(string Name, string Mask)
@@ -302,16 +318,43 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(Mask) || Mask == "*" || Mask == "*.*")
                 return true;
 
-            return FileSystemName.MatchesSimpleExpression(Mask.AsSpan(), Name.AsSpan(), ignoreCase: true);
+            return FileSystemName.MatchesSimpleExpression(TranslateDosWildcards(Mask).AsSpan(), Name.AsSpan(), ignoreCase: true);
         }
+
+        /// <summary>
+        /// Rewrites the DOS wildcards the IO manager receives into the plain ones.
+        /// </summary>
+        private static string TranslateDosWildcards(string Mask)
+        {
+            if (Mask.IndexOfAny(DosWildcards) < 0)
+                return Mask;
+
+            return string.Create(Mask.Length, Mask, static (Destination, Source) =>
+            {
+                for (int i = 0; i < Source.Length; i++)
+                {
+                    char Current = Source[i];
+                    Destination[i] = Current switch
+                    {
+                        '<' => '*',
+                        '>' => '?',
+                        '"' => '.',
+                        _ => Current
+                    };
+                }
+            });
+        }
+
+        private static readonly char[] DosWildcards = { '<', '>', '"' };
 
         private static string ReadUnicodeString64(BinaryEmulator Instance, ulong UnicodeString)
         {
             if (UnicodeString == 0)
                 return string.Empty;
 
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
             ushort Length = Instance._emulator.ReadMemoryUShort(UnicodeString + 0x00);
-            ulong Buffer = Instance._emulator.ReadMemoryULong(UnicodeString + 0x08);
+            ulong Buffer = Instance.WinHelper.ReadPointer(UnicodeString + PointerSize);
 
             if (Length == 0 || Buffer == 0)
                 return string.Empty;

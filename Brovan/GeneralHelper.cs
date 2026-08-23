@@ -2043,11 +2043,12 @@ namespace Brovan
             /// <param name="Format">binary format of the emulated process (used to apply platform rules).</param>
             /// <param name="CreateDirectories">whether to create parent directories for the resolved path.</param>
             /// <param name="PreserveFinalLink">whether to preserve the final filesystem link so the caller can inspect it.</param>
+            /// <param name="NativeSystemView">whether to read the native System32 view instead of the WOW64 one.</param>
             /// <returns>returns the resolved host path, or null if the path is not allowed or cannot be resolved.</returns>
             /// <remarks>
             /// This method shouldn't be called when resolving for writes, for resolving writes use <see cref="ResolveVirtualHostPath"/> instead.
             /// </remarks>
-            public static string ResolveHostPath(string EmulatedPath, BinaryFormat Format, bool CreateDirectories = false, bool PreserveFinalLink = false)
+            public static string ResolveHostPath(string EmulatedPath, BinaryFormat Format, bool CreateDirectories = false, bool PreserveFinalLink = false, bool NativeSystemView = false)
             {
                 if (string.IsNullOrWhiteSpace(EmulatedPath))
                     return null;
@@ -2083,7 +2084,7 @@ namespace Brovan
                     string LeafOnly = Path.GetFileName(RawWinPath);
                     if (!string.IsNullOrEmpty(LeafOnly) && string.Equals(LeafOnly, RawWinPath, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (Wow64FileRedirect)
+                        if (Wow64FileRedirect && !NativeSystemView)
                         {
                             string Wow64LeafPath = TryResolveFromWindowsLibsRelative(Path.Combine(WindowsLibsPath, "SysWOW64"), LeafOnly);
                             if (!string.IsNullOrEmpty(Wow64LeafPath))
@@ -2100,7 +2101,8 @@ namespace Brovan
                 if (string.IsNullOrEmpty(WinPath))
                     return null;
 
-                WinPath = ApplyWow64FileRedirect(WinPath);
+                if (!NativeSystemView)
+                    WinPath = ApplyWow64FileRedirect(WinPath);
 
                 string VirtualPath = ResolveVirtualHostPathInternal(WinPath, CreateDirectories, PreserveFinalLink);
                 if (!string.IsNullOrEmpty(VirtualPath))
@@ -3114,11 +3116,23 @@ namespace Brovan
             }
 
             /// <summary>
-            /// Returns a full path without sandbox validation (normal .NET path resolution).
+            /// Resolves an emulated path to the host location outside the sandbox overlay.
             /// </summary>
-            /// <param name="CandidatePath">candidate path to normalize.</param>
-            /// <param name="CreateDirectories">whether to create parent directories.</param>
-            /// <returns>returns the normalized full path, or null if it cannot be resolved.</returns>
+            /// <remarks>
+            /// Directory enumeration has to show both the overlay and what the host already has there.
+            /// </remarks>
+            public static string ResolveNativeHostPath(string EmulatedPath)
+            {
+                if (!IsWindows || string.IsNullOrWhiteSpace(EmulatedPath))
+                    return null;
+
+                string WinPath = NormalizeWindowsEmulatedPath(EmulatedPath.Trim().TrimEnd('\0').Replace('/', '\\'));
+                if (string.IsNullOrEmpty(WinPath))
+                    return null;
+
+                return GetNativeFullPath(ApplyWow64FileRedirect(WinPath), false);
+            }
+
             private static string GetNativeFullPath(string CandidatePath, bool CreateDirectories)
             {
                 if (string.IsNullOrWhiteSpace(CandidatePath))

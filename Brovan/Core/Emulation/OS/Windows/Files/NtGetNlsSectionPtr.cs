@@ -23,7 +23,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             string Path = $@"C:\Windows\System32\C_{SectionData}.NLS";
 
-            WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
+            // The kernel publishes the NLS tables as section objects, so they never follow WOW64 redirection.
+            WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path, false, true);
             if (!Stream.TryReadAllBytes(out byte[] Data) || Data.Length == 0)
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 

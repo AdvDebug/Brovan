@@ -107,11 +107,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case THREADINFOCLASS.ThreadQuerySetWin32StartAddress:
                     {
-                        NTSTATUS Status = ValidateOutputBuffer(8);
+                        NTSTATUS Status = ValidateOutputBuffer((uint)Instance.WinHelper.PointerSize);
                         if (Status != NTSTATUS.STATUS_SUCCESS)
                             return Status;
 
-                        if (!Instance._emulator.WriteMemory(ThreadInformation, ThreadObj.StartAddress))
+                        if (!Instance.WinHelper.WritePointer(ThreadInformation, ThreadObj.StartAddress))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                         return NTSTATUS.STATUS_SUCCESS;
@@ -119,11 +119,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case THREADINFOCLASS.ThreadAffinityMask:
                     {
-                        NTSTATUS Status = ValidateOutputBuffer(8);
+                        NTSTATUS Status = ValidateOutputBuffer((uint)Instance.WinHelper.PointerSize);
                         if (Status != NTSTATUS.STATUS_SUCCESS)
                             return Status;
 
-                        if (!Instance._emulator.WriteMemory(ThreadInformation, ThreadObj.AffinityMask == 0 ? 1UL : ThreadObj.AffinityMask))
+                        if (!Instance.WinHelper.WritePointer(ThreadInformation, ThreadObj.AffinityMask == 0 ? 1UL : ThreadObj.AffinityMask))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                         return NTSTATUS.STATUS_SUCCESS;
@@ -169,11 +169,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case THREADINFOCLASS.ThreadUmsInformation:
                     {
-                        NTSTATUS Status = ValidateOutputBuffer(8);
+                        NTSTATUS Status = ValidateOutputBuffer((uint)Instance.WinHelper.PointerSize);
                         if (Status != NTSTATUS.STATUS_SUCCESS)
                             return Status;
 
-                        if (!Instance._emulator.WriteMemory(ThreadInformation, 0UL))
+                        if (!Instance.WinHelper.WritePointer(ThreadInformation, 0UL))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                         return NTSTATUS.STATUS_SUCCESS;

@@ -177,13 +177,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static readonly Dictionary<string, (string Read, string Write)> GuestPathCache = new(StringComparer.OrdinalIgnoreCase);
         public static void InvalidateGuestPathCache() => GuestPathCache.Clear();
-        public static WindowsFileStream FromGuestPath(string GuestPath, bool CreateWriteDirectories = false)
+        public static WindowsFileStream FromGuestPath(string GuestPath, bool CreateWriteDirectories = false, bool NativeSystemView = false)
         {
-            if (!CreateWriteDirectories && GuestPath != null && GuestPathCache.TryGetValue(GuestPath, out var Cached))
+            bool Cacheable = !CreateWriteDirectories && !NativeSystemView && GuestPath != null;
+            if (Cacheable && GuestPathCache.TryGetValue(GuestPath, out var Cached))
                 return new WindowsFileStream(GuestPath, Cached.Read, Cached.Write);
-            string ReadHostPath = GeneralHelper.IO.ResolveHostPath(GuestPath, BinaryFormat.PE);
+            string ReadHostPath = GeneralHelper.IO.ResolveHostPath(GuestPath, BinaryFormat.PE, false, false, NativeSystemView);
             string WriteHostPath = GeneralHelper.IO.ResolveVirtualHostPath(GuestPath, BinaryFormat.PE, CreateWriteDirectories);
-            if (!CreateWriteDirectories && GuestPath != null && ReadHostPath != null && WriteHostPath != null)
+            if (Cacheable && ReadHostPath != null && WriteHostPath != null)
                 GuestPathCache[GuestPath] = (ReadHostPath, WriteHostPath);
             return new WindowsFileStream(GuestPath, ReadHostPath, WriteHostPath);
         }

@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -26,20 +25,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (!Instance.IsRegionMapped(WndClassPtr, (ulong)Marshal.SizeOf<WNDCLASSEXW64>()))
+            if (!Win32kHelper.TryReadWindowClass(Instance, WndClassPtr, out Win32kWindowClassDefinition WndClass))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!StructSerializer.ParseStruct(Instance, WndClassPtr, out WNDCLASSEXW64 WndClass))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            if (WndClass.cbSize < Marshal.SizeOf<WNDCLASSEXW64>())
+            if (WndClass.cbSize < Win32kHelper.WindowClassSize(Instance))
             {
                 Instance.SetLastWinError(ERROR_INVALID_PARAMETER);
                 Instance.SetRawSyscallReturn(0);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            string ClassName = ReadUnicodeString64(Instance, ClassNamePtr);
+            string ClassName = Win32kHelper.ReadUnicodeString(Instance, ClassNamePtr);
             if (string.IsNullOrEmpty(ClassName))
                 ClassName = ReadClassNameFromPointer(Instance, WndClass.lpszClassName);
 
@@ -50,7 +46,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            string ClassVersion = ReadUnicodeString64(Instance, ClassVersionPtr) ?? string.Empty;
+            string ClassVersion = Win32kHelper.ReadUnicodeString(Instance, ClassVersionPtr) ?? string.Empty;
             string MenuName = ReadMenuName(Instance, ClassMenuNamePtr, WndClass.lpszMenuName);
 
             WinWindowClass RegisteredClass = Instance.WinHelper.RegisterWindowClass(new WinWindowClass
@@ -93,23 +89,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static string ReadUnicodeString64(BinaryEmulator Instance, ulong Address)
-        {
-            if (Address == 0)
-                return null;
-
-            if (!StructSerializer.ParseStruct(Instance, Address, out UNICODE_STRING64 String))
-                return null;
-
-            if (String.Buffer == 0 || String.Length == 0)
-                return string.Empty;
-
-            if (!Instance.IsRegionMapped(String.Buffer, String.Length))
-                return null;
-
-            return Instance._emulator.ReadMemoryString(String.Buffer, String.Length, Encoding.Unicode)?.TrimEnd('\0');
-        }
-
         private static string ReadClassNameFromPointer(BinaryEmulator Instance, ulong Pointer)
         {
             if (Pointer == 0)
@@ -123,18 +102,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static string ReadMenuName(BinaryEmulator Instance, ulong ClassMenuNamePtr, ulong WndClassMenuNamePtr)
         {
-            if (ClassMenuNamePtr != 0 && Instance.IsRegionMapped(ClassMenuNamePtr, (ulong)Marshal.SizeOf<CLSMENUNAME64>()))
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+            if (ClassMenuNamePtr != 0 && Instance.IsRegionMapped(ClassMenuNamePtr, PointerSize * 3))
             {
-                if (StructSerializer.ParseStruct(Instance, ClassMenuNamePtr, out CLSMENUNAME64 MenuName))
-                {
-                    string Name = ReadUnicodeString64(Instance, MenuName.pusMenuName);
-                    if (!string.IsNullOrEmpty(Name))
-                        return Name;
+                ulong ClientUnicodeMenuName = Instance.WinHelper.ReadPointer(ClassMenuNamePtr + PointerSize);
+                ulong MenuNameString = Instance.WinHelper.ReadPointer(ClassMenuNamePtr + PointerSize * 2);
 
-                    Name = ReadNullTerminatedUnicodeString(Instance, MenuName.pwszClientUnicodeMenuName);
-                    if (!string.IsNullOrEmpty(Name))
-                        return Name;
-                }
+                string Name = Win32kHelper.ReadUnicodeString(Instance, MenuNameString);
+                if (!string.IsNullOrEmpty(Name))
+                    return Name;
+
+                Name = ReadNullTerminatedUnicodeString(Instance, ClientUnicodeMenuName);
+                if (!string.IsNullOrEmpty(Name))
+                    return Name;
             }
 
             if (WndClassMenuNamePtr == 0)
@@ -172,33 +152,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             return Builder.ToString();
-        }
-
-        [StructLayout(LayoutKind.Explicit, Size = 80)]
-        [GenerateStructSerializer]
-        internal struct WNDCLASSEXW64
-        {
-            [FieldOffset(0)] public uint cbSize;
-            [FieldOffset(4)] public uint style;
-            [FieldOffset(8)] public ulong lpfnWndProc;
-            [FieldOffset(16)] public int cbClsExtra;
-            [FieldOffset(20)] public int cbWndExtra;
-            [FieldOffset(24)] public ulong hInstance;
-            [FieldOffset(32)] public ulong hIcon;
-            [FieldOffset(40)] public ulong hCursor;
-            [FieldOffset(48)] public ulong hbrBackground;
-            [FieldOffset(56)] public ulong lpszMenuName;
-            [FieldOffset(64)] public ulong lpszClassName;
-            [FieldOffset(72)] public ulong hIconSm;
-        }
-
-        [GenerateStructSerializer]
-        [StructLayout(LayoutKind.Explicit, Size = 24)]
-        internal struct CLSMENUNAME64
-        {
-            [FieldOffset(0)] public ulong pszClientAnsiMenuName;
-            [FieldOffset(8)] public ulong pwszClientUnicodeMenuName;
-            [FieldOffset(16)] public ulong pusMenuName;
         }
     }
 }

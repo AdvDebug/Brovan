@@ -79,18 +79,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Address == 0)
                 return true;
 
-            if (!StructSerializer.ParseStruct(Instance, Address, out UNICODE_STRING64 UnicodeString))
-                return false;
-
-            Present = true;
-
-            if (UnicodeString.Buffer == 0 || UnicodeString.Length == 0)
+            if (Instance.WinHelper.TryReadUnicodeString(Address, out Value, out NTSTATUS Status))
             {
-                Value = string.Empty;
+                Present = true;
+                Value ??= string.Empty;
                 return true;
             }
 
-            Value = Instance._emulator.ReadMemoryString(UnicodeString.Buffer, UnicodeString.Length, Encoding.Unicode)?.TrimEnd('\0');
+            if (Status == NTSTATUS.STATUS_ACCESS_VIOLATION)
+                return false;
+
+            Present = true;
+            Value = string.Empty;
             return true;
         }
     }

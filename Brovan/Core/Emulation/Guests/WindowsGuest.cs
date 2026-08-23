@@ -41,6 +41,10 @@ namespace Brovan.Core.Emulation.Guests
         private const ulong GdtDataSelector = GdtDataIndex << 3;
         private const ulong GdtFsSelector = GdtFsIndex << 3;
         private const uint GdtSize = 0x1000;
+        private const ulong NtUserCodeSelector = 0x33;
+        private const ulong NtUserCodeSelector32 = 0x23;
+        private const ulong NtUserDataSelector = 0x2B;
+        private const ulong NtUserTebSelector32 = 0x53;
         private const byte GdtCodeAccess = 0x9B;
         private const byte GdtDataAccess = 0x93;
         private const byte GdtGranularityDefault = 0xC;
@@ -1123,12 +1127,7 @@ namespace Brovan.Core.Emulation.Guests
             Thread.Context.RIP = StartAddress;
             Thread.Context.RSP = InitialStack;
             Thread.Context.RFLAGS = 0x202;
-            Thread.Context.CS = Instance.ReadRegister(Registers.UC_X86_REG_CS);
-            Thread.Context.DS = Instance.ReadRegister(Registers.UC_X86_REG_DS);
-            Thread.Context.ES = Instance.ReadRegister(Registers.UC_X86_REG_ES);
-            Thread.Context.FS = Instance.ReadRegister(Registers.UC_X86_REG_FS);
-            Thread.Context.GS = Instance.ReadRegister(Registers.UC_X86_REG_GS);
-            Thread.Context.SS = Instance.ReadRegister(Registers.UC_X86_REG_SS);
+            ApplyInitialSegments(Instance, Thread.Context);
             Thread.Context.DR0 = Instance.ReadRegister(Registers.UC_X86_REG_DR0);
             Thread.Context.DR1 = Instance.ReadRegister(Registers.UC_X86_REG_DR1);
             Thread.Context.DR2 = Instance.ReadRegister(Registers.UC_X86_REG_DR2);
@@ -1180,12 +1179,8 @@ namespace Brovan.Core.Emulation.Guests
             State.Teb = AllocateAndInitializeTEB(Instance, Thread, CreateFlags, InitialThread);
 
             Thread.Context.RIP = LdrInitializeThunk;
-            Thread.Context.CS = Instance.ReadRegister(Registers.UC_X86_REG_CS);
-            Thread.Context.DS = Instance.ReadRegister(Registers.UC_X86_REG_DS);
-            Thread.Context.ES = Instance.ReadRegister(Registers.UC_X86_REG_ES);
-            Thread.Context.FS = Instance.ReadRegister(Registers.UC_X86_REG_FS);
-            Thread.Context.GS = Instance.ReadRegister(Registers.UC_X86_REG_GS);
-            Thread.Context.SS = Instance.ReadRegister(Registers.UC_X86_REG_SS);
+            Thread.Context.RFLAGS = 0x202;
+            ApplyInitialSegments(Instance, Thread.Context);
             Thread.Context.DR0 = Instance.ReadRegister(Registers.UC_X86_REG_DR0);
             Thread.Context.DR1 = Instance.ReadRegister(Registers.UC_X86_REG_DR1);
             Thread.Context.DR2 = Instance.ReadRegister(Registers.UC_X86_REG_DR2);
@@ -1244,7 +1239,7 @@ namespace Brovan.Core.Emulation.Guests
             {
                 { "PROCESSOR_ARCHITECTURE", Instance._binary.Architecture == BinaryArchitecture.x64 ? "AMD64" : "x86" },
                 { "OS", "Windows_NT" },
-                { "NUMBER_OF_PROCESSORS", "8" },
+                { "NUMBER_OF_PROCESSORS", Environment.ProcessorCount.ToString() },
                 { "TEMP", @$"{UserProfile}\AppData\Local\Temp" },
                 { "TMP",  @$"{UserProfile}\AppData\Local\Temp" },
                 { "APPDATA", @$"{UserProfile}\AppData\Roaming" },
@@ -1261,6 +1256,9 @@ namespace Brovan.Core.Emulation.Guests
                 { "CommonProgramFiles", @"C:\Program Files\Common Files" },
                 { "CommonProgramFiles(x86)", @"C:\Program Files (x86)\Common Files" },
                 { "CommonProgramW6432", @"C:\Program Files\Common Files" },
+                { "ProgramFiles", @"C:\Program Files" },
+                { "ProgramFiles(x86)", @"C:\Program Files (x86)" },
+                { "ProgramW6432", @"C:\Program Files" },
                 { "WINDIR", @"C:\WINDOWS" },
                 { "USERNAME", Username },
                 { "USERPROFILE", UserProfile },
@@ -1273,6 +1271,14 @@ namespace Brovan.Core.Emulation.Guests
                 { "PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC" },
                 { "PATH", @"C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\" }
             };
+
+            if (Instance._binary.Architecture != BinaryArchitecture.x64)
+            {
+                // WOW64 shows the 32-bit view in ProcessorArchitecture/ProgramFiles and the native one alongside it
+                Env["PROCESSOR_ARCHITEW6432"] = "AMD64";
+                Env["CommonProgramFiles"] = @"C:\Program Files (x86)\Common Files";
+                Env["ProgramFiles"] = @"C:\Program Files (x86)";
+            }
 
             // pass DXVK environment variables if available to the guest for debugging
             foreach (DictionaryEntry HostVariable in Environment.GetEnvironmentVariables())
@@ -1737,6 +1743,36 @@ namespace Brovan.Core.Emulation.Guests
             Descriptor |= (ulong)(Granularity & 0xF) << 52;
             Descriptor |= ((Base >> 24) & 0xFFUL) << 56;
             return Descriptor;
+        }
+
+        /// <summary>
+        /// Fills the segment selectors a freshly created thread starts with.
+        /// </summary>
+        /// <remarks>
+        /// Reading them off the CPU would capture whatever the syscall trap left behind, which is not a
+        /// user-mode selector on every backend.
+        /// </remarks>
+        private void ApplyInitialSegments(BinaryEmulator Instance, CpuContext Context)
+        {
+            bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
+
+            if (GuestGdt != 0)
+            {
+                Context.CS = GdtCodeSelector;
+                Context.SS = GdtDataSelector;
+                Context.DS = GdtDataSelector;
+                Context.ES = GdtDataSelector;
+                Context.GS = GdtDataSelector;
+                Context.FS = Is64 ? GdtDataSelector : GdtFsSelector;
+                return;
+            }
+
+            Context.CS = Is64 ? NtUserCodeSelector : NtUserCodeSelector32;
+            Context.SS = NtUserDataSelector;
+            Context.DS = NtUserDataSelector;
+            Context.ES = NtUserDataSelector;
+            Context.GS = NtUserDataSelector;
+            Context.FS = Is64 ? NtUserDataSelector : NtUserTebSelector32;
         }
 
         private void InstallGdt(BinaryEmulator Instance)

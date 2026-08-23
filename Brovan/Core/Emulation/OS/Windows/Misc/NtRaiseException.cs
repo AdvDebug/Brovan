@@ -39,6 +39,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             uint ExceptionCode = Instance.ReadMemoryUInt(ExceptionRecordPtr + 0x00);
+            uint ExceptionFlags = Instance.ReadMemoryUInt(ExceptionRecordPtr + 0x04);
             uint NumberParameters = Instance.ReadMemoryUInt(ExceptionRecordPtr + (Is64 ? 0x18UL : 0x10UL));
             if (NumberParameters > 15)
                 NumberParameters = 15;
@@ -130,6 +131,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ExceptionInformation Info = new ExceptionInformation();
             Info.Status = (NTSTATUS)ExceptionCode;
+            Info.Flags = ExceptionFlags;
             if (Parameters.Length != 0)
                 Info.CustomParameters = Parameters;
 

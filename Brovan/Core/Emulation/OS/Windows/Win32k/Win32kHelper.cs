@@ -55,6 +55,22 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
     }
 
+    internal struct Win32kWindowClassDefinition
+    {
+        public uint cbSize;
+        public uint style;
+        public ulong lpfnWndProc;
+        public int cbClsExtra;
+        public int cbWndExtra;
+        public ulong hInstance;
+        public ulong hIcon;
+        public ulong hCursor;
+        public ulong hbrBackground;
+        public ulong lpszMenuName;
+        public ulong lpszClassName;
+        public ulong hIconSm;
+    }
+
     internal struct Win32kBitmap
     {
         public int Width;
@@ -131,7 +147,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const ulong FirstDeviceContextHandle = 0x770001;
         private const uint PM_REMOVE = 0x0001;
         private const int MSG64_SIZE = 48;
+        private const int MSG32_SIZE = 28;
         private const int PAINTSTRUCT64_SIZE = 72;
+        private const int PAINTSTRUCT32_SIZE = 64;
         private const int MaxWindowTextBytes = 0x1000;
         private const long MaxBitmapBytes = 0x40000000;
         private const uint BitmapCopyChunkBytes = 0x10000;
@@ -748,58 +766,157 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
         }
 
+        private static bool Is64(BinaryEmulator Instance) => Instance.WinHelper.PointerSize == 8;
+
         internal static bool WriteMessage(BinaryEmulator Instance, ulong Address, Win32kMessage Message)
         {
-            if (Address == 0 || !Instance.IsRegionMapped(Address, MSG64_SIZE))
+            bool Wide = Is64(Instance);
+            int Size = Wide ? MSG64_SIZE : MSG32_SIZE;
+            if (Address == 0 || !Instance.IsRegionMapped(Address, (uint)Size))
                 return false;
 
-            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(MSG64_SIZE);
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan((ulong)Size);
             Buffer.Clear();
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), Message.Hwnd);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x08, 4), Message.Message);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x10, 8), Message.WParam);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x18, 8), Message.LParam);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x20, 4), Message.Time);
-            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x24, 4), Message.X);
-            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x28, 4), Message.Y);
-            return Instance.WriteMemory(Address, Buffer.Slice(0, MSG64_SIZE));
+            if (Wide)
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), Message.Hwnd);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x08, 4), Message.Message);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x10, 8), Message.WParam);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x18, 8), Message.LParam);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x20, 4), Message.Time);
+                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x24, 4), Message.X);
+                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x28, 4), Message.Y);
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), (uint)Message.Hwnd);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), Message.Message);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x08, 4), (uint)Message.WParam);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x0C, 4), (uint)Message.LParam);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x10, 4), Message.Time);
+                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x14, 4), Message.X);
+                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x18, 4), Message.Y);
+            }
+            return Instance.WriteMemory(Address, Buffer.Slice(0, Size));
         }
 
         internal static bool TryReadMessage(BinaryEmulator Instance, ulong Address, out Win32kMessage Message)
         {
+            bool Wide = Is64(Instance);
+            int Size = Wide ? MSG64_SIZE : MSG32_SIZE;
             Message = default;
-            if (Address == 0 || !Instance.IsRegionMapped(Address, MSG64_SIZE))
+            if (Address == 0 || !Instance.IsRegionMapped(Address, (uint)Size))
                 return false;
 
-            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(MSG64_SIZE);
-            if (!Instance.ReadMemory(Address, Buffer.Slice(0, MSG64_SIZE), MSG64_SIZE))
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan((ulong)Size);
+            if (!Instance.ReadMemory(Address, Buffer.Slice(0, Size), (uint)Size))
                 return false;
 
-            Message = new Win32kMessage(
-                BinaryPrimitives.ReadUInt64LittleEndian(Buffer.Slice(0x00, 8)),
-                BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x08, 4)),
-                BinaryPrimitives.ReadUInt64LittleEndian(Buffer.Slice(0x10, 8)),
-                BinaryPrimitives.ReadUInt64LittleEndian(Buffer.Slice(0x18, 8)),
-                BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x20, 4)),
-                BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x24, 4)),
-                BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x28, 4)));
+            Message = Wide
+                ? new Win32kMessage(
+                    BinaryPrimitives.ReadUInt64LittleEndian(Buffer.Slice(0x00, 8)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x08, 4)),
+                    BinaryPrimitives.ReadUInt64LittleEndian(Buffer.Slice(0x10, 8)),
+                    BinaryPrimitives.ReadUInt64LittleEndian(Buffer.Slice(0x18, 8)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x20, 4)),
+                    BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x24, 4)),
+                    BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x28, 4)))
+                : new Win32kMessage(
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x00, 4)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x04, 4)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x08, 4)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x0C, 4)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x10, 4)),
+                    BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x14, 4)),
+                    BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x18, 4)));
             return true;
         }
 
         internal static bool WritePaintStruct(BinaryEmulator Instance, ulong PaintStructPtr, ulong Hdc, WinWindow Window)
         {
-            if (PaintStructPtr == 0 || !Instance.IsRegionMapped(PaintStructPtr, PAINTSTRUCT64_SIZE))
+            bool Wide = Is64(Instance);
+            int Size = Wide ? PAINTSTRUCT64_SIZE : PAINTSTRUCT32_SIZE;
+            if (PaintStructPtr == 0 || !Instance.IsRegionMapped(PaintStructPtr, (uint)Size))
                 return false;
 
-            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(PAINTSTRUCT64_SIZE);
+            int RectOffset = Wide ? 0x0C : 0x08;
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan((ulong)Size);
             Buffer.Clear();
-            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), Hdc);
-            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x08, 4), 1);
-            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x0C, 4), 0);
-            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x10, 4), 0);
-            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x14, 4), (int)Math.Min(Window.Width, (uint)int.MaxValue));
-            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x18, 4), (int)Math.Min(Window.Height, (uint)int.MaxValue));
-            return Instance.WriteMemory(PaintStructPtr, Buffer.Slice(0, PAINTSTRUCT64_SIZE));
+            if (Wide)
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), Hdc);
+            else
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), (uint)Hdc);
+
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset - 4, 4), 1);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset + 0, 4), 0);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset + 4, 4), 0);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset + 8, 4), (int)Math.Min(Window.Width, (uint)int.MaxValue));
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset + 12, 4), (int)Math.Min(Window.Height, (uint)int.MaxValue));
+            return Instance.WriteMemory(PaintStructPtr, Buffer.Slice(0, Size));
+        }
+
+        /// <summary>
+        /// Reads a UNICODE_STRING in the layout of the guest architecture.
+        /// </summary>
+        internal static string ReadUnicodeString(BinaryEmulator Instance, ulong Address)
+        {
+            if (Address == 0)
+                return null;
+
+            return Instance.WinHelper.TryReadUnicodeString(Address, out string Value, out _) ? Value : null;
+        }
+
+        /// <summary>
+        /// Reads a LARGE_STRING in the layout of the guest architecture. The high bit of MaximumLength selects ANSI.
+        /// </summary>
+        internal static string ReadLargeString(BinaryEmulator Instance, ulong Address)
+        {
+            if (Address == 0 || Address <= 0xFFFF)
+                return null;
+
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+            if (!Instance.IsRegionMapped(Address, 8 + PointerSize))
+                return null;
+
+            uint Length = Instance._emulator.ReadMemoryUInt(Address) & 0x7FFFFFFF;
+            uint MaximumLength = Instance._emulator.ReadMemoryUInt(Address + 4);
+            ulong Buffer = Instance.WinHelper.ReadPointer(Address + 8);
+
+            if (Buffer == 0 || Length == 0)
+                return string.Empty;
+
+            if (!Instance.IsRegionMapped(Buffer, Length))
+                return null;
+
+            Encoding Enc = (MaximumLength & 0x80000000u) != 0 ? Encoding.ASCII : Encoding.Unicode;
+            return Instance._emulator.ReadMemoryString(Buffer, (int)Length, Enc)?.TrimEnd('\0');
+        }
+
+        internal static uint WindowClassSize(BinaryEmulator Instance) => 16 + 8 * (uint)Instance.WinHelper.PointerSize;
+
+        /// <summary>
+        /// Reads a WNDCLASSEXW in the layout of the guest architecture.
+        /// </summary>
+        internal static bool TryReadWindowClass(BinaryEmulator Instance, ulong Address, out Win32kWindowClassDefinition Class)
+        {
+            Class = default;
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+            if (Address == 0 || !Instance.IsRegionMapped(Address, WindowClassSize(Instance)))
+                return false;
+
+            Class.cbSize = Instance._emulator.ReadMemoryUInt(Address + 0);
+            Class.style = Instance._emulator.ReadMemoryUInt(Address + 4);
+            Class.lpfnWndProc = Instance.WinHelper.ReadPointer(Address + 8);
+            Class.cbClsExtra = (int)Instance._emulator.ReadMemoryUInt(Address + 8 + PointerSize);
+            Class.cbWndExtra = (int)Instance._emulator.ReadMemoryUInt(Address + 12 + PointerSize);
+            Class.hInstance = Instance.WinHelper.ReadPointer(Address + 16 + PointerSize);
+            Class.hIcon = Instance.WinHelper.ReadPointer(Address + 16 + PointerSize * 2);
+            Class.hCursor = Instance.WinHelper.ReadPointer(Address + 16 + PointerSize * 3);
+            Class.hbrBackground = Instance.WinHelper.ReadPointer(Address + 16 + PointerSize * 4);
+            Class.lpszMenuName = Instance.WinHelper.ReadPointer(Address + 16 + PointerSize * 5);
+            Class.lpszClassName = Instance.WinHelper.ReadPointer(Address + 16 + PointerSize * 6);
+            Class.hIconSm = Instance.WinHelper.ReadPointer(Address + 16 + PointerSize * 7);
+            return true;
         }
 
         internal static ulong DispatchMessage(BinaryEmulator Instance, Win32kMessage Message)

@@ -1583,6 +1583,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             public ExceptionType Type;
             public NTSTATUS Status;
             public ulong[] CustomParameters;
+            public uint Flags;
+
             public ulong[] Parameters
             {
                 get
@@ -1590,12 +1592,22 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (CustomParameters != null && CustomParameters.Length != 0)
                         return CustomParameters;
 
+                    if (Status == NTSTATUS.STATUS_ACCESS_VIOLATION ||
+                        Status == NTSTATUS.STATUS_GUARD_PAGE_VIOLATION ||
+                        Status == NTSTATUS.STATUS_IN_PAGE_ERROR)
+                        return new[] { (ulong)Type, Address };
+
+                    if (Status == NTSTATUS.STATUS_BREAKPOINT)
+                        return SingleZeroParameter;
+
                     if (Type != 0 || Address != 0)
                         return new[] { (ulong)Type, Address };
 
                     return Array.Empty<ulong>();
                 }
             }
+
+            private static readonly ulong[] SingleZeroParameter = new ulong[1];
         }
 
         /// <summary>
@@ -1937,7 +1949,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
             Record.Clear();
             WriteUInt32(Record, 0x00, (uint)Exception);
-            WriteUInt32(Record, 0x04, 0);
+            WriteUInt32(Record, 0x04, ExceptionInformation?.Flags ?? 0);
             WriteUInt32(Record, 0x08, 0);
             WriteUInt32(Record, 0x0C, InitialEip);
 
@@ -2089,7 +2101,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
             Record.Clear();
             WriteUInt32(Record, 0x00, (uint)Exception);
-            WriteUInt32(Record, 0x04, 0u);   // ExceptionFlags
+            WriteUInt32(Record, 0x04, ExceptionInformation?.Flags ?? 0u);
             WriteUInt64(Record, 0x08, 0UL);  // ExceptionRecord (chained)
             WriteUInt64(Record, 0x10, InitialRip); // ExceptionAddress
 

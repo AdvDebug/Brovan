@@ -766,14 +766,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// A parsed CD_USER_DEFINED_IO header plus its CD_IO_BUFFER table, in the guest's pointer width.
+        /// A parsed CD_USER_DEFINED_IO header plus its CD_IO_BUFFER table.
         /// </summary>
         private readonly ref struct UserIoRequest
         {
+            private const int TableOffset = 0x10;
+            private const int Stride = 0x10;
+
             private readonly ReadOnlySpan<byte> Raw;
-            private readonly int TableOffset;
-            private readonly int Stride;
-            private readonly bool Is64;
 
             public readonly ulong Client;
             public readonly uint InputCount;
@@ -782,9 +782,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             public UserIoRequest(BinaryEmulator Instance, byte[] Buffer, uint Length)
             {
-                Is64 = Instance.WinHelper.PointerSize == 8;
-                TableOffset = Is64 ? 0x10 : 0x0C;
-                Stride = Is64 ? 0x10 : 0x08;
                 Client = 0;
                 InputCount = 0;
                 OutputCount = 0;
@@ -795,9 +792,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return;
 
                 ReadOnlySpan<byte> Header = Buffer.AsSpan(0, (int)Length);
-                Client = Is64 ? BinaryPrimitives.ReadUInt64LittleEndian(Header) : BinaryPrimitives.ReadUInt32LittleEndian(Header);
-                InputCount = BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(Is64 ? 0x08 : 0x04));
-                OutputCount = BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(Is64 ? 0x0C : 0x08));
+                Client = BinaryPrimitives.ReadUInt64LittleEndian(Header);
+                InputCount = BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(0x08));
+                OutputCount = BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(0x0C));
 
                 if (InputCount == 0 || OutputCount == 0)
                     return;
@@ -820,7 +817,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 ReadOnlySpan<byte> Entry = Raw.Slice(TableOffset + (int)Index * Stride, Stride);
                 Size = BinaryPrimitives.ReadUInt32LittleEndian(Entry);
-                Address = Is64 ? BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(0x08)) : BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(0x04));
+                Address = BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(0x08));
                 return Address != 0;
             }
         }

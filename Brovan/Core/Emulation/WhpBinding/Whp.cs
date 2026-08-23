@@ -1459,7 +1459,7 @@ namespace Brovan.Core.Emulation
             names[2] = (uint)WhvRegisterName.Ds; values[2] = _userDataSegment;
             names[3] = (uint)WhvRegisterName.Es; values[3] = _userDataSegment;
             names[4] = (uint)WhvRegisterName.Fs;
-            values[4] = _guest64 ? MakeSegment(0x53, false, true) : MakeSegment(WhpConstants.UserFsSelector32, false, true);
+            values[4] = MakeSegment(WhpConstants.UserFsSelector32, false, true);
             names[5] = (uint)WhvRegisterName.Gs;
             values[5] = _guest64 ? _userDataSegment : MakeSegment(WhpConstants.UserGsSelector32, false, true);
             names[6] = (uint)WhvRegisterName.Tr;
@@ -1532,11 +1532,10 @@ namespace Brovan.Core.Emulation
                 WriteDescriptor(gdt, WhpConstants.KernelCodeSelector >> 3, 0, 0xFFFFF, 0x9B, 0xA);
                 WriteDescriptor(gdt, WhpConstants.KernelDataSelector >> 3, 0, 0xFFFFF, 0x93, 0xC);
                 WriteDescriptor(gdt, WhpConstants.UserCodeSelector32 >> 3, 0, 0xFFFFF, 0xFB, 0xC);
-                WriteDescriptor(gdt, WhpConstants.UserDataSelector32 >> 3, 0, 0xFFFFF, 0xF3, 0xC);
                 WriteDescriptor(gdt, WhpConstants.UserDataSelector >> 3, 0, 0xFFFFF, 0xF3, 0xC);
                 WriteDescriptor(gdt, WhpConstants.UserCodeSelector >> 3, 0, 0xFFFFF, 0xFB, 0xA);
-                WriteDescriptor(gdt, WhpConstants.UserFsSelector32 >> 3, 0, 0xFFFFF, 0xF3, 0xC);
-                WriteDescriptor(gdt, WhpConstants.UserGsSelector32 >> 3, 0, 0xFFFFF, 0xF3, 0xC);
+                // RtlGetCurrentProcessorNumber reads this descriptor limit with lsl and shifts it right by 14
+                WriteDescriptor(gdt, WhpConstants.UserFsSelector32 >> 3, 0, 0x0FFF, 0xF3, 0x4);
             }
         }
 
@@ -2769,7 +2768,7 @@ namespace Brovan.Core.Emulation
         private unsafe void SyncGdtDescriptorBase(ushort selector, ulong segmentBase)
         {
             int index = selector >> 3;
-            if (index != WhpConstants.UserFsSelector32 >> 3 && index != WhpConstants.UserGsSelector32 >> 3) return;
+            if (index != WhpConstants.UserFsSelector32 >> 3) return;
             if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage gdtPage) || gdtPage.HostPage == IntPtr.Zero) return;
 
             byte* descriptor = (byte*)gdtPage.HostPage + index * 8;

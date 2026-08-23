@@ -1,4 +1,3 @@
-using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -44,8 +43,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            string ClassName = ReadLargeString64(Instance, ClassNamePtr);
-            string classVersion = ReadLargeString64(Instance, ClassVersionPtr) ?? string.Empty;
+            string ClassName = Win32kHelper.ReadLargeString(Instance, ClassNamePtr);
+            string classVersion = Win32kHelper.ReadLargeString(Instance, ClassVersionPtr) ?? string.Empty;
             WinWindowClass WindowClass = null;
 
             if (ClassNamePtr != 0 && ClassNamePtr <= 0xFFFF)
@@ -58,7 +57,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 WindowClass = Instance.WinHelper.GetWindowClass(InstanceHandle, ClassName, classVersion);
             }
 
-            string title = ReadLargeString64(Instance, WindowNamePtr) ?? string.Empty;
+            string title = Win32kHelper.ReadLargeString(Instance, WindowNamePtr) ?? string.Empty;
             ulong hwnd = Instance.WinHelper.AllocateUserHandle();
 
             WinWindow window = new WinWindow
@@ -87,22 +86,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance.SetLastWinError(0);
             Instance.SetRawSyscallReturn(hwnd);
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private static string ReadLargeString64(BinaryEmulator Instance, ulong Address)
-        {
-            if (Address == 0 || Address <= 0xFFFF)
-                return null;
-
-            if (!StructSerializer.ParseStruct(Instance, Address, out LARGE_STRING64 value))
-                return null;
-
-            uint Length = value.Length & 0x7FFFFFFF;
-            if (value.Buffer == 0 || Length == 0)
-                return string.Empty;
-
-            Encoding Enc = (value.MaximumLength & 0x80000000u) != 0 ? Encoding.ASCII : Encoding.Unicode;
-            return Instance._emulator.ReadMemoryString(value.Buffer, (int)Length, Enc)?.TrimEnd('\0');
         }
     }
 }
