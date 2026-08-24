@@ -2580,7 +2580,7 @@ namespace Brovan
                     break;
                 case WinIoCompletion Completion:
                     Console.WriteLine($"Name:            {Completion.Name}");
-                    Console.WriteLine($"Queued:          {Completion.Entries.Count}");
+                    Console.WriteLine($"Queued:          {Completion.PendingCount}");
                     Console.WriteLine($"Count:           {Completion.Count}");
                     break;
                 case WinWorkerFactory Factory:
@@ -2851,7 +2851,7 @@ namespace Brovan
                 EmulatedThread Thread => $"tid={Thread.ThreadId} state={Thread.State}",
                 WinTimer Timer => $"{Timer.Name} active={Timer.Active} signaled={Timer.Signaled}",
                 WinPort Port => Port.Name,
-                WinIoCompletion Completion => $"{Completion.Name} queued={Completion.Entries.Count}",
+                WinIoCompletion Completion => $"{Completion.Name} queued={Completion.PendingCount}",
                 WinWorkerFactory Factory => $"{Factory.Name} workers={Factory.WorkerThreads.Count}",
                 WinWaitCompletionPacket Packet => $"{Packet.Name} associated={Packet.Associated}",
                 WinEtwRegistration Etw => Etw.ObjectId,
