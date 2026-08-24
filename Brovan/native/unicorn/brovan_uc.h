@@ -185,6 +185,8 @@ struct brov_ops {
 #define BROVAN_UC_FIELDS                                                       \
     uint32_t brov_last_reason;                                                 \
     uint32_t brov_budget_mode;                                                 \
+    void *brov_ram_starts;                                                     \
+    unsigned brov_ram_starts_cap;                                              \
     struct brov_ops brov;
 
 #define BROVAN_TCG_FIELDS                                                      \

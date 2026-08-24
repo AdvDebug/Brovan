@@ -35,6 +35,8 @@ copy|brovan_tcg_exitcheck.inc.h|include/brovan_tcg_exitcheck.inc.h
 copy|brovan_tcg_budget.inc.h|include/brovan_tcg_budget.inc.h
 copy|brovan_mem_hooks.inc.h|include/brovan_mem_hooks.inc.h
 copy|brovan_notdirty.inc.h|include/brovan_notdirty.inc.h
+copy|brovan_flatview.inc.c|include/brovan_flatview.inc.c
+copy|brovan_ramblock.inc.h|include/brovan_ramblock.inc.h
 
 # --- uc_struct gains the brov ops table and the inline-hook switch -----------
 insert-after|include/uc_priv.h|#include "list.h"|#include "brovan_uc.h"
@@ -96,3 +98,21 @@ replace-all|qemu/target/i386/cpu.h|ZMMReg xmm_t0;|QEMU_ALIGN(16, ZMMReg) xmm_t0;
 
 # --- MXCSR.FZ reaches the SSE status, not the x87 one -----------------------
 replace-all|qemu/target/i386/fpu_helper.c|set_flush_to_zero((mxcsr & SSE_FZ) ? 1 : 0, &env->fp_status);|set_flush_to_zero((mxcsr & SSE_FZ) ? 1 : 0, &env->sse_status);
+
+# --- a new region is inserted into the live flat view, not re-rendered ------
+insert-after|qemu/softmmu/memory.c|#include "uc_priv.h"|static bool brov_flatview_add(MemoryRegion *mr);
+insert-after|qemu/softmmu/memory.c|static bool brov_flatview_add(MemoryRegion *mr);|static void brov_dispatch_compact(FlatView *fv);
+replace-all|qemu/softmmu/memory.c|    memory_region_transaction_commit(subregion);|    if (!brov_flatview_add(subregion)) { memory_region_transaction_commit(subregion); }
+append|qemu/softmmu/memory.c|#include "brovan_flatview.inc.c"
+
+# --- only the view the insert mutates skips compaction, not every dispatch ---
+replace-all|qemu/softmmu/memory.c|address_space_dispatch_compact(view->dispatch);|brov_dispatch_compact(view);
+replace-all|qemu/softmmu/memory.c|address_space_dispatch_compact(dst->dispatch);|brov_dispatch_compact(dst);
+replace-all|qemu/softmmu/memory.c|address_space_dispatch_compact(fv->dispatch);|brov_dispatch_compact(fv);
+
+# --- a RAMBlock no larger than the smallest one belongs at the tail ----------
+insert-after|qemu/exec.c|#include "uc_priv.h"|#include "brovan_ramblock.inc.h"
+replace-all|qemu/exec.c|new_block->max_length > uc->target_page_size|brov_ramblock_needs_sort_walk(uc, new_block)
+replace-all|qemu/exec.c|if (uc->ram_list.freed|if (0 /* brov: a freed block no longer forces the walk */ 
+replace-all|qemu/exec.c|if (!uc->ram_list.freed) {|{ ram_addr_t brov_off; if (brov_find_ram_offset(uc, size, &brov_off)) { return brov_off; } } if (!uc->ram_list.freed) {
+

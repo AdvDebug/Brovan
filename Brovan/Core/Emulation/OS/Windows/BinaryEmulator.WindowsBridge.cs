@@ -1,4 +1,4 @@
-﻿using System.Buffers;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Brovan.Core.Emulation.OS.Windows;
@@ -1060,32 +1060,50 @@ namespace Brovan.Core.Emulation
                    Left.Flags == Right.Flags;
         }
 
-        private static List<MemoryRegion> MergeProtectedWinRegions(List<MemoryRegion> Regions)
+        /// <summary>
+        /// Collapses adjacent regions carrying identical attributes inside <paramref name="First"/>..
+        /// <paramref name="Last"/> and returns the index of the last entry that survived. Slots between
+        /// the returned index and <paramref name="Last"/> are stale and belong to the caller to drop.
+        /// </summary>
+        private static int MergeWinRegionWindow(List<MemoryRegion> Regions, int First, int Last)
         {
-            Regions.Sort((Left, Right) => Left.BaseAddress.CompareTo(Right.BaseAddress));
-
-            List<MemoryRegion> Merged = new List<MemoryRegion>(Regions.Count);
-            foreach (MemoryRegion Region in Regions)
+            int Write = First;
+            for (int Read = First + 1; Read <= Last; Read++)
             {
-                if (Merged.Count == 0)
+                MemoryRegion Current = Regions[Write];
+                MemoryRegion Next = Regions[Read];
+
+                if (CanMergeProtectedWinRegions(Current, Next))
                 {
-                    Merged.Add(Region);
+                    Current.Size += Next.Size;
+                    Current.RequestedSize = Current.Size;
+                    Regions[Write] = Current;
                     continue;
                 }
 
-                MemoryRegion Last = Merged[Merged.Count - 1];
-                if (CanMergeProtectedWinRegions(Last, Region))
-                {
-                    Last.Size += Region.Size;
-                    Last.RequestedSize = Last.Size;
-                    Merged[Merged.Count - 1] = Last;
-                    continue;
-                }
-
-                Merged.Add(Region);
+                Write++;
+                if (Write != Read)
+                    Regions[Write] = Next;
             }
 
-            return Merged;
+            return Write;
+        }
+
+        /// <summary>
+        /// Sorts a freshly built region list and merges it end to end. Returns the same list.
+        /// </summary>
+        private static List<MemoryRegion> MergeProtectedWinRegions(List<MemoryRegion> Regions)
+        {
+            if (Regions.Count < 2)
+                return Regions;
+
+            Regions.Sort((Left, Right) => Left.BaseAddress.CompareTo(Right.BaseAddress));
+
+            int Kept = MergeWinRegionWindow(Regions, 0, Regions.Count - 1);
+            if (Kept + 1 < Regions.Count)
+                Regions.RemoveRange(Kept + 1, Regions.Count - (Kept + 1));
+
+            return Regions;
         }
 
         private static bool HasGuardProtection(SpecialProtections Protections)
@@ -1284,7 +1302,104 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        private bool ProtectWinMemoryRange(ulong Address, ulong Size, MemoryProtection Protection, uint WinProtect = 0,
+        /// <summary>
+        /// Rewrites the mapped region list for one protection change, splitting only the regions the range
+        /// covers instead of rebuilding the whole list, then re-merging just the window it touched.
+        /// </summary>
+        private void SpliceWinProtectionRange(ulong AlignedBase, ulong AlignedEnd, MemoryProtection Protection, uint WinProtect, SpecialProtections Special)
+        {
+            if (AlignedEnd <= AlignedBase || _memory.Count == 0)
+                return;
+
+            int Left = 0;
+            int Right = _memory.Count - 1;
+            while (Left <= Right)
+            {
+                int Middle = Left + ((Right - Left) >> 1);
+                if (_memory[Middle].BaseAddress < AlignedBase)
+                    Left = Middle + 1;
+                else
+                    Right = Middle - 1;
+            }
+
+            int First = Left;
+            while (First > 0 && GetRangeEnd(_memory[First - 1].BaseAddress, _memory[First - 1].Size) > AlignedBase)
+                First--;
+
+            int Last = First;
+            while (Last < _memory.Count && _memory[Last].BaseAddress < AlignedEnd)
+                Last++;
+
+            if (Last == First)
+                return;
+
+            List<MemoryRegion> Replacement = new List<MemoryRegion>((Last - First) + 2);
+
+            for (int i = First; i < Last; i++)
+            {
+                MemoryRegion Region = _memory[i];
+                ulong RegionStart = Region.BaseAddress;
+                ulong RegionEnd = GetRangeEnd(RegionStart, Region.Size);
+
+                if (RegionStart < AlignedBase)
+                {
+                    MemoryRegion LeftPart = Region;
+                    LeftPart.Size = AlignedBase - RegionStart;
+                    LeftPart.RequestedSize = LeftPart.Size;
+                    Replacement.Add(LeftPart);
+                }
+
+                ulong MiddleStart = Math.Max(RegionStart, AlignedBase);
+                ulong MiddleEnd = Math.Min(RegionEnd, AlignedEnd);
+                if (MiddleEnd > MiddleStart)
+                {
+                    MemoryRegion Middle = Region;
+                    Middle.BaseAddress = MiddleStart;
+                    Middle.Size = MiddleEnd - MiddleStart;
+                    Middle.RequestedSize = Middle.Size;
+                    Middle.Protections = Protection;
+                    Middle.Protect = WinProtect;
+                    Middle.SpecialProtections = Special;
+                    Replacement.Add(Middle);
+                }
+
+                if (RegionEnd > AlignedEnd)
+                {
+                    MemoryRegion RightPart = Region;
+                    RightPart.BaseAddress = AlignedEnd;
+                    RightPart.Size = RegionEnd - AlignedEnd;
+                    RightPart.RequestedSize = RightPart.Size;
+                    Replacement.Add(RightPart);
+                }
+            }
+
+            _memory.RemoveRange(First, Last - First);
+            _memory.InsertRange(First, Replacement);
+
+            // Only the spliced span and the two regions flanking it can have gained a mergeable neighbour;
+            // everything outside that window was already merged by whoever wrote it.
+            MergeAdjacentWinRegions(First - 1, First + Replacement.Count);
+        }
+
+        /// <summary>
+        /// Collapses adjacent regions that carry identical attributes inside a window of the region list,
+        /// so a query reports one region where Windows would.
+        /// </summary>
+        private void MergeAdjacentWinRegions(int First, int Last)
+        {
+            if (First < 0)
+                First = 0;
+            if (Last >= _memory.Count)
+                Last = _memory.Count - 1;
+            if (Last <= First)
+                return;
+
+            int Kept = MergeWinRegionWindow(_memory, First, Last);
+            if (Kept < Last)
+                _memory.RemoveRange(Kept + 1, Last - Kept);
+        }
+
+        internal bool ProtectWinMemoryRange(ulong Address, ulong Size, MemoryProtection Protection, uint WinProtect = 0,
             SpecialProtections Special = SpecialProtections.None)
         {
             if (Size == 0)
@@ -1300,53 +1415,8 @@ namespace Brovan.Core.Emulation
                 return false;
 
             uint EffectiveWinProtect = WinProtect != 0 ? WinProtect : (WinHelper != null ? (uint)WinHelper.ConvertInternalToWinProtect(Protection) : 0);
-            List<MemoryRegion> NewRegions = new List<MemoryRegion>();
 
-            foreach (MemoryRegion Region in EnumerateMemoryRegionsByBase())
-            {
-                ulong RegionStart = Region.BaseAddress;
-                ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
-
-                if (RegionEnd <= AlignedBase || RegionStart >= AlignedEnd)
-                {
-                    NewRegions.Add(Region);
-                    continue;
-                }
-
-                if (RegionStart < AlignedBase)
-                {
-                    MemoryRegion Left = Region;
-                    Left.BaseAddress = RegionStart;
-                    Left.Size = AlignedBase - RegionStart;
-                    Left.RequestedSize = Left.Size;
-                    NewRegions.Add(Left);
-                }
-
-                ulong MiddleStart = Math.Max(RegionStart, AlignedBase);
-                ulong MiddleEnd = Math.Min(RegionEnd, AlignedEnd);
-                if (MiddleEnd > MiddleStart)
-                {
-                    MemoryRegion Middle = Region;
-                    Middle.BaseAddress = MiddleStart;
-                    Middle.Size = MiddleEnd - MiddleStart;
-                    Middle.RequestedSize = Middle.Size;
-                    Middle.Protections = Protection;
-                    Middle.Protect = EffectiveWinProtect;
-                    Middle.SpecialProtections = Special;
-                    NewRegions.Add(Middle);
-                }
-
-                if (RegionEnd > AlignedEnd)
-                {
-                    MemoryRegion Right = Region;
-                    Right.BaseAddress = AlignedEnd;
-                    Right.Size = RegionEnd - AlignedEnd;
-                    Right.RequestedSize = Right.Size;
-                    NewRegions.Add(Right);
-                }
-            }
-
-            ReplaceMemoryRegions(MergeProtectedWinRegions(NewRegions));
+            SpliceWinProtectionRange(AlignedBase, AlignedEnd, Protection, EffectiveWinProtect, Special);
             return true;
         }
 
@@ -1379,59 +1449,9 @@ namespace Brovan.Core.Emulation
             if (AlignedRanges.Count == 0)
                 return true;
 
-            List<MemoryRegion> Regions = EnumerateMemoryRegionsByBase().ToList();
             foreach (var Range in AlignedRanges)
-            {
-                List<MemoryRegion> NewRegions = new List<MemoryRegion>(Regions.Count + 2);
+                SpliceWinProtectionRange(Range.BaseAddress, Range.EndAddress, Range.Protection, Range.WinProtect, SpecialProtections.None);
 
-                foreach (MemoryRegion Region in Regions)
-                {
-                    ulong RegionStart = Region.BaseAddress;
-                    ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
-
-                    if (RegionEnd <= Range.BaseAddress || RegionStart >= Range.EndAddress)
-                    {
-                        NewRegions.Add(Region);
-                        continue;
-                    }
-
-                    if (RegionStart < Range.BaseAddress)
-                    {
-                        MemoryRegion Left = Region;
-                        Left.BaseAddress = RegionStart;
-                        Left.Size = Range.BaseAddress - RegionStart;
-                        Left.RequestedSize = Left.Size;
-                        NewRegions.Add(Left);
-                    }
-
-                    ulong MiddleStart = Math.Max(RegionStart, Range.BaseAddress);
-                    ulong MiddleEnd = Math.Min(RegionEnd, Range.EndAddress);
-                    if (MiddleEnd > MiddleStart)
-                    {
-                        MemoryRegion Middle = Region;
-                        Middle.BaseAddress = MiddleStart;
-                        Middle.Size = MiddleEnd - MiddleStart;
-                        Middle.RequestedSize = Middle.Size;
-                        Middle.Protections = Range.Protection;
-                        Middle.Protect = Range.WinProtect;
-                        Middle.SpecialProtections = SpecialProtections.None;
-                        NewRegions.Add(Middle);
-                    }
-
-                    if (RegionEnd > Range.EndAddress)
-                    {
-                        MemoryRegion Right = Region;
-                        Right.BaseAddress = Range.EndAddress;
-                        Right.Size = RegionEnd - Range.EndAddress;
-                        Right.RequestedSize = Right.Size;
-                        NewRegions.Add(Right);
-                    }
-                }
-
-                Regions = NewRegions;
-            }
-
-            ReplaceMemoryRegions(MergeProtectedWinRegions(Regions));
             return true;
         }
 

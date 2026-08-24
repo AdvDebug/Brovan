@@ -326,6 +326,16 @@ void *brov_alloc_uc(size_t size)
 
 void brov_free_uc(void *p)
 {
+    if (p) {
+        /* Every free(uc) site in uc.c passes the uc_struct, and it is zeroed at
+         * allocation, so this is a no-op on the early-teardown paths. */
+        struct uc_struct *uc = (struct uc_struct *)p;
+
+        g_free(uc->brov_ram_starts);
+        uc->brov_ram_starts = NULL;
+        uc->brov_ram_starts_cap = 0;
+    }
+
     if (g_brov.active && (uint8_t *)p >= g_brov.arena &&
         (uint8_t *)p < g_brov.arena + BROV_ARENA_SIZE) {
         return;

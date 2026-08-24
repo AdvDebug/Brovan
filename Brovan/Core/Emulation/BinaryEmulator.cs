@@ -336,7 +336,6 @@ namespace Brovan.Core.Emulation
 
         internal List<MemoryRegion> _memory = new();
         internal List<MemoryRegion> _freedmemory = new();
-        private readonly List<int> MemoryRegionIndex = new();
         private readonly Queue<int>[] MlfqReadyQueues = new Queue<int>[32];
         private readonly HashSet<int> MlfqQueuedThreads = new();
         private readonly uint[] MlfqQuanta = new uint[32];
@@ -357,7 +356,6 @@ namespace Brovan.Core.Emulation
         private long EarliestWaitDeadline = long.MaxValue;
         private long LastFullWakeupScanTick;
         private uint SlicesSinceFullWakeupScan;
-        private bool MemoryRegionIndexDirty = true;
         private bool _freedMemorySorted = true;
 
         private static readonly MemoryRegionBaseComparer _memoryRegionBaseComparer = new();
@@ -936,59 +934,58 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Marks the sorted memory-region index as dirty after mutating <see cref="_memory"/>.
-        /// </summary>
-        internal void MarkMemoryRegionIndexDirty()
-        {
-            MemoryRegionIndexDirty = true;
-        }
-
-        /// <summary>
-        /// Adds a mapped memory region and invalidates the sorted memory-region index.
+        /// Adds a mapped memory region, keeping the list ordered by base address.
         /// </summary>
         internal void AddMemoryRegion(MemoryRegion Region)
         {
             int idx = _memory.BinarySearch(Region, _memoryRegionBaseComparer);
             if (idx < 0) idx = ~idx;
             _memory.Insert(idx, Region);
-            MemoryRegionIndexDirty = true;
         }
 
         /// <summary>
-        /// Removes a mapped memory region and invalidates the sorted memory-region index.
+        /// Removes a mapped memory region.
         /// </summary>
         internal bool RemoveMemoryRegion(MemoryRegion Region)
         {
-            bool Removed = _memory.Remove(Region);
-            if (Removed)
-                MemoryRegionIndexDirty = true;
+            int Index = _memory.BinarySearch(Region, _memoryRegionBaseComparer);
+            if (Index < 0)
+                return false;
 
-            return Removed;
+            int First = Index;
+            while (First > 0 && _memory[First - 1].BaseAddress == Region.BaseAddress)
+                First--;
+
+            for (int i = First; i < _memory.Count && _memory[i].BaseAddress == Region.BaseAddress; i++)
+            {
+                if (!_memory[i].Equals(Region))
+                    continue;
+
+                _memory.RemoveAt(i);
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
-        /// Removes a mapped memory region by index and invalidates the sorted memory-region index.
+        /// Removes a mapped memory region by index.
         /// </summary>
         internal void RemoveMemoryRegionAt(int Index)
         {
             _memory.RemoveAt(Index);
-            MemoryRegionIndexDirty = true;
         }
 
         /// <summary>
-        /// Removes all mapped memory regions matching a predicate and invalidates the sorted memory-region index when needed.
+        /// Removes all mapped memory regions matching a predicate.
         /// </summary>
         internal int RemoveMemoryRegions(Predicate<MemoryRegion> Match)
         {
-            int Removed = _memory.RemoveAll(Match);
-            if (Removed != 0)
-                MemoryRegionIndexDirty = true;
-
-            return Removed;
+            return _memory.RemoveAll(Match);
         }
 
         /// <summary>
-        /// Replaces a mapped memory region by index and invalidates the sorted memory-region index.
+        /// Replaces a mapped memory region by index, restoring base-address order when it moved.
         /// </summary>
         internal void SetMemoryRegion(int Index, MemoryRegion Region)
         {
@@ -999,20 +996,16 @@ namespace Brovan.Core.Emulation
             _memory[Index] = Region;
 
             if (Region.BaseAddress != OldBase)
-            {
                 _memory.Sort(_memoryRegionBaseComparer);
-                MemoryRegionIndexDirty = true;
-            }
         }
 
         /// <summary>
-        /// Replaces the mapped memory region list and invalidates the sorted memory-region index.
+        /// Replaces the mapped memory region list and restores base-address order.
         /// </summary>
         internal void ReplaceMemoryRegions(List<MemoryRegion> Regions)
         {
             _memory = Regions ?? new List<MemoryRegion>();
             _memory.Sort(_memoryRegionBaseComparer);
-            MemoryRegionIndexDirty = true;
         }
 
         /// <summary>
@@ -1035,17 +1028,16 @@ namespace Brovan.Core.Emulation
         /// </summary>
         internal bool TryFindMemoryRegionIndex(ulong Address, out int Index)
         {
-            EnsureMemoryRegionIndex();
             Index = -1;
 
             int Left = 0;
-            int Right = MemoryRegionIndex.Count - 1;
+            int Right = _memory.Count - 1;
             int Candidate = -1;
 
             while (Left <= Right)
             {
                 int Middle = Left + ((Right - Left) >> 1);
-                MemoryRegion Region = _memory[MemoryRegionIndex[Middle]];
+                MemoryRegion Region = _memory[Middle];
 
                 if (Region.BaseAddress <= Address)
                 {
@@ -1061,7 +1053,7 @@ namespace Brovan.Core.Emulation
             if (Candidate < 0)
                 return false;
 
-            Index = MemoryRegionIndex[Candidate];
+            Index = Candidate;
             MemoryRegion Found = _memory[Index];
             ulong End = GetRangeEnd(Found.BaseAddress, Found.Size);
             if (Address >= Found.BaseAddress && Address < End)
@@ -1076,19 +1068,17 @@ namespace Brovan.Core.Emulation
         /// </summary>
         internal bool TryFindMemoryRegionByBase(ulong BaseAddress, out int Index, out MemoryRegion Region)
         {
-            EnsureMemoryRegionIndex();
             int Left = 0;
-            int Right = MemoryRegionIndex.Count - 1;
+            int Right = _memory.Count - 1;
 
             while (Left <= Right)
             {
                 int Middle = Left + ((Right - Left) >> 1);
-                int CandidateIndex = MemoryRegionIndex[Middle];
-                MemoryRegion Candidate = _memory[CandidateIndex];
+                MemoryRegion Candidate = _memory[Middle];
 
                 if (Candidate.BaseAddress == BaseAddress)
                 {
-                    Index = CandidateIndex;
+                    Index = Middle;
                     Region = Candidate;
                     return true;
                 }
@@ -1109,10 +1099,9 @@ namespace Brovan.Core.Emulation
         /// </summary>
         internal bool TryFindOverlappingMemoryRegion(ulong Address, ulong Size, out MemoryRegion Region)
         {
-            EnsureMemoryRegionIndex();
             Region = default;
 
-            if (Size == 0 || MemoryRegionIndex.Count == 0)
+            if (Size == 0 || _memory.Count == 0)
                 return false;
 
             ulong End = GetRangeEnd(Address, Size);
@@ -1122,7 +1111,7 @@ namespace Brovan.Core.Emulation
 
             for (int i = Start; i >= 0; i--)
             {
-                MemoryRegion Candidate = _memory[MemoryRegionIndex[i]];
+                MemoryRegion Candidate = _memory[i];
                 ulong CandidateEnd = GetRangeEnd(Candidate.BaseAddress, Candidate.Size);
 
                 if (CandidateEnd <= Address)
@@ -1146,8 +1135,7 @@ namespace Brovan.Core.Emulation
             if (Destination == null || Size == 0)
                 return;
 
-            EnsureMemoryRegionIndex();
-            if (MemoryRegionIndex.Count == 0)
+            if (_memory.Count == 0)
                 return;
 
             ulong End = GetRangeEnd(Address, Size);
@@ -1157,7 +1145,7 @@ namespace Brovan.Core.Emulation
 
             for (int i = Start; i >= 0; i--)
             {
-                MemoryRegion Region = _memory[MemoryRegionIndex[i]];
+                MemoryRegion Region = _memory[i];
                 ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
 
                 if (RegionEnd <= Address)
@@ -1199,15 +1187,14 @@ namespace Brovan.Core.Emulation
         /// </summary>
         internal bool TryFindNextMemoryRegionBase(ulong Address, out ulong BaseAddress)
         {
-            EnsureMemoryRegionIndex();
             int Left = 0;
-            int Right = MemoryRegionIndex.Count - 1;
+            int Right = _memory.Count - 1;
             int Candidate = -1;
 
             while (Left <= Right)
             {
                 int Middle = Left + ((Right - Left) >> 1);
-                MemoryRegion Region = _memory[MemoryRegionIndex[Middle]];
+                MemoryRegion Region = _memory[Middle];
 
                 if (Region.BaseAddress > Address)
                 {
@@ -1222,7 +1209,7 @@ namespace Brovan.Core.Emulation
 
             if (Candidate >= 0)
             {
-                BaseAddress = _memory[MemoryRegionIndex[Candidate]].BaseAddress;
+                BaseAddress = _memory[Candidate].BaseAddress;
                 return true;
             }
 
@@ -1231,57 +1218,25 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Enumerates mapped memory regions in base-address order without sorting the region list every call.
+        /// Enumerates mapped memory regions in base-address order. <see cref="_memory"/> is kept sorted
+        /// by every mutator, so this is a plain walk.
         /// </summary>
         internal IEnumerable<MemoryRegion> EnumerateMemoryRegionsByBase()
         {
-            EnsureMemoryRegionIndex();
-            for (int i = 0; i < MemoryRegionIndex.Count; i++)
-                yield return _memory[MemoryRegionIndex[i]];
-        }
-
-        private void EnsureMemoryRegionIndex()
-        {
-            if (!MemoryRegionIndexDirty && MemoryRegionIndex.Count == _memory.Count)
-                return;
-
-            MemoryRegionIndex.Clear();
             for (int i = 0; i < _memory.Count; i++)
-                MemoryRegionIndex.Add(i);
-
-            MemoryRegionIndexDirty = false;
-        }
-
-        private readonly struct MemoryRegionIndexComparer : IComparer<int>
-        {
-            private readonly List<MemoryRegion> _memory;
-            public MemoryRegionIndexComparer(List<MemoryRegion> memory) => _memory = memory;
-
-            public int Compare(int LeftIndex, int RightIndex)
-            {
-                ulong LeftBase = _memory[LeftIndex].BaseAddress;
-                ulong RightBase = _memory[RightIndex].BaseAddress;
-
-                if (LeftBase < RightBase)
-                    return -1;
-
-                if (LeftBase > RightBase)
-                    return 1;
-
-                return LeftIndex.CompareTo(RightIndex);
-            }
+                yield return _memory[i];
         }
 
         private int FindFirstRegionStartingBefore(ulong Address)
         {
             int Left = 0;
-            int Right = MemoryRegionIndex.Count - 1;
+            int Right = _memory.Count - 1;
             int Candidate = -1;
 
             while (Left <= Right)
             {
                 int Middle = Left + ((Right - Left) >> 1);
-                MemoryRegion Region = _memory[MemoryRegionIndex[Middle]];
+                MemoryRegion Region = _memory[Middle];
 
                 if (Region.BaseAddress < Address)
                 {
@@ -1322,16 +1277,14 @@ namespace Brovan.Core.Emulation
             if (Size == 0 || Alignment == 0)
                 return false;
 
-            EnsureMemoryRegionIndex();
-
             ulong Candidate = AlignUp(MinAddress, Alignment);
             if (Candidate < MinAddress || Candidate >= MaxAddress)
                 return false;
 
-            int Count = MemoryRegionIndex.Count;
+            int Count = _memory.Count;
             for (int i = 0; i < Count; i++)
             {
-                MemoryRegion Region = _memory[MemoryRegionIndex[i]];
+                MemoryRegion Region = _memory[i];
 
                 ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
                 if (RegionEnd <= Candidate)
@@ -3709,8 +3662,6 @@ namespace Brovan.Core.Emulation
 
                 _memory.Clear();
                 _freedmemory.Clear();
-                MemoryRegionIndex.Clear();
-                MemoryRegionIndexDirty = true;
                 _emulator = null;
                 _binary = null;
                 _memory = null;
