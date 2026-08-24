@@ -41,25 +41,35 @@ jobs:
       - name: Publish
         run: dotnet publish Brovan/Brovan.csproj -c Release -r ${{ matrix.rid }} --self-contained false -o artifacts/publish/${{ matrix.rid }}
 
-      - name: Package Windows artifact
+      - name: Build the BrovVulk Vulkan shim (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path artifacts/packages | Out-Null
-          Compress-Archive -Path "artifacts/publish/${{ matrix.rid }}/*" -DestinationPath "artifacts/packages/Brovan-${{ matrix.rid }}.zip"
+        run: ./Brovan.Graphics/brovvulk-icd/build.bat
 
-      - name: Package Linux artifact
+      - name: Build the BrovVulk Vulkan shim (Linux)
         if: runner.os == 'Linux'
         shell: bash
+        run: sh Brovan.Graphics/brovvulk-icd/build.sh
+
+      - name: Stage the Vulkan shim into the published VirtualFS
+        shell: bash
         run: |
-          mkdir -p artifacts/packages
-          tar -C "artifacts/publish/${{ matrix.rid }}" -czf "artifacts/packages/Brovan-${{ matrix.rid }}.tar.gz" .
+          shim="Brovan.Graphics/brovvulk-icd/bin"
+          vfs="artifacts/publish/${{ matrix.rid }}/VirtualFS/C/Windows"
+
+          for dll in "$shim/vulkan-1.dll" "$shim/x86/vulkan-1.dll"; do
+            [ -f "$dll" ] || { echo "error: the Vulkan shim build produced no $dll" >&2; exit 1; }
+          done
+
+          mkdir -p "$vfs/System32" "$vfs/SysWOW64"
+          cp -f "$shim/vulkan-1.dll" "$vfs/System32/vulkan-1.dll"
+          cp -f "$shim/x86/vulkan-1.dll" "$vfs/SysWOW64/vulkan-1.dll"
 
       - name: Upload CI Artifact
         uses: actions/upload-artifact@v6
         with:
           name: Brovan ${{ matrix.platform }}
-          path: artifacts/packages/*
+          path: artifacts/publish/${{ matrix.rid }}
           retention-days: 14
 
   android:
@@ -136,10 +146,20 @@ jobs:
         with:
           path: release-artifacts
 
+      # upload-artifact drops the executable bit, so the apphost is made runnable again before the
+      # tarball is rolled.
+      - name: Package release archives
+        run: |
+          mkdir -p release-assets
+          ( cd "release-artifacts/Brovan Windows x64" && zip -qr "$GITHUB_WORKSPACE/release-assets/Brovan-win-x64.zip" . )
+          chmod +x "release-artifacts/Brovan Linux x64/Brovan"
+          tar -C "release-artifacts/Brovan Linux x64" -czf release-assets/Brovan-linux-x64.tar.gz .
+          cp release-artifacts/"Brovan Android arm64"/*.apk release-assets/
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" release-artifacts/**/* \
+          gh release create "${{ github.ref_name }}" release-assets/* \
             --title "${{ github.ref_name }}" \
             --generate-notes
