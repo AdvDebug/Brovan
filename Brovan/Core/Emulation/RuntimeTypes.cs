@@ -1,9 +1,30 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation
 {
+    /// <summary>
+    /// Counts the state changes that can make a blocked guest thread runnable. The scheduler compares it against
+    /// the value it last scanned at, so a slice that produced nothing skips the wakeup scan entirely.
+    /// </summary>
+    /// <remarks>
+    /// The audio engine and the GUI thread both produce, so the counter is atomic. It only ever counts up: a
+    /// missed bump costs latency until the fallback sweep, a spurious one costs a single scan.
+    /// </remarks>
+    public sealed class WakeSignal
+    {
+        private long Counter;
+
+        public long Current => Volatile.Read(ref Counter);
+
+        public void Bump()
+        {
+            Interlocked.Increment(ref Counter);
+        }
+    }
+
     public sealed class CpuContext
     {
         public ulong RAX, RBX, RCX, RDX, RSI, RDI, RBP, RSP;

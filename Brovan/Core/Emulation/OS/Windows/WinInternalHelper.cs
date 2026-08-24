@@ -124,10 +124,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong NextHandle = 0x40;
         private readonly Dictionary<ulong, HandleEntry> HandleTable = new();
         private readonly Dictionary<string, List<ulong>> ObjectIdToHandles = new();
+        private readonly WakeSignal Signal;
+
+        public HandleManager(WakeSignal Signal)
+        {
+            this.Signal = Signal;
+        }
 
         public WinHandle AddHandle(IHandleObject obj, AccessMask Permissions)
         {
             ulong handle = AllocateHandleValue();
+
+            // Entering the table is the first moment a thread can wait on this object, so it is also the first
+            // moment its state changes are worth reporting.
+            if (obj is WaitableHandleObject Waitable)
+                Waitable.WakeSignal ??= Signal;
 
             WinHandle winHandle = new WinHandle
             {

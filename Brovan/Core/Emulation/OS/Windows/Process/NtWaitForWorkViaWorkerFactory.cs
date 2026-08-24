@@ -65,9 +65,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             uint Removed = 0;
             uint PacketSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x20u : 0x10u;
-            while (Removed < Count && Completion.Entries.Count > 0)
+            while (Removed < Count && Completion.PendingCount > 0)
             {
-                WinIoCompletionEntry Entry = Completion.Entries.Dequeue();
+                WinIoCompletionEntry Entry = Completion.Take();
                 WorkerFactoryHelper.OnIoCompletionEntryDequeued(Instance, Entry);
 
                 if (Entry.WaitCompletionPacketHandle != 0)

@@ -20,6 +20,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             CurrentThread.ExitCode = (int)(uint)error_code;
             CurrentThread.State = EmulatedThreadState.Terminated;
+            Instance.WakeSignal.Bump();
 
             LinuxGuest.CleanupExitedThread(Instance, CurrentThread);
 

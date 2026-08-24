@@ -777,6 +777,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             }
 
             EventfdDescriptor.Counter += Value;
+            Instance.WakeSignal.Bump();
             Helper.SetReturnValue(Instance, Context, sizeof(ulong));
         }
 
@@ -2182,6 +2183,9 @@ namespace Brovan.Core.Emulation.OS.Linux
             if (Waiters.Count == 0)
                 FutexWaiters.Remove(Address);
 
+            if (Woken != 0)
+                Instance.WakeSignal.Bump();
+
             return Woken;
         }
 
@@ -2678,6 +2682,7 @@ namespace Brovan.Core.Emulation.OS.Linux
 
             State.PendingSignal = Pending;
             State.DispatchSignal = true;
+            Instance.WakeSignal.Bump();
         }
 
         public static bool TryActivatePendingSignal(LinuxThreadState State)
@@ -3094,6 +3099,7 @@ namespace Brovan.Core.Emulation.OS.Linux
 
                 Thread.State = EmulatedThreadState.Terminated;
                 Thread.ExitCode = ExitCode;
+                Instance.WakeSignal.Bump();
                 if (Thread.Context != null)
                     Thread.Context.RAX = unchecked((ulong)ExitCode);
             }

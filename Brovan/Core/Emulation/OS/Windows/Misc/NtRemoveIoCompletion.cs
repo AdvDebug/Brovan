@@ -43,9 +43,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.MaterializeSignaledWaitPackets(IoCompletionHandle);
 
-            if (Completion.Entries.Count > 0)
+            if (Completion.PendingCount > 0)
             {
-                WinIoCompletionEntry Entry = Completion.Entries.Dequeue();
+                WinIoCompletionEntry Entry = Completion.Take();
                 Instance.ReleaseWaitCompletionPacket(Entry);
 
                 if (Thread.WaitActive)

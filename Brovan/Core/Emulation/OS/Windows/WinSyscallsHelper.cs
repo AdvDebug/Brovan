@@ -279,7 +279,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Completion == null)
                 return;
 
-            Completion.Entries.Enqueue(new WinIoCompletionEntry
+            Completion.Post(new WinIoCompletionEntry
             {
                 KeyContext = File.CompletionKey,
                 ApcContext = ApcContext,
@@ -1182,7 +1182,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinModule> MappedImageViews = new List<WinModule>();
         private readonly Dictionary<string, int> ImageViewCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal KuserSharedDataManager KuserSharedData;
-        internal HandleManager HandleManager = new HandleManager();
+        internal HandleManager HandleManager;
         private static string WinRegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
         public RegistryManager RegManager = new RegistryManager(WinRegPath);
         public Hive[] RegHives;
@@ -1385,6 +1385,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Shared = new WindowsSharedBuffer();
             this.Emulator = Emulator;
+            HandleManager = new HandleManager(Emulator.WakeSignal);
             SyntheticVolumeGuid = Guid.NewGuid().ToString("D").ToLowerInvariant();
             SyntheticVolumeGuidSymbolicLink = $"\\??\\Volume{{{SyntheticVolumeGuid}}}";
             SyntheticVolumeWin32GuidPath = $"\\\\?\\Volume{{{SyntheticVolumeGuid}}}\\";

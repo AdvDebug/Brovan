@@ -673,6 +673,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         State.MessageQueue.Enqueue(new Win32kMessage(TargetHwnd, Message, WParam, LParam, Time, 0, 0));
                 }
 
+                Instance.WakeSignal.Bump();
                 return true;
             }
 
@@ -680,6 +681,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return false;
 
             State.MessageQueue.Enqueue(new Win32kMessage(Hwnd, Message, WParam, LParam, Time, 0, 0));
+            Instance.WakeSignal.Bump();
             return true;
         }
 
@@ -688,6 +690,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Win32kState State = GetState(Instance);
             State.QuitExitCode = ExitCode;
             State.QuitPosted = true;
+            Instance.WakeSignal.Bump();
         }
 
         internal static bool TryGetMessage(BinaryEmulator Instance, ulong HwndFilter, uint MinMessage, uint MaxMessage, bool Remove, out Win32kMessage Message)

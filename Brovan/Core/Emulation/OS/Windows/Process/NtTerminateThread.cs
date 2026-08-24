@@ -28,6 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             TargetThread.ExitCode = unchecked((int)(uint)ExitStatus);
             Instance.WinHelper.ClearTerminationState(TargetThread);
             TargetThread.State = EmulatedThreadState.Terminated;
+            Instance.WakeSignal.Bump();
 
             if (Instance.CurrentThread != null && TargetThread.ThreadId == (uint)Instance.CurrentThreadId)
             {

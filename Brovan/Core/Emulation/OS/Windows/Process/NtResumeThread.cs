@@ -57,6 +57,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         TargetThread.State = EmulatedThreadState.Waiting;
                     else
                         TargetThread.State = EmulatedThreadState.Ready;
+                        Instance.WakeSignal.Bump();
                 }
             }
 

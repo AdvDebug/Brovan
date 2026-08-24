@@ -1,5 +1,4 @@
-﻿using System.Linq;
-using static Brovan.Core.Helpers.BinaryHelpers;
+﻿using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -13,7 +12,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance.CurrentThread != null && Instance.CurrentThread.ThreadId == ThreadId)
                 return Instance.CurrentThread;
 
-            return Instance.Threads.Values.FirstOrDefault(thread => thread != null && thread.ThreadId == ThreadId);
+            return Instance.Threads.TryGetValue(ThreadId, out EmulatedThread Thread) ? Thread : null;
         }
 
         internal static NTSTATUS AlertThread(BinaryEmulator Instance, uint ThreadId)
@@ -24,6 +23,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WindowsThreadState State = WinEmulatedThread.GetState(TargetThread);
             State.AlertByThreadIdPending = true;
+            Instance.WakeSignal.Bump();
 
             if (TargetThread.WaitActive && State.AlertByThreadIdWaitActive && TargetThread.State == EmulatedThreadState.Waiting)
             {
@@ -48,7 +48,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 else
                 {
-                    Instance.YieldSliceAfterWake();
+                    Instance.YieldSliceAfterWake(TargetThread);
                 }
             }
 

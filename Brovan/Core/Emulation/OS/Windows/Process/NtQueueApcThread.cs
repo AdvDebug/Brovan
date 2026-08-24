@@ -30,6 +30,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ApcArgument3 = ApcArgument3
             });
 
+            // A queued APC makes the target runnable through HasPendingGuestWork even when it stays Waiting.
+            Instance.WakeSignal.Bump();
+
             bool SpecialApc = (ApcFlags & WinPendingUserApc.SpecialUserApc) != 0;
             bool AlertableWait = Thread.WaitActive && State.WaitAlertable;
 

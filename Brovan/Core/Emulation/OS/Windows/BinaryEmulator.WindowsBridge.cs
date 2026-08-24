@@ -195,9 +195,9 @@ namespace Brovan.Core.Emulation
             if (WinHelper == null)
                 return false;
 
-            foreach (EmulatedThread Thread in Threads.Values)
+            foreach (EmulatedThread Thread in LiveThreads)
             {
-                if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
                     continue;
 
                 if (Thread.WaitHandles != null && Thread.WaitHandles.Contains(Handle))
@@ -326,6 +326,12 @@ namespace Brovan.Core.Emulation
 
         private long WindowsTimerSnapshotVersion = -1;
         private long WindowsMaterializePacketVersion = -1;
+        private long EarliestWindowsTimerDue = -1;
+
+        internal void InvalidateWindowsTimerDue()
+        {
+            EarliestWindowsTimerDue = -1;
+        }
 
         internal bool RefreshWindowsTimersAndWakeWaiters()
         {
@@ -338,6 +344,11 @@ namespace Brovan.Core.Emulation
             // than the timer work itself once a guest holds a few thousand handles, so keep the timers-only view
             // and rebuild it when the table changes.
             long Version = WinHelper.HandleManager.Version;
+            long Now = EmulatedTickCount64;
+
+            if (Version == WindowsTimerSnapshotVersion && EarliestWindowsTimerDue >= 0 && Now < EarliestWindowsTimerDue)
+                return false;
+
             if (Version != WindowsTimerSnapshotVersion)
             {
                 WinHelper.HandleManager.SnapshotHandles(WindowsHandleScratch);
@@ -353,6 +364,8 @@ namespace Brovan.Core.Emulation
                 WindowsTimerSnapshotVersion = Version;
             }
 
+            long NextDue = long.MaxValue;
+
             for (int i = 0; i < WindowsTimerHandleSnapshot.Count; i++)
             {
                 KeyValuePair<ulong, IHandleObject> Pair = WindowsTimerHandleSnapshot[i];
@@ -361,7 +374,12 @@ namespace Brovan.Core.Emulation
 
                 if (RefreshTimerState(Timer))
                     WokeThread |= WakeWorkerFactoryWaitersForObject(Pair.Key);
+
+                if (Timer.Active && Timer.DueTick < NextDue)
+                    NextDue = Timer.DueTick;
             }
+
+            EarliestWindowsTimerDue = NextDue;
 
             return WokeThread;
         }
@@ -377,9 +395,9 @@ namespace Brovan.Core.Emulation
             long BestDelta = long.MaxValue;
             bool HasCompletionPacketWaiter = false;
 
-            foreach (EmulatedThread Thread in Threads.Values)
+            foreach (EmulatedThread Thread in LiveThreads)
             {
-                if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
@@ -403,9 +421,9 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 bool HasHandleWaiter = false;
-                foreach (EmulatedThread Thread in Threads.Values)
+                foreach (EmulatedThread Thread in LiveThreads)
                 {
-                    if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                    if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
                         continue;
 
                     if (Thread.WaitHandles != null && Thread.WaitHandles.Contains(Pair.Key))
@@ -483,7 +501,7 @@ namespace Brovan.Core.Emulation
             }
 
             WindowsWakeThreadSnapshot.Clear();
-            foreach (EmulatedThread Thread in Threads.Values)
+            foreach (EmulatedThread Thread in LiveThreads)
                 WindowsWakeThreadSnapshot.Add(Thread);
 
             for (int i = 0; i < WindowsWakeThreadSnapshot.Count; i++)
@@ -555,7 +573,7 @@ namespace Brovan.Core.Emulation
                 if (!TryAcquireWaitHandle(Packet.TargetObjectHandle, null, out _))
                     continue;
 
-                Completion.Entries.Enqueue(new WinIoCompletionEntry
+                Completion.Post(new WinIoCompletionEntry
                 {
                     KeyContext = Packet.KeyContext,
                     ApcContext = Packet.ApcContext,
@@ -594,10 +612,10 @@ namespace Brovan.Core.Emulation
 
             MaterializeSignaledWaitPackets(State.IoCompletionHandle);
 
-            if (Completion.Entries.Count == 0)
+            if (Completion.PendingCount == 0)
                 return false;
 
-            WinIoCompletionEntry Entry = Completion.Entries.Dequeue();
+            WinIoCompletionEntry Entry = Completion.Take();
             ReleaseWaitCompletionPacket(Entry);
             State.IoCompletionReservedEntry = Entry;
             return true;
@@ -624,9 +642,9 @@ namespace Brovan.Core.Emulation
             MaterializeSignaledWaitPackets(Factory.IoCompletionHandle);
 
             uint Limit = MaxPackets == 0 ? 1u : MaxPackets;
-            while (Reserved.Count < Limit && Completion.Entries.Count > 0)
+            while (Reserved.Count < Limit && Completion.PendingCount > 0)
             {
-                WinIoCompletionEntry Entry = Completion.Entries.Dequeue();
+                WinIoCompletionEntry Entry = Completion.Take();
                 Reserved.Add(Entry);
 
                 if (Entry.WaitCompletionPacketHandle != 0)

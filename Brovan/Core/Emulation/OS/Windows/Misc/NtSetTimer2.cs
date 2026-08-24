@@ -58,6 +58,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Timer.Active = true;
             Timer.DueTick = Instance.CreateEmulatedDeadlineMilliseconds(DueMilliseconds);
             Timer.PeriodMilliseconds = PeriodMilliseconds;
+            Instance.InvalidateWindowsTimerDue();
 
             if (DueMilliseconds == 0)
             {

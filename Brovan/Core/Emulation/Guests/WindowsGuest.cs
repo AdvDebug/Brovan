@@ -346,7 +346,7 @@ namespace Brovan.Core.Emulation.Guests
             if (Obj is WinIoCompletion Completion)
             {
                 Instance.MaterializeSignaledWaitPackets(Handle);
-                return Completion.Entries.Count > 0;
+                return Completion.PendingCount > 0;
             }
 
             return false;
@@ -476,7 +476,7 @@ namespace Brovan.Core.Emulation.Guests
             if (Completion == null)
                 return false;
 
-            return Completion.Entries.Count > 0;
+            return Completion.PendingCount > 0;
         }
 
         private void CompleteWorkerFactoryWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)

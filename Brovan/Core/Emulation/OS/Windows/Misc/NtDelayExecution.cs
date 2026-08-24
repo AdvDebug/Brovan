@@ -51,9 +51,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             long Now = Instance.EmulatedTickCount64;
             long BestDelta = long.MaxValue;
 
-            foreach (EmulatedThread Thread in Instance.Threads.Values)
+            foreach (EmulatedThread Thread in Instance.LiveThreads)
             {
-                if (Thread == null || Thread == CurrentThread)
+                if (Thread == CurrentThread)
                     continue;
 
                 if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive || Thread.WaitDeadline == -1)
@@ -109,6 +109,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (TryGetYieldTimeAdvanceMs(Instance, Thread, MaxYieldAdvanceMs, out int AdvanceMs) && AdvanceMs > 0)
                     Instance.AdvanceEmulatedTimeMilliseconds(AdvanceMs);
 
+                // A zero delay is a yield, so whoever the caller is standing aside for has to be looked at now.
+                Instance.WakeSignal.Bump();
                 Instance._emulator.WriteRegister(Instance.IPRegister, NextRip);
                 Thread.State = EmulatedThreadState.Ready;
                 Instance._emulator.StopEmulation();

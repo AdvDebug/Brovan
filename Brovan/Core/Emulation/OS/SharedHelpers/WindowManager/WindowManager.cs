@@ -28,6 +28,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static int _closeRequested;
         private static int _pendingDpi;
 
+        // The GUI thread fills this queue, and DrainHostEvents on the scheduler thread is the only thing that
+        // moves it into a guest message queue. Without the bump a scheduler that skips its wakeup scan never
+        // reaches DrainHostEvents and host input stops arriving.
+        internal static WakeSignal WakeSignal;
+
+        private static void Signal()
+        {
+            WakeSignal?.Bump();
+        }
+
         public static void RequestClose()
         {
             if (Interlocked.Exchange(ref _closeRequested, 1) != 0)
@@ -52,6 +62,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static void MarkDpiChanged(uint dpi)
         {
             Interlocked.Exchange(ref _pendingDpi, (int)dpi);
+            Signal();
         }
 
         public static uint ConsumeDpiChange()
@@ -62,6 +73,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static void MarkRepaint()
         {
             Interlocked.Exchange(ref _pendingRepaint, 1);
+            Signal();
         }
 
         public static bool ConsumeRepaint()
@@ -80,6 +92,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     {
                         tail.WParam = wParam;
                         tail.LParam = lParam;
+                        Signal();
                         return;
                     }
                 }
@@ -93,6 +106,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 slot.LParam = lParam;
                 _count++;
             }
+
+            Signal();
         }
 
         public static bool TryDequeue(out uint message, out ulong wParam, out ulong lParam)

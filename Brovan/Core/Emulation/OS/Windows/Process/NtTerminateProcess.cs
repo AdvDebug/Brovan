@@ -21,6 +21,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                         Instance.WinHelper.AbandonMutexesOwnedByThread(ProcessThreads.ThreadId);
                         ProcessThreads.State = EmulatedThreadState.Terminated;
+                        Instance.WakeSignal.Bump();
                         ProcessThreads.ExitCode = (int)ExitCode;
                         Instance.WinHelper.ClearTerminationState(ProcessThreads);
                     }
@@ -38,6 +39,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                         Instance.WinHelper.AbandonMutexesOwnedByThread(ProcessThreads.ThreadId);
                         ProcessThreads.State = EmulatedThreadState.Terminated;
+                        Instance.WakeSignal.Bump();
                         ProcessThreads.ExitCode = (int)ExitCode;
                         Instance.WinHelper.ClearTerminationState(ProcessThreads);
                     }
@@ -62,6 +64,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             Instance.WinHelper.AbandonMutexesOwnedByThread(ProcessThreads.ThreadId);
                             ProcessThreads.State = EmulatedThreadState.Terminated;
+                            Instance.WakeSignal.Bump();
                             ProcessThreads.ExitCode = (int)ExitCode;
                             Instance.WinHelper.ClearTerminationState(ProcessThreads);
                         }

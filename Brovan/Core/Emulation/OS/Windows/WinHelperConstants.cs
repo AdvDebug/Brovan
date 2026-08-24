@@ -1089,6 +1089,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         HandleType ObjectType { get; }
     }
 
+    public abstract class WaitableHandleObject : IHandleObject
+    {
+        internal WakeSignal WakeSignal;
+
+        public abstract string ObjectId { get; }
+
+        public abstract HandleType ObjectType { get; }
+
+        protected void Signal()
+        {
+            WakeSignal?.Bump();
+        }
+    }
+
     public class WinProcess : IHandleObject
     {
         public uint PID;
@@ -1291,21 +1305,46 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
     }
 
-    public class WinMutex : IHandleObject
+    public class WinMutex : WaitableHandleObject
     {
         public string Name;
-        public bool Signaled;
         public bool Abandoned;
-        public uint OwnerThreadId;
         public int RecursionCount;
+
+        private bool SignaledState;
+        private uint Owner;
+
+        public bool Signaled
+        {
+            get => SignaledState;
+            set
+            {
+                SignaledState = value;
+                if (value)
+                    Signal();
+            }
+        }
+
+        // A wait can be satisfied by the mutex going unowned as well as by it being signalled.
+        public uint OwnerThreadId
+        {
+            get => Owner;
+            set
+            {
+                bool Released = Owner != 0 && value == 0;
+                Owner = value;
+                if (Released)
+                    Signal();
+            }
+        }
 
         public int SignalState => RecursionCount == 0 ? 1 : 1 - RecursionCount;
 
-        public string ObjectId => Name;
-        public HandleType ObjectType => HandleType.MutexHandle;
+        public override string ObjectId => Name;
+        public override HandleType ObjectType => HandleType.MutexHandle;
     }
 
-    public class WinRegKey : IHandleObject
+    public class WinRegKey : WaitableHandleObject
     {
         public string FullPath;
         public Hive Hive;
@@ -1316,13 +1355,25 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint VirtualizationFlags;
         public uint DebugInformation;
         public uint HandleTags;
-        public bool NotifySignaled;
+
+        private bool NotifySignaledState;
+
+        public bool NotifySignaled
+        {
+            get => NotifySignaledState;
+            set
+            {
+                NotifySignaledState = value;
+                if (value)
+                    Signal();
+            }
+        }
 
         public RegistryHiveReader.HiveKey ParsedKey;
         public bool HasParsedKey;
 
-        public string ObjectId => FullPath;
-        public HandleType ObjectType => HandleType.RegistryKeyHandle;
+        public override string ObjectId => FullPath;
+        public override HandleType ObjectType => HandleType.RegistryKeyHandle;
     }
 
     public class WinRegistryNotification
@@ -1340,24 +1391,49 @@ namespace Brovan.Core.Emulation.OS.Windows
         public int ThreadId;
     }
 
-    public class WinEvent : IHandleObject
+    public class WinEvent : WaitableHandleObject
     {
         public string Name;
-        public bool Signaled;
         public uint EventType;
 
-        public string ObjectId => Name;
-        public HandleType ObjectType => HandleType.EventHandle;
+        private bool SignaledState;
+
+        public bool Signaled
+        {
+            get => SignaledState;
+            set
+            {
+                SignaledState = value;
+                if (value)
+                    Signal();
+            }
+        }
+
+        public override string ObjectId => Name;
+        public override HandleType ObjectType => HandleType.EventHandle;
     }
 
-    public class WinSemaphore : IHandleObject
+    public class WinSemaphore : WaitableHandleObject
     {
         public string Name;
-        public int CurrentCount;
         public int MaximumCount;
 
-        public string ObjectId => Name;
-        public HandleType ObjectType => HandleType.SemaphoreHandle;
+        private int Count;
+
+        public int CurrentCount
+        {
+            get => Count;
+            set
+            {
+                bool Released = value > Count;
+                Count = value;
+                if (Released)
+                    Signal();
+            }
+        }
+
+        public override string ObjectId => Name;
+        public override HandleType ObjectType => HandleType.SemaphoreHandle;
     }
 
     public struct WinSectionView
@@ -1595,18 +1671,32 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool WorkerFactoryRelease;
     }
 
-    public sealed class WinIoCompletion : IHandleObject
+    public sealed class WinIoCompletion : WaitableHandleObject
     {
         public string Name;
         public uint Count;
-        public Queue<WinIoCompletionEntry> Entries = new Queue<WinIoCompletionEntry>();
 
-        public string ObjectId => Name;
+        private readonly Queue<WinIoCompletionEntry> Queued = new Queue<WinIoCompletionEntry>();
 
-        public HandleType ObjectType => HandleType.IoCompletionHandle;
+        public int PendingCount => Queued.Count;
+
+        public void Post(WinIoCompletionEntry Entry)
+        {
+            Queued.Enqueue(Entry);
+            Signal();
+        }
+
+        public WinIoCompletionEntry Take()
+        {
+            return Queued.Dequeue();
+        }
+
+        public override string ObjectId => Name;
+
+        public override HandleType ObjectType => HandleType.IoCompletionHandle;
     }
 
-    public sealed class WinWorkerFactory : IHandleObject
+    public sealed class WinWorkerFactory : WaitableHandleObject
     {
         public string Name;
         public uint FactoryId;
@@ -1622,7 +1712,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint ThreadSoftMaximum;
         public uint BindingCount;
         public uint Paused;
-        public bool Shutdown;
         public uint Flags;
         public uint ThreadBasePriority = 8;
         public uint TimeoutWaiters;
@@ -1632,13 +1721,39 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint LastInfoClass;
         public uint LastInfoLength;
         public ulong LastInfoValue;
-        public uint PendingReleaseCount;
         public bool ReleasePending;
         public List<ulong> WorkerThreads = new List<ulong>();
 
-        public string ObjectId => Name;
+        private bool ShutdownState;
+        private uint PendingReleases;
 
-        public HandleType ObjectType => HandleType.WorkerFactoryHandle;
+        // A shut-down factory satisfies every wait on it immediately.
+        public bool Shutdown
+        {
+            get => ShutdownState;
+            set
+            {
+                ShutdownState = value;
+                if (value)
+                    Signal();
+            }
+        }
+
+        public uint PendingReleaseCount
+        {
+            get => PendingReleases;
+            set
+            {
+                bool Released = value > PendingReleases;
+                PendingReleases = value;
+                if (Released)
+                    Signal();
+            }
+        }
+
+        public override string ObjectId => Name;
+
+        public override HandleType ObjectType => HandleType.WorkerFactoryHandle;
     }
 
 
@@ -1707,7 +1822,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Completion == null)
                 return false;
 
-            Completion.Entries.Enqueue(new WinIoCompletionEntry
+            Completion.Post(new WinIoCompletionEntry
             {
                 IoStatus = NTSTATUS.STATUS_SUCCESS,
                 IoStatusInformation = 0,
@@ -1786,7 +1901,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
     }
 
-    public sealed class WinWaitCompletionPacket : IHandleObject
+    public sealed class WinWaitCompletionPacket : WaitableHandleObject
     {
         public string Name;
         public ulong IoCompletionHandle;
@@ -1796,11 +1911,23 @@ namespace Brovan.Core.Emulation.OS.Windows
         public NTSTATUS IoStatus;
         public ulong IoStatusInformation;
         public bool Associated;
-        public bool QueuedCompletion;
 
-        public string ObjectId => Name;
+        private bool QueuedCompletionState;
 
-        public HandleType ObjectType => HandleType.WaitCompletionPacketHandle;
+        public bool QueuedCompletion
+        {
+            get => QueuedCompletionState;
+            set
+            {
+                QueuedCompletionState = value;
+                if (value)
+                    Signal();
+            }
+        }
+
+        public override string ObjectId => Name;
+
+        public override HandleType ObjectType => HandleType.WaitCompletionPacketHandle;
     }
 
     /// <summary>
@@ -1819,19 +1946,31 @@ namespace Brovan.Core.Emulation.OS.Windows
         public HandleType ObjectType => HandleType.EtwRegistrationHandle;
     }
 
-    public class WinTimer : IHandleObject
+    public class WinTimer : WaitableHandleObject
     {
         public string Name;
         public uint TimerId;
         public uint Attributes;
         public TIMER_TYPE TimerType = TIMER_TYPE.SynchronizationTimer;
-        public bool Signaled;
         public bool Active;
         public long DueTick;
         public long PeriodMilliseconds;
 
-        public string ObjectId => Name;
-        public HandleType ObjectType => HandleType.TimerHandle;
+        private bool SignaledState;
+
+        public bool Signaled
+        {
+            get => SignaledState;
+            set
+            {
+                SignaledState = value;
+                if (value)
+                    Signal();
+            }
+        }
+
+        public override string ObjectId => Name;
+        public override HandleType ObjectType => HandleType.TimerHandle;
     }
 
     public class WinSymbolicLink : IHandleObject

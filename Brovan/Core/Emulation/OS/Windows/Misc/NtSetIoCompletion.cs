@@ -17,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Completion == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            Completion.Entries.Enqueue(new WinIoCompletionEntry
+            Completion.Post(new WinIoCompletionEntry
             {
                 KeyContext = KeyContext,
                 ApcContext = ApcContext,
