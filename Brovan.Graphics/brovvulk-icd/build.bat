@@ -89,7 +89,7 @@ exit /b 1
 pushd "%HERE%" || exit /b 1
 
 if /i "%MODE%"=="msvc" (
-    "%COMPILER%" /nologo /O2 /MT /LD vulkan_shim.c /I. /I"..\vulkan-headers" /Fo"obj\build\" /Fe"bin\vulkan-1.dll" /link /DEF:"obj\generated\exports.def" /IMPLIB:"bin\vulkan-1.lib" kernel32.lib
+    "%COMPILER%" /nologo /O2 /MT /LD vulkan_shim.c /I. /I"..\vulkan-headers" /Fo"obj\build\vulkan_shim.obj" /Fe"bin\vulkan-1.dll" /link /DEF:"obj\generated\exports.def" /IMPLIB:"bin\vulkan-1.lib" kernel32.lib
 ) else (
     "%COMPILER%" -O2 -c "vulkan_shim.c" -I. -I"..\vulkan-headers" -o "obj\build\vulkan_shim.o"
     if not errorlevel 1 (
