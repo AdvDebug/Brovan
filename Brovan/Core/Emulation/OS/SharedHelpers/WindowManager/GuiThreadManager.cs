@@ -13,6 +13,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         GdiPrimitive,
         CreateWindow,
         WarpCursor,
+        SetCursorVisible,
         Shutdown,
     }
 
@@ -152,6 +153,17 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return;
 
             Submit(new GuiCommand { Kind = GuiCommandKind.WarpCursor, X = clientX, Y = clientY });
+        }
+
+        /// <summary>
+        /// Shows or hides the host pointer over the window.
+        /// </summary>
+        public void EnqueueSetCursorVisible(bool visible)
+        {
+            if (_disposed)
+                return;
+
+            Submit(new GuiCommand { Kind = GuiCommandKind.SetCursorVisible, X = visible ? 1 : 0 });
         }
 
         public void EnqueuePresent(string title, int width, int height, bool visible, WindowState state)
@@ -412,6 +424,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 case GuiCommandKind.WarpCursor:
                     window?.WarpCursor(command.X, command.Y);
+                    return;
+
+                case GuiCommandKind.SetCursorVisible:
+                    window?.SetCursorVisible(command.X != 0);
                     return;
 
                 case GuiCommandKind.Shutdown:

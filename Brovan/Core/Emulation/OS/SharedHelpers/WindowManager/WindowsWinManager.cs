@@ -118,6 +118,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_SYSKEYDOWN = 0x0104;
         private const uint WM_SYSKEYUP = 0x0105;
         private const uint WM_MOUSEMOVE = 0x0200;
+        private const uint WM_SETCURSOR = 0x0020;
+        private const uint WM_INPUT = 0x00FF;
+        private const uint RID_INPUT = 0x10000003;
+        private const uint RIM_TYPEMOUSE = 0;
+        private const ushort MOUSE_MOVE_ABSOLUTE = 0x0001;
+        private const ushort HidUsagePageGeneric = 0x01;
+        private const ushort HidUsageMouse = 0x02;
+        private const int HTCLIENT = 1;
+        private static readonly IntPtr IDC_ARROW = new(32512);
         private const uint WM_LBUTTONDOWN = 0x0201;
         private const uint WM_LBUTTONUP = 0x0202;
         private const uint WM_RBUTTONDOWN = 0x0204;
@@ -218,6 +227,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             Windows[hwnd] = window;
 
             ApplyBrovanAccent(hwnd);
+            RegisterRawMouse(hwnd);
             ApplyInitialState(window, options);
             return window;
         }
@@ -319,6 +329,43 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             uint color = BrovanAccentColor;
             DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref color, sizeof(uint));
+        }
+
+        /// <summary>
+        /// Asks the host for mouse travel straight off the device, so a guest in relative mode gets motion that a
+        /// pointer position cannot carry: motion past the edge of the screen, and motion a warp did not cause.
+        /// </summary>
+        private static void RegisterRawMouse(IntPtr hwnd)
+        {
+            RAWINPUTDEVICE device = new()
+            {
+                usUsagePage = HidUsagePageGeneric,
+                usUsage = HidUsageMouse,
+                dwFlags = 0,
+                hwndTarget = hwnd,
+            };
+
+            if (RegisterRawInputDevices(ref device, 1, (uint)Marshal.SizeOf<RAWINPUTDEVICE>()))
+                HostEventQueue.RawMouseAvailable = true;
+        }
+
+        private static unsafe void ForwardRawInput(IntPtr rawInput)
+        {
+            int headerSize = 8 + 2 * IntPtr.Size;
+            byte* buffer = stackalloc byte[128];
+            uint size = 128;
+
+            if (GetRawInputData(rawInput, RID_INPUT, (IntPtr)buffer, ref size, (uint)headerSize) == uint.MaxValue)
+                return;
+
+            if (*(uint *)buffer != RIM_TYPEMOUSE)
+                return;
+
+            byte* mouse = buffer + headerSize;
+            if ((*(ushort *)mouse & MOUSE_MOVE_ABSOLUTE) != 0)
+                return;
+
+            HostEventQueue.EnqueueRawMouseMotion(*(int *)(mouse + 12), *(int *)(mouse + 16));
         }
 
         private static void ApplyInitialState(WindowsWindow window, WindowOptions options)
@@ -723,6 +770,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private bool _decorated;
             private readonly bool _resizable;
             private uint _style;
+            private bool _cursorVisible = true;
 
             private IntPtr _hdc;
             private IntPtr _selectedPen;
@@ -867,6 +915,22 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     SetCursorPos(Point.X, Point.Y);
             }
 
+            public void SetCursorVisible(bool visible)
+            {
+                EnsureAlive();
+
+                if (_cursorVisible == visible)
+                    return;
+
+                _cursorVisible = visible;
+                ApplyCursor();
+            }
+
+            private void ApplyCursor()
+            {
+                SetCursor(_cursorVisible ? LoadCursorW(IntPtr.Zero, IDC_ARROW) : IntPtr.Zero);
+            }
+
             public void Present()
             {
                 EnsureAlive();
@@ -923,6 +987,21 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     case WM_SYSKEYDOWN:
                     case WM_SYSKEYUP:
                         HostEventQueue.Enqueue(msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam));
+                        break;
+
+                    case WM_INPUT:
+                        ForwardRawInput(lParam);
+                        break;
+
+                    // The window class carries no cursor, so the shape the pointer keeps on the way in is the one
+                    // it holds until this answers.
+                    case WM_SETCURSOR:
+                        if ((unchecked((uint)(long)lParam) & 0xFFFF) == HTCLIENT)
+                        {
+                            ApplyCursor();
+                            return new IntPtr(1);
+                        }
+
                         break;
 
                     case WM_SIZE:
@@ -1032,6 +1111,28 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetCursorPos(int X, int Y);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetCursor(IntPtr hCursor);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RAWINPUTDEVICE
+        {
+            public ushort usUsagePage;
+            public ushort usUsage;
+            public uint dwFlags;
+            public IntPtr hwndTarget;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool RegisterRawInputDevices(ref RAWINPUTDEVICE pRawInputDevices, uint uiNumDevices, uint cbSize);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint GetRawInputData(IntPtr hRawInput, uint uiCommand, IntPtr pData, ref uint pcbSize, uint cbSizeHeader);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr LoadCursorW(IntPtr hInstance, IntPtr lpCursorName);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT

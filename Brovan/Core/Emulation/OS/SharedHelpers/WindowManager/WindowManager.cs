@@ -24,6 +24,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static int _head;
         private static int _count;
 
+        // Pointer travel reported by the host input device instead of a pointer position. Motion derived from
+        // positions cannot survive a warp: the host reports where the pointer ended up, not how it got there.
+        internal const uint RawMouseMotion = 0x10000001;
+
+        internal static bool RawMouseAvailable;
+
         private static int _pendingRepaint;
         private static int _closeRequested;
         private static int _pendingDpi;
@@ -79,6 +85,38 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static bool ConsumeRepaint()
         {
             return Interlocked.Exchange(ref _pendingRepaint, 0) != 0;
+        }
+
+        public static void EnqueueRawMouseMotion(int deltaX, int deltaY)
+        {
+            if (deltaX == 0 && deltaY == 0)
+                return;
+
+            lock (InputSync)
+            {
+                if (_count != 0)
+                {
+                    ref HostEvent tail = ref _input[(_head + _count - 1) & (_input.Length - 1)];
+                    if (tail.Message == RawMouseMotion)
+                    {
+                        tail.WParam = unchecked((ulong)(long)(unchecked((int)(uint)tail.WParam) + deltaX));
+                        tail.LParam = unchecked((ulong)(long)(unchecked((int)(uint)tail.LParam) + deltaY));
+                        Signal();
+                        return;
+                    }
+                }
+
+                if (_count == _input.Length)
+                    Grow();
+
+                ref HostEvent slot = ref _input[(_head + _count) & (_input.Length - 1)];
+                slot.Message = RawMouseMotion;
+                slot.WParam = unchecked((ulong)(long)deltaX);
+                slot.LParam = unchecked((ulong)(long)deltaY);
+                _count++;
+            }
+
+            Signal();
         }
 
         public static void Enqueue(uint message, ulong wParam, ulong lParam)
@@ -615,6 +653,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         void Present();
 
         void WarpCursor(int clientX, int clientY);
+
+        void SetCursorVisible(bool visible);
 
         IntPtr NativeHandle { get; }
 

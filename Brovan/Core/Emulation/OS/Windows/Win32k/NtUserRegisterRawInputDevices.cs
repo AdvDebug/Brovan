@@ -4,11 +4,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtUserRegisterRawInputDevices : IWinSyscall
     {
-        private const uint RIDEV_REMOVE = 0x00000001;
-        private const uint RIDEV_EXCLUDE = 0x00000010;
-        private const uint RIDEV_PAGEONLY = 0x00000020;
-        private const uint RIDEV_NOLEGACY = 0x00000030;
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong DevicesPtr = Instance.WinHelper.GetArg(0);
@@ -18,11 +13,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             uint EntrySize = Instance.IsX86Guest ? 12u : 16u;
 
             if (EntrySizeArg != EntrySize)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             if (DeviceCount == 0)
             {
@@ -32,48 +23,35 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             if (DevicesPtr == 0 || !Instance.IsRegionMapped(DevicesPtr, DeviceCount * EntrySize))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             for (uint Index = 0; Index < DeviceCount; Index++)
             {
                 ulong Entry = DevicesPtr + Index * EntrySize;
-                ushort UsagePage = (ushort)Instance.ReadMemoryUInt(Entry);
-                ushort Usage = (ushort)(Instance.ReadMemoryUInt(Entry) >> 16);
+                uint Usages = Instance.ReadMemoryUInt(Entry);
+                ushort UsagePage = (ushort)Usages;
+                ushort Usage = (ushort)(Usages >> 16);
                 uint Flags = Instance.ReadMemoryUInt(Entry + 4);
                 ulong Target = Instance.IsX86Guest ? Instance.ReadMemoryUInt(Entry + 8) : Instance.ReadMemoryULong(Entry + 8);
 
                 if (UsagePage == 0 && Usage != 0)
-                {
-                    Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                    Instance.SetBooleanSyscallReturn(false);
-                    return NTSTATUS.STATUS_SUCCESS;
-                }
+                    return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
                 // RIDEV_REMOVE tears a registration down, so a window to deliver to is a contradiction.
-                if ((Flags & RIDEV_REMOVE) != 0 && Target != 0)
-                {
-                    Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                    Instance.SetBooleanSyscallReturn(false);
-                    return NTSTATUS.STATUS_SUCCESS;
-                }
+                if ((Flags & Win32kRawInput.RIDEV_REMOVE) != 0 && Target != 0)
+                    return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
-                if ((Flags & RIDEV_EXCLUDE) != 0 && (Flags & RIDEV_PAGEONLY) != 0)
-                {
-                    Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                    Instance.SetBooleanSyscallReturn(false);
-                    return NTSTATUS.STATUS_SUCCESS;
-                }
+                uint Selector = Flags & Win32kRawInput.RIDEV_NOLEGACY;
+                if (Selector == Win32kRawInput.RIDEV_PAGEONLY && Usage != 0)
+                    return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+
+                if ((Flags & (Win32kRawInput.RIDEV_INPUTSINK | Win32kRawInput.RIDEV_EXINPUTSINK)) != 0 && Target == 0)
+                    return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
                 if (Target != 0 && Instance.WinHelper.GetWindow(Target) == null)
-                {
-                    Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                    Instance.SetBooleanSyscallReturn(false);
-                    return NTSTATUS.STATUS_SUCCESS;
-                }
+                    return Fail(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
+
+                Win32kRawInput.Register(Instance, UsagePage, Usage, Flags, Target);
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtUserRegisterRawInputDevices: usage {UsagePage}/{Usage}, flags 0x{Flags:X}, target 0x{Target:X}.", LogFlags.Syscall);
@@ -81,6 +59,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Instance.SetLastWinError(0);
             Instance.SetBooleanSyscallReturn(true);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS Fail(BinaryEmulator Instance, uint Error)
+        {
+            Instance.SetLastWinError(Error);
+            Instance.SetBooleanSyscallReturn(false);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

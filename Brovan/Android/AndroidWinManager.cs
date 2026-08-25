@@ -248,6 +248,10 @@ namespace Brovan.Android
             {
             }
 
+            public void SetCursorVisible(bool visible)
+            {
+            }
+
             public void Show() => Visible = true;
 
             public void Hide() => Visible = false;

@@ -111,6 +111,69 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [LibraryImport("libX11.so.6")]
         public static partial int XFlush(IntPtr display);
 
+        public const int GenericEvent = 35;
+        public const int XIAllMasterDevices = 1;
+        public const int XI_RawMotion = 17;
+
+        [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
+        public static partial int XQueryExtension(IntPtr display, string name, out int opcode, out int firstEvent, out int firstError);
+
+        [LibraryImport("libX11.so.6")]
+        [return: MarshalAs(UnmanagedType.I4)]
+        public static partial int XGetEventData(IntPtr display, ref XGenericEventCookie cookie);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial void XFreeEventData(IntPtr display, ref XGenericEventCookie cookie);
+
+        [LibraryImport("libXi.so.6")]
+        public static partial int XIQueryVersion(IntPtr display, ref int major, ref int minor);
+
+        [LibraryImport("libXi.so.6")]
+        public static partial int XISelectEvents(IntPtr display, IntPtr window, ref XIEventMask masks, int numMasks);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct XIEventMask
+        {
+            public int DeviceId;
+            public int MaskLength;
+            public IntPtr Mask;
+        }
+
+        [StructLayout(LayoutKind.Explicit, Size = 192)]
+        public struct XGenericEventCookie
+        {
+            [FieldOffset(0)] public int Type;
+            [FieldOffset(32)] public int Extension;
+            [FieldOffset(36)] public int EventType;
+            [FieldOffset(40)] public uint Cookie;
+            [FieldOffset(48)] public IntPtr Data;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        public struct XIRawEvent
+        {
+            [FieldOffset(36)] public int EventType;
+            [FieldOffset(64)] public int ValuatorMaskLength;
+            [FieldOffset(72)] public IntPtr ValuatorMask;
+            [FieldOffset(88)] public IntPtr RawValues;
+        }
+
+        [LibraryImport("libX11.so.6")]
+        public static partial IntPtr XCreateBitmapFromData(IntPtr display, IntPtr drawable, IntPtr data, uint width, uint height);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial IntPtr XCreatePixmapCursor(IntPtr display, IntPtr source, IntPtr mask,
+            ref XColor foreground, ref XColor background, uint x, uint y);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XDefineCursor(IntPtr display, IntPtr window, IntPtr cursor);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XUndefineCursor(IntPtr display, IntPtr window);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XFreePixmap(IntPtr display, IntPtr pixmap);
+
         [LibraryImport("libX11.so.6")]
         public static partial int XWarpPointer(IntPtr display, IntPtr sourceWindow, IntPtr destinationWindow,
             int sourceX, int sourceY, uint sourceWidth, uint sourceHeight, int destinationX, int destinationY);
@@ -475,6 +538,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private readonly ConcurrentDictionary<IntPtr, LinuxWindow> _windows = new();
         private readonly Dictionary<uint, nuint> _pixelCache = new();
         private IntPtr _xDisplay;
+        private int _xiOpcode = -1;
+        private double _rawRemainderX;
+        private double _rawRemainderY;
         private IntPtr _wlDisplay;
         private int _screen;
         private int _connectionFd = -1;
@@ -569,7 +635,103 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             X11.XkbSetDetectableAutoRepeat(_xDisplay, 1, out _);
 
+            SelectRawMouse();
+
             _fontStruct = X11.XLoadQueryFont(_xDisplay, "fixed");
+        }
+
+        /// <summary>
+        /// Asks XInput2 for mouse travel straight off the device, so a guest in relative mode gets motion that a
+        /// pointer position cannot carry: motion past the edge of the screen, and motion a warp did not cause.
+        /// </summary>
+        private unsafe void SelectRawMouse()
+        {
+            if (X11.XQueryExtension(_xDisplay, "XInputExtension", out int Opcode, out _, out _) == 0)
+                return;
+
+            int Major = 2;
+            int Minor = 0;
+
+            try
+            {
+                if (X11.XIQueryVersion(_xDisplay, ref Major, ref Minor) != 0)
+                    return;
+
+                byte* Mask = stackalloc byte[3];
+                Mask[0] = 0;
+                Mask[1] = 0;
+                Mask[2] = 0;
+                Mask[X11.XI_RawMotion >> 3] |= (byte)(1 << (X11.XI_RawMotion & 7));
+
+                X11.XIEventMask Selection = new()
+                {
+                    DeviceId = X11.XIAllMasterDevices,
+                    MaskLength = 3,
+                    Mask = (IntPtr)Mask,
+                };
+
+                X11.XISelectEvents(_xDisplay, X11.XRootWindow(_xDisplay, _screen), ref Selection, 1);
+                X11.XFlush(_xDisplay);
+            }
+            catch (DllNotFoundException)
+            {
+                return;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return;
+            }
+
+            _xiOpcode = Opcode;
+            HostEventQueue.RawMouseAvailable = true;
+        }
+
+        private unsafe void TranslateRawMotion(ref X11.XEvent nativeEvent)
+        {
+            ref X11.XGenericEventCookie Cookie = ref Unsafe.As<X11.XEvent, X11.XGenericEventCookie>(ref nativeEvent);
+            if (Cookie.Extension != _xiOpcode || X11.XGetEventData(_xDisplay, ref Cookie) == 0)
+                return;
+
+            if (Cookie.EventType == X11.XI_RawMotion && Cookie.Data != IntPtr.Zero)
+            {
+                X11.XIRawEvent* Raw = (X11.XIRawEvent*)Cookie.Data;
+                byte* Mask = (byte*)Raw->ValuatorMask;
+                double* Values = (double*)Raw->RawValues;
+
+                if (Mask != null && Values != null)
+                {
+                    int Index = 0;
+                    double DeltaX = 0;
+                    double DeltaY = 0;
+
+                    for (int Axis = 0; Axis < Raw->ValuatorMaskLength * 8 && Axis < 2; Axis++)
+                    {
+                        if ((Mask[Axis >> 3] & (1 << (Axis & 7))) == 0)
+                            continue;
+
+                        if (Axis == 0)
+                            DeltaX = Values[Index];
+                        else
+                            DeltaY = Values[Index];
+
+                        Index++;
+                    }
+
+                    // Device units are fractional on a high resolution mouse, and a truncated remainder is slow
+                    // aiming that never moves at all.
+                    _rawRemainderX += DeltaX;
+                    _rawRemainderY += DeltaY;
+
+                    int WholeX = (int)_rawRemainderX;
+                    int WholeY = (int)_rawRemainderY;
+                    _rawRemainderX -= WholeX;
+                    _rawRemainderY -= WholeY;
+
+                    HostEventQueue.EnqueueRawMouseMotion(WholeX, WholeY);
+                }
+            }
+
+            X11.XFreeEventData(_xDisplay, ref Cookie);
         }
 
         public bool IsConnected => !_disposed && _xDisplay != IntPtr.Zero;
@@ -662,6 +824,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         {
             switch (nativeEvent.Type)
             {
+                case X11.GenericEvent:
+                    if (_xiOpcode >= 0)
+                        TranslateRawMotion(ref nativeEvent);
+
+                    return;
+
                 case X11.KeyPress:
                 case X11.KeyRelease:
                     {
@@ -1585,6 +1753,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private bool _hidden;
             private bool _maximized;
             private readonly bool _resizable;
+            private IntPtr _emptyCursor;
 
             internal LinuxWindow(LinuxWinManager manager, IntPtr display, IntPtr window, WindowOptions options)
             {
@@ -1688,6 +1857,39 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 EnsureAlive();
 
                 X11.XWarpPointer(_display, IntPtr.Zero, _window, 0, 0, 0, 0, clientX, clientY);
+                X11.XFlush(_display);
+            }
+
+            public unsafe void SetCursorVisible(bool visible)
+            {
+                EnsureAlive();
+
+                if (visible)
+                {
+                    X11.XUndefineCursor(_display, _window);
+                    X11.XFlush(_display);
+                    return;
+                }
+
+                if (_emptyCursor == IntPtr.Zero)
+                {
+                    byte* Bits = stackalloc byte[8];
+                    for (int i = 0; i < 8; i++)
+                        Bits[i] = 0;
+
+                    IntPtr Pixmap = X11.XCreateBitmapFromData(_display, _window, (IntPtr)Bits, 8, 8);
+                    if (Pixmap == IntPtr.Zero)
+                        return;
+
+                    X11.XColor Blank = default;
+                    _emptyCursor = X11.XCreatePixmapCursor(_display, Pixmap, Pixmap, ref Blank, ref Blank, 0, 0);
+                    X11.XFreePixmap(_display, Pixmap);
+                }
+
+                if (_emptyCursor == IntPtr.Zero)
+                    return;
+
+                X11.XDefineCursor(_display, _window, _emptyCursor);
                 X11.XFlush(_display);
             }
 

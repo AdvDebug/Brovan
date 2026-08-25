@@ -2,15 +2,15 @@ using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
-    internal class NtUserGetRawInputDeviceList : IWinSyscall
+    internal class NtUserGetRegisteredRawInputDevices : IWinSyscall
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            ulong ListPtr = Instance.WinHelper.GetArg(0);
+            ulong DevicesPtr = Instance.WinHelper.GetArg(0);
             ulong CountPtr = Instance.WinHelper.GetArg(1);
             uint EntrySizeArg = (uint)Instance.WinHelper.GetArg(2);
 
-            uint EntrySize = Instance.IsX86Guest ? 8u : 16u;
+            uint EntrySize = Instance.IsX86Guest ? 12u : 16u;
 
             if (EntrySizeArg != EntrySize || CountPtr == 0 || !Instance.IsRegionMapped(CountPtr, 4))
             {
@@ -19,9 +19,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            uint Count = (uint)Win32kRawInput.DeviceCount;
+            uint Count = (uint)Win32kRawInput.RegistrationCount(Instance);
 
-            if (ListPtr == 0)
+            if (DevicesPtr == 0)
             {
                 Instance._emulator.WriteMemory(CountPtr, Count, 4);
                 Instance.SetRawSyscallReturn(0);
@@ -37,7 +37,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (!Instance.IsRegionMapped(ListPtr, Count * EntrySize))
+            if (Count != 0 && !Instance.IsRegionMapped(DevicesPtr, Count * EntrySize))
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
                 Instance.SetRawSyscallReturn(uint.MaxValue);
@@ -46,12 +46,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             for (uint Index = 0; Index < Count; Index++)
             {
-                Win32kRawDevice Device = Win32kRawInput.GetDevice((int)Index);
-                ulong Entry = ListPtr + Index * EntrySize;
-                Instance._emulator.WriteMemory(Entry, Device.Handle, Instance.IsX86Guest ? 4u : 8u);
-                Instance._emulator.WriteMemory(Entry + (Instance.IsX86Guest ? 4ul : 8ul), Device.Type, 4);
+                if (!Win32kRawInput.TryGetRegistration(Instance, (int)Index, out ushort UsagePage, out ushort Usage, out uint Flags, out ulong Target))
+                    break;
+
+                ulong Entry = DevicesPtr + Index * EntrySize;
+                Instance._emulator.WriteMemory(Entry, UsagePage | ((uint)Usage << 16), 4);
+                Instance._emulator.WriteMemory(Entry + 4, Flags, 4);
+                Instance._emulator.WriteMemory(Entry + 8, Target, Instance.IsX86Guest ? 4u : 8u);
             }
 
+            Instance.SetLastWinError(0);
             Instance.SetRawSyscallReturn(Count);
             return NTSTATUS.STATUS_SUCCESS;
         }

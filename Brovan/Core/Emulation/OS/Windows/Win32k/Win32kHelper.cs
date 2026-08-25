@@ -86,6 +86,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
     internal static class Win32kHelper
     {
+        internal const uint ERROR_INVALID_HANDLE = 6;
         internal const uint ERROR_INVALID_PARAMETER = 87;
         internal const uint ERROR_CALL_NOT_IMPLEMENTED = 120;
         internal const uint ERROR_INSUFFICIENT_BUFFER = 122;
@@ -98,6 +99,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WM_NULL = 0x0000;
         internal const uint WM_DESTROY = 0x0002;
         internal const uint WM_SIZE = 0x0005;
+        internal const uint WM_ACTIVATE = 0x0006;
+        internal const uint WM_SETFOCUS = 0x0007;
+        internal const uint WM_KILLFOCUS = 0x0008;
+        internal const uint WM_ACTIVATEAPP = 0x001C;
         internal const uint WM_MOVE = 0x0003;
         internal const uint WM_WINDOWPOSCHANGED = 0x0047;
         internal const uint SIZE_MINIMIZED = 1;
@@ -119,6 +124,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WM_SYSKEYUP = 0x0105;
         internal const uint WM_SYSCHAR = 0x0106;
         internal const uint WM_DPICHANGED = 0x02E0;
+        internal const uint WM_INPUT = 0x00FF;
         internal const uint WM_MOUSEMOVE = 0x0200;
         internal const uint WM_LBUTTONDOWN = 0x0201;
         internal const uint WM_LBUTTONUP = 0x0202;
@@ -142,6 +148,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint QS_ALLEVENTS = QS_INPUT | QS_POSTMESSAGE | QS_TIMER | QS_PAINT | QS_HOTKEY;
         internal const uint QS_ALLINPUT = QS_ALLEVENTS | QS_SENDMESSAGE;
 
+        private const uint WA_INACTIVE = 0;
+        private const uint WA_ACTIVE = 1;
+
         private const int HTCLIENT = 1;
         private const ulong HWND_BROADCAST = 0xFFFF;
         private const ulong FirstDeviceContextHandle = 0x770001;
@@ -164,10 +173,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly Dictionary<ulong, Win32kBitmap> Bitmaps = new();
             public ulong NextDeviceContext = FirstDeviceContextHandle;
             public ulong CaptureWindow;
+            public ulong ActivatedWindow;
             public bool QuitPosted;
             public ulong QuitExitCode;
             public int CursorX;
             public int CursorY;
+            public ulong CursorHandle;
+            public ulong StockCursor;
+            public bool CursorAssigned;
+            public int CursorShowCount;
+            public bool CursorHidden;
         }
 
         private sealed class Win32kDeviceContext
@@ -750,6 +765,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 case WM_PAINT:
                     return QS_PAINT;
+                case WM_INPUT:
+                    return QS_RAWINPUT;
                 case WM_MOUSEMOVE:
                     return QS_MOUSEMOVE;
                 case WM_LBUTTONDOWN:
@@ -982,6 +999,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Foreground == 0)
                 return;
 
+            SyncActivation(Instance, Foreground);
+
             Win32kDpi.DrainHostDpiChange(Instance);
 
             if (HostEventQueue.ConsumeRepaint())
@@ -993,6 +1012,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 if (!HostEventQueue.TryDequeue(out uint Message, out ulong WParam, out ulong LParam))
                     break;
+
+                if (Message == HostEventQueue.RawMouseMotion)
+                {
+                    Win32kRawInput.DeliverHostRawMouse(Instance, Foreground, unchecked((int)(uint)WParam), unchecked((int)(uint)LParam));
+                    continue;
+                }
 
                 if (Message >= WM_MOUSEMOVE && Message <= WM_RBUTTONUP)
                 {
@@ -1010,7 +1035,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     GeometryChanged = true;
                 }
 
-                PostMessage(Instance, Foreground, Message, WParam, LParam);
+                if (Win32kRawInput.DeliverHostEvent(Instance, Foreground, Message, WParam, LParam))
+                    PostMessage(Instance, Foreground, Message, WParam, LParam);
             }
 
             if (GeometryChanged)
@@ -1019,6 +1045,35 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (Resized != null)
                     Resized.PendingWindowPosChanged = true;
             }
+        }
+
+        /// <summary>
+        /// Hands activation to the foreground window. A window that never gets WM_ACTIVATE and WM_SETFOCUS is not
+        /// the focus window as far as its own toolkit is concerned, and toolkits drop raw input on that test.
+        /// </summary>
+        private static void SyncActivation(BinaryEmulator Instance, ulong Foreground)
+        {
+            Win32kState State = GetState(Instance);
+            if (State.ActivatedWindow == Foreground)
+                return;
+
+            ulong Previous = State.ActivatedWindow;
+            State.ActivatedWindow = Foreground;
+
+            if (Previous != 0 && Instance.WinHelper.GetWindow(Previous) != null)
+            {
+                PostMessage(Instance, Previous, WM_ACTIVATE, WA_INACTIVE, Foreground);
+                PostMessage(Instance, Previous, WM_KILLFOCUS, Foreground, 0);
+            }
+
+            Instance.WinHelper.ActiveWindow = Foreground;
+            Instance.WinHelper.FocusWindow = Foreground;
+
+            if (Previous == 0)
+                PostMessage(Instance, Foreground, WM_ACTIVATEAPP, 1, 0);
+
+            PostMessage(Instance, Foreground, WM_ACTIVATE, WA_ACTIVE, Previous);
+            PostMessage(Instance, Foreground, WM_SETFOCUS, Previous, 0);
         }
 
         internal static bool TryDeliverWindowPosChanged(BinaryEmulator Instance, ulong SyscallResult)
@@ -1114,6 +1169,49 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             State.CursorY = ClientY;
 
             Instance.WinHelper.WarpHostCursor(ClientX, ClientY);
+            Win32kRawInput.ResetPointerBaseline(Instance, ClientX, ClientY);
+        }
+
+        /// <summary>
+        /// Hands out the one handle every stock cursor resolves to. The shape is the host's, but a guest that asks
+        /// for a stock cursor has to get something other than NULL back: NULL is how it says "no cursor".
+        /// </summary>
+        internal static ulong EnsureStockCursor(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            if (State.StockCursor == 0)
+                State.StockCursor = Instance.WinHelper.AllocateUserHandle();
+
+            return State.StockCursor;
+        }
+
+        internal static ulong SetCursorHandle(BinaryEmulator Instance, ulong Handle)
+        {
+            Win32kState State = GetState(Instance);
+            ulong Previous = State.CursorAssigned ? State.CursorHandle : EnsureStockCursor(Instance);
+
+            State.CursorHandle = Handle;
+            State.CursorAssigned = true;
+            ApplyCursorVisibility(Instance, State);
+            return Previous;
+        }
+
+        internal static int ShowCursor(BinaryEmulator Instance, bool Show)
+        {
+            Win32kState State = GetState(Instance);
+            State.CursorShowCount += Show ? 1 : -1;
+            ApplyCursorVisibility(Instance, State);
+            return State.CursorShowCount;
+        }
+
+        private static void ApplyCursorVisibility(BinaryEmulator Instance, Win32kState State)
+        {
+            bool Hidden = State.CursorShowCount < 0 || (State.CursorAssigned && State.CursorHandle == 0);
+            if (State.CursorHidden == Hidden)
+                return;
+
+            State.CursorHidden = Hidden;
+            Instance.WinHelper.SetHostCursorVisible(!Hidden);
         }
 
         internal static bool InvalidateWindow(BinaryEmulator Instance, ulong Hwnd)

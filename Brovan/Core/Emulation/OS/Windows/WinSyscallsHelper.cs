@@ -4668,6 +4668,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 GuiManager.EnqueueWarpCursor(ClientX, ClientY);
         }
 
+        /// <summary>
+        /// Shows or hides the host pointer, for guests that draw their own or want none.
+        /// </summary>
+        public void SetHostCursorVisible(bool Visible)
+        {
+            if (DesktopDisplay is GuiThreadManager GuiManager)
+                GuiManager.EnqueueSetCursorVisible(Visible);
+        }
+
         private int UserForegroundWindowOffset = -1;
 
         private bool TryGetForegroundWindowOffset(out int Offset)
