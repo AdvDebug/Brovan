@@ -60,6 +60,13 @@ namespace Brovan.Android
             HostEventQueue.Enqueue(message, buttons, MakeLParam(x, y));
         }
 
+        // Travel the finger reported, not the difference between two cursor positions: the cursor stops at the
+        // edge of the surface and a guest turning on the spot would run out of room to turn.
+        public static void MouseTravel(int deltaX, int deltaY)
+        {
+            HostEventQueue.EnqueueRawMouseMotion(deltaX, deltaY);
+        }
+
         public static void Scroll(int delta, int x, int y, uint buttons)
         {
             HostEventQueue.Enqueue(WM_MOUSEWHEEL, buttons | ((ulong)(ushort)(short)delta << 16), MakeLParam(x, y));

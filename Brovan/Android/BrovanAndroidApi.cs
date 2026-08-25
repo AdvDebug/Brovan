@@ -220,6 +220,12 @@ namespace Brovan.Android
             Guard(() => AndroidInput.Pointer((PointerAction)action, (PointerButton)button, x, y, (uint)buttons), nameof(InjectPointer));
         }
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_inject_mouse_travel")]
+        public static void InjectMouseTravel(int deltaX, int deltaY)
+        {
+            Guard(() => AndroidInput.MouseTravel(deltaX, deltaY), nameof(InjectMouseTravel));
+        }
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_inject_scroll")]
         public static void InjectScroll(int delta, int x, int y, int buttons)
         {

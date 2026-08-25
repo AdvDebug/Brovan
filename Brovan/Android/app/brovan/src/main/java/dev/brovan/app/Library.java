@@ -84,11 +84,19 @@ final class Library {
     }
 
     void commit(File directory, String executableRelativePath) throws IOException {
+        File file = new File(directory, MANIFEST);
         Properties manifest = new Properties();
+
+        if (file.isFile()) {
+            try (InputStream stream = new java.io.FileInputStream(file)) {
+                manifest.load(stream);
+            }
+        }
+
         manifest.setProperty(KEY_NAME, directory.getName());
         manifest.setProperty(KEY_EXECUTABLE, executableRelativePath);
 
-        try (OutputStream stream = new FileOutputStream(new File(directory, MANIFEST))) {
+        try (OutputStream stream = new FileOutputStream(file)) {
             manifest.store(stream, null);
         }
     }

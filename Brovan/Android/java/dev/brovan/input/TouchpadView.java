@@ -26,6 +26,8 @@ public class TouchpadView extends View {
     private float lastX;
     private float lastY;
     private float travelled;
+    private float travelX;
+    private float travelY;
     private long downAt;
     private int pointerId = MotionEvent.INVALID_POINTER_ID;
 
@@ -83,14 +85,16 @@ public class TouchpadView extends View {
                     return true;
                 }
 
-                float dx = (event.getX(index) - lastX) * SPEED;
-                float dy = (event.getY(index) - lastY) * SPEED;
+                float speed = SPEED * PointerState.speed();
+                float dx = (event.getX(index) - lastX) * speed;
+                float dy = (event.getY(index) - lastY) * speed;
                 lastX = event.getX(index);
                 lastY = event.getY(index);
                 travelled += Math.abs(dx) + Math.abs(dy);
 
                 cursorX = clamp(cursorX + dx, surfaceWidth());
                 cursorY = clamp(cursorY + dy, surfaceHeight());
+                reportTravel(dx, dy);
                 PointerState.moved((int) cursorX, (int) cursorY);
                 BrovanNative.injectPointer(BrovanNative.POINTER_MOVE, BrovanNative.BUTTON_LEFT,
                         (int) cursorX, (int) cursorY, 0);
@@ -116,6 +120,18 @@ public class TouchpadView extends View {
             default:
                 return super.onTouchEvent(event);
         }
+    }
+
+    private void reportTravel(float dx, float dy) {
+        travelX += dx;
+        travelY += dy;
+
+        int wholeX = (int) travelX;
+        int wholeY = (int) travelY;
+        travelX -= wholeX;
+        travelY -= wholeY;
+
+        BrovanNative.injectMouseTravel(wholeX, wholeY);
     }
 
     private void click() {

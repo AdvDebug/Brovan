@@ -172,6 +172,13 @@ public final class BrovanNative {
         nativeInjectPointer(action, button, x, y, buttons);
     }
 
+    /** Reports how far the pointing device moved, which a guest reading raw input uses instead of the cursor. */
+    public static void injectMouseTravel(int deltaX, int deltaY) {
+        if (deltaX != 0 || deltaY != 0) {
+            nativeInjectMouseTravel(deltaX, deltaY);
+        }
+    }
+
     public static void injectScroll(int delta, int x, int y, int buttons) {
         nativeInjectScroll(delta, x, y, buttons);
     }
@@ -374,6 +381,8 @@ public final class BrovanNative {
     private static native void nativeRequestClose();
 
     private static native void nativeInjectPointer(int action, int button, int x, int y, int buttons);
+
+    private static native void nativeInjectMouseTravel(int deltaX, int deltaY);
 
     private static native void nativeInjectScroll(int delta, int x, int y, int buttons);
 

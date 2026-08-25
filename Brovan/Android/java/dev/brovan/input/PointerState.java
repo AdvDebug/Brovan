@@ -18,8 +18,18 @@ public final class PointerState {
 
     private static volatile int x;
     private static volatile int y;
+    private static volatile float speed = 1f;
 
     private PointerState() {
+    }
+
+    /** Scales every finger movement, so the whole pointer feels the same wherever it is driven from. */
+    public static void setSpeed(float value) {
+        speed = value;
+    }
+
+    public static float speed() {
+        return speed;
     }
 
     public static void moved(int px, int py) {

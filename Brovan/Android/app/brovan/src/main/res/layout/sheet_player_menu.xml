@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipToPadding="false"
+    android:scrollbars="none">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="20dp"
+        android:paddingTop="32dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="28dp">
+
+        <TextView
+            android:id="@+id/title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textColor="@color/text_primary"
+            android:textSize="24sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/player_menu_hint"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp" />
+
+        <TextView style="@style/SectionLabel" android:text="@string/player_pointer_section" />
+
+        <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.Brovan.Card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp">
+
+            <LinearLayout style="@style/Widget.Brovan.Card.Body">
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/player_pointer">
+
+                    <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                        android:id="@+id/pointer"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="none" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <View style="@style/SettingsDivider" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:baselineAligned="false"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        style="@style/SettingsRowTitle"
+                        android:layout_width="0dp"
+                        android:layout_weight="1"
+                        android:text="@string/player_sensitivity" />
+
+                    <TextView
+                        android:id="@+id/sensitivity_value"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/accent"
+                        android:textSize="15sp" />
+                </LinearLayout>
+
+                <TextView style="@style/SettingsSummary" android:text="@string/player_sensitivity_summary" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/sensitivity"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:stepSize="0.1"
+                    android:valueFrom="0.4"
+                    android:valueTo="3.0"
+                    app:labelBehavior="gone" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <TextView style="@style/SectionLabel" android:text="@string/player_controls" />
+
+        <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.Brovan.Card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp">
+
+            <LinearLayout style="@style/Widget.Brovan.Card.Body">
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/settings_controls">
+
+                    <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                        android:id="@+id/controls"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="none" />
+                </com.google.android.material.textfield.TextInputLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <TextView style="@style/SectionLabel" android:text="@string/player_actions" />
+
+        <com.google.android.material.card.MaterialCardView
+            style="@style/Widget.Brovan.Card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/windows"
+                    style="@style/Widget.Brovan.SheetAction"
+                    android:text="@string/player_windows"
+                    app:icon="@drawable/ic_window" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/escape"
+                    style="@style/Widget.Brovan.SheetAction"
+                    android:text="@string/player_escape"
+                    app:icon="@drawable/ic_keyboard" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/redraw"
+                    style="@style/Widget.Brovan.SheetAction"
+                    android:text="@string/player_redraw"
+                    app:icon="@drawable/ic_refresh" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/debugger"
+                    style="@style/Widget.Brovan.SheetAction"
+                    android:text="@string/player_debugger"
+                    android:visibility="gone"
+                    app:icon="@drawable/ic_files" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/quit"
+                    style="@style/Widget.Brovan.SheetAction"
+                    android:text="@string/player_quit"
+                    android:textColor="@color/log_error"
+                    app:icon="@drawable/ic_power"
+                    app:iconTint="@color/log_error" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

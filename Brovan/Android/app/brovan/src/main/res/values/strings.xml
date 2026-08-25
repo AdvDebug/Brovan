@@ -204,6 +204,13 @@
     <string name="player_developer_hint">[*] Developer mode: the program is loaded but not running. Run starts it.</string>
     <string name="player_send">Send</string>
     <string name="player_debugger">Debugger</string>
+    <string name="player_menu_hint">These settings are kept for this program</string>
+    <string name="player_pointer_section">Pointer</string>
+    <string name="player_actions">Program</string>
+    <string name="player_sensitivity">Drag sensitivity</string>
+    <string name="player_sensitivity_summary">How far the pointer travels for the same finger movement.</string>
+    <string name="player_escape">Send Esc</string>
+    <string name="player_resume">Resume</string>
 
     <string name="debug_run">Run</string>
     <string name="debug_continue">Continue</string>

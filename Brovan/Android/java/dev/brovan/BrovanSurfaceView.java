@@ -22,7 +22,7 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
     /** How a finger on the guest picture is turned into pointer input. */
     public enum PointerMode {
         DRAG("Touch drags with the button held"),
-        HOVER("Touch moves the cursor, tap clicks"),
+        HOVER("Drag moves the cursor, tap clicks"),
         TRACKPAD("Whole screen is a trackpad");
 
         private final String label;
@@ -39,6 +39,7 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
     private static final int TAP_SLOP = 40;
     private static final int TAP_TIMEOUT_MS = 400;
     private static final float TRACKPAD_SPEED = 1.6f;
+    private static final float HOVER_SPEED = 1f;
 
     private PointerMode mode = PointerMode.DRAG;
 
@@ -48,8 +49,11 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
     private float lastX;
     private float lastY;
     private float travelled;
+    private float travelX;
+    private float travelY;
     private long downAt;
     private boolean secondFinger;
+    private boolean moving;
     private int pointerId = MotionEvent.INVALID_POINTER_ID;
 
     public BrovanSurfaceView(Context context) {
@@ -94,6 +98,7 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
         super.onSizeChanged(width, height, oldWidth, oldHeight);
         cursorX = width / 2f;
         cursorY = height / 2f;
+        PointerState.moved((int) cursorX, (int) cursorY);
     }
 
     @Override
@@ -107,15 +112,12 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
                 travelled = 0f;
                 downAt = event.getEventTime();
                 secondFinger = false;
+                moving = mode == PointerMode.DRAG;
 
-                if (mode != PointerMode.TRACKPAD) {
+                if (moving) {
                     cursorX = lastX;
                     cursorY = lastY;
-                }
-
-                move();
-
-                if (mode == PointerMode.DRAG) {
+                    move();
                     buttons |= BrovanNative.MK_LBUTTON;
                     inject(BrovanNative.POINTER_DOWN);
                 }
@@ -142,14 +144,27 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
                 lastY = event.getY(index);
                 travelled += Math.abs(dx) + Math.abs(dy);
 
-                if (mode == PointerMode.TRACKPAD) {
-                    cursorX = clamp(cursorX + dx * TRACKPAD_SPEED, getWidth());
-                    cursorY = clamp(cursorY + dy * TRACKPAD_SPEED, getHeight());
-                } else {
-                    cursorX = lastX;
-                    cursorY = lastY;
+                // The cursor stays where it is until the finger has travelled far enough to mean a move,
+                // so a tap clicks the spot the guest is already pointing at instead of jumping to the finger.
+                if (!moving) {
+                    if (travelled < TAP_SLOP) {
+                        return true;
+                    }
+
+                    moving = true;
                 }
 
+                float speed = (mode == PointerMode.TRACKPAD ? TRACKPAD_SPEED : HOVER_SPEED) * PointerState.speed();
+
+                if (mode == PointerMode.DRAG) {
+                    cursorX = lastX;
+                    cursorY = lastY;
+                } else {
+                    cursorX = clamp(cursorX + dx * speed, getWidth());
+                    cursorY = clamp(cursorY + dy * speed, getHeight());
+                }
+
+                reportTravel(dx * speed, dy * speed);
                 move();
                 return true;
             }
@@ -178,6 +193,20 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
             default:
                 return super.onTouchEvent(event);
         }
+    }
+
+    // A guest in mouselook reads travel, not the cursor, and the cursor has already stopped at the edge of
+    // the surface by the time the finger is still going. The fraction is carried so slow movement is not lost.
+    private void reportTravel(float dx, float dy) {
+        travelX += dx;
+        travelY += dy;
+
+        int wholeX = (int) travelX;
+        int wholeY = (int) travelY;
+        travelX -= wholeX;
+        travelY -= wholeY;
+
+        BrovanNative.injectMouseTravel(wholeX, wholeY);
     }
 
     private void move() {
@@ -254,8 +283,7 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
             case KeyEvent.KEYCODE_ALT_LEFT: return 0x12;
             case KeyEvent.KEYCODE_ALT_RIGHT: return 0xA5;
             case KeyEvent.KEYCODE_CAPS_LOCK: return 0x14;
-            case KeyEvent.KEYCODE_ESCAPE:
-            case KeyEvent.KEYCODE_BACK: return 0x1B;
+            case KeyEvent.KEYCODE_ESCAPE: return 0x1B;
             case KeyEvent.KEYCODE_SPACE: return 0x20;
             case KeyEvent.KEYCODE_PAGE_UP: return 0x21;
             case KeyEvent.KEYCODE_PAGE_DOWN: return 0x22;

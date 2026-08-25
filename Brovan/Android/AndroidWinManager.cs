@@ -29,6 +29,7 @@ namespace Brovan.Android
                 throw new PlatformNotSupportedException("The Android window backend requires brovan_init to have run first.");
 
             _wakeFd = Posix.EventFd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+            HostEventQueue.RawMouseAvailable = true;
             _current = this;
         }
 

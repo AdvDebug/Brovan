@@ -14,12 +14,33 @@
         <item name="android:statusBarColor">@color/background</item>
         <item name="android:navigationBarColor">@color/background</item>
         <item name="materialSwitchStyle">@style/Widget.Brovan.Switch</item>
+        <item name="sideSheetDialogTheme">@style/ThemeOverlay.Brovan.SideSheet</item>
     </style>
 
     <style name="Widget.Brovan.Switch" parent="Widget.Material3.CompoundButton.MaterialSwitch">
         <item name="thumbTint">@color/switch_thumb_tint</item>
         <item name="trackTint">@color/switch_track_tint</item>
         <item name="trackDecorationTint">@color/outline</item>
+    </style>
+
+    <style name="ThemeOverlay.Brovan.SideSheet" parent="ThemeOverlay.Material3.SideSheetDialog">
+        <item name="sideSheetModalStyle">@style/Widget.Brovan.SideSheet</item>
+    </style>
+
+    <style name="Widget.Brovan.SideSheet" parent="Widget.Material3.SideSheet.Modal">
+        <item name="backgroundTint">@color/background</item>
+    </style>
+
+    <style name="Widget.Brovan.SheetAction" parent="Widget.Material3.Button.TextButton">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:gravity">start|center_vertical</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+        <item name="iconTint">@color/text_secondary</item>
+        <item name="iconPadding">16dp</item>
     </style>
 
     <style name="SectionLabel" parent="">

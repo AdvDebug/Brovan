@@ -28,14 +28,4 @@
         android:orientation="vertical"
         android:visibility="gone" />
 
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/menu"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:layout_margin="16dp"
-        android:alpha="0.85"
-        android:contentDescription="@string/nav_open"
-        app:fabSize="mini"
-        app:srcCompat="@drawable/ic_menu" />
 </FrameLayout>

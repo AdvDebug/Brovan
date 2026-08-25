@@ -4,6 +4,8 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -21,10 +23,17 @@ public class JoystickView extends View {
     }
 
     private static final float DEAD_ZONE = 0.28f;
+    private static final float ARM_HALF_WIDTH = 0.34f;
+    private static final float[] ARM_ROTATION = {0f, 180f, 270f, 90f};
 
     private final Paint basePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint knobPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint litPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint arrowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Path pad = new Path();
+    private final Path arrow = new Path();
+    private final RectF armBounds = new RectF();
 
     private VirtualKey up = VirtualKey.W;
     private VirtualKey down = VirtualKey.S;
@@ -46,6 +55,14 @@ public class JoystickView extends View {
         ringPaint.setStyle(Paint.Style.STROKE);
         ringPaint.setStrokeWidth(3f);
         knobPaint.setColor(Color.argb(170, 255, 255, 255));
+        litPaint.setColor(Color.argb(90, 255, 255, 255));
+        arrowPaint.setColor(Color.argb(220, 255, 255, 255));
+    }
+
+    @Override
+    protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight);
+        buildCross();
     }
 
     public void setListener(Listener listener) {
@@ -85,22 +102,70 @@ public class JoystickView extends View {
     }
 
     private void drawCross(Canvas canvas, float centreX, float centreY, float radius) {
-        float arm = radius * 0.42f;
+        if (pad.isEmpty()) {
+            buildCross();
+        }
+
+        float half = radius * ARM_HALF_WIDTH;
+        float corner = half * 0.6f;
+
+        basePaint.setAlpha(70);
+        canvas.drawPath(pad, basePaint);
+        canvas.drawPath(pad, ringPaint);
 
         for (int index = 0; index < 4; index++) {
             boolean horizontal = index >= 2;
             float direction = index % 2 == 0 ? -1f : 1f;
-            float offsetX = horizontal ? direction * (radius - arm) : 0f;
-            float offsetY = horizontal ? 0f : direction * (radius - arm);
-
             boolean lit = active && (horizontal
                     ? Math.abs(knobX) >= DEAD_ZONE && Math.signum(knobX) == direction
                     : Math.abs(knobY) >= DEAD_ZONE && Math.signum(knobY) == direction);
 
-            basePaint.setAlpha(lit ? 150 : 70);
-            canvas.drawCircle(centreX + offsetX, centreY + offsetY, arm, basePaint);
-            canvas.drawCircle(centreX + offsetX, centreY + offsetY, arm, ringPaint);
+            canvas.save();
+            canvas.rotate(ARM_ROTATION[index], centreX, centreY);
+
+            if (lit) {
+                canvas.save();
+                canvas.clipPath(pad);
+                armBounds.set(centreX - half, centreY - radius, centreX + half, centreY - half * 0.2f);
+                canvas.drawRoundRect(armBounds, corner, corner, litPaint);
+                canvas.restore();
+            }
+
+            float tip = centreY - radius + half * 0.5f;
+            arrow.reset();
+            arrow.moveTo(centreX, tip);
+            arrow.lineTo(centreX - half * 0.62f, tip + half * 0.9f);
+            arrow.lineTo(centreX + half * 0.62f, tip + half * 0.9f);
+            arrow.close();
+
+            arrowPaint.setAlpha(lit ? 255 : 190);
+            canvas.drawPath(arrow, arrowPaint);
+            canvas.restore();
         }
+    }
+
+    private void buildCross() {
+        pad.reset();
+
+        float centreX = getWidth() / 2f;
+        float centreY = getHeight() / 2f;
+        float radius = Math.min(centreX, centreY) - 6f;
+        if (radius <= 0f) {
+            return;
+        }
+
+        float half = radius * ARM_HALF_WIDTH;
+        float corner = half * 0.6f;
+
+        Path vertical = new Path();
+        vertical.addRoundRect(centreX - half, centreY - radius, centreX + half, centreY + radius,
+                corner, corner, Path.Direction.CW);
+
+        Path horizontal = new Path();
+        horizontal.addRoundRect(centreX - radius, centreY - half, centreX + radius, centreY + half,
+                corner, corner, Path.Direction.CW);
+
+        pad.op(vertical, horizontal, Path.Op.UNION);
     }
 
     /**

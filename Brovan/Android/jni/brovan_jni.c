@@ -31,6 +31,7 @@ extern void brovan_send_command(const char *command);
 extern void brovan_request_close(void);
 extern void brovan_request_repaint(void);
 extern void brovan_inject_pointer(int action, int button, int x, int y, int buttons);
+extern void brovan_inject_mouse_travel(int deltaX, int deltaY);
 extern void brovan_inject_scroll(int delta, int x, int y, int buttons);
 extern void brovan_inject_key(int down, int virtualKey, int scanCode);
 extern void brovan_inject_focus(int focused);
@@ -486,6 +487,12 @@ JNIEXPORT void JNICALL METHOD(InjectPointer)(JNIEnv *env, jclass clazz, jint act
     (void)env;
     (void)clazz;
     brovan_inject_pointer(action, button, x, y, buttons);
+}
+
+JNIEXPORT void JNICALL METHOD(InjectMouseTravel)(JNIEnv *env, jclass clazz, jint deltaX, jint deltaY) {
+    (void)env;
+    (void)clazz;
+    brovan_inject_mouse_travel(deltaX, deltaY);
 }
 
 JNIEXPORT void JNICALL METHOD(InjectScroll)(JNIEnv *env, jclass clazz, jint delta, jint x, jint y, jint buttons) {

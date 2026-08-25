@@ -176,7 +176,19 @@ echo "    packaged vulkan-1.dll into the APK assets"
 
 echo "==> [4/5] Assembling the APK"
 printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > "$GRADLE_PROJECT/local.properties"
-"$GRADLE" -p "$GRADLE_PROJECT" assembleDebug --no-daemon
+GRADLE_LOG="$(mktemp)"
+trap 'rm -f "$GRADLE_LOG"' EXIT
+
+gradle_status=0
+"$GRADLE" -p "$GRADLE_PROJECT" assembleDebug --no-daemon 2>&1 | tee "$GRADLE_LOG" || gradle_status=$?
+
+if [ "$gradle_status" -ne 0 ]; then
+    grep -qE 'DexArchiveMergerException|is defined multiple times' "$GRADLE_LOG" || exit "$gradle_status"
+
+    echo "    stale dex archive; dropping it and assembling again"
+    rm -rf "$GRADLE_PROJECT"/*/build/intermediates/project_dex_archive "$GRADLE_PROJECT"/*/build/intermediates/dex
+    "$GRADLE" -p "$GRADLE_PROJECT" assembleDebug --no-daemon
+fi
 
 echo "==> [5/5] Collecting the APK"
 BUILT_APK="$(find "$GRADLE_PROJECT" -path '*/outputs/apk/debug/*.apk' -print | head -1)"
