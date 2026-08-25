@@ -62,6 +62,8 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private static final int MAX_LINES = 1200;
     private static final int TRIM_CHUNK = 200;
     private static final long FLUSH_DELAY_MS = 80;
+    private static final long CLOSE_GRACE_MS = 5_000;
+    private static final long STOP_TIMEOUT_MS = 10_000;
 
     private static final int VK_ESCAPE = 0x1B;
     private static final int ESCAPE_SCAN_CODE = 1;
@@ -87,6 +89,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private TextView log;
     private ScrollView logScroll;
     private boolean developerMode;
+    private boolean quitting;
     private boolean flushScheduled;
     private boolean logStale;
     private int logColorError;
@@ -397,9 +400,38 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         controls.releaseAll();
     }
 
+    /**
+     * The emulator only saves the JIT cache on a clean shutdown, so quitting asks the guest to close and
+     * waits for {@link #onExit} instead of tearing the process down at once. A guest that ignores WM_CLOSE
+     * is stopped by the emulator itself, which still unwinds through the saving path; killing the process
+     * is the last resort. A second press skips straight to it.
+     */
     private void quit() {
+        if (quitting || !BrovanNative.isRunning()) {
+            finish();
+            return;
+        }
+
+        quitting = true;
+        setStatus("Stopping...");
         BrovanNative.requestClose();
-        finish();
+
+        // The developer-mode command loop never reports an exit; "exit" is only consumed once the guest
+        // has stopped and the cache is saved, and it takes the process with it.
+        if (developerMode) {
+            BrovanNative.sendCommand("exit");
+        }
+
+        ui.postDelayed(this::forceStop, CLOSE_GRACE_MS);
+    }
+
+    private void forceStop() {
+        if (isFinishing() || !BrovanNative.isRunning()) {
+            return;
+        }
+
+        BrovanNative.stop();
+        ui.postDelayed(this::finish, STOP_TIMEOUT_MS);
     }
 
     private void fail(String message) {
@@ -526,7 +558,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         append(reason == 0 ? "[*] The program closed." : "[-] The program stopped unexpectedly.");
         setStatus(reason == 0 ? "Finished" : "Stopped");
         runOnUiThread(() -> {
-            if (!developerMode) {
+            if (!developerMode || quitting) {
                 finish();
             }
         });

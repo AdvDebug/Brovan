@@ -546,6 +546,7 @@ namespace Brovan.Core.Emulation
         internal int NextThreadId = 1;
         private bool SchedulerRefreshRequested;
         internal bool EscapeScheduler;
+        private int TerminationRequested;
 
         // Threads keeps terminated entries so thread-id lookups stay valid, so it grows with every thread the guest
         // has ever created. ThreadOrder is the live set.
@@ -2609,6 +2610,9 @@ namespace Brovan.Core.Emulation
                 if (WinHelper != null)
                     OS.Windows.RemoteProcessRequests.Drain(this);
 
+                if (Interlocked.Exchange(ref TerminationRequested, 0) != 0)
+                    StopEmulation();
+
                 bool ThreadOrderChanged = ThreadOrder.Count != KnownThreadOrderCount;
                 bool AgingDue = AgingThresholdSlices > 0 && SchedulerTick % AgingThresholdSlices == 0;
                 if (AgingDue)
@@ -3185,6 +3189,11 @@ namespace Brovan.Core.Emulation
             }
             TriggerDebugMessage(() => $"emu: stop result={Result} ip=0x{ReadRegister(IPRegister):X} error={GetLastError()}");
             return Result;
+        }
+
+        public void RequestTermination()
+        {
+            Interlocked.Exchange(ref TerminationRequested, 1);
         }
 
         /// <summary>

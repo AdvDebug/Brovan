@@ -211,6 +211,9 @@ namespace Brovan.Android
         [UnmanagedCallersOnly(EntryPoint = "brovan_request_close")]
         public static void RequestClose() => Guard(HostEventQueue.RequestClose, nameof(RequestClose));
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_stop")]
+        public static void Stop() => Guard(() => Variables.Emulator?.RequestTermination(), nameof(Stop));
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_request_repaint")]
         public static void RequestRepaint() => Guard(HostEventQueue.MarkRepaint, nameof(RequestRepaint));
 

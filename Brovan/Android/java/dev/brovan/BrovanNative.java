@@ -168,6 +168,14 @@ public final class BrovanNative {
         nativeRequestClose();
     }
 
+    /**
+     * Terminates every guest thread and unwinds the emulator through its normal shutdown, which saves the
+     * JIT cache. For a guest that ignored {@link #requestClose}; {@link Listener#onExit} reports completion.
+     */
+    public static void stop() {
+        nativeStop();
+    }
+
     public static void injectPointer(int action, int button, int x, int y, int buttons) {
         nativeInjectPointer(action, button, x, y, buttons);
     }
@@ -379,6 +387,8 @@ public final class BrovanNative {
     private static native int nativeIsRunning();
 
     private static native void nativeRequestClose();
+
+    private static native void nativeStop();
 
     private static native void nativeInjectPointer(int action, int button, int x, int y, int buttons);
 

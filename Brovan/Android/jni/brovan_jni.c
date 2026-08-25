@@ -29,6 +29,7 @@ extern int brovan_start(const char *binaryPath, const char *guestCommandLine, co
 extern int brovan_is_running(void);
 extern void brovan_send_command(const char *command);
 extern void brovan_request_close(void);
+extern void brovan_stop(void);
 extern void brovan_request_repaint(void);
 extern void brovan_inject_pointer(int action, int button, int x, int y, int buttons);
 extern void brovan_inject_mouse_travel(int deltaX, int deltaY);
@@ -474,6 +475,12 @@ JNIEXPORT void JNICALL METHOD(RequestClose)(JNIEnv *env, jclass clazz) {
     (void)env;
     (void)clazz;
     brovan_request_close();
+}
+
+JNIEXPORT void JNICALL METHOD(Stop)(JNIEnv *env, jclass clazz) {
+    (void)env;
+    (void)clazz;
+    brovan_stop();
 }
 
 JNIEXPORT void JNICALL METHOD(RequestRepaint)(JNIEnv *env, jclass clazz) {
