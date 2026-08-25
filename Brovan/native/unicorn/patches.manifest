@@ -37,6 +37,9 @@ copy|brovan_mem_hooks.inc.h|include/brovan_mem_hooks.inc.h
 copy|brovan_notdirty.inc.h|include/brovan_notdirty.inc.h
 copy|brovan_flatview.inc.c|include/brovan_flatview.inc.c
 copy|brovan_ramblock.inc.h|include/brovan_ramblock.inc.h
+copy|brovan_softfloat_fast.inc.h|include/brovan_softfloat_fast.inc.h
+copy|brovan_softfloat_cmp.inc.c|include/brovan_softfloat_cmp.inc.c
+copy|brovan_sse_fastconv.inc.h|include/brovan_sse_fastconv.inc.h
 
 # --- uc_struct gains the brov ops table and the inline-hook switch -----------
 insert-after|include/uc_priv.h|#include "list.h"|#include "brovan_uc.h"
@@ -95,6 +98,54 @@ replace-all|qemu/include/exec/cpu-defs.h|#define CPU_TLB_DYN_DEFAULT_BITS 8|#def
 # --- the SSE register file is aligned for vector access ---------------------
 replace-all|qemu/target/i386/cpu.h|ZMMReg xmm_regs[CPU_NB_REGS == 8 ? 8 : 32];|QEMU_ALIGN(16, ZMMReg) xmm_regs[CPU_NB_REGS == 8 ? 8 : 32];
 replace-all|qemu/target/i386/cpu.h|ZMMReg xmm_t0;|QEMU_ALIGN(16, ZMMReg) xmm_t0;
+
+# --- MSVC lacks flatten: hardfloat dispatch is inlined by hand ---------------
+insert-before|qemu/fpu/softfloat.c|static inline bool can_use_fpu(const float_status *s)|#include "brovan_softfloat_fast.inc.h"
+replace-all|qemu/fpu/softfloat.c|static inline bool f32_is_zon2(union_float32 a, union_float32 b)|static BROV_SF_INLINE bool f32_is_zon2(union_float32 a, union_float32 b)
+replace-all|qemu/fpu/softfloat.c|static inline bool f64_is_zon2(union_float64 a, union_float64 b)|static BROV_SF_INLINE bool f64_is_zon2(union_float64 a, union_float64 b)
+replace-all|qemu/fpu/softfloat.c|static float32 float32_addsub(float32 a, float32 b, float_status *s,|static BROV_SF_INLINE float32 float32_addsub(float32 a, float32 b, float_status *s,
+replace-all|qemu/fpu/softfloat.c|static float64 float64_addsub(float64 a, float64 b, float_status *s,|static BROV_SF_INLINE float64 float64_addsub(float64 a, float64 b, float_status *s,
+
+# --- isless and friends are CRT calls under MSVC; operators inline -----------
+replace-all|qemu/fpu/softfloat.c|    if (isgreaterequal(ua.h, ub.h)) {|    if (ua.h >= ub.h) {
+replace-all|qemu/fpu/softfloat.c|        if (isgreater(ua.h, ub.h)) {|        if (ua.h > ub.h) {
+replace-all|qemu/fpu/softfloat.c|    if (likely(isless(ua.h, ub.h))) {|    if (likely(ua.h < ub.h)) {
+
+# --- min/max/cmp compares answer ordered operands on the host ----------------
+replace-all|qemu/fpu/softfloat.c|int float32_lt(float32 a, float32 b, float_status *status)|static int brov_soft_float32_lt(float32 a, float32 b, float_status *status)
+replace-all|qemu/fpu/softfloat.c|int float32_le(float32 a, float32 b, float_status *status)|static int brov_soft_float32_le(float32 a, float32 b, float_status *status)
+replace-all|qemu/fpu/softfloat.c|int float32_eq_quiet(float32 a, float32 b, float_status *status)|static int brov_soft_float32_eq_quiet(float32 a, float32 b, float_status *status)
+replace-all|qemu/fpu/softfloat.c|int float32_unordered_quiet(float32 a, float32 b, float_status *status)|static int brov_soft_float32_unordered_quiet(float32 a, float32 b, float_status *status)
+replace-all|qemu/fpu/softfloat.c|int float64_lt(float64 a, float64 b, float_status *status)|static int brov_soft_float64_lt(float64 a, float64 b, float_status *status)
+replace-all|qemu/fpu/softfloat.c|int float64_le(float64 a, float64 b, float_status *status)|static int brov_soft_float64_le(float64 a, float64 b, float_status *status)
+replace-all|qemu/fpu/softfloat.c|int float64_eq_quiet(float64 a, float64 b, float_status *status)|static int brov_soft_float64_eq_quiet(float64 a, float64 b, float_status *status)
+replace-all|qemu/fpu/softfloat.c|int float64_unordered_quiet(float64 a, float64 b, float_status *status)|static int brov_soft_float64_unordered_quiet(float64 a, float64 b, float_status *status)
+append|qemu/fpu/softfloat.c|#include "brovan_softfloat_cmp.inc.c"
+
+# --- conversions answer in-range finite values on the host -------------------
+insert-before|qemu/target/i386/ops_sse.h|void helper_cvtdq2ps(CPUX86State *env, Reg *d, Reg *s)|#include "brovan_sse_fastconv.inc.h"
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float64(l0, &env->sse_status)|brov_i32_to_f64(l0)
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float64(l1, &env->sse_status)|brov_i32_to_f64(l1)
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float64(s->MMX_L(0), &env->sse_status)|brov_i32_to_f64(s->MMX_L(0))
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float64(s->MMX_L(1), &env->sse_status)|brov_i32_to_f64(s->MMX_L(1))
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float64(val, &env->sse_status)|brov_i32_to_f64(val)
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float32(s->ZMM_L(0), &env->sse_status)|brov_i32_to_f32(s->ZMM_L(0), &env->sse_status)
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float32(s->ZMM_L(1), &env->sse_status)|brov_i32_to_f32(s->ZMM_L(1), &env->sse_status)
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float32(s->ZMM_L(2), &env->sse_status)|brov_i32_to_f32(s->ZMM_L(2), &env->sse_status)
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float32(s->ZMM_L(3), &env->sse_status)|brov_i32_to_f32(s->ZMM_L(3), &env->sse_status)
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float32(s->MMX_L(0), &env->sse_status)|brov_i32_to_f32(s->MMX_L(0), &env->sse_status)
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float32(s->MMX_L(1), &env->sse_status)|brov_i32_to_f32(s->MMX_L(1), &env->sse_status)
+replace-all|qemu/target/i386/ops_sse.h|int32_to_float32(val, &env->sse_status)|brov_i32_to_f32(val, &env->sse_status)
+replace-all|qemu/target/i386/ops_sse.h|WRAP_FLOATCONV(int32_t, float32_to_int32_round_to_zero, float32, INT32_MIN)|/* x86_float32_to_int32_round_to_zero: brovan_sse_fastconv.inc.h */
+replace-all|qemu/target/i386/ops_sse.h|WRAP_FLOATCONV(int32_t, float64_to_int32_round_to_zero, float64, INT32_MIN)|/* x86_float64_to_int32_round_to_zero: brovan_sse_fastconv.inc.h */
+replace-all|qemu/target/i386/ops_sse.h|WRAP_FLOATCONV(int64_t, float32_to_int64_round_to_zero, float32, INT64_MIN)|/* x86_float32_to_int64_round_to_zero: brovan_sse_fastconv.inc.h */
+replace-all|qemu/target/i386/ops_sse.h|WRAP_FLOATCONV(int64_t, float64_to_int64_round_to_zero, float64, INT64_MIN)|/* x86_float64_to_int64_round_to_zero: brovan_sse_fastconv.inc.h */
+
+# --- hardfloat is armed from reset, not from the first soft op ---------------
+insert-after|qemu/target/i386/fpu_helper.c|#include "cpu.h"|#include "brovan_softfloat_fast.inc.h"
+insert-after|qemu/target/i386/fpu_helper.c|set_flush_inputs_to_zero((mxcsr & SSE_DAZ) ? 1 : 0, &env->sse_status);|    brov_seed_inexact(&env->sse_status);
+insert-after|qemu/target/i386/cpu.c|#include "cpu.h"|#include "brovan_softfloat_fast.inc.h"
+insert-after|qemu/target/i386/cpu.c|env->mxcsr = 0x1f80;|    brov_seed_inexact(&env->sse_status);
 
 # --- MXCSR.FZ reaches the SSE status, not the x87 one -----------------------
 replace-all|qemu/target/i386/fpu_helper.c|set_flush_to_zero((mxcsr & SSE_FZ) ? 1 : 0, &env->fp_status);|set_flush_to_zero((mxcsr & SSE_FZ) ? 1 : 0, &env->sse_status);
