@@ -4,8 +4,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtGdiSetBoundsRect : IWinSyscall
     {
-        private const uint DcbDisable = 0x0008;
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong Hdc = Instance.WinHelper.GetArg(0);
@@ -34,7 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             Instance.SetLastWinError(0);
-            Instance.SetRawSyscallReturn(Previous == 0 ? DcbDisable : Previous);
+            Instance.SetRawSyscallReturn(Previous);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

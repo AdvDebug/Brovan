@@ -98,6 +98,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Win32kHelper.SendWindowCreateMessage(Instance, window, Win32kHelper.WM_NCCREATE, Creation))
                 return NTSTATUS.STATUS_SUCCESS;
 
+            // The callback path is x64 only, so a 32-bit guest gets the window with none of its creation
+            // messages and the class has to cope on its own.
             Instance.SetRawSyscallReturn(hwnd);
             return NTSTATUS.STATUS_SUCCESS;
         }
