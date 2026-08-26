@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Linux.Files
@@ -53,7 +54,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             string HostPath;
             if (!Helper.SpecialPathsHandler.TryResolveHostBackedPath(Helper, NormalizedPath, out HostPath))
-                HostPath = Helper.ResolveHostPath(NormalizedPath);
+                HostPath = Helper.ResolveHostPath(NormalizedPath, false, !FollowSymlink);
             if (string.IsNullOrEmpty(HostPath))
                 return LinuxErrno.ENOENT;
 
@@ -147,7 +148,8 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         private static LinuxStatData CreateHostData(FileObject FileDesc, bool NoFollowLink)
         {
             FileSystemInfo Info = GetFileSystemInfo(FileDesc.HostPath);
-            if (!Info.Exists && string.IsNullOrEmpty(Info.LinkTarget))
+            bool IsLink = GeneralHelper.IO.TryReadHostSymlinkTarget(Info.FullName, out string LinkTarget);
+            if (!Info.Exists && !IsLink)
                 throw new FileNotFoundException(FileDesc.HostPath);
 
             bool IsDirectory = FileDesc.IsDirectory || Info is DirectoryInfo;
@@ -159,11 +161,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             ulong NLink = IsDirectory ? 2UL : 1UL;
             uint Mode = IsDirectory ? (S_IFDIR | MODE_DIRECTORY) : (S_IFREG | MODE_REGULAR);
 
-            if (NoFollowLink && !string.IsNullOrEmpty(Info.LinkTarget))
+            if (NoFollowLink && IsLink)
             {
                 Kind = LinuxStatFileKind.SymbolicLink;
                 Mode = S_IFLNK | MODE_SYMLINK;
-                Size = Info.LinkTarget.Length;
+                Size = Encoding.UTF8.GetByteCount(LinkTarget);
                 NLink = 1;
             }
             else if (IsDirectory)

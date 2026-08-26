@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -130,11 +131,11 @@ namespace Brovan
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
 
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        public static extern bool CreateSymbolicLinkW(string lpSymlinkFileName, string lpTargetFileName, int dwFlags);
-
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool DeviceIoControl(SafeFileHandle Handle, uint IoControlCode, IntPtr InBuffer, int InBufferSize, byte[] OutBuffer, int OutBufferSize, out int BytesReturned, IntPtr Overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool DeviceIoControl(SafeFileHandle Handle, uint IoControlCode, byte[] InBuffer, int InBufferSize, IntPtr OutBuffer, int OutBufferSize, out int BytesReturned, IntPtr Overlapped);
 
         [DllImport("user32.dll")]
         public static extern int GetSystemMetrics(int nIndex);
@@ -1027,6 +1028,17 @@ namespace Brovan
 
             private static readonly char[] WindowsPathSeparators = { '\\', '/' };
 
+            private const uint GENERIC_WRITE = 0x40000000;
+            private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            private const uint FSCTL_GET_REPARSE_POINT = 0x000900A8;
+            private const uint FSCTL_SET_REPARSE_POINT = 0x000900A4;
+            private const uint IO_REPARSE_TAG_LX_SYMLINK = 0xA000001D;
+            private const uint LX_SYMLINK_VERSION = 2;
+            private const int LX_SYMLINK_HEADER_SIZE = 12;
+            private const int MAXIMUM_REPARSE_DATA_BUFFER_SIZE = 16 * 1024;
+            private const int MaximumSymlinkHops = 40;
+
             /// <summary>
             /// Initializes the default sandbox drive mappings and allowed IO roots.
             /// </summary>
@@ -1215,11 +1227,10 @@ namespace Brovan
                 File.WriteAllText(HostPath, Content, new UTF8Encoding(false));
             }
 
-            private sealed class UbuntuRootfsPendingLink
+            private sealed class UbuntuRootfsPendingHardLink
             {
                 public string EntryPath;
                 public string LinkName;
-                public TarEntryType EntryType;
                 public UnixFileMode Mode;
                 public DateTimeOffset ModificationTime;
             }
@@ -1244,7 +1255,8 @@ namespace Brovan
 
                 for (int i = 0; i < RequiredFiles.Length; i++)
                 {
-                    if (File.Exists(RequiredFiles[i]))
+                    string Resolved = ResolveSandboxLinks(RequiredFiles[i], true, EnforceAllowedRoots: false);
+                    if (!string.IsNullOrEmpty(Resolved) && File.Exists(Resolved))
                         return true;
                 }
 
@@ -1277,8 +1289,8 @@ namespace Brovan
                     using GZipStream GzipStream = new GZipStream(ResponseStream, CompressionMode.Decompress, leaveOpen: false);
                     using TarReader Reader = new TarReader(GzipStream);
 
-                    List<UbuntuRootfsPendingLink> PendingLinks = new();
-                    Dictionary<string, UbuntuRootfsPendingLink> PendingLinksByArchivePath = new(StringComparer.Ordinal);
+                    List<UbuntuRootfsPendingHardLink> PendingHardLinks = new();
+                    Dictionary<string, string> SymlinkTargetsByArchivePath = new(StringComparer.Ordinal);
                     TarEntry Entry;
 
                     while ((Entry = Reader.GetNextEntry()) != null)
@@ -1287,7 +1299,12 @@ namespace Brovan
                         if (string.IsNullOrWhiteSpace(NormalizedEntryPath))
                             continue;
 
-                        string HostPath = ResolveUbuntuRootfsHostPath(NormalizedEntryPath);
+                        // Entries below an already extracted symlink belong to the link target, and an entry whose
+                        // prefix does not resolve would be written through that link.
+                        if (!TryResolveUbuntuRootfsArchivePath(NormalizedEntryPath, SymlinkTargetsByArchivePath, out string EntryArchivePath))
+                            continue;
+
+                        string HostPath = ResolveUbuntuRootfsHostPath(EntryArchivePath);
                         if (string.IsNullOrWhiteSpace(HostPath))
                             continue;
 
@@ -1300,20 +1317,37 @@ namespace Brovan
                             continue;
                         }
 
-                        if (Entry.EntryType == TarEntryType.SymbolicLink || Entry.EntryType == TarEntryType.HardLink)
+                        if (Entry.EntryType == TarEntryType.SymbolicLink)
                         {
+                            if (string.IsNullOrEmpty(Entry.LinkName))
+                                continue;
 
-                            UbuntuRootfsPendingLink PendingLink = new UbuntuRootfsPendingLink
+                            string LinkParent = Path.GetDirectoryName(HostPath);
+                            if (!string.IsNullOrWhiteSpace(LinkParent))
+                                Directory.CreateDirectory(LinkParent);
+
+                            DeletePathIfExists(HostPath);
+
+                            if (!CreateSymbolicLinkPortable(HostPath, Entry.LinkName))
+                            {
+                                Utils.LogError($"[IO] Failed to create symlink '{EntryArchivePath}' -> '{Entry.LinkName}'.");
+                                continue;
+                            }
+
+                            SymlinkTargetsByArchivePath[EntryArchivePath] = Entry.LinkName;
+                            continue;
+                        }
+
+                        if (Entry.EntryType == TarEntryType.HardLink)
+                        {
+                            PendingHardLinks.Add(new UbuntuRootfsPendingHardLink
                             {
                                 EntryPath = HostPath,
                                 LinkName = Entry.LinkName,
-                                EntryType = Entry.EntryType,
                                 Mode = Entry.Mode,
                                 ModificationTime = Entry.ModificationTime,
-                            };
+                            });
 
-                            PendingLinks.Add(PendingLink);
-                            PendingLinksByArchivePath[NormalizedEntryPath] = PendingLink;
                             continue;
                         }
 
@@ -1337,15 +1371,14 @@ namespace Brovan
                         ApplyTarMetadata(HostPath, Entry, false);
                     }
 
-                    List<UbuntuRootfsPendingLink> PendingHardLinks = PendingLinks.Where(Link => Link.EntryType == TarEntryType.HardLink).ToList();
                     while (PendingHardLinks.Count > 0)
                     {
                         bool Progress = false;
-                        List<UbuntuRootfsPendingLink> Remaining = new();
+                        List<UbuntuRootfsPendingHardLink> Remaining = new();
 
-                        foreach (UbuntuRootfsPendingLink Link in PendingHardLinks)
+                        foreach (UbuntuRootfsPendingHardLink Link in PendingHardLinks)
                         {
-                            if (TryMaterializeRootfsHardLink(Link, PendingLinksByArchivePath))
+                            if (TryMaterializeRootfsHardLink(Link, SymlinkTargetsByArchivePath))
                             {
                                 Progress = true;
                                 continue;
@@ -1365,35 +1398,6 @@ namespace Brovan
 
                     if (PendingHardLinks.Count > 0)
                         Utils.LogError($"[IO] {PendingHardLinks.Count} rootfs hardlink(s) could not be resolved after retries.");
-
-                    List<UbuntuRootfsPendingLink> PendingSymlinks = PendingLinks.Where(Link => Link.EntryType == TarEntryType.SymbolicLink).ToList();
-                    while (PendingSymlinks.Count > 0)
-                    {
-                        bool Progress = false;
-                        List<UbuntuRootfsPendingLink> Remaining = new();
-
-                        foreach (UbuntuRootfsPendingLink Link in PendingSymlinks)
-                        {
-                            if (TryMaterializeRootfsSymlink(Link, PendingLinksByArchivePath))
-                            {
-                                Progress = true;
-                                continue;
-                            }
-
-                            Remaining.Add(Link);
-                        }
-
-                        if (!Progress)
-                        {
-                            PendingSymlinks = Remaining;
-                            break;
-                        }
-
-                        PendingSymlinks = Remaining;
-                    }
-
-                    if (PendingSymlinks.Count > 0)
-                        Utils.LogError($"[IO] {PendingSymlinks.Count} rootfs symlink(s) could not be resolved after retries.");
 
                     if (!IsUbuntuBaseRootfsInstalled())
                         Utils.LogError("[IO] Ubuntu Base rootfs download completed, but the expected interpreter file was still not found.");
@@ -1423,20 +1427,18 @@ namespace Brovan
                 }
             }
 
-            private static bool CreateSymbolicLinkPortable(string LinkPath, string TargetPath, bool IsDirectory)
+            /// <summary>
+            /// Creates a symlink that keeps the guest target string.
+            /// </summary>
+            /// <param name="LinkPath">host path of the link.</param>
+            /// <param name="TargetPath">guest target string to store in the link.</param>
+            /// <returns>returns true when the link was created.</returns>
+            private static bool CreateSymbolicLinkPortable(string LinkPath, string TargetPath)
             {
                 try
                 {
                     if (IsWindows)
-                    {
-                        const int SYMBOLIC_LINK_FLAG_DIRECTORY = 0x1;
-                        const int SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE = 0x2;
-                        int Flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
-                        if (IsDirectory)
-                            Flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
-
-                        return NativeWinImports.CreateSymbolicLinkW(LinkPath, TargetPath, Flags);
-                    }
+                        return CreateWindowsLxSymlink(LinkPath, TargetPath);
 
                     return NativeUnixImports.Symlink(TargetPath, LinkPath) == 0;
                 }
@@ -1444,6 +1446,98 @@ namespace Brovan
                 {
                     Utils.LogError($"[IO] Failed to create symlink '{LinkPath}' -> '{TargetPath}': {ex.Message}");
                     return false;
+                }
+            }
+
+            // A NTFS symlink stores a host path and needs a privilege. The WSL LX reparse point keeps the
+            // guest string as written and any user can set it.
+            private static bool CreateWindowsLxSymlink(string LinkPath, string TargetPath)
+            {
+                byte[] Target = Encoding.UTF8.GetBytes(TargetPath);
+                if (Target.Length > MAXIMUM_REPARSE_DATA_BUFFER_SIZE - LX_SYMLINK_HEADER_SIZE)
+                    return false;
+
+                byte[] ReparseBuffer = new byte[LX_SYMLINK_HEADER_SIZE + Target.Length];
+                BitConverter.GetBytes(IO_REPARSE_TAG_LX_SYMLINK).CopyTo(ReparseBuffer, 0);
+                BitConverter.GetBytes((ushort)(sizeof(uint) + Target.Length)).CopyTo(ReparseBuffer, 4);
+                BitConverter.GetBytes(LX_SYMLINK_VERSION).CopyTo(ReparseBuffer, 8);
+                Target.CopyTo(ReparseBuffer, LX_SYMLINK_HEADER_SIZE);
+
+                using (SafeFileHandle Handle = NativeWinImports.CreateFileW(LinkPath, GENERIC_WRITE, FileShare.None, IntPtr.Zero, FileMode.CreateNew, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero))
+                {
+                    if (Handle.IsInvalid)
+                        return false;
+
+                    if (NativeWinImports.DeviceIoControl(Handle, FSCTL_SET_REPARSE_POINT, ReparseBuffer, ReparseBuffer.Length, IntPtr.Zero, 0, out _, IntPtr.Zero))
+                        return true;
+                }
+
+                DeletePathIfExists(LinkPath);
+                return false;
+            }
+
+            /// <summary>
+            /// Reads the target string kept by a host symlink.
+            /// </summary>
+            /// <param name="HostPath">host path to read.</param>
+            /// <param name="Target">receives the stored target, which stays relative when the link is relative.</param>
+            /// <returns>returns true when the path is a symlink.</returns>
+            public static bool TryReadHostSymlinkTarget(string HostPath, out string Target)
+            {
+                Target = null;
+                if (string.IsNullOrWhiteSpace(HostPath))
+                    return false;
+
+                if (IsWindows)
+                    return TryReadWindowsLxSymlinkTarget(HostPath, out Target);
+
+                try
+                {
+                    Target = new FileInfo(HostPath).LinkTarget;
+                }
+                catch
+                {
+                    return false;
+                }
+
+                return !string.IsNullOrEmpty(Target);
+            }
+
+            private static bool TryReadWindowsLxSymlinkTarget(string HostPath, out string Target)
+            {
+                Target = null;
+
+                using SafeFileHandle Handle = NativeWinImports.CreateFileW(HostPath, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
+                if (Handle.IsInvalid)
+                    return false;
+
+                byte[] ReparseBuffer = ArrayPool<byte>.Shared.Rent(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+                try
+                {
+                    if (!NativeWinImports.DeviceIoControl(Handle, FSCTL_GET_REPARSE_POINT, IntPtr.Zero, 0, ReparseBuffer, MAXIMUM_REPARSE_DATA_BUFFER_SIZE, out int BytesReturned, IntPtr.Zero))
+                        return false;
+
+                    if (BytesReturned < LX_SYMLINK_HEADER_SIZE ||
+                        BitConverter.ToUInt32(ReparseBuffer, 0) != IO_REPARSE_TAG_LX_SYMLINK ||
+                        BitConverter.ToUInt32(ReparseBuffer, 8) != LX_SYMLINK_VERSION)
+                    {
+                        return false;
+                    }
+
+                    int TargetLength = BitConverter.ToUInt16(ReparseBuffer, 4) - sizeof(uint);
+                    if (TargetLength <= 0 || LX_SYMLINK_HEADER_SIZE + TargetLength > BytesReturned)
+                        return false;
+
+                    int End = LX_SYMLINK_HEADER_SIZE + TargetLength;
+                    while (End > LX_SYMLINK_HEADER_SIZE && ReparseBuffer[End - 1] == 0)
+                        End--;
+
+                    Target = Encoding.UTF8.GetString(ReparseBuffer, LX_SYMLINK_HEADER_SIZE, End - LX_SYMLINK_HEADER_SIZE);
+                    return Target.Length > 0;
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(ReparseBuffer);
                 }
             }
 
@@ -1478,12 +1572,12 @@ namespace Brovan
                 {
                 }
             }
-            private static bool TryMaterializeRootfsHardLink(UbuntuRootfsPendingLink Link, IReadOnlyDictionary<string, UbuntuRootfsPendingLink> PendingLinksByArchivePath)
+            private static bool TryMaterializeRootfsHardLink(UbuntuRootfsPendingHardLink Link, IReadOnlyDictionary<string, string> SymlinkTargetsByArchivePath)
             {
                 if (Link == null || string.IsNullOrWhiteSpace(Link.EntryPath) || string.IsNullOrWhiteSpace(Link.LinkName))
                     return false;
 
-                if (!TryResolveUbuntuRootfsArchivePath(Link.LinkName, PendingLinksByArchivePath, out string ResolvedArchivePath))
+                if (!TryResolveUbuntuRootfsArchivePath(Link.LinkName, SymlinkTargetsByArchivePath, out string ResolvedArchivePath))
                 {
                     Utils.LogError($"[IO] Failed to resolve hardlink target '{Link.LinkName}' for '{Link.EntryPath}'.");
                     return false;
@@ -1512,170 +1606,6 @@ namespace Brovan
                 return true;
             }
 
-            private static bool TryMaterializeRootfsSymlink(UbuntuRootfsPendingLink Link, IReadOnlyDictionary<string, UbuntuRootfsPendingLink> PendingLinksByArchivePath)
-            {
-                string ResolvedTarget = ResolveUbuntuRootfsLinkTargetHostPath(Link.EntryPath, Link.LinkName, PendingLinksByArchivePath);
-                if (string.IsNullOrWhiteSpace(ResolvedTarget) || (!File.Exists(ResolvedTarget) && !Directory.Exists(ResolvedTarget)))
-                {
-                    Utils.LogError($"[IO] Failed to resolve symlink target '{Link.LinkName}' for '{Link.EntryPath}'.");
-                    return false;
-                }
-
-                string Parent = Path.GetDirectoryName(Link.EntryPath);
-                if (!string.IsNullOrWhiteSpace(Parent))
-                    Directory.CreateDirectory(Parent);
-
-                string EntryFullPath = Path.GetFullPath(Link.EntryPath);
-                string TargetFullPath = Path.GetFullPath(ResolvedTarget);
-
-                StringComparison Comparison = IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-                if (string.Equals(TargetFullPath, EntryFullPath, Comparison))
-                {
-                    bool IsDirectory = Directory.Exists(ResolvedTarget) && !File.Exists(ResolvedTarget);
-                    ApplyTarMetadata(Link.EntryPath, Link.Mode, Link.ModificationTime, IsDirectory);
-                    return true;
-                }
-
-                bool EntryIsDirectory = Directory.Exists(Link.EntryPath) && !File.Exists(Link.EntryPath);
-                bool TargetIsDirectory = Directory.Exists(ResolvedTarget) && !File.Exists(ResolvedTarget);
-
-                if (EntryIsDirectory && TargetIsDirectory)
-                {
-                    if (ArePathsNested(EntryFullPath, TargetFullPath))
-                    {
-                        Utils.LogError($"[IO] Refusing to flatten recursive directory symlink '{Link.EntryPath}' -> '{Link.LinkName}'.");
-                        return false;
-                    }
-
-                    if (!TryCopyDirectoryRecursive(Link.EntryPath, ResolvedTarget, Link.Mode, Link.ModificationTime))
-                    {
-                        Utils.LogError($"[IO] Failed to merge existing directory '{Link.EntryPath}' into symlink target '{ResolvedTarget}'.");
-                        return false;
-                    }
-                }
-
-                DeletePathIfExists(Link.EntryPath);
-
-                if (TargetIsDirectory)
-                {
-                    if (!TryCopyDirectoryRecursive(ResolvedTarget, Link.EntryPath, Link.Mode, Link.ModificationTime))
-                    {
-                        Utils.LogError($"[IO] Failed to flatten symlink directory '{Link.EntryPath}' -> '{Link.LinkName}'.");
-                        return false;
-                    }
-
-                    return true;
-                }
-
-                try
-                {
-                    File.Copy(ResolvedTarget, Link.EntryPath, true);
-                    ApplyTarMetadata(Link.EntryPath, Link.Mode, Link.ModificationTime, false);
-                    return true;
-                }
-                catch (Exception ex)
-                {
-                    Utils.LogError($"[IO] Failed to flatten symlink '{Link.EntryPath}' -> '{Link.LinkName}': {ex.Message}");
-                    return false;
-                }
-            }
-
-            private static bool ArePathsNested(string FirstPath, string SecondPath)
-            {
-                if (string.IsNullOrWhiteSpace(FirstPath) || string.IsNullOrWhiteSpace(SecondPath))
-                    return false;
-
-                string FirstFullPath = Path.GetFullPath(FirstPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                string SecondFullPath = Path.GetFullPath(SecondPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-                StringComparison Comparison = IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-                if (string.Equals(FirstFullPath, SecondFullPath, Comparison))
-                    return true;
-                return SecondFullPath.StartsWith(FirstFullPath + Path.DirectorySeparatorChar, Comparison) ||
-                       SecondFullPath.StartsWith(FirstFullPath + Path.AltDirectorySeparatorChar, Comparison) ||
-                       FirstFullPath.StartsWith(SecondFullPath + Path.DirectorySeparatorChar, Comparison) ||
-                       FirstFullPath.StartsWith(SecondFullPath + Path.AltDirectorySeparatorChar, Comparison);
-            }
-
-            private static bool TryCopyDirectoryRecursive(string SourceDirectory, string DestinationDirectory, UnixFileMode Mode, DateTimeOffset ModificationTime)
-            {
-                if (string.IsNullOrWhiteSpace(SourceDirectory) || string.IsNullOrWhiteSpace(DestinationDirectory))
-                    return false;
-
-                try
-                {
-                    string SourceFullPath = Path.GetFullPath(SourceDirectory);
-                    string DestinationFullPath = Path.GetFullPath(DestinationDirectory);
-
-                    StringComparison Comparison = IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-                    if (string.Equals(SourceFullPath, DestinationFullPath, Comparison))
-                    {
-                        Directory.CreateDirectory(DestinationFullPath);
-                        ApplyTarMetadata(DestinationFullPath, Mode, ModificationTime, true);
-                        return true;
-                    }
-
-                    Directory.CreateDirectory(DestinationFullPath);
-
-                    foreach (string DirectoryPath in Directory.EnumerateDirectories(SourceFullPath, "*", SearchOption.AllDirectories))
-                    {
-                        string RelativePath = Path.GetRelativePath(SourceFullPath, DirectoryPath);
-                        string DestinationPath = Path.Combine(DestinationFullPath, RelativePath);
-                        Directory.CreateDirectory(DestinationPath);
-
-                        try
-                        {
-                            DirectoryInfo SourceInfo = new DirectoryInfo(DirectoryPath);
-                            DirectoryInfo DestinationInfo = new DirectoryInfo(DestinationPath);
-                            if (SourceInfo.Exists)
-                            {
-                                if (SourceInfo.LastWriteTimeUtc != default)
-                                    Directory.SetLastWriteTimeUtc(DestinationPath, SourceInfo.LastWriteTimeUtc);
-
-                                DestinationInfo.UnixFileMode = SourceInfo.UnixFileMode;
-                            }
-                        }
-                        catch
-                        {
-                        }
-                    }
-
-                    foreach (string FilePath in Directory.EnumerateFiles(SourceFullPath, "*", SearchOption.AllDirectories))
-                    {
-                        string RelativePath = Path.GetRelativePath(SourceFullPath, FilePath);
-                        string DestinationPath = Path.Combine(DestinationFullPath, RelativePath);
-                        string DestinationParent = Path.GetDirectoryName(DestinationPath);
-                        if (!string.IsNullOrWhiteSpace(DestinationParent))
-                            Directory.CreateDirectory(DestinationParent);
-
-                        File.Copy(FilePath, DestinationPath, true);
-
-                        try
-                        {
-                            FileInfo SourceInfo = new FileInfo(FilePath);
-                            FileInfo DestinationInfo = new FileInfo(DestinationPath);
-                            if (SourceInfo.Exists)
-                            {
-                                if (SourceInfo.LastWriteTimeUtc != default)
-                                    File.SetLastWriteTimeUtc(DestinationPath, SourceInfo.LastWriteTimeUtc);
-
-                                DestinationInfo.UnixFileMode = SourceInfo.UnixFileMode;
-                            }
-                        }
-                        catch
-                        {
-                        }
-                    }
-
-                    ApplyTarMetadata(DestinationFullPath, Mode, ModificationTime, true);
-                    return true;
-                }
-                catch (Exception ex)
-                {
-                    Utils.LogError($"[IO] Failed to copy directory '{SourceDirectory}' to '{DestinationDirectory}': {ex.Message}");
-                    return false;
-                }
-            }
             private static string ResolveUbuntuRootfsArchiveLinkTarget(string LinkEntryPath, string LinkName)
             {
                 if (string.IsNullOrWhiteSpace(LinkEntryPath) || string.IsNullOrWhiteSpace(LinkName))
@@ -1696,7 +1626,7 @@ namespace Brovan
                 return NormalizeUbuntuRootfsArchivePath(CombinedPath);
             }
 
-            private static bool TryResolveUbuntuRootfsArchivePath(string PathValue, IReadOnlyDictionary<string, UbuntuRootfsPendingLink> PendingLinksByArchivePath, out string ResolvedPath)
+            private static bool TryResolveUbuntuRootfsArchivePath(string PathValue, IReadOnlyDictionary<string, string> SymlinkTargetsByArchivePath, out string ResolvedPath)
             {
                 ResolvedPath = NormalizeUbuntuRootfsArchivePath(PathValue);
                 if (ResolvedPath == null)
@@ -1718,10 +1648,10 @@ namespace Brovan
                     for (int PrefixLength = Parts.Length; PrefixLength >= 1; PrefixLength--)
                     {
                         string Prefix = string.Join('/', Parts.Take(PrefixLength));
-                        if (!PendingLinksByArchivePath.TryGetValue(Prefix, out UbuntuRootfsPendingLink PendingLink) || PendingLink.EntryType != TarEntryType.SymbolicLink)
+                        if (!SymlinkTargetsByArchivePath.TryGetValue(Prefix, out string LinkName))
                             continue;
 
-                        string ResolvedPrefix = ResolveUbuntuRootfsArchiveLinkTarget(Prefix, PendingLink.LinkName);
+                        string ResolvedPrefix = ResolveUbuntuRootfsArchiveLinkTarget(Prefix, LinkName);
                         if (string.IsNullOrWhiteSpace(ResolvedPrefix))
                             return false;
 
@@ -1744,18 +1674,6 @@ namespace Brovan
                         return true;
                 }
             }
-            private static string ResolveUbuntuRootfsLinkTargetHostPath(string LinkEntryPath, string LinkName, IReadOnlyDictionary<string, UbuntuRootfsPendingLink> PendingLinksByArchivePath)
-            {
-                string ResolvedArchiveTarget = ResolveUbuntuRootfsArchiveLinkTarget(LinkEntryPath, LinkName);
-                if (ResolvedArchiveTarget == null)
-                    return null;
-
-                if (!TryResolveUbuntuRootfsArchivePath(ResolvedArchiveTarget, PendingLinksByArchivePath, out string FullyResolvedArchivePath))
-                    return null;
-
-                return ResolveUbuntuRootfsHostPath(FullyResolvedArchivePath);
-            }
-
             private static string NormalizeUbuntuRootfsArchivePath(string PathValue)
             {
                 if (string.IsNullOrWhiteSpace(PathValue))
@@ -2837,6 +2755,16 @@ namespace Brovan
 
             private static string ResolveLinuxVirtualHostPathInternal(string LinuxPath, bool CreateDirectories, bool PreserveFinalLink = false)
             {
+                return GetSandboxedFullPath(MapLinuxPathToHostPath(LinuxPath), CreateDirectories, PreserveFinalLink);
+            }
+
+            /// <summary>
+            /// Maps an absolute linux path to its host path through the mount table, without resolving links.
+            /// </summary>
+            /// <param name="LinuxPath">absolute emulated linux path.</param>
+            /// <returns>returns the host path, or null when the path is not absolute.</returns>
+            private static string MapLinuxPathToHostPath(string LinuxPath)
+            {
                 if (string.IsNullOrWhiteSpace(LinuxPath) || !LinuxPath.StartsWith("/", StringComparison.Ordinal))
                     return null;
 
@@ -2866,8 +2794,7 @@ namespace Brovan
                 }
 
                 string RelativePath = LinuxPath == MountPoint ? string.Empty : LinuxPath.Substring(MountPoint.Length).TrimStart('/');
-                string HostPath = string.IsNullOrEmpty(RelativePath) ? HostRoot : CombineLinuxRelativePath(HostRoot, RelativePath);
-                return GetSandboxedFullPath(HostPath, CreateDirectories, PreserveFinalLink);
+                return string.IsNullOrEmpty(RelativePath) ? HostRoot : CombineLinuxRelativePath(HostRoot, RelativePath);
             }
 
             private static string CombineLinuxRelativePath(string Root, string LinuxRelative)
@@ -3000,7 +2927,9 @@ namespace Brovan
                 if (!IsUnderAllowedRoots(Full))
                     return null;
 
-                bool IncludeFinal = !PreserveFinalLink && (File.Exists(Full) || Directory.Exists(Full));
+                // The final component cannot be gated on the path existing: a path below a symlinked directory only
+                // exists once the walk has resolved that directory.
+                bool IncludeFinal = !PreserveFinalLink;
                 string Resolved = ResolveSandboxLinks(Full, IncludeFinal);
                 if (string.IsNullOrEmpty(Resolved) || !IsUnderAllowedRoots(Resolved))
                     return null;
@@ -3018,7 +2947,6 @@ namespace Brovan
                         return null;
                     }
 
-                    IncludeFinal = !PreserveFinalLink && (File.Exists(Resolved) || Directory.Exists(Resolved));
                     Resolved = ResolveSandboxLinks(Resolved, IncludeFinal);
                     if (string.IsNullOrEmpty(Resolved) || !IsUnderAllowedRoots(Resolved))
                         return null;
@@ -3029,7 +2957,12 @@ namespace Brovan
 
             private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, bool EnforceAllowedRoots = true)
             {
-                if (string.IsNullOrWhiteSpace(FullPath))
+                return ResolveSandboxLinks(FullPath, IncludeFinal, EnforceAllowedRoots, 0);
+            }
+
+            private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, bool EnforceAllowedRoots, int Hops)
+            {
+                if (string.IsNullOrWhiteSpace(FullPath) || Hops > MaximumSymlinkHops)
                     return null;
 
                 string Normalized;
@@ -3061,29 +2994,40 @@ namespace Brovan
                     if (IsFinal && !IncludeFinal)
                         continue;
 
-                    if (!File.Exists(Current) && !Directory.Exists(Current))
+                    string LinkTarget;
+                    if (IsWindows)
+                    {
+                        FileAttributes Attributes;
+                        try
+                        {
+                            Attributes = File.GetAttributes(Current);
+                        }
+                        catch
+                        {
+                            continue;
+                        }
+
+                        if ((Attributes & FileAttributes.ReparsePoint) == 0)
+                            continue;
+
+                        if (!TryReadHostSymlinkTarget(Current, out LinkTarget))
+                        {
+                            string HostTarget = ResolveLinkTarget(Current, Attributes);
+                            if (string.IsNullOrEmpty(HostTarget) || !IsAcceptedLinkTarget(Current, HostTarget, EnforceAllowedRoots))
+                                return null;
+
+                            Current = HostTarget;
+                            continue;
+                        }
+                    }
+                    else if (!TryReadHostSymlinkTarget(Current, out LinkTarget))
                         continue;
 
-                    FileAttributes Attributes;
-                    try
-                    {
-                        Attributes = File.GetAttributes(Current);
-                    }
-                    catch
-                    {
-                        return null;
-                    }
-
-                    if ((Attributes & FileAttributes.ReparsePoint) == 0)
-                        continue;
-
-                    string Resolved = ResolveLinkTarget(Current, Attributes);
-                    if (string.IsNullOrEmpty(Resolved))
+                    string Resolved = ResolveSandboxLinks(CombineHostLinkTarget(Current, LinkTarget), true, EnforceAllowedRoots, Hops + 1);
+                    if (string.IsNullOrEmpty(Resolved) || !IsAcceptedLinkTarget(Current, Resolved, EnforceAllowedRoots))
                         return null;
 
                     Current = Resolved;
-                    if (EnforceAllowedRoots && !IsUnderAllowedRoots(Current))
-                        return null;
                 }
 
                 try
@@ -3094,6 +3038,94 @@ namespace Brovan
                 {
                     return null;
                 }
+            }
+
+            /// <summary>
+            /// Turns the target string of a symlink into the host path it points at.
+            /// </summary>
+            /// <param name="LinkPath">host path of the link.</param>
+            /// <param name="LinkTarget">target string stored in the link.</param>
+            /// <returns>returns the host path of the target, or null when the target is unusable.</returns>
+            private static string CombineHostLinkTarget(string LinkPath, string LinkTarget)
+            {
+                if (string.IsNullOrWhiteSpace(LinkPath) || string.IsNullOrWhiteSpace(LinkTarget))
+                    return null;
+
+                string Normalized = LinkTarget.Trim();
+                if (Normalized.Length == 0)
+                    return null;
+
+                try
+                {
+                    if (Normalized[0] == '/' || Normalized[0] == '\\')
+                    {
+                        // A link inside a linux mount holds a guest path, so it follows the mount table and not the host root.
+                        if (IsLinuxMountHostPath(LinkPath))
+                            return MapLinuxPathToHostPath("/" + Normalized.Replace('\\', '/').TrimStart('/'));
+
+                        return Path.GetFullPath(Normalized);
+                    }
+
+                    string Parent = Path.GetDirectoryName(LinkPath);
+                    if (string.IsNullOrEmpty(Parent))
+                        return null;
+
+                    return Path.GetFullPath(Path.Combine(Parent, Normalized.Replace('/', Path.DirectorySeparatorChar)));
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            /// <summary>
+            /// Checks that a link target stays inside the sandbox.
+            /// </summary>
+            /// <param name="LinkPath">host path of the link.</param>
+            /// <param name="TargetPath">host path the link resolves to.</param>
+            /// <param name="EnforceAllowedRoots">whether the target has to stay inside an allowed root.</param>
+            /// <returns>returns true when the target may be used.</returns>
+            private static bool IsAcceptedLinkTarget(string LinkPath, string TargetPath, bool EnforceAllowedRoots)
+            {
+                if (EnforceAllowedRoots && !IsUnderAllowedRoots(TargetPath))
+                    return false;
+
+                // A link the guest wrote inside a linux mount must not reach the windows drives or the host.
+                return !IsLinuxMountHostPath(LinkPath) || IsLinuxMountHostPath(TargetPath);
+            }
+
+            private static bool IsLinuxMountHostPath(string HostPath)
+            {
+                lock (DriveMapLock)
+                {
+                    foreach (KeyValuePair<string, string> Pair in LinuxMountMappings)
+                    {
+                        if (IsSameOrUnderRoot(Pair.Value, HostPath))
+                            return true;
+                    }
+                }
+
+                return false;
+            }
+
+            private static bool IsSameOrUnderRoot(string Root, string FullPath)
+            {
+                if (string.IsNullOrWhiteSpace(Root) || string.IsNullOrWhiteSpace(FullPath))
+                    return false;
+
+                string RootFullPath;
+                try
+                {
+                    RootFullPath = Path.GetFullPath(Root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                }
+                catch
+                {
+                    return false;
+                }
+
+                StringComparison Comparison = IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                return string.Equals(FullPath, RootFullPath, Comparison) ||
+                       FullPath.StartsWith(RootFullPath + Path.DirectorySeparatorChar, Comparison);
             }
 
             private static string ResolveLinkTarget(string PathValue, FileAttributes Attributes)
