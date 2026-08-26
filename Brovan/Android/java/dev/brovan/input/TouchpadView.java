@@ -2,7 +2,6 @@ package dev.brovan.input;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.view.MotionEvent;
 import android.view.View;
@@ -21,6 +20,9 @@ public class TouchpadView extends View {
 
     private final Paint hintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
+    private int strokeColor = ControlItem.DEFAULT_COLOR;
+    private float opacity = 1f;
+
     private float cursorX;
     private float cursorY;
     private float lastX;
@@ -33,9 +35,20 @@ public class TouchpadView extends View {
 
     public TouchpadView(Context context) {
         super(context);
-        hintPaint.setColor(Color.argb(40, 255, 255, 255));
         hintPaint.setStyle(Paint.Style.STROKE);
         hintPaint.setStrokeWidth(2f);
+        applyStyle();
+    }
+
+    public void setStyle(int stroke, float opacity) {
+        strokeColor = stroke;
+        this.opacity = opacity;
+        applyStyle();
+        invalidate();
+    }
+
+    private void applyStyle() {
+        hintPaint.setColor(ControlItem.shade(strokeColor, 40, opacity));
     }
 
     @Override

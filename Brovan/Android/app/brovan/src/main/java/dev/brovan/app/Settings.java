@@ -20,6 +20,7 @@ final class Settings {
     private static final String KEY_POINTER = "pointer";
     private static final String KEY_DXVK_VERSION = "dxvk_version";
     private static final String KEY_POINTER_SPEED = "pointer_speed";
+    private static final String KEY_LIBRARY_STYLE = "library_style";
 
     private final SharedPreferences preferences;
 
@@ -100,6 +101,26 @@ final class Settings {
 
     void setPointerSpeed(float value) {
         preferences.edit().putFloat(KEY_POINTER_SPEED, value).apply();
+    }
+
+    int libraryStyle() {
+        return preferences.getInt(KEY_LIBRARY_STYLE, 0);
+    }
+
+    void setLibraryStyle(int value) {
+        preferences.edit().putInt(KEY_LIBRARY_STYLE, value).apply();
+    }
+
+    Palette palette() {
+        return Palette.load(preferences);
+    }
+
+    void setPalette(Palette palette) {
+        palette.save(preferences);
+    }
+
+    void clearPalette() {
+        Palette.clear(preferences);
     }
 
     /** The DXVK release tag to download, or {@link Dxvk#LATEST} for whichever is newest at that moment. */

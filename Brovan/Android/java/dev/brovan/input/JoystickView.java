@@ -2,7 +2,6 @@ package dev.brovan.input;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
@@ -35,6 +34,11 @@ public class JoystickView extends View {
     private final Path arrow = new Path();
     private final RectF armBounds = new RectF();
 
+    private int fillColor = ControlItem.DEFAULT_COLOR;
+    private int strokeColor = ControlItem.DEFAULT_COLOR;
+    private int labelColor = ControlItem.DEFAULT_COLOR;
+    private float opacity = 1f;
+
     private VirtualKey up = VirtualKey.W;
     private VirtualKey down = VirtualKey.S;
     private VirtualKey left = VirtualKey.A;
@@ -50,13 +54,26 @@ public class JoystickView extends View {
     public JoystickView(Context context) {
         super(context);
 
-        basePaint.setColor(Color.argb(70, 255, 255, 255));
-        ringPaint.setColor(Color.argb(120, 255, 255, 255));
         ringPaint.setStyle(Paint.Style.STROKE);
         ringPaint.setStrokeWidth(3f);
-        knobPaint.setColor(Color.argb(170, 255, 255, 255));
-        litPaint.setColor(Color.argb(90, 255, 255, 255));
-        arrowPaint.setColor(Color.argb(220, 255, 255, 255));
+        applyStyle();
+    }
+
+    public void setStyle(int fill, int stroke, int text, float opacity) {
+        fillColor = fill;
+        strokeColor = stroke;
+        labelColor = text;
+        this.opacity = opacity;
+        applyStyle();
+        invalidate();
+    }
+
+    private void applyStyle() {
+        basePaint.setColor(ControlItem.shade(fillColor, 70, opacity));
+        ringPaint.setColor(ControlItem.shade(strokeColor, 120, opacity));
+        knobPaint.setColor(ControlItem.shade(labelColor, 170, opacity));
+        litPaint.setColor(ControlItem.shade(labelColor, 90, opacity));
+        arrowPaint.setColor(ControlItem.shade(labelColor, 220, opacity));
     }
 
     @Override
@@ -109,7 +126,6 @@ public class JoystickView extends View {
         float half = radius * ARM_HALF_WIDTH;
         float corner = half * 0.6f;
 
-        basePaint.setAlpha(70);
         canvas.drawPath(pad, basePaint);
         canvas.drawPath(pad, ringPaint);
 
@@ -138,7 +154,7 @@ public class JoystickView extends View {
             arrow.lineTo(centreX + half * 0.62f, tip + half * 0.9f);
             arrow.close();
 
-            arrowPaint.setAlpha(lit ? 255 : 190);
+            arrowPaint.setColor(ControlItem.shade(labelColor, lit ? 255 : 190, opacity));
             canvas.drawPath(arrow, arrowPaint);
             canvas.restore();
         }

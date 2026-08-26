@@ -326,7 +326,7 @@ final class FileBrowser {
             segment.setText(folder.equals(root) ? activity.getString(R.string.files_root) : folder.getName());
 
             if (index == 0) {
-                segment.setTextColor(activity.getColor(R.color.text_primary));
+                segment.setTextColor(Theming.color(activity, Palette.Role.TEXT_PRIMARY));
             } else {
                 segment.setOnClickListener(button -> {
                     resumeAt.clear();
@@ -341,7 +341,7 @@ final class FileBrowser {
     }
 
     private void showAddOptions() {
-        new AlertDialog.Builder(activity)
+        Theming.dialog(activity)
                 .setTitle(R.string.files_add_title)
                 .setItems(new CharSequence[]{
                         activity.getString(R.string.files_new_folder),
@@ -387,7 +387,7 @@ final class FileBrowser {
         labels.add(activity.getString(R.string.files_delete));
         actions.add(() -> confirmDelete(target, entry.folder));
 
-        new AlertDialog.Builder(activity)
+        Theming.dialog(activity)
                 .setTitle(entry.name)
                 .setItems(labels.toArray(new CharSequence[0]), (dialog, index) -> actions.get(index).run())
                 .show();
@@ -435,7 +435,7 @@ final class FileBrowser {
         EditText editor = body.findViewById(R.id.text_body);
         editor.setText(text);
 
-        AlertDialog.Builder builder = new AlertDialog.Builder(activity)
+        AlertDialog.Builder builder = Theming.dialog(activity)
                 .setTitle(file.getName())
                 .setView(body)
                 .setNegativeButton(android.R.string.cancel, null);
@@ -522,7 +522,7 @@ final class FileBrowser {
         field.setText(initial);
         field.setSelection(initial.length());
 
-        new AlertDialog.Builder(activity)
+        Theming.dialog(activity)
                 .setTitle(titleId)
                 .setView(body)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -540,7 +540,7 @@ final class FileBrowser {
     }
 
     private void confirmDelete(File target, boolean folder) {
-        new AlertDialog.Builder(activity)
+        Theming.dialog(activity)
                 .setTitle(activity.getString(folder ? R.string.files_delete_folder : R.string.files_delete_file,
                         target.getName()))
                 .setNegativeButton(android.R.string.cancel, null)

@@ -4,8 +4,8 @@ import android.os.Bundle;
 import android.view.View;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
-import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.google.android.material.button.MaterialButton;
@@ -21,26 +21,38 @@ import dev.brovan.input.VirtualKey;
 public class ControlsActivity extends AppCompatActivity implements ControlOverlay.EditListener {
 
     private Settings settings;
+    private Palette palette;
     private ControlOverlay overlay;
     private ControlLayout layout;
     private View editor;
     private TextView hint;
     private LinearLayout keyRow;
     private Slider size;
+    private Slider opacity;
+    private View fillSwatch;
+    private View strokeSwatch;
+    private View labelSwatch;
     private ControlItem selected;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        settings = new Settings(this);
+        palette = settings.palette();
+        Theming.install(this, palette);
+
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_controls);
-
-        settings = new Settings(this);
+        Theming.apply(this, Palette.defaults(), palette);
 
         overlay = findViewById(R.id.controls);
         editor = findViewById(R.id.controls_editor);
         hint = findViewById(R.id.controls_hint);
         keyRow = findViewById(R.id.controls_keys);
         size = findViewById(R.id.controls_size);
+        opacity = findViewById(R.id.controls_opacity);
+        fillSwatch = findViewById(R.id.controls_colour_fill);
+        strokeSwatch = findViewById(R.id.controls_colour_stroke);
+        labelSwatch = findViewById(R.id.controls_colour_label);
 
         layout = ControlLayout.fromJson(settings.controlLayout());
         if (layout.items().isEmpty()) {
@@ -57,6 +69,41 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
             }
         });
 
+        opacity.addOnChangeListener((slider, value, fromUser) -> {
+            if (selected != null && fromUser) {
+                selected.opacity = value / 100f;
+                overlay.restyle();
+            }
+        });
+
+        fillSwatch.setOnClickListener(view -> {
+            if (selected != null) {
+                ColorPicker.show(this, R.string.controls_colour_fill, selected.fillColor, palette, rgb -> {
+                    selected.fillColor = rgb;
+                    applyStyle();
+                });
+            }
+        });
+
+        strokeSwatch.setOnClickListener(view -> {
+            if (selected != null) {
+                ColorPicker.show(this, R.string.controls_colour_stroke, selected.strokeColor, palette, rgb -> {
+                    selected.strokeColor = rgb;
+                    applyStyle();
+                });
+            }
+        });
+
+        labelSwatch.setOnClickListener(view -> {
+            if (selected != null) {
+                ColorPicker.show(this, R.string.controls_colour_label, selected.labelColor, palette, rgb -> {
+                    selected.labelColor = rgb;
+                    applyStyle();
+                });
+            }
+        });
+
+        findViewById(R.id.controls_style_all).setOnClickListener(button -> applyStyleToAll());
         findViewById(R.id.controls_delete).setOnClickListener(button -> deleteSelected());
         findViewById(R.id.controls_add).setOnClickListener(button -> showAdd());
         findViewById(R.id.controls_preset).setOnClickListener(button -> showPresets());
@@ -86,6 +133,12 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
         editor.setVisibility(View.VISIBLE);
         hint.setText(getString(R.string.controls_selected, selected.caption()));
         size.setValue(Math.max(size.getValueFrom(), Math.min(size.getValueTo(), selected.size)));
+        opacity.setValue(snap(opacity, selected.opacity * 100f));
+
+        boolean pad = selected.kind == ControlItem.Kind.TOUCHPAD;
+        fillSwatch.setVisibility(pad ? View.GONE : View.VISIBLE);
+        labelSwatch.setVisibility(pad ? View.GONE : View.VISIBLE);
+        showSwatches();
 
         switch (selected.kind) {
             case BUTTON:
@@ -125,6 +178,37 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
         }
     }
 
+    private void showSwatches() {
+        ColorPicker.swatch(fillSwatch, selected.fillColor);
+        ColorPicker.swatch(strokeSwatch, selected.strokeColor);
+        ColorPicker.swatch(labelSwatch, selected.labelColor);
+    }
+
+    private void applyStyle() {
+        overlay.restyle();
+        showSwatches();
+    }
+
+    private void applyStyleToAll() {
+        if (selected == null) {
+            return;
+        }
+
+        for (ControlItem item : layout.items()) {
+            selected.copyStyleTo(item);
+        }
+
+        overlay.restyle();
+        Toast.makeText(this, R.string.controls_style_all_done, Toast.LENGTH_SHORT).show();
+    }
+
+    private static float snap(Slider slider, float value) {
+        float step = slider.getStepSize();
+        float from = slider.getValueFrom();
+        float snapped = from + Math.round((value - from) / step) * step;
+        return Math.max(from, Math.min(slider.getValueTo(), snapped));
+    }
+
     private interface KeyChoice {
         void onChosen(VirtualKey key);
     }
@@ -162,7 +246,7 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
             labels[i] = all[i].label();
         }
 
-        new AlertDialog.Builder(this)
+        Theming.dialog(this)
                 .setTitle(R.string.controls_pick_key)
                 .setItems(labels, (dialog, index) -> choice.onChosen(all[index]))
                 .show();
@@ -176,7 +260,7 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
                 getString(R.string.controls_add_touchpad),
                 getString(R.string.controls_add_mouse)};
 
-        new AlertDialog.Builder(this)
+        Theming.dialog(this)
                 .setTitle(R.string.controls_add)
                 .setItems(options, (dialog, index) -> add(index))
                 .show();
@@ -233,7 +317,7 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
             labels[i] = schemes[i].label();
         }
 
-        new AlertDialog.Builder(this)
+        Theming.dialog(this)
                 .setTitle(R.string.controls_preset_title)
                 .setItems(labels, (dialog, index) -> {
                     layout = ControlLayout.forScheme(schemes[index]);

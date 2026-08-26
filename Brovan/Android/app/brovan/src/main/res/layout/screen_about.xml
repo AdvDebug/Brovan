@@ -49,20 +49,46 @@
                     android:textColor="@color/text_primary"
                     android:textSize="22sp" />
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:text="@string/about_github"
-                    android:textColor="@color/accent"
-                    android:textSize="14sp" />
+                <TextView style="@style/SectionLabel" android:text="@string/about_links" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/open_github"
-                    android:layout_width="wrap_content"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="16dp"
-                    android:text="@string/about_open_github" />
+                    android:layout_marginTop="10dp"
+                    android:gravity="start|center_vertical"
+                    android:text="@string/about_open_github"
+                    app:icon="@drawable/ic_github"
+                    app:iconGravity="start"
+                    app:iconPadding="16dp"
+                    app:iconTint="@color/text_primary" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/open_linkedin"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:gravity="start|center_vertical"
+                    android:text="@string/about_open_linkedin"
+                    app:icon="@drawable/ic_linkedin"
+                    app:iconGravity="start"
+                    app:iconPadding="16dp"
+                    app:iconTint="@color/text_primary" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/open_discord"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:gravity="start|center_vertical"
+                    android:text="@string/about_open_discord"
+                    app:icon="@drawable/ic_discord"
+                    app:iconGravity="start"
+                    app:iconPadding="16dp"
+                    app:iconTint="@color/text_primary" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
     </LinearLayout>

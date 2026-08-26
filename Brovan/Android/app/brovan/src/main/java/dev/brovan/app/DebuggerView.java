@@ -17,7 +17,6 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.AlertDialog;
 import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
@@ -594,7 +593,7 @@ public class DebuggerView extends LinearLayout {
         input.setHint(R.string.debug_goto_hint);
         input.setSingleLine(true);
 
-        new AlertDialog.Builder(getContext())
+        Theming.dialog(getContext())
                 .setTitle(R.string.debug_goto_title)
                 .setView(input)
                 .setPositiveButton(android.R.string.ok, (dialog, which) -> goTo(input.getText().toString().trim()))

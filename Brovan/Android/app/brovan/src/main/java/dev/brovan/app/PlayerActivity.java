@@ -2,6 +2,7 @@ package dev.brovan.app;
 
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -14,6 +15,7 @@ import android.text.SpannableStringBuilder;
 import android.text.style.ForegroundColorSpan;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowManager;
 import android.widget.ArrayAdapter;
 import android.widget.EditText;
@@ -21,9 +23,11 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.activity.OnBackPressedCallback;
-import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.google.android.material.sidesheet.SideSheetDialog;
 import com.google.android.material.slider.Slider;
@@ -116,12 +120,38 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .putExtra(EXTRA_POINTER, own.pointerMode());
     }
 
+    private void goFullscreen() {
+        Window window = getWindow();
+        window.setStatusBarColor(Color.BLACK);
+        window.setNavigationBarColor(Color.BLACK);
+
+        WindowInsetsControllerCompat bars = WindowCompat.getInsetsController(window, window.getDecorView());
+        bars.hide(WindowInsetsCompat.Type.systemBars());
+        bars.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+
+        if (hasFocus) {
+            goFullscreen();
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        Palette palette = new Settings(this).palette();
+        Theming.install(this, palette);
+
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         applySustainedPerformance();
+
         setContentView(R.layout.activity_player);
+
+        Theming.apply(this, Palette.defaults(), palette);
+        goFullscreen();
 
         settings = new Settings(this);
         program = new ProgramSettings(new File(getIntent().getStringExtra(EXTRA_DIRECTORY)), settings);
@@ -148,7 +178,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         logColorInfo = ContextCompat.getColor(this, R.color.log_info);
         logColorSpecial = ContextCompat.getColor(this, R.color.log_special);
         logColorCommand = ContextCompat.getColor(this, R.color.log_command);
-        logColorText = ContextCompat.getColor(this, R.color.text_primary);
+        logColorText = Theming.color(this, Palette.Role.TEXT_PRIMARY);
 
         developerMode = getIntent().getBooleanExtra(EXTRA_DEVELOPER, false);
         debugger.setDeveloperMode(developerMode);
@@ -229,6 +259,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         bindMenu(view);
 
         menu = new SideSheetDialog(this);
+        Theming.paintOnShow(menu, new Settings(this).palette());
         menu.setContentView(view);
 
         // The sheet view only exists once there is content in it, and both the edge and the width belong
@@ -369,7 +400,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
             labels[i] = windows.get(i).toString();
         }
 
-        new AlertDialog.Builder(this)
+        Theming.dialog(this)
                 .setTitle(R.string.player_windows)
                 .setItems(labels, (dialog, index) -> {
                     BrovanNative.selectWindow(windows.get(index).hwnd());

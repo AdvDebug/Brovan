@@ -9,6 +9,8 @@ import org.json.JSONObject;
  */
 public final class ControlItem {
 
+    public static final int DEFAULT_COLOR = 0xFFFFFF;
+
     public enum Kind {
         BUTTON,
         JOYSTICK,
@@ -28,6 +30,14 @@ public final class ControlItem {
     public VirtualKey right;
     public int mouseButton;
     public String label;
+    public int fillColor = DEFAULT_COLOR;
+    public int strokeColor = DEFAULT_COLOR;
+    public int labelColor = DEFAULT_COLOR;
+    public float opacity = 1f;
+
+    public static int shade(int rgb, int alpha, float opacity) {
+        return (Math.round(alpha * opacity) << 24) | (rgb & 0xFFFFFF);
+    }
 
     public static ControlItem button(VirtualKey key, String label, float x, float y, int size) {
         ControlItem item = new ControlItem();
@@ -87,7 +97,18 @@ public final class ControlItem {
         item.right = right;
         item.mouseButton = mouseButton;
         item.label = label;
+        item.fillColor = fillColor;
+        item.strokeColor = strokeColor;
+        item.labelColor = labelColor;
+        item.opacity = opacity;
         return item;
+    }
+
+    public void copyStyleTo(ControlItem other) {
+        other.fillColor = fillColor;
+        other.strokeColor = strokeColor;
+        other.labelColor = labelColor;
+        other.opacity = opacity;
     }
 
     /** What the control shows on screen, and what the editor lists it as. */
@@ -111,6 +132,10 @@ public final class ControlItem {
         json.put("y", y);
         json.put("size", size);
         json.put("mouseButton", mouseButton);
+        json.put("fill", fillColor);
+        json.put("stroke", strokeColor);
+        json.put("text", labelColor);
+        json.put("opacity", opacity);
 
         if (key != null) {
             json.put("key", key.name());
@@ -149,7 +174,15 @@ public final class ControlItem {
         item.left = VirtualKey.byName(json.optString("left", null), VirtualKey.A);
         item.right = VirtualKey.byName(json.optString("right", null), VirtualKey.D);
         item.label = json.optString("label", null);
+        item.fillColor = json.optInt("fill", DEFAULT_COLOR);
+        item.strokeColor = json.optInt("stroke", DEFAULT_COLOR);
+        item.labelColor = json.optInt("text", DEFAULT_COLOR);
+        item.opacity = clampOpacity((float) json.optDouble("opacity", 1.0));
 
         return item;
+    }
+
+    private static float clampOpacity(float value) {
+        return Math.max(0.2f, Math.min(1f, value));
     }
 }

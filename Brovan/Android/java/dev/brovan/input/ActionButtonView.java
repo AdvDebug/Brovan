@@ -2,7 +2,6 @@ package dev.brovan.input;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.view.MotionEvent;
 import android.view.View;
@@ -19,6 +18,10 @@ public class ActionButtonView extends View {
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private String label;
+    private int fillColor = ControlItem.DEFAULT_COLOR;
+    private int strokeColor = ControlItem.DEFAULT_COLOR;
+    private int labelColor = ControlItem.DEFAULT_COLOR;
+    private float opacity = 1f;
     private Listener listener;
     private boolean pressed;
     private int pointerId = MotionEvent.INVALID_POINTER_ID;
@@ -27,12 +30,24 @@ public class ActionButtonView extends View {
         super(context);
         this.label = label;
 
-        fillPaint.setColor(Color.argb(70, 255, 255, 255));
-        ringPaint.setColor(Color.argb(130, 255, 255, 255));
         ringPaint.setStyle(Paint.Style.STROKE);
         ringPaint.setStrokeWidth(3f);
-        textPaint.setColor(Color.argb(220, 255, 255, 255));
         textPaint.setTextAlign(Paint.Align.CENTER);
+        applyStyle();
+    }
+
+    public void setStyle(int fill, int stroke, int text, float opacity) {
+        fillColor = fill;
+        strokeColor = stroke;
+        labelColor = text;
+        this.opacity = opacity;
+        applyStyle();
+        invalidate();
+    }
+
+    private void applyStyle() {
+        ringPaint.setColor(ControlItem.shade(strokeColor, 130, opacity));
+        textPaint.setColor(ControlItem.shade(labelColor, 220, opacity));
     }
 
     public void setLabel(String value) {
@@ -50,7 +65,7 @@ public class ActionButtonView extends View {
         float centreY = getHeight() / 2f;
         float radius = Math.min(centreX, centreY) - 4f;
 
-        fillPaint.setAlpha(pressed ? 140 : 70);
+        fillPaint.setColor(ControlItem.shade(fillColor, pressed ? 140 : 70, opacity));
         canvas.drawCircle(centreX, centreY, radius, fillPaint);
         canvas.drawCircle(centreX, centreY, radius, ringPaint);
 

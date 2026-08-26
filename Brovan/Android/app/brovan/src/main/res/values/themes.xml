@@ -4,17 +4,78 @@
     <style name="Theme.Brovan" parent="Theme.Material3.Dark.NoActionBar">
         <item name="colorPrimary">@color/accent</item>
         <item name="colorOnPrimary">@color/on_accent</item>
+        <item name="colorPrimaryContainer">@color/accent</item>
+        <item name="colorOnPrimaryContainer">@color/on_accent</item>
         <item name="colorSecondary">@color/accent</item>
+        <item name="colorSecondaryContainer">@color/surface_variant</item>
+        <item name="colorOnSecondaryContainer">@color/text_primary</item>
         <item name="android:colorBackground">@color/background</item>
         <item name="colorSurface">@color/surface</item>
         <item name="colorSurfaceContainer">@color/surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/background</item>
+        <item name="colorSurfaceContainerLow">@color/surface</item>
+        <item name="colorSurfaceContainerHigh">@color/surface</item>
+        <item name="colorSurfaceContainerHighest">@color/surface_variant</item>
+        <item name="colorSurfaceVariant">@color/surface_variant</item>
         <item name="colorOnSurface">@color/text_primary</item>
         <item name="colorOnSurfaceVariant">@color/text_secondary</item>
         <item name="colorOutline">@color/outline</item>
         <item name="android:statusBarColor">@color/background</item>
         <item name="android:navigationBarColor">@color/background</item>
         <item name="materialSwitchStyle">@style/Widget.Brovan.Switch</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.Brovan.Dialog</item>
+        <item name="extendedFloatingActionButtonStyle">@style/Widget.Brovan.Fab</item>
         <item name="sideSheetDialogTheme">@style/ThemeOverlay.Brovan.SideSheet</item>
+    </style>
+
+    <style name="ThemeOverlay.Brovan.Light" parent="ThemeOverlay.Material3.Light">
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorOnPrimary">@color/on_accent</item>
+        <item name="colorPrimaryContainer">@color/accent</item>
+        <item name="colorOnPrimaryContainer">@color/on_accent</item>
+        <item name="colorSecondary">@color/accent</item>
+        <item name="colorSecondaryContainer">@color/surface_variant</item>
+        <item name="colorOnSecondaryContainer">@color/text_primary</item>
+        <item name="android:colorBackground">@color/background</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorSurfaceContainer">@color/surface_variant</item>
+        <item name="colorSurfaceContainerLowest">@color/background</item>
+        <item name="colorSurfaceContainerLow">@color/surface</item>
+        <item name="colorSurfaceContainerHigh">@color/surface</item>
+        <item name="colorSurfaceContainerHighest">@color/surface_variant</item>
+        <item name="colorSurfaceVariant">@color/surface_variant</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+        <item name="colorOnSurfaceVariant">@color/text_secondary</item>
+        <item name="colorOutline">@color/outline</item>
+    </style>
+
+    <style name="ThemeOverlay.Brovan.Dialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorSurfaceContainerHigh">@color/surface</item>
+        <item name="android:colorBackground">@color/surface</item>
+        <item name="alertDialogStyle">@style/Widget.Brovan.AlertDialog</item>
+    </style>
+
+    <style name="Widget.Brovan.AlertDialog" parent="MaterialAlertDialog.Material3">
+        <item name="backgroundTint">@color/surface</item>
+        <item name="shapeAppearanceOverlay">@style/ShapeAppearance.Brovan.Dialog</item>
+    </style>
+
+    <style name="ShapeAppearance.Brovan.Dialog" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">24dp</item>
+    </style>
+
+    <style name="Widget.Brovan.Fab" parent="Widget.Material3.ExtendedFloatingActionButton.Icon.Primary">
+        <item name="backgroundTint">@color/accent</item>
+        <item name="iconTint">@color/on_accent</item>
+        <item name="android:textColor">@color/on_accent</item>
+        <item name="shapeAppearanceOverlay">@style/ShapeAppearance.Brovan.Fab</item>
+    </style>
+
+    <style name="ShapeAppearance.Brovan.Fab" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">16dp</item>
     </style>
 
     <style name="Widget.Brovan.Switch" parent="Widget.Material3.CompoundButton.MaterialSwitch">
@@ -126,7 +187,9 @@
 
     <style name="Theme.Brovan.Player" parent="Theme.Brovan">
         <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowFullscreen">true</item>
         <item name="android:statusBarColor" tools:targetApi="21">@android:color/black</item>
+        <item name="android:navigationBarColor" tools:targetApi="21">@android:color/black</item>
     </style>
 
 </resources>

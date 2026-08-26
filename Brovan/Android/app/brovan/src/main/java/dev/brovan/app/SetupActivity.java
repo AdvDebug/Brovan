@@ -18,7 +18,6 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
@@ -79,8 +78,13 @@ public class SetupActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        Palette palette = new Settings(this).palette();
+        Theming.install(this, palette);
+
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_setup);
+
+        Theming.apply(this, Palette.defaults(), palette);
 
         library = new Library(this);
         settings = new Settings(this);
@@ -450,7 +454,7 @@ public class SetupActivity extends AppCompatActivity {
         }
 
         CharSequence[] options = result.executables.toArray(new CharSequence[0]);
-        new AlertDialog.Builder(this)
+        Theming.dialog(this)
                 .setTitle(R.string.library_pick_executable)
                 .setItems(options, (dialog, choice) -> commit(result.directory, result.executables.get(choice), state))
                 .setOnCancelListener(dialog -> library.discard(result.directory))
@@ -561,6 +565,7 @@ public class SetupActivity extends AppCompatActivity {
         incoming.setAlpha(0f);
         incoming.setTranslationX(shift);
         host.addView(incoming);
+        Theming.apply(host, Palette.defaults(), new Settings(this).palette());
         incoming.animate()
                 .alpha(1f)
                 .translationX(0f)

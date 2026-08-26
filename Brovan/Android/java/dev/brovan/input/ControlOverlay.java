@@ -113,6 +113,25 @@ public class ControlOverlay extends FrameLayout {
         requestLayout();
     }
 
+    public void restyle() {
+        for (int i = 0; i < getChildCount(); i++) {
+            View child = getChildAt(i);
+            if (!(child.getTag() instanceof ControlItem)) {
+                continue;
+            }
+
+            ControlItem item = (ControlItem) child.getTag();
+
+            if (child instanceof ActionButtonView) {
+                ((ActionButtonView) child).setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
+            } else if (child instanceof JoystickView) {
+                ((JoystickView) child).setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
+            } else if (child instanceof TouchpadView) {
+                ((TouchpadView) child).setStyle(item.strokeColor, item.opacity);
+            }
+        }
+    }
+
     /** Anything the overlay did not add itself, such as the guest surface it is drawn over, stays put. */
     private void removeControls() {
         for (int i = getChildCount() - 1; i >= 0; i--) {
@@ -153,17 +172,20 @@ public class ControlOverlay extends FrameLayout {
             case DPAD:
                 return stick(item);
 
-            case TOUCHPAD:
-                return new TouchpadView(getContext());
+            case TOUCHPAD: {
+                TouchpadView view = new TouchpadView(getContext());
+                view.setStyle(item.strokeColor, item.opacity);
+                return view;
+            }
 
             case MOUSE: {
-                ActionButtonView view = new ActionButtonView(getContext(), item.caption());
+                ActionButtonView view = button(item);
                 view.setListener(down -> PointerState.press(item.mouseButton, down));
                 return view;
             }
 
             default: {
-                ActionButtonView view = new ActionButtonView(getContext(), item.caption());
+                ActionButtonView view = button(item);
                 view.setListener(down -> {
                     if (down) {
                         keys.press(item, item.key);
@@ -176,8 +198,15 @@ public class ControlOverlay extends FrameLayout {
         }
     }
 
+    private ActionButtonView button(ControlItem item) {
+        ActionButtonView view = new ActionButtonView(getContext(), item.caption());
+        view.setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
+        return view;
+    }
+
     private View stick(ControlItem item) {
         JoystickView view = new JoystickView(getContext());
+        view.setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
         view.setKeys(item.up, item.down, item.left, item.right);
         view.setCross(item.kind == ControlItem.Kind.DPAD);
         view.setListener(new JoystickView.Listener() {

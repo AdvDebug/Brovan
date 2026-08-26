@@ -1,27 +1,43 @@
 package dev.brovan.app;
 
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.res.ColorStateList;
 import android.net.Uri;
 import android.os.Bundle;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
+import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.GridLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.drawerlayout.widget.DrawerLayout;
 import androidx.recyclerview.widget.GridLayoutManager;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.LinearSnapHelper;
+import androidx.recyclerview.widget.PagerSnapHelper;
 import androidx.recyclerview.widget.RecyclerView;
+import androidx.recyclerview.widget.SnapHelper;
 
 import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.button.MaterialButton;
+import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.materialswitch.MaterialSwitch;
 import com.google.android.material.navigation.NavigationView;
 import com.google.android.material.progressindicator.CircularProgressIndicator;
@@ -31,17 +47,19 @@ import com.google.android.material.snackbar.Snackbar;
 import com.google.android.material.textfield.MaterialAutoCompleteTextView;
 
 import java.io.File;
-
-import dev.brovan.BrovanNative;
-import dev.brovan.BrovanSurfaceView;
-import dev.brovan.input.ControlOverlay;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import dev.brovan.BrovanNative;
+import dev.brovan.BrovanSurfaceView;
+import dev.brovan.input.ControlOverlay;
+
 public class MainActivity extends AppCompatActivity {
+
+    private static final String STATE_SCREEN = "screen";
 
     private static final int REQUEST_FOLDER = 1;
     private static final int REQUEST_FILE = 2;
@@ -51,11 +69,17 @@ public class MainActivity extends AppCompatActivity {
 
     private Library library;
     private Settings settings;
+    private Palette palette;
+    private View[] roleSwatches;
     private NavigationView navigation;
     private DrawerLayout drawer;
     private FrameLayout content;
     private MaterialToolbar toolbar;
     private ProgramAdapter adapter;
+    private RecyclerView programList;
+    private SnapHelper snap;
+    private TextView emptyTitle;
+    private TextView emptyBody;
     private View emptyState;
     private CircularProgressIndicator progress;
     private Uri selectedIso;
@@ -65,11 +89,15 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        settings = new Settings(this);
+        palette = settings.palette();
+        Theming.install(this, palette);
+
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        Theming.apply(this, Palette.defaults(), palette);
 
         library = new Library(this);
-        settings = new Settings(this);
 
         // Refreshes the guest-side files bundled in the APK, so an app update cannot leave
         // a stale Vulkan shim behind for the new emulator to load.
@@ -88,7 +116,9 @@ public class MainActivity extends AppCompatActivity {
         });
         insetDrawerHeader(navigation);
 
-        openScreen(R.id.nav_library);
+        openScreen(savedInstanceState == null
+                ? R.id.nav_library
+                : savedInstanceState.getInt(STATE_SCREEN, R.id.nav_library));
 
         if (savedInstanceState == null && !windowsFilesPresent() && !settings.setupDismissed()) {
             startActivity(new Intent(this, SetupActivity.class));
@@ -131,6 +161,12 @@ public class MainActivity extends AppCompatActivity {
         worker.shutdownNow();
     }
 
+    @Override
+    protected void onSaveInstanceState(@NonNull Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putInt(STATE_SCREEN, currentScreen);
+    }
+
     private void openScreen(int itemId) {
         navigation.setCheckedItem(itemId);
         show(itemId);
@@ -149,6 +185,9 @@ public class MainActivity extends AppCompatActivity {
             toolbar.setTitle(R.string.nav_files);
             files = new FileBrowser(this, worker);
             content.addView(files.create(content));
+        } else if (itemId == R.id.nav_theme) {
+            toolbar.setTitle(R.string.nav_theme);
+            content.addView(createTheme());
         } else if (itemId == R.id.nav_settings) {
             toolbar.setTitle(R.string.nav_settings);
             content.addView(createSettings());
@@ -159,17 +198,20 @@ public class MainActivity extends AppCompatActivity {
             toolbar.setTitle(R.string.nav_library);
             content.addView(createLibrary());
         }
+
+        Theming.apply(content, Palette.defaults(), palette);
     }
 
     private View createLibrary() {
         View view = LayoutInflater.from(this).inflate(R.layout.screen_library, content, false);
 
         emptyState = view.findViewById(R.id.empty);
+        emptyTitle = view.findViewById(R.id.empty_title);
+        emptyBody = view.findViewById(R.id.empty_body);
         progress = view.findViewById(R.id.progress);
 
-        RecyclerView list = view.findViewById(R.id.apps);
-        list.setLayoutManager(new GridLayoutManager(this, columnCount()));
-        adapter = new ProgramAdapter(new ProgramAdapter.Listener() {
+        programList = view.findViewById(R.id.apps);
+        adapter = new ProgramAdapter(new File(getCacheDir(), "icons"), worker, new ProgramAdapter.Listener() {
             @Override
             public void onLaunch(Program program) {
                 launch(program);
@@ -180,12 +222,161 @@ public class MainActivity extends AppCompatActivity {
                 confirmRemoval(program);
             }
         });
-        list.setAdapter(adapter);
+        programList.setAdapter(adapter);
+        applyLibraryStyle(ProgramAdapter.Style.of(settings.libraryStyle()));
 
+        view.findViewById(R.id.library_style).setOnClickListener(button -> showStyles());
         view.findViewById(R.id.add).setOnClickListener(this::showAddOptions);
+        bindSearch(view);
 
         refresh();
         return view;
+    }
+
+    private void bindSearch(View view) {
+        EditText search = view.findViewById(R.id.search);
+        View clear = view.findViewById(R.id.search_clear);
+
+        search.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence text, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence text, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable text) {
+                clear.setVisibility(text.length() == 0 ? View.GONE : View.VISIBLE);
+                adapter.search(text.toString());
+                showEmptyState();
+            }
+        });
+
+        clear.setOnClickListener(button -> search.setText(""));
+    }
+
+    private void showStyles() {
+        ProgramAdapter.Style[] styles = ProgramAdapter.Style.values();
+
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(2);
+        grid.setPadding(dp(18), dp(6), dp(18), dp(2));
+
+        AlertDialog[] dialog = new AlertDialog[1];
+
+        for (int i = 0; i < styles.length; i++) {
+            int index = i;
+            View option = styleOption(styles[i]);
+            option.setOnClickListener(view -> {
+                applyLibraryStyle(styles[index]);
+                settings.setLibraryStyle(index);
+                dialog[0].dismiss();
+            });
+
+            GridLayout.LayoutParams params = new GridLayout.LayoutParams();
+            params.width = 0;
+            params.columnSpec = GridLayout.spec(i % 2, 1f);
+            params.rowSpec = GridLayout.spec(i / 2);
+            params.setMargins(dp(5), dp(5), dp(5), dp(5));
+            grid.addView(option, params);
+        }
+
+        dialog[0] = Theming.dialog(this)
+                .setTitle(R.string.library_style)
+                .setView(grid)
+                .setNegativeButton(android.R.string.cancel, null)
+                .create();
+
+        dialog[0].show();
+    }
+
+    private View styleOption(ProgramAdapter.Style style) {
+        boolean chosen = style == adapter.style();
+        int accent = palette.get(chosen ? Palette.Role.ACCENT : Palette.Role.TEXT_SECONDARY);
+
+        MaterialCardView card = new MaterialCardView(this);
+        card.setCardBackgroundColor(palette.get(
+                chosen ? Palette.Role.SURFACE_VARIANT : Palette.Role.SURFACE));
+        card.setRadius(dp(16));
+        card.setCardElevation(0f);
+        card.setStrokeWidth(dp(chosen ? 2 : 1));
+        card.setStrokeColor(chosen ? accent : palette.get(Palette.Role.OUTLINE));
+        card.setClickable(true);
+        card.setFocusable(true);
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setGravity(Gravity.CENTER_HORIZONTAL);
+        body.setPadding(dp(12), dp(14), dp(12), dp(12));
+
+        ImageView preview = new ImageView(this);
+        preview.setImageResource(style.previewId());
+        preview.setImageTintList(ColorStateList.valueOf(accent));
+        body.addView(preview, new LinearLayout.LayoutParams(dp(54), dp(40)));
+
+        TextView label = new TextView(this);
+        label.setText(style.labelId());
+        label.setTextSize(13f);
+        label.setTextColor(palette.get(chosen ? Palette.Role.TEXT_PRIMARY : Palette.Role.TEXT_SECONDARY));
+
+        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        labelParams.topMargin = dp(10);
+        body.addView(label, labelParams);
+
+        card.addView(body);
+        return card;
+    }
+
+    private void applyLibraryStyle(ProgramAdapter.Style style) {
+        adapter.setStyle(style);
+
+        programList.setLayoutManager(style.horizontal()
+                ? new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false)
+                : new GridLayoutManager(this, style.columns(widthDp())));
+
+        if (snap != null) {
+            snap.attachToRecyclerView(null);
+            snap = null;
+        }
+
+        programList.clearOnScrollListeners();
+
+        if (style == ProgramAdapter.Style.CAROUSEL) {
+            snap = new PagerSnapHelper();
+        } else if (style == ProgramAdapter.Style.SHELF) {
+            snap = new LinearSnapHelper();
+            programList.addOnScrollListener(centreFocus);
+        }
+
+        if (snap != null) {
+            snap.attachToRecyclerView(programList);
+        }
+
+        applyListBounds(style);
+    }
+
+    private void applyListBounds(ProgramAdapter.Style style) {
+        boolean band = style == ProgramAdapter.Style.SHELF;
+
+        FrameLayout.LayoutParams bounds = (FrameLayout.LayoutParams) programList.getLayoutParams();
+        bounds.height = band ? FrameLayout.LayoutParams.WRAP_CONTENT : FrameLayout.LayoutParams.MATCH_PARENT;
+        bounds.gravity = band ? Gravity.CENTER_VERTICAL : Gravity.TOP;
+        programList.setLayoutParams(bounds);
+
+        if (!style.horizontal()) {
+            programList.setPadding(dp(12), dp(4), dp(12), dp(96));
+            return;
+        }
+
+        programList.setPadding(0, 0, 0, 0);
+        programList.post(() -> {
+            int side = Math.max(0, (programList.getWidth() - style.pageWidth(programList.getWidth())) / 2);
+            programList.setPadding(side, 0, side, 0);
+            centreFocus.onScrolled(programList, 0, 0);
+        });
     }
 
     /// Windows system files screen: the only place the emulator is allowed to fetch Microsoft's files.
@@ -329,20 +520,55 @@ public class MainActivity extends AppCompatActivity {
         action.setText(present ? R.string.windows_runtimes_again : R.string.windows_runtimes);
     }
 
-    private int columnCount() {
-        int widthDp = (int) (getResources().getDisplayMetrics().widthPixels
+    private final RecyclerView.OnScrollListener centreFocus = new RecyclerView.OnScrollListener() {
+        @Override
+        public void onScrolled(@NonNull RecyclerView list, int dx, int dy) {
+            float centre = list.getWidth() / 2f;
+            if (centre <= 0f) {
+                return;
+            }
+
+            for (int i = 0; i < list.getChildCount(); i++) {
+                View child = list.getChildAt(i);
+                float offset = Math.abs(centre - (child.getLeft() + child.getRight()) / 2f);
+                float away = Math.min(1f, offset / centre);
+
+                child.setScaleX(1f - away * 0.14f);
+                child.setScaleY(1f - away * 0.14f);
+                child.setAlpha(1f - away * 0.4f);
+            }
+        }
+    };
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private int widthDp() {
+        return (int) (getResources().getDisplayMetrics().widthPixels
                 / getResources().getDisplayMetrics().density);
-        return Math.max(2, widthDp / 190);
     }
 
     private void refresh() {
-        List<Program> programs = library.list();
-        adapter.submit(programs);
-        emptyState.setVisibility(programs.isEmpty() ? View.VISIBLE : View.GONE);
+        adapter.submit(library.list());
+        showEmptyState();
+    }
+
+    private void showEmptyState() {
+        boolean empty = adapter.getItemCount() == 0;
+        emptyState.setVisibility(empty ? View.VISIBLE : View.GONE);
+
+        if (!empty) {
+            return;
+        }
+
+        boolean nothingImported = adapter.isLibraryEmpty();
+        emptyTitle.setText(nothingImported ? R.string.library_empty_title : R.string.library_search_empty_title);
+        emptyBody.setText(nothingImported ? R.string.library_empty_body : R.string.library_search_empty_body);
     }
 
     private void showAddOptions(View anchor) {
-        new AlertDialog.Builder(this)
+        Theming.dialog(this)
                 .setTitle(R.string.library_add_title)
                 .setItems(new CharSequence[]{
                         getString(R.string.library_add_folder),
@@ -430,7 +656,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         CharSequence[] options = result.executables.toArray(new CharSequence[0]);
-        new AlertDialog.Builder(this)
+        Theming.dialog(this)
                 .setTitle(R.string.library_pick_executable)
                 .setItems(options, (dialog, index) -> commit(result.directory, result.executables.get(index)))
                 .setOnCancelListener(dialog -> library.discard(result.directory))
@@ -447,7 +673,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void confirmRemoval(Program program) {
-        new AlertDialog.Builder(this)
+        Theming.dialog(this)
                 .setTitle(program.name())
                 .setItems(new CharSequence[]{getString(R.string.library_remove)}, (dialog, index) -> {
                     library.remove(program);
@@ -591,17 +817,117 @@ public class MainActivity extends AppCompatActivity {
         action.setText(installed.isEmpty() ? R.string.settings_dxvk_install : R.string.settings_dxvk_install_again);
     }
 
+    private View createTheme() {
+        View view = LayoutInflater.from(this).inflate(R.layout.screen_theme, content, false);
+
+        LinearLayout roles = view.findViewById(R.id.theme_roles);
+        Palette.Role[] all = Palette.Role.values();
+        roleSwatches = new View[all.length];
+
+        for (int i = 0; i < all.length; i++) {
+            Palette.Role role = all[i];
+            View row = LayoutInflater.from(this).inflate(R.layout.item_theme_role, roles, false);
+
+            ((TextView) row.findViewById(R.id.role_name)).setText(role.labelId);
+            roleSwatches[i] = row.findViewById(R.id.role_swatch);
+            ColorPicker.swatch(roleSwatches[i], palette.get(role));
+
+            row.setOnClickListener(button -> ColorPicker.show(this, role.labelId, palette.get(role), palette,
+                    rgb -> editTheme(edited -> edited.set(role, rgb))));
+
+            roles.addView(row);
+        }
+
+        LinearLayout presets = view.findViewById(R.id.theme_presets);
+        for (Palette.Preset preset : Palette.Preset.values()) {
+            presets.addView(presetChip(preset, presets));
+        }
+
+        view.findViewById(R.id.theme_reset).setOnClickListener(button -> {
+            settings.clearPalette();
+            editTheme(edited -> {
+                for (Palette.Role role : Palette.Role.values()) {
+                    edited.set(role, role.fallback);
+                }
+            });
+        });
+
+        return view;
+    }
+
+    private interface ThemeEdit {
+        void apply(Palette palette);
+    }
+
+    private void editTheme(ThemeEdit edit) {
+        Palette before = palette.copy();
+        edit.apply(palette);
+
+        settings.setPalette(palette);
+
+        if (before.isLight() != palette.isLight()) {
+            recreate();
+            return;
+        }
+
+        Theming.apply(this, before, palette);
+
+        if (roleSwatches != null) {
+            Palette.Role[] all = Palette.Role.values();
+
+            for (int i = 0; i < all.length; i++) {
+                ColorPicker.swatch(roleSwatches[i], palette.get(all[i]));
+            }
+        }
+    }
+
+    private View presetChip(Palette.Preset preset, ViewGroup parent) {
+        View chip = LayoutInflater.from(this).inflate(R.layout.item_theme_preset, parent, false);
+        Palette colors = preset.palette();
+
+        ((TextView) chip.findViewById(R.id.preset_name)).setText(preset.labelId);
+        ColorPicker.swatch(chip.findViewById(R.id.preset_background), colors.get(Palette.Role.BACKGROUND));
+        ColorPicker.swatch(chip.findViewById(R.id.preset_surface), colors.get(Palette.Role.SURFACE));
+        ColorPicker.swatch(chip.findViewById(R.id.preset_accent), colors.get(Palette.Role.ACCENT));
+
+        chip.setOnClickListener(button -> editTheme(edited -> {
+            for (Palette.Role role : Palette.Role.values()) {
+                edited.set(role, colors.get(role));
+            }
+        }));
+
+        return chip;
+    }
+
     private View createAbout() {
         View view = LayoutInflater.from(this).inflate(R.layout.screen_about, content, false);
-        MaterialButton open = view.findViewById(R.id.open_github);
-        open.setOnClickListener(button -> {
-            try {
-                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(getString(R.string.about_github))));
-            } catch (ActivityNotFoundException missing) {
-                snack(getString(R.string.about_github));
-            }
-        });
+
+        view.findViewById(R.id.open_github).setOnClickListener(button -> openLink(R.string.about_github));
+        view.findViewById(R.id.open_linkedin).setOnClickListener(button -> openLink(R.string.about_linkedin));
+        view.findViewById(R.id.open_discord).setOnClickListener(button -> copyDiscord());
+
         return view;
+    }
+
+    private void openLink(int urlId) {
+        String url = getString(urlId);
+
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (ActivityNotFoundException missing) {
+            snack(url);
+        }
+    }
+
+    private void copyDiscord() {
+        String name = getString(R.string.about_discord);
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(ClipData.newPlainText(getString(R.string.about_open_discord), name));
+        }
+
+        snack(getString(R.string.about_discord_copied, name));
     }
 
     private void snack(String message) {
