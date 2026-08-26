@@ -50,7 +50,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 RectBottom = (int)Window.Height;
             }
 
-            Instance.WinHelper.EnqueueTextRender(Hwnd, Text, X, Y, RectLeft, RectTop, RectRight, RectBottom, Options);
+            Instance.WinHelper.EnqueueTextRender(Hwnd, Hdc, Text, X, Y, RectLeft, RectTop, RectRight, RectBottom, Options);
 
             Instance.SetRawSyscallReturn(1);
             return NTSTATUS.STATUS_SUCCESS;

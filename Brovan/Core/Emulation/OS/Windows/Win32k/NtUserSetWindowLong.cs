@@ -39,7 +39,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
                 case GWL_EXSTYLE:
                     Previous = Window.ExStyle;
-                    Window.ExStyle = NewValue;
+                    // The visible state bit shares this dword client-side and belongs to Visible.
+                    Window.ExStyle = NewValue & ~WinSysHelper.UserWindowStateVisible;
                     break;
 
                 case GWL_USERDATA:
@@ -63,8 +64,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     break;
 
                 default:
-                    Instance.SetLastWinError(ERROR_INVALID_INDEX);
-                    Instance.SetRawSyscallReturn(0);
+                    if (!Win32kHelper.TryExchangeWindowExtra(Instance, Window, Index, NewValue, 4, out ulong PreviousExtra))
+                    {
+                        Instance.SetLastWinError(ERROR_INVALID_INDEX);
+                        Instance.SetRawSyscallReturn(0);
+                        return NTSTATUS.STATUS_SUCCESS;
+                    }
+
+                    Instance.SetLastWinError(0);
+                    Instance.SetRawSyscallReturn((uint)PreviousExtra);
                     return NTSTATUS.STATUS_SUCCESS;
             }
 

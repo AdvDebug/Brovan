@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Brovan.Core.Emulation.OS.Windows;
@@ -732,6 +732,17 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
+            if (State != null && State.WaitMessageActive)
+            {
+                if (!Win32kHelper.HasQueuedInputEvent(this, Win32kHelper.QS_ALLINPUT))
+                    return false;
+
+                State.WaitMessageActive = false;
+                Thread.WaitSatisfiedIndex = 1;
+                State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
+                return true;
+            }
+
             if (State != null && State.GetMessageWaitActive)
             {
                 if (Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, true, out Win32kMessage Message))
@@ -894,7 +905,7 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State != null && (State.GetMessageWaitActive || State.MsgWaitActive))
+                if (State != null && (State.GetMessageWaitActive || State.MsgWaitActive || State.WaitMessageActive))
                     return true;
             }
 

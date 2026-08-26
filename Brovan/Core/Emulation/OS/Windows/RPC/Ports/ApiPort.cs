@@ -311,11 +311,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (!Instance.WinHelper.EnsureUserSharedInfo(out ulong psi, out ulong aheList, out uint entrySize))
                 return false;
 
+            Instance.WinHelper.PublishDpiServerInfo();
+
             ulong DisplayInfo = Instance.WinHelper.EnsureUserDesktopInfo();
             if (DisplayInfo == 0)
                 return false;
 
-            if (!Instance.WinHelper.EnsureUserMessageBitmasks(out ulong Bitmask1, out ulong Bitmask2))
+            if (!Instance.WinHelper.EnsureUserMessageBitmask(out ulong Bitmask))
                 return false;
 
             Data.Clear();
@@ -332,10 +334,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             WriteU32(Data, UserConnectHeaderSize + 0x10, entrySize);
             WriteU64(Data, UserConnectHeaderSize + 0x18, DisplayInfo);
 
-            WriteU32(Data, UserConnectHeaderSize + 0x218, 0x3FFu);
-            WriteU64(Data, UserConnectHeaderSize + 0x220, Bitmask1);
-            WriteU32(Data, UserConnectHeaderSize + 0x228, 0x3FFu);
-            WriteU64(Data, UserConnectHeaderSize + 0x230, Bitmask2);
+            for (int Index = 0; Index < WinSysHelper.UserSharedInfoMessageTableCount; Index++)
+            {
+                int Offset = UserConnectHeaderSize + WinSysHelper.UserSharedInfoMessageTableOffset(Index);
+                WriteU32(Data, Offset, WinSysHelper.UserMessageBitmaskLastMessage);
+                WriteU64(Data, Offset + 8, Bitmask);
+            }
 
             return true;
         }

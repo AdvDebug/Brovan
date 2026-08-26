@@ -87,17 +87,23 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     internal static class Win32kHelper
     {
         internal const uint ERROR_INVALID_HANDLE = 6;
+        internal const uint ERROR_ACCESS_DENIED = 5;
         internal const uint ERROR_INVALID_PARAMETER = 87;
         internal const uint ERROR_CALL_NOT_IMPLEMENTED = 120;
         internal const uint ERROR_INSUFFICIENT_BUFFER = 122;
         internal const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
+        internal const uint ERROR_CANNOT_FIND_WND_CLASS = 1407;
+
+        internal const int MaxClassExtraBytes = 0x10000;
 
         internal const byte PenHandleType = 0x30;
         internal const byte BrushHandleType = 0x10;
         internal const byte BitmapHandleType = 0x05;
 
         internal const uint WM_NULL = 0x0000;
+        internal const uint WM_CREATE = 0x0001;
         internal const uint WM_DESTROY = 0x0002;
+        internal const uint WM_NCCREATE = 0x0081;
         internal const uint WM_SIZE = 0x0005;
         internal const uint WM_ACTIVATE = 0x0006;
         internal const uint WM_SETFOCUS = 0x0007;
@@ -114,6 +120,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WM_GETTEXT = 0x000D;
         internal const uint WM_GETTEXTLENGTH = 0x000E;
         internal const uint WM_NCHITTEST = 0x0084;
+        internal const uint WM_CTLCOLORMSGBOX = 0x0132;
+        internal const uint WM_CTLCOLOREDIT = 0x0133;
+        internal const uint WM_CTLCOLORLISTBOX = 0x0134;
+        internal const uint WM_CTLCOLORBTN = 0x0135;
+        internal const uint WM_CTLCOLORDLG = 0x0136;
+        internal const uint WM_CTLCOLORSCROLLBAR = 0x0137;
+        internal const uint WM_CTLCOLORSTATIC = 0x0138;
+
+        internal const int COLOR_SCROLLBAR = 0;
+        internal const int COLOR_WINDOW = 5;
+        internal const int COLOR_BTNFACE = 15;
         internal const uint WM_NCDESTROY = 0x0082;
         internal const uint WM_PAINT = 0x000F;
         internal const uint WM_SETTEXT = 0x000C;
@@ -171,6 +188,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly Dictionary<ulong, Win32kDeviceContext> DeviceContexts = new();
             public readonly Dictionary<ulong, Win32kPenBrush> PenBrushObjects = new();
             public readonly Dictionary<ulong, Win32kBitmap> Bitmaps = new();
+            public ulong StockBitmap;
             public ulong NextDeviceContext = FirstDeviceContextHandle;
             public ulong CaptureWindow;
             public ulong ActivatedWindow;
@@ -183,6 +201,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public bool CursorAssigned;
             public int CursorShowCount;
             public bool CursorHidden;
+            public Win32kCaret Caret;
+        }
+
+        internal sealed class Win32kCaret
+        {
+            public ulong Hwnd;
+            public ulong Bitmap;
+            public int X;
+            public int Y;
+            public int Width;
+            public int Height;
+            public int ShowCount;
         }
 
         private sealed class Win32kDeviceContext
@@ -191,11 +221,52 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public ulong Hwnd;
             public bool WindowDc;
             public bool PaintDc;
+            public ulong SelectedBitmap;
+            public uint BoundsFlags;
+            public int BoundsLeft;
+            public int BoundsTop;
+            public int BoundsRight;
+            public int BoundsBottom;
         }
 
         private static Win32kState GetState(BinaryEmulator Instance)
         {
             return States.GetValue(Instance, static _ => new Win32kState());
+        }
+
+        internal static bool CreateCaret(BinaryEmulator Instance, ulong Hwnd, ulong Bitmap, int Width, int Height)
+        {
+            if (Instance.WinHelper.GetWindow(Hwnd) == null)
+                return false;
+
+            GetState(Instance).Caret = new Win32kCaret
+            {
+                Hwnd = Hwnd,
+                Bitmap = Bitmap,
+                Width = Width,
+                Height = Height,
+                ShowCount = 0,
+            };
+            return true;
+        }
+
+        internal static bool DestroyCaret(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            if (State.Caret == null)
+                return false;
+
+            State.Caret = null;
+            return true;
+        }
+
+        internal static Win32kCaret GetOwnedCaret(BinaryEmulator Instance, ulong Hwnd)
+        {
+            Win32kCaret Caret = GetState(Instance).Caret;
+            if (Caret == null)
+                return null;
+
+            return Hwnd == 0 || Caret.Hwnd == Hwnd ? Caret : null;
         }
 
         internal static ulong GetCaptureWindow(BinaryEmulator Instance)
@@ -233,6 +304,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Hwnd = Hwnd,
                 WindowDc = WindowDc,
                 PaintDc = PaintDc,
+                SelectedBitmap = EnsureStockBitmap(Instance),
             };
             return GdiHandle;
         }
@@ -268,6 +340,65 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return false;
 
             return GetState(Instance).DeviceContexts.ContainsKey(Hdc);
+        }
+
+        internal static bool TrySelectDcBitmap(BinaryEmulator Instance, ulong Hdc, ulong Bitmap, out ulong Previous)
+        {
+            Previous = 0;
+
+            Win32kState State = GetState(Instance);
+            if (!State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return false;
+
+            Previous = Dc.SelectedBitmap != 0 ? Dc.SelectedBitmap : EnsureStockBitmap(Instance);
+            Dc.SelectedBitmap = Bitmap;
+            return true;
+        }
+
+        internal static bool TrySetDcBounds(BinaryEmulator Instance, ulong Hdc, uint Flags, bool HasRect,
+            int Left, int Top, int Right, int Bottom, out uint Previous)
+        {
+            const uint DcbReset = 0x0001;
+            const uint DcbAccumulate = 0x0002;
+            const uint DcbEnable = 0x0004;
+            const uint DcbDisable = 0x0008;
+
+            Previous = 0;
+
+            Win32kState State = GetState(Instance);
+            if (!State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return false;
+
+            Previous = Dc.BoundsFlags == 0 ? DcbDisable : Dc.BoundsFlags;
+
+            bool Empty = (Flags & DcbReset) != 0 ||
+                (Dc.BoundsRight <= Dc.BoundsLeft && Dc.BoundsBottom <= Dc.BoundsTop);
+
+            if ((Flags & DcbReset) != 0)
+            {
+                Dc.BoundsLeft = 0;
+                Dc.BoundsTop = 0;
+                Dc.BoundsRight = 0;
+                Dc.BoundsBottom = 0;
+            }
+
+            if (HasRect && (Flags & DcbAccumulate) != 0 && (Right != Left || Bottom != Top))
+            {
+                int NewLeft = Math.Min(Left, Right);
+                int NewTop = Math.Min(Top, Bottom);
+                int NewRight = Math.Max(Left, Right);
+                int NewBottom = Math.Max(Top, Bottom);
+
+                Dc.BoundsLeft = Empty ? NewLeft : Math.Min(Dc.BoundsLeft, NewLeft);
+                Dc.BoundsTop = Empty ? NewTop : Math.Min(Dc.BoundsTop, NewTop);
+                Dc.BoundsRight = Empty ? NewRight : Math.Max(Dc.BoundsRight, NewRight);
+                Dc.BoundsBottom = Empty ? NewBottom : Math.Max(Dc.BoundsBottom, NewBottom);
+            }
+
+            if ((Flags & (DcbEnable | DcbDisable)) != 0)
+                Dc.BoundsFlags = Flags & (DcbEnable | DcbDisable);
+
+            return true;
         }
 
         internal static ulong CreatePen(BinaryEmulator Instance, int Style, int Width, uint ColorRef)
@@ -598,6 +729,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return DibSection ? (int)(((Bits + 31) / 32) * 4) : (int)(((Bits + 15) / 16) * 2);
         }
 
+        // Every DC starts on this, so a caller that selects its own bitmap has one to select back.
+        internal static ulong EnsureStockBitmap(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            if (State.StockBitmap == 0)
+                State.StockBitmap = CreateBitmap(Instance, 1, 1, 1, 1, false, false);
+
+            return State.StockBitmap;
+        }
+
         internal static ulong CreateBitmap(BinaryEmulator Instance, int Width, int Height, ushort Planes, ushort BitsPerPixel, bool DibSection, bool TopDown)
         {
             int Stride = GetBitmapStride(Width, Planes, BitsPerPixel, DibSection);
@@ -675,9 +816,57 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return true;
         }
 
+        internal const int TextMetricWSize = 60;
+
+        internal static TextMetricsData DefaultTextMetrics => new TextMetricsData
+        {
+            Height = 16,
+            Ascent = 12,
+            Descent = 4,
+            AveCharWidth = 8,
+            MaxCharWidth = 16,
+            Weight = 400,
+            DigitizedAspectX = 96,
+            DigitizedAspectY = 96,
+            FirstChar = 0x20,
+            LastChar = 0xFF,
+            DefaultChar = 0x20,
+            BreakChar = 0x20,
+            PitchAndFamily = 0x01,
+        };
+
+        internal static void WriteTextMetricsW(Span<byte> Buffer, in TextMetricsData Metrics)
+        {
+            Buffer.Slice(0, TextMetricWSize).Clear();
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x00, 4), Metrics.Height);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x04, 4), Metrics.Ascent);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x08, 4), Metrics.Descent);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x0C, 4), Metrics.InternalLeading);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x10, 4), Metrics.ExternalLeading);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x14, 4), Metrics.AveCharWidth);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x18, 4), Metrics.MaxCharWidth);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x1C, 4), Metrics.Weight);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x20, 4), Metrics.Overhang);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x24, 4), Metrics.DigitizedAspectX);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x28, 4), Metrics.DigitizedAspectY);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(0x2C, 2), Metrics.FirstChar);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(0x2E, 2), Metrics.LastChar);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(0x30, 2), Metrics.DefaultChar);
+            BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(0x32, 2), Metrics.BreakChar);
+            Buffer[0x34] = Metrics.Italic;
+            Buffer[0x35] = Metrics.Underlined;
+            Buffer[0x36] = Metrics.StruckOut;
+            Buffer[0x37] = Metrics.PitchAndFamily;
+            Buffer[0x38] = Metrics.CharSet;
+        }
+
         internal static bool PostMessage(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam)
         {
-            Win32kState State = GetState(Instance);
+            return PostMessage(Instance, GetState(Instance), Hwnd, Message, WParam, LParam);
+        }
+
+        private static bool PostMessage(BinaryEmulator Instance, Win32kState State, ulong Hwnd, uint Message, ulong WParam, ulong LParam)
+        {
             uint Time = unchecked((uint)Instance.EmulatedTickCount64);
 
             if (Hwnd == HWND_BROADCAST)
@@ -948,43 +1137,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return 0;
             }
 
-            if (Window != null)
-            {
-                switch (Message.Message)
-                {
-                    case WM_SETTEXT:
-                        Window.Title = ReadWindowTextPointer(Instance, Message.LParam, false) ?? string.Empty;
-                        Window.Dirty = true;
-                        Instance.WinHelper.MaterializeUserWindow(Window);
-                        Instance.WinHelper.PresentDesktop();
-                        return 1;
+            if (Window == null)
+                return 0;
 
-                    case WM_GETTEXT:
-                        return WriteWindowText(Instance, Window.Title ?? string.Empty, Message.LParam, Message.WParam, false);
-
-                    case WM_GETTEXTLENGTH:
-                        return (ulong)(Window.Title?.Length ?? 0);
-
-                    case WM_NCHITTEST:
-                        return HTCLIENT;
-
-                    case WM_ERASEBKGND:
-                        return 1;
-
-                    case WM_CLOSE:
-                        Instance.WinHelper.DestroyWindow(Window.Hwnd);
-                        return 0;
-
-                    case WM_DESTROY:
-                    case WM_SETCURSOR:
-                    case WM_PAINT:
-                    case WM_NULL:
-                    default:
-                        return 0;
-                }
-            }
-
-            return 0;
+            return DefaultWindowProc(Instance, Window, Message.Message, Message.WParam, Message.LParam, false);
         }
 
         private const int MaxHostInputEventsPerDrain = 64;
@@ -1242,6 +1398,141 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return true;
         }
 
+        internal static void InvalidateWindowTree(BinaryEmulator Instance, ulong Hwnd)
+        {
+            InvalidateWindowTree(Instance, GetState(Instance), Hwnd, 0);
+        }
+
+        private static void InvalidateWindowTree(BinaryEmulator Instance, Win32kState State, ulong Hwnd, int Depth)
+        {
+            // A child list that has been closed into a loop would otherwise walk forever.
+            if (Depth >= MaxWindowTreeDepth)
+                return;
+
+            WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
+            if (Window == null || !Window.Visible)
+                return;
+
+            Window.Dirty = true;
+            PostMessage(Instance, State, Hwnd, WM_PAINT, 0, 0);
+
+            for (int i = 0; i < Window.Children.Count; i++)
+                InvalidateWindowTree(Instance, State, Window.Children[i], Depth + 1);
+        }
+
+        private const int MaxWindowTreeDepth = 64;
+
+        // The plain callback shape passes hwnd, message, wParam and lParam unchanged. The
+        // DispatchMessage-shaped entry beside it carries no lParam, only a pointer to the MSG.
+        private const uint WindowProcCallbackIndex = 2;
+        private const ulong WindowProcArgumentReserve = 0x400;
+        private const int WindowProcArgumentHeaderSize = 0x30;
+        private const int WindowProcArgumentBlockSize = 0x40;
+        private const int CreateStructSize = 0x50;
+        private const int CreateStructNameChars = 96;
+
+        // The syscall in progress does not answer. The procedure's result becomes its return value.
+        internal static bool InvokeWindowProc(BinaryEmulator Instance, ulong Hwnd, ulong WndProc, uint Message, ulong WParam, ulong LParam, WinWindowCreation Creation = null, ulong SyscallRetryRip = 0)
+        {
+            if (!TryBeginWindowProcCallback(Instance, WndProc, out ulong Callback, out ulong ArgumentBuffer))
+                return false;
+
+            WriteWindowProcCallbackArguments(Instance, ArgumentBuffer, Hwnd, WndProc, Message, WParam, LParam);
+            return Instance.WinHelper.EnterUserCallback(Callback, WindowProcCallbackIndex, ArgumentBuffer, Creation, SyscallRetryRip);
+        }
+
+        internal static bool SendWindowCreateMessage(BinaryEmulator Instance, WinWindow Window, uint Message, WinWindowCreation Creation)
+        {
+            if (Window == null || !TryBeginWindowProcCallback(Instance, Window.WndProc, out ulong Callback, out ulong ArgumentBuffer))
+                return false;
+
+            ulong CreateStruct = ArgumentBuffer + WindowProcArgumentHeaderSize;
+            ulong NameAddress = CreateStruct + CreateStructSize;
+            ulong ClassAddress = NameAddress + (ulong)CreateStructNameChars * 2;
+
+            if (!WriteCallbackString(Instance, NameAddress, Window.Title))
+                NameAddress = 0;
+
+            // A class named by atom stays an atom, the way CreateWindowEx was called.
+            if (Window.ClassAtom != 0 && Window.ClassName != null && Window.ClassName.StartsWith("#ATOM_", StringComparison.Ordinal))
+                ClassAddress = Window.ClassAtom;
+            else if (!WriteCallbackString(Instance, ClassAddress, Window.ClassName))
+                ClassAddress = 0;
+
+            Span<byte> Data = Instance.WinHelper.Shared.GetSpan(CreateStructSize).Slice(0, CreateStructSize);
+            Data.Clear();
+
+            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Window.CreateParam);
+            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x08, 8), Window.InstanceHandle);
+            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x10, 8), Window.MenuHandle);
+            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x18, 8), Window.ParentHwnd);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x20, 4), Window.Height);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x24, 4), Window.Width);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x28, 4), (uint)Window.Y);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x2C, 4), (uint)Window.X);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x30, 4), Window.Style);
+            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x38, 8), NameAddress);
+            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x40, 8), ClassAddress);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x48, 4), Window.ExStyle);
+
+            if (!Instance.WriteMemory(CreateStruct, Data))
+                return false;
+
+            WriteWindowProcCallbackArguments(Instance, ArgumentBuffer, Window.Hwnd, Window.WndProc, Message, 0, CreateStruct);
+            return Instance.WinHelper.EnterUserCallback(Callback, WindowProcCallbackIndex, ArgumentBuffer, Creation);
+        }
+
+        private static bool TryBeginWindowProcCallback(BinaryEmulator Instance, ulong WndProc, out ulong Callback, out ulong ArgumentBuffer)
+        {
+            Callback = 0;
+            ArgumentBuffer = 0;
+
+            if (WndProc == 0 || Instance.WinHelper.PointerSize != 8)
+                return false;
+
+            Callback = Instance.WinHelper.GetKernelCallbackEntry(WindowProcCallbackIndex);
+            if (Callback == 0)
+                return false;
+
+            ulong CurrentRsp = Instance.ReadRegister(Registers.UC_X86_REG_RSP);
+            if (!Instance.IsRegionMapped(CurrentRsp, 8))
+                return false;
+
+            ArgumentBuffer = (CurrentRsp - WindowProcArgumentReserve) & ~0xFUL;
+            if (!Instance.IsRegionMapped(ArgumentBuffer, WindowProcArgumentReserve))
+                return false;
+
+            for (int Offset = 0; Offset < WindowProcArgumentBlockSize; Offset += 8)
+                Instance._emulator.WriteMemory(ArgumentBuffer + (ulong)Offset, 0UL, 8);
+
+            return true;
+        }
+
+        private static void WriteWindowProcCallbackArguments(BinaryEmulator Instance, ulong ArgumentBuffer,
+            ulong Hwnd, ulong WndProc, uint Message, ulong WParam, ulong LParam)
+        {
+            Instance._emulator.WriteMemory(ArgumentBuffer + 0x00, Hwnd, 8);
+            Instance._emulator.WriteMemory(ArgumentBuffer + 0x08, (ulong)Message, 8);
+            Instance._emulator.WriteMemory(ArgumentBuffer + 0x10, WParam, 8);
+            Instance._emulator.WriteMemory(ArgumentBuffer + 0x18, LParam, 8);
+            Instance._emulator.WriteMemory(ArgumentBuffer + 0x20, 0UL, 8);
+            Instance._emulator.WriteMemory(ArgumentBuffer + 0x28, WndProc, 8);
+        }
+
+        private static bool WriteCallbackString(BinaryEmulator Instance, ulong Address, string Value)
+        {
+            string Text = Value ?? string.Empty;
+            if (Text.Length >= CreateStructNameChars)
+                Text = Text.Substring(0, CreateStructNameChars - 1);
+
+            uint Bytes = (uint)((Text.Length + 1) * 2);
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(Bytes).Slice(0, (int)Bytes);
+            Buffer.Clear();
+            Encoding.Unicode.GetBytes(Text, Buffer);
+
+            return Instance.WriteMemory(Address, Buffer);
+        }
+
         internal static ulong HandleMessageCall(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam, bool Ansi)
         {
             if (Hwnd != 0 && Instance.WinHelper.GetWindow(Hwnd) == null)
@@ -1254,34 +1545,82 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Window == null)
                 return 0;
 
-            if (Message == WM_SETTEXT)
+            return DefaultWindowProc(Instance, Window, Message, WParam, LParam, Ansi);
+        }
+
+        private static ulong DefaultWindowProc(BinaryEmulator Instance, WinWindow Window, uint Message, ulong WParam, ulong LParam, bool Ansi)
+        {
+            switch (Message)
             {
-                Window.Title = ReadWindowTextPointer(Instance, LParam, Ansi) ?? string.Empty;
-                Window.Dirty = true;
-                Instance.WinHelper.MaterializeUserWindow(Window);
-                Instance.WinHelper.PresentDesktop();
-                return 1;
+                case WM_SETTEXT:
+                    Window.Title = ReadWindowTextPointer(Instance, LParam, Ansi) ?? string.Empty;
+                    Window.Dirty = true;
+                    Instance.WinHelper.MaterializeUserWindow(Window);
+                    Instance.WinHelper.PresentDesktop();
+                    return 1;
+
+                case WM_GETTEXT:
+                    return WriteWindowText(Instance, Window.Title ?? string.Empty, LParam, WParam, Ansi);
+
+                case WM_GETTEXTLENGTH:
+                    return (ulong)(Window.Title?.Length ?? 0);
+
+                case WM_NCHITTEST:
+                    return HTCLIENT;
+
+                // DefWindowProc accepts the window. Answering zero here would refuse every creation.
+                case WM_NCCREATE:
+                    return 1;
+
+                case WM_ERASEBKGND:
+                    return EraseWindowBackground(Instance, Window, WParam) ? 1ul : 0ul;
+
+                case WM_CLOSE:
+                    Instance.WinHelper.DestroyWindow(Window.Hwnd);
+                    return 0;
+
+                default:
+                    if (Message >= WM_CTLCOLORMSGBOX && Message <= WM_CTLCOLORSTATIC)
+                        return Instance.WinHelper.GetSystemColorBrush(DefaultControlColorIndex(Message));
+
+                    return 0;
             }
+        }
 
-            if (Message == WM_GETTEXT)
-                return WriteWindowText(Instance, Window.Title ?? string.Empty, LParam, WParam, Ansi);
+        private static bool EraseWindowBackground(BinaryEmulator Instance, WinWindow Window, ulong Hdc)
+        {
+            WinWindowClass Class = Window.ClassAtom == 0 ? null : Instance.WinHelper.GetWindowClass(Window.ClassAtom);
+            ulong Background = Class?.BackgroundBrush ?? 0;
+            if (Background == 0)
+                return false;
 
-            if (Message == WM_GETTEXTLENGTH)
-                return (ulong)(Window.Title?.Length ?? 0);
+            // A class can name a system colour instead of a brush, as the colour index plus one.
+            uint Color = Background <= SystemColorCount
+                ? Instance.WinHelper.GetSystemColor((int)Background - 1)
+                : ResolvePenBrush(Instance, Background, false).ColorRef;
 
-            if (Message == WM_NCHITTEST)
-                return HTCLIENT;
+            Instance.WinHelper.EnqueueGdiFillRect(Window.Hwnd, Hdc, 0, 0,
+                (int)Window.Width, (int)Window.Height, Color, PatCopy);
+            return true;
+        }
 
-            if (Message == WM_ERASEBKGND)
-                return 1;
+        private const uint SystemColorCount = 31;
+        private const uint PatCopy = 0x00F00021;
 
-            if (Message == WM_CLOSE)
+        internal static int DefaultControlColorIndex(uint Message)
+        {
+            switch (Message)
             {
-                Instance.WinHelper.DestroyWindow(Window.Hwnd);
-                return 0;
-            }
+                case WM_CTLCOLOREDIT:
+                case WM_CTLCOLORLISTBOX:
+                    return COLOR_WINDOW;
 
-            return 0;
+                case WM_CTLCOLORSCROLLBAR:
+                    return COLOR_SCROLLBAR;
+
+                default:
+                    return COLOR_BTNFACE;
+            }
         }
 
         internal static bool RemoveFlagSet(uint Flags)
@@ -1342,6 +1681,242 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return 0;
 
             return (ulong)Output.Length;
+        }
+
+        internal const ushort FnidFirst = 0x029A;
+        internal const ushort FnidScrollBar = 0x029A;
+        internal const ushort FnidIconTitle = 0x029B;
+        internal const ushort FnidMenu = 0x029C;
+        internal const ushort FnidDesktop = 0x029D;
+        internal const ushort FnidDefWindowProc = 0x029E;
+        internal const ushort FnidMessageWnd = 0x029F;
+        internal const ushort FnidSwitch = 0x02A0;
+        internal const ushort FnidButton = 0x02A1;
+        internal const ushort FnidComboBox = 0x02A2;
+        internal const ushort FnidComboLBox = 0x02A3;
+        internal const ushort FnidDialog = 0x02A4;
+        internal const ushort FnidEdit = 0x02A5;
+        internal const ushort FnidListBox = 0x02A6;
+        internal const ushort FnidMdiClient = 0x02A7;
+        internal const ushort FnidStatic = 0x02A8;
+        internal const ushort FnidIme = 0x02A9;
+        internal const ushort FnidGhost = 0x02AA;
+
+        private const ushort FnidSendMessageFirst = 0x02B1;
+        private const ushort FnidSendMessageLast = 0x02B8;
+        internal const ushort FnidLast = FnidSendMessageLast;
+        internal const int FnidCount = FnidLast - FnidFirst + 1;
+
+        // FNID_DDEML, FNID_DESTROY and FNID_FREED ride above the fnid itself.
+        private const uint FnidStatusBits = 0xE000;
+
+        // A dialog template names a standard control by an ordinal into gpsi->atomSysClass.
+        private const int IclsButton = 0;
+        private const int IclsEdit = 1;
+        private const int IclsStatic = 2;
+        private const int IclsListBox = 3;
+        private const int IclsScrollBar = 4;
+        private const int IclsComboBox = 5;
+        private const int IclsMdiClient = 6;
+        private const int IclsComboLBox = 7;
+        private const int IclsIme = 15;
+        private const int IclsGhost = 16;
+        private const int IclsDesktop = 17;
+        private const int IclsDialog = 18;
+        private const int IclsMenu = 19;
+        private const int IclsSwitch = 20;
+        private const int IclsIconTitle = 21;
+
+        internal static bool IsSendMessageFunction(uint FunctionId)
+        {
+            ushort Fnid = MaskFunctionId(FunctionId);
+            return Fnid >= FnidSendMessageFirst && Fnid <= FnidSendMessageLast;
+        }
+
+        internal static ushort MaskFunctionId(uint FunctionId)
+        {
+            return (ushort)(FunctionId & ~FnidStatusBits);
+        }
+
+        // A control reads a sibling's class atom out of gpsi->atomSysClass once, so every slot has to answer
+        // before user32 registers anything. The five named by an integer atom keep it.
+        internal static readonly (ushort FunctionId, int Index, ushort WellKnownAtom, string Name)[] ReservedClasses =
+        {
+            (FnidButton, IclsButton, (ushort)0, "Button"),
+            (FnidEdit, IclsEdit, (ushort)0, "Edit"),
+            (FnidStatic, IclsStatic, (ushort)0, "Static"),
+            (FnidListBox, IclsListBox, (ushort)0, "ListBox"),
+            (FnidScrollBar, IclsScrollBar, (ushort)0, "ScrollBar"),
+            (FnidComboBox, IclsComboBox, (ushort)0, "ComboBox"),
+            (FnidMdiClient, IclsMdiClient, (ushort)0, "MDIClient"),
+            (FnidComboLBox, IclsComboLBox, (ushort)0, "ComboLBox"),
+            (FnidIme, IclsIme, (ushort)0, "IME"),
+            (FnidGhost, IclsGhost, (ushort)0, "Ghost"),
+            (FnidMenu, IclsMenu, (ushort)32768, "#32768"),
+            (FnidDesktop, IclsDesktop, (ushort)32769, "#32769"),
+            (FnidDialog, IclsDialog, (ushort)32770, "#32770"),
+            (FnidSwitch, IclsSwitch, (ushort)32771, "#32771"),
+            (FnidIconTitle, IclsIconTitle, (ushort)32772, "#32772"),
+        };
+
+        internal static bool TryGetSystemClassIndex(uint FunctionId, out int Index)
+        {
+            switch (MaskFunctionId(FunctionId))
+            {
+                case FnidButton: Index = IclsButton; return true;
+                case FnidEdit: Index = IclsEdit; return true;
+                case FnidStatic: Index = IclsStatic; return true;
+                case FnidListBox: Index = IclsListBox; return true;
+                case FnidScrollBar: Index = IclsScrollBar; return true;
+                case FnidComboBox: Index = IclsComboBox; return true;
+                case FnidMdiClient: Index = IclsMdiClient; return true;
+                case FnidComboLBox: Index = IclsComboLBox; return true;
+                case FnidIme: Index = IclsIme; return true;
+                case FnidGhost: Index = IclsGhost; return true;
+                case FnidDesktop: Index = IclsDesktop; return true;
+                case FnidDialog: Index = IclsDialog; return true;
+                case FnidMenu: Index = IclsMenu; return true;
+                case FnidSwitch: Index = IclsSwitch; return true;
+                case FnidIconTitle: Index = IclsIconTitle; return true;
+                default: Index = -1; return false;
+            }
+        }
+
+        private const ulong WindowStateBase = 0x10;
+        private const int WindowStateExStyleFirstByte = 0x08;
+        private const int WindowStateStyleFirstByte = 0x0C;
+        private const int WindowStateFieldBytes = 4;
+        private const int WindowStateDialogByte = 0x02;
+        private const byte WindowStateDialogMask = 0x01;
+
+        // user32 names the byte with a packed word, the high byte is the offset from tagWND+0x10 and
+        // the low byte is the mask.
+        internal static bool ApplyWindowState(BinaryEmulator Instance, WinWindow Window, uint Packed, bool Set)
+        {
+            if (Window == null || Window.ClientWindowAddress == 0)
+                return false;
+
+            int Offset = (int)((Packed >> 8) & 0xFF);
+            byte Mask = (byte)(Packed & 0xFF);
+            ulong Address = Window.ClientWindowAddress + WindowStateBase + (ulong)Offset;
+
+            if (!Instance.IsRegionMapped(Address, 1))
+                return false;
+
+            byte Current = (byte)Instance.ReadMemoryUInt(Address);
+            byte Updated = Set ? (byte)(Current | Mask) : (byte)(Current & ~Mask);
+            Instance._emulator.WriteMemory(Address, Updated, 1);
+
+            // The next refresh of the window writes win32k's own copy back over whatever the guest set here.
+            if (Offset >= WindowStateStyleFirstByte && Offset < WindowStateStyleFirstByte + WindowStateFieldBytes)
+            {
+                Window.Style = ReplaceByte(Window.Style, Offset - WindowStateStyleFirstByte, Updated);
+                Window.Visible = (Window.Style & WinSysHelper.UserWindowStyleVisible) != 0;
+            }
+            else if (Offset >= WindowStateExStyleFirstByte && Offset < WindowStateExStyleFirstByte + WindowStateFieldBytes)
+            {
+                uint Composed = Window.ExStyle | (Window.Visible ? WinSysHelper.UserWindowStateVisible : 0u);
+                Composed = ReplaceByte(Composed, Offset - WindowStateExStyleFirstByte, Updated);
+
+                Window.Visible = (Composed & WinSysHelper.UserWindowStateVisible) != 0;
+                Window.ExStyle = Composed & ~WinSysHelper.UserWindowStateVisible;
+            }
+            else if (Offset == WindowStateDialogByte && (Mask & WindowStateDialogMask) != 0)
+            {
+                Window.IsDialog = (Updated & WindowStateDialogMask) != 0;
+            }
+
+            return true;
+        }
+
+        private static uint ReplaceByte(uint Value, int Index, byte Replacement)
+        {
+            int Shift = Index * 8;
+            return (Value & ~(0xFFu << Shift)) | ((uint)Replacement << Shift);
+        }
+
+        internal static bool TryExchangeWindowExtra(BinaryEmulator Instance, WinWindow Window, int Offset, ulong Value, uint Size, out ulong Previous)
+        {
+            Previous = 0;
+
+            if (Window == null || Offset < 0 || Offset > Window.WindowExtraBytes - (int)Size)
+                return false;
+
+            ulong Extra = Instance.WinHelper.GetWindowExtraBytesAddress(Window);
+            if (Extra == 0 || !Instance.IsRegionMapped(Extra + (ulong)Offset, Size))
+                return false;
+
+            ulong Address = Extra + (ulong)Offset;
+            Previous = Size == 8 ? Instance.ReadMemoryULong(Address) : Instance.ReadMemoryUInt(Address);
+            return Instance._emulator.WriteMemory(Address, Value, Size);
+        }
+
+        private const int OemGlyphSize = 13;
+        private const int OemRadioMask = 71;
+        private const int OemCheckBoxFirst = 72;
+        private const int OemRadioFirst = 77;
+        private const int OemThreeStateFirst = 82;
+        private const int OemStatesPerGlyph = 5;
+        private const int OemLast = OemThreeStateFirst + OemStatesPerGlyph - 1;
+
+        private const int OemStateChecked = 1;
+        private const int OemStatePushed = 2;
+        private const int OemStateCheckedPushed = 3;
+        private const int OemStateCheckedDisabled = 4;
+
+        internal const int COLOR_WINDOWTEXT = 8;
+        internal const int COLOR_BTNSHADOW = 16;
+        internal const int COLOR_GRAYTEXT = 17;
+
+        internal static bool TryGetOemBitmapSize(int Index, out int Width, out int Height)
+        {
+            Width = OemGlyphSize;
+            Height = OemGlyphSize;
+            return Index >= OemRadioMask && Index <= OemLast;
+        }
+
+        // A radio arrives as two blits, a mask under SRCAND then the glyph under SRCINVERT. Drawing the
+        // circle once on the second is the same picture.
+        internal static bool DrawOemBitmap(BinaryEmulator Instance, ulong Hdc, int X, int Y, int Index)
+        {
+            if (Index < OemRadioMask || Index > OemLast)
+                return false;
+
+            ulong Hwnd = Instance.WinHelper.GetHwndFromDc(Hdc);
+            if (Hwnd == 0)
+                return false;
+
+            if (Index == OemRadioMask)
+                return true;
+
+            bool Round = Index >= OemRadioFirst && Index < OemThreeStateFirst;
+            int First = Round ? OemRadioFirst : Index >= OemThreeStateFirst ? OemThreeStateFirst : OemCheckBoxFirst;
+            int State = Index - First;
+
+            bool Marked = State == OemStateChecked || State == OemStateCheckedPushed || State == OemStateCheckedDisabled;
+            bool Sunken = State == OemStatePushed || State == OemStateCheckedPushed || State == OemStateCheckedDisabled ||
+                Index >= OemThreeStateFirst;
+
+            uint Interior = Instance.WinHelper.GetSystemColor(Sunken ? COLOR_BTNFACE : COLOR_WINDOW);
+            uint Border = Instance.WinHelper.GetSystemColor(COLOR_BTNSHADOW);
+            uint Mark = Instance.WinHelper.GetSystemColor(State == OemStateCheckedDisabled ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT);
+
+            Instance.WinHelper.EnqueueGdiShape(Hwnd, Hdc, Round ? GdiPrimitiveKind.Ellipse : GdiPrimitiveKind.Rectangle,
+                X, Y, X + OemGlyphSize, Y + OemGlyphSize, Border, 1, Interior);
+
+            if (!Marked)
+                return true;
+
+            if (Round)
+            {
+                Instance.WinHelper.EnqueueGdiShape(Hwnd, Hdc, GdiPrimitiveKind.Ellipse,
+                    X + 4, Y + 4, X + OemGlyphSize - 4, Y + OemGlyphSize - 4, Mark, 1, Mark);
+                return true;
+            }
+
+            Instance.WinHelper.EnqueueGdiLine(Hwnd, Hdc, X + 3, Y + 6, X + 5, Y + 9, Mark, 2);
+            Instance.WinHelper.EnqueueGdiLine(Hwnd, Hdc, X + 5, Y + 9, X + 10, Y + 3, Mark, 2);
+            return true;
         }
     }
 }

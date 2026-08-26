@@ -1,4 +1,4 @@
-using Brovan.Core.Emulation.OS.SharedHelpers;
+﻿using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -39,18 +39,22 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             GdiPrimitiveKind Kind = DrawType == PolygonType ? GdiPrimitiveKind.Polygon : GdiPrimitiveKind.Polyline;
 
             ulong PointOffset = 0;
+
             for (uint Figure = 0; Figure < FigureCount; Figure++)
             {
                 if (!Instance.IsRegionMapped(CountsPtr + (ulong)Figure * 4, 4))
                     break;
 
                 uint PointCount = Instance.ReadMemoryUInt(CountsPtr + (ulong)Figure * 4);
+                ulong FigureBytes = (ulong)PointCount * PointSize;
+
+                // A figure too short to draw still owns its points, and the ones after it are found past them.
                 if (PointCount < 2)
                 {
+                    PointOffset += FigureBytes;
                     continue;
                 }
 
-                ulong FigureBytes = (ulong)PointCount * PointSize;
                 ulong FigureAddr = PointsPtr + PointOffset;
                 if (!Instance.IsRegionMapped(FigureAddr, FigureBytes))
                     break;
@@ -66,7 +70,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     };
                 }
 
-                Instance.WinHelper.EnqueueGdiPoly(Hwnd, Kind, Points, Pen.ColorRef, Pen.PenWidth, Brush.ColorRef, DrawType == PolygonType);
+                Instance.WinHelper.EnqueueGdiPoly(Hwnd, Hdc, Kind, Points, Pen.ColorRef, Pen.PenWidth, Brush.ColorRef, DrawType == PolygonType);
 
                 PointOffset += FigureBytes;
             }

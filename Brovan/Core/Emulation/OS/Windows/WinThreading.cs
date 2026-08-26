@@ -56,6 +56,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong AlertByThreadIdAddress { get; set; }
         public bool MsgWaitActive { get; set; }
         public uint MsgWaitMask { get; set; }
+        public ulong ClientThreadInfo { get; set; }
+        public bool WaitMessageActive { get; set; }
         public bool GetMessageWaitActive { get; set; }
         public ulong GetMessageMessagePtr { get; set; }
         public ulong GetMessageHwndFilter { get; set; }
@@ -66,9 +68,31 @@ namespace Brovan.Core.Emulation.OS.Windows
 
     public sealed class WinUserCallbackFrame
     {
-        public ulong SavedRip;
         public ulong SavedRsp;
         public ulong SavedReturnAddress;
+        public ulong SyscallRetryRip;
+
+        public ulong SavedSyscallNumber;
+        public ulong SavedArg0;
+        public ulong SavedArg1;
+        public ulong SavedArg2;
+        public ulong SavedArg3;
+
+        public WinWindowCreation WindowCreation;
+    }
+
+    public sealed class WinWindowCreation
+    {
+        public ulong Hwnd;
+        public WinWindowCreationStep Step;
+    }
+
+    public enum WinWindowCreationStep
+    {
+        NonClientCreate,
+        Create,
+        Size,
+        Move,
     }
 
     public static class WinEmulatedThread

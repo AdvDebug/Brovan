@@ -1652,13 +1652,30 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public ulong WndProc;
         public ushort Fnid;
+        public int WindowExtraBytes;
+        public bool IsDialog;
+        public ulong DialogPointer;
         public bool Dirty = true;
+
+        public WinScrollBarInfo HorizontalScroll = WinScrollBarInfo.Default;
+        public WinScrollBarInfo VerticalScroll = WinScrollBarInfo.Default;
 
 
         public string ObjectId => $"HWND_{Hwnd:X}";
         public HandleType ObjectType => HandleType.Window;
     }
 
+
+    public struct WinScrollBarInfo
+    {
+        public int Minimum;
+        public int Maximum;
+        public uint Page;
+        public int Position;
+        public int TrackPosition;
+
+        public static WinScrollBarInfo Default => new WinScrollBarInfo { Maximum = 100 };
+    }
 
     public sealed class WinIoCompletionEntry
     {
