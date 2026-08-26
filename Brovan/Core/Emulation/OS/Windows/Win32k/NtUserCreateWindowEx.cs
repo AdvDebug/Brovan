@@ -57,13 +57,21 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 WindowClass = Instance.WinHelper.GetWindowClass(InstanceHandle, ClassName, classVersion);
             }
 
+            // Answering "no such class" is what makes user32 register a standard control and call back in.
+            if (WindowClass == null)
+            {
+                Instance.SetLastWinError(Win32kHelper.ERROR_CANNOT_FIND_WND_CLASS);
+                Instance.SetRawSyscallReturn(0);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
             string title = Win32kHelper.ReadLargeString(Instance, WindowNamePtr) ?? string.Empty;
             ulong hwnd = Instance.WinHelper.AllocateUserHandle();
 
             WinWindow window = new WinWindow
             {
                 Hwnd = hwnd,
-                ClassAtom = WindowClass?.Atom ?? 0,
+                ClassAtom = WindowClass.Atom,
                 Title = title,
                 ClassName = string.IsNullOrEmpty(ClassName) ? "#UNNAMED" : ClassName,
                 Visible = ((uint)StyleArg & 0x10000000U) != 0, // WS_VISIBLE
@@ -78,12 +86,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 InstanceHandle = InstanceHandle,
                 CreateParam = CreateParam,
                 OwnerThreadId = Instance.CurrentThread?.ThreadId ?? 0,
-                WndProc = WindowClass?.WndProc ?? 0,
+                WndProc = WindowClass.WndProc,
+                WindowExtraBytes = WindowClass.WindowExtraBytes,
                 Dirty = true,
             };
 
             Instance.WinHelper.RegisterWindow(window);
             Instance.SetLastWinError(0);
+
+            WinWindowCreation Creation = new WinWindowCreation { Hwnd = hwnd };
+            if (Win32kHelper.SendWindowCreateMessage(Instance, window, Win32kHelper.WM_NCCREATE, Creation))
+                return NTSTATUS.STATUS_SUCCESS;
+
             Instance.SetRawSyscallReturn(hwnd);
             return NTSTATUS.STATUS_SUCCESS;
         }

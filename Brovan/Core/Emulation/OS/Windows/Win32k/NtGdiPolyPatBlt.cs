@@ -33,8 +33,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 int Height = unchecked((int)Instance.ReadMemoryUInt(EntryAddr + 0x0C));
                 ulong BrushHandle = Instance.ReadMemoryULong(EntryAddr + 0x10);
 
+                // An entry with no brush of its own paints with the one selected into the DC.
+                if (BrushHandle == 0)
+                    BrushHandle = Instance.WinHelper.ReadDcSelectedBrush(Hdc);
+
                 Win32kPenBrush Brush = Win32kHelper.ResolvePenBrush(Instance, BrushHandle, false);
-                Instance.WinHelper.EnqueueGdiFillRect(Hwnd, X, Y, X + Width, Y + Height, Brush.ColorRef, Rop);
+                Instance.WinHelper.EnqueueGdiFillRect(Hwnd, Hdc, X, Y, X + Width, Y + Height, Brush.ColorRef, Rop);
             }
 
             Instance.SetRawSyscallReturn(1);

@@ -1,4 +1,4 @@
-using static Brovan.Core.Helpers.BinaryHelpers;
+﻿using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
@@ -22,7 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong PenHandle = Instance.WinHelper.ReadDcSelectedPen(Hdc);
             Win32kPenBrush Pen = Win32kHelper.ResolvePenBrush(Instance, PenHandle, true);
 
-            Instance.WinHelper.EnqueueGdiLine(Hwnd, StartX, StartY, X, Y, Pen.ColorRef, Pen.PenWidth);
+            Instance.WinHelper.EnqueueGdiLine(Hwnd, Hdc, StartX, StartY, X, Y, Pen.ColorRef, Pen.PenWidth);
             Instance.WinHelper.WriteDcCurrentPosition(Hdc, X, Y);
 
             Instance.SetRawSyscallReturn(1);

@@ -35,6 +35,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            // Both counts ride into a per-window allocation, so an unusable one is refused here.
+            if (WndClass.cbWndExtra < 0 || WndClass.cbWndExtra > Win32kHelper.MaxClassExtraBytes ||
+                WndClass.cbClsExtra < 0 || WndClass.cbClsExtra > Win32kHelper.MaxClassExtraBytes)
+            {
+                Instance.SetLastWinError(ERROR_INVALID_PARAMETER);
+                Instance.SetRawSyscallReturn(0);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
             string ClassName = Win32kHelper.ReadUnicodeString(Instance, ClassNamePtr);
             if (string.IsNullOrEmpty(ClassName))
                 ClassName = ReadClassNameFromPointer(Instance, WndClass.lpszClassName);
@@ -63,7 +72,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 CursorHandle = WndClass.hCursor,
                 BackgroundBrush = WndClass.hbrBackground,
                 SmallIconHandle = WndClass.hIconSm,
-                FunctionId = FunctionId,
+                FunctionId = Win32kHelper.MaskFunctionId(FunctionId),
                 Flags = Flags,
                 Ansi = (Flags & 1) != 0,
             });

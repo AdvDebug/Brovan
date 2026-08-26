@@ -404,6 +404,7 @@ namespace Brovan.Core.Emulation.Guests
             State.AlertByThreadIdAddress = 0;
             State.MsgWaitActive = false;
             State.MsgWaitMask = 0;
+            State.WaitMessageActive = false;
             State.GetMessageWaitActive = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;

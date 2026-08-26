@@ -1,4 +1,4 @@
-using static Brovan.Core.Helpers.BinaryHelpers;
+﻿using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
@@ -77,6 +77,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Instance.WinHelper.FocusWindow = Window.Hwnd;
 
                 Instance.WinHelper.SetThreadWindowContext(Window);
+
+                if (!WasVisible)
+                    Win32kHelper.InvalidateWindowTree(Instance, Window.Hwnd);
             }
 
             Instance.WinHelper.PresentDesktop();
