@@ -179,6 +179,8 @@ Thanks to <a href="https://github.com/unicorn-engine/unicorn">Unicorn Engine</a>
 
 Thanks to my friend <a href="https://github.com/GittingHubbers">GittingHubbers</a> for help with the MLFQ Scheduler.
 
+Thanks to my friend <a href="https://github.com/ZypherionTechnologies">Adam (Zypherion Technologies)</a> for help with various parts of the emulator.
+
 ## License
 
 GPL-2.0
