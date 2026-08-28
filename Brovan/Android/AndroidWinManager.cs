@@ -54,6 +54,13 @@ namespace Brovan.Android
 
             AndroidHost.WindowTitle = options.Title ?? string.Empty;
             _window = new AndroidWindow(options);
+
+            // Host events delivered before the guest had a window drained into nothing. The surface size in
+            // particular is published only on change, so without this the guest never hears it and a guest
+            // that waits for its first size event never starts presenting.
+            _publishedWidth = 0;
+            _publishedHeight = 0;
+            AndroidInput.ReplayFocus();
             return _window;
         }
 

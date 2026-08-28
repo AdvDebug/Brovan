@@ -84,9 +84,18 @@ namespace Brovan.Android
             HostEventQueue.Enqueue(message, virtualKey, BuildKeyLParam(scanCode, virtualKey, down, _altHeld));
         }
 
+        private static volatile bool _focused;
+
         public static void Focus(bool focused)
         {
+            _focused = focused;
             HostEventQueue.Enqueue(focused ? WM_SETFOCUS : WM_KILLFOCUS, 0, 0);
+        }
+
+        public static void ReplayFocus()
+        {
+            if (_focused)
+                HostEventQueue.Enqueue(WM_SETFOCUS, 0, 0);
         }
 
         public static void Resize(int width, int height)
