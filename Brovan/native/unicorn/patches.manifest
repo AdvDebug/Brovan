@@ -156,6 +156,9 @@ insert-after|qemu/softmmu/memory.c|static bool brov_flatview_add(MemoryRegion *m
 replace-all|qemu/softmmu/memory.c|    memory_region_transaction_commit(subregion);|    if (!brov_flatview_add(subregion)) { memory_region_transaction_commit(subregion); }
 append|qemu/softmmu/memory.c|#include "brovan_flatview.inc.c"
 
+# --- the mru lookup cache cannot outlive a section-array realloc -------------
+insert-in-body|qemu/exec.c|static uint16_t phys_section_add(struct uc_struct *uc, PhysPageMap *map,|    container_of(map, AddressSpaceDispatch, map)->mru_section = NULL; /* brov: the array can move while the dispatch is live */
+
 # --- only the view the insert mutates skips compaction, not every dispatch ---
 replace-all|qemu/softmmu/memory.c|address_space_dispatch_compact(view->dispatch);|brov_dispatch_compact(view);
 replace-all|qemu/softmmu/memory.c|address_space_dispatch_compact(dst->dispatch);|brov_dispatch_compact(dst);

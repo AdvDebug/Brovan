@@ -24,6 +24,11 @@
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_budget.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_mem_hooks.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_notdirty.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_flatview.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_ramblock.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_softfloat_fast.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_softfloat_cmp.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_sse_fastconv.inc.h" />
   </ItemGroup>
 
   <UsingTask TaskName="ApplyUnicornPatches" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">

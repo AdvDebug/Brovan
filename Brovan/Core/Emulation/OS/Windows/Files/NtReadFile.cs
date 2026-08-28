@@ -6,6 +6,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtReadFile : IWinSyscall
     {
+        internal const int IoChunkBytes = 4 << 20;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 
@@ -108,26 +110,38 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_FILE_LOCK_CONFLICT;
             }
 
-            Span<byte> Slice = Instance.WinHelper.Shared.GetSpan((uint)ToRead);
+            // Bounded chunks keep a guest-sized read from growing the shared scratch buffer to the file size.
+            int Done = 0;
             try
             {
-                ToRead = Stream.ReadAt(Offset, Slice.Slice(0, ToRead));
+                while (Done < ToRead)
+                {
+                    int ChunkSize = Math.Min(IoChunkBytes, ToRead - Done);
+                    Span<byte> Slice = Instance.WinHelper.Shared.GetSpan((uint)ChunkSize);
+                    int Got = Stream.ReadAt(Offset + Done, Slice.Slice(0, ChunkSize));
+                    if (Got <= 0)
+                        break;
+
+                    Instance._emulator.WriteMemory(BufferPtr + (ulong)Done, Slice.Slice(0, Got));
+                    Done += Got;
+                }
             }
             catch
             {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                return NTSTATUS.STATUS_ACCESS_DENIED;
+                if (Done == 0)
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                    return NTSTATUS.STATUS_ACCESS_DENIED;
+                }
             }
 
-            Instance._emulator.WriteMemory(BufferPtr, Slice.Slice(0, ToRead));
-
             if (ByteOffsetPtr == 0)
-                FileObj.Position = Offset + ToRead;
+                FileObj.Position = Offset + Done;
 
-            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)ToRead);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Done);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                Instance.TriggerEventMessage($"[+] NtReadFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Read=0x{ToRead:X}.", LogFlags.Syscall);
+                Instance.TriggerEventMessage($"[+] NtReadFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Read=0x{Done:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

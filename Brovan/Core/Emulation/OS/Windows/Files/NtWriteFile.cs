@@ -79,13 +79,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance.TriggerEventMessage($"[!] The emulated program tried to write to {WarnData}", LogFlags.Suspicious);
             }
 
-            Span<byte> Incoming = Length == 0 ? Span<byte>.Empty : Instance.WinHelper.ReadMemorySpan(BufferPtr, Length);
-            if (Length != 0 && Incoming.Length == 0)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            }
-
             WindowsFileStream Stream = FileObj.GetFileStream(true);
             if (Stream == null)
             {
@@ -98,30 +91,52 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Offset < 0)
                 Offset = 0;
 
-            if (Incoming.Length != 0 && FileObj.HasConflictingIoLock((ulong)Offset, (ulong)Incoming.Length, true))
+            int ToWrite = Length > int.MaxValue ? int.MaxValue : (int)Length;
+            if (ToWrite != 0 && FileObj.HasConflictingIoLock((ulong)Offset, (ulong)ToWrite, true))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_LOCK_CONFLICT, 0);
                 return NTSTATUS.STATUS_FILE_LOCK_CONFLICT;
             }
 
+            // Bounded chunks keep a guest-sized write from growing the shared scratch buffer to the data size.
+            int Done = 0;
             try
             {
-                if (Incoming.Length != 0)
-                    Stream.WriteAt(Offset, Incoming);
+                while (Done < ToWrite)
+                {
+                    int ChunkSize = Math.Min(NtReadFile.IoChunkBytes, ToWrite - Done);
+                    Span<byte> Incoming = Instance.WinHelper.ReadMemorySpan(BufferPtr + (ulong)Done, (uint)ChunkSize);
+                    if (Incoming.Length == 0)
+                    {
+                        if (Done == 0)
+                        {
+                            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        }
+
+                        break;
+                    }
+
+                    Stream.WriteAt(Offset + Done, Incoming);
+                    Done += Incoming.Length;
+                }
             }
             catch
             {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                return NTSTATUS.STATUS_ACCESS_DENIED;
+                if (Done == 0)
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                    return NTSTATUS.STATUS_ACCESS_DENIED;
+                }
             }
 
             FileObj.Real = true;
-            FileObj.Position = Offset + Incoming.Length;
+            FileObj.Position = Offset + Done;
 
-            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Incoming.Length);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Done);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                Instance.TriggerEventMessage($"[+] NtWriteFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Wrote=0x{Incoming.Length:X}.", LogFlags.Syscall);
+                Instance.TriggerEventMessage($"[+] NtWriteFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Wrote=0x{Done:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

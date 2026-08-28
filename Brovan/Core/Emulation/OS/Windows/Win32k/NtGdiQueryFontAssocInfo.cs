@@ -1,13 +1,15 @@
-using Microsoft.Win32;
+using System;
+using System.Text;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtGdiQueryFontAssocInfo : IWinSyscall
     {
-        private const string FontAssocKeyPath = @"SYSTEM\CurrentControlSet\Control\FontAssoc\Associated Charset";
+        private const string FontAssocKeyPath = @"\Registry\Machine\SYSTEM\CurrentControlSet\Control\FontAssoc\Associated Charset";
 
-        private static int _cachedFlags = -1;
+        private int _cachedFlags = -1;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -15,11 +17,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance.WinHelper.GetArg(0);
 
             Instance.SetLastWinError(0);
-            Instance.SetRawSyscallReturn((ulong)(uint)ResolveAssociationFlags());
+            Instance.SetRawSyscallReturn((ulong)(uint)ResolveAssociationFlags(Instance));
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static int ResolveAssociationFlags()
+        private int ResolveAssociationFlags(BinaryEmulator Instance)
         {
             int Cached = _cachedFlags;
             if (Cached >= 0)
@@ -27,23 +29,24 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             int Flags = 0;
 
-            if (GeneralHelper.IsWindows)
+            if (Instance.WinHelper.RegistryKeyExists(FontAssocKeyPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly))
             {
-                try
+                WinRegKey RegKey = new WinRegKey
                 {
-                    using RegistryKey Key = Registry.LocalMachine.OpenSubKey(FontAssocKeyPath, false);
-                    if (Key != null)
-                    {
-                        foreach (string Name in Key.GetValueNames())
-                        {
-                            string Value = Key.GetValue(Name) as string;
-                            if (Value != null && Value.Equals("YES", System.StringComparison.OrdinalIgnoreCase))
-                                Flags |= MapCharsetNameToBit(Name);
-                        }
-                    }
-                }
-                catch
+                    FullPath = FontAssocKeyPath,
+                    Hive = Hive,
+                    ParsedKey = Key,
+                    HasParsedKey = !TempOnly && Hive != null && Hive.Reader != null
+                };
+
+                for (int Index = 0; Instance.WinHelper.TryEnumerateRegistryValueFull(RegKey, Index, out string Name, out _, out byte[] Data); Index++)
                 {
+                    if (Data == null || Data.Length < 2)
+                        continue;
+
+                    string Value = Encoding.Unicode.GetString(Data).TrimEnd('\0').Trim();
+                    if (Value.Equals("YES", StringComparison.OrdinalIgnoreCase))
+                        Flags |= MapCharsetNameToBit(Name);
                 }
             }
 

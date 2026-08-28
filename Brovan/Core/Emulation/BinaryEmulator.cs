@@ -2968,7 +2968,8 @@ namespace Brovan.Core.Emulation
 
         private void SyscallInstructionHandler()
         {
-            TriggerDebugMessage(() => $"cpu: syscall instruction at 0x{ReadRegister(IPRegister):X}");
+            if (Debug)
+                TriggerDebugMessage($"cpu: syscall instruction at 0x{ReadRegister(IPRegister):X}");
             try
             {
                 Guest.TryHandleSyscall(this);
@@ -3181,13 +3182,15 @@ namespace Brovan.Core.Emulation
                 return false;
 
             _emulator.RestoreCodeCache();
-            TriggerDebugMessage(() => $"emu: start 0x{StartAddress:X}->0x{EndAddress:X} timeout={Timeout} count={Count}");
+            if (Debug)
+                TriggerDebugMessage($"emu: start 0x{StartAddress:X}->0x{EndAddress:X} timeout={Timeout} count={Count}");
             bool Result = _emulator.Emulate(StartAddress, EndAddress, Timeout, Count);
             if (!Result && LogErrors)
             {
                 Utils.LogError($"[BinaryEmulator] Emulation failed: {GetLastError()}");
             }
-            TriggerDebugMessage(() => $"emu: stop result={Result} ip=0x{ReadRegister(IPRegister):X} error={GetLastError()}");
+            if (Debug)
+                TriggerDebugMessage($"emu: stop result={Result} ip=0x{ReadRegister(IPRegister):X} error={GetLastError()}");
             return Result;
         }
 

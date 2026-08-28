@@ -7,6 +7,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtDeviceIoControlFile : IWinSyscall
     {
         private const uint LargeObjectThreshold = 85000;
+        // The shared pool keeps what it is handed for the process lifetime, so guest-sized buffers stay unpooled.
+        private const uint MaxPooledIoBytes = 1 << 26;
 
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -74,7 +76,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (InputBufferPtr != 0 && InputBufferLength != 0)
             {
                 byte[] InputBuffer;
-                if (InputBufferLength >= LargeObjectThreshold)
+                if (InputBufferLength > MaxPooledIoBytes)
+                {
+                    InputBuffer = new byte[InputBufferLength];
+                }
+                else if (InputBufferLength >= LargeObjectThreshold)
                 {
                     RentedInput = ArrayPool<byte>.Shared.Rent((int)InputBufferLength);
                     InputBuffer = RentedInput;
@@ -95,9 +101,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             byte[] RentedOutput = null;
             if (OutputBufferPtr != 0 && OutputBufferLength != 0)
             {
-                RentedOutput = ArrayPool<byte>.Shared.Rent((int)OutputBufferLength);
-                Array.Clear(RentedOutput, 0, (int)OutputBufferLength);
-                Data.OutputBuffer = RentedOutput;
+                if (OutputBufferLength > MaxPooledIoBytes)
+                {
+                    Data.OutputBuffer = new byte[OutputBufferLength];
+                }
+                else
+                {
+                    RentedOutput = ArrayPool<byte>.Shared.Rent((int)OutputBufferLength);
+                    Array.Clear(RentedOutput, 0, (int)OutputBufferLength);
+                    Data.OutputBuffer = RentedOutput;
+                }
+
                 Data.OutputLength = OutputBufferLength;
             }
 

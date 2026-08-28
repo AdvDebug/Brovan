@@ -56,10 +56,23 @@ static bool brov_find_ram_offset(struct uc_struct *uc, ram_addr_t size, ram_addr
     unsigned count = 0;
     unsigned i = 0;
 
-    /* Before the first free the offsets only grow, and the caller has an O(1) answer
-     * for that case. */
     if (!uc->ram_list.freed) {
-        return false;
+        ram_addr_t max_end = 0;
+
+        RAMBLOCK_FOREACH(block) {
+            ram_addr_t end = block->offset + block->max_length;
+
+            if (end > max_end) {
+                max_end = end;
+            }
+        }
+
+        if (size > RAM_ADDR_MAX - max_end) {
+            abort();
+        }
+
+        *result = max_end;
+        return true;
     }
 
     RAMBLOCK_FOREACH(block) {

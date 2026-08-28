@@ -60,6 +60,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint KeyboardPayloadSize = 16;
 
         private const int RecordSlots = 128;
+        private const uint CoalesceBacklog = 8;
         private const uint MinConfineExtent = 64;
 
         private static readonly Win32kRawDevice[] Devices =
@@ -95,6 +96,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly List<RawInputRegistration> Registrations = new();
             public readonly RawRecord[] Records = new RawRecord[RecordSlots];
             public uint NextHandle = 1;
+            public uint LastDeliveredHandle;
             public bool HavePointer;
             public int PointerX;
             public int PointerY;
@@ -333,11 +335,36 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static void Post(BinaryEmulator Instance, RawInputState State, ulong Hwnd, ref RawRecord Record)
         {
+            // A guest slower than the host input rate outruns the ring and reads stale handles: fold
+            // pending travel into the newest unread move, drop what a full ring cannot hold. The NT raw
+            // input queue also drops on overflow.
+            uint Backlog = State.NextHandle - 1 - State.LastDeliveredHandle;
+            if (Backlog >= CoalesceBacklog && Record.Type == RimTypeMouse && Record.ButtonFlags == 0)
+            {
+                ref RawRecord Previous = ref State.Records[(State.NextHandle - 1) % RecordSlots];
+                if (Previous.Handle == State.NextHandle - 1 && Previous.Type == RimTypeMouse && Previous.ButtonFlags == 0)
+                {
+                    Previous.LastX += Record.LastX;
+                    Previous.LastY += Record.LastY;
+                    return;
+                }
+            }
+
+            if (Backlog >= (uint)RecordSlots)
+                return;
+
             Record.Handle = State.NextHandle;
             State.NextHandle = State.NextHandle == uint.MaxValue ? 1 : State.NextHandle + 1;
             State.Records[Record.Handle % RecordSlots] = Record;
 
             Win32kHelper.PostMessage(Instance, Hwnd, Win32kHelper.WM_INPUT, 0, Record.Handle);
+        }
+
+        internal static void NoteInputDelivered(BinaryEmulator Instance, uint Handle)
+        {
+            RawInputState State = GetState(Instance);
+            if ((int)(Handle - State.LastDeliveredHandle) > 0)
+                State.LastDeliveredHandle = Handle;
         }
 
         // A guest in relative mode hides the pointer and never moves it back, so the pointer walks out of the

@@ -909,7 +909,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 {
                     Message = Candidate;
                     if (Remove)
+                    {
                         RemoveMessageAt(State.MessageQueue, Index);
+                        if (Candidate.Message == WM_INPUT)
+                            Win32kRawInput.NoteInputDelivered(Instance, (uint)Candidate.LParam);
+                    }
                     return true;
                 }
 
