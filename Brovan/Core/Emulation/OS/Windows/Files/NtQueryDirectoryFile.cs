@@ -28,7 +28,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ReturnSingleEntry)
                 QueryFlags |= SL_RETURN_SINGLE_ENTRY;
 
-            return NtQueryDirectoryFileCommon.Handle(Instance, FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName);
+            NTSTATUS Status = NtQueryDirectoryFileCommon.Handle(Instance, FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName);
+            Instance.WinHelper.SignalIoEvent(EventHandle, Status);
+            return Status;
         }
     }
 }

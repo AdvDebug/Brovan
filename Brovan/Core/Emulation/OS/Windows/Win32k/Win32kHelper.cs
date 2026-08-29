@@ -1,4 +1,5 @@
 ﻿using System.Buffers.Binary;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Brovan.Core.Emulation.OS.SharedHelpers;
@@ -95,6 +96,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint ERROR_CANNOT_FIND_WND_CLASS = 1407;
 
         internal const int MaxClassExtraBytes = 0x10000;
+
+        internal const string KeyboardPreloadKey = @"\Keyboard Layout\Preload";
+        internal const string KeyboardLayoutsKey = @"\Registry\Machine\SYSTEM\CurrentControlSet\Control\Keyboard Layouts";
 
         internal const byte PenHandleType = 0x30;
         internal const byte BrushHandleType = 0x10;
@@ -202,6 +206,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public int CursorShowCount;
             public bool CursorHidden;
             public Win32kCaret Caret;
+
+            public uint QueuedWakeBits;
+            public bool QueuedWakeBitsValid;
+
+            // Advance width per character, biased by one so that zero reads as unmeasured.
+            public int[] CharAdvanceWidths;
+
+            public IReadOnlyList<uint> KeyboardLayouts;
+            public uint KeyboardLayoutsGeneration;
         }
 
         internal sealed class Win32kCaret
@@ -873,8 +886,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 foreach (ulong TargetHwnd in Instance.WinHelper.TopLevelWindows)
                 {
-                    if (Instance.WinHelper.GetWindow(TargetHwnd) != null)
-                        State.MessageQueue.Enqueue(new Win32kMessage(TargetHwnd, Message, WParam, LParam, Time, 0, 0));
+                    if (Instance.WinHelper.GetWindow(TargetHwnd) == null)
+                        continue;
+
+                    State.MessageQueue.Enqueue(new Win32kMessage(TargetHwnd, Message, WParam, LParam, Time, 0, 0));
+                    NoteQueuedMessage(State, Message);
                 }
 
                 Instance.WakeSignal.Bump();
@@ -885,8 +901,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return false;
 
             State.MessageQueue.Enqueue(new Win32kMessage(Hwnd, Message, WParam, LParam, Time, 0, 0));
+            NoteQueuedMessage(State, Message);
             Instance.WakeSignal.Bump();
             return true;
+        }
+
+        private static void NoteQueuedMessage(Win32kState State, uint Message)
+        {
+            if (State.QueuedWakeBitsValid)
+                State.QueuedWakeBits |= GetMessageWakeBits(Message);
         }
 
         internal static void PostQuitMessage(BinaryEmulator Instance, ulong ExitCode)
@@ -910,7 +933,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Message = Candidate;
                     if (Remove)
                     {
-                        RemoveMessageAt(State.MessageQueue, Index);
+                        RemoveMessageAt(State, Index);
                         if (Candidate.Message == WM_INPUT)
                             Win32kRawInput.NoteInputDelivered(Instance, (uint)Candidate.LParam);
                     }
@@ -934,22 +957,114 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static bool HasQueuedInputEvent(BinaryEmulator Instance, uint WakeMask)
         {
+            return GetQueuedWakeBits(Instance, WakeMask) != 0;
+        }
+
+        // For a layout that is not a substitute, both halves of the HKL are the language the KLID ends with.
+        internal static uint KeyboardLayoutFromKlid(uint Klid)
+        {
+            uint Language = Klid & 0xFFFF;
+            uint Variant = Klid >> 16;
+            return Variant == 0 ? (Language << 16) | Language : ((0xF000u | Variant) << 16) | Language;
+        }
+
+        internal static bool TryParseKlid(string Klid, out uint Value)
+        {
+            return uint.TryParse(Klid, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out Value);
+        }
+
+        internal static bool IsInstalledKeyboardLayout(BinaryEmulator Instance, string Klid)
+        {
+            return !string.IsNullOrEmpty(Klid) && Instance.WinHelper.ResolveRegistryKey(KeyboardLayoutsKey + "\\" + Klid) != null;
+        }
+
+        /// <summary>
+        /// The layouts loaded for the current user, in the order the Preload list gives them. Held until a
+        /// registry change could have rewritten that list.
+        /// </summary>
+        internal static IReadOnlyList<uint> GetKeyboardLayouts(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            uint Generation = Instance.WinHelper.RegistryGeneration;
+
+            if (State.KeyboardLayouts != null && State.KeyboardLayoutsGeneration == Generation)
+                return State.KeyboardLayouts;
+
+            List<uint> Layouts = BuildKeyboardLayouts(Instance);
+            State.KeyboardLayouts = Layouts;
+            State.KeyboardLayoutsGeneration = Generation;
+            return Layouts;
+        }
+
+        private static List<uint> BuildKeyboardLayouts(BinaryEmulator Instance)
+        {
+            List<uint> Layouts = new List<uint>();
+            WinRegKey Preload = Instance.WinHelper.ResolveRegistryKey(@"\Registry\User\" + Instance.WinHelper.CurrentUserSid + KeyboardPreloadKey);
+
+            for (int Index = 0; Preload != null; Index++)
+            {
+                if (!Instance.WinHelper.TryEnumerateRegistryValueFull(Preload, Index, out _, out int Type, out byte[] Data))
+                    break;
+
+                if (Type != 1 || Data == null || Data.Length < 2)
+                    continue;
+
+                string Klid = Encoding.Unicode.GetString(Data).TrimEnd('\0');
+                if (!TryParseKlid(Klid, out uint Value))
+                    continue;
+
+                uint Layout = KeyboardLayoutFromKlid(Value);
+                if (!Layouts.Contains(Layout))
+                    Layouts.Add(Layout);
+            }
+
+            return Layouts;
+        }
+
+        /// <summary>
+        /// Backs <see cref="GetCharAdvanceWidth"/>. Fetched once by a caller that measures a run of characters,
+        /// so the per-character path costs an array read.
+        /// </summary>
+        internal static int[] GetCharAdvanceWidthCache(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            return State.CharAdvanceWidths ??= new int[char.MaxValue + 1];
+        }
+
+        internal static int GetCharAdvanceWidth(BinaryEmulator Instance, int[] Cache, char Character, int FallbackWidth)
+        {
+            int Cached = Cache[Character];
+            if (Cached != 0)
+                return Cached - 1;
+
+            if (!Instance.WinHelper.MeasureText(Character.ToString(), out int Measured, out _) || Measured <= 0)
+                return FallbackWidth;
+
+            Cache[Character] = Measured + 1;
+            return Measured;
+        }
+
+        internal static uint GetQueuedWakeBits(BinaryEmulator Instance, uint WakeMask)
+        {
             DrainHostEvents(Instance);
 
             if (WakeMask == 0)
-                return false;
+                return 0;
 
             Win32kState State = GetState(Instance);
-            if (State.QuitPosted && (WakeMask & QS_POSTMESSAGE) != 0)
-                return true;
 
-            foreach (Win32kMessage Candidate in State.MessageQueue)
+            if (!State.QueuedWakeBitsValid)
             {
-                if ((GetMessageWakeBits(Candidate.Message) & WakeMask) != 0)
-                    return true;
+                uint Queued = 0;
+                foreach (Win32kMessage Candidate in State.MessageQueue)
+                    Queued |= GetMessageWakeBits(Candidate.Message);
+
+                State.QueuedWakeBits = Queued;
+                State.QueuedWakeBitsValid = true;
             }
 
-            return false;
+            uint Bits = State.QuitPosted ? State.QueuedWakeBits | QS_POSTMESSAGE : State.QueuedWakeBits;
+            return Bits & WakeMask;
         }
 
         private static uint GetMessageWakeBits(uint Message)
@@ -1643,8 +1758,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Message.Message >= MinMessage && Message.Message <= MaxMessage;
         }
 
-        private static void RemoveMessageAt(Queue<Win32kMessage> Queue, int Index)
+        private static void RemoveMessageAt(Win32kState State, int Index)
         {
+            Queue<Win32kMessage> Queue = State.MessageQueue;
             int Count = Queue.Count;
             for (int i = 0; i < Count; i++)
             {
@@ -1652,6 +1768,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (i != Index)
                     Queue.Enqueue(Message);
             }
+
+            State.QueuedWakeBitsValid = false;
         }
 
         private static string ReadWindowTextPointer(BinaryEmulator Instance, ulong Address, bool Ansi)

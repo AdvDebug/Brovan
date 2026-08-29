@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -27,7 +27,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (ClassPtr != 0)
                 {
-                    uint UnicodeStringSize = (uint)Marshal.SizeOf<UNICODE_STRING64>();
+                    uint UnicodeStringSize = (uint)(Instance.WinHelper.PointerSize == 8 ? Unsafe.SizeOf<UNICODE_STRING64>() : Unsafe.SizeOf<UNICODE_STRING>());
                     if (!Instance.IsRegionMapped(ClassPtr, UnicodeStringSize))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }

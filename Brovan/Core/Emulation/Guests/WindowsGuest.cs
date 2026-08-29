@@ -134,7 +134,7 @@ namespace Brovan.Core.Emulation.Guests
                 return;
             }
 
-            StackSize = Binary.Architecture == BinaryArchitecture.x64 ? Binary.PE.OptionalHeader64.SizeOfStackReserve : Binary.PE.OptionalHeader32.SizeOfStackReserve / 2;
+            StackSize = Binary.Architecture == BinaryArchitecture.x64 ? Binary.PE.OptionalHeader64.SizeOfStackReserve : Binary.PE.OptionalHeader32.SizeOfStackReserve;
             ulong ImageBase = Binary.PE.ImageBase;
             ReadOnlySpan<byte> BinaryData = Binary.GetBinaryData();
             ulong ImageSize = Instance.AlignToPageSize(Binary.PE.SizeOfImage != 0 ? Binary.PE.SizeOfImage : (uint)Binary.BinarySize);
@@ -704,10 +704,7 @@ namespace Brovan.Core.Emulation.Guests
                     {
                         Instance.WinHelper.EndSyscall();
                     }
-                    {
-                        {
-                        }
-                    }
+
                     if (Instance.Settings.SyscallNotificationCallback != null)
                     {
                         Instance.Settings.SyscallNotificationCallback.Invoke(Instance.ReadRegister(Instance.IPRegister), Syscall, HandlerName, (ulong)(uint)Status);

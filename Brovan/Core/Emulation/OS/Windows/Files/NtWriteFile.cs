@@ -7,6 +7,14 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
+            ulong Event = Instance.WinHelper.GetArg(1);
+            NTSTATUS Status = Write(Instance);
+            Instance.WinHelper.SignalIoEvent(Event, Status);
+            return Status;
+        }
+
+        private static NTSTATUS Write(BinaryEmulator Instance)
+        {
 
             ulong FileHandle = Instance.WinHelper.GetArg(0);
             ulong EventHandle = Instance.WinHelper.GetArg(1);

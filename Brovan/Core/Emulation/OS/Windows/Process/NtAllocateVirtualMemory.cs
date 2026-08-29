@@ -106,51 +106,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong RegionSizePtr = Instance.WinHelper.GetArg(3);
             ulong AllocationTypeValue = (uint)Instance.WinHelper.GetArg(4);
             ulong ProtectValue = (uint)Instance.WinHelper.GetArg(5);
-            ulong RegionSize = 0;
             if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) && ProcessHandle != uint.MaxValue)
             {
-                RegionSize = Instance.WinHelper.ReadPointer(RegionSizePtr);
-
-                if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-
-                if (BaseAddressPtr == 0)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                if (RegionSize == 0)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessVMOperation);
-                if (Process == null)
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-
-                if (Instance.WinHelper.IsProtectedStatus(Process.Status))
-                    return NTSTATUS.STATUS_ACCESS_DENIED;
-
-                if (Process.Remote == null)
-                    return NTSTATUS.STATUS_INVALID_CID;
-
-                NTSTATUS RemoteStatus = Process.Remote.AllocateMemory(
-                    Instance.WinHelper.ReadPointer(BaseAddressPtr),
-                    RegionSize,
-                    (uint)AllocationTypeValue,
-                    (uint)ProtectValue,
-                    out ulong GrantedBase,
-                    out ulong GrantedSize);
-
-                if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
-                    return RemoteStatus;
-
-                if (!Instance.WinHelper.WritePointer(BaseAddressPtr, GrantedBase))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                if (!Instance.WinHelper.WritePointer(RegionSizePtr, GrantedSize))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                    Instance.TriggerEventMessage($"[+] Allocated 0x{GrantedSize:X} bytes in process \"{Process.Name}\" at 0x{GrantedBase:X}.", LogFlags.Syscall);
-
-                return NTSTATUS.STATUS_SUCCESS;
+                return AllocateRemote(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, (uint)AllocationTypeValue, (uint)ProtectValue, (uint)Instance.WinHelper.PointerSize);
             }
 
             if (BaseAddressPtr == 0 || RegionSizePtr == 0)
@@ -185,7 +143,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
+            ulong RegionSize = BinaryEmulator.AlignUp(RegionSizeRaw, PageSize);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtAllocateVirtualMemory (BaseAddress: 0x{BaseAddress:X}, RegionSize: {RegionSize}, Commit: {Commit}, Reserve: {Reserve})", LogFlags.Syscall);
@@ -199,6 +157,51 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Instance.WinHelper.WritePointer(RegionSizePtr, RegionSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal static NTSTATUS AllocateRemote(BinaryEmulator Instance, ulong ProcessHandle, ulong BaseAddressPtr, ulong RegionSizePtr, uint AllocationType, uint Protect, uint PointerSize)
+        {
+            if (BaseAddressPtr == 0 || RegionSizePtr == 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (!Instance.IsRegionMapped(BaseAddressPtr, PointerSize) || !Instance.IsRegionMapped(RegionSizePtr, PointerSize))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            ulong RegionSize = Instance.WinHelper.ReadPointer(RegionSizePtr, PointerSize);
+            if (RegionSize == 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessVMOperation);
+            if (Process == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            if (Instance.WinHelper.IsProtectedStatus(Process.Status))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            if (Process.Remote == null)
+                return NTSTATUS.STATUS_INVALID_CID;
+
+            NTSTATUS RemoteStatus = Process.Remote.AllocateMemory(
+                Instance.WinHelper.ReadPointer(BaseAddressPtr, PointerSize),
+                RegionSize,
+                AllocationType,
+                Protect,
+                out ulong GrantedBase,
+                out ulong GrantedSize);
+
+            if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
+                return RemoteStatus;
+
+            if (!Instance._emulator.WriteMemory(BaseAddressPtr, GrantedBase, PointerSize) || !Instance._emulator.WriteMemory(RegionSizePtr, GrantedSize, PointerSize))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] Allocated 0x{GrantedSize:X} bytes in process \"{Process.Name}\" at 0x{GrantedBase:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

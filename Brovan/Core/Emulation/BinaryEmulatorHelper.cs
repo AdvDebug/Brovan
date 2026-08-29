@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
@@ -1662,6 +1662,7 @@ namespace Brovan.Core.Emulation
 
                 RegisterSyscall(0x2000, nameof(Wow64UserConnectToServer), false);
                 RegisterSyscall(0x300B, nameof(Wow64BasepNlsGetUserInfo), false);
+                RegisterSyscall(0x300E, nameof(Wow64CsrBasepCreateProcess2), false);
                 RegisterSyscall(0x300F, nameof(Wow64BasepCreateActCtx), false);
             }
             else if (GeneralHelper.IsWindows)

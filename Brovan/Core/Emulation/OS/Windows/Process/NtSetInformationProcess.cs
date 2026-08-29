@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -18,7 +18,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool CurrentProcess = HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle);
 
             if (!CurrentProcess)
-                return NTSTATUS.STATUS_NOT_SUPPORTED;
+            {
+                WinProcess Target = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessSetInformation);
+                if (Target == null)
+                    return NTSTATUS.STATUS_INVALID_HANDLE;
+
+                // kernelbase treats a failure here as fatal, and nothing below models another process.
+                if (Target.PID != Instance.WinHelper.PID)
+                    return NTSTATUS.STATUS_SUCCESS;
+            }
 
             switch (InfoClass)
             {

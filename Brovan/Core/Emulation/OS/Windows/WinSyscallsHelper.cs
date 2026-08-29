@@ -292,6 +292,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.StopEmulation();
         }
 
+        /// <summary>
+        /// Signals the optional event a file request carries, which is what GetOverlappedResult waits on.
+        /// </summary>
+        public void SignalIoEvent(ulong EventHandle, NTSTATUS Status)
+        {
+            if (EventHandle == 0 || Status == NTSTATUS.STATUS_PENDING)
+                return;
+
+            WinEvent Ev = GetEventByHandle(EventHandle, AccessMask.GiveTemp);
+            if (Ev != null)
+                Ev.Signaled = true;
+        }
+
         public void WriteIoStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
         {
             if (PointerSize == 8)
@@ -398,11 +411,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Ok32;
         }
 
-        public ulong ReadPointer(ulong Address)
+        public ulong ReadPointer(ulong Address) => ReadPointer(Address, (uint)PointerSize);
+
+        /// <summary>
+        /// A WOW64 caller passes 64-bit values whatever the guest width is.
+        /// </summary>
+        public ulong ReadPointer(ulong Address, uint PointerWidth)
         {
-            return PointerSize == 8
-                ? Emulator._emulator.ReadMemoryULong(Address)
-                : Emulator._emulator.ReadMemoryUInt(Address);
+            return PointerWidth == 8 ? Emulator._emulator.ReadMemoryULong(Address) : Emulator._emulator.ReadMemoryUInt(Address);
         }
 
         public bool WritePointer(ulong Address, ulong Value)
@@ -1048,6 +1064,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public uint GetArg32(int Index) => (uint)GetArg(Index);
 
+        /// <summary>
+        /// A 64-bit argument a WOW64 caller passes as two 32-bit slots, low half first.
+        /// </summary>
+        public ulong GetWideArg(int Index) => GetArg(Index) | (GetArg(Index + 1) << 32);
+
         private uint SequentialIdCursor = 30000;
         private uint AnonymousObjectCursor;
 
@@ -1187,6 +1208,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static string WinRegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
         public RegistryManager RegManager = new RegistryManager(WinRegPath);
         public Hive[] RegHives;
+        /// <summary>
+        /// Bumped by every registry change, so a reader can cache what it derived from the registry and notice
+        /// when that result is stale.
+        /// </summary>
+        public uint RegistryGeneration;
+
         public HashSet<string> TempRegistryKeys = new(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> DeletedRegistryKeys = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, Dictionary<string, ValueNode>> TempRegistryValues = new(StringComparer.OrdinalIgnoreCase);
@@ -5766,15 +5793,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             long SignedOffset = unchecked((long)Emulator._emulator.ReadMemoryULong(ByteOffsetPtr));
-            long SignedLength = unchecked((long)Emulator._emulator.ReadMemoryULong(LengthPtr));
-            if (SignedOffset < 0 || SignedLength < 0)
+            if (SignedOffset < 0)
             {
                 Status = NTSTATUS.STATUS_INVALID_LOCK_RANGE;
                 return false;
             }
 
+            // The documented way to lock a whole file is a length of -1, so only the offset is signed.
             Offset = (ulong)SignedOffset;
-            Length = (ulong)SignedLength;
+            Length = Emulator._emulator.ReadMemoryULong(LengthPtr);
 
             if (!IsValidFileLockRange(Offset, Length))
             {
@@ -6012,6 +6039,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEPATH", 1, "\\Users\\" + CurrentUserName, KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "APPDATA", 2, "%USERPROFILE%\\AppData\\Roaming", KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "LOCALAPPDATA", 2, "%USERPROFILE%\\AppData\\Local", KeyCache, DefaultHive);
+
+            SetSyntheticRegistryStringTrusted(UserRoot + "\\Keyboard Layout\\Preload", "1", 1, "00000409", KeyCache, DefaultHive);
 
             string ProfileListKey = "\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\" + CurrentUserSid;
             AddSyntheticRegistryKeyTrusted(ProfileListKey, KeyCache, DefaultHive);
@@ -6793,6 +6822,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 DeletedRegistryKeys.Add(Child);
             }
 
+            RegistryGeneration++;
+
             string ParentPath = GetRegistryParentPath(NtPath);
             CompleteRegistryNotifications(!string.IsNullOrEmpty(ParentPath) ? ParentPath : NtPath, 0x00000001);
             return true;
@@ -6821,6 +6852,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DeletedRegistryValues.TryGetValue(NtPath, out HashSet<string> DeletedValues))
                 DeletedValues.Remove(ValueName);
 
+            RegistryGeneration++;
             CompleteRegistryNotifications(NtPath, 0x00000004);
             return true;
         }
@@ -6858,6 +6890,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             DeletedValues.Add(ValueName);
+            RegistryGeneration++;
             CompleteRegistryNotifications(NtPath, 0x00000004);
             return true;
         }
@@ -6919,16 +6952,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        public WinHandle OpenRegistryKey(string NtPath, AccessMask Permissions)
+        public WinRegKey ResolveRegistryKey(string NtPath)
         {
             NtPath = NormalizeNtRegistryPath(NtPath);
-            if (string.IsNullOrEmpty(NtPath))
+            if (string.IsNullOrEmpty(NtPath) || !RegistryKeyExists(NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly))
                 return null;
 
-            if (!RegistryKeyExists(NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly))
-                return null;
-
-            WinRegKey RegKey = new WinRegKey
+            return new WinRegKey
             {
                 FullPath = NtPath,
                 Hive = Hive,
@@ -6936,6 +6966,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ParsedKey = Key,
                 HasParsedKey = !TempOnly && Hive != null && Hive.Reader != null
             };
+        }
+
+        public WinHandle OpenRegistryKey(string NtPath, AccessMask Permissions)
+        {
+            WinRegKey RegKey = ResolveRegistryKey(NtPath);
+            if (RegKey == null)
+                return null;
 
             WinHandle Handle = HandleManager.AddHandle(RegKey, Permissions);
             AddWinHandle(Handle);

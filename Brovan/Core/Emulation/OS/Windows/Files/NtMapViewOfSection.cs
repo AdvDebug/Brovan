@@ -74,6 +74,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             WindowsDirectoryBytes[WindowsDirectoryByteCount - 1] = 0;
             Instance._emulator.WriteMemory(ReadOnlyStaticServerData + 0x1E, WindowsDirectoryBytes.Slice(0, WindowsDirectoryByteCount));
 
+            // kernel32 dereferences IniFileMapping without a null check.
+            ulong IniFileMapping = BaseStaticServerData + 0xC00;
+            Instance.WinHelper.WriteZeroMemory(IniFileMapping, 0x20);
+            Instance._emulator.WriteMemory(BaseStaticServerData + 0x170, IniFileMapping, 8);
+
             // CSDNumber / RCNumber.
             Instance._emulator.WriteMemory(BaseStaticServerData + 0x036, (ushort)0, 2);
             Instance._emulator.WriteMemory(BaseStaticServerData + 0x038, (ushort)0, 2);

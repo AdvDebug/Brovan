@@ -10,9 +10,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
+            ulong Event = Instance.WinHelper.GetArg(1);
+            NTSTATUS Status = Read(Instance);
+            Instance.WinHelper.SignalIoEvent(Event, Status);
+            return Status;
+        }
+
+        private static NTSTATUS Read(BinaryEmulator Instance)
+        {
 
             ulong FileHandle = Instance.WinHelper.GetArg(0);
-            ulong Event = Instance.WinHelper.GetArg(1);
             ulong ApcRoutine = Instance.WinHelper.GetArg(2);
             ulong ApcContext = Instance.WinHelper.GetArg(3);
             ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(4);

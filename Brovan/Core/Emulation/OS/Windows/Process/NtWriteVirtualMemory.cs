@@ -1,3 +1,5 @@
+﻿using System;
+using System.Buffers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -6,12 +8,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            ulong ProcessHandle = Instance.WinHelper.GetArg(0);
-            ulong BaseAddress = Instance.WinHelper.GetArg(1);
-            ulong Buffer = Instance.WinHelper.GetArg(2);
-            ulong NumberOfBytesToWrite = Instance.WinHelper.GetArg(3);
-            ulong BytesWrittenPtr = Instance.WinHelper.GetArg(4);
+            return Write(Instance, Instance.WinHelper.GetArg(0), Instance.WinHelper.GetArg(1), Instance.WinHelper.GetArg(2), Instance.WinHelper.GetArg(3), Instance.WinHelper.GetArg(4), (uint)Instance.WinHelper.PointerSize);
+        }
 
+        internal static NTSTATUS Write(BinaryEmulator Instance, ulong ProcessHandle, ulong BaseAddress, ulong Buffer, ulong NumberOfBytesToWrite, ulong BytesWrittenPtr, uint BytesWrittenSize)
+        {
             if (BaseAddress == 0 || Buffer == 0 || NumberOfBytesToWrite == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -21,51 +22,60 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(Buffer, NumberOfBytesToWrite))
                 return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
-            byte[] Payload = Instance.ReadMemory(Buffer, (uint)NumberOfBytesToWrite);
-            if (Payload.Length == 0)
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            int Length = (int)NumberOfBytesToWrite;
+            byte[] Rented = ArrayPool<byte>.Shared.Rent(Length);
 
-            if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
+            try
             {
-                if (!Instance.WinHelper.HandleExists(ProcessHandle))
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
+                Span<byte> Payload = Rented.AsSpan(0, Length);
+                if (!Instance.ReadMemory(Buffer, Payload, (uint)Length))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessVMOperation | AccessMask.ProcessVMWrite);
-                if (Process == null)
-                    return NTSTATUS.STATUS_ACCESS_DENIED;
-
-                if (Process.PID != Instance.WinHelper.PID)
+                if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
                 {
-                    if (Process.Remote == null)
-                        return NTSTATUS.STATUS_INVALID_CID;
+                    if (!Instance.WinHelper.HandleExists(ProcessHandle))
+                        return NTSTATUS.STATUS_INVALID_HANDLE;
 
-                    NTSTATUS RemoteStatus = Process.Remote.WriteMemory(BaseAddress, Payload, out ulong Written);
-                    if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
-                        return RemoteStatus;
+                    WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessVMOperation | AccessMask.ProcessVMWrite);
+                    if (Process == null)
+                        return NTSTATUS.STATUS_ACCESS_DENIED;
 
-                    WriteCount(Instance, BytesWrittenPtr, Written);
-                    return NTSTATUS.STATUS_SUCCESS;
+                    if (Process.PID != Instance.WinHelper.PID)
+                    {
+                        if (Process.Remote == null)
+                            return NTSTATUS.STATUS_INVALID_CID;
+
+                        NTSTATUS RemoteStatus = Process.Remote.WriteMemory(BaseAddress, Payload, out ulong Written);
+                        if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
+                            return RemoteStatus;
+
+                        WriteCount(Instance, BytesWrittenPtr, Written, BytesWrittenSize);
+                        return NTSTATUS.STATUS_SUCCESS;
+                    }
                 }
+
+                if (!Instance.IsRegionMapped(BaseAddress, NumberOfBytesToWrite))
+                    return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+
+                if (!Instance._emulator.WriteMemory(BaseAddress, Payload))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Rented);
             }
 
-            if (!Instance.IsRegionMapped(BaseAddress, NumberOfBytesToWrite))
-                return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
-
-            if (!Instance._emulator.WriteMemory(BaseAddress, Payload))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            WriteCount(Instance, BytesWrittenPtr, (ulong)Payload.Length);
+            WriteCount(Instance, BytesWrittenPtr, NumberOfBytesToWrite, BytesWrittenSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static void WriteCount(BinaryEmulator Instance, ulong BytesWrittenPtr, ulong Count)
+        private static void WriteCount(BinaryEmulator Instance, ulong BytesWrittenPtr, ulong Count, uint BytesWrittenSize)
         {
             if (BytesWrittenPtr == 0)
                 return;
 
-            int PointerSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
-            if (Instance.IsRegionMapped(BytesWrittenPtr, (ulong)PointerSize))
-                Instance._emulator.WriteMemory(BytesWrittenPtr, Count, (uint)PointerSize);
+            if (Instance.IsRegionMapped(BytesWrittenPtr, BytesWrittenSize))
+                Instance._emulator.WriteMemory(BytesWrittenPtr, Count, BytesWrittenSize);
         }
     }
 }
