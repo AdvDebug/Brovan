@@ -39,6 +39,8 @@ namespace Brovan.Core.Emulation
         private UCErrors _error;
         private readonly List<MappedRegion> _mappedRegions = new List<MappedRegion>();
         private readonly List<IntPtr> _pendingFrees = new List<IntPtr>();
+        private readonly Dictionary<IntPtr, nuint> _bufferSizes = new Dictionary<IntPtr, nuint>();
+        private ulong _pendingFreeBytes;
         private readonly List<MappedRegion> _unmapSurvivors = new List<MappedRegion>();
         private readonly List<IntPtr> _unmapReleasedBuffers = new List<IntPtr>();
         private List<IntPtr> HooksList = new List<IntPtr>();
@@ -165,6 +167,34 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        private const ulong PendingFreeSliceLimit = 64UL * 1024 * 1024;
+
+        private static unsafe byte* AllocateBacking(nuint size)
+        {
+            if (GeneralHelper.IsWindows)
+                return (byte*)VirtualAlloc(IntPtr.Zero, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+            IntPtr Mapped = Mmap(IntPtr.Zero, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            return Mapped == IntPtr.Zero || Mapped == new IntPtr(-1) ? null : (byte*)Mapped;
+        }
+
+        private static unsafe void FreeBacking(byte* pointer, nuint size)
+        {
+            if (GeneralHelper.IsWindows)
+                VirtualFree((IntPtr)pointer, UIntPtr.Zero, MEM_RELEASE);
+            else
+                Munmap((IntPtr)pointer, size);
+        }
+
+        private unsafe void ReleaseBacking(IntPtr buffer)
+        {
+            if (!_bufferSizes.TryGetValue(buffer, out nuint Size))
+                return;
+
+            _bufferSizes.Remove(buffer);
+            FreeBacking((byte*)buffer, Size);
+        }
+
         public unsafe bool MapMemory(ulong address, ulong size, MemoryProtection protection)
         {
             lock (_mapsLock)
@@ -173,17 +203,17 @@ namespace Brovan.Core.Emulation
                     return false;
 
                 nuint nativeSize = (nuint)size;
-                byte* ptr = (byte*)NativeMemory.AlignedAlloc(nativeSize, 0x1000);
+                byte* ptr = AllocateBacking(nativeSize);
                 if (ptr != null)
                 {
-                    NativeMemory.Clear(ptr, nativeSize);
                     _error = uc_mem_map_ptr(_uc, address, new UIntPtr(size), protection, (IntPtr)ptr);
                     if (_error == UCErrors.UC_ERR_OK)
                     {
+                        _bufferSizes[(IntPtr)ptr] = nativeSize;
                         InsertMappedRegion(new MappedRegion { Address = address, Size = size, Ptr = (IntPtr)ptr, BufferBase = (IntPtr)ptr });
                         return true;
                     }
-                    NativeMemory.AlignedFree(ptr);
+                    FreeBacking(ptr, nativeSize);
                 }
 
                 _error = uc_mem_map(_uc, address, new UIntPtr(size), protection);
@@ -310,8 +340,17 @@ namespace Brovan.Core.Emulation
                 }
 
                 if (!StillAliased)
+                {
                     _pendingFrees.Add(Buffer);
+                    if (_bufferSizes.TryGetValue(Buffer, out nuint Bytes))
+                        _pendingFreeBytes += Bytes;
+                }
             }
+
+            // Buffers are released at the end of the slice, so a guest that commits and decommits large
+            // blocks inside one slice keeps every dead buffer resident. Cut the slice short instead.
+            if (_pendingFreeBytes >= PendingFreeSliceLimit && _uc != IntPtr.Zero)
+                uc_emu_stop(_uc);
         }
 
         /// <summary>
@@ -1173,16 +1212,17 @@ namespace Brovan.Core.Emulation
 
         private unsafe void FlushPendingFrees()
         {
-            IntPtr[] toFree;
             lock (_mapsLock)
             {
                 if (_pendingFrees.Count == 0)
                     return;
-                toFree = _pendingFrees.ToArray();
+
+                for (int i = 0; i < _pendingFrees.Count; i++)
+                    ReleaseBacking(_pendingFrees[i]);
+
                 _pendingFrees.Clear();
+                _pendingFreeBytes = 0;
             }
-            foreach (IntPtr ptr in toFree)
-                NativeMemory.AlignedFree((void*)ptr);
         }
 
         /// <summary>
@@ -1830,15 +1870,17 @@ namespace Brovan.Core.Emulation
                                         _unmapReleasedBuffers.Add(region.BufferBase);
                                 }
                                 foreach (IntPtr buffer in _unmapReleasedBuffers)
-                                    NativeMemory.AlignedFree((void*)buffer);
+                                    ReleaseBacking(buffer);
                                 _unmapReleasedBuffers.Clear();
                                 _unmapSurvivors.Clear();
                                 _mappedRegions.Clear();
 
                                 foreach (IntPtr ptr in _pendingFrees)
-                                    NativeMemory.AlignedFree((void*)ptr);
+                                    ReleaseBacking(ptr);
                             }
                             _pendingFrees.Clear();
+                            _pendingFreeBytes = 0;
+                            _bufferSizes.Clear();
                         }
                         lock (_hooksLock) { HooksList.Clear(); }
                     }

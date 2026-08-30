@@ -231,6 +231,29 @@ namespace Brovan.Core.Emulation
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         public static extern UCErrors brov_reg_ptr(IntPtr uc, int regid, out IntPtr ptr, out UIntPtr size, out uint flags);
+
+        public const uint MEM_COMMIT = 0x1000;
+        public const uint MEM_RESERVE = 0x2000;
+        public const uint MEM_RELEASE = 0x8000;
+        public const uint PAGE_READWRITE = 0x04;
+
+        public const int PROT_READ = 0x1;
+        public const int PROT_WRITE = 0x2;
+        public const int MAP_PRIVATE = 0x02;
+        public const int MAP_ANONYMOUS = 0x20;
+
+        [DllImport("kernel32", SetLastError = true)]
+        public static extern IntPtr VirtualAlloc(IntPtr address, UIntPtr size, uint allocationType, uint protect);
+
+        [DllImport("kernel32", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool VirtualFree(IntPtr address, UIntPtr size, uint freeType);
+
+        [DllImport("libc", EntryPoint = "mmap", SetLastError = true)]
+        public static extern IntPtr Mmap(IntPtr address, UIntPtr length, int protection, int flags, int fd, long offset);
+
+        [DllImport("libc", EntryPoint = "munmap", SetLastError = true)]
+        public static extern int Munmap(IntPtr address, UIntPtr length);
     }
 
     internal static class NativeLibraryResolver
