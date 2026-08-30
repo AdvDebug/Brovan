@@ -540,6 +540,7 @@ namespace Brovan.Generators
             "vkFreeDescriptorSets",
             "vkUpdateDescriptorSets",
             "vkCmdBindDescriptorSets",
+            "vkCmdPushDescriptorSet",
             "vkCmdCopyImage",
             "vkCmdBlitImage",
             "vkCmdCopyImageToBuffer",
