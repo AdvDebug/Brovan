@@ -240,6 +240,11 @@ namespace Brovan.Core.Emulation
         public LogFlags Flags;
 
         /// <summary>
+        /// Holds every guest thread suspended until another session member resumes the process.
+        /// </summary>
+        public bool StartSuspended;
+
+        /// <summary>
         /// Split the stack to support individual function emulation (on by default).
         /// </summary>
         public bool SplitStack;
@@ -541,6 +546,10 @@ namespace Brovan.Core.Emulation
         public event MessageHandler OnMessage;
 
         internal readonly Dictionary<uint, EmulatedThread> Threads = new();
+
+        private bool StartSuspendedApplied;
+
+        private bool StartSuspendedReleased;
         internal readonly List<int> ThreadOrder = new();
         internal int CurrentThreadId = -1;
         internal int NextThreadId = 1;
@@ -2130,6 +2139,29 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
+        /// Releases the threads held back by <see cref="BinaryEmulatorSettings.StartSuspended"/>, which is what
+        /// the creator asking to resume the initial thread means for a process spawned suspended.
+        /// </summary>
+        public void ResumeSuspendedStart()
+        {
+            if (StartSuspendedReleased)
+                return;
+
+            // The resume can arrive before the scheduler ever held the threads, so record it either way.
+            StartSuspendedReleased = true;
+
+            if (!StartSuspendedApplied)
+                return;
+
+            StartSuspendedApplied = false;
+
+            foreach (EmulatedThread Thread in Threads.Values)
+                ResumeThread(Thread, out _);
+
+            SchedulerRefreshRequested = true;
+        }
+
+        /// <summary>
         /// Resumes an emulated thread and returns its previous suspend count.
         /// </summary>
         public bool TryResumeThread(uint ThreadId, out int PreviousSuspendCount)
@@ -2596,6 +2628,14 @@ namespace Brovan.Core.Emulation
             if (Debug)
                 TriggerDebugMessage($"scheduler: start threads={ThreadOrder.Count} levels={Levels} baseQuantum={BaseQuantumInstructions} maxInstructions={MaxTotalInstructions} maxSlices={MaxSlices}");
 
+            if (Settings.StartSuspended && !StartSuspendedApplied && !StartSuspendedReleased)
+            {
+                StartSuspendedApplied = true;
+
+                foreach (EmulatedThread Thread in Threads.Values)
+                    SuspendThread(Thread, out _, false);
+            }
+
             RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
             SchedulerRefreshRequested = false;
 
@@ -2655,6 +2695,16 @@ namespace Brovan.Core.Emulation
                     {
                         TrimDeadThreadsFromOrder();
                         KnownThreadOrderCount = ThreadOrder.Count;
+
+                        // A process created suspended has no runnable thread by design, and it still has to serve
+                        // session requests until its creator resumes it.
+                        if (StartSuspendedApplied && !StartSuspendedReleased)
+                        {
+                            Thread.Sleep(IdleWaitSliceMs);
+                            WakeupScanRequired = true;
+                            continue;
+                        }
+
                         if (!HasLiveMlfqThread())
                         {
                             if (Debug)

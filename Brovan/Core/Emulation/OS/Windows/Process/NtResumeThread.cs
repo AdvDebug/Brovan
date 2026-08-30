@@ -18,8 +18,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (TargetThread == null)
             {
-                // A spawned process runs its own initial thread, so there is nothing to resume, but the count a
-                // real initial thread would have had still has to come back or CreateProcess fails.
+                // The initial thread of a spawned process lives in the other emulator, and a process created
+                // suspended is still parked there waiting for exactly this call.
                 WinRemoteThread Remote = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRemoteThread>(ThreadHandle);
                 if (Remote == null)
                     return NTSTATUS.STATUS_INVALID_HANDLE;
@@ -35,6 +35,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance._emulator.WriteMemory(PreviousSuspendCountPtr, 1u);
                 }
 
+                // A process that was never held cannot report a failure to release it, and the suspend count
+                // still has to come back or the caller treats the whole create as failed.
+                Remote.Process.Resume();
                 return NTSTATUS.STATUS_SUCCESS;
             }
 

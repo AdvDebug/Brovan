@@ -11,6 +11,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         WriteMemory = 2,
         AllocateMemory = 3,
         CreateThread = 4,
+        ResumeProcess = 5,
     }
 
     /// <summary>

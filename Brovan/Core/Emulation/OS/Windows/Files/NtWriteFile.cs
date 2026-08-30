@@ -51,6 +51,33 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (FileObj.ConsoleKind == ConsoleObjectKind.Output || FileHandle == Instance.WinHelper.STD_OUT.Handle)
                 return HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
 
+            if (FileObj.Pipe != null)
+            {
+                if (!HasWriteAccess(Instance, FileHandle))
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                    return NTSTATUS.STATUS_ACCESS_DENIED;
+                }
+
+                if (Length > GuestNamedPipe.MaxMessageBytes)
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+                }
+
+                Span<byte> PipeBuffer = Instance.WinHelper.Shared.GetSpan(Length);
+                Instance._emulator.ReadMemory(BufferPtr, PipeBuffer.Slice(0, (int)Length));
+                NTSTATUS PipeStatus = FileObj.Pipe.Write(PipeBuffer.Slice(0, (int)Length), GuestNamedPipe.OwnerOf(Instance), out int PipeWritten);
+
+                // NT blocks a synchronous write until the peer reads.
+                if (PipeStatus == NTSTATUS.STATUS_PENDING &&
+                    Instance.WinHelper.TryRetrySyscallAfterSlice(GuestNamedPipe.PollSliceMilliseconds))
+                    return NTSTATUS.STATUS_PENDING;
+
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, PipeStatus, (ulong)PipeWritten);
+                return PipeStatus;
+            }
+
             if (FileObj.Device)
             {
                 if (NullDevice.IsNullDevicePath(FileObj.Path))

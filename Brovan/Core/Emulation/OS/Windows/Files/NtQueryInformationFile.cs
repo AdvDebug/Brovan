@@ -12,6 +12,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint FileEaInformationSize = 0x04;
         private const uint FileAccessInformationSize = 0x04;
         private const uint FilePositionInformationSize = 0x08;
+        private const uint FilePipeInformationSize = 0x08;
+        private const uint FilePipeLocalInformationSize = 0x28;
         private const uint FileModeInformationSize = 0x04;
         private const uint FileAlignmentInformationSize = 0x04;
         private const uint FileNetworkOpenInformationSize = 0x38;
@@ -73,6 +75,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return HandleFileAttributeTagInformation(Instance, File, IoStatusBlock, FileInformation, Length);
                 case FILE_INFORMATION_CLASS.FileIsRemoteDeviceInformation:
                     return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileEaInformationSize, 0);
+                case FILE_INFORMATION_CLASS.FilePipeInformation:
+                case FILE_INFORMATION_CLASS.FilePipeLocalInformation:
+                    return HandleFilePipeInformation(Instance, File, IoStatusBlock, FileInformation, Length, InfoClass);
                 case FILE_INFORMATION_CLASS.FileIdInformation:
                     return HandleFileIdInformation(Instance, File, IoStatusBlock, FileInformation, Length);
                 default:
@@ -81,6 +86,37 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
+        }
+
+        private static NTSTATUS HandleFilePipeInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation, uint Length, FILE_INFORMATION_CLASS InfoClass)
+        {
+            if (File.Pipe == null)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            }
+
+            uint Required = InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation ? FilePipeInformationSize : FilePipeLocalInformationSize;
+            if (Length < Required)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            if (InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation)
+            {
+                Instance._emulator.WriteMemory(FileInformation + 0x00, File.Pipe.ReadMode);
+                Instance._emulator.WriteMemory(FileInformation + 0x04, File.Pipe.CompletionMode);
+            }
+            else
+            {
+                Span<byte> Local = stackalloc byte[(int)FilePipeLocalInformationSize];
+                File.Pipe.WriteLocalInformation(Local);
+                Instance._emulator.WriteMemory(FileInformation, Local);
+            }
+
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, Required);
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         private static NTSTATUS HandleFileBasicInformation(BinaryEmulator Instance, ulong FileHandle, WinFile File, ulong IoStatusBlock, ulong FileInformation, uint Length)

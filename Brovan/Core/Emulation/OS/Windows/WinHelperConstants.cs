@@ -225,6 +225,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_SEMAPHORE_LIMIT_EXCEEDED = 0xC0000047,
         STATUS_NOT_A_REPARSE_POINT = 0xC0000275,
         STATUS_PROCESS_IN_JOB = 0x00000124,
+        STATUS_INSTANCE_NOT_AVAILABLE = 0xC00000AB,
+        STATUS_PIPE_NOT_AVAILABLE = 0xC00000AC,
+        STATUS_INVALID_PIPE_STATE = 0xC00000AD,
+        STATUS_PIPE_BUSY = 0xC00000AE,
+        STATUS_PIPE_DISCONNECTED = 0xC00000B0,
+        STATUS_PIPE_CLOSING = 0xC00000B1,
+        STATUS_PIPE_CONNECTED = 0xC00000B2,
+        STATUS_PIPE_LISTENING = 0xC00000B3,
+        STATUS_PIPE_EMPTY = 0xC00000D9,
+        STATUS_IO_TIMEOUT = 0xC00000B5,
+        STATUS_PIPE_BROKEN = 0xC000014B,
     }
 
     public enum THREADINFOCLASS : int
@@ -320,6 +331,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         FileDispositionInformation = 13,
         FilePositionInformation = 14,
         FileModeInformation = 16,
+        FilePipeInformation = 23,
+        FilePipeLocalInformation = 24,
         FileAlignmentInformation = 17,
         FileAllInformation = 18,
         FileAllocationInformation = 19,
@@ -1128,6 +1141,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public RemoteGuestProcess Remote;
 
+        /// <summary>
+        /// Set for a session sibling pulled in on demand, which this instance did not launch and must drop
+        /// again once the sibling exits.
+        /// </summary>
+        public bool Adopted;
+
         public string ObjectId => PID.ToString();
         public HandleType ObjectType => HandleType.ProcessHandle;
     }
@@ -1194,6 +1213,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong CompletionKey;
 
         public ConsoleObjectKind ConsoleKind;
+
+        internal GuestNamedPipe Pipe;
 
         public WinDeviceDelegate Handler;
 

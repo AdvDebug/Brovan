@@ -59,6 +59,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong ClientThreadInfo { get; set; }
         public bool WaitMessageActive { get; set; }
         public bool GetMessageWaitActive { get; set; }
+        public bool RetrySyscallActive { get; set; }
+        public uint RetrySyscallNumber { get; set; }
+        public ulong PipeWaitHandle { get; set; }
+        public long PipeWaitDeadline { get; set; } = -1;
         public ulong GetMessageMessagePtr { get; set; }
         public ulong GetMessageHwndFilter { get; set; }
         public uint GetMessageMinMessage { get; set; }

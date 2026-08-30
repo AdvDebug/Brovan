@@ -90,7 +90,19 @@ namespace Brovan.Core.Emulation
         private readonly List<IntPtr> _liveHookHandles = new();
 
         private readonly object _mmioLock = new();
-        private Thread _mmioRefreshThread;
+        private readonly object _partitionLock = new();
+        private Thread _maintenanceThread;
+
+        // WHP cannot end a run after a set number of instructions, so a slice that makes no VM exit is
+        // bounded by wall clock instead. Without it one guest loop never returns to the scheduler.
+        private const int BoundedSliceMilliseconds = 10;
+
+        // The next slice clears the trap flag, so an armed completion cannot carry over.
+        private const int CompletionGraceMilliseconds = 10;
+
+        private long _sliceDeadlineTimestamp;
+        private long _sliceGeneration;
+        private long _sliceExpiredGeneration;
 
         private bool _completionActive;
         private ulong _completionPageGpa;
@@ -453,7 +465,7 @@ namespace Brovan.Core.Emulation
             }
 
             RefreshTrappedPages();
-            EnsureMmioRefreshThread();
+            EnsureMaintenanceThread();
             _error = WhpErrors.Ok;
             return true;
         }
@@ -483,20 +495,20 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private void EnsureMmioRefreshThread()
+        private void EnsureMaintenanceThread()
         {
-            if (_mmioRefreshThread != null)
+            if (_maintenanceThread != null)
                 return;
 
-            _mmioRefreshThread = new Thread(MmioRefreshLoop)
+            _maintenanceThread = new Thread(MaintenanceLoop)
             {
                 IsBackground = true,
-                Name = "WhpMmioRefresh"
+                Name = "WhpMaintenance"
             };
-            _mmioRefreshThread.Start();
+            _maintenanceThread.Start();
         }
 
-        private void MmioRefreshLoop()
+        private void MaintenanceLoop()
         {
             while (!Disposed && !Disposing)
             {
@@ -506,7 +518,33 @@ namespace Brovan.Core.Emulation
                         RefreshMmioRegion(_mmioRegions[i]);
                 }
 
+                EnforceSliceDeadline();
+
                 Thread.Sleep(1);
+            }
+        }
+
+        private void EnforceSliceDeadline()
+        {
+            // Emulate arms the generation first, so reading it second keeps the pair consistent.
+            long deadline = Volatile.Read(ref _sliceDeadlineTimestamp);
+            long generation = Volatile.Read(ref _sliceGeneration);
+            if (deadline == 0 || Stopwatch.GetTimestamp() < deadline)
+                return;
+
+            if (Disposed || Disposing)
+                return;
+
+            if (Interlocked.CompareExchange(ref _sliceDeadlineTimestamp, 0, deadline) != deadline)
+                return;
+
+            // Naming the slice that ran out keeps a late cancel from ending the one that replaced it.
+            Volatile.Write(ref _sliceExpiredGeneration, generation);
+
+            lock (_partitionLock)
+            {
+                if (_partition != IntPtr.Zero)
+                    WhpNative.WHvCancelRunVirtualProcessor(_partition, VpIndex, 0);
             }
         }
 
@@ -918,6 +956,15 @@ namespace Brovan.Core.Emulation
             _stopRequested = false;
             _singleStepRequested = count == 1;
 
+            long SliceGeneration = Interlocked.Increment(ref _sliceGeneration);
+
+            if (count != 0)
+            {
+                EnsureMaintenanceThread();
+                Volatile.Write(ref _sliceDeadlineTimestamp,
+                    Stopwatch.GetTimestamp() + (Stopwatch.Frequency * BoundedSliceMilliseconds) / 1000);
+            }
+
             if (_singleStepRequested)
             {
                 GetRegistersRef().Rflags |= 0x100UL;
@@ -927,8 +974,26 @@ namespace Brovan.Core.Emulation
 
             try
             {
-                while (!_stopRequested)
+                // A stepped completion still owes a #DB, and its page stays writable until that arrives.
+                long CompletionGraceEnd = 0;
+
+                while (true)
                 {
+                    if (_stopRequested || Volatile.Read(ref _sliceExpiredGeneration) == SliceGeneration)
+                    {
+                        if (!_completionActive)
+                            break;
+
+                        long Now = Stopwatch.GetTimestamp();
+                        if (CompletionGraceEnd == 0)
+                            CompletionGraceEnd = Now + (Stopwatch.Frequency * CompletionGraceMilliseconds) / 1000;
+                        else if (Now >= CompletionGraceEnd)
+                        {
+                            AbandonSteppedCompletion();
+                            break;
+                        }
+                    }
+
                     RefreshMmioBackedRegions();
 
                     FlushRegisterCache();
@@ -946,7 +1011,12 @@ namespace Brovan.Core.Emulation
                             _error = WhpErrors.Ok;
                             return true;
                         case WhvRunVpExitReason.Canceled:
-                            if (_stopRequested) { _error = WhpErrors.Ok; return true; }
+                            if (_stopRequested && !_completionActive) { _error = WhpErrors.Ok; return true; }
+                            if (Volatile.Read(ref _sliceExpiredGeneration) == SliceGeneration && !_completionActive)
+                            {
+                                _error = WhpErrors.Ok;
+                                return true;
+                            }
                             continue;
                         case WhvRunVpExitReason.X64InterruptWindow:
                             continue;
@@ -970,6 +1040,8 @@ namespace Brovan.Core.Emulation
             }
             finally
             {
+                Volatile.Write(ref _sliceDeadlineTimestamp, 0);
+
                 if (_singleStepRequested)
                 {
                     _singleStepRequested = false;
@@ -983,12 +1055,18 @@ namespace Brovan.Core.Emulation
         {
             if (DisposedCheck()) return false;
 
-            _stopRequested = true;
-            if (_partition != IntPtr.Zero)
-                WhpNative.WHvCancelRunVirtualProcessor(_partition, VpIndex, 0);
+            RequestStop();
 
             _error = WhpErrors.Ok;
             return true;
+        }
+
+        // _error belongs to the thread running the slice, so a stop raised from elsewhere leaves it alone.
+        private void RequestStop()
+        {
+            _stopRequested = true;
+            if (_partition != IntPtr.Zero)
+                WhpNative.WHvCancelRunVirtualProcessor(_partition, VpIndex, 0);
         }
 
         private unsafe ref WhvRunVpExitContext RunVirtualProcessor()
@@ -1231,11 +1309,14 @@ namespace Brovan.Core.Emulation
             {
                 RemoveHooks();
 
-                if (_partition != IntPtr.Zero)
+                lock (_partitionLock)
                 {
-                    WhpNative.WHvDeleteVirtualProcessor(_partition, VpIndex);
-                    WhpNative.WHvDeletePartition(_partition);
-                    _partition = IntPtr.Zero;
+                    if (_partition != IntPtr.Zero)
+                    {
+                        WhpNative.WHvDeleteVirtualProcessor(_partition, VpIndex);
+                        WhpNative.WHvDeletePartition(_partition);
+                        _partition = IntPtr.Zero;
+                    }
                 }
 
                 if (_exitContextPtr != IntPtr.Zero)
@@ -2248,6 +2329,26 @@ namespace Brovan.Core.Emulation
 
             if (!_singleStepRequested)
                 ClearTrapFlag();
+            FlushRegisterCache();
+        }
+
+        /// <summary>
+        /// Gives up a stepped access whose #DB never arrived. The guest faults on the page again.
+        /// </summary>
+        private void AbandonSteppedCompletion()
+        {
+            if (!_completionActive)
+                return;
+
+            ulong pageGpa = _completionPageGpa;
+            _completionActive = false;
+            _completionPageGpa = 0;
+            _completionAccessGpa = 0;
+            _completionLen = 0;
+            _completionIsWrite = false;
+
+            ReTrapPage(pageGpa);
+            ClearTrapFlag();
             FlushRegisterCache();
         }
 

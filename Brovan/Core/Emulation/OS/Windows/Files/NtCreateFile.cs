@@ -86,7 +86,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeDevicePath, null);
             }
 
-            if (Instance.WinHelper.TryCreateDevice(Normalized, Ea, out string DevicePath, out WinDeviceDelegate DeviceHandler, out NTSTATUS DeviceStatus))
+            if (!IsRootRelativeName(RawPath, RootDirectoryHandle) &&
+                Instance.WinHelper.TryCreateDevice(Normalized, Ea, out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus))
             {
                 if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
                 {
@@ -94,7 +95,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return DeviceStatus;
                 }
 
-                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler);
+                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler, DevicePipe);
             }
 
             string Path = ResolveNtPath(Instance, RawPath, RootDirectoryHandle);
@@ -163,7 +164,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, VolumeDevicePath, null);
             }
 
-            if (Instance.WinHelper.TryCreateDevice(Normalized, Ea, out string DevicePath, out WinDeviceDelegate DeviceHandler, out NTSTATUS DeviceStatus))
+            if (!IsRootRelativeName(RawPath, RootDirectoryHandle) &&
+                Instance.WinHelper.TryCreateDevice(Normalized, Ea, out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus))
             {
                 if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
                 {
@@ -171,7 +173,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return DeviceStatus;
                 }
 
-                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, DevicePath, DeviceHandler);
+                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, DevicePath, DeviceHandler, DevicePipe);
             }
 
             string Path = ResolveNtPath(Instance, RawPath, RootDirectoryHandle);
@@ -536,7 +538,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return new string(Buf);
         }
 
-        internal static NTSTATUS CreateDeviceHandle(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string InternalPath, WinDeviceDelegate Handler)
+        /// <summary>
+        /// NT resolves a relative name against the RootDirectory handle, so it never reaches a device.
+        /// </summary>
+        internal static bool IsRootRelativeName(string RawPath, ulong RootDirectoryHandle)
+        {
+            return RootDirectoryHandle != 0 && !string.IsNullOrEmpty(RawPath) &&
+                   !RawPath.StartsWith("\\", StringComparison.Ordinal);
+        }
+
+        internal static NTSTATUS CreateDeviceHandle(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string InternalPath, WinDeviceDelegate Handler, GuestNamedPipe Pipe = null)
         {
             WinFile FileObj = new WinFile
             {
@@ -545,7 +556,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Real = false,
                 Directory = false,
                 Position = 0,
-                Handler = Handler
+                Handler = Handler,
+                Pipe = Pipe
             };
 
             Instance.WinHelper.WinFiles.Add(FileObj);
@@ -713,21 +725,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (string.IsNullOrEmpty(NtPath))
                 return null;
-
-            bool Absolute = NtPath.StartsWith("\\", StringComparison.Ordinal);
-
-            if (!Absolute && RootDirectoryHandle != 0)
-            {
-                WinFile Root = Instance.WinHelper.HandleManager.GetObjectByHandle<WinFile>(RootDirectoryHandle);
-
-                if (Root != null && !string.IsNullOrEmpty(Root.Path))
-                {
-                    string Base = Root.Path;
-                    if (!Base.EndsWith("\\"))
-                        Base += "\\";
-                    return Instance.WinHelper.ResolveWindowsFilePath(Base + NtPath);
-                }
-            }
 
             string Path = Instance.WinHelper.ResolveWindowsFilePath(NtPath, RootDirectoryHandle);
             if (string.IsNullOrEmpty(Path))

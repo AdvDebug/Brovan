@@ -7,6 +7,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const uint FileBasicInformationSize = 0x28;
         private const uint FilePositionInformationSize = 0x08;
+        private const uint FilePipeInformationSize = 0x08;
         private const uint FileModeInformationSize = 0x04;
         private const uint FileAllocationInformationSize = 0x08;
         private const uint FileEndOfFileInformationSize = 0x08;
@@ -44,6 +45,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (InfoClass == FILE_INFORMATION_CLASS.FileCompletionInformation)
                 return HandleFileCompletionInformation(Instance, FileObj, IoStatusBlock, FileInformation, Length);
 
+            if (FileObj.Pipe != null && InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation)
+                return HandleFilePipeInformation(Instance, FileObj, IoStatusBlock, FileInformation, Length);
+
             if (FileObj.Device)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
@@ -75,6 +79,30 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
+        }
+
+        private static NTSTATUS HandleFilePipeInformation(BinaryEmulator Instance, WinFile FileObj, ulong IoStatusBlock, ulong FileInformation, uint Length)
+        {
+            if (Length < FilePipeInformationSize)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            uint ReadMode = Instance._emulator.ReadMemoryUInt(FileInformation + 0x00);
+            uint CompletionMode = Instance._emulator.ReadMemoryUInt(FileInformation + 0x04);
+
+            if (ReadMode > GuestNamedPipe.FILE_PIPE_MESSAGE_MODE || CompletionMode > GuestNamedPipe.FILE_PIPE_COMPLETE_OPERATION)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            }
+
+            FileObj.Pipe.ReadMode = ReadMode;
+            FileObj.Pipe.CompletionMode = CompletionMode;
+
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         private static NTSTATUS HandleFileCompletionInformation(BinaryEmulator Instance, WinFile FileObj, ulong IoStatusBlock, ulong FileInformation, uint Length)

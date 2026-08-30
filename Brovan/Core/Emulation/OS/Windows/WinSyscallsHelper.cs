@@ -44,6 +44,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NormalizeDevicePath(Path, null);
         }
 
+        internal static string NormalizePipePath(string Path) => NormalizeDevicePath(Path, null);
+
+        private const string DosDevicesPrefix = "\\DosDevices\\";
+
         private static string NormalizeDevicePath(string Path, string VolumeGuid)
         {
             if (string.IsNullOrEmpty(Path))
@@ -53,6 +57,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Normalized.StartsWith("\\??\\", StringComparison.OrdinalIgnoreCase))
                 Normalized = Normalized.Substring(4);
+            else if (Normalized.StartsWith(DosDevicesPrefix, StringComparison.OrdinalIgnoreCase))
+                Normalized = Normalized.Substring(DosDevicesPrefix.Length);
 
             while (Normalized.Length > "\\Device\\".Length && Normalized.EndsWith("\\", StringComparison.Ordinal))
                 Normalized = Normalized.Substring(0, Normalized.Length - 1);
@@ -63,7 +69,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Normalized = Normalized.Substring(4);
             }
 
-            if (Normalized.Equals("BrovVulk", StringComparison.OrdinalIgnoreCase))
+            if (Normalized.Equals("pipe", StringComparison.OrdinalIgnoreCase) ||
+                Normalized.StartsWith("pipe\\", StringComparison.OrdinalIgnoreCase))
+            {
+                Normalized = GuestNamedPipe.DeviceName + Normalized.Substring("pipe".Length).TrimEnd('\\');
+            }
+            else if (Normalized.Equals("BrovVulk", StringComparison.OrdinalIgnoreCase))
                 Normalized = "\\Device\\BrovVulk";
             else if (Normalized.Equals("MountPointManager", StringComparison.OrdinalIgnoreCase))
                 Normalized = "\\Device\\MountPointManager";
@@ -94,15 +105,28 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns>True if the path matched a registered device.</returns>
         public bool TryCreateDevice(string Path, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler, out NTSTATUS Status)
         {
+            return TryCreateDevice(Path, EaBuffer, out InternalPath, out Handler, out _, out Status);
+        }
+
+        /// <param name="Pipe">The pipe endpoint when the path named one, null for every other device.</param>
+        internal bool TryCreateDevice(string Path, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler, out GuestNamedPipe Pipe, out NTSTATUS Status)
+        {
             InternalPath = null;
             Handler = null;
+            Pipe = null;
             Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
             string DevicePath = NormalizeDevicePath(Path, SyntheticVolumeGuid);
             if (!DeviceRegistry.Value.TryGetValue(DevicePath, out IWinDevice Device))
-                return false;
+            {
+                // Each pipe is a separate object under one device, so the registry cannot hold the name.
+                if (!GuestNamedPipe.IsPipePath(DevicePath) || !DeviceRegistry.Value.TryGetValue(GuestNamedPipe.DeviceName, out Device))
+                    return false;
+            }
 
-            Status = Device.Create(Emulator, DevicePath, EaBuffer ?? Array.Empty<byte>(), out InternalPath, out Handler);
+            Status = Device is NamedPipeDevice PipeDevice
+                ? PipeDevice.CreatePipe(DevicePath, out InternalPath, out Handler, out Pipe)
+                : Device.Create(Emulator, DevicePath, EaBuffer ?? Array.Empty<byte>(), out InternalPath, out Handler);
 
             if (Status == NTSTATUS.STATUS_SUCCESS && (string.IsNullOrEmpty(InternalPath) || Handler == null))
                 Status = NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
@@ -186,6 +210,81 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
+        /// Parks the thread for one slice and resumes it on the syscall instruction, so the syscall runs
+        /// again. Sleeping here instead would stop every other thread of the process.
+        /// </summary>
+        public bool TryRetrySyscallAfterSlice(int SliceMilliseconds)
+        {
+            EmulatedThread Thread = Emulator.CurrentThread;
+            if (Thread == null)
+                return false;
+
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            ulong SyscallRip = GetSyscallRip(Thread, false);
+
+            State.RetrySyscallNumber = Emulator.ReadRegister32(Emulator._binary.Architecture == BinaryArchitecture.x64
+                ? Registers.UC_X86_REG_RAX
+                : Registers.UC_X86_REG_EAX);
+            State.RetrySyscallActive = true;
+
+            Thread.WaitActive = true;
+            Thread.WaitHandles = null;
+            Thread.WaitAll = false;
+            Thread.WaitDeadline = Emulator.CreateEmulatedDeadlineMilliseconds(SliceMilliseconds);
+            State.WaitCompleted = false;
+            State.WaitStatus = NTSTATUS.STATUS_PENDING;
+            State.WaitResumeRIP = SyscallRip;
+            State.WaitReturnRIP = SyscallRip;
+            State.WaitAlertable = false;
+            State.ApcAlertable = false;
+
+            Thread.State = EmulatedThreadState.Waiting;
+            Emulator._emulator.WriteRegister(Emulator.IPRegister, SyscallRip);
+            Emulator._emulator.StopEmulation();
+            return true;
+        }
+
+        /// <summary>
+        /// The deadline spans every park, so it is kept per thread and handle rather than per call.
+        /// </summary>
+        public bool TryContinuePipeWait(ulong FileHandle, int TimeoutMilliseconds, int SliceMilliseconds)
+        {
+            EmulatedThread Thread = Emulator.CurrentThread;
+            if (Thread == null)
+                return false;
+
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+
+            if (State.PipeWaitHandle != FileHandle)
+            {
+                State.PipeWaitHandle = FileHandle;
+                State.PipeWaitDeadline = Emulator.CreateEmulatedDeadlineMilliseconds(TimeoutMilliseconds);
+            }
+            else if (Emulator.IsEmulatedDeadlineExpired(State.PipeWaitDeadline))
+            {
+                ClearPipeWait();
+                return false;
+            }
+
+            if (TryRetrySyscallAfterSlice(SliceMilliseconds))
+                return true;
+
+            ClearPipeWait();
+            return false;
+        }
+
+        public void ClearPipeWait()
+        {
+            EmulatedThread Thread = Emulator.CurrentThread;
+            WindowsThreadState State = Thread == null ? null : WinEmulatedThread.TryGetState(Thread);
+            if (State == null)
+                return;
+
+            State.PipeWaitHandle = 0;
+            State.PipeWaitDeadline = -1;
+        }
+
+        /// <summary>
         /// Clears the blocked wait state for an emulated thread.
         /// </summary>
         /// <param name="Thread">The emulated thread.</param>
@@ -210,6 +309,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.MsgWaitMask = 0;
             State.WaitMessageActive = false;
             State.GetMessageWaitActive = false;
+            State.RetrySyscallActive = false;
+            State.RetrySyscallNumber = 0;
+            State.PipeWaitHandle = 0;
+            State.PipeWaitDeadline = -1;
             State.IoCompletionWaitActive = false;
             State.IoCompletionHandle = 0;
             State.IoCompletionKeyContextPtr = 0;
@@ -979,8 +1082,31 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ParentProcessIdOffset = Is64 ? 0x58UL : 0x48UL;
             const ulong ImageNameOffset = 0x38;
 
+            ReapAdoptedSessionProcesses();
+
             List<WinProcess> Processes = WinProcesses ?? new List<WinProcess>();
-            RequiredLength = (uint)Processes.Count * EntrySize;
+            List<(uint Pid, uint Ppid, string Name)> Entries = new(Processes.Count + GuestSession.SlotCount);
+
+            ListedProcessIds.Clear();
+
+            for (int i = 0; i < Processes.Count; i++)
+            {
+                WinProcess Process = Processes[i];
+                Entries.Add((Process.PID, Process.PPID, Process.Status != ProtectionStatus.Unaccessible ? Process.Name : null));
+                ListedProcessIds.Add(Process.PID);
+            }
+
+            // The other guest processes of the session run in their own emulator instances, and a guest that
+            // enumerates processes has to see them the same way it sees its own.
+            List<(uint ProcessId, string ImageName)> Members = GetSessionMembers();
+
+            for (int i = 0; i < Members.Count; i++)
+            {
+                if (ListedProcessIds.Add(Members[i].ProcessId))
+                    Entries.Add((Members[i].ProcessId, 0u, Members[i].ImageName));
+            }
+
+            RequiredLength = (uint)Entries.Count * EntrySize;
 
             if (BufferLength < RequiredLength)
                 return false;
@@ -988,33 +1114,33 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteZeroMemory(Buffer, RequiredLength);
 
             ulong Current = Buffer;
-            for (int i = 0; i < Processes.Count; i++)
+            for (int i = 0; i < Entries.Count; i++)
             {
-                WinProcess Process = Processes[i];
+                (uint Pid, uint Ppid, string Name) Entry = Entries[i];
 
-                Emulator._emulator.WriteMemory(Current + 0x00, i == Processes.Count - 1 ? 0u : EntrySize);
+                Emulator._emulator.WriteMemory(Current + 0x00, i == Entries.Count - 1 ? 0u : EntrySize);
                 Emulator._emulator.WriteMemory(Current + 0x04, 1u);
 
                 ulong ImageName = Current + ImageNameOffset;
-                if (!string.IsNullOrEmpty(Process.Name) && Process.Status != ProtectionStatus.Unaccessible)
+                if (!string.IsNullOrEmpty(Entry.Name))
                 {
                     if (Is64)
-                        SetUnicodeString(ImageName, Process.Name);
+                        SetUnicodeString(ImageName, Entry.Name);
                     else
-                        SetUnicodeString32((uint)ImageName, Process.Name);
+                        SetUnicodeString32((uint)ImageName, Entry.Name);
                 }
+
+                Emulator._emulator.WriteMemory(Current + BasePriorityOffset, 8u);
 
                 if (Is64)
                 {
-                    Emulator._emulator.WriteMemory(Current + BasePriorityOffset, 8u);
-                    Emulator._emulator.WriteMemory(Current + ProcessIdOffset, (ulong)Process.PID, 8);
-                    Emulator._emulator.WriteMemory(Current + ParentProcessIdOffset, (ulong)Process.PPID, 8);
+                    Emulator._emulator.WriteMemory(Current + ProcessIdOffset, (ulong)Entry.Pid, 8);
+                    Emulator._emulator.WriteMemory(Current + ParentProcessIdOffset, (ulong)Entry.Ppid, 8);
                 }
                 else
                 {
-                    Emulator._emulator.WriteMemory(Current + BasePriorityOffset, 8u);
-                    Emulator._emulator.WriteMemory(Current + ProcessIdOffset, Process.PID);
-                    Emulator._emulator.WriteMemory(Current + ParentProcessIdOffset, Process.PPID);
+                    Emulator._emulator.WriteMemory(Current + ProcessIdOffset, Entry.Pid);
+                    Emulator._emulator.WriteMemory(Current + ParentProcessIdOffset, Entry.Ppid);
                 }
 
                 Current += EntrySize;
@@ -1071,6 +1197,33 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private uint SequentialIdCursor = 30000;
         private uint AnonymousObjectCursor;
+
+        private const long SessionMemberCacheMilliseconds = 250;
+
+        private readonly List<(uint ProcessId, string ImageName)> SessionMembers = new();
+        private readonly HashSet<uint> ListedProcessIds = new();
+        private long SessionMemberCacheDeadline;
+
+        /// <summary>
+        /// The live session members, refreshed at most a few times a second. Reading them takes the session
+        /// lock every member of the session shares, so a polling guest must not reach it on every call.
+        /// </summary>
+        private List<(uint ProcessId, string ImageName)> GetSessionMembers()
+        {
+            long Now = Environment.TickCount64;
+            if (Now < SessionMemberCacheDeadline)
+                return SessionMembers;
+
+            SessionMembers.Clear();
+            GuestSession.ListLive(SessionMembers);
+            SessionMemberCacheDeadline = Now + SessionMemberCacheMilliseconds;
+            return SessionMembers;
+        }
+
+        private static uint ReadGuestParentProcessId()
+        {
+            return uint.TryParse(Environment.GetEnvironmentVariable("BROVAN_PARENT_PID"), out uint Parent) ? Parent : 0;
+        }
 
         private uint AdoptHostProcessId()
         {
@@ -1466,7 +1619,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             SyntheticMountDevUniqueId = Guid.Parse(SyntheticVolumeGuid).ToByteArray();
             KuserSharedData = new KuserSharedDataManager(Emulator);
             PID = AdoptHostProcessId();
-            PPID = GenerateRandomPID();
+
+            // A guest spawned by another guest has a real parent in the session, and a check for
+            // "who started me" has to see the creator rather than an invented shell.
+            uint GuestParent = ReadGuestParentProcessId();
+            if (GuestParent != 0)
+                PIDs.Add(GuestParent);
+
+            PPID = GuestParent != 0 ? GuestParent : GenerateRandomPID();
+            uint ShellPID = GuestParent != 0 ? GenerateRandomPID() : PPID;
             string FileName = null;
             BinaryFile Binary = Emulator._binary;
             if (Emulator.GuestImagePath != null)
@@ -1507,8 +1668,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "smss.exe", Path = "C:\\Windows\\System32\\smss.exe", Status = ProtectionStatus.LightTCB, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "Memory Compression", Path = "MemCompression", Status = ProtectionStatus.Full, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = PID, PPID = PPID, Name = FileName, Path = Emulator.GuestImagePath, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = Binary.Architecture, PrimaryToken = new WinToken{SessionId = 1, IsElevated = false, IsRestricted = false, OwningProcessId = PID, OwningThreadId = 0, Type = TokenType.Primary } },
-                new WinProcess{ PID = PPID, PPID = GenerateRandomPID(), Name = "explorer.exe", Path = "C:\\Windows\\explorer.exe", Status = ProtectionStatus.None, RunningUser = User.Standard, Critical = false, Arch = BinaryArchitecture.x64 },
-                new WinProcess{ PID = FirefoxParent, PPID = PPID, Name = "firefox.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\firefox.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},
+                new WinProcess{ PID = ShellPID, PPID = GenerateRandomPID(), Name = "explorer.exe", Path = "C:\\Windows\\explorer.exe", Status = ProtectionStatus.None, RunningUser = User.Standard, Critical = false, Arch = BinaryArchitecture.x64 },
+                new WinProcess{ PID = FirefoxParent, PPID = ShellPID, Name = "firefox.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\firefox.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},
                 new WinProcess{ PID = GenerateRandomPID(), PPID = FirefoxParent, Name = "crashhelper.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\crashhelper.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},
                 new WinProcess{ PID = WininitPID, PPID = GenerateRandomPID(), Name = "wininit.exe", Path = "C:\\Windows\\System32\\wininit.exe", Status = ProtectionStatus.LightTCB, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = ServicesPID, PPID = WininitPID, Name = "services.exe", Path = "C:\\Windows\\System32\\services.exe", Status = ProtectionStatus.LightTCB, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
@@ -2656,6 +2817,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             else if (Value.Equals("\\Windows", StringComparison.OrdinalIgnoreCase))
                 Value = "C:\\Windows";
 
+            // NT resolves a relative object name against the RootDirectory handle. Every file syscall has
+            // to agree with NtCreateFile about where that lands, or a path opens but cannot be queried.
+            if (RootDirectory != 0 && !Value.StartsWith("\\", StringComparison.Ordinal) &&
+                !(Value.Length >= 2 && char.IsLetter(Value[0]) && Value[1] == ':'))
+            {
+                WinFile Root = HandleManager.GetObjectByHandle<WinFile>(RootDirectory);
+                if (Root != null && !string.IsNullOrEmpty(Root.Path))
+                {
+                    string Base = Root.Path.EndsWith("\\", StringComparison.Ordinal) ? Root.Path : Root.Path + "\\";
+                    return ResolveWindowsFilePath(Base + Value);
+                }
+            }
+
             return Value.Length >= 3 && char.IsLetter(Value[0]) && Value[1] == ':' && Value[2] == '\\' ? Value : string.Empty;
         }
 
@@ -3468,6 +3642,78 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// Adopts a live guest process of the session into this instance's process list, so a handle can be
+        /// opened to a sibling that runs in its own emulator instance.
+        /// </summary>
+        /// <param name="ProcessId">Guest process id of the sibling.</param>
+        /// <returns>Null when the id is not a live member of the session.</returns>
+        internal WinProcess TryAdoptSessionProcess(uint ProcessId)
+        {
+            if (ProcessId == 0 || ProcessId == PID)
+                return null;
+
+            if (!GuestSession.TryResolveMember(ProcessId, out uint HostProcessId, out string ImageName, out ulong Peb, out ulong Parameters))
+                return null;
+
+            // Zero until the member publishes startup.
+            if (Peb == 0)
+                return null;
+
+            System.Diagnostics.Process Host;
+            try
+            {
+                Host = System.Diagnostics.Process.GetProcessById((int)HostProcessId);
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+
+            WinProcess Sibling = new WinProcess
+            {
+                PID = ProcessId,
+                PPID = 0,
+                Name = string.IsNullOrEmpty(ImageName) ? "Brovan.exe" : ImageName,
+                Path = string.Empty,
+                Arch = BinaryArchitecture.Unknown,
+                Status = ProtectionStatus.None,
+                RunningUser = CurrentUser,
+                CreationTime = Emulator.GetEmulatedSystemTimeFileTimeUtc(),
+                Remote = RemoteGuestProcess.Adopt(ProcessId, Host, Peb, Parameters),
+                Adopted = true,
+            };
+
+            PIDs.Add(ProcessId);
+            WinProcesses.Add(Sibling);
+            return Sibling;
+        }
+
+        /// <summary>
+        /// Drops the session siblings that have exited. Their slots are already gone, so nothing else would
+        /// take them out of this instance's process list.
+        /// </summary>
+        private void ReapAdoptedSessionProcesses()
+        {
+            for (int Index = WinProcesses.Count - 1; Index >= 0; Index--)
+            {
+                WinProcess Candidate = WinProcesses[Index];
+                if (!Candidate.Adopted || Candidate.Remote == null || !Candidate.Remote.HasExited)
+                    continue;
+
+                // NT keeps an exited process queryable while a handle is open.
+                if (HandleManager.GetHandlesByObjectId(Candidate.ObjectId).Count != 0)
+                    continue;
+
+                WinProcesses.RemoveAt(Index);
+                PIDs.Remove(Candidate.PID);
+            }
         }
 
         public List<WinProcess> GetProcessList()
@@ -6269,6 +6515,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Normalized += "\\";
 
             SyntheticDirectories.Add(Normalized);
+
+            // Answering a query is not enough, creating a file under one of these needs the directory to exist.
+            string HostPath = GeneralHelper.IO.ResolveVirtualHostPath(Normalized, BinaryFormat.PE);
+            if (string.IsNullOrEmpty(HostPath))
+                return;
+
+            try
+            {
+                Directory.CreateDirectory(HostPath);
+            }
+            catch (Exception Error)
+            {
+                Utils.LogError($"[WinSysHelper] Failed to create the profile directory {Normalized}: {Error.Message}");
+            }
         }
 
         public bool IsSyntheticDirectory(string Path)
@@ -7180,6 +7440,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Entry.Object != null && Entry.Object.ObjectType == HandleType.FileHandle)
                 {
                     WinFile Closing = Entry.Object as WinFile;
+                    if (Closing?.Pipe != null && HandleManager.GetHandlesByObjectId(Closing.ObjectId).Count <= 1)
+                    {
+                        Closing.Pipe.Dispose();
+                        Closing.Pipe = null;
+                    }
+
                     if (Closing != null && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
                     {
                         List<ulong> HandlesForObject = HandleManager.GetHandlesByObjectId(Closing.ObjectId);

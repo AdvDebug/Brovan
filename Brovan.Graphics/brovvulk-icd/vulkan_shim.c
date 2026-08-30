@@ -42,6 +42,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceLayerProperties(
     return VK_SUCCESS;
 }
 
+// Device layers are deprecated, the spec lets a loader report none.
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceLayerProperties(
+    VkPhysicalDevice physicalDevice, uint32_t* pPropertyCount, VkLayerProperties* pProperties)
+{
+    (void)physicalDevice;
+    (void)pProperties;
+    if (pPropertyCount)
+        *pPropertyCount = 0;
+    return VK_SUCCESS;
+}
+
 #define BVK_HDR 8u
 
 static BVK_TLS unsigned char* bvk_rq;
@@ -549,6 +560,9 @@ typedef struct
     VkDescriptorUpdateTemplateEntry* entries;
     uint32_t entryCount;
     VkDescriptorUpdateTemplateType templateType;
+    VkPipelineBindPoint pipelineBindPoint;
+    VkPipelineLayout pipelineLayout;
+    uint32_t set;
 } BvkTemplate;
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(
@@ -571,6 +585,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(
     memcpy(t->entries, pCreateInfo->pDescriptorUpdateEntries, bytes);
     t->entryCount = pCreateInfo->descriptorUpdateEntryCount;
     t->templateType = pCreateInfo->templateType;
+    t->pipelineBindPoint = pCreateInfo->pipelineBindPoint;
+    t->pipelineLayout = pCreateInfo->pipelineLayout;
+    t->set = pCreateInfo->set;
     *pDescriptorUpdateTemplate = (VkDescriptorUpdateTemplate)(uintptr_t)t;
     return VK_SUCCESS;
 }
@@ -586,19 +603,17 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplate(
     free(t);
 }
 
-VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
-    VkDevice device, VkDescriptorSet descriptorSet, VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void* pData)
+static VkWriteDescriptorSet* bvk_expand_template(
+    const BvkTemplate* t, const void* pData, VkDescriptorSet descriptorSet, uint32_t* pWriteCount)
 {
-    BvkTemplate* t = (BvkTemplate*)(uintptr_t)descriptorUpdateTemplate;
-    if (!t || t->templateType != VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET || !pData)
-        return;
+    *pWriteCount = 0;
     size_t scratchBytes = 0;
     for (uint32_t i = 0; i < t->entryCount; i++)
         scratchBytes += (size_t)t->entries[i].descriptorCount * sizeof(VkDescriptorImageInfo);
     VkWriteDescriptorSet* writes = (VkWriteDescriptorSet*)malloc(
         t->entryCount * sizeof(VkWriteDescriptorSet) + scratchBytes);
     if (!writes)
-        return;
+        return NULL;
     unsigned char* scratch = (unsigned char*)(writes + t->entryCount);
     uint32_t writeCount = 0;
     for (uint32_t i = 0; i < t->entryCount; i++)
@@ -658,9 +673,49 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
             w->pTexelBufferView = (const VkBufferView*)arr;
         writeCount++;
     }
+    *pWriteCount = writeCount;
+    return writes;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
+    VkDevice device, VkDescriptorSet descriptorSet, VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void* pData)
+{
+    BvkTemplate* t = (BvkTemplate*)(uintptr_t)descriptorUpdateTemplate;
+    if (!t || t->templateType != VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET || !pData)
+        return;
+    uint32_t writeCount = 0;
+    VkWriteDescriptorSet* writes = bvk_expand_template(t, pData, descriptorSet, &writeCount);
+    if (!writes)
+        return;
     if (writeCount)
         vkUpdateDescriptorSets(device, writeCount, writes, 0, NULL);
     free(writes);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate(
+    VkCommandBuffer commandBuffer, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    VkPipelineLayout layout, uint32_t set, const void* pData)
+{
+    BvkTemplate* t = (BvkTemplate*)(uintptr_t)descriptorUpdateTemplate;
+    if (!t || t->templateType != VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS || !pData)
+        return;
+    uint32_t writeCount = 0;
+    VkWriteDescriptorSet* writes = bvk_expand_template(t, pData, VK_NULL_HANDLE, &writeCount);
+    if (!writes)
+        return;
+    if (writeCount)
+        vkCmdPushDescriptorSet(commandBuffer, t->pipelineBindPoint,
+                               layout ? layout : t->pipelineLayout, set, writeCount, writes);
+    free(writes);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate2(
+    VkCommandBuffer commandBuffer, const VkPushDescriptorSetWithTemplateInfo* pInfo)
+{
+    if (!pInfo)
+        return;
+    vkCmdPushDescriptorSetWithTemplate(commandBuffer, pInfo->descriptorUpdateTemplate,
+                                       pInfo->layout, pInfo->set, pInfo->pData);
 }
 
 typedef struct
@@ -774,9 +829,16 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
     M(vkGetInstanceProcAddr);
     M(vkGetDeviceProcAddr);
     M(vkEnumerateInstanceLayerProperties);
+    M(vkEnumerateDeviceLayerProperties);
     M(vkCreateDescriptorUpdateTemplate);
     M(vkDestroyDescriptorUpdateTemplate);
     M(vkUpdateDescriptorSetWithTemplate);
+    M(vkCmdPushDescriptorSetWithTemplate);
+    M(vkCmdPushDescriptorSetWithTemplate2);
+    if (strcmp(pName, "vkCmdPushDescriptorSetWithTemplateKHR") == 0)
+        return (PFN_vkVoidFunction)vkCmdPushDescriptorSetWithTemplate;
+    if (strcmp(pName, "vkCmdPushDescriptorSetWithTemplate2KHR") == 0)
+        return (PFN_vkVoidFunction)vkCmdPushDescriptorSetWithTemplate2;
     M(vkCreatePrivateDataSlot);
     M(vkDestroyPrivateDataSlot);
     M(vkSetPrivateData);

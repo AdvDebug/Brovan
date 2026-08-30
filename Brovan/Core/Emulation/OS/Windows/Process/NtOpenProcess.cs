@@ -32,6 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 WinProcess TargetProcess = Instance.WinHelper.GetProcessList().FirstOrDefault(p => p.PID == TargetPid);
+                TargetProcess ??= Instance.WinHelper.TryAdoptSessionProcess((uint)TargetPid);
                 if(TargetProcess == null)
                 {
                     return NTSTATUS.STATUS_INVALID_CID;
@@ -92,6 +93,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 WinProcess TargetProcess = Instance.WinHelper.GetProcessList().FirstOrDefault(p => p.PID == TargetPid);
+                TargetProcess ??= Instance.WinHelper.TryAdoptSessionProcess(TargetPid);
                 if (TargetProcess == null)
                 {
                     return NTSTATUS.STATUS_INVALID_CID;

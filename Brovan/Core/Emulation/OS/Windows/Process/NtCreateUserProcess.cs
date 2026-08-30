@@ -30,7 +30,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             string ImageNameHint = ReadImageNameAttribute(Instance, AttributeList, Is64);
 
-            if (!GuestProcessLauncher.TryLaunch(Instance, ProcessParameters, ImageNameHint, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status))
+            // THREAD_CREATE_FLAGS_CREATE_SUSPENDED, the creator wants to act on the process before it runs.
+            bool StartSuspended = (Instance.WinHelper.GetArg(7) & 1) != 0;
+
+            if (!GuestProcessLauncher.TryLaunch(Instance, ProcessParameters, ImageNameHint, StartSuspended, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status))
                 return Status;
 
             WinRemoteThread Thread = new WinRemoteThread

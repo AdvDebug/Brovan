@@ -76,14 +76,40 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Data.OutputLength = OutputBufferLength;
             }
 
+            Data.File = File;
+
             NTSTATUS Status;
             try
             {
-                Status = WindowsStorageDeviceSupport.HandleFsControl(FsControlCode, ref Data, File);
+                // FSCTL and IOCTL are separate namespaces, and a device handler answers the IOCTL one.
+                Status = File.Pipe != null
+                    ? File.Pipe.HandleControl(FsControlCode, ref Data, Instance)
+                    : WindowsStorageDeviceSupport.HandleFsControl(FsControlCode, ref Data, File);
             }
             catch
             {
                 Status = NTSTATUS.STATUS_UNSUCCESSFUL;
+            }
+
+            if (File.Pipe != null && Status == NTSTATUS.STATUS_PENDING)
+            {
+                int TimeoutMilliseconds = FsControlCode == GuestNamedPipe.FSCTL_PIPE_WAIT
+                    ? GuestNamedPipe.ReadWaitTimeoutMilliseconds(Data.InputBuffer, Data.InputLength)
+                    : GuestNamedPipe.BlockingIoMilliseconds;
+
+                if (Instance.WinHelper.TryContinuePipeWait(FileHandle, TimeoutMilliseconds, GuestNamedPipe.PollSliceMilliseconds))
+                    return NTSTATUS.STATUS_PENDING;
+
+                Status = FsControlCode switch
+                {
+                    GuestNamedPipe.FSCTL_PIPE_WAIT => NTSTATUS.STATUS_IO_TIMEOUT,
+                    GuestNamedPipe.FSCTL_PIPE_TRANSCEIVE => NTSTATUS.STATUS_PIPE_EMPTY,
+                    _ => NTSTATUS.STATUS_PIPE_LISTENING,
+                };
+            }
+            else if (File.Pipe != null)
+            {
+                Instance.WinHelper.ClearPipeWait();
             }
 
             ulong Information = Data.Information;

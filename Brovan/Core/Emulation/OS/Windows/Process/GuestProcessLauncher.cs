@@ -11,6 +11,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal static class GuestProcessLauncher
     {
         private const string SpawnDepthVariable = "BROVAN_GUEST_SPAWN_DEPTH";
+        private const string ParentProcessVariable = "BROVAN_PARENT_PID";
+        private const string StartSuspendedVariable = "BROVAN_START_SUSPENDED";
         private const int MaxSpawnDepth = 8;
 
         private const int MaxSessionProcesses = 6;
@@ -36,7 +38,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ushort OptionalHeaderMagic32 = 0x10B;
         private const ushort OptionalHeaderMagic64 = 0x20B;
 
-        internal static bool TryLaunch(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
+        internal static bool TryLaunch(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, bool StartSuspended, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
         {
             Process = null;
             ImageInformation = default;
@@ -127,6 +129,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             StartInfo.ArgumentList.Add(HostImage);
             StartInfo.Environment[SpawnDepthVariable] = (Depth + 1).ToString();
             StartInfo.Environment["BROVAN_SESSION_ID"] = GuestSession.SessionId;
+            StartInfo.Environment[ParentProcessVariable] = Instance.WinHelper.PID.ToString();
+
+            // The child inherits this emulator's environment, so a suspended process must clear the request
+            // again or every process it goes on to spawn starts held as well.
+            if (StartSuspended)
+                StartInfo.Environment[StartSuspendedVariable] = "1";
+            else
+                StartInfo.Environment.Remove(StartSuspendedVariable);
 
             Process HostProcess;
             try
@@ -164,7 +174,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Path = ImagePath,
                 Arch = Instance._binary.Architecture,
                 CreationTime = DateTime.UtcNow.ToFileTimeUtc(),
-                Remote = RemoteGuestProcess.Adopt(HostProcess, PebAddress, StartupParameters),
+                Remote = RemoteGuestProcess.Adopt(ProcessId, HostProcess, PebAddress, StartupParameters),
             };
 
             Instance.TriggerEventMessage($"[GuestProcessLauncher] Launched {Process.Name} as host process {Process.PID} (depth {Depth + 1}).", LogFlags.Syscall);
@@ -279,6 +289,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static int GetSpawnDepth()
         {
             return int.TryParse(Environment.GetEnvironmentVariable(SpawnDepthVariable), out int Depth) && Depth > 0 ? Depth : 0;
+        }
+
+        /// <summary>
+        /// Whether the creator asked for this process to hold its threads until it is resumed.
+        /// </summary>
+        internal static bool StartedSuspended()
+        {
+            return Environment.GetEnvironmentVariable(StartSuspendedVariable) == "1";
         }
 
         private static bool TryReserveLaunchSlot(out NTSTATUS Status)

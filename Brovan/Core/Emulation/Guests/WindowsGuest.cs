@@ -371,6 +371,12 @@ namespace Brovan.Core.Emulation.Guests
                 return;
             }
 
+            if (State.RetrySyscallActive)
+            {
+                CompleteSyscallRetry(Instance, Thread, State);
+                return;
+            }
+
             NTSTATUS WaitStatus = State.WaitStatus;
             if (WaitStatus == NTSTATUS.STATUS_PENDING)
                 WaitStatus = NTSTATUS.STATUS_SUCCESS;
@@ -406,6 +412,36 @@ namespace Brovan.Core.Emulation.Guests
             State.MsgWaitMask = 0;
             State.WaitMessageActive = false;
             State.GetMessageWaitActive = false;
+            Thread.WaitTimedOut = false;
+            Thread.WaitSatisfiedIndex = -1;
+
+            if (Instance.CurrentThread == Thread)
+            {
+                Instance.WriteRegister(Registers.UC_X86_REG_RIP, Thread.Context.RIP);
+                Instance.WriteRegister(Registers.UC_X86_REG_RAX, Thread.Context.RAX);
+            }
+        }
+
+        /// <summary>
+        /// Restores the syscall number that a completed wait would otherwise overwrite with its status.
+        /// </summary>
+        private void CompleteSyscallRetry(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
+        {
+            if (Thread.Context == null)
+                Thread.Context = new CpuContext();
+
+            Thread.Context.RIP = State.WaitResumeRIP;
+            Thread.Context.RAX = State.RetrySyscallNumber;
+
+            State.RetrySyscallActive = false;
+            State.RetrySyscallNumber = 0;
+            State.WaitCompleted = false;
+            State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
+            State.WaitResumeRIP = 0;
+            State.WaitReturnRIP = 0;
+            State.WaitAlertable = false;
+            State.WaitObjects = null;
+            State.ApcAlertable = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
 
@@ -824,7 +860,13 @@ namespace Brovan.Core.Emulation.Guests
                     return true;
                 case 0x29:
                     if ((Instance.Settings.Flags & LogFlags.General) != 0)
-                        Instance.TriggerEventMessage($"[!] The Emulated Program asked to Fast-Fail at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.General);
+                    {
+                        // __fastfail carries its reason in the first integer argument register.
+                        ulong FailCode = Instance.ReadRegister(Instance.IsX86Guest
+                            ? (int)Registers.UC_X86_REG_ECX
+                            : (int)Registers.UC_X86_REG_RCX);
+                        Instance.TriggerEventMessage($"[!] The Emulated Program asked to Fast-Fail at 0x{Instance.ReadRegister(Instance.IPRegister):X} with code {FailCode}.", LogFlags.General);
+                    }
                     Instance.StopEmulation();
                     return true;
                 case 0x2E:
@@ -1285,7 +1327,7 @@ namespace Brovan.Core.Emulation.Guests
                 if (string.IsNullOrEmpty(Name))
                     continue;
 
-                if (!Name.StartsWith("DXVK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("SDL_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("MONO_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("DOTNET_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("COMPlus_", StringComparison.OrdinalIgnoreCase))
+                if (!Name.StartsWith("DXVK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VKD3D_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("SDL_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("MONO_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("DOTNET_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("COMPlus_", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 Env[Name] = HostVariable.Value as string ?? string.Empty;

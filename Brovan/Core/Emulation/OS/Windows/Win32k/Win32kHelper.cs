@@ -87,6 +87,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
     internal static class Win32kHelper
     {
+        internal const uint ERROR_SUCCESS = 0;
         internal const uint ERROR_INVALID_HANDLE = 6;
         internal const uint ERROR_ACCESS_DENIED = 5;
         internal const uint ERROR_INVALID_PARAMETER = 87;

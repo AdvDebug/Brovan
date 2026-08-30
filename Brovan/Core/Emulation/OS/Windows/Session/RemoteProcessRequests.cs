@@ -113,6 +113,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Result = Thread.ThreadId;
                     return NTSTATUS.STATUS_SUCCESS;
                 }
+
+                case SessionOperation.ResumeProcess:
+                {
+                    Instance.ResumeSuspendedStart();
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
             }
 
             return NTSTATUS.STATUS_NOT_SUPPORTED;

@@ -24,7 +24,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.HandleExists(ProcessHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessVMOperation | AccessMask.ProcessVMRead);
+            // NT wants PROCESS_VM_READ for a read. PROCESS_VM_OPERATION belongs to write and protect.
+            WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessVMRead);
             if (Process == null)
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 

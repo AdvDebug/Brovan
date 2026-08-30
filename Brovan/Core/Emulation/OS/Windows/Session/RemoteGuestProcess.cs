@@ -42,9 +42,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        internal static RemoteGuestProcess Adopt(Process Host, ulong PebAddress, ulong ProcessParameters)
+        /// <summary>
+        /// Builds the handle to a guest process running in another emulator.
+        /// </summary>
+        /// <param name="ProcessId">Guest process id, which is what the session slots are keyed on.</param>
+        /// <param name="Host">Emulator instance hosting it.</param>
+        internal static RemoteGuestProcess Adopt(uint ProcessId, Process Host, ulong PebAddress, ulong ProcessParameters)
         {
-            return new RemoteGuestProcess(unchecked((uint)Host.Id), Host, PebAddress, ProcessParameters);
+            return new RemoteGuestProcess(ProcessId, Host, PebAddress, ProcessParameters);
         }
 
         internal NTSTATUS ReadMemory(ulong Address, Span<byte> Destination, out int Read)
@@ -104,6 +109,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ThreadId = (uint)RemoteThreadId;
 
             return Result;
+        }
+
+        /// <summary>
+        /// Releases a process that was created suspended, so its creator can inject before any guest code runs.
+        /// </summary>
+        internal NTSTATUS Resume()
+        {
+            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
+                return Status;
+
+            return GuestSessionMailbox.Send(Slot, SessionOperation.ResumeProcess, 0, 0, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out _, out _);
         }
 
         /// <summary>

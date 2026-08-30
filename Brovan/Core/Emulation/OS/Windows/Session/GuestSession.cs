@@ -201,6 +201,53 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        /// <summary>
+        /// Everything needed to open a handle to a sibling guest process of the session.
+        /// </summary>
+        /// <param name="GuestProcessId">Guest process id to resolve.</param>
+        /// <param name="HostProcessId">Receives the emulator instance hosting it.</param>
+        /// <param name="ImageName">Receives the image name the member published.</param>
+        /// <param name="PebAddress">Receives the guest PEB, zero until the member published startup.</param>
+        /// <param name="ProcessParameters">Receives the guest process parameters.</param>
+        internal static bool TryResolveMember(uint GuestProcessId, out uint HostProcessId, out string ImageName, out ulong PebAddress, out ulong ProcessParameters)
+        {
+            HostProcessId = 0;
+            ImageName = string.Empty;
+            PebAddress = 0;
+            ProcessParameters = 0;
+
+            lock (Sync)
+            {
+                if (!TryOpen())
+                    return false;
+
+                using SessionLock Lock = Acquire();
+                if (!Lock.Held || !TryFindLiveSlotLocked(GuestProcessId, out int Slot))
+                    return false;
+
+                int Offset = SlotOffset(Slot);
+                HostProcessId = _view.ReadUInt32(Offset + HostProcessIdOffset);
+                if (HostProcessId == 0)
+                    return false;
+
+                int NameLength = (int)Math.Min(_view.ReadUInt32(Offset + ImageLengthOffset), (uint)MaxImageBytes);
+                if (NameLength > 0)
+                {
+                    byte[] Name = new byte[NameLength];
+                    _view.ReadArray(Offset + ImageOffset, Name, 0, NameLength);
+                    ImageName = Encoding.Unicode.GetString(Name);
+                }
+
+                if (_view.ReadUInt32(Offset + ReadyOffset) != 0)
+                {
+                    PebAddress = _view.ReadUInt64(Offset + PebAddressOffset);
+                    ProcessParameters = _view.ReadUInt64(Offset + ProcessParametersOffset);
+                }
+
+                return true;
+            }
+        }
+
         internal static bool TryFindLiveSlot(uint GuestProcessId, out int Slot)
         {
             Slot = -1;
@@ -224,6 +271,48 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 using SessionLock Lock = Acquire();
                 return Lock.Held ? CountLiveLocked() : 0;
+            }
+        }
+
+        /// <summary>
+        /// Live guest processes of the session, each of which runs in its own emulator instance.
+        /// </summary>
+        /// <param name="Members">Receives the guest process id and image name of every live member.</param>
+        internal static void ListLive(List<(uint ProcessId, string ImageName)> Members)
+        {
+            lock (Sync)
+            {
+                if (!TryOpen())
+                    return;
+
+                using SessionLock Lock = Acquire();
+                if (!Lock.Held)
+                    return;
+
+                for (int Index = 0; Index < SlotCount; Index++)
+                {
+                    int Offset = SlotOffset(Index);
+                    if (_view.ReadUInt32(Offset + StateOffset) != SlotLive)
+                        continue;
+
+                    if (!IsHostAlive(_view.ReadUInt32(Offset + HostProcessIdOffset)))
+                    {
+                        _view.Write(Offset + StateOffset, SlotFree);
+                        continue;
+                    }
+
+                    int NameLength = (int)Math.Min(_view.ReadUInt32(Offset + ImageLengthOffset), (uint)MaxImageBytes);
+                    string ImageName = string.Empty;
+
+                    if (NameLength > 0)
+                    {
+                        byte[] Name = new byte[NameLength];
+                        _view.ReadArray(Offset + ImageOffset, Name, 0, NameLength);
+                        ImageName = Encoding.Unicode.GetString(Name);
+                    }
+
+                    Members.Add((_view.ReadUInt32(Offset + GuestProcessIdOffset), ImageName));
+                }
             }
         }
 
@@ -296,6 +385,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 _view = _map.CreateViewAccessor(0, TableSize);
 
                 PurgeAbandonedSessions();
+                GuestPipeChannel.PurgeAbandoned();
                 return true;
             }
             catch (Exception Ex)
@@ -498,7 +588,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static int SlotOffset(int Slot) => Slot * SlotSize;
 
-        private static bool IsHostAlive(uint HostProcessId)
+        internal static bool IsHostAlive(uint HostProcessId)
         {
             if (HostProcessId == 0)
                 return false;

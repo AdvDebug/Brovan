@@ -50,7 +50,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                         {
                             if (Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                             {
-                                WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryInformation | AccessMask.ProcessQueryLimitedInformation);
+                                // Either right is enough for NT, limited information is the weaker of the two.
+                                WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryInformation)
+                                    ?? Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation);
 
                                 if (Process == null)
                                 {
@@ -104,7 +106,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             {
                                 if (Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                                 {
-                                    WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation | AccessMask.ProcessQueryInformation);
+                                    WinProcess Process = GetProcessForQuery(Instance, ProcessHandle);
                                     if (Process == null)
                                     {
                                         return NTSTATUS.STATUS_ACCESS_DENIED;
@@ -255,7 +257,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             {
                                 if (Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                                 {
-                                    WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation | AccessMask.ProcessQueryInformation);
+                                    WinProcess Process = GetProcessForQuery(Instance, ProcessHandle);
                                     if (Process == null)
                                     {
                                         return NTSTATUS.STATUS_ACCESS_DENIED;
@@ -312,7 +314,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         {
                             if (Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                             {
-                                WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation | AccessMask.ProcessQueryInformation);
+                                WinProcess Process = GetProcessForQuery(Instance, ProcessHandle);
                                 if (Process == null)
                                 {
                                     return NTSTATUS.STATUS_ACCESS_DENIED;
@@ -620,6 +622,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.ValidProcessHandle(ProcessHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            Process = GetProcessForQuery(Instance, ProcessHandle);
+            if (Process == null)
+                return Instance.WinHelper.HandleManager.GetObjectByHandle<WinProcess>(ProcessHandle) == null
+                    ? NTSTATUS.STATUS_INVALID_HANDLE
+                    : NTSTATUS.STATUS_ACCESS_DENIED;
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        /// <summary>
+        /// NT lets either query right reach these classes, so asking for both denies a handle with one.
+        /// </summary>
+        private static WinProcess GetProcessForQuery(BinaryEmulator Instance, ulong ProcessHandle)
+        {
             AccessMask GrantedAccess = Instance.WinHelper.HandleManager.GetPermissionsByHandle(ProcessHandle);
             bool CanQuery = GrantedAccess == AccessMask.GiveTemp ||
                             (GrantedAccess & AccessMask.GenericAll) != 0 ||
@@ -627,11 +643,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             (GrantedAccess & AccessMask.ProcessQueryInformation) != 0 ||
                             (GrantedAccess & AccessMask.ProcessQueryLimitedInformation) != 0;
 
-            if (!CanQuery)
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-
-            Process = Instance.WinHelper.HandleManager.GetObjectByHandle<WinProcess>(ProcessHandle);
-            return Process != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_HANDLE;
+            return CanQuery ? Instance.WinHelper.HandleManager.GetObjectByHandle<WinProcess>(ProcessHandle) : null;
         }
 
     }

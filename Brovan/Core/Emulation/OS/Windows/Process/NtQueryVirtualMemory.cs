@@ -74,6 +74,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     ulong QueryAddress = AlignDownPage(Address);
 
+                    // NT fails past the user address ceiling, which is what ends a VirtualQuery walk.
+                    ulong MaxUserAddress = Instance.MaxAddress;
+                    if (QueryAddress > MaxUserAddress)
+                        return NTSTATUS.STATUS_INVALID_PARAMETER;
+
                     bool HasRegion = Instance.TryFindMemoryRegion(QueryAddress, out MemoryRegion Region) &&
                                      QueryAddress >= Region.BaseAddress &&
                                      QueryAddress < Region.BaseAddress + BinaryEmulator.AlignUp(Region.Size, 0x1000);
@@ -154,7 +159,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                         else
                         {
-                            ulong Next = ulong.MaxValue;
+                            // RegionSize is always whole pages.
+                            ulong Next = AlignDownPage(MaxUserAddress) + 0x1000;
 
                             if (Instance.TryFindNextMemoryRegionBase(QueryAddress, out ulong NextMapped) && NextMapped < Next)
                                 Next = NextMapped;
@@ -166,9 +172,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             }
 
                             FreeBase = QueryAddress;
-                            FreeSize = (Next == ulong.MaxValue) ? 0x1000UL : (Next - FreeBase);
-                            if (FreeSize == 0)
-                                FreeSize = 0x1000UL;
+                            FreeSize = Next > FreeBase ? Next - FreeBase : 0x1000UL;
                         }
 
                         Info.BaseAddress = FreeBase;

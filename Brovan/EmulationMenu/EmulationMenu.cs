@@ -2416,7 +2416,8 @@ namespace Brovan.EmulationMenu
                     WorkingDirectory = WorkingDirectory,
                     ProgramArguments = ProgramArguments ?? Array.Empty<string>(),
                     NoHooks = NoHooks,
-                    BackendKind = BackendKind
+                    BackendKind = BackendKind,
+                    StartSuspended = GuestProcessLauncher.StartedSuspended()
                 };
 
                 if (UseWindowsBlobGuest)

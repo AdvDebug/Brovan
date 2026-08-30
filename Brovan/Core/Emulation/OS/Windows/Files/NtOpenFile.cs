@@ -47,7 +47,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeDevicePath, null);
             }
 
-            if (Instance.WinHelper.TryCreateDevice(Normalized, Array.Empty<byte>(), out string DevicePath, out WinDeviceDelegate DeviceHandler, out NTSTATUS DeviceStatus))
+            if (!NtCreateFile.IsRootRelativeName(FullName, AttributesRoot) &&
+                Instance.WinHelper.TryCreateDevice(Normalized, Array.Empty<byte>(), out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus))
             {
                 if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
                 {
@@ -55,7 +56,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return DeviceStatus;
                 }
 
-                return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler);
+                return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler, DevicePipe);
             }
 
             string Path = ResolveNtPath(Instance, FullName, AttributesRoot);
@@ -174,21 +175,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static string ResolveNtPath(BinaryEmulator Instance, string NtPath, ulong RootDirectoryHandle)
         {
-            bool Absolute = NtPath.StartsWith("\\", StringComparison.Ordinal);
-
-            if (!Absolute && RootDirectoryHandle != 0)
-            {
-                WinFile Root = Instance.WinHelper.HandleManager.GetObjectByHandle<WinFile>(RootDirectoryHandle);
-
-                if (Root != null && !string.IsNullOrEmpty(Root.Path))
-                {
-                    string Base = Root.Path;
-                    if (!Base.EndsWith("\\"))
-                        Base += "\\";
-                    return Instance.WinHelper.ResolveWindowsFilePath(Base + NtPath);
-                }
-            }
-
             string Path = Instance.WinHelper.ResolveWindowsFilePath(NtPath, RootDirectoryHandle);
             if (string.IsNullOrEmpty(Path))
                 return null;

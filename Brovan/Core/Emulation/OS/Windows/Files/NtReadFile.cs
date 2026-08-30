@@ -56,6 +56,31 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
+            if (FileObj.Pipe != null)
+            {
+                if (!HasReadAccess(Instance, FileHandle))
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                    return NTSTATUS.STATUS_ACCESS_DENIED;
+                }
+
+                int PipeLength = Length > GuestNamedPipe.MaxMessageBytes ? GuestNamedPipe.MaxMessageBytes : (int)Length;
+                Span<byte> PipeBuffer = Instance.WinHelper.Shared.GetSpan((uint)PipeLength);
+                NTSTATUS PipeStatus = FileObj.Pipe.Read(PipeBuffer.Slice(0, PipeLength), out int PipeRead);
+
+                if (PipeStatus == NTSTATUS.STATUS_PIPE_EMPTY && FileObj.Pipe.BlockingMode &&
+                    Instance.WinHelper.TryContinuePipeWait(FileHandle, GuestNamedPipe.BlockingIoMilliseconds, GuestNamedPipe.PollSliceMilliseconds))
+                    return NTSTATUS.STATUS_PENDING;
+
+                Instance.WinHelper.ClearPipeWait();
+
+                if (PipeRead != 0)
+                    Instance._emulator.WriteMemory(BufferPtr, PipeBuffer.Slice(0, PipeRead));
+
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, PipeStatus, (ulong)PipeRead);
+                return PipeStatus;
+            }
+
             if (FileObj.Device)
             {
                 if (NullDevice.IsNullDevicePath(FileObj.Path))
