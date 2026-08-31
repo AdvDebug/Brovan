@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/art_windows_accent">
+
+    <target
+        android:name="arrow"
+        android:animation="@animator/setup_art_draw" />
+</animated-vector>

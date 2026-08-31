@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/art_programs_accent">
+
+    <target
+        android:name="bar"
+        android:animation="@animator/setup_art_draw" />
+
+    <target
+        android:name="dot"
+        android:animation="@animator/setup_art_fade" />
+</animated-vector>

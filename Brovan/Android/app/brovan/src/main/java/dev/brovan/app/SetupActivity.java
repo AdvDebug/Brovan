@@ -5,15 +5,17 @@ import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
+import android.graphics.drawable.Animatable;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
+import android.text.InputType;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
-import android.view.animation.OvershootInterpolator;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -51,7 +53,6 @@ public class SetupActivity extends AppCompatActivity {
             R.layout.setup_page_ready};
 
     private static final String STATE_INDEX = "index";
-    private static final String STATE_ISO = "iso";
 
     /** Roughly what the extracted Windows files occupy; the download needs headroom on top. */
     private static final long WINDOWS_BYTES = 8L << 30;
@@ -71,8 +72,6 @@ public class SetupActivity extends AppCompatActivity {
     private int index;
     private boolean busy;
 
-    private Uri iso;
-    private TextView isoLabel;
     private TextView programState;
     private LinearProgressIndicator programProgress;
 
@@ -107,12 +106,6 @@ public class SetupActivity extends AppCompatActivity {
         skip.setOnClickListener(button -> done());
 
         buildDots();
-
-        if (savedInstanceState != null) {
-            String saved = savedInstanceState.getString(STATE_ISO);
-            iso = saved == null ? null : Uri.parse(saved);
-        }
-
         go(savedInstanceState == null ? 0 : savedInstanceState.getInt(STATE_INDEX), true);
     }
 
@@ -120,7 +113,6 @@ public class SetupActivity extends AppCompatActivity {
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
         outState.putInt(STATE_INDEX, index);
-        outState.putString(STATE_ISO, iso == null ? null : iso.toString());
     }
 
     @Override
@@ -155,20 +147,31 @@ public class SetupActivity extends AppCompatActivity {
         }
 
         index = target;
-        isoLabel = null;
         programState = null;
         programProgress = null;
 
         View incoming = LayoutInflater.from(this).inflate(PAGES[index], host, false);
         bind(incoming);
         swap(incoming, forward);
+        startArt(incoming);
         updateChrome();
+    }
+
+    private void startArt(View target) {
+        ImageView art = target.findViewById(R.id.page_art);
+        if (art == null) {
+            return;
+        }
+
+        Drawable drawable = art.getDrawable();
+        if (drawable instanceof Animatable) {
+            art.postDelayed(((Animatable) drawable)::start, 400);
+        }
     }
 
     private void bind(View target) {
         switch (index) {
             case 0:
-                bindWelcome(target);
                 break;
             case 1:
                 bindWindows(target);
@@ -185,71 +188,90 @@ public class SetupActivity extends AppCompatActivity {
         }
     }
 
-    private void bindWelcome(View target) {
-        feature(target, R.id.feature_programs, R.drawable.ic_windows,
-                R.string.setup_welcome_programs, R.string.setup_welcome_programs_body);
-        feature(target, R.id.feature_graphics, R.drawable.ic_play,
-                R.string.setup_welcome_graphics, R.string.setup_welcome_graphics_body);
-        feature(target, R.id.feature_controls, R.drawable.ic_settings,
-                R.string.setup_welcome_controls, R.string.setup_welcome_controls_body);
-    }
-
-    private void feature(View target, int id, int iconId, int titleId, int bodyId) {
-        View row = target.findViewById(id);
-        ((ImageView) row.findViewById(R.id.feature_icon)).setImageResource(iconId);
-        ((TextView) row.findViewById(R.id.feature_title)).setText(titleId);
-        ((TextView) row.findViewById(R.id.feature_body)).setText(bodyId);
-    }
-
     private void bindWindows(View target) {
         TextView state = target.findViewById(R.id.windows_state);
         MaterialSwitch licensed = target.findViewById(R.id.windows_licensed);
-        TextInputEditText source = target.findViewById(R.id.windows_source);
-        MaterialButton install = target.findViewById(R.id.windows_install);
-        LinearProgressIndicator bar = target.findViewById(R.id.windows_progress);
-        TextView detail = target.findViewById(R.id.windows_progress_text);
 
         showWindowsState(state);
 
-        isoLabel = target.findViewById(R.id.windows_iso);
-        showIso();
-
-        target.findViewById(R.id.windows_open_page).setOnClickListener(button -> openMicrosoft());
-        target.findViewById(R.id.windows_choose).setOnClickListener(button ->
+        target.findViewById(R.id.windows_download).setOnClickListener(button -> {
+            if (!busy && licensed(licensed)) {
+                installWindows(null, null);
+            }
+        });
+        target.findViewById(R.id.windows_iso_pick).setOnClickListener(button -> {
+            if (!busy && licensed(licensed)) {
                 pick(new Intent(Intent.ACTION_OPEN_DOCUMENT)
                         .addCategory(Intent.CATEGORY_OPENABLE)
-                        .setType("*/*"), REQUEST_ISO));
+                        .setType("*/*"), REQUEST_ISO);
+            }
+        });
+        target.findViewById(R.id.windows_link).setOnClickListener(button -> {
+            if (!busy && licensed(licensed)) {
+                askLink();
+            }
+        });
+    }
 
-        install.setOnClickListener(button -> {
-            if (!licensed.isChecked()) {
-                shake(licensed);
-                snack(getString(R.string.windows_needs_license));
-                return;
+    private boolean licensed(MaterialSwitch licensed) {
+        if (licensed.isChecked()) {
+            return true;
+        }
+
+        shake(licensed);
+        snack(getString(R.string.windows_needs_license));
+        return false;
+    }
+
+    private void askLink() {
+        TextInputEditText input = new TextInputEditText(this);
+        input.setHint(R.string.setup_windows_link_hint);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+
+        FrameLayout holder = new FrameLayout(this);
+        holder.setPadding(dp(20), dp(8), dp(20), 0);
+        holder.addView(input);
+
+        Theming.dialog(this)
+                .setTitle(R.string.setup_windows_link)
+                .setView(holder)
+                .setPositiveButton(R.string.windows_install, (dialog, which) -> {
+                    CharSequence typed = input.getText();
+                    String url = typed == null ? "" : typed.toString().trim();
+                    if (!url.isEmpty()) {
+                        installWindows(url, null);
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void installWindows(String url, Uri isoFile) {
+        View target = page;
+        TextView state = target.findViewById(R.id.windows_state);
+        MaterialButton download = target.findViewById(R.id.windows_download);
+        LinearProgressIndicator bar = target.findViewById(R.id.windows_progress);
+        TextView detail = target.findViewById(R.id.windows_progress_text);
+
+        startWork(download, bar, detail, R.string.windows_working);
+        WindowsInstall.windows(this, worker, url, isoFile, new WindowsInstall.Listener() {
+            @Override
+            public void onProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal) {
+                if (filesTotal <= 0) {
+                    return;
+                }
+
+                advance(bar, filesDone, filesTotal);
+                detail.setText(getString(R.string.setup_progress_files,
+                        filesDone, filesTotal, bytesDone >> 20, bytesTotal >> 20));
             }
 
-            CharSequence typed = source.getText();
-            String url = typed == null || typed.toString().trim().isEmpty() ? null : typed.toString().trim();
-
-            startWork(install, bar, detail, R.string.windows_working);
-            WindowsInstall.windows(this, worker, url, iso, new WindowsInstall.Listener() {
-                @Override
-                public void onProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal) {
-                    if (filesTotal <= 0) {
-                        return;
-                    }
-
-                    advance(bar, filesDone, filesTotal);
-                    detail.setText(getString(R.string.setup_progress_files,
-                            filesDone, filesTotal, bytesDone >> 20, bytesTotal >> 20));
-                }
-
-                @Override
-                public void onFinished(int status) {
-                    finishWork(install, bar, detail, status, R.string.windows_done);
-                    showWindowsState(state);
-                    pulse(state);
-                }
-            });
+            @Override
+            public void onFinished(int status) {
+                finishWork(download, bar, detail, status, R.string.windows_done);
+                showWindowsState(state);
+                pulse(state);
+            }
         });
     }
 
@@ -327,17 +349,15 @@ public class SetupActivity extends AppCompatActivity {
 
     private CharSequence describeDevice() {
         long free = getFilesDir().getUsableSpace();
+        boolean vulkan = getPackageManager().hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION);
 
         StringBuilder text = new StringBuilder();
         text.append(getString(R.string.setup_device_storage, formatSize(free)));
+        text.append(" · ").append(getString(vulkan ? R.string.setup_device_vulkan : R.string.setup_device_no_vulkan));
 
         if (free < WINDOWS_BYTES) {
             text.append('\n').append(getString(R.string.setup_device_storage_low, formatSize(WINDOWS_BYTES)));
         }
-
-        boolean vulkan = getPackageManager().hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION);
-        text.append('\n').append(getString(vulkan ? R.string.setup_device_vulkan : R.string.setup_device_no_vulkan));
-        text.append('\n').append(getString(R.string.setup_device_android, Build.VERSION.RELEASE, Build.MODEL));
 
         return text;
     }
@@ -363,24 +383,6 @@ public class SetupActivity extends AppCompatActivity {
         chip.setTextColor(color(count == 0 ? R.color.text_secondary : R.color.log_ok));
     }
 
-    private void showIso() {
-        if (isoLabel == null || iso == null) {
-            return;
-        }
-
-        isoLabel.setText(getString(R.string.windows_chosen, iso.getLastPathSegment()));
-        reveal(isoLabel);
-    }
-
-    private void openMicrosoft() {
-        try {
-            startActivity(new Intent(Intent.ACTION_VIEW,
-                    Uri.parse("https://www.microsoft.com/software-download/windows11")));
-        } catch (ActivityNotFoundException missing) {
-            snack(getString(R.string.setup_no_browser));
-        }
-    }
-
     private void pick(Intent intent, int requestCode) {
         try {
             startActivityForResult(intent, requestCode);
@@ -400,8 +402,7 @@ public class SetupActivity extends AppCompatActivity {
         Uri uri = data.getData();
 
         if (requestCode == REQUEST_ISO) {
-            iso = uri;
-            showIso();
+            installWindows(null, uri);
             return;
         }
 
@@ -560,7 +561,7 @@ public class SetupActivity extends AppCompatActivity {
 
     private void swap(View incoming, boolean forward) {
         View outgoing = page;
-        int shift = dp(forward ? 40 : -40);
+        int shift = dp(forward ? 20 : -20);
 
         incoming.setAlpha(0f);
         incoming.setTranslationX(shift);
@@ -599,12 +600,12 @@ public class SetupActivity extends AppCompatActivity {
         for (int i = 0; i < rows.getChildCount(); i++) {
             View row = rows.getChildAt(i);
             row.setAlpha(0f);
-            row.setTranslationY(dp(18));
+            row.setTranslationY(dp(10));
             row.animate()
                     .alpha(1f)
                     .translationY(0f)
-                    .setStartDelay(110 + i * 45L)
-                    .setDuration(280)
+                    .setStartDelay(100 + i * 60L)
+                    .setDuration(320)
                     .setInterpolator(new DecelerateInterpolator())
                     .start();
         }
@@ -623,10 +624,11 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     private void pulse(View target) {
-        target.setScaleX(0.9f);
-        target.setScaleY(0.9f);
-        target.animate().scaleX(1f).scaleY(1f).setDuration(320)
-                .setInterpolator(new OvershootInterpolator()).start();
+        target.setAlpha(0.4f);
+        target.setScaleX(0.97f);
+        target.setScaleY(0.97f);
+        target.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(280)
+                .setInterpolator(new DecelerateInterpolator()).start();
     }
 
     private void shake(View target) {

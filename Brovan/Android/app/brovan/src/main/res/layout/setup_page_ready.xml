@@ -15,10 +15,34 @@
         android:paddingTop="24dp"
         android:paddingBottom="12dp">
 
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="150dp"
+            android:background="@drawable/bg_feature_panel">
+
+            <ImageView
+                android:layout_width="180dp"
+                android:layout_height="96dp"
+                android:layout_gravity="center"
+                android:contentDescription="@null"
+                android:src="@drawable/art_ready"
+                app:tint="@color/text_secondary" />
+
+            <ImageView
+                android:id="@+id/page_art"
+                android:layout_width="180dp"
+                android:layout_height="96dp"
+                android:layout_gravity="center"
+                android:contentDescription="@null"
+                android:src="@drawable/art_ready_anim"
+                app:tint="@color/accent" />
+        </FrameLayout>
+
         <TextView
             android:id="@+id/ready_title"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
             android:textColor="@color/text_primary"
             android:textSize="30sp" />
 
@@ -31,55 +55,33 @@
             android:textColor="@color/text_secondary"
             android:textSize="15sp" />
 
-        <com.google.android.material.card.MaterialCardView
+        <TextView
+            android:id="@+id/ready_windows"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="22dp"
-            app:cardBackgroundColor="@color/surface"
-            app:cardCornerRadius="16dp"
-            app:cardElevation="0dp"
-            app:strokeColor="@color/outline"
-            app:strokeWidth="1dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="18dp">
-
-                <TextView
-                    android:id="@+id/ready_windows"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textSize="14sp" />
-
-                <TextView
-                    android:id="@+id/ready_runtimes"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:textSize="14sp" />
-
-                <TextView
-                    android:id="@+id/ready_program"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:textSize="14sp" />
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
+            android:layout_marginTop="20dp"
+            android:textSize="14sp" />
 
         <TextView
-            style="@style/SectionLabel"
-            android:layout_marginTop="24dp"
-            android:text="@string/setup_device" />
+            android:id="@+id/ready_runtimes"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/ready_program"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:textSize="14sp" />
 
         <TextView
             android:id="@+id/ready_device"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:lineSpacingExtra="4dp"
+            android:layout_marginTop="20dp"
+            android:lineSpacingExtra="3dp"
             android:textColor="@color/text_secondary"
             android:textSize="13sp" />
     </LinearLayout>
