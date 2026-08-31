@@ -70,7 +70,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         };
 
         private static ulong _fakeServerInfo = 0;
-        private static ulong _fakeActivationContextData = 0;
         private static uint _tempFileCounter = 1;
         private static readonly Dictionary<Guid, string> EventLogContexts = new();
 
@@ -460,7 +459,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (OutputPointer == 0 || !Instance.IsRegionMapped(OutputPointer, 8))
                 return false;
 
-            ulong ActivationContextData = GetOrAllocActivationContextData(Instance);
+            ulong ActivationContextData = AllocActivationContextData(Instance);
             if (ActivationContextData == 0)
                 return false;
 
@@ -827,11 +826,16 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return addr;
         }
 
-        public static ulong GetOrAllocActivationContextData(BinaryEmulator Instance)
+        /// <summary>
+        /// Builds one ACTIVATION_CONTEXT_DATA block.
+        /// </summary>
+        /// <remarks>
+        /// Every created context owns its own block. ntdll unmaps
+        /// the block when it releases the context, and a shared one leaves the other contexts pointing at
+        /// freed address space.
+        /// </remarks>
+        public static ulong AllocActivationContextData(BinaryEmulator Instance)
         {
-            if (_fakeActivationContextData != 0 && Instance.IsRegionMapped(_fakeActivationContextData, MinimalActivationContextDataSize))
-                return _fakeActivationContextData;
-
             const ulong Size = 0x1000;
             ulong Address = Instance.MapUniqueAddress(Size, MemoryProtection.ReadWrite);
             if (Address == 0)
@@ -842,7 +846,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Data.Clear();
             BuildMinimalActivationContextData(Data);
             Instance._emulator.WriteMemory(Address, Data.Slice(0, MinimalActivationContextDataSize));
-            _fakeActivationContextData = Address;
             return Address;
         }
 

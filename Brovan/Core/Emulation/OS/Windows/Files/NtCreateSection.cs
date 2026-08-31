@@ -25,6 +25,29 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(SectionHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+            string ShortName = null;
+            string FullName = null;
+            if (ObjectAttributesPtr != 0)
+                Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out _, out ShortName, out FullName, out _);
+
+            if (!string.IsNullOrEmpty(FullName))
+            {
+                WinSection Existing = Instance.WinHelper.FindSectionByName(FullName, ShortName);
+                if (Existing != null)
+                {
+                    WinHandle ExistingHandle = Instance.WinHelper.HandleManager.AddHandle(Existing, (AccessMask)(uint)DesiredAccess);
+                    Instance.WinHelper.AddWinHandle(ExistingHandle);
+
+                    if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)ExistingHandle.Handle))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                        Instance.TriggerEventMessage($"[+] NtCreateSection: Name=\"{FullName}\", Handle=0x{ExistingHandle.Handle:X} (reused).", LogFlags.Syscall);
+
+                    return NTSTATUS.STATUS_OBJECT_NAME_EXISTS;
+                }
+            }
+
             bool IsImage = (AllocationAttributes & SEC_IMAGE) != 0;
 
             ulong Size = 0;
@@ -93,13 +116,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            WinHandle Handle = Instance.WinHelper.CreateSectionHandle(null, Size, SectionPageProtection, AllocationAttributes, Path, BackingAddress, (AccessMask)(uint)DesiredAccess);
+            WinHandle Handle = Instance.WinHelper.CreateSectionHandle(FullName, Size, SectionPageProtection, AllocationAttributes, Path, BackingAddress, (AccessMask)(uint)DesiredAccess);
 
             if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                Instance.TriggerEventMessage($"[+] NtCreateSection: Handle=0x{Handle.Handle:X}, Size=0x{Size:X}, Attr=0x{AllocationAttributes:X}, Prot=0x{SectionPageProtection:X}, File=0x{FileHandle:X}.", LogFlags.Syscall);
+                Instance.TriggerEventMessage($"[+] NtCreateSection: Name=\"{FullName}\", Handle=0x{Handle.Handle:X}, Size=0x{Size:X}, Attr=0x{AllocationAttributes:X}, Prot=0x{SectionPageProtection:X}, File=0x{FileHandle:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

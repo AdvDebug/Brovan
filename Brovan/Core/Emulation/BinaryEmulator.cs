@@ -1428,6 +1428,7 @@ namespace Brovan.Core.Emulation
                     {
                         BaseAddress = CurrentAddress,
                         Size = Size,
+                        AllocationBase = CurrentAddress,
                         InitialProtections = Protection,
                         Protections = Protection,
                     };

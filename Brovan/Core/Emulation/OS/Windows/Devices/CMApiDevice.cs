@@ -7,6 +7,12 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const int ReplyHeaderSize = 20;
         private const int ReplyStatusOffset = 4;
+        private const int ReplyLengthOffset = 8;
+
+        private const uint IoctlGetDeviceInterfaceList = 0x470807;
+
+        // Two WCHARs. CM_Get_Device_Interface_ListW refuses anything shorter and asks again.
+        private const int EmptyInterfaceListBytes = 4;
 
         public string DeviceName => "\\Device\\DeviceApi\\CMApi";
 
@@ -27,7 +33,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             byte[] Reply = new byte[ReplyHeaderSize];
-            BinaryPrimitives.WriteUInt32LittleEndian(Reply.AsSpan(ReplyStatusOffset, 4), (uint)NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND);
+
+            // cfgmgr32 reads "class not found" as an empty interface list, but only after its sizing call has
+            // been told how much room the list needs. Sizing it below the terminator loops the caller forever.
+            if (IOCTL == IoctlGetDeviceInterfaceList && Data.OutputLength < ReplyHeaderSize + EmptyInterfaceListBytes)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(Reply.AsSpan(ReplyStatusOffset, 4), (uint)NTSTATUS.STATUS_BUFFER_TOO_SMALL);
+                BinaryPrimitives.WriteUInt32LittleEndian(Reply.AsSpan(ReplyLengthOffset, 4), EmptyInterfaceListBytes);
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(Reply.AsSpan(ReplyStatusOffset, 4), (uint)NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND);
+            }
 
             Data.OutputBuffer = Reply;
             Data.Information = ReplyHeaderSize;

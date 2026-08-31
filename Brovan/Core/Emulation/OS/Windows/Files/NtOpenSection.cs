@@ -47,7 +47,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 SectionPageProtection = PAGE_EXECUTE_READ;
             }
 
-            WinSection Existing = FindSectionByName(Instance, FullName, Name);
+            WinSection Existing = Instance.WinHelper.FindSectionByName(FullName, Name);
             if (Existing != null)
             {
                 if (Existing.IsImage && Existing.ImageSectionId == 0 && !string.IsNullOrEmpty(ResolvedKnownDllBackingPath))
@@ -153,23 +153,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return false;
-        }
-
-        private static WinSection FindSectionByName(BinaryEmulator Instance, string FullName, string ShortName)
-        {
-            foreach (WinSection s in Instance.WinHelper.WinSections)
-            {
-                if (s == null || string.IsNullOrEmpty(s.Name))
-                    continue;
-
-                if (string.Equals(s.Name, FullName, StringComparison.OrdinalIgnoreCase))
-                    return s;
-
-                if (string.Equals(s.Name, ShortName, StringComparison.OrdinalIgnoreCase))
-                    return s;
-            }
-
-            return null;
         }
 
         private static string ResolveKnownDllBackingPath(BinaryEmulator Instance, ulong RootDirectory, string FullName, string Name)

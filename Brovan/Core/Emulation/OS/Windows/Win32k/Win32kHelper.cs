@@ -1350,6 +1350,29 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return true;
         }
 
+        /// <summary>
+        /// Writes a WNDCLASSEXW in the layout of the guest architecture.
+        /// </summary>
+        internal static bool TryWriteWindowClass(BinaryEmulator Instance, ulong Address, WinWindowClass Class)
+        {
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+            if (Address == 0 || Class == null || !Instance.IsRegionMapped(Address, WindowClassSize(Instance)))
+                return false;
+
+            return Instance._emulator.WriteMemory(Address + 0, WindowClassSize(Instance))
+                && Instance._emulator.WriteMemory(Address + 4, Class.Style)
+                && Instance.WinHelper.WritePointer(Address + 8, Class.WndProc)
+                && Instance._emulator.WriteMemory(Address + 8 + PointerSize, (uint)Class.ClassExtraBytes)
+                && Instance._emulator.WriteMemory(Address + 12 + PointerSize, (uint)Class.WindowExtraBytes)
+                && Instance.WinHelper.WritePointer(Address + 16 + PointerSize, Class.InstanceHandle)
+                && Instance.WinHelper.WritePointer(Address + 16 + PointerSize * 2, Class.IconHandle)
+                && Instance.WinHelper.WritePointer(Address + 16 + PointerSize * 3, Class.CursorHandle)
+                && Instance.WinHelper.WritePointer(Address + 16 + PointerSize * 4, Class.BackgroundBrush)
+                && Instance.WinHelper.WritePointer(Address + 16 + PointerSize * 5, 0)
+                && Instance.WinHelper.WritePointer(Address + 16 + PointerSize * 6, Class.Atom)
+                && Instance.WinHelper.WritePointer(Address + 16 + PointerSize * 7, Class.SmallIconHandle);
+        }
+
         internal static ulong DispatchMessage(BinaryEmulator Instance, Win32kMessage Message)
         {
             WinWindow Window = Message.Hwnd == 0 ? null : Instance.WinHelper.GetWindow(Message.Hwnd);

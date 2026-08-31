@@ -17,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (OutputPointer == 0 || !Instance.IsRegionMapped(OutputPointer, 4))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            ulong ActivationContextData = CsrssPortHandler.GetOrAllocActivationContextData(Instance);
+            ulong ActivationContextData = CsrssPortHandler.AllocActivationContextData(Instance);
             if (ActivationContextData == 0)
                 return NTSTATUS.STATUS_NO_MEMORY;
 

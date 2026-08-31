@@ -4188,7 +4188,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             {
                                 // The record carries the origin the batched call drew through, not the one
                                 // the DC holds now.
-                                EnqueueTextRender(Hwnd, 0, EnsureDefaultTextFont(), Text, X + VpOrgX, Y + VpOrgY,
+                                EnqueueTextRender(Hwnd, 0, Win32kHelper.ResolveDcFont(Emulator, BatchHdc), Text, X + VpOrgX, Y + VpOrgY,
                                     RectLeft + VpOrgX, RectTop + VpOrgY, RectRight + VpOrgX, RectBottom + VpOrgY, Options);
                             }
                         }
@@ -5813,7 +5813,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return;
 
                 WinWindow Window = GetWindow(GetForegroundWindow());
-                if (Window == null)
+                if (Window == null || IsToolWindow(Window))
                     Window = GetTopLevelWindow();
 
                 string title;
@@ -5926,11 +5926,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (int i = TopLevelWindows.Count - 1; i >= 0; i--)
             {
                 ulong Hwnd = TopLevelWindows[i];
-                if (WinWindows.TryGetValue(Hwnd, out WinWindow Window) && Window != null && !Window.Destroyed)
+                if (WinWindows.TryGetValue(Hwnd, out WinWindow Window) && Window != null && !Window.Destroyed && !IsToolWindow(Window))
                     return Window;
             }
 
             return null;
+        }
+
+        private static bool IsToolWindow(WinWindow Window)
+        {
+            const uint WS_EX_TOOLWINDOW = 0x00000080;
+            return (Window.ExStyle & WS_EX_TOOLWINDOW) != 0;
         }
 
         public WinWindow GetWindow(ulong Hwnd)
@@ -7574,6 +7580,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinHandle Handle = HandleManager.AddHandle(Sec, Permissions);
             AddWinHandle(Handle);
             return Handle;
+        }
+
+        public WinSection FindSectionByName(string FullName, string ShortName)
+        {
+            for (int Index = 0; Index < WinSections.Count; Index++)
+            {
+                WinSection Section = WinSections[Index];
+                if (Section == null || string.IsNullOrEmpty(Section.Name))
+                    continue;
+
+                if (!string.IsNullOrEmpty(FullName) && string.Equals(Section.Name, FullName, StringComparison.OrdinalIgnoreCase))
+                    return Section;
+
+                if (!string.IsNullOrEmpty(ShortName) && string.Equals(Section.Name, ShortName, StringComparison.OrdinalIgnoreCase))
+                    return Section;
+            }
+
+            return null;
         }
 
         public WinSection? GetSectionByHandle(ulong Handle, AccessMask Purpose)
