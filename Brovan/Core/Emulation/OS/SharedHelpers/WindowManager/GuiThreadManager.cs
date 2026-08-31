@@ -22,6 +22,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public GuiCommandKind Kind;
         public uint TextOptions;
         public ulong Hwnd;
+        public IntPtr Font;
         public int X;
         public int Y;
         public int RectLeft;
@@ -192,7 +193,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             WakeGuiThread();
         }
 
-        public void EnqueueTextRender(ulong hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        public void EnqueueTextRender(ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
         {
             if (_disposed || string.IsNullOrEmpty(text))
                 return;
@@ -201,6 +202,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 Kind = GuiCommandKind.RenderText,
                 Hwnd = hwnd,
+                Font = font,
                 Text = text,
                 X = x,
                 Y = y,
@@ -231,7 +233,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return support != null && support.TranslateVirtualKey(virtualKey, scanCode, out character);
         }
 
-        public bool MeasureText(string text, out int width, out int height)
+        public bool MeasureText(IntPtr font, string text, out int width, out int height)
         {
             width = 0;
             height = 0;
@@ -240,10 +242,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return false;
 
             ITextMetricsSupport support = _textMetrics;
-            return support != null && support.MeasureText(text ?? string.Empty, out width, out height);
+            return support != null && support.MeasureText(font, text ?? string.Empty, out width, out height);
         }
 
-        public bool GetTextMetrics(out TextMetricsData metrics)
+        public bool GetTextMetrics(IntPtr font, out TextMetricsData metrics)
         {
             metrics = default;
 
@@ -251,7 +253,24 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return false;
 
             ITextMetricsSupport support = _textMetrics;
-            return support != null && support.GetTextMetrics(out metrics);
+            return support != null && support.GetTextMetrics(font, out metrics);
+        }
+
+        public IntPtr CreateFont(in FontDescription description)
+        {
+            if (_disposed || !WaitForInitialization())
+                return IntPtr.Zero;
+
+            ITextMetricsSupport support = _textMetrics;
+            return support == null ? IntPtr.Zero : support.CreateFont(description);
+        }
+
+        public void DeleteFont(IntPtr font)
+        {
+            if (_disposed || font == IntPtr.Zero)
+                return;
+
+            _textMetrics?.DeleteFont(font);
         }
 
         public void PumpEvents()
@@ -406,6 +425,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         _textRender.RenderText(
                             window.NativeHandle,
                             command.Hwnd,
+                            command.Font,
                             command.Text,
                             command.X,
                             command.Y,

@@ -61,7 +61,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Characters = Target;
                 }
 
-                int[] WidthCache = Win32kHelper.GetCharAdvanceWidthCache(Instance);
+                IntPtr Font = Win32kHelper.ResolveDcFont(Instance, Hdc);
+                int[] WidthCache = Win32kHelper.GetCharAdvanceWidthCache(Instance, Font);
                 Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(BufferSize);
                 bool AsFloat = (Flags & IntegerWidths) == 0;
 
@@ -71,7 +72,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         ? (char)BinaryPrimitives.ReadUInt16LittleEndian(Characters.Slice((int)Index * 2, 2))
                         : (char)(FirstCharacter + Index);
 
-                    int Width = Win32kHelper.GetCharAdvanceWidth(Instance, WidthCache, Character, FallbackCharWidth);
+                    int Width = Win32kHelper.GetCharAdvanceWidth(Instance, Font, WidthCache, Character, FallbackCharWidth);
 
                     Span<byte> Entry = Buffer.Slice((int)(Index * AbcSize), AbcSize);
                     if (AsFloat)

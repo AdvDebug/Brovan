@@ -1,4 +1,4 @@
-﻿using static Brovan.Core.Helpers.BinaryHelpers;
+using static Brovan.Core.Helpers.BinaryHelpers;
 using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -1483,6 +1483,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<string, ushort> WinWindowClassAtomsByKey = new(StringComparer.OrdinalIgnoreCase);
         private ushort NextWindowClassAtom = 0xC000;
         private readonly Dictionary<ushort, ushort> ReservedSystemClassAtoms = new();
+        private readonly Dictionary<ushort, string> ReservedSystemClassNames = new();
         public readonly List<ulong> TopLevelWindows = new();
         private const uint UserHandleEntryCount = 0x200;
         private const uint UserHandleEntrySize = 0x20;
@@ -1537,12 +1538,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         };
 
         private const ulong UserServerInfoMessageFontOffset = 0x138C;
+        private const ulong UserServerInfoMessageBoxStringsOffset = 0x3A4;
+        private const int MessageBoxStringStride = 40;
+        private const int MessageBoxStringCaptionBytes = 32;
         private const ulong UserServerInfoLogPixelsOffset = 0x1B56;
         private const int LogFontSize = 92;
         private const int LogFontFaceNameOffset = 28;
         private const int LogFontFaceNameChars = 32;
         private const int MessageFontPointSize = 9;
         private const string MessageFontFace = "Segoe UI";
+        private const int MessageFontWeight = 400;
+        private const byte MessageFontCharSet = 1;
 
         private const int MaxWindowAncestorDepth = 32;
 
@@ -3172,6 +3178,44 @@ namespace Brovan.Core.Emulation.OS.Windows
         // apfnClientWorker holds 11 procedures and ends at cbHandleTable, right below atomSysClass at 0x364.
         private const int ClientPfnWorkerBytes = 88;
 
+        private ulong ClientPfnScratch;
+        private bool ClientPfnFetched;
+        private const int ClientPfnScratchSize = 0x18;
+
+        // Windows has csrss fetch the client procedure tables. Brovan has no csrss, so the first thread that
+        // needs them makes the call and repeats its own syscall. True means return at once and run again.
+        public bool BeginClientPfnFetch()
+        {
+            if (ClientPfnFetched || PointerSize != 8)
+                return false;
+
+            if (ClientPfnScratch != 0)
+            {
+                ClientPfnFetched = true;
+                PublishClientPfnArrays(
+                    Emulator.ReadMemoryULong(ClientPfnScratch),
+                    Emulator.ReadMemoryULong(ClientPfnScratch + 8),
+                    Emulator.ReadMemoryULong(ClientPfnScratch + 16));
+                return false;
+            }
+
+            WinModule Ntdll = WinModules.FirstOrDefault(m => m != null && m.Name != null && m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase));
+            ulong Retrieve = Ntdll == null ? 0 : GetExportAddress(Ntdll, "RtlRetrieveNtUserPfn");
+            ulong Scratch = Retrieve == 0 ? 0 : Emulator.MapUniqueAddress(ClientPfnScratchSize, MemoryProtection.ReadWrite);
+            if (Scratch == 0 || !WriteZeroMemory(Scratch, ClientPfnScratchSize))
+            {
+                ClientPfnFetched = true;
+                return false;
+            }
+
+            ClientPfnScratch = Scratch;
+            if (BeginGuestCall(Retrieve, Scratch, Scratch + 8, Scratch + 16, 0, 0, Emulator.ReadRegister(Emulator.IPRegister)))
+                return true;
+
+            ClientPfnFetched = true;
+            return false;
+        }
+
         public void PublishClientPfnArrays(ulong Ansi, ulong Unicode, ulong Worker)
         {
             ulong ServerInfo = EnsureUserServerInfo();
@@ -3181,6 +3225,33 @@ namespace Brovan.Core.Emulation.OS.Windows
             CopyGuestBytes(Ansi, ServerInfo + UserServerInfoClientProcsAnsiOffset, ClientPfnTableBytes);
             CopyGuestBytes(Unicode, ServerInfo + UserServerInfoClientProcsUnicodeOffset, ClientPfnTableBytes);
             CopyGuestBytes(Worker, ServerInfo + UserServerInfoClientProcsWorkerOffset, ClientPfnWorkerBytes);
+        }
+
+        public ushort GetWindowClassFunctionId(WinWindow Window)
+        {
+            return Window != null && WinWindowClassesByAtom.TryGetValue(Window.ClassAtom, out WinWindowClass WindowClass)
+                ? Win32kHelper.MaskFunctionId(WindowClass.FunctionId)
+                : (ushort)0;
+        }
+
+        // user32 publishes each system class procedure in an ANSI and a Unicode table. Which table the
+        // procedure came from is the only thing that marks the message ANSI.
+        public ulong GetAnsiWindowProc(ulong WndProc, ushort Fnid)
+        {
+            int Index = Fnid - Win32kHelper.FnidScrollBar;
+            if (WndProc == 0 || Index < 0 || Index >= ClientPfnTableBytes / 8)
+                return WndProc;
+
+            ulong ServerInfo = EnsureUserServerInfo();
+            if (ServerInfo == 0)
+                return WndProc;
+
+            ulong Offset = (ulong)Index * 8;
+            if (Emulator.ReadMemoryULong(ServerInfo + UserServerInfoClientProcsUnicodeOffset + Offset) != WndProc)
+                return WndProc;
+
+            ulong Ansi = Emulator.ReadMemoryULong(ServerInfo + UserServerInfoClientProcsAnsiOffset + Offset);
+            return Ansi != 0 ? Ansi : WndProc;
         }
 
         private void CopyGuestBytes(ulong From, ulong To, int Length)
@@ -3307,7 +3378,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Page == 0 ? 0 : Page + GuestCallScratchOffset;
         }
 
-        public bool BeginGuestCall(ulong Function, ulong Arg0, ulong Arg1, ulong Arg2, ulong Arg3, ulong ResultValue)
+        public bool BeginGuestCall(ulong Function, ulong Arg0, ulong Arg1, ulong Arg2, ulong Arg3, ulong ResultValue, ulong SyscallRetryRip = 0)
         {
             if (PointerSize != 8 || Function == 0 || !Emulator.IsRegionMapped(Function, 1))
                 return false;
@@ -3327,7 +3398,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 SavedRsp = CurrentRsp,
                 SavedReturnAddress = Emulator.ReadMemoryULong(CurrentRsp),
+                SyscallRetryRip = SyscallRetryRip,
             };
+
+            if (SyscallRetryRip != 0)
+            {
+                Frame.SavedSyscallNumber = Emulator.ReadRegister(Registers.UC_X86_REG_RAX);
+                Frame.SavedArg0 = Emulator.ReadRegister(Registers.UC_X86_REG_R10);
+                Frame.SavedArg1 = Emulator.ReadRegister(Registers.UC_X86_REG_RDX);
+                Frame.SavedArg2 = Emulator.ReadRegister(Registers.UC_X86_REG_R8);
+                Frame.SavedArg3 = Emulator.ReadRegister(Registers.UC_X86_REG_R9);
+            }
+
             WinEmulatedThread.GetState(Thread).UserCallbackFrames.Push(Frame);
 
             ulong CallRsp = ((CurrentRsp - 0x200) & ~0xFUL) - 8;
@@ -4106,7 +4188,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             {
                                 // The record carries the origin the batched call drew through, not the one
                                 // the DC holds now.
-                                EnqueueTextRender(Hwnd, 0, Text, X + VpOrgX, Y + VpOrgY,
+                                EnqueueTextRender(Hwnd, 0, EnsureDefaultTextFont(), Text, X + VpOrgX, Y + VpOrgY,
                                     RectLeft + VpOrgX, RectTop + VpOrgY, RectRight + VpOrgX, RectBottom + VpOrgY, Options);
                             }
                         }
@@ -4193,14 +4275,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             OffsetY += ViewportY;
         }
 
-        public void EnqueueTextRender(ulong Hwnd, ulong Hdc, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        public void EnqueueTextRender(ulong Hwnd, ulong Hdc, IntPtr Font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
         {
             if (DesktopDisplay is not GuiThreadManager guiManager)
                 return;
 
             GetDcSurfaceOrigin(Hwnd, Hdc, out int SurfaceX, out int SurfaceY);
 
-            guiManager.EnqueueTextRender(Hwnd, text, x + SurfaceX, y + SurfaceY,
+            guiManager.EnqueueTextRender(Hwnd, Font, text, x + SurfaceX, y + SurfaceY,
                 rectLeft + SurfaceX, rectTop + SurfaceY, rectRight + SurfaceX, rectBottom + SurfaceY, options);
         }
 
@@ -4309,25 +4391,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
-        public bool MeasureText(string Text, out int Width, out int Height)
+        public bool MeasureText(IntPtr Font, string Text, out int Width, out int Height)
         {
             Width = 0;
             Height = 0;
 
             EnsureDesktopDisplay();
             if (DesktopDisplay is GuiThreadManager guiManager)
-                return guiManager.MeasureText(Text ?? string.Empty, out Width, out Height);
+                return guiManager.MeasureText(Font, Text ?? string.Empty, out Width, out Height);
 
             return false;
         }
 
-        public bool GetTextMetrics(out TextMetricsData Metrics)
+        public bool GetTextMetrics(IntPtr Font, out TextMetricsData Metrics)
         {
             Metrics = default;
 
             EnsureDesktopDisplay();
             if (DesktopDisplay is GuiThreadManager guiManager)
-                return guiManager.GetTextMetrics(out Metrics);
+                return guiManager.GetTextMetrics(Font, out Metrics);
 
             return false;
         }
@@ -4393,13 +4475,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (int i = 0; i < UserServerInfoWindowExtraBytes.Length; i++)
                 Emulator._emulator.WriteMemory(Address + UserServerInfoWindowExtraOffset + (ulong)(i * 2), UserServerInfoWindowExtraBytes[i], 2);
 
-            uint SystemDpi = HostDisplayMetrics.SystemDpi;
-            Emulator._emulator.WriteMemory(Address + UserServerInfoLogPixelsOffset, SystemDpi, 2);
-            WriteUserMessageFont(Address + UserServerInfoMessageFontOffset, SystemDpi);
-
             UserServerInfoAddress = Address;
+            PublishUserDisplayDpi();
+            WriteMessageBoxStrings(Address + UserServerInfoMessageBoxStringsOffset);
+
             ReserveSystemClassAtoms();
             return UserServerInfoAddress;
+        }
+
+        // A guest can declare DPI awareness after user32 is up. That changes the DPI it sees, and the message
+        // font has to change with it.
+        public void PublishUserDisplayDpi()
+        {
+            if (UserServerInfoAddress == 0)
+                return;
+
+            uint Dpi = Win32kDpi.GetEffectiveDpi(Emulator);
+            Emulator._emulator.WriteMemory(UserServerInfoAddress + UserServerInfoLogPixelsOffset, Dpi, 2);
+            WriteUserMessageFont(UserServerInfoAddress + UserServerInfoMessageFontOffset, Dpi);
+
+            DeleteHostFont(DefaultTextFont);
+            DefaultTextFont = IntPtr.Zero;
+            DefaultTextFontResolved = false;
         }
 
         private void ReserveSystemClassAtoms()
@@ -4411,9 +4508,61 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 ushort Atom = WellKnownAtom != 0 ? WellKnownAtom : NextWindowClassAtom++;
                 ReservedSystemClassAtoms[FunctionId] = Atom;
+                ReservedSystemClassNames[Atom] = Name;
 
                 PublishSystemClassAtom(Index, Atom);
             }
+        }
+
+        // user32 takes each message box button caption and control id from these slots.
+        private static readonly (string Caption, uint ControlId)[] MessageBoxButtons =
+        {
+            ("OK", 1), ("Cancel", 2), ("&Abort", 3), ("&Retry", 4), ("&Ignore", 5), ("&Yes", 6),
+            ("&No", 7), ("Close", 8), ("Help", 9), ("&Try Again", 10), ("&Continue", 11),
+        };
+
+        private void WriteMessageBoxStrings(ulong Address)
+        {
+            Span<byte> Entry = stackalloc byte[MessageBoxStringStride];
+
+            for (int i = 0; i < MessageBoxButtons.Length; i++)
+            {
+                Entry.Clear();
+                Encoding.Unicode.GetBytes(MessageBoxButtons[i].Caption, Entry);
+                BinaryPrimitives.WriteUInt32LittleEndian(Entry.Slice(MessageBoxStringCaptionBytes), MessageBoxButtons[i].ControlId);
+                Emulator.WriteMemory(Address + (ulong)(i * MessageBoxStringStride), Entry);
+            }
+        }
+
+        private IntPtr DefaultTextFont;
+        private bool DefaultTextFontResolved;
+
+        // Must stay the message font published in SERVERINFO, or the dialog units a guest converts with will
+        // not match the text Brovan draws.
+        public IntPtr EnsureDefaultTextFont()
+        {
+            if (DefaultTextFontResolved)
+                return DefaultTextFont;
+
+            DefaultTextFontResolved = true;
+            DefaultTextFont = CreateHostFont(new FontDescription(
+                -(int)((MessageFontPointSize * Win32kDpi.GetEffectiveDpi(Emulator)) / 72),
+                0, MessageFontWeight, false, false, false, MessageFontCharSet, 0, MessageFontFace));
+
+            return DefaultTextFont;
+        }
+
+        public string DefaultFaceName => MessageFontFace;
+
+        public IntPtr CreateHostFont(in FontDescription Description)
+        {
+            return DesktopDisplay is GuiThreadManager guiManager ? guiManager.CreateFont(Description) : IntPtr.Zero;
+        }
+
+        public void DeleteHostFont(IntPtr Font)
+        {
+            if (Font != IntPtr.Zero && DesktopDisplay is GuiThreadManager guiManager)
+                guiManager.DeleteFont(Font);
         }
 
         private void WriteUserMessageFont(ulong Address, uint Dpi)
@@ -4903,9 +5052,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int UserWindowParentOffset = 0x30;
         private const int UserWindowExtraBytesOffset = 0xC8;
         private const int UserWindowExtraPointerOffset = 0x128;
+        // DefDlgProcWorker reaches the DLG block user32 allocated through this slot.
+        private const int UserWindowExtraDialogPointerOffset = 0x08;
         private const int UserWindowChildOffset = 0x38;
         private const int UserWindowNextOffset = 0x48;
         private const int UserWindowIdOffset = 0x140;
+        private const int UserWindowUserDataOffset = 0xD8;
         private const int UserWindowStateOffset = 0x12;
         private const byte UserWindowStateDialog = 0x01;
         internal const uint UserWindowStateVisible = 0x800;
@@ -5007,8 +5159,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             State = Window.IsDialog ? (byte)(State | UserWindowStateDialog) : (byte)(State & ~UserWindowStateDialog);
             Emulator._emulator.WriteMemory(StateAddress, State, 1);
 
+            ulong ExtraBytes = GetWindowExtraBytesAddress(Window);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowExtraBytesOffset, (uint)Window.WindowExtraBytes, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowExtraPointerOffset, GetWindowExtraBytesAddress(Window), 8);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowExtraPointerOffset, ExtraBytes, 8);
+
+            if (ExtraBytes != 0 && Window.WindowExtraBytes >= UserWindowExtraDialogPointerOffset + 8)
+                Emulator._emulator.WriteMemory(ExtraBytes + UserWindowExtraDialogPointerOffset, Window.DialogPointer, 8);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowUserDataOffset, Window.UserData, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xB8, Window.ClientTextBytes, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xC0, TextObject, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xE0, 0UL, 8);
@@ -5246,8 +5403,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
             }
 
-            Name = null;
-            return false;
+            // win32k owns these atoms from desktop creation, so they answer before user32 registers the class.
+            return ReservedSystemClassNames.TryGetValue(Atom, out Name);
         }
 
         // The character dimensions user32 converts dialog units with, so they have to describe the font
@@ -5258,7 +5415,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ServerInfo == 0)
                 return false;
 
-            if (!MeasureText(CharDimensionSample, out int SampleWidth, out int SampleHeight) || SampleWidth <= 0 || SampleHeight <= 0)
+            if (!MeasureText(EnsureDefaultTextFont(), CharDimensionSample, out int SampleWidth, out int SampleHeight) || SampleWidth <= 0 || SampleHeight <= 0)
                 return false;
 
             int CharWidth = ((SampleWidth / 26) + 1) / 2;
@@ -5266,7 +5423,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             // An edit control takes its font description from here, and reads a zeroed one as no height.
-            if (!GetTextMetrics(out TextMetricsData Metrics))
+            if (!GetTextMetrics(EnsureDefaultTextFont(), out TextMetricsData Metrics))
                 Metrics = Win32kHelper.DefaultTextMetrics;
 
             Span<byte> Buffer = Shared.GetSpan(Win32kHelper.TextMetricWSize).Slice(0, Win32kHelper.TextMetricWSize);

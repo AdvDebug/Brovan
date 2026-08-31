@@ -8,7 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 
-            Instance.WinHelper.GetArg(0);
+            ulong Hdc = Instance.WinHelper.GetArg(0);
             ulong BufferPtr = Instance.WinHelper.GetArg(1);
             uint BufferSize = (uint)Instance.WinHelper.GetArg(2);
 
@@ -18,7 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (!Instance.WinHelper.GetTextMetrics(out TextMetricsData Metrics))
+            if (!Instance.WinHelper.GetTextMetrics(Win32kHelper.ResolveDcFont(Instance, Hdc), out TextMetricsData Metrics))
                 Metrics = Win32kHelper.DefaultTextMetrics;
 
             Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(Win32kHelper.TextMetricWSize);

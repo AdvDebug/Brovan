@@ -11,7 +11,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 
-            Instance.WinHelper.GetArg(0);
+            ulong Hdc = Instance.WinHelper.GetArg(0);
             ulong StringPtr = Instance.WinHelper.GetArg(1);
             int Count = unchecked((int)Instance.WinHelper.GetArg(2));
             ulong SizePtr = Instance.WinHelper.GetArg(3);
@@ -30,6 +30,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            IntPtr Font = Win32kHelper.ResolveDcFont(Instance, Hdc);
             int Cx = 0;
             int Cy = FallbackCharHeight;
 
@@ -46,7 +47,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                             Chars[i] = (char)(Raw[i * 2] | (Raw[i * 2 + 1] << 8));
                         string Text = new string(Chars);
 
-                        if (Instance.WinHelper.MeasureText(Text, out int MeasuredWidth, out int MeasuredHeight))
+                        if (Instance.WinHelper.MeasureText(Font, Text, out int MeasuredWidth, out int MeasuredHeight))
                         {
                             Cx = MeasuredWidth;
                             Cy = MeasuredHeight > 0 ? MeasuredHeight : FallbackCharHeight;
@@ -68,7 +69,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
             else if (Count == 0)
             {
-                if (Instance.WinHelper.MeasureText(string.Empty, out int _, out int MeasuredHeight) && MeasuredHeight > 0)
+                if (Instance.WinHelper.MeasureText(Font, string.Empty, out int _, out int MeasuredHeight) && MeasuredHeight > 0)
                     Cy = MeasuredHeight;
             }
 

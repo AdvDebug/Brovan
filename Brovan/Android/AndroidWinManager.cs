@@ -101,20 +101,30 @@ namespace Brovan.Android
                 _gdi.Execute(primitive);
         }
 
-        public void RenderText(IntPtr windowHandle, ulong hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        // Android draws with one system face, so a font handle selects nothing.
+        public void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
         {
             if (!_disposed)
                 _gdi.DrawText(hwnd, text, x, y, rectLeft, rectTop, rectRight, rectBottom, options);
         }
 
-        public bool MeasureText(string text, out int width, out int height)
+        public bool MeasureText(IntPtr font, string text, out int width, out int height)
         {
             return AndroidText.Measure(text, out width, out height);
         }
 
-        public bool GetTextMetrics(out TextMetricsData metrics)
+        public bool GetTextMetrics(IntPtr font, out TextMetricsData metrics)
         {
             return AndroidText.GetMetrics(out metrics);
+        }
+
+        public IntPtr CreateFont(in FontDescription description)
+        {
+            return IntPtr.Zero;
+        }
+
+        public void DeleteFont(IntPtr font)
+        {
         }
 
         public void InvalidateSurface()

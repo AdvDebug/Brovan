@@ -523,7 +523,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
     public interface ITextRenderSupport
     {
-        void RenderText(IntPtr windowHandle, ulong hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options);
+        void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options);
     }
 
     public enum GdiPrimitiveKind
@@ -607,11 +607,27 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public byte CharSet;
     }
 
+    public readonly record struct FontDescription(
+        int Height,
+        int Width,
+        int Weight,
+        bool Italic,
+        bool Underline,
+        bool StrikeOut,
+        byte CharSet,
+        byte PitchAndFamily,
+        string FaceName);
+
     public interface ITextMetricsSupport
     {
-        bool MeasureText(string text, out int width, out int height);
+        // A zero font is the host's own default.
+        bool MeasureText(IntPtr font, string text, out int width, out int height);
 
-        bool GetTextMetrics(out TextMetricsData metrics);
+        bool GetTextMetrics(IntPtr font, out TextMetricsData metrics);
+
+        IntPtr CreateFont(in FontDescription description);
+
+        void DeleteFont(IntPtr font);
     }
 
     public interface IDisplayConnection : IDisposable

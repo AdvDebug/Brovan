@@ -1440,11 +1440,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             _gcForeground = pixel;
         }
 
-        private X11.XFontStruct ReadFont()
+        private X11.XFontStruct ReadFont() => ReadFont(_fontStruct);
+
+        private static X11.XFontStruct ReadFont(IntPtr fontStruct)
         {
             unsafe
             {
-                return *(X11.XFontStruct*)_fontStruct;
+                return *(X11.XFontStruct*)fontStruct;
             }
         }
 
@@ -1672,67 +1674,106 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             height = (uint)Math.Abs(primitive.Y2 - primitive.Y1);
         }
 
-        public void RenderText(IntPtr windowHandle, ulong hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        public void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
         {
             if (_xDisplay == IntPtr.Zero || windowHandle == IntPtr.Zero || string.IsNullOrEmpty(text))
                 return;
 
             IntPtr gc = EnsureGraphicsContext(windowHandle);
-            if (gc == IntPtr.Zero || _fontStruct == IntPtr.Zero)
+            IntPtr fontStruct = ResolveFont(font);
+            if (gc == IntPtr.Zero || fontStruct == IntPtr.Zero)
                 return;
 
-            X11.XFontStruct font = ReadFont();
+            X11.XFontStruct metrics = ReadFont(fontStruct);
 
             SetGraphicsFunction(gc, X11.GXcopy);
             SetGraphicsForeground(gc, _blackPixel);
+            X11.XSetFont(_xDisplay, gc, metrics.Fid);
 
             int textX = x;
-            int textY = y + font.Ascent;
+            int textY = y + metrics.Ascent;
 
             if (rectRight > rectLeft && rectBottom > rectTop)
             {
-                int textWidth = X11.XTextWidth(_fontStruct, text, text.Length);
+                int textWidth = X11.XTextWidth(fontStruct, text, text.Length);
                 textX = rectLeft + ((rectRight - rectLeft - textWidth) / 2);
-                textY = rectTop + ((rectBottom - rectTop - (font.Ascent + font.Descent)) / 2) + font.Ascent;
+                textY = rectTop + ((rectBottom - rectTop - (metrics.Ascent + metrics.Descent)) / 2) + metrics.Ascent;
             }
 
             X11.XDrawString(_xDisplay, windowHandle, gc, textX, textY, text, text.Length);
         }
 
-        public bool MeasureText(string text, out int width, out int height)
+        public bool MeasureText(IntPtr font, string text, out int width, out int height)
         {
             width = 0;
             height = 0;
 
-            if (_xDisplay == IntPtr.Zero || _fontStruct == IntPtr.Zero || text == null)
+            IntPtr fontStruct = ResolveFont(font);
+            if (_xDisplay == IntPtr.Zero || fontStruct == IntPtr.Zero || text == null)
                 return false;
 
-            X11.XFontStruct font = ReadFont();
-            width = text.Length == 0 ? 0 : X11.XTextWidth(_fontStruct, text, text.Length);
-            height = font.Ascent + font.Descent;
+            X11.XFontStruct metrics = ReadFont(fontStruct);
+            width = text.Length == 0 ? 0 : X11.XTextWidth(fontStruct, text, text.Length);
+            height = metrics.Ascent + metrics.Descent;
             return true;
         }
 
-        public bool GetTextMetrics(out TextMetricsData metrics)
+        // A LOGFONTW face name is not an X family name, so only the measurable fields translate.
+        public IntPtr CreateFont(in FontDescription description)
+        {
+            if (_xDisplay == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            int pixels = Math.Abs(description.Height);
+            string weight = description.Weight >= 600 ? "bold" : "medium";
+            string slant = description.Italic ? "i" : "r";
+            string family = description.PitchAndFamily != 0 && (description.PitchAndFamily & 0x03) == 0x01
+                ? "courier"
+                : "helvetica";
+
+            string pattern = pixels > 0
+                ? $"-*-{family}-{weight}-{slant}-normal--{pixels}-*-*-*-*-*-iso10646-1"
+                : $"-*-{family}-{weight}-{slant}-normal--*-*-*-*-*-*-iso10646-1";
+
+            IntPtr loaded = X11.XLoadQueryFont(_xDisplay, pattern);
+            if (loaded == IntPtr.Zero)
+                loaded = X11.XLoadQueryFont(_xDisplay, $"-*-*-{weight}-{slant}-normal--{pixels}-*-*-*-*-*-*-*");
+
+            return loaded;
+        }
+
+        public void DeleteFont(IntPtr font)
+        {
+            if (_xDisplay != IntPtr.Zero && font != IntPtr.Zero && font != _fontStruct)
+                X11.XFreeFont(_xDisplay, font);
+        }
+
+        private IntPtr ResolveFont(IntPtr font)
+        {
+            return font != IntPtr.Zero ? font : _fontStruct;
+        }
+
+        public bool GetTextMetrics(IntPtr font, out TextMetricsData metrics)
         {
             metrics = default;
 
-            if (_xDisplay == IntPtr.Zero || _fontStruct == IntPtr.Zero)
+            IntPtr fontStruct = ResolveFont(font);
+            if (_xDisplay == IntPtr.Zero || fontStruct == IntPtr.Zero)
                 return false;
 
-            X11.XFontStruct font = ReadFont();
+            X11.XFontStruct face = ReadFont(fontStruct);
 
-            metrics.Height = font.Ascent + font.Descent;
-            metrics.Ascent = font.Ascent;
-            metrics.Descent = font.Descent;
-            metrics.AveCharWidth = Math.Max(font.MaxWidth / 2, 1);
-            metrics.MaxCharWidth = font.MaxWidth;
+            metrics.Height = face.Ascent + face.Descent;
+            metrics.Ascent = face.Ascent;
+            metrics.Descent = face.Descent;
+            metrics.AveCharWidth = Math.Max(face.MaxWidth / 2, 1);
+            metrics.MaxCharWidth = face.MaxWidth;
             metrics.Weight = 400;
             metrics.DigitizedAspectX = 96;
             metrics.DigitizedAspectY = 96;
-            metrics.FirstChar = (ushort)font.MinCharOrByte2;
-            metrics.LastChar = (ushort)font.MaxCharOrByte2;
-            metrics.DefaultChar = (ushort)font.DefaultChar;
+            metrics.FirstChar = (ushort)face.MinCharOrByte2;
+            metrics.LastChar = (ushort)face.MaxCharOrByte2;
+            metrics.DefaultChar = (ushort)face.DefaultChar;
             metrics.BreakChar = 0x20;
             metrics.PitchAndFamily = 0x01;
             return true;

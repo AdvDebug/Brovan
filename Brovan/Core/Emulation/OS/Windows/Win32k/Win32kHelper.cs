@@ -104,6 +104,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const byte PenHandleType = 0x30;
         internal const byte BrushHandleType = 0x10;
         internal const byte BitmapHandleType = 0x05;
+        internal const byte FontHandleType = 0x0A;
 
         internal const uint WM_NULL = 0x0000;
         internal const uint WM_CREATE = 0x0001;
@@ -193,6 +194,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly Dictionary<ulong, Win32kDeviceContext> DeviceContexts = new();
             public readonly Dictionary<ulong, Win32kPenBrush> PenBrushObjects = new();
             public readonly Dictionary<ulong, Win32kBitmap> Bitmaps = new();
+            public readonly Dictionary<ulong, Win32kFont> Fonts = new();
+
+            // Advance width per character, biased by one so that zero reads as unmeasured.
+            public readonly Dictionary<IntPtr, int[]> CharAdvanceWidthsByFont = new();
+
             public ulong StockBitmap;
             public ulong NextDeviceContext = FirstDeviceContextHandle;
             public ulong CaptureWindow;
@@ -206,13 +212,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public bool CursorAssigned;
             public int CursorShowCount;
             public bool CursorHidden;
+            public bool CursorHiddenWhileTyping;
             public Win32kCaret Caret;
 
             public uint QueuedWakeBits;
             public bool QueuedWakeBitsValid;
-
-            // Advance width per character, biased by one so that zero reads as unmeasured.
-            public int[] CharAdvanceWidths;
 
             public IReadOnlyList<uint> KeyboardLayouts;
             public uint KeyboardLayoutsGeneration;
@@ -229,6 +233,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public int ShowCount;
         }
 
+        private sealed class Win32kFont
+        {
+            public FontDescription Description;
+            public IntPtr HostFont;
+        }
+
         private sealed class Win32kDeviceContext
         {
             public ulong Handle;
@@ -236,6 +246,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public bool WindowDc;
             public bool PaintDc;
             public ulong SelectedBitmap;
+            public ulong SelectedFont;
             public uint BoundsFlags;
             public int BoundsLeft;
             public int BoundsTop;
@@ -428,6 +439,76 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 PenWidth = Width,
             };
             return Handle;
+        }
+
+        internal static ulong CreateFont(BinaryEmulator Instance, in FontDescription Description)
+        {
+            IntPtr HostFont = Instance.WinHelper.CreateHostFont(Description);
+            if (HostFont == IntPtr.Zero)
+                return 0;
+
+            ulong Handle = Instance.WinHelper.AllocateGdiHandle(FontHandleType);
+            if (Handle == 0)
+            {
+                Instance.WinHelper.DeleteHostFont(HostFont);
+                return 0;
+            }
+
+            GetState(Instance).Fonts[Handle] = new Win32kFont { Description = Description, HostFont = HostFont };
+            return Handle;
+        }
+
+        internal static bool RemoveFont(BinaryEmulator Instance, ulong Handle)
+        {
+            Win32kState State = GetState(Instance);
+            if (!State.Fonts.Remove(Handle, out Win32kFont Font))
+                return false;
+
+            State.CharAdvanceWidthsByFont.Remove(Font.HostFont);
+            Instance.WinHelper.DeleteHostFont(Font.HostFont);
+            return true;
+        }
+
+        internal static ulong SelectFont(BinaryEmulator Instance, ulong Hdc, ulong Font)
+        {
+            if (!GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Context))
+                return 0;
+
+            ulong Previous = Context.SelectedFont;
+            Context.SelectedFont = Font;
+            return Previous;
+        }
+
+        // A device context with no font selected uses the message font SERVERINFO advertises.
+        internal static IntPtr ResolveDcFont(BinaryEmulator Instance, ulong Hdc)
+        {
+            Win32kFont Font = ResolveDcFontObject(Instance, Hdc);
+            return Font != null ? Font.HostFont : Instance.WinHelper.EnsureDefaultTextFont();
+        }
+
+        internal static string GetDcFaceName(BinaryEmulator Instance, ulong Hdc)
+        {
+            return ResolveDcFontObject(Instance, Hdc)?.Description.FaceName ?? Instance.WinHelper.DefaultFaceName;
+        }
+
+        internal static byte GetDcCharSet(BinaryEmulator Instance, ulong Hdc)
+        {
+            Win32kFont Font = ResolveDcFontObject(Instance, Hdc);
+            return Font != null ? Font.Description.CharSet : DefaultCharSet;
+        }
+
+        private const byte DefaultCharSet = 1;
+
+        private static Win32kFont ResolveDcFontObject(BinaryEmulator Instance, ulong Hdc)
+        {
+            Win32kState State = GetState(Instance);
+            if (Hdc != 0 && State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Context) &&
+                Context.SelectedFont != 0 && State.Fonts.TryGetValue(Context.SelectedFont, out Win32kFont Font))
+            {
+                return Font;
+            }
+
+            return null;
         }
 
         internal static ulong CreateSolidBrush(BinaryEmulator Instance, uint ColorRef)
@@ -901,10 +982,25 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Hwnd != 0 && Instance.WinHelper.GetWindow(Hwnd) == null)
                 return false;
 
+            // A window never holds more than one WM_PAINT.
+            if (Message == WM_PAINT && IsQueued(State, Hwnd, WM_PAINT))
+                return true;
+
             State.MessageQueue.Enqueue(new Win32kMessage(Hwnd, Message, WParam, LParam, Time, 0, 0));
             NoteQueuedMessage(State, Message);
             Instance.WakeSignal.Bump();
             return true;
+        }
+
+        private static bool IsQueued(Win32kState State, ulong Hwnd, uint Message)
+        {
+            foreach (Win32kMessage Queued in State.MessageQueue)
+            {
+                if (Queued.Message == Message && Queued.Hwnd == Hwnd)
+                    return true;
+            }
+
+            return false;
         }
 
         private static void NoteQueuedMessage(Win32kState State, uint Message)
@@ -1026,19 +1122,25 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         /// Backs <see cref="GetCharAdvanceWidth"/>. Fetched once by a caller that measures a run of characters,
         /// so the per-character path costs an array read.
         /// </summary>
-        internal static int[] GetCharAdvanceWidthCache(BinaryEmulator Instance)
+        internal static int[] GetCharAdvanceWidthCache(BinaryEmulator Instance, IntPtr Font)
         {
-            Win32kState State = GetState(Instance);
-            return State.CharAdvanceWidths ??= new int[char.MaxValue + 1];
+            Dictionary<IntPtr, int[]> Caches = GetState(Instance).CharAdvanceWidthsByFont;
+            if (!Caches.TryGetValue(Font, out int[] Cache))
+            {
+                Cache = new int[char.MaxValue + 1];
+                Caches[Font] = Cache;
+            }
+
+            return Cache;
         }
 
-        internal static int GetCharAdvanceWidth(BinaryEmulator Instance, int[] Cache, char Character, int FallbackWidth)
+        internal static int GetCharAdvanceWidth(BinaryEmulator Instance, IntPtr Font, int[] Cache, char Character, int FallbackWidth)
         {
             int Cached = Cache[Character];
             if (Cached != 0)
                 return Cached - 1;
 
-            if (!Instance.WinHelper.MeasureText(Character.ToString(), out int Measured, out _) || Measured <= 0)
+            if (!Instance.WinHelper.MeasureText(Font, Character.ToString(), out int Measured, out _) || Measured <= 0)
                 return FallbackWidth;
 
             Cache[Character] = Measured + 1;
@@ -1279,8 +1381,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Win32kDpi.DrainHostDpiChange(Instance);
 
+            // The host surface holds no backing store, so a host repaint has erased every control with it.
             if (HostEventQueue.ConsumeRepaint())
-                InvalidateWindow(Instance, Foreground);
+            {
+                InvalidateWindowTree(Instance, Foreground);
+                Instance.WinHelper.PresentDesktop();
+            }
 
             Win32kState State = GetState(Instance);
             bool GeometryChanged = false;
@@ -1299,6 +1405,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 {
                     State.CursorX = (short)(LParam & 0xFFFF);
                     State.CursorY = (short)((LParam >> 16) & 0xFFFF);
+
+                    if (State.CursorHiddenWhileTyping)
+                    {
+                        State.CursorHiddenWhileTyping = false;
+                        ApplyCursorVisibility(Instance, State);
+                    }
                 }
                 else if (Message == WM_SIZE)
                 {
@@ -1312,7 +1424,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 }
 
                 if (Win32kRawInput.DeliverHostEvent(Instance, Foreground, Message, WParam, LParam))
-                    PostMessage(Instance, Foreground, Message, WParam, LParam);
+                    PostMessage(Instance, ResolveInputTarget(Instance, Foreground, Message, ref LParam), Message, WParam, LParam);
             }
 
             if (GeometryChanged)
@@ -1321,6 +1433,61 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (Resized != null)
                     Resized.PendingWindowPosChanged = true;
             }
+        }
+
+        private static ulong ResolveInputTarget(BinaryEmulator Instance, ulong Foreground, uint Message, ref ulong LParam)
+        {
+            if (Message >= WM_KEYDOWN && Message <= WM_SYSCHAR)
+            {
+                ulong Focus = Instance.WinHelper.FocusWindow;
+                return Focus != 0 && Instance.WinHelper.GetWindow(Focus) != null ? Focus : Foreground;
+            }
+
+            if (Message < WM_MOUSEMOVE || Message > WM_RBUTTONUP)
+                return Foreground;
+
+            int X = (short)(LParam & 0xFFFF);
+            int Y = (short)((LParam >> 16) & 0xFFFF);
+
+            ulong Capture = GetCaptureWindow(Instance);
+            ulong Target = Capture != 0 && Instance.WinHelper.GetWindow(Capture) != null
+                ? Capture
+                : ChildFromPoint(Instance, Foreground, X, Y, 0);
+
+            if (Target == Foreground)
+                return Foreground;
+
+            Instance.WinHelper.GetSurfaceOrigin(Target, out int OffsetX, out int OffsetY);
+            LParam = (ulong)(uint)(((Y - OffsetY) << 16) | ((X - OffsetX) & 0xFFFF));
+            return Target;
+        }
+
+        private const uint WindowStyleDisabled = 0x08000000;
+
+        // X and Y are client coordinates of the top level window, which is the surface every child sits on.
+        private static ulong ChildFromPoint(BinaryEmulator Instance, ulong Hwnd, int X, int Y, int Depth)
+        {
+            if (Depth >= MaxWindowTreeDepth)
+                return Hwnd;
+
+            WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
+            if (Window == null)
+                return Hwnd;
+
+            for (int i = Window.Children.Count - 1; i >= 0; i--)
+            {
+                WinWindow Child = Instance.WinHelper.GetWindow(Window.Children[i]);
+                if (Child == null || !Child.Visible || (Child.Style & WindowStyleDisabled) != 0)
+                    continue;
+
+                Instance.WinHelper.GetSurfaceOrigin(Child.Hwnd, out int ChildX, out int ChildY);
+                if (X < ChildX || Y < ChildY || X >= ChildX + (int)Child.Width || Y >= ChildY + (int)Child.Height)
+                    continue;
+
+                return ChildFromPoint(Instance, Child.Hwnd, X, Y, Depth + 1);
+            }
+
+            return Hwnd;
         }
 
         /// <summary>
@@ -1480,9 +1647,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return State.CursorShowCount;
         }
 
+        // Separate from the ShowCursor count, so the two cannot cancel each other out.
+        internal static void HideCursorWhileTyping(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            State.CursorHiddenWhileTyping = true;
+            ApplyCursorVisibility(Instance, State);
+        }
+
         private static void ApplyCursorVisibility(BinaryEmulator Instance, Win32kState State)
         {
-            bool Hidden = State.CursorShowCount < 0 || (State.CursorAssigned && State.CursorHandle == 0);
+            bool Hidden = State.CursorShowCount < 0 || State.CursorHiddenWhileTyping ||
+                (State.CursorAssigned && State.CursorHandle == 0);
             if (State.CursorHidden == Hidden)
                 return;
 

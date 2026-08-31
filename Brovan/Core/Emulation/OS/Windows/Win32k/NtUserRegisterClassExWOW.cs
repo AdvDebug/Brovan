@@ -103,8 +103,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Pointer == 0)
                 return null;
 
+            // user32 names its own dialog, menu and desktop classes by the bare atom win32k already owns.
             if (Pointer <= 0xFFFF)
-                return $"#ATOM_{Pointer:X}";
+                return Instance.WinHelper.TryGetAtomName((ushort)Pointer, out string AtomName) ? AtomName : $"#ATOM_{Pointer:X}";
 
             return ReadNullTerminatedUnicodeString(Instance, Pointer);
         }

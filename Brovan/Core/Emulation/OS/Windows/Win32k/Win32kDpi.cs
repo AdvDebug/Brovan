@@ -132,6 +132,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 : Context;
 
             State.Locked = true;
+            Instance.WinHelper.PublishUserDisplayDpi();
             PublishContext(Instance);
             return true;
         }

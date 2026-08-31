@@ -1,13 +1,14 @@
-using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
-    internal class NtUserGetDpiForCurrentProcess : IWinSyscall
+    internal class NtGdiGetCharSet : IWinSyscall
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            Instance.SetRawSyscallReturn(Win32kDpi.GetEffectiveDpi(Instance));
+            ulong Hdc = Instance.WinHelper.GetArg(0);
+
+            Instance.SetRawSyscallReturn(Win32kHelper.GetDcCharSet(Instance, Hdc));
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

@@ -559,7 +559,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return style;
         }
 
-        public void RenderText(IntPtr windowHandle, ulong hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        public void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
         {
             if (string.IsNullOrEmpty(text) || !Windows.TryGetValue(windowHandle, out WindowsWindow? window))
                 return;
@@ -568,8 +568,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (hdc == IntPtr.Zero)
                 return;
 
+            IntPtr previous = font != IntPtr.Zero ? SelectObject(hdc, font) : IntPtr.Zero;
             RECT rect = new RECT { Left = rectLeft, Top = rectTop, Right = rectRight, Bottom = rectBottom };
             ExtTextOutW(hdc, x, y, options, ref rect, text, (uint)text.Length, IntPtr.Zero);
+
+            if (previous != IntPtr.Zero)
+                SelectObject(hdc, previous);
         }
 
         public unsafe void ExecuteGdiPrimitive(IntPtr windowHandle, GdiPrimitive primitive)
@@ -666,7 +670,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return true;
         }
 
-        public bool MeasureText(string text, out int width, out int height)
+        public bool MeasureText(IntPtr font, string text, out int width, out int height)
         {
             width = 0;
             height = 0;
@@ -680,23 +684,56 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 if (hdc == IntPtr.Zero)
                     return false;
 
-                if (!GetTextExtentPoint32W(hdc, text, text.Length, out SIZE size))
+                IntPtr previous = font != IntPtr.Zero ? SelectObject(hdc, font) : IntPtr.Zero;
+                bool measured = GetTextExtentPoint32W(hdc, text, text.Length, out SIZE size);
+                bool haveHeight = false;
+                int emptyHeight = 0;
+
+                if (text.Length == 0 && GetTextMetricsW(hdc, out TEXTMETRICW empty))
+                {
+                    haveHeight = true;
+                    emptyHeight = empty.tmHeight;
+                }
+
+                if (previous != IntPtr.Zero)
+                    SelectObject(hdc, previous);
+
+                if (!measured)
                     return false;
 
                 width = size.cx;
-                height = size.cy;
-            }
-
-            if (text.Length == 0)
-            {
-                if (GetTextMetrics(out TextMetricsData metrics))
-                    height = metrics.Height;
+                height = haveHeight ? emptyHeight : size.cy;
             }
 
             return true;
         }
 
-        public bool GetTextMetrics(out TextMetricsData metrics)
+        public IntPtr CreateFont(in FontDescription description)
+        {
+            LOGFONTW logFont = new LOGFONTW
+            {
+                lfHeight = description.Height,
+                lfWidth = description.Width,
+                lfWeight = description.Weight,
+                lfItalic = description.Italic ? (byte)1 : (byte)0,
+                lfUnderline = description.Underline ? (byte)1 : (byte)0,
+                lfStrikeOut = description.StrikeOut ? (byte)1 : (byte)0,
+                lfCharSet = description.CharSet,
+                lfPitchAndFamily = description.PitchAndFamily,
+                lfQuality = CleartypeQuality,
+                lfFaceName = description.FaceName ?? string.Empty,
+            };
+
+            return CreateFontIndirectW(ref logFont);
+        }
+
+        public void DeleteFont(IntPtr font)
+        {
+            if (font != IntPtr.Zero)
+                DeleteObject(font);
+        }
+
+        public bool GetTextMetrics(IntPtr font, out TextMetricsData metrics)
         {
             metrics = default;
 
@@ -706,7 +743,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 if (hdc == IntPtr.Zero)
                     return false;
 
-                if (!GetTextMetricsW(hdc, out TEXTMETRICW native))
+                IntPtr previous = font != IntPtr.Zero ? SelectObject(hdc, font) : IntPtr.Zero;
+                bool read = GetTextMetricsW(hdc, out TEXTMETRICW native);
+
+                if (previous != IntPtr.Zero)
+                    SelectObject(hdc, previous);
+
+                if (!read)
                     return false;
 
                 metrics.Height = native.tmHeight;
@@ -1307,6 +1350,31 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         [DllImport("gdi32.dll", SetLastError = true)]
         private static extern IntPtr CreateSolidBrush(int crColor);
+
+        private const byte CleartypeQuality = 5;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct LOGFONTW
+        {
+            public int lfHeight;
+            public int lfWidth;
+            public int lfEscapement;
+            public int lfOrientation;
+            public int lfWeight;
+            public byte lfItalic;
+            public byte lfUnderline;
+            public byte lfStrikeOut;
+            public byte lfCharSet;
+            public byte lfOutPrecision;
+            public byte lfClipPrecision;
+            public byte lfQuality;
+            public byte lfPitchAndFamily;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string lfFaceName;
+        }
+
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateFontIndirectW(ref LOGFONTW lplf);
 
         [DllImport("gdi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

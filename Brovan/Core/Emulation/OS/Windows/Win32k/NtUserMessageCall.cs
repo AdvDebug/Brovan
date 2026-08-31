@@ -29,8 +29,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
                 // A window procedure only ever runs on the thread that owns the window.
                 bool OwnedHere = Target != null && Target.OwnerThreadId == (Instance.CurrentThread?.ThreadId ?? 0);
-                if (OwnedHere && Win32kHelper.InvokeWindowProc(Instance, Hwnd, Target.WndProc, Message, WParam, LParam))
-                    return NTSTATUS.STATUS_SUCCESS;
+                if (OwnedHere)
+                {
+                    ulong WndProc = Target.WndProc;
+                    if (Ansi)
+                    {
+                        if (Instance.WinHelper.BeginClientPfnFetch())
+                            return NTSTATUS.STATUS_SUCCESS;
+
+                        WndProc = Instance.WinHelper.GetAnsiWindowProc(WndProc, Instance.WinHelper.GetWindowClassFunctionId(Target));
+                    }
+
+                    if (Win32kHelper.InvokeWindowProc(Instance, Hwnd, WndProc, Message, WParam, LParam))
+                        return NTSTATUS.STATUS_SUCCESS;
+                }
             }
 
             ulong Result = Win32kHelper.HandleMessageCall(Instance, Hwnd, Message, WParam, LParam, Ansi);
