@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading;
 using Brovan.Core.Emulation;
 using Brovan.Core.Emulation.OS.SharedHelpers;
+using Brovan.Core.Emulation.OS.Windows;
 using Brovan.Core.Helpers;
 using Brovan.Core.Helpers.WindowsImage;
 
@@ -29,6 +30,7 @@ namespace Brovan.Android
         private static bool _verbose;
         private static IntPtr _exitSink;
         private static IntPtr _installProgressSink;
+        private static IntPtr _spawnSink;
 
         [UnmanagedCallersOnly(EntryPoint = "brovan_init")]
         public static int Init(byte* baseDirectory)
@@ -55,6 +57,8 @@ namespace Brovan.Android
                 // Every path in the emulator is derived from AppContext.BaseDirectory, and several of those
                 // are static field initializers, so this has to land before anything else is touched.
                 AppContext.SetData("APP_CONTEXT_BASE_DIRECTORY", directory);
+
+                UseWritableTempDirectory(directory);
 
                 AndroidHost.MarkActive();
 
@@ -91,6 +95,63 @@ namespace Brovan.Android
 
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_text_sink")]
         public static void SetTextSink(IntPtr sink) => AndroidText.SetSink(sink);
+
+        [UnmanagedCallersOnly(EntryPoint = "brovan_set_spawn_sink")]
+        public static void SetSpawnSink(IntPtr sink)
+        {
+            Volatile.Write(ref _spawnSink, sink);
+            GuestProcessLauncher.HostLauncher = sink == IntPtr.Zero ? null : Spawn;
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "brovan_join_session")]
+        public static void JoinSession(byte* sessionId, uint spawnToken, int depth)
+        {
+            Guard(() =>
+            {
+                string session = Marshal.PtrToStringUTF8((IntPtr)sessionId);
+                if (string.IsNullOrWhiteSpace(session))
+                    return;
+
+                Environment.SetEnvironmentVariable("BROVAN_SESSION_ID", session);
+                Environment.SetEnvironmentVariable("BROVAN_GUEST_SPAWN_DEPTH", depth.ToString());
+                GuestSession.SpawnToken = spawnToken;
+            }, nameof(JoinSession));
+        }
+
+        private static bool Spawn(string image, string arguments, string workingDirectory, string sessionId, uint spawnToken, int depth)
+        {
+            IntPtr sink = Volatile.Read(ref _spawnSink);
+            if (sink == IntPtr.Zero)
+                return false;
+
+            IntPtr imageUtf8 = IntPtr.Zero;
+            IntPtr argumentsUtf8 = IntPtr.Zero;
+            IntPtr directoryUtf8 = IntPtr.Zero;
+            IntPtr sessionUtf8 = IntPtr.Zero;
+
+            try
+            {
+                imageUtf8 = Marshal.StringToCoTaskMemUTF8(image ?? string.Empty);
+                argumentsUtf8 = Marshal.StringToCoTaskMemUTF8(arguments ?? string.Empty);
+                directoryUtf8 = Marshal.StringToCoTaskMemUTF8(workingDirectory ?? string.Empty);
+                sessionUtf8 = Marshal.StringToCoTaskMemUTF8(sessionId ?? string.Empty);
+
+                return ((delegate* unmanaged<byte*, byte*, byte*, byte*, uint, int, int>)sink)(
+                    (byte*)imageUtf8, (byte*)argumentsUtf8, (byte*)directoryUtf8, (byte*)sessionUtf8, spawnToken, depth) != 0;
+            }
+            catch (Exception exception)
+            {
+                AndroidLog.Write(AndroidNative.LogError, $"[brovan_spawn] {exception}");
+                return false;
+            }
+            finally
+            {
+                Marshal.FreeCoTaskMem(imageUtf8);
+                Marshal.FreeCoTaskMem(argumentsUtf8);
+                Marshal.FreeCoTaskMem(directoryUtf8);
+                Marshal.FreeCoTaskMem(sessionUtf8);
+            }
+        }
 
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_verbose")]
         public static void SetVerbose(int enabled) => _verbose = enabled != 0;
@@ -439,6 +500,22 @@ namespace Brovan.Android
             {
                 AndroidLog.Write(AndroidNative.LogError, $"[brovan_start] ApiSetMap generation failed: {exception.Message}");
                 return false;
+            }
+        }
+
+        // Android has no /tmp, where the runtime backs a named mutex. setenv because the runtime reads it
+        // with getenv, which Environment.SetEnvironmentVariable does not reach.
+        private static void UseWritableTempDirectory(string baseDirectory)
+        {
+            try
+            {
+                string temporary = Path.Combine(baseDirectory, "tmp");
+                Directory.CreateDirectory(temporary);
+                AndroidNative.SetEnvironment("TMPDIR", temporary, 1);
+            }
+            catch (Exception exception)
+            {
+                AndroidLog.Write(AndroidNative.LogError, $"[brovan_init] temporary directory: {exception.Message}");
             }
         }
 

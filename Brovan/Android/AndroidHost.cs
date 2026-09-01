@@ -18,6 +18,7 @@ namespace Brovan.Android
         private static int _height;
         private static int _densityDpi;
         private static volatile bool _active;
+        private static volatile bool _surfaceSeen;
         private static volatile string _windowTitle = string.Empty;
 
         public static bool IsActive => _active;
@@ -72,14 +73,21 @@ namespace Brovan.Android
                 AndroidNative.NativeWindowRelease(previous);
 
             if (window != IntPtr.Zero)
+            {
+                _surfaceSeen = true;
                 SurfaceReady.Set();
+            }
             else
+            {
                 SurfaceReady.Reset();
+            }
         }
 
+        // Later surfaces come and go as the activity leaves the front, and a guest behind another one
+        // still creates windows.
         public static bool WaitForSurface()
         {
-            return SurfaceReady.Wait(SurfaceWaitMilliseconds);
+            return _surfaceSeen || SurfaceReady.Wait(SurfaceWaitMilliseconds);
         }
 
         /// <summary>Keeps the calling thread off the slowest CPU cluster for the rest of its life.</summary>

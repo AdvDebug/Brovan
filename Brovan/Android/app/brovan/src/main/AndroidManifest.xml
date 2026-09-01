@@ -41,5 +41,42 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
             android:screenOrientation="landscape"
             android:launchMode="singleTask" />
+
+        <!-- One process per guest, and Android fixes the processes at build time. GuestSpawner picks a free one. -->
+        <activity
+            android:name=".GuestActivity1"
+            android:process=":guest1"
+            android:exported="false"
+            android:theme="@style/Theme.Brovan.Player"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:screenOrientation="landscape"
+            android:launchMode="singleTask" />
+
+        <activity
+            android:name=".GuestActivity2"
+            android:process=":guest2"
+            android:exported="false"
+            android:theme="@style/Theme.Brovan.Player"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:screenOrientation="landscape"
+            android:launchMode="singleTask" />
+
+        <activity
+            android:name=".GuestActivity3"
+            android:process=":guest3"
+            android:exported="false"
+            android:theme="@style/Theme.Brovan.Player"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:screenOrientation="landscape"
+            android:launchMode="singleTask" />
+
+        <activity
+            android:name=".GuestActivity4"
+            android:process=":guest4"
+            android:exported="false"
+            android:theme="@style/Theme.Brovan.Player"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:screenOrientation="landscape"
+            android:launchMode="singleTask" />
     </application>
 </manifest>

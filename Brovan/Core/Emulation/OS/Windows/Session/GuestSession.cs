@@ -12,6 +12,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const int SlotCount = 16;
 
         private const string SessionVariable = "BROVAN_SESSION_ID";
+        private const string SpawnTokenVariable = "BROVAN_SPAWN_TOKEN";
         private const string DirectoryName = "Sessions";
         private const string TableFileName = "processes.bin";
 
@@ -30,6 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int PebAddressOffset = 0x28;
         private const int ProcessParametersOffset = 0x30;
         private const int ExitCodeOffset = 0x38;
+        private const int SpawnTokenOffset = 0x3C;
         private const int ImageOffset = 0x40;
         private const int MaxImageBytes = SlotSize - ImageOffset - 2;
 
@@ -55,6 +57,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static int _ownSlot = -1;
         private static bool _unavailable;
         private static bool _exitPublished;
+        private static uint _spawnToken;
         private static Action<uint> _terminateCallback;
 
         /// <summary>
@@ -84,6 +87,28 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// Kept next to the emulator rather than in the temporary directory so the files are the user's to delete.
         /// </summary>
         internal static string Directory => _directory ??= Path.Combine(AppContext.BaseDirectory, DirectoryName, SessionId);
+
+        // A creator that hands the launch to the system never learns a process id, so it picks this instead
+        // and the child publishes it.
+        internal static uint SpawnToken
+        {
+            get
+            {
+                lock (Sync)
+                {
+                    if (_spawnToken == 0)
+                        uint.TryParse(Environment.GetEnvironmentVariable(SpawnTokenVariable), out _spawnToken);
+
+                    return _spawnToken;
+                }
+            }
+
+            set
+            {
+                lock (Sync)
+                    _spawnToken = value;
+            }
+        }
 
         internal static int OwnSlot => _ownSlot;
 
@@ -192,8 +217,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Lock.Held)
                     return;
 
+                // Not at process exit: the host can kill the emulator before it unwinds.
                 int Offset = SlotOffset(_ownSlot);
                 _view.Write(Offset + ExitCodeOffset, ExitCode);
+                _view.Write(Offset + StateOffset, SlotExited);
                 _view.Flush();
                 _exitPublished = true;
             }
@@ -220,6 +247,45 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     ExitCode = _view.ReadUInt32(Offset + ExitCodeOffset);
                     return true;
+                }
+
+                return false;
+            }
+        }
+
+        internal static bool TryResolveSpawn(uint SpawnToken, out uint GuestProcessId, out uint HostProcessId, out ulong PebAddress, out ulong ProcessParameters)
+        {
+            GuestProcessId = 0;
+            HostProcessId = 0;
+            PebAddress = 0;
+            ProcessParameters = 0;
+
+            if (SpawnToken == 0)
+                return false;
+
+            lock (Sync)
+            {
+                if (!TryOpen())
+                    return false;
+
+                using SessionLock Lock = Acquire();
+                if (!Lock.Held)
+                    return false;
+
+                for (int Index = 0; Index < SlotCount; Index++)
+                {
+                    int Offset = SlotOffset(Index);
+                    if (_view.ReadUInt32(Offset + StateOffset) != SlotLive || _view.ReadUInt32(Offset + SpawnTokenOffset) != SpawnToken)
+                        continue;
+
+                    if (_view.ReadUInt32(Offset + ReadyOffset) == 0)
+                        return false;
+
+                    GuestProcessId = _view.ReadUInt32(Offset + GuestProcessIdOffset);
+                    HostProcessId = _view.ReadUInt32(Offset + HostProcessIdOffset);
+                    PebAddress = _view.ReadUInt64(Offset + PebAddressOffset);
+                    ProcessParameters = _view.ReadUInt64(Offset + ProcessParametersOffset);
+                    return PebAddress != 0;
                 }
 
                 return false;
@@ -626,6 +692,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             _view.Write(Offset + HostProcessIdOffset, (uint)Environment.ProcessId);
             _view.Write(Offset + GuestProcessIdOffset, GuestProcessId);
+            _view.Write(Offset + SpawnTokenOffset, SpawnToken);
             _view.Write(Offset + ArchitectureOffset, Architecture);
             _view.Write(Offset + StartTimeOffset, DateTime.UtcNow.Ticks);
             _view.Write(Offset + ImageLengthOffset, (uint)NameLength);

@@ -62,6 +62,11 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private static final String EXTRA_SUSTAINED = "sustained";
     private static final String EXTRA_LAYOUT = "layout";
     private static final String EXTRA_POINTER = "pointer";
+    private static final String EXTRA_ARGUMENTS = "arguments";
+    private static final String EXTRA_GUEST_DIRECTORY = "guest_directory";
+    private static final String EXTRA_SESSION = "session";
+    private static final String EXTRA_TOKEN = "token";
+    private static final String EXTRA_DEPTH = "depth";
 
     private static final int MAX_LINES = 1200;
     private static final int TRIM_CHUNK = 200;
@@ -111,6 +116,29 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .putExtra(EXTRA_DIRECTORY, program.directory().getAbsolutePath())
                 .putExtra(EXTRA_EXECUTABLE, program.executable().getAbsolutePath())
                 .putExtra(EXTRA_NAME, program.name())
+                .putExtra(EXTRA_NETWORK, settings.network())
+                .putExtra(EXTRA_DEVELOPER, settings.developerMode())
+                .putExtra(EXTRA_CONTROLS, own.controlScheme())
+                .putExtra(EXTRA_JIT_CACHE, settings.jitCache())
+                .putExtra(EXTRA_SUSTAINED, settings.sustainedPerformance())
+                .putExtra(EXTRA_LAYOUT, settings.controlLayout())
+                .putExtra(EXTRA_POINTER, own.pointerMode());
+    }
+
+    /** The session and token are what let the two emulator processes find each other. */
+    static Intent spawnIntent(Context context, Class<?> target, Settings settings, File directory, File image,
+                              String arguments, String guestDirectory, String sessionId, int spawnToken,
+                              int depth) {
+        ProgramSettings own = new ProgramSettings(directory, settings);
+        return new Intent(context, target)
+                .putExtra(EXTRA_DIRECTORY, directory.getAbsolutePath())
+                .putExtra(EXTRA_EXECUTABLE, image.getAbsolutePath())
+                .putExtra(EXTRA_NAME, image.getName())
+                .putExtra(EXTRA_ARGUMENTS, arguments)
+                .putExtra(EXTRA_GUEST_DIRECTORY, guestDirectory)
+                .putExtra(EXTRA_SESSION, sessionId)
+                .putExtra(EXTRA_TOKEN, spawnToken)
+                .putExtra(EXTRA_DEPTH, depth)
                 .putExtra(EXTRA_NETWORK, settings.network())
                 .putExtra(EXTRA_DEVELOPER, settings.developerMode())
                 .putExtra(EXTRA_CONTROLS, own.controlScheme())
@@ -220,6 +248,15 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         BrovanNative.setJitCache(getIntent().getBooleanExtra(EXTRA_JIT_CACHE, true));
         setStatus(getIntent().getStringExtra(EXTRA_NAME));
 
+        String session = getIntent().getStringExtra(EXTRA_SESSION);
+        if (session != null && !session.isEmpty()) {
+            BrovanNative.joinSession(session, getIntent().getIntExtra(EXTRA_TOKEN, 0),
+                    getIntent().getIntExtra(EXTRA_DEPTH, 1));
+        }
+
+        BrovanNative.setSpawnHandler((image, arguments, workingDirectory, sessionId, spawnToken, depth) ->
+                GuestSpawner.spawn(this, image, arguments, workingDirectory, sessionId, spawnToken, depth));
+
         // Developer mode leaves the guest at the debugger prompt instead of running it, so the debugger has
         // to be up for the "start" that gets it going to be reachable.
         if (developerMode) {
@@ -227,10 +264,16 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
             append(getString(R.string.player_developer_hint));
         }
 
+        // A spawned program gets a guest path, not the host directory of the program.
+        String guestDirectory = getIntent().getStringExtra(EXTRA_GUEST_DIRECTORY);
+        String directory = guestDirectory == null || guestDirectory.isEmpty()
+                ? getIntent().getStringExtra(EXTRA_DIRECTORY)
+                : guestDirectory;
+
         int result = BrovanNative.start(
                 getIntent().getStringExtra(EXTRA_EXECUTABLE),
-                null,
-                getIntent().getStringExtra(EXTRA_DIRECTORY),
+                getIntent().getStringExtra(EXTRA_ARGUMENTS),
+                directory,
                 null,
                 getIntent().getIntExtra(EXTRA_NETWORK, 1));
 

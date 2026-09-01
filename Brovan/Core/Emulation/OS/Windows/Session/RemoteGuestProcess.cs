@@ -12,6 +12,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     public sealed class RemoteGuestProcess
     {
         private const uint StillActive = 0x103;
+        private const int ProbeIntervalMilliseconds = 50;
 
         private static readonly List<RemoteGuestProcess> Live = new List<RemoteGuestProcess>();
 
@@ -39,6 +40,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // The exit code is stored before this flag, so a reader that sees the flag sees the code with it.
         private volatile bool Exited;
+
+        private long NextProbeTick;
 
         /// <summary>
         /// Builds the handle to a guest process running in another emulator.
@@ -72,13 +75,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Process.Refresh();
         }
 
+        // A wait scan asks on every pass and the table costs a lock and a scan. The watcher poll turns a
+        // stale answer into a wake.
         private bool Refresh()
         {
             if (Exited)
                 return true;
 
-            // The session table costs a lock and a scan, so read it only once the host is gone.
-            if (!HostHasExited())
+            long Now = Environment.TickCount64;
+            if (Now < NextProbeTick)
+                return false;
+
+            NextProbeTick = Now + ProbeIntervalMilliseconds;
+
+            if (GuestSession.TryFindLiveSlot(ProcessId, out _))
                 return false;
 
             ExitCode = GuestSession.TryReadExit(ProcessId, out uint Code) ? Code : HostExitCode();
@@ -91,20 +101,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        private bool HostHasExited()
-        {
-            try
-            {
-                return Host.HasExited;
-            }
-            catch (InvalidOperationException)
-            {
-                return true;
-            }
-        }
-
         private uint HostExitCode()
         {
+            if (Host == null)
+                return 0;
+
             try
             {
                 return unchecked((uint)Host.ExitCode);
@@ -207,6 +208,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (GuestSession.RequestTerminate(ProcessId, ExitCode))
                 return NTSTATUS.STATUS_SUCCESS;
+
+            if (Host == null)
+                return NTSTATUS.STATUS_INVALID_CID;
 
             try
             {

@@ -59,6 +59,15 @@ public final class BrovanNative {
         void onInstallProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal);
     }
 
+    /**
+     * The emulator cannot start a process on Android, so the app does. Called from an emulator thread that
+     * blocks until the new process joins the session.
+     */
+    public interface SpawnHandler {
+        boolean onSpawn(String image, String arguments, String workingDirectory, String sessionId,
+                        int spawnToken, int depth);
+    }
+
     private static final String[] NO_RECORDS = new String[0];
 
     /** The cell of the default GDI font, which is what the emulator falls back to when text cannot be measured. */
@@ -77,6 +86,7 @@ public final class BrovanNative {
 
     private static volatile Listener listener;
     private static volatile InstallListener installListener;
+    private static volatile SpawnHandler spawnHandler;
 
     static {
         // .NET's crypto shim dlopens libssl.so, and Android provides none. Loading our bundled pair up front
@@ -101,6 +111,15 @@ public final class BrovanNative {
 
     public static void setInstallListener(InstallListener value) {
         installListener = value;
+    }
+
+    public static void setSpawnHandler(SpawnHandler value) {
+        spawnHandler = value;
+    }
+
+    /** Must be called before {@link #start}. */
+    public static void joinSession(String sessionId, int spawnToken, int depth) {
+        nativeJoinSession(sessionId, spawnToken, depth);
     }
 
     /**
@@ -276,6 +295,13 @@ public final class BrovanNative {
     }
 
     @SuppressWarnings("unused")
+    private static boolean onNativeSpawn(String image, String arguments, String workingDirectory,
+                                         String sessionId, int spawnToken, int depth) {
+        SpawnHandler current = spawnHandler;
+        return current != null && current.onSpawn(image, arguments, workingDirectory, sessionId, spawnToken, depth);
+    }
+
+    @SuppressWarnings("unused")
     private static void onNativeInstallProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal) {
         InstallListener current = installListener;
         if (current != null) {
@@ -377,6 +403,8 @@ public final class BrovanNative {
 
     private static native int nativeStart(String binaryPath, String guestCommandLine, String workingDirectory,
                                           String debuggerCommands, int networkMode);
+
+    private static native void nativeJoinSession(String sessionId, int spawnToken, int depth);
 
     private static native void nativeSetVerbose(int enabled);
 

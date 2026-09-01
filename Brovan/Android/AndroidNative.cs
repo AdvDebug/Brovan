@@ -65,5 +65,8 @@ namespace Brovan.Android
 
         [LibraryImport("libc", EntryPoint = "sched_setaffinity", SetLastError = true)]
         public static unsafe partial int SchedSetAffinity(int thread, nuint maskSize, ulong* mask);
+
+        [LibraryImport("libc", EntryPoint = "setenv", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+        public static partial int SetEnvironment(string name, string value, int overwrite);
     }
 }

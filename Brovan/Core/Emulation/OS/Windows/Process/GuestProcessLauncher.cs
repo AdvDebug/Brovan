@@ -8,11 +8,21 @@ using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
+    // True only means the request was accepted. The process reports itself in the session table under SpawnToken.
+    internal delegate bool GuestHostLauncher(string HostImage, string GuestArguments, string GuestDirectory, string SessionId, uint SpawnToken, int Depth);
+
     internal static class GuestProcessLauncher
     {
+        // Set on hosts where the system starts the process because Environment.ProcessPath is empty.
+        internal static GuestHostLauncher HostLauncher;
+
         private const string SpawnDepthVariable = "BROVAN_GUEST_SPAWN_DEPTH";
         private const string ParentProcessVariable = "BROVAN_PARENT_PID";
         private const string StartSuspendedVariable = "BROVAN_START_SUSPENDED";
+        private const string SessionVariable = "BROVAN_SESSION_ID";
+        private const string SpawnTokenVariable = "BROVAN_SPAWN_TOKEN";
+
+        private static int _spawnCounter;
         private const int MaxSpawnDepth = 8;
 
         private const int MaxSessionProcesses = 6;
@@ -87,13 +97,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryReserveLaunchSlot(out Status))
                 return false;
 
-            string HostExecutable = Environment.ProcessPath;
-            if (string.IsNullOrEmpty(HostExecutable))
-            {
-                Status = NTSTATUS.STATUS_NOT_SUPPORTED;
-                return false;
-            }
-
             int Depth = GetSpawnDepth();
             if (Depth >= MaxSpawnDepth)
             {
@@ -102,65 +105,33 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            ProcessStartInfo StartInfo = new ProcessStartInfo
-            {
-                FileName = HostExecutable,
-                UseShellExecute = false,
-                WorkingDirectory = ResolveWorkingDirectory(CurrentDirectory, HostImage),
-            };
-
-            AppendEmulatorOptions(Instance, StartInfo.ArgumentList);
-
-            StartInfo.CreateNoWindow = Utils.SilentMode;
-
             string GuestArguments = StripArgv0(CommandLine);
-            if (!string.IsNullOrEmpty(GuestArguments))
-            {
-                StartInfo.ArgumentList.Add("--guest-cmdline");
-                StartInfo.ArgumentList.Add(Encode(GuestArguments));
-            }
-
-            if (!string.IsNullOrWhiteSpace(CurrentDirectory))
-            {
-                StartInfo.ArgumentList.Add("--cwd");
-                StartInfo.ArgumentList.Add(Encode(StripNtPrefix(CurrentDirectory)));
-            }
-
-            StartInfo.ArgumentList.Add(HostImage);
-            StartInfo.Environment[SpawnDepthVariable] = (Depth + 1).ToString();
-            StartInfo.Environment["BROVAN_SESSION_ID"] = GuestSession.SessionId;
-            StartInfo.Environment[ParentProcessVariable] = Instance.WinHelper.PID.ToString();
-
-            // The child inherits this emulator's environment, so a suspended process must clear the request
-            // again or every process it goes on to spawn starts held as well.
-            if (StartSuspended)
-                StartInfo.Environment[StartSuspendedVariable] = "1";
-            else
-                StartInfo.Environment.Remove(StartSuspendedVariable);
+            string WorkingDirectory = ResolveWorkingDirectory(CurrentDirectory, HostImage);
+            uint SpawnToken = NextSpawnToken();
 
             Process HostProcess;
-            try
+
+            if (HostLauncher != null)
             {
-                HostProcess = System.Diagnostics.Process.Start(StartInfo);
+                // The guest form of the directory: the new process maps it back to a guest path.
+                if (!HostLauncher(HostImage, GuestArguments, StripNtPrefix(CurrentDirectory), GuestSession.SessionId, SpawnToken, Depth + 1))
+                {
+                    Utils.LogError($"[GuestProcessLauncher] The host refused to launch {HostImage}.");
+                    Status = NTSTATUS.STATUS_NOT_SUPPORTED;
+                    return false;
+                }
+
+                HostProcess = null;
             }
-            catch (Exception Ex)
+            else if (!TryStartEmulator(Instance, HostImage, GuestArguments, CurrentDirectory, WorkingDirectory, SpawnToken, Depth, StartSuspended, out HostProcess))
             {
-                Utils.LogError($"[GuestProcessLauncher] Failed to launch {HostImage}: {Ex.Message}");
                 Status = NTSTATUS.STATUS_NOT_SUPPORTED;
                 return false;
             }
 
-            if (HostProcess == null)
+            if (!WaitForStartup(HostProcess, SpawnToken, out uint ProcessId, out ulong PebAddress, out ulong StartupParameters))
             {
-                Status = NTSTATUS.STATUS_NOT_SUPPORTED;
-                return false;
-            }
-
-            uint ProcessId = unchecked((uint)HostProcess.Id);
-
-            if (!WaitForStartup(HostProcess, ProcessId, out ulong PebAddress, out ulong StartupParameters))
-            {
-                Utils.LogError($"[GuestProcessLauncher] {Path.GetFileName(HostImage)} (host process {ProcessId}) never reached guest startup.");
+                Utils.LogError($"[GuestProcessLauncher] {Path.GetFileName(HostImage)} never reached guest startup.");
                 Terminate(HostProcess);
                 Status = NTSTATUS.STATUS_TIMEOUT;
                 return false;
@@ -177,27 +148,100 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Remote = RemoteGuestProcess.Adopt(ProcessId, HostProcess, Instance, PebAddress, StartupParameters),
             };
 
-            Instance.TriggerEventMessage($"[GuestProcessLauncher] Launched {Process.Name} as host process {Process.PID} (depth {Depth + 1}).", LogFlags.Syscall);
+            Instance.TriggerEventMessage($"[GuestProcessLauncher] Launched {Process.Name} as guest process {Process.PID} (depth {Depth + 1}).", LogFlags.Syscall);
 
             Status = NTSTATUS.STATUS_SUCCESS;
             return true;
+        }
+
+        private static bool TryStartEmulator(
+            BinaryEmulator Instance,
+            string HostImage,
+            string GuestArguments,
+            string CurrentDirectory,
+            string WorkingDirectory,
+            uint SpawnToken,
+            int Depth,
+            bool StartSuspended,
+            out Process HostProcess)
+        {
+            HostProcess = null;
+
+            string HostExecutable = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(HostExecutable))
+                return false;
+
+            ProcessStartInfo StartInfo = new ProcessStartInfo
+            {
+                FileName = HostExecutable,
+                UseShellExecute = false,
+                WorkingDirectory = WorkingDirectory,
+                CreateNoWindow = Utils.SilentMode,
+            };
+
+            AppendEmulatorOptions(Instance, StartInfo.ArgumentList);
+
+            if (!string.IsNullOrEmpty(GuestArguments))
+            {
+                StartInfo.ArgumentList.Add("--guest-cmdline");
+                StartInfo.ArgumentList.Add(Encode(GuestArguments));
+            }
+
+            if (!string.IsNullOrWhiteSpace(CurrentDirectory))
+            {
+                StartInfo.ArgumentList.Add("--cwd");
+                StartInfo.ArgumentList.Add(Encode(StripNtPrefix(CurrentDirectory)));
+            }
+
+            StartInfo.ArgumentList.Add(HostImage);
+            StartInfo.Environment[SpawnDepthVariable] = (Depth + 1).ToString();
+            StartInfo.Environment[SessionVariable] = GuestSession.SessionId;
+            StartInfo.Environment[SpawnTokenVariable] = SpawnToken.ToString();
+            StartInfo.Environment[ParentProcessVariable] = Instance.WinHelper.PID.ToString();
+
+            // The child inherits this emulator's environment, so a suspended process must clear the request
+            // again or every process it goes on to spawn starts held as well.
+            if (StartSuspended)
+                StartInfo.Environment[StartSuspendedVariable] = "1";
+            else
+                StartInfo.Environment.Remove(StartSuspendedVariable);
+
+            try
+            {
+                HostProcess = System.Diagnostics.Process.Start(StartInfo);
+            }
+            catch (Exception Ex)
+            {
+                Utils.LogError($"[GuestProcessLauncher] Failed to launch {HostImage}: {Ex.Message}");
+                return false;
+            }
+
+            return HostProcess != null;
+        }
+
+        // Only has to be unique among the live members of one session.
+        private static uint NextSpawnToken()
+        {
+            uint Token = unchecked((uint)((Environment.ProcessId << 8) + Interlocked.Increment(ref _spawnCounter)));
+            return Token == 0 ? 1u : Token;
         }
 
         /// <summary>
         /// The child only owns a PEB and answers cross-process requests once its emulator booted, and the creating
         /// kernel32 uses both as soon as this returns. Windows hands back an address space that already exists.
         /// </summary>
-        private static bool WaitForStartup(Process HostProcess, uint ProcessId, out ulong PebAddress, out ulong StartupParameters)
+        private static bool WaitForStartup(Process HostProcess, uint SpawnToken, out uint ProcessId, out ulong PebAddress, out ulong StartupParameters)
         {
             long Deadline = Environment.TickCount64 + StartupTimeoutMilliseconds;
 
             while (true)
             {
-                if (GuestSession.TryReadStartup(ProcessId, out PebAddress, out StartupParameters))
-                    return PebAddress != 0;
+                if (GuestSession.TryResolveSpawn(SpawnToken, out ProcessId, out _, out PebAddress, out StartupParameters))
+                    return true;
 
-                if (HostProcess.HasExited || Environment.TickCount64 >= Deadline)
+                if ((HostProcess != null && HostProcess.HasExited) || Environment.TickCount64 >= Deadline)
                 {
+                    ProcessId = 0;
                     PebAddress = 0;
                     StartupParameters = 0;
                     return false;
@@ -209,6 +253,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static void Terminate(Process HostProcess)
         {
+            if (HostProcess == null)
+                return;
+
             try
             {
                 if (!HostProcess.HasExited)

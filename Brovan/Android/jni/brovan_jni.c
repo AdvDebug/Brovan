@@ -20,6 +20,8 @@ extern void brovan_set_log_sink(void *sink);
 extern void brovan_set_exit_sink(void *sink);
 extern void brovan_set_install_progress_sink(void *sink);
 extern void brovan_set_text_sink(void *sink);
+extern void brovan_set_spawn_sink(void *sink);
+extern void brovan_join_session(const char *sessionId, unsigned int spawnToken, int depth);
 extern void brovan_set_verbose(int enabled);
 extern void brovan_set_jit_cache(int enabled);
 extern void brovan_set_surface(void *nativeWindow, int width, int height, int densityDpi);
@@ -49,6 +51,7 @@ static jmethodID g_onExit;
 static jmethodID g_onInstallProgress;
 static jmethodID g_onTextMetrics;
 static jmethodID g_onTextBitmap;
+static jmethodID g_onSpawn;
 static pthread_key_t g_attachment_key;
 static int g_attachment_key_ready;
 
@@ -148,6 +151,54 @@ static void on_exit_guest(int reason) {
 
     (*attachment.env)->CallStaticVoidMethod(attachment.env, g_callbacks, g_onExit, (jint)reason);
     detach(attachment);
+}
+
+/* The calling guest thread blocks until the new process reports itself, so this only asks for the launch. */
+static int on_spawn(const char *image, const char *arguments, const char *workingDirectory,
+                    const char *sessionId, unsigned int spawnToken, int depth) {
+    if (image == NULL || g_callbacks == NULL || g_onSpawn == NULL) {
+        return 0;
+    }
+
+    Attachment attachment = attach();
+    JNIEnv *env = attachment.env;
+    if (env == NULL) {
+        return 0;
+    }
+
+    jstring imageText = (*env)->NewStringUTF(env, image);
+    jstring argumentsText = (*env)->NewStringUTF(env, arguments == NULL ? "" : arguments);
+    jstring directoryText = (*env)->NewStringUTF(env, workingDirectory == NULL ? "" : workingDirectory);
+    jstring sessionText = (*env)->NewStringUTF(env, sessionId == NULL ? "" : sessionId);
+
+    jboolean accepted = JNI_FALSE;
+
+    if (imageText != NULL && argumentsText != NULL && directoryText != NULL && sessionText != NULL) {
+        accepted = (*env)->CallStaticBooleanMethod(env, g_callbacks, g_onSpawn, imageText, argumentsText,
+                                                   directoryText, sessionText, (jint)spawnToken, (jint)depth);
+
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionDescribe(env);
+            (*env)->ExceptionClear(env);
+            accepted = JNI_FALSE;
+        }
+    }
+
+    if (imageText != NULL) {
+        (*env)->DeleteLocalRef(env, imageText);
+    }
+    if (argumentsText != NULL) {
+        (*env)->DeleteLocalRef(env, argumentsText);
+    }
+    if (directoryText != NULL) {
+        (*env)->DeleteLocalRef(env, directoryText);
+    }
+    if (sessionText != NULL) {
+        (*env)->DeleteLocalRef(env, sessionText);
+    }
+
+    detach(attachment);
+    return accepted == JNI_TRUE ? 1 : 0;
 }
 
 #define TEXT_FIELD_COUNT 8
@@ -334,6 +385,8 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
         g_onTextMetrics = (*env)->GetStaticMethodID(env, clazz, "onNativeTextMetrics", "(Ljava/lang/String;)[I");
         g_onTextBitmap = (*env)->GetStaticMethodID(env, clazz, "onNativeRasterizeText",
                                                    "(Ljava/lang/String;)Landroid/graphics/Bitmap;");
+        g_onSpawn = (*env)->GetStaticMethodID(env, clazz, "onNativeSpawn",
+                                              "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;II)Z");
         (*env)->ExceptionClear(env);
     }
 
@@ -352,6 +405,7 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
         brovan_set_exit_sink((void *)&on_exit_guest);
         brovan_set_install_progress_sink((void *)&on_install_progress);
         brovan_set_text_sink((void *)&on_text);
+        brovan_set_spawn_sink((void *)&on_spawn);
     } else {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "brovan_init failed: %d", status);
     }
@@ -435,6 +489,19 @@ JNIEXPORT jint JNICALL METHOD(Start)(JNIEnv *env, jclass clazz, jstring binaryPa
     release(env, commands, debuggerCommands);
 
     return status;
+}
+
+JNIEXPORT void JNICALL METHOD(JoinSession)(JNIEnv *env, jclass clazz, jstring sessionId, jint spawnToken,
+                                           jint depth) {
+    (void)clazz;
+
+    const char *session = borrow(env, sessionId);
+    if (session == NULL) {
+        return;
+    }
+
+    brovan_join_session(session, (unsigned int)spawnToken, depth);
+    release(env, sessionId, session);
 }
 
 JNIEXPORT void JNICALL METHOD(SetVerbose)(JNIEnv *env, jclass clazz, jint enabled) {
