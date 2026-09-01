@@ -277,6 +277,13 @@ namespace Brovan.Core.Emulation
             if (Obj is EmulatedThread Thread)
                 return Thread.State == EmulatedThreadState.Terminated;
 
+            // NT: an exited process or thread stays signalled.
+            if (Obj is WinProcess Process)
+                return Process.Remote != null && Process.Remote.HasExited;
+
+            if (Obj is WinRemoteThread RemoteThread)
+                return RemoteThread.Process == null || RemoteThread.Process.HasExited;
+
             if (Obj is WinTimer Timer)
             {
                 RefreshTimerState(Timer);

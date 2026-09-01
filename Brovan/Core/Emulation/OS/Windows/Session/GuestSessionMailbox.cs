@@ -12,6 +12,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         AllocateMemory = 3,
         CreateThread = 4,
         ResumeProcess = 5,
+        QueryMemory = 6,
     }
 
     /// <summary>

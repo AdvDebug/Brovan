@@ -11,12 +11,18 @@ namespace Brovan.Core.Emulation.OS.Windows
     /// </summary>
     public sealed class RemoteGuestProcess
     {
-        private readonly Process Host;
+        private const uint StillActive = 0x103;
 
-        private RemoteGuestProcess(uint ProcessId, Process Host, ulong PebAddress, ulong ProcessParameters)
+        private static readonly List<RemoteGuestProcess> Live = new List<RemoteGuestProcess>();
+
+        private readonly Process Host;
+        private readonly BinaryEmulator Owner;
+
+        private RemoteGuestProcess(uint ProcessId, Process Host, BinaryEmulator Owner, ulong PebAddress, ulong ProcessParameters)
         {
             this.ProcessId = ProcessId;
             this.Host = Host;
+            this.Owner = Owner;
             this.PebAddress = PebAddress;
             this.ProcessParameters = ProcessParameters;
         }
@@ -27,29 +33,86 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal ulong ProcessParameters { get; }
 
-        internal bool HasExited
-        {
-            get
-            {
-                try
-                {
-                    return Host.HasExited;
-                }
-                catch (InvalidOperationException)
-                {
-                    return true;
-                }
-            }
-        }
+        internal uint ExitCode { get; private set; } = StillActive;
+
+        internal bool HasExited => Exited || Refresh();
+
+        // The exit code is stored before this flag, so a reader that sees the flag sees the code with it.
+        private volatile bool Exited;
 
         /// <summary>
         /// Builds the handle to a guest process running in another emulator.
         /// </summary>
         /// <param name="ProcessId">Guest process id, which is what the session slots are keyed on.</param>
-        /// <param name="Host">Emulator instance hosting it.</param>
-        internal static RemoteGuestProcess Adopt(uint ProcessId, Process Host, ulong PebAddress, ulong ProcessParameters)
+        /// <param name="Host">Host process of the emulator running it.</param>
+        internal static RemoteGuestProcess Adopt(uint ProcessId, Process Host, BinaryEmulator Owner, ulong PebAddress, ulong ProcessParameters)
         {
-            return new RemoteGuestProcess(ProcessId, Host, PebAddress, ProcessParameters);
+            RemoteGuestProcess Process = new RemoteGuestProcess(ProcessId, Host, Owner, PebAddress, ProcessParameters);
+
+            lock (Live)
+                Live.Add(Process);
+
+            return Process;
+        }
+
+        // Nothing else reports an exit in another emulator, so this poll is the wake site for waiting threads.
+        internal static void PollLive()
+        {
+            RemoteGuestProcess[] Snapshot;
+
+            lock (Live)
+            {
+                if (Live.Count == 0)
+                    return;
+
+                Snapshot = Live.ToArray();
+            }
+
+            foreach (RemoteGuestProcess Process in Snapshot)
+                Process.Refresh();
+        }
+
+        private bool Refresh()
+        {
+            if (Exited)
+                return true;
+
+            // The session table costs a lock and a scan, so read it only once the host is gone.
+            if (!HostHasExited())
+                return false;
+
+            ExitCode = GuestSession.TryReadExit(ProcessId, out uint Code) ? Code : HostExitCode();
+            Exited = true;
+            Owner?.WakeSignal.Bump();
+
+            lock (Live)
+                Live.Remove(this);
+
+            return true;
+        }
+
+        private bool HostHasExited()
+        {
+            try
+            {
+                return Host.HasExited;
+            }
+            catch (InvalidOperationException)
+            {
+                return true;
+            }
+        }
+
+        private uint HostExitCode()
+        {
+            try
+            {
+                return unchecked((uint)Host.ExitCode);
+            }
+            catch (Exception)
+            {
+                return 0;
+            }
         }
 
         internal NTSTATUS ReadMemory(ulong Address, Span<byte> Destination, out int Read)
@@ -70,6 +133,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Status;
 
             return GuestSessionMailbox.Send(Slot, SessionOperation.WriteMemory, Address, 0, Source, Span<byte>.Empty, out _, out Written);
+        }
+
+        internal NTSTATUS QueryMemory(ulong Address, Span<byte> Destination)
+        {
+            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
+                return Status;
+
+            Status = GuestSessionMailbox.Send(Slot, SessionOperation.QueryMemory, Address, 0, ReadOnlySpan<byte>.Empty, Destination, out int Length, out _);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            return Length == Destination.Length ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_UNSUCCESSFUL;
         }
 
         internal NTSTATUS AllocateMemory(ulong Address, ulong RegionSize, uint AllocationType, uint Protect, out ulong AllocatedBase, out ulong AllocatedSize)

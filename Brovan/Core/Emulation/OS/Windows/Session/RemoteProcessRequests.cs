@@ -74,6 +74,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
+                case SessionOperation.QueryMemory:
+                {
+                    NTSTATUS Status = NtQueryVirtualMemory.BuildBasicInformation(Instance, Address, out MEMORY_BASIC_INFORMATION Info);
+                    if (Status != NTSTATUS.STATUS_SUCCESS)
+                        return Status;
+
+                    Output = new byte[NtQueryVirtualMemory.CanonicalBasicInformationBytes];
+                    NtQueryVirtualMemory.Serialize(Info, true, Output);
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
                 case SessionOperation.AllocateMemory:
                 {
                     if (Input == null || Input.Length < 8)

@@ -1388,6 +1388,7 @@ namespace Brovan.Core.Emulation.Guests
                 ExitCode =>
                 {
                     Instance.TriggerEventMessage($"[!] Another process in the session asked this one to stop with exit code 0x{ExitCode:X}.", LogFlags.Important);
+                    GuestSession.PublishExit(ExitCode);
                     Instance.WinHelper.HideDesktopWindow();
                     Instance.StopEmulation();
                 });

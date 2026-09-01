@@ -3768,7 +3768,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Status = ProtectionStatus.None,
                 RunningUser = CurrentUser,
                 CreationTime = Emulator.GetEmulatedSystemTimeFileTimeUtc(),
-                Remote = RemoteGuestProcess.Adopt(ProcessId, Host, Peb, Parameters),
+                Remote = RemoteGuestProcess.Adopt(ProcessId, Host, Emulator, Peb, Parameters),
                 Adopted = true,
             };
 

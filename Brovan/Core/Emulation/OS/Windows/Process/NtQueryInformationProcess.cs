@@ -60,10 +60,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 }
 
                                 ulong Peb = Instance.PEB;
-                                if (Process.PID != Instance.WinHelper.PID && Process.Remote != null && Process.Remote.PebAddress != 0)
-                                    Peb = Process.Remote.PebAddress;
+                                uint ExitStatus = (uint)NTSTATUS.STATUS_PENDING;
 
-                                if (!WriteProcessBasicInformation(Instance, OutBufferPtr, Peb, 0x8UL, Process.PID, Process.PPID))
+                                if (Process.PID != Instance.WinHelper.PID && Process.Remote != null)
+                                {
+                                    if (Process.Remote.PebAddress != 0)
+                                        Peb = Process.Remote.PebAddress;
+
+                                    if (Process.Remote.HasExited)
+                                        ExitStatus = Process.Remote.ExitCode;
+                                }
+
+                                if (!WriteProcessBasicInformation(Instance, OutBufferPtr, Peb, 0x8UL, Process.PID, Process.PPID, ExitStatus))
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                                 SetReturnLength(PbiSize);
                                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -515,12 +523,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static bool WriteProcessBasicInformation(BinaryEmulator Instance, ulong OutBufferPtr, ulong Peb, ulong AffinityMask, ulong Pid, ulong ParentPid)
+        private static bool WriteProcessBasicInformation(BinaryEmulator Instance, ulong OutBufferPtr, ulong Peb, ulong AffinityMask, ulong Pid, ulong ParentPid, uint ExitStatus = (uint)NTSTATUS.STATUS_PENDING)
         {
             if (Instance.WinHelper.PointerSize == 8)
             {
                 Span<byte> Buffer = GetSharedWriteBuffer(Instance, 48);
-                WriteUInt32(Buffer, 0, (uint)NTSTATUS.STATUS_PENDING);
+                WriteUInt32(Buffer, 0, ExitStatus);
                 WriteUInt64(Buffer, 8, Peb);
                 WriteUInt64(Buffer, 16, AffinityMask);
                 WriteUInt64(Buffer, 24, (ulong)Instance.WinHelper.CurrentPriority);
@@ -530,7 +538,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Span<byte> Buffer32 = GetSharedWriteBuffer(Instance, 24);
-            WriteUInt32(Buffer32, 0x00, (uint)NTSTATUS.STATUS_PENDING);
+            WriteUInt32(Buffer32, 0x00, ExitStatus);
             WriteUInt32(Buffer32, 0x04, (uint)Peb);
             WriteUInt32(Buffer32, 0x08, (uint)AffinityMask);
             WriteUInt32(Buffer32, 0x0C, (uint)Instance.WinHelper.CurrentPriority);

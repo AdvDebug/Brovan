@@ -29,11 +29,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int ImageLengthOffset = 0x24;
         private const int PebAddressOffset = 0x28;
         private const int ProcessParametersOffset = 0x30;
-        private const int ImageOffset = 0x38;
+        private const int ExitCodeOffset = 0x38;
+        private const int ImageOffset = 0x40;
         private const int MaxImageBytes = SlotSize - ImageOffset - 2;
 
         private const uint SlotFree = 0;
         private const uint SlotLive = 1;
+        private const uint SlotExited = 2;
 
         private const uint ControlNone = 0;
         private const uint ControlTerminate = 1;
@@ -52,6 +54,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static Thread _watcher;
         private static int _ownSlot = -1;
         private static bool _unavailable;
+        private static bool _exitPublished;
         private static Action<uint> _terminateCallback;
 
         /// <summary>
@@ -142,7 +145,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     if (Lock.Held)
                     {
-                        _view.Write(SlotOffset(_ownSlot) + StateOffset, SlotFree);
+                        // The slot outlives the process, since its creator reads the exit code from here.
+                        _view.Write(SlotOffset(_ownSlot) + StateOffset, _exitPublished ? SlotExited : SlotFree);
                         _view.Flush();
                         LastMember = CountLiveLocked() == 0;
                     }
@@ -174,6 +178,51 @@ namespace Brovan.Core.Emulation.OS.Windows
                 _view.Write(Offset + ProcessParametersOffset, ProcessParameters);
                 _view.Write(Offset + ReadyOffset, 1u);
                 _view.Flush();
+            }
+        }
+
+        internal static void PublishExit(uint ExitCode)
+        {
+            lock (Sync)
+            {
+                if (_ownSlot < 0 || _view == null)
+                    return;
+
+                using SessionLock Lock = Acquire();
+                if (!Lock.Held)
+                    return;
+
+                int Offset = SlotOffset(_ownSlot);
+                _view.Write(Offset + ExitCodeOffset, ExitCode);
+                _view.Flush();
+                _exitPublished = true;
+            }
+        }
+
+        internal static bool TryReadExit(uint GuestProcessId, out uint ExitCode)
+        {
+            ExitCode = 0;
+
+            lock (Sync)
+            {
+                if (!TryOpen())
+                    return false;
+
+                using SessionLock Lock = Acquire();
+                if (!Lock.Held)
+                    return false;
+
+                for (int Index = 0; Index < SlotCount; Index++)
+                {
+                    int Offset = SlotOffset(Index);
+                    if (_view.ReadUInt32(Offset + StateOffset) != SlotExited || _view.ReadUInt32(Offset + GuestProcessIdOffset) != GuestProcessId)
+                        continue;
+
+                    ExitCode = _view.ReadUInt32(Offset + ExitCodeOffset);
+                    return true;
+                }
+
+                return false;
             }
         }
 
@@ -486,6 +535,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             while (true)
             {
                 Thread.Sleep(ControlPollMilliseconds);
+
+                RemoteGuestProcess.PollLive();
 
                 uint Request;
                 uint ExitCode;

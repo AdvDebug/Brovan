@@ -174,7 +174,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Path = ImagePath,
                 Arch = Instance._binary.Architecture,
                 CreationTime = DateTime.UtcNow.ToFileTimeUtc(),
-                Remote = RemoteGuestProcess.Adopt(ProcessId, HostProcess, PebAddress, StartupParameters),
+                Remote = RemoteGuestProcess.Adopt(ProcessId, HostProcess, Instance, PebAddress, StartupParameters),
             };
 
             Instance.TriggerEventMessage($"[GuestProcessLauncher] Launched {Process.Name} as host process {Process.PID} (depth {Depth + 1}).", LogFlags.Syscall);
