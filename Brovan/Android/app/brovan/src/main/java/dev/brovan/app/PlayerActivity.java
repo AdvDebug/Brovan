@@ -59,6 +59,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private static final String EXTRA_DEVELOPER = "developer";
     private static final String EXTRA_CONTROLS = "controls";
     private static final String EXTRA_JIT_CACHE = "jit_cache";
+    private static final String EXTRA_RELAX_VULKAN = "relax_vulkan";
     private static final String EXTRA_SUSTAINED = "sustained";
     private static final String EXTRA_LAYOUT = "layout";
     private static final String EXTRA_POINTER = "pointer";
@@ -120,6 +121,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .putExtra(EXTRA_DEVELOPER, settings.developerMode())
                 .putExtra(EXTRA_CONTROLS, own.controlScheme())
                 .putExtra(EXTRA_JIT_CACHE, settings.jitCache())
+                .putExtra(EXTRA_RELAX_VULKAN, settings.relaxVulkan())
                 .putExtra(EXTRA_SUSTAINED, settings.sustainedPerformance())
                 .putExtra(EXTRA_LAYOUT, settings.controlLayout())
                 .putExtra(EXTRA_POINTER, own.pointerMode());
@@ -143,6 +145,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .putExtra(EXTRA_DEVELOPER, settings.developerMode())
                 .putExtra(EXTRA_CONTROLS, own.controlScheme())
                 .putExtra(EXTRA_JIT_CACHE, settings.jitCache())
+                .putExtra(EXTRA_RELAX_VULKAN, settings.relaxVulkan())
                 .putExtra(EXTRA_SUSTAINED, settings.sustainedPerformance())
                 .putExtra(EXTRA_LAYOUT, settings.controlLayout())
                 .putExtra(EXTRA_POINTER, own.pointerMode());
@@ -246,6 +249,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
 
         BrovanNative.setVerbose(developerMode);
         BrovanNative.setJitCache(getIntent().getBooleanExtra(EXTRA_JIT_CACHE, true));
+        BrovanNative.setRelaxVulkan(getIntent().getBooleanExtra(EXTRA_RELAX_VULKAN, false));
         setStatus(getIntent().getStringExtra(EXTRA_NAME));
 
         String session = getIntent().getStringExtra(EXTRA_SESSION);

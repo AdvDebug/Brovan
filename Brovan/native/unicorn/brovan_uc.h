@@ -51,6 +51,7 @@ typedef enum brov_reason {
     BROV_REASON_EMPTY,
     BROV_REASON_BLOATED,
     BROV_REASON_SLOT_UNRESOLVED,
+    BROV_REASON_BUDGET,
     BROV_REASON_MAX
 } brov_reason;
 
@@ -119,6 +120,9 @@ typedef struct brov_audit_result_t {
     uint64_t first_offset;
     uint64_t first_value;
     char first_object[32];
+    uint32_t first_context_before;
+    uint32_t first_context_bytes;
+    uint8_t first_context[48];
 } brov_audit_result_t;
 
 typedef struct brov_blob_header_t {
@@ -272,5 +276,6 @@ bool brov_cache_requested(void);
 bool brov_strict_audit(void);
 bool brov_commit_rwx(void *addr, uint64_t size);
 void brov_arm_budget(struct uc_struct *uc, size_t count);
+uint32_t brov_budget_mode_wanted(struct uc_struct *uc);
 
 #endif /* BROVAN_UC_H */

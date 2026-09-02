@@ -447,6 +447,9 @@ static int brov_audit_impl(struct uc_struct *uc, brov_audit_result_t *out)
     out->first_offset = 0;
     out->first_value = 0;
     memset(out->first_object, 0, sizeof(out->first_object));
+    out->first_context_before = 0;
+    out->first_context_bytes = 0;
+    memset(out->first_context, 0, sizeof(out->first_context));
 
     if (used < 8) {
         return UC_ERR_OK;
@@ -493,6 +496,17 @@ static int brov_audit_impl(struct uc_struct *uc, brov_audit_result_t *out)
                 memcpy(out->first_object, name, n);
                 out->first_offset = (uint64_t)i;
                 out->first_value = v;
+
+                /* On aarch64 a baked pointer sits in the aligned constant pool. The bytes around a hit
+                 * tell a real one from a false one. */
+                size_t before = i > 16 ? 16 : i;
+                size_t span = used - (i - before);
+                if (span > sizeof(out->first_context)) {
+                    span = sizeof(out->first_context);
+                }
+                memcpy(out->first_context, code + (i - before), span);
+                out->first_context_before = (uint32_t)before;
+                out->first_context_bytes = (uint32_t)span;
             }
             if (dump && out->hit_count < 32) {
                 size_t ctx = i > 8 ? i - 8 : 0;
@@ -827,11 +841,26 @@ static int brov_load_impl(struct uc_struct *uc, const void *blob, size_t len)
         goto reject;
     }
     if (hdr->target_arch != (uint32_t)uc->arch || hdr->target_mode != (uint32_t)uc->mode) {
+        if (brov_dump()) {
+            fprintf(stderr, "[brov-load] target blob arch=%u mode=%u, engine arch=%u mode=%u\n",
+                    (unsigned)hdr->target_arch, (unsigned)hdr->target_mode,
+                    (unsigned)uc->arch, (unsigned)uc->mode);
+        }
         reason = BROV_REASON_TARGET;
         goto reject;
     }
+    /* uc_emu_start() has not armed the mode yet. */
+    {
+        uint32_t want = brov_budget_mode_wanted(uc);
+
+        if (want != uc->brov_budget_mode) {
+            uc->brov_budget_mode = want;
+            uc->tb_flush(uc);
+        }
+    }
+
     if (((hdr->flags & BROV_BLOB_FLAG_BUDGET) != 0) != (uc->brov_budget_mode != 0)) {
-        reason = BROV_REASON_TARGET;
+        reason = BROV_REASON_BUDGET;
         goto reject;
     }
     if (hdr->reservation_base != base || hdr->reservation_size != size ||

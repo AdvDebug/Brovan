@@ -1074,7 +1074,7 @@ namespace Brovan.Generators
             if (c.Name == "vkAllocateMemory")
                 return "            case " + id + ":\n                return BrovVulkGenMemory.AllocateMemory(r, w, st, inst, " + StructId["VkMemoryAllocateInfo"] + ");\n";
             if (c.Name == "vkFreeMemory")
-                return "            case " + id + ":\n                return BrovVulkGenMemory.FreeMemory(r, st);\n";
+                return "            case " + id + ":\n                return BrovVulkGenMemory.FreeMemory(r, st, inst);\n";
             if (c.Name == "vkCreateDevice")
                 return "            case " + id + ":\n                return BrovVulkGenMemory.CreateDevice(r, w, st, " + StructId["VkDeviceCreateInfo"] + ");\n";
             if (c.Name == "vkFlushMappedMemoryRanges")
@@ -1131,6 +1131,7 @@ namespace Brovan.Generators
                     "                System.IntPtr vki = System.IntPtr.Zero;\n" +
                     "                int rr = (int)BrovVulkApi.vkCreateInstance(ci, System.IntPtr.Zero, (System.IntPtr)(&vki));\n" +
                     "                if (rr >= 0 && vki == System.IntPtr.Zero) rr = -3;\n" +
+                    "                if (rr >= 0) BrovVulkProc.HostInstance = vki;\n" +
                     "                w.WriteU32(rr >= 0 ? st.Register(vki, \"VkInstance\") : 0u);\n" +
                     "                return rr;\n            }\n";
             if (c.Name == "vkCreateWin32SurfaceKHR")
@@ -1429,7 +1430,7 @@ namespace Brovan.Generators
             }
 
             if (c.Name == "vkDestroyDevice" || c.Name == "vkDestroyInstance")
-                post.Add("                st.ClearMappings();");
+                b.Append("                BrovVulkGenMemory.ReleaseMappings(st, inst);\n");
 
             // The driver indexes its own per-layout descriptor state by firstSet with no bound check of
             // its own, so the set count the layout was built with has to be kept and enforced here.
@@ -1464,6 +1465,8 @@ namespace Brovan.Generators
                         : "                if (rr >= 0 && p" + infoIdx + " != System.IntPtr.Zero) st.SetPipelineLayoutSets(p" + outIdx + ", *(uint*)(p" + infoIdx + " + BrovVulkLayout.MemberOffset[\"" + t + ".setLayoutCount\"]));");
                 }
             }
+
+            EmitStandInHooks(c, b, post);
 
             EmitWsiHooks(c, b, check, post);
 
@@ -1500,6 +1503,126 @@ namespace Brovan.Generators
         {
             int i = c.Params.FindIndex(x => x.Name == name);
             return i < 0 ? null : "p" + i;
+        }
+
+        private static void EmitStandInHooks(Command c, StringBuilder b, List<string> post)
+        {
+            if (c.Name == "vkGetPhysicalDeviceFeatures")
+            {
+                post.Insert(0, "                VulkanStandIns.Advertise(p0, p1);");
+                return;
+            }
+
+            if (c.Name == "vkGetPhysicalDeviceFeatures2" || c.Name == "vkGetPhysicalDeviceFeatures2KHR")
+            {
+                post.Insert(0, "                VulkanStandIns.Advertise(p0, p1 + BrovVulkLayout.MemberOffset[\"VkPhysicalDeviceFeatures2.features\"]);");
+                return;
+            }
+
+            string device = Arg(c, "device");
+            if (c.Name == "vkCreateGraphicsPipelines")
+            {
+                int infoIdx = c.Params.FindIndex(x => x.Type == "VkGraphicsPipelineCreateInfo");
+                int countIdx = c.Params.FindIndex(x => x.Name == "createInfoCount");
+                string cache = Arg(c, "pipelineCache");
+                string pipelines = Arg(c, "pPipelines");
+                if (device != null && cache != null && pipelines != null && infoIdx >= 0 && countIdx >= 0 && StructId.TryGetValue("VkGraphicsPipelineCreateInfo", out int sid))
+                {
+                    b.Append("                VulkanStandIns.PreparePipelines(st, ").Append(device).Append(", p").Append(infoIdx)
+                     .Append(", p").Append(countIdx).Append(", BrovVulkStructMeta.Sizes[").Append(sid).Append("]);\n");
+                    post.Insert(0, "                VulkanStandIns.FinishPipelines(st, " + device + ", " + cache + ", " + pipelines + ", rr);");
+                }
+                return;
+            }
+
+            if (c.Name == "vkCreateShaderModule")
+            {
+                string ci = Arg(c, "pCreateInfo");
+                string module = Arg(c, "pShaderModule");
+                if (device != null && ci != null && module != null)
+                {
+                    b.Append("                if (").Append(ci).Append(" != System.IntPtr.Zero) VulkanStandIns.PatchShaderModule(st, ").Append(device).Append(", ").Append(ci).Append(");\n");
+                    post.Add("                if (rr >= 0 && " + ci + " != System.IntPtr.Zero) VulkanStandIns.NoteShaderModule(st, " + device + ", " + ci + ", " + module + ");");
+                }
+                return;
+            }
+
+            if (c.Name == "vkDestroyShaderModule")
+            {
+                string module = Arg(c, "shaderModule");
+                if (module != null)
+                    b.Append("                VulkanStandIns.ForgetShaderModule(st, ").Append(module).Append(");\n");
+                return;
+            }
+
+            if (c.Name == "vkDestroyPipeline")
+            {
+                string pipeline = Arg(c, "pipeline");
+                if (device != null && pipeline != null)
+                    b.Append("                VulkanStandIns.DestroyPipeline(st, ").Append(device).Append(", ").Append(pipeline).Append(");\n");
+                return;
+            }
+
+            if (c.Name == "vkDestroyDevice" || c.Name == "vkDestroyInstance")
+            {
+                b.Append("                VulkanStandIns.ReleaseDevice(st, ").Append(c.Name == "vkDestroyDevice" && device != null ? device : "System.IntPtr.Zero").Append(");\n");
+                return;
+            }
+
+            string commandBuffer = Arg(c, "commandBuffer");
+            if (c.Name == "vkCmdBindPipeline")
+            {
+                string bindPoint = Arg(c, "pipelineBindPoint");
+                string pipeline = Arg(c, "pipeline");
+                if (commandBuffer != null && bindPoint != null && pipeline != null)
+                    b.Append("                ").Append(pipeline).Append(" = VulkanStandIns.BindPipeline(st, ").Append(commandBuffer).Append(", ").Append(bindPoint).Append(", ").Append(pipeline).Append(");\n");
+                return;
+            }
+
+            if (c.Name == "vkCmdSetPrimitiveTopology")
+            {
+                string topology = Arg(c, "primitiveTopology");
+                if (commandBuffer != null && topology != null)
+                    b.Append("                VulkanStandIns.SetPrimitiveTopology(st, ").Append(commandBuffer).Append(", ").Append(topology).Append(");\n");
+                return;
+            }
+
+            if (c.Name == "vkBeginCommandBuffer" || c.Name == "vkResetCommandBuffer")
+            {
+                if (commandBuffer != null)
+                    b.Append("                VulkanStandIns.ResetCommandBuffer(st, ").Append(commandBuffer).Append(");\n");
+                return;
+            }
+
+            int buffersIdx = c.Params.FindIndex(x => x.Name == "pCommandBuffers");
+            if (c.Name == "vkAllocateCommandBuffers" && device != null && buffersIdx >= 0)
+            {
+                post.Add("                if (rr >= 0) for (uint k = 0; k < p" + buffersIdx + "n; k++) st.SetCommandBufferDevice(System.Runtime.InteropServices.Marshal.ReadIntPtr(p" + buffersIdx + ", (int)k * 8), " + device + ");");
+                return;
+            }
+
+            if (c.Name == "vkFreeCommandBuffers" && buffersIdx >= 0)
+            {
+                post.Add("                for (uint k = 0; k < p" + buffersIdx + "n; k++) st.ForgetCommandBuffer(System.Runtime.InteropServices.Marshal.ReadIntPtr(p" + buffersIdx + ", (int)k * 8));");
+                return;
+            }
+
+            if (commandBuffer == null || !c.Name.StartsWith("vkCmdSet", StringComparison.Ordinal))
+                return;
+
+            for (int i = 0; i < c.Params.Count; i++)
+            {
+                if (c.Params[i].Name != "viewportCount" && c.Params[i].Name != "scissorCount")
+                    continue;
+
+                string first = Arg(c, c.Params[i].Name == "viewportCount" ? "firstViewport" : "firstScissor");
+                b.Append("                if ((st.CommandBufferStandIns(").Append(commandBuffer).Append(") & VulkanStandIns.MultiViewportBit) != 0)\n");
+                b.Append("                {\n");
+                if (first != null)
+                    b.Append("                    if (MultiViewport.Skip(").Append(first).Append(")) return 0;\n");
+                b.Append("                    p").Append(i).Append(" = MultiViewport.Clamp(p").Append(i).Append(");\n");
+                b.Append("                }\n");
+            }
         }
 
         private static void EmitWsiHooks(Command c, StringBuilder b, List<string> check, List<string> post)
@@ -2022,16 +2145,56 @@ namespace Brovan.Generators
                 b.AppendLine("            \"" + c.Name + "\",");
             b.AppendLine("        };");
             b.AppendLine();
+            Dictionary<string, List<string>> promotedFrom = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            foreach (Command a in m.Commands.Values)
+            {
+                if (a.Alias == null)
+                    continue;
+                if (!promotedFrom.TryGetValue(a.Alias, out List<string> names))
+                {
+                    names = new List<string>();
+                    promotedFrom[a.Alias] = names;
+                }
+                names.Add(a.Name);
+            }
+            foreach (List<string> names in promotedFrom.Values)
+                names.Sort(StringComparer.Ordinal);
+
             foreach (Command c in cmds)
             {
                 StringBuilder args = new StringBuilder();
+                StringBuilder call = new StringBuilder();
+                StringBuilder fnPtr = new StringBuilder("delegate* unmanaged<");
                 for (int i = 0; i < c.Params.Count; i++)
                 {
-                    if (i > 0) args.Append(", ");
-                    args.Append(CsType(m, c.Params[i].Type, c.Params[i].PtrDepth)).Append(" a").Append(i);
+                    string ty = CsType(m, c.Params[i].Type, c.Params[i].PtrDepth);
+                    if (i > 0) { args.Append(", "); call.Append(", "); }
+                    args.Append(ty).Append(" a").Append(i);
+                    call.Append('a').Append(i);
+                    fnPtr.Append(ty).Append(", ");
                 }
-                b.AppendLine("        [DllImport(\"vulkan-1.dll\", EntryPoint = \"" + c.Name + "\", CallingConvention = CallingConvention.Winapi)]");
-                b.AppendLine("        internal static extern " + CsRet(m, c.Ret) + " " + c.Name + "(" + args + ");");
+                string ret = CsRet(m, c.Ret);
+                fnPtr.Append(ret).Append('>');
+
+                if (!promotedFrom.TryGetValue(c.Name, out List<string> aliases))
+                {
+                    b.AppendLine("        [DllImport(\"vulkan-1.dll\", EntryPoint = \"" + c.Name + "\", CallingConvention = CallingConvention.Winapi)]");
+                    b.AppendLine("        internal static extern " + ret + " " + c.Name + "(" + args + ");");
+                    continue;
+                }
+
+                StringBuilder aliasArgs = new StringBuilder();
+                foreach (string alias in aliases)
+                    aliasArgs.Append(", \"").Append(alias).Append('"');
+
+                b.AppendLine("        private static IntPtr Pfn" + c.Name + ";");
+                b.AppendLine("        internal static " + ret + " " + c.Name + "(" + args + ")");
+                b.AppendLine("        {");
+                b.AppendLine("            IntPtr p = Pfn" + c.Name + ";");
+                b.AppendLine("            if (p == IntPtr.Zero)");
+                b.AppendLine("                p = Pfn" + c.Name + " = BrovVulkProc.Resolve(\"" + c.Name + "\"" + aliasArgs + ");");
+                b.AppendLine("            " + (ret == "void" ? "" : "return ") + "((" + fnPtr + ")p)(" + call + ");");
+                b.AppendLine("        }");
             }
             b.AppendLine("    }");
             b.AppendLine("}");

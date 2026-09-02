@@ -100,6 +100,56 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static extern IntPtr GetModuleHandleW(IntPtr lpModuleName);
     }
 
+    /// <summary>
+    /// Resolves host Vulkan commands the loader does not export. A loader exports only the core commands of
+    /// its own version, the rest comes from vkGetInstanceProcAddr.
+    /// </summary>
+    internal static class BrovVulkProc
+    {
+        private static IntPtr Library;
+        private static bool LibraryTried;
+
+        internal static IntPtr HostInstance;
+
+        internal static IntPtr Resolve(string Name, params string[] Aliases)
+        {
+            if (!LibraryTried)
+            {
+                LibraryTried = true;
+                if (GeneralHelper.IsWindows)
+                    NativeLibrary.TryLoad("vulkan-1.dll", out Library);
+                else if (!NativeLibrary.TryLoad("libvulkan.so.1", out Library))
+                    NativeLibrary.TryLoad("libvulkan.so", out Library);
+            }
+
+            if (Library != IntPtr.Zero && NativeLibrary.TryGetExport(Library, Name, out IntPtr Export) && Export != IntPtr.Zero)
+                return Export;
+
+            if (HostInstance != IntPtr.Zero)
+            {
+                IntPtr Proc = InstanceProc(Name);
+                if (Proc != IntPtr.Zero)
+                    return Proc;
+
+                for (int i = 0; i < Aliases.Length; i++)
+                {
+                    Proc = InstanceProc(Aliases[i]);
+                    if (Proc != IntPtr.Zero)
+                        return Proc;
+                }
+            }
+
+            throw new EntryPointNotFoundException("The host Vulkan loader has no entry point for " + Name + ".");
+        }
+
+        private static IntPtr InstanceProc(string Name)
+        {
+            IntPtr Ansi = Marshal.StringToHGlobalAnsi(Name);
+            try { return BrovVulkApi.vkGetInstanceProcAddr(HostInstance, Ansi); }
+            finally { Marshal.FreeHGlobal(Ansi); }
+        }
+    }
+
     internal static unsafe class BrovVulkGenExt
     {
         private const int PropSize = 260;
@@ -193,15 +243,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             public readonly ulong MapOffset;
             public readonly ulong Size;
             public readonly bool Imported;
+            public readonly bool Shared;
 
-            public MapEntry(IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size, bool imported)
+            public MapEntry(IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size, bool imported, bool shared)
             {
                 HostPtr = hostPtr;
                 GuestVa = guestVa;
                 MapOffset = mapOffset;
                 Size = size;
                 Imported = imported;
+                Shared = shared;
             }
+
+            public bool NeedsCopy => !Imported && !Shared;
         }
 
         public readonly struct DeviceImport
@@ -225,11 +279,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly HashSet<uint> _importedMem = new HashSet<uint>();
         private readonly Dictionary<IntPtr, DeviceImport> _deviceImports = new Dictionary<IntPtr, DeviceImport>();
         private readonly Dictionary<IntPtr, IntPtr> _devicePhysical = new Dictionary<IntPtr, IntPtr>();
+        private readonly Dictionary<IntPtr, int> _deviceStandIns = new Dictionary<IntPtr, int>();
+        private readonly Dictionary<IntPtr, int> _commandBufferStandIns = new Dictionary<IntPtr, int>();
         private readonly Dictionary<IntPtr, uint> _layoutSets = new Dictionary<IntPtr, uint>();
         private readonly Dictionary<IntPtr, ulong> _bufferSizes = new Dictionary<IntPtr, ulong>();
         private uint _next = 1;
 
         public readonly BrovVulkWsi Wsi = new BrovVulkWsi();
+        public readonly VulkanStandInState StandIns = new VulkanStandInState();
 
         private IntPtr _arena;
         private int _arenaUsed;
@@ -341,8 +398,33 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool TryGetDevicePhysical(IntPtr device, out IntPtr physicalDevice) => _devicePhysical.TryGetValue(device, out physicalDevice);
 
-        public void AddMapping(uint id, IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size, bool imported) =>
-            _mappings[id] = new MapEntry(hostPtr, guestVa, mapOffset, size, imported);
+        public void SetDeviceStandIns(IntPtr device, int bits)
+        {
+            if (device != IntPtr.Zero)
+                _deviceStandIns[device] = bits;
+        }
+
+        public int DeviceStandIns(IntPtr device) => _deviceStandIns.TryGetValue(device, out int bits) ? bits : 0;
+
+        public void SetCommandBufferDevice(IntPtr commandBuffer, IntPtr device)
+        {
+            int bits = DeviceStandIns(device);
+            if (bits != 0)
+                _commandBufferStandIns[commandBuffer] = bits;
+            else
+                _commandBufferStandIns.Remove(commandBuffer);
+        }
+
+        public int CommandBufferStandIns(IntPtr commandBuffer) => _commandBufferStandIns.TryGetValue(commandBuffer, out int bits) ? bits : 0;
+
+        public void ForgetCommandBuffer(IntPtr commandBuffer)
+        {
+            _commandBufferStandIns.Remove(commandBuffer);
+            StandIns.CommandBuffers.Remove(commandBuffer);
+        }
+
+        public void AddMapping(uint id, IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size, bool imported, bool shared) =>
+            _mappings[id] = new MapEntry(hostPtr, guestVa, mapOffset, size, imported, shared);
 
         public bool TryGetMapping(uint id, out MapEntry entry) => _mappings.TryGetValue(id, out entry);
 

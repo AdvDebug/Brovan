@@ -56,6 +56,7 @@ static bool brov_find_ram_offset(struct uc_struct *uc, ram_addr_t size, ram_addr
     unsigned count = 0;
     unsigned i = 0;
 
+    /* ram_list is size-sorted, so last_block is not the highest offset. */
     if (!uc->ram_list.freed) {
         ram_addr_t max_end = 0;
 

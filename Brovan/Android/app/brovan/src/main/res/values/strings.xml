@@ -87,6 +87,8 @@
     <string name="settings_network">Network access</string>
     <string name="settings_jit_cache">JIT code cache</string>
     <string name="settings_jit_cache_summary">Keeps translated code for the next start, so programs start quicker. Experimental.</string>
+    <string name="settings_relax_vulkan">Claim missing GPU features</string>
+    <string name="settings_relax_vulkan_summary">Tells programs the GPU has every core Vulkan feature it is missing, whatever those are on this device. Some Direct3D programs refuse to start otherwise, but anything that really uses one will draw wrong or fail.</string>
     <string name="settings_sustained">Sustained performance</string>
     <string name="settings_sustained_summary">Holds a steady speed on long runs instead of a fast start that slows down as the device gets hot. Peak speed is lower.</string>
     <string name="settings_pointer">Touch behaviour</string>

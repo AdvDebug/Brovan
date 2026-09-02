@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using Brovan.Core.Helpers;
 using static Brovan.Core.Emulation.Native;
 
@@ -31,6 +32,7 @@ namespace Brovan.Core.Emulation
             "reservation-mismatch", "prologue-mismatch", "arena-mismatch",
             "code-hash-mismatch", "slot-table-full", "audit-failed",
             "too-many-stale-blocks", "empty", "mostly-dead-code", "slot-unresolved",
+            "budget-mode-mismatch",
         };
 
         private static byte[] PendingBlob;
@@ -48,6 +50,30 @@ namespace Brovan.Core.Emulation
         public static bool PrintStats { get; set; }
 
         public static string CacheDirectory { get; set; }
+
+        /// <summary>
+        /// Formats the bytes around an audit hit, with the eight matched bytes marked.
+        /// </summary>
+        private static string DescribeContext(BrovAuditResult Audit)
+        {
+            byte[] Context = Audit.FirstContext;
+            if (Context == null || Audit.FirstContextBytes == 0)
+                return "(none)";
+
+            int Count = (int)Math.Min(Audit.FirstContextBytes, (uint)Context.Length);
+            int Hit = (int)Audit.FirstContextBefore;
+            StringBuilder Text = new StringBuilder(Count * 3 + 8);
+
+            for (int i = 0; i < Count; i++)
+            {
+                Text.Append(i == Hit ? '|' : ' ');
+                Text.Append(Context[i].ToString("x2", CultureInfo.InvariantCulture));
+                if (i == Hit + 7)
+                    Text.Append('|');
+            }
+
+            return Text.ToString();
+        }
 
         public static string ReasonName(uint Reason)
         {
@@ -205,7 +231,10 @@ namespace Brovan.Core.Emulation
                         Utils.LogError($"[jit-cache] not saved ({ReasonName(Engine.GetCodeCacheReason())}).");
 
                         if (!Engine.ValidateCodeCache(out BrovAuditResult Audit) && Audit.HitCount != 0)
-                            Utils.LogError($"[jit-cache] audit hit {Audit.HitCount} site(s); first at +0x{Audit.FirstOffset:X} = 0x{Audit.FirstValue:X} ({Audit.FirstObject}).");
+                        {
+                            Utils.LogError($"[jit-cache] audit hit {Audit.HitCount} site(s); first at +0x{Audit.FirstOffset:X} = 0x{Audit.FirstValue:X} ({Audit.FirstObject}), align {Audit.FirstOffset & 7}.");
+                            Utils.LogError("[jit-cache] audit context " + DescribeContext(Audit));
+                        }
 
                         return;
                     }

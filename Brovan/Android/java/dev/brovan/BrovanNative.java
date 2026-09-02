@@ -173,6 +173,11 @@ public final class BrovanNative {
         nativeSetJitCache(enabled ? 1 : 0);
     }
 
+    /** Claims the core Vulkan features nothing stands in for. Call before {@link #start}. */
+    public static void setRelaxVulkan(boolean enabled) {
+        nativeSetRelaxVulkan(enabled ? 1 : 0);
+    }
+
     /** Feeds one line to the emulator's debugger prompt. Verbose mode only. */
     public static void sendCommand(String command) {
         nativeSendCommand(command);
@@ -409,6 +414,8 @@ public final class BrovanNative {
     private static native void nativeSetVerbose(int enabled);
 
     private static native void nativeSetJitCache(int enabled);
+
+    private static native void nativeSetRelaxVulkan(int enabled);
 
     private static native void nativeSendCommand(String command);
 

@@ -32,6 +32,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return VkErrorInitializationFailed;
             IntPtr ci = BrovVulkGenStruct.Rebuild(createInfoSid, r, st);
 
+            int standIns = VulkanStandIns.StripDeviceFeatures(st, pd, ci);
+
             bool importCapable = DeviceSupportsHostImport(pd, st);
             if (importCapable)
             {
@@ -53,6 +55,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return rr;
 
             st.SetDevicePhysical(device, pd);
+            st.SetDeviceStandIns(device, standIns);
 
             if (importCapable)
             {
@@ -215,7 +218,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return (bits & (1u << (int)memoryTypeIndex)) != 0;
         }
 
-        internal static int FreeMemory(GenReader r, GenState st)
+        internal static int FreeMemory(GenReader r, GenState st, BinaryEmulator inst)
         {
             IntPtr device = st.Lookup(r.ReadU32(), "VkDevice");
             uint memId = r.ReadU32();
@@ -224,8 +227,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             IntPtr memory = st.Lookup(memId, "VkDeviceMemory");
             if (memory == IntPtr.Zero)
                 return 0;
-            if (st.HasMapping(memId))
+            if (st.TryGetMapping(memId, out GenState.MapEntry e))
             {
+                if (e.Shared && !inst.RestoreRegionBacking(e.GuestVa, e.Size) && inst.IsRegionMapped(e.GuestVa, e.Size))
+                    Utils.LogError($"[BrovVulk] guest range 0x{e.GuestVa:X}+0x{e.Size:X} could not be re-backed before vkFreeMemory, it still aliases driver memory.");
                 BrovVulkApi.vkUnmapMemory(device, memory);
                 st.RemoveMapping(memId);
             }
@@ -257,9 +262,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 BrovVulkApi.vkUnmapMemory(device, memory);
                 return VkErrorMemoryMapFailed;
             }
+            bool shared = false;
             if (!imported)
-                CopyHostToGuest(inst, hostPtr, guestVa, size);
-            st.AddMapping(memId, hostPtr, guestVa, offset, size, imported);
+            {
+                shared = inst.RebackRegionWithHostMemory(guestVa, size, hostPtr);
+                ImportStats.Record(shared ? ImportOutcome.MappingShared : ImportOutcome.MappingCopied, size);
+                if (!shared)
+                    CopyHostToGuest(inst, hostPtr, guestVa, size);
+            }
+
+            st.AddMapping(memId, hostPtr, guestVa, offset, size, imported, shared);
             return rr;
         }
 
@@ -270,8 +282,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             IntPtr memory = st.Lookup(memId, "VkDeviceMemory");
             if (memory == IntPtr.Zero || !st.TryGetMapping(memId, out GenState.MapEntry e))
                 return 0;
-            if (!e.Imported && inst.IsRegionMapped(e.GuestVa, e.Size))
+            if (e.Shared)
+            {
+                if (inst.RestoreRegionBacking(e.GuestVa, e.Size))
+                {
+                    CopyHostToGuest(inst, e.HostPtr, e.GuestVa, e.Size);
+                }
+                else if (inst.IsRegionMapped(e.GuestVa, e.Size))
+                {
+                    Utils.LogError($"[BrovVulk] guest range 0x{e.GuestVa:X}+0x{e.Size:X} could not be re-backed, the host mapping is kept.");
+                    return 0;
+                }
+            }
+            else if (!e.Imported && inst.IsRegionMapped(e.GuestVa, e.Size))
+            {
                 CopyGuestToHost(inst, e.GuestVa, e.HostPtr, e.Size);
+            }
+
             BrovVulkApi.vkUnmapMemory(device, memory);
             st.RemoveMapping(memId);
             return 0;
@@ -288,7 +315,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             int copied = 0;
             ulong bytes = 0;
             foreach (GenState.MapEntry e in st.Mappings)
-                if (!e.Imported && inst.IsRegionMapped(e.GuestVa, e.Size))
+                if (e.NeedsCopy && inst.IsRegionMapped(e.GuestVa, e.Size))
                 {
                     CopyGuestToHost(inst, e.GuestVa, e.HostPtr, e.Size);
                     copied++;
@@ -296,6 +323,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
             ImportStats.RecordSync(copied, bytes);
+        }
+
+        internal static void ReleaseMappings(GenState st, BinaryEmulator inst)
+        {
+            foreach (GenState.MapEntry e in st.Mappings)
+            {
+                if (e.Shared && !inst.RestoreRegionBacking(e.GuestVa, e.Size) && inst.IsRegionMapped(e.GuestVa, e.Size))
+                    Utils.LogError($"[BrovVulk] guest range 0x{e.GuestVa:X}+0x{e.Size:X} could not be re-backed, it still aliases driver memory.");
+            }
+
+            st.ClearMappings();
         }
 
         private static int SyncRanges(GenReader r, GenState st, BinaryEmulator inst, bool invalidate)
@@ -328,8 +366,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong* sp = (ulong*)((byte*)spans + k * 24);
                 sp[0] = (ulong)(long)e.HostPtr + rel;
                 sp[1] = e.GuestVa + rel;
-                sp[2] = e.Imported ? 0 : len;
-                if (!invalidate && !e.Imported && len > 0)
+                sp[2] = e.NeedsCopy ? len : 0;
+                if (!invalidate && e.NeedsCopy && len > 0)
                 {
                     EnsureGuestRange(inst, sp[1], len);
                     CopyGuestToHost(inst, sp[1], (IntPtr)(long)sp[0], len);
@@ -394,6 +432,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             DeviceExtensionAbsent,
             DeviceProcAddrMissing,
             DeviceAlignmentUnusable,
+            MappingShared,
+            MappingCopied,
         }
 
         /// <summary>

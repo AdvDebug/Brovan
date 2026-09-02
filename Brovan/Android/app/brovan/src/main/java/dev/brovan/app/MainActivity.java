@@ -723,6 +723,10 @@ public class MainActivity extends AppCompatActivity {
         jitCache.setChecked(settings.jitCache());
         jitCache.setOnCheckedChangeListener((button, checked) -> settings.setJitCache(checked));
 
+        MaterialSwitch relaxVulkan = view.findViewById(R.id.relax_vulkan);
+        relaxVulkan.setChecked(settings.relaxVulkan());
+        relaxVulkan.setOnCheckedChangeListener((button, checked) -> settings.setRelaxVulkan(checked));
+
         MaterialSwitch sustained = view.findViewById(R.id.sustained);
         sustained.setChecked(settings.sustainedPerformance());
         sustained.setOnCheckedChangeListener((button, checked) -> settings.setSustainedPerformance(checked));

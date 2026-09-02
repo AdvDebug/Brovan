@@ -1885,6 +1885,48 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
+        /// Puts caller-owned host pages behind a committed guest range. The region records stay as they are.
+        /// </summary>
+        public bool RebackRegionWithHostMemory(ulong BaseAddress, ulong Size, IntPtr HostPointer)
+        {
+            if (HostPointer == IntPtr.Zero || Size == 0 || (BaseAddress & (PageSize - 1)) != 0
+                || (Size & (PageSize - 1)) != 0 || ((ulong)HostPointer & (PageSize - 1)) != 0)
+                return false;
+
+            if (!TryFindMemoryRegion(BaseAddress, out MemoryRegion Region) || !Region.IsCommitted
+                || GetRangeEnd(BaseAddress, Size) > GetRangeEnd(Region.BaseAddress, Region.Size))
+                return false;
+
+            if (!IsRegionMapped(BaseAddress, Size) || !_emulator.UnmapMemory(BaseAddress, Size))
+                return false;
+
+            if (_emulator.MapMemoryShared(BaseAddress, Size, Region.Protections, HostPointer))
+                return true;
+
+            // The range is unmapped now, so a failure has to leave ordinary pages behind.
+            _emulator.MapMemory(BaseAddress, Size, Region.Protections);
+            return false;
+        }
+
+        /// <summary>
+        /// Puts ordinary pages back behind a range from <see cref="RebackRegionWithHostMemory"/>. The contents
+        /// are lost.
+        /// </summary>
+        public bool RestoreRegionBacking(ulong BaseAddress, ulong Size)
+        {
+            if (Size == 0 || (BaseAddress & (PageSize - 1)) != 0 || (Size & (PageSize - 1)) != 0)
+                return false;
+
+            if (!TryFindMemoryRegion(BaseAddress, out MemoryRegion Region))
+                return false;
+
+            if (IsRegionMapped(BaseAddress, Size) && !_emulator.UnmapMemory(BaseAddress, Size))
+                return false;
+
+            return _emulator.MapMemory(BaseAddress, Size, Region.Protections);
+        }
+
+        /// <summary>
         /// Maps [Address, Address+Size) a second time at Alias.
         /// </summary>
         public bool MapSharedMemoryRange(ulong Alias, ulong Address, ulong Size, MemoryProtection Protection, uint AllocationProtect, ulong AllocationBase = 0)

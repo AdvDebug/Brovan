@@ -191,6 +191,10 @@ namespace Brovan.Core.Emulation
             public ulong FirstValue;
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
             public string FirstObject;
+            public uint FirstContextBefore;
+            public uint FirstContextBytes;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 48)]
+            public byte[] FirstContext;
         }
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]

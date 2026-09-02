@@ -159,6 +159,9 @@ namespace Brovan.Android
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_jit_cache")]
         public static void SetJitCache(int enabled) => UnicornCodeCache.Enabled = enabled != 0;
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_set_relax_vulkan")]
+        public static void SetRelaxVulkan(int enabled) => VulkanStandIns.Relax = enabled != 0;
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_surface")]
         public static void SetSurface(IntPtr nativeWindow, int width, int height, int densityDpi)
         {

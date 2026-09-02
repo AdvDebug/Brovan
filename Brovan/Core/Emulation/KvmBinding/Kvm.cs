@@ -98,6 +98,9 @@ namespace Brovan.Core.Emulation
         private int _disposed;
         private int _disposing;
         private volatile bool _stopRequested;
+        private bool _mmioCompletionPending;
+        private bool _faultRegistersSaved;
+        private LinuxKvmRegisters _faultRegisters;
         private bool _singleStepRequested;
 
         public bool NoHooks;
@@ -811,6 +814,8 @@ namespace Brovan.Core.Emulation
 
             FlushRegisterCache();
             _stopRequested = false;
+            _mmioCompletionPending = false;
+            _faultRegistersSaved = false;
             _singleStepRequested = count == 1;
             ref LinuxKvmRun run = ref GetRunRef();
             run.ImmediateExit = 0;
@@ -824,7 +829,7 @@ namespace Brovan.Core.Emulation
 
             try
             {
-                while (!_stopRequested)
+                while (!_stopRequested || _mmioCompletionPending)
                 {
                     if (HandlePreRunInstruction()) continue;
 
@@ -839,6 +844,16 @@ namespace Brovan.Core.Emulation
                     }
 
                     InvalidateRegisterCache();
+
+                    if (_mmioCompletionPending)
+                    {
+                        _mmioCompletionPending = false;
+                        if (_faultRegistersSaved && (rc < 0 || run.ExitReason != KvmConstants.ExitMmio))
+                        {
+                            _faultRegistersSaved = false;
+                            SetRegisters(_faultRegisters);
+                        }
+                    }
 
                     if (rc < 0)
                     {
@@ -862,10 +877,9 @@ namespace Brovan.Core.Emulation
                             if (HandleHltExit()) continue;
                             return _error == KvmErrors.Ok;
                         case KvmConstants.ExitMmio:
-                            if (HandleMmioExit(ref run))
-                                continue;
-                            _error = KvmErrors.Ok;
-                            return true;
+                            if (!HandleMmioExit(ref run))
+                                StopEmulation();
+                            continue;
                         case KvmConstants.ExitException:
                             {
                                 uint excVector = run.Exit.Exception.Exception;
@@ -2054,6 +2068,13 @@ namespace Brovan.Core.Emulation
             uint len = mmio.Len;
             byte isWrite = mmio.IsWrite;
 
+            // A later fragment of the faulted instruction.
+            if (_faultRegistersSaved)
+            {
+                _mmioCompletionPending = true;
+                return true;
+            }
+
             foreach (MmioRegion region in _mmioRegions)
             {
                 if (physAddr < region.Address || physAddr >= region.Address + region.Size) continue;
@@ -2073,25 +2094,67 @@ namespace Brovan.Core.Emulation
             if (mapped && _trappedPages.Contains(faultPage))
                 return HandleTrappedAccess(ref mmio, physAddr, len, isWrite != 0);
 
+            // KVM reports a wide access one fragment at a time. A fragment on a page that is accessible now
+            // is not a new fault.
+            if (mapped && IsPageAccessible(faultPage, isWrite != 0))
+            {
+                if (_mappingsDirty) RebuildMappings();
+                CompleteMmioAccess(ref mmio);
+                return true;
+            }
+
             BackendHookType required = mapped ? BackendHookType.MemoryProtected : BackendHookType.MemoryUnmapped;
             BackendMemoryAccessType type = mapped
                 ? (isWrite != 0 ? BackendMemoryAccessType.WriteProtected : BackendMemoryAccessType.ReadProtected)
                 : (isWrite != 0 ? BackendMemoryAccessType.WriteUnmapped : BackendMemoryAccessType.ReadUnmapped);
 
+            bool hookRan = false;
+            bool handled = false;
             for (int i = 0; i < _memoryHooks.Count; i++)
             {
                 MemoryHookEntry entry = _memoryHooks[i];
                 if ((entry.Type & required) == 0) continue;
                 if (entry.End == 0 || entry.End < entry.Begin || (entry.Begin <= physAddr && entry.End >= physAddr))
                 {
+                    hookRan = true;
                     if (entry.Callback(type, physAddr, len, isWrite != 0 ? mmio.Data : 0))
                     {
-                        CompleteMmioAccess(ref mmio);
-                        return true;
+                        handled = true;
+                        break;
                     }
                 }
             }
-            return false;
+
+            // A guard page hook makes the page accessible and returns false. KVM does not retry, so the
+            // access is applied here.
+            if (!handled && hookRan && IsPageAccessible(faultPage, isWrite != 0))
+            {
+                if (_mappingsDirty) RebuildMappings();
+                handled = true;
+            }
+
+            if (!handled)
+            {
+                // The completion writes back RIP and the loaded register. The fault-time registers go back
+                // after it.
+                _faultRegisters = GetRegisters();
+                _faultRegistersSaved = true;
+                _mmioCompletionPending = true;
+                return false;
+            }
+
+            CompleteMmioAccess(ref mmio);
+            return true;
+        }
+
+        private bool IsPageAccessible(ulong pageAddress, bool write)
+        {
+            if (_trappedPages.Contains(pageAddress)) return false;
+            if (!_mappedPages.TryGetValue(pageAddress, out MappedPage page) || page == null || page.HostPage == IntPtr.Zero)
+                return false;
+
+            KvmMemoryPermission needed = write ? KvmMemoryPermission.Write : KvmMemoryPermission.Read;
+            return (page.Permissions & needed) != 0;
         }
 
         private unsafe bool HandleTrappedAccess(ref LinuxKvmMmioExit mmio, ulong physAddr, uint len, bool isWrite)
@@ -2125,6 +2188,9 @@ namespace Brovan.Core.Emulation
 
         private unsafe void CompleteMmioAccess(ref LinuxKvmMmioExit mmio)
         {
+            // KVM retires the instruction on its next entry, before it reads immediate_exit.
+            _mmioCompletionPending = true;
+
             uint len = mmio.Len;
             if (len == 0 || len > sizeof(ulong)) return;
 

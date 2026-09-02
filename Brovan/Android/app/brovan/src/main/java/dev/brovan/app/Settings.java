@@ -14,6 +14,7 @@ final class Settings {
     private static final String KEY_FIT_WINDOW = "fit_window";
     private static final String KEY_CONTROLS = "controls";
     private static final String KEY_JIT_CACHE = "jit_cache";
+    private static final String KEY_RELAX_VULKAN = "relax_vulkan";
     private static final String KEY_SUSTAINED = "sustained";
     private static final String KEY_SETUP_DISMISSED = "setup_dismissed";
     private static final String KEY_CONTROL_LAYOUT = "control_layout";
@@ -58,6 +59,14 @@ final class Settings {
 
     void setFitWindow(boolean value) {
         preferences.edit().putBoolean(KEY_FIT_WINDOW, value).apply();
+    }
+
+    boolean relaxVulkan() {
+        return preferences.getBoolean(KEY_RELAX_VULKAN, false);
+    }
+
+    void setRelaxVulkan(boolean value) {
+        preferences.edit().putBoolean(KEY_RELAX_VULKAN, value).apply();
     }
 
     boolean jitCache() {

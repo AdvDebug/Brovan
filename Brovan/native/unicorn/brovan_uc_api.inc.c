@@ -349,14 +349,10 @@ void *brov_alloc_arena(size_t size)
     return p ? p : g_malloc0(size);
 }
 
-/* Picks between Unicorn's per-instruction count hook and the per-block budget,
- * and programs the counter for this uc_emu_start(). Exactness is only
- * observable through an embedder code hook, and that path already pays the
- * per-instruction preamble the budget exists to avoid, so it keeps the hook. */
-void brov_arm_budget(struct uc_struct *uc, size_t count)
+/* brov_budget_mode is armed by the first uc_emu_start(). A cache load runs before that and asks here. */
+uint32_t brov_budget_mode_wanted(struct uc_struct *uc)
 {
     int foreign_code_hooks;
-    uint32_t want;
     static int disabled = -1;
 
     if (disabled < 0) {
@@ -367,15 +363,20 @@ void brov_arm_budget(struct uc_struct *uc, size_t count)
     }
 
     if (disabled || !uc->brov.set_budget) {
-        if (uc->brov_budget_mode) {
-            uc->brov_budget_mode = 0;
-            uc->tb_flush(uc);
-        }
-        return;
+        return 0;
     }
 
     foreign_code_hooks = uc->hooks_count[UC_HOOK_CODE_IDX] - (uc->count_hook ? 1 : 0);
-    want = foreign_code_hooks > 0 ? 0u : 1u;
+    return foreign_code_hooks > 0 ? 0u : 1u;
+}
+
+/* Picks between Unicorn's per-instruction count hook and the per-block budget,
+ * and programs the counter for this uc_emu_start(). Exactness is only
+ * observable through an embedder code hook, and that path already pays the
+ * per-instruction preamble the budget exists to avoid, so it keeps the hook. */
+void brov_arm_budget(struct uc_struct *uc, size_t count)
+{
+    uint32_t want = brov_budget_mode_wanted(uc);
 
     if (want != uc->brov_budget_mode) {
         uc->brov_budget_mode = want;
