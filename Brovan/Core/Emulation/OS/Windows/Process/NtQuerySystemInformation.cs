@@ -460,6 +460,55 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
+                    case SYSTEM_INFORMATION_CLASS.SystemProcessorPerformanceInformation:
+                        {
+                            const uint EntrySize = 0x30;
+
+                            uint CpuCount = (uint)Math.Max(1, Environment.ProcessorCount);
+                            uint FullSize = EntrySize * CpuCount;
+
+                            if (SystemInformationLength < EntrySize)
+                            {
+                                if (ReturnLengthPtr != 0)
+                                {
+                                    if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                    Instance._emulator.WriteMemory(ReturnLengthPtr, FullSize);
+                                }
+
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            uint Entries = (uint)Math.Min(CpuCount, SystemInformationLength / EntrySize);
+                            uint WrittenSize = Entries * EntrySize;
+
+                            Instance.WinHelper.GetProcessorTimes(out long IdleTime, out long KernelTime, out long UserTime);
+
+                            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(WrittenSize);
+                            Buffer.Slice(0, (int)WrittenSize).Clear();
+                            for (int i = 0; i < Entries; i++)
+                            {
+                                Span<byte> Entry = Buffer.Slice(i * (int)EntrySize, (int)EntrySize);
+                                BinaryPrimitives.WriteInt64LittleEndian(Entry.Slice(0x00, 8), IdleTime);
+                                BinaryPrimitives.WriteInt64LittleEndian(Entry.Slice(0x08, 8), KernelTime);
+                                BinaryPrimitives.WriteInt64LittleEndian(Entry.Slice(0x10, 8), UserTime);
+                            }
+
+                            if (!Instance.WriteMemory(SystemInformationPtr, Buffer.Slice(0, (int)WrittenSize)))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            if (ReturnLengthPtr != 0)
+                            {
+                                if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                Instance._emulator.WriteMemory(ReturnLengthPtr, WrittenSize);
+                            }
+
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
                     case SYSTEM_INFORMATION_CLASS.SystemEmulationBasicInformation:
                     case SYSTEM_INFORMATION_CLASS.SystemBasicInformation:
                         {

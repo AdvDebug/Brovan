@@ -27,7 +27,8 @@ namespace Brovan.Core.Emulation
     public sealed class Whp : IDisposable
     {
         private IntPtr _partition = IntPtr.Zero;
-        private const uint VpIndex = 0;
+        private const uint SharedVpIndex = 0;
+        private const uint MaxVirtualProcessors = 240;
         private IntPtr _exitContextPtr = IntPtr.Zero;
 
         private readonly Dictionary<ulong, MappedPage> _mappedPages = new();
@@ -69,15 +70,31 @@ namespace Brovan.Core.Emulation
 
         private readonly object _vcpuLock = new();
 
-        private WhpRegisters _regsCache;
-        private bool _regsValid;
-        private bool _regsDirty;
-        private readonly WhvRegisterValue[] _xmmCache = new WhvRegisterValue[VectorRegisterCount];
-        private bool _xmmValid;
-        private bool _xmmDirty;
-        private WhvRegisterValue _pendingCs;
-        private WhvRegisterValue _pendingSs;
-        private bool _segmentsDirty;
+        private sealed class VirtualProcessor
+        {
+            public uint Index;
+            public uint ThreadId;
+            public WhpRegisters Regs;
+            public bool RegsValid;
+            public bool RegsDirty;
+            public readonly WhvRegisterValue[] Xmm = new WhvRegisterValue[VectorRegisterCount];
+            public bool XmmValid;
+            public bool XmmDirty;
+            public WhvRegisterValue PendingCs;
+            public WhvRegisterValue PendingSs;
+            public bool SegmentsDirty;
+            public ulong FsBase = ulong.MaxValue;
+            public ulong GsBase = ulong.MaxValue;
+        }
+
+        // Each guest thread runs on its own VP so a thread switch moves no register state. Threads past
+        // the partition's VP limit share VP 0 and are saved and restored around every slice.
+        private VirtualProcessor _vp;
+        private readonly List<VirtualProcessor> _processors = new();
+        private readonly Stack<VirtualProcessor> _idleProcessors = new();
+        private readonly Dictionary<uint, VirtualProcessor> _threadProcessors = new();
+        private uint _processorLimit;
+        private int _runningVpIndex;
 
         private readonly WhvRegisterValue _userCodeSegment;
         private readonly WhvRegisterValue _userDataSegment;
@@ -113,6 +130,7 @@ namespace Brovan.Core.Emulation
         private int _disposed;
         private int _disposing;
         private volatile bool _stopRequested;
+        private int _emulateThreadId;
         private bool _singleStepRequested;
 
         public bool NoHooks;
@@ -231,6 +249,7 @@ namespace Brovan.Core.Emulation
             _userDataSegment = MakeSegment(_guest64 ? WhpConstants.UserDataSelector : WhpConstants.UserDataSelector32, false, true);
 
             EnsurePlatformSupport();
+            _timestampCounterFrequency = QueryTimestampCounterFrequency();
             ConfigurePartition();
             AllocateInternalPool();
             InitializeLongModePageTables();
@@ -238,10 +257,39 @@ namespace Brovan.Core.Emulation
             InitializeSyscallTrapPage();
             InitializeExceptionHandling();
             RebuildMappings();
-            InitializeVirtualProcessorState();
+            InitializeVirtualProcessorState(_vp);
         }
 
         public WhpErrors GetLastError() => _error;
+
+        private readonly ulong _timestampCounterFrequency;
+
+        public ulong TimestampCounterFrequency => _timestampCounterFrequency;
+
+        private static unsafe ulong QueryTimestampCounterFrequency()
+        {
+            ulong frequency = 0;
+            uint written = 0;
+            int hr = WhpNative.WHvGetCapability(WhvCapabilityCode.ProcessorClockFrequency, &frequency, sizeof(ulong), &written);
+            return WhpNative.Failed(hr) || written < sizeof(ulong) ? 0 : frequency;
+        }
+
+        public bool TryReadTimestampCounter(out ulong value)
+        {
+            value = 0;
+            if (DisposedCheck())
+                return false;
+
+            try
+            {
+                value = GetSingleRegister(WhvRegisterName.Tsc).Low;
+                return true;
+            }
+            catch (WhpException)
+            {
+                return false;
+            }
+        }
 
         public bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, IntPtr hostPointer)
         {
@@ -495,11 +543,16 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        // Slice deadlines are enforced from a 1 ms sleep loop, which the default 15.6 ms system timer
+        // would stretch to 16 ms; the request is per process and released with the partition.
+        private const uint MaintenanceTimerPeriodMs = 1;
+
         private void EnsureMaintenanceThread()
         {
             if (_maintenanceThread != null)
                 return;
 
+            WhpNative.timeBeginPeriod(MaintenanceTimerPeriodMs);
             _maintenanceThread = new Thread(MaintenanceLoop)
             {
                 IsBackground = true,
@@ -524,6 +577,21 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        public bool TryLimitSlice(int microseconds)
+        {
+            long limit = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * microseconds) / 1_000_000;
+            while (true)
+            {
+                long deadline = Volatile.Read(ref _sliceDeadlineTimestamp);
+                if (deadline == 0)
+                    return false;
+                if (limit >= deadline)
+                    return true;
+                if (Interlocked.CompareExchange(ref _sliceDeadlineTimestamp, limit, deadline) == deadline)
+                    return true;
+            }
+        }
+
         private void EnforceSliceDeadline()
         {
             // Emulate arms the generation first, so reading it second keeps the pair consistent.
@@ -544,7 +612,7 @@ namespace Brovan.Core.Emulation
             lock (_partitionLock)
             {
                 if (_partition != IntPtr.Zero)
-                    WhpNative.WHvCancelRunVirtualProcessor(_partition, VpIndex, 0);
+                    WhpNative.WHvCancelRunVirtualProcessor(_partition, (uint)Volatile.Read(ref _runningVpIndex), 0);
             }
         }
 
@@ -856,7 +924,7 @@ namespace Brovan.Core.Emulation
 
             ref ulong target = ref GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             target = WriteGpRegisterField(target, access, value);
-            _regsDirty = true;
+            _vp.RegsDirty = true;
             _error = WhpErrors.Ok;
             return true;
         }
@@ -872,7 +940,7 @@ namespace Brovan.Core.Emulation
 
             ref ulong target = ref GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             target = access.ZeroExtend32 ? value : WriteGpRegisterField(target, access, value);
-            _regsDirty = true;
+            _vp.RegsDirty = true;
             _error = WhpErrors.Ok;
             return true;
         }
@@ -889,7 +957,7 @@ namespace Brovan.Core.Emulation
             ref ulong target = ref GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             int shift = access.Offset * 8;
             target = (target & ~(0xFFUL << shift)) | ((ulong)value << shift);
-            _regsDirty = true;
+            _vp.RegsDirty = true;
             _error = WhpErrors.Ok;
             return true;
         }
@@ -950,10 +1018,12 @@ namespace Brovan.Core.Emulation
             ClearTrapFlag();
 
             GetRegistersRef().Rip = start;
-            _regsDirty = true;
+            _vp.RegsDirty = true;
 
             FlushRegisterCache();
             _stopRequested = false;
+            _emulateThreadId = Environment.CurrentManagedThreadId;
+            Volatile.Write(ref _runningVpIndex, (int)_vp.Index);
             _singleStepRequested = count == 1;
 
             long SliceGeneration = Interlocked.Increment(ref _sliceGeneration);
@@ -968,7 +1038,7 @@ namespace Brovan.Core.Emulation
             if (_singleStepRequested)
             {
                 GetRegistersRef().Rflags |= 0x100UL;
-                _regsDirty = true;
+                _vp.RegsDirty = true;
                 FlushRegisterCache();
             }
 
@@ -982,7 +1052,9 @@ namespace Brovan.Core.Emulation
                     if (_stopRequested || Volatile.Read(ref _sliceExpiredGeneration) == SliceGeneration)
                     {
                         if (!_completionActive)
+                        {
                             break;
+                        }
 
                         long Now = Stopwatch.GetTimestamp();
                         if (CompletionGraceEnd == 0)
@@ -1011,7 +1083,6 @@ namespace Brovan.Core.Emulation
                             _error = WhpErrors.Ok;
                             return true;
                         case WhvRunVpExitReason.Canceled:
-                            if (_stopRequested && !_completionActive) { _error = WhpErrors.Ok; return true; }
                             if (Volatile.Read(ref _sliceExpiredGeneration) == SliceGeneration && !_completionActive)
                             {
                                 _error = WhpErrors.Ok;
@@ -1062,16 +1133,20 @@ namespace Brovan.Core.Emulation
         }
 
         // _error belongs to the thread running the slice, so a stop raised from elsewhere leaves it alone.
+        // A cancel is only for a run in progress on another thread. Issued from the emulation thread
+        // itself, between runs, WHP keeps it pending and the next run returns Canceled at once.
         private void RequestStop()
         {
             _stopRequested = true;
+            if (Environment.CurrentManagedThreadId == _emulateThreadId)
+                return;
             if (_partition != IntPtr.Zero)
-                WhpNative.WHvCancelRunVirtualProcessor(_partition, VpIndex, 0);
+                WhpNative.WHvCancelRunVirtualProcessor(_partition, (uint)Volatile.Read(ref _runningVpIndex), 0);
         }
 
         private unsafe ref WhvRunVpExitContext RunVirtualProcessor()
         {
-            int hr = WhpNative.WHvRunVirtualProcessor(_partition, VpIndex, (void*)_exitContextPtr,
+            int hr = WhpNative.WHvRunVirtualProcessor(_partition, _vp.Index, (void*)_exitContextPtr,
                 (uint)sizeof(WhvRunVpExitContext));
             if (WhpNative.Failed(hr))
             {
@@ -1309,11 +1384,15 @@ namespace Brovan.Core.Emulation
             {
                 RemoveHooks();
 
+                if (_maintenanceThread != null)
+                    WhpNative.timeEndPeriod(MaintenanceTimerPeriodMs);
+
                 lock (_partitionLock)
                 {
                     if (_partition != IntPtr.Zero)
                     {
-                        WhpNative.WHvDeleteVirtualProcessor(_partition, VpIndex);
+                        for (int i = 0; i < _processors.Count; i++)
+                            WhpNative.WHvDeleteVirtualProcessor(_partition, _processors[i].Index);
                         WhpNative.WHvDeletePartition(_partition);
                         _partition = IntPtr.Zero;
                     }
@@ -1400,9 +1479,9 @@ namespace Brovan.Core.Emulation
 
         private void QueueCsSs(WhvRegisterValue cs, WhvRegisterValue ss)
         {
-            _pendingCs = cs;
-            _pendingSs = ss;
-            _segmentsDirty = true;
+            _vp.PendingCs = cs;
+            _vp.PendingSs = ss;
+            _vp.SegmentsDirty = true;
         }
 
         private void ClearTrapFlag()
@@ -1410,7 +1489,7 @@ namespace Brovan.Core.Emulation
             ref WhpRegisters regs = ref GetRegistersRef();
             if ((regs.Rflags & 0x100UL) == 0) return;
             regs.Rflags &= ~0x100UL;
-            _regsDirty = true;
+            _vp.RegsDirty = true;
             FlushRegisterCache();
         }
 
@@ -1512,24 +1591,116 @@ namespace Brovan.Core.Emulation
             if (WhpNative.Failed(hr))
                 throw new WhpException("WHvCreatePartition failed", hr);
 
-            uint processorCount = 1;
-            hr = WhpNative.WHvSetPartitionProperty(_partition, WhvPartitionPropertyCode.ProcessorCount,
-                &processorCount, sizeof(uint));
-            if (WhpNative.Failed(hr))
-                throw new WhpException("WHvSetPartitionProperty(ProcessorCount) failed", hr);
+            if (!TrySetupPartition(MaxVirtualProcessors, out hr))
+            {
+                WhpNative.WHvDeletePartition(_partition);
+                hr = WhpNative.WHvCreatePartition(out _partition);
+                if (WhpNative.Failed(hr))
+                    throw new WhpException("WHvCreatePartition failed", hr);
+                if (!TrySetupPartition(1, out hr))
+                    throw new WhpException("WHvSetupPartition failed", hr);
+            }
 
-            hr = WhpNative.WHvSetupPartition(_partition);
-            if (WhpNative.Failed(hr))
-                throw new WhpException("WHvSetupPartition failed", hr);
-
-            hr = WhpNative.WHvCreateVirtualProcessor(_partition, VpIndex, 0);
-            if (WhpNative.Failed(hr))
-                throw new WhpException("WHvCreateVirtualProcessor failed", hr);
+            _vp = CreateProcessor(SharedVpIndex);
 
             _exitContextPtr = Marshal.AllocHGlobal(sizeof(WhvRunVpExitContext));
         }
 
-        private unsafe void InitializeVirtualProcessorState()
+        private unsafe bool TrySetupPartition(uint processorCount, out int hr)
+        {
+            hr = WhpNative.WHvSetPartitionProperty(_partition, WhvPartitionPropertyCode.ProcessorCount,
+                &processorCount, sizeof(uint));
+            if (WhpNative.Failed(hr))
+                return false;
+
+            hr = WhpNative.WHvSetupPartition(_partition);
+            if (WhpNative.Failed(hr))
+                return false;
+
+            _processorLimit = processorCount;
+            return true;
+        }
+
+        private VirtualProcessor CreateProcessor(uint index)
+        {
+            int hr = WhpNative.WHvCreateVirtualProcessor(_partition, index, 0);
+            if (WhpNative.Failed(hr))
+                throw new WhpException("WHvCreateVirtualProcessor failed", hr);
+
+            VirtualProcessor vp = new VirtualProcessor { Index = index };
+            _processors.Add(vp);
+            return vp;
+        }
+
+        private static void ResetProcessorCache(VirtualProcessor vp)
+        {
+            vp.RegsValid = false;
+            vp.RegsDirty = false;
+            vp.XmmValid = false;
+            vp.XmmDirty = false;
+            vp.SegmentsDirty = false;
+            vp.FsBase = ulong.MaxValue;
+            vp.GsBase = ulong.MaxValue;
+        }
+
+        public bool SupportsThreadResidency => _processorLimit > 1;
+
+        public bool IsThreadResident(uint threadId) => _threadProcessors.ContainsKey(threadId);
+
+        public bool TryBindThread(uint threadId)
+        {
+            if (DisposedCheck() || threadId == 0)
+                return false;
+
+            if (_threadProcessors.ContainsKey(threadId))
+                return true;
+
+            VirtualProcessor vp;
+            if (_idleProcessors.Count != 0)
+            {
+                vp = _idleProcessors.Pop();
+            }
+            else
+            {
+                if ((uint)_processors.Count >= _processorLimit)
+                    return false;
+
+                try
+                {
+                    vp = CreateProcessor((uint)_processors.Count);
+                }
+                catch (WhpException)
+                {
+                    _processorLimit = (uint)_processors.Count;
+                    return false;
+                }
+
+                InitializeVirtualProcessorState(vp);
+            }
+
+            vp.ThreadId = threadId;
+            ResetProcessorCache(vp);
+            _threadProcessors[threadId] = vp;
+            return true;
+        }
+
+        public void UnbindThread(uint threadId)
+        {
+            if (!_threadProcessors.Remove(threadId, out VirtualProcessor vp))
+                return;
+
+            vp.ThreadId = 0;
+            _idleProcessors.Push(vp);
+            if (ReferenceEquals(_vp, vp))
+                _vp = _processors[(int)SharedVpIndex];
+        }
+
+        public void SelectThread(uint threadId)
+        {
+            _vp = _threadProcessors.TryGetValue(threadId, out VirtualProcessor vp) ? vp : _processors[(int)SharedVpIndex];
+        }
+
+        private unsafe void InitializeVirtualProcessorState(VirtualProcessor vp)
         {
             const int maxCount = 16;
             Span<uint> names = stackalloc uint[maxCount];
@@ -1569,7 +1740,7 @@ namespace Brovan.Core.Emulation
                 fixed (uint* n = names)
                 fixed (WhvRegisterValue* v = values)
                 {
-                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, n, (uint)count, v);
+                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, vp.Index, n, (uint)count, v);
                     if (WhpNative.Failed(hr))
                         throw new WhpException("WHvSetVirtualProcessorRegisters(initial state) failed", hr);
                 }
@@ -2290,7 +2461,7 @@ namespace Brovan.Core.Emulation
 
             ref WhpRegisters regs = ref GetRegistersRef();
             regs.Rflags |= 0x100UL;
-            _regsDirty = true;
+            _vp.RegsDirty = true;
             FlushRegisterCache();
         }
 
@@ -2403,7 +2574,7 @@ namespace Brovan.Core.Emulation
             if (vector == 3) regs.Rip -= 1;
             regs.Rsp = frameRsp;
             regs.Rflags = frameRflags;
-            _regsDirty = true;
+            _vp.RegsDirty = true;
 
             QueueCsSs(MakeSegment((ushort)frameCs, true, (frameCs & 3) == 3),
                 MakeSegment((ushort)frameSs, false, (frameSs & 3) == 3));
@@ -2423,7 +2594,7 @@ namespace Brovan.Core.Emulation
             regs.Rip = preSyscallRip;
             regs.Rcx = postSyscallR10;
             regs.Rflags = savedRflags;
-            _regsDirty = true;
+            _vp.RegsDirty = true;
 
             if (_syscallHook.Callback != null) _syscallHook.Callback();
             else if (_syscallHook.BoolCallback != null) _syscallHook.BoolCallback();
@@ -2433,7 +2604,7 @@ namespace Brovan.Core.Emulation
                 after.Rip = postSyscallRcx;
             else
                 after.Rip += 2;
-            _regsDirty = true;
+            _vp.RegsDirty = true;
 
             QueueCsSs(_userCodeSegment, _userDataSegment);
             return true;
@@ -2481,17 +2652,17 @@ namespace Brovan.Core.Emulation
         private void AdvanceRip(ulong amount)
         {
             GetRegistersRef().Rip += amount;
-            _regsDirty = true;
+            _vp.RegsDirty = true;
         }
 
         private unsafe ref WhpRegisters GetRegistersRef()
         {
-            if (!_regsValid)
+            if (!_vp.RegsValid)
             {
                 LoadRegisters();
-                _regsValid = true;
+                _vp.RegsValid = true;
             }
-            return ref _regsCache;
+            return ref _vp.Regs;
         }
 
         internal const int XmmRegisterCount = 16;
@@ -2534,26 +2705,26 @@ namespace Brovan.Core.Emulation
             if (Write)
             {
                 // The cache also carries the two control registers, which this call does not supply.
-                if (!_xmmValid && !LoadXmmRegisters())
+                if (!_vp.XmmValid && !LoadXmmRegisters())
                     return false;
 
                 for (int i = 0; i < XmmRegisterCount; i++)
                 {
-                    _xmmCache[i].Low = Values[i * 2];
-                    _xmmCache[i].High = Values[i * 2 + 1];
+                    _vp.Xmm[i].Low = Values[i * 2];
+                    _vp.Xmm[i].High = Values[i * 2 + 1];
                 }
 
-                _xmmDirty = true;
+                _vp.XmmDirty = true;
                 return true;
             }
 
-            if (!_xmmValid && !LoadXmmRegisters())
+            if (!_vp.XmmValid && !LoadXmmRegisters())
                 return false;
 
             for (int i = 0; i < XmmRegisterCount; i++)
             {
-                Values[i * 2] = _xmmCache[i].Low;
-                Values[i * 2 + 1] = _xmmCache[i].High;
+                Values[i * 2] = _vp.Xmm[i].Low;
+                Values[i * 2 + 1] = _vp.Xmm[i].High;
             }
 
             return true;
@@ -2564,15 +2735,15 @@ namespace Brovan.Core.Emulation
             lock (_vcpuLock)
             {
                 fixed (uint* Names = VectorRegNames)
-                fixed (WhvRegisterValue* Vals = _xmmCache)
+                fixed (WhvRegisterValue* Vals = _vp.Xmm)
                 {
-                    int Hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, VpIndex, Names, VectorRegisterCount, Vals);
+                    int Hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, _vp.Index, Names, VectorRegisterCount, Vals);
                     if (WhpNative.Failed(Hr))
                         return false;
                 }
             }
 
-            _xmmValid = true;
+            _vp.XmmValid = true;
             return true;
         }
 
@@ -2581,15 +2752,15 @@ namespace Brovan.Core.Emulation
             lock (_vcpuLock)
             {
                 fixed (uint* Names = VectorRegNames)
-                fixed (WhvRegisterValue* Vals = _xmmCache)
+                fixed (WhvRegisterValue* Vals = _vp.Xmm)
                 {
-                    int Hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, Names, VectorRegisterCount, Vals);
+                    int Hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, _vp.Index, Names, VectorRegisterCount, Vals);
                     if (WhpNative.Failed(Hr))
                         throw new WhpException("WHvSetVirtualProcessorRegisters(XMM) failed", Hr);
                 }
             }
 
-            _xmmDirty = false;
+            _vp.XmmDirty = false;
         }
 
         // XMM is deliberately not folded into this call. Reading XMM makes WHP extract the full FP
@@ -2603,73 +2774,73 @@ namespace Brovan.Core.Emulation
                 fixed (uint* names = GpRegNames)
                 fixed (WhvRegisterValue* vals = values)
                 {
-                    int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, VpIndex, names,
+                    int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, _vp.Index, names,
                         (uint)GpRegNames.Length, vals);
                     if (WhpNative.Failed(hr))
                         throw new WhpException("WHvGetVirtualProcessorRegisters(GP) failed", hr);
                 }
             }
 
-            _regsCache.Rax = values[0].Low;
-            _regsCache.Rbx = values[1].Low;
-            _regsCache.Rcx = values[2].Low;
-            _regsCache.Rdx = values[3].Low;
-            _regsCache.Rsi = values[4].Low;
-            _regsCache.Rdi = values[5].Low;
-            _regsCache.Rsp = values[6].Low;
-            _regsCache.Rbp = values[7].Low;
-            _regsCache.R8 = values[8].Low;
-            _regsCache.R9 = values[9].Low;
-            _regsCache.R10 = values[10].Low;
-            _regsCache.R11 = values[11].Low;
-            _regsCache.R12 = values[12].Low;
-            _regsCache.R13 = values[13].Low;
-            _regsCache.R14 = values[14].Low;
-            _regsCache.R15 = values[15].Low;
-            _regsCache.Rip = values[16].Low;
-            _regsCache.Rflags = values[17].Low;
+            _vp.Regs.Rax = values[0].Low;
+            _vp.Regs.Rbx = values[1].Low;
+            _vp.Regs.Rcx = values[2].Low;
+            _vp.Regs.Rdx = values[3].Low;
+            _vp.Regs.Rsi = values[4].Low;
+            _vp.Regs.Rdi = values[5].Low;
+            _vp.Regs.Rsp = values[6].Low;
+            _vp.Regs.Rbp = values[7].Low;
+            _vp.Regs.R8 = values[8].Low;
+            _vp.Regs.R9 = values[9].Low;
+            _vp.Regs.R10 = values[10].Low;
+            _vp.Regs.R11 = values[11].Low;
+            _vp.Regs.R12 = values[12].Low;
+            _vp.Regs.R13 = values[13].Low;
+            _vp.Regs.R14 = values[14].Low;
+            _vp.Regs.R15 = values[15].Low;
+            _vp.Regs.Rip = values[16].Low;
+            _vp.Regs.Rflags = values[17].Low;
         }
 
         private unsafe void StoreRegisters()
         {
-            bool withSegments = _segmentsDirty;
-            bool withXmm = _xmmDirty;
+            bool withSegments = _vp.SegmentsDirty;
+            bool withXmm = _vp.XmmDirty;
             uint[] names = withSegments
                 ? (withXmm ? GpSegXmmRegNames : GpRegNamesWithSegments)
                 : (withXmm ? GpXmmRegNames : GpRegNames);
             Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpSegXmmRegNames.Length];
-            values[0] = WhvRegisterValue.FromReg64(_regsCache.Rax);
-            values[1] = WhvRegisterValue.FromReg64(_regsCache.Rbx);
-            values[2] = WhvRegisterValue.FromReg64(_regsCache.Rcx);
-            values[3] = WhvRegisterValue.FromReg64(_regsCache.Rdx);
-            values[4] = WhvRegisterValue.FromReg64(_regsCache.Rsi);
-            values[5] = WhvRegisterValue.FromReg64(_regsCache.Rdi);
-            values[6] = WhvRegisterValue.FromReg64(_regsCache.Rsp);
-            values[7] = WhvRegisterValue.FromReg64(_regsCache.Rbp);
-            values[8] = WhvRegisterValue.FromReg64(_regsCache.R8);
-            values[9] = WhvRegisterValue.FromReg64(_regsCache.R9);
-            values[10] = WhvRegisterValue.FromReg64(_regsCache.R10);
-            values[11] = WhvRegisterValue.FromReg64(_regsCache.R11);
-            values[12] = WhvRegisterValue.FromReg64(_regsCache.R12);
-            values[13] = WhvRegisterValue.FromReg64(_regsCache.R13);
-            values[14] = WhvRegisterValue.FromReg64(_regsCache.R14);
-            values[15] = WhvRegisterValue.FromReg64(_regsCache.R15);
-            values[16] = WhvRegisterValue.FromReg64(_regsCache.Rip);
-            values[17] = WhvRegisterValue.FromReg64(_regsCache.Rflags | 0x2UL);
+            values[0] = WhvRegisterValue.FromReg64(_vp.Regs.Rax);
+            values[1] = WhvRegisterValue.FromReg64(_vp.Regs.Rbx);
+            values[2] = WhvRegisterValue.FromReg64(_vp.Regs.Rcx);
+            values[3] = WhvRegisterValue.FromReg64(_vp.Regs.Rdx);
+            values[4] = WhvRegisterValue.FromReg64(_vp.Regs.Rsi);
+            values[5] = WhvRegisterValue.FromReg64(_vp.Regs.Rdi);
+            values[6] = WhvRegisterValue.FromReg64(_vp.Regs.Rsp);
+            values[7] = WhvRegisterValue.FromReg64(_vp.Regs.Rbp);
+            values[8] = WhvRegisterValue.FromReg64(_vp.Regs.R8);
+            values[9] = WhvRegisterValue.FromReg64(_vp.Regs.R9);
+            values[10] = WhvRegisterValue.FromReg64(_vp.Regs.R10);
+            values[11] = WhvRegisterValue.FromReg64(_vp.Regs.R11);
+            values[12] = WhvRegisterValue.FromReg64(_vp.Regs.R12);
+            values[13] = WhvRegisterValue.FromReg64(_vp.Regs.R13);
+            values[14] = WhvRegisterValue.FromReg64(_vp.Regs.R14);
+            values[15] = WhvRegisterValue.FromReg64(_vp.Regs.R15);
+            values[16] = WhvRegisterValue.FromReg64(_vp.Regs.Rip);
+            values[17] = WhvRegisterValue.FromReg64(_vp.Regs.Rflags | 0x2UL);
 
             if (withSegments)
             {
-                values[18] = _pendingCs;
-                values[19] = _pendingSs;
-                _segmentsDirty = false;
+                values[18] = _vp.PendingCs;
+                values[19] = _vp.PendingSs;
+                _vp.SegmentsDirty = false;
             }
 
             if (withXmm)
             {
                 int xmmBase = withSegments ? GpRegNamesWithSegments.Length : GpRegNames.Length;
                 for (int i = 0; i < VectorRegisterCount; i++)
-                    values[xmmBase + i] = _xmmCache[i];
-                _xmmDirty = false;
+                    values[xmmBase + i] = _vp.Xmm[i];
+                _vp.XmmDirty = false;
             }
 
             lock (_vcpuLock)
@@ -2677,7 +2848,7 @@ namespace Brovan.Core.Emulation
                 fixed (uint* n = names)
                 fixed (WhvRegisterValue* vals = values)
                 {
-                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, n,
+                    int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, _vp.Index, n,
                         (uint)names.Length, vals);
                     if (WhpNative.Failed(hr))
                         throw new WhpException("WHvSetVirtualProcessorRegisters(GP) failed", hr);
@@ -2687,23 +2858,23 @@ namespace Brovan.Core.Emulation
 
         private void FlushRegisterCache()
         {
-            if (_regsDirty || _segmentsDirty)
+            if (_vp.RegsDirty || _vp.SegmentsDirty)
             {
-                _regsDirty = false;
+                _vp.RegsDirty = false;
                 StoreRegisters();
                 return;
             }
 
-            // _regsCache is only known-live once something has dirtied it, so a lone XMM write
+            // _vp.Regs is only known-live once something has dirtied it, so a lone XMM write
             // must not ride along a GP store that would push a stale cache into the processor.
-            if (_xmmDirty)
+            if (_vp.XmmDirty)
                 StoreXmmRegisters();
         }
 
         private void InvalidateRegisterCache()
         {
-            _regsValid = false;
-            _xmmValid = false;
+            _vp.RegsValid = false;
+            _vp.XmmValid = false;
         }
 
         private unsafe void SetSingleRegister(WhvRegisterName name, WhvRegisterValue value)
@@ -2711,7 +2882,7 @@ namespace Brovan.Core.Emulation
             uint n = (uint)name;
             lock (_vcpuLock)
             {
-                int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, VpIndex, &n, 1, &value);
+                int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, _vp.Index, &n, 1, &value);
                 if (WhpNative.Failed(hr))
                     throw new WhpException($"WHvSetVirtualProcessorRegisters({name}) failed", hr);
             }
@@ -2719,14 +2890,14 @@ namespace Brovan.Core.Emulation
 
         private unsafe WhvRegisterValue GetSingleRegister(WhvRegisterName name)
         {
-            if (_segmentsDirty && (name == WhvRegisterName.Cs || name == WhvRegisterName.Ss))
+            if (_vp.SegmentsDirty && (name == WhvRegisterName.Cs || name == WhvRegisterName.Ss))
                 FlushRegisterCache();
 
             uint n = (uint)name;
             WhvRegisterValue value;
             lock (_vcpuLock)
             {
-                int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, VpIndex, &n, 1, &value);
+                int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, _vp.Index, &n, 1, &value);
                 if (WhpNative.Failed(hr))
                     throw new WhpException($"WHvGetVirtualProcessorRegisters({name}) failed", hr);
             }
@@ -2799,8 +2970,8 @@ namespace Brovan.Core.Emulation
 
             switch (register)
             {
-                case Registers.UC_X86_REG_FS_BASE: value = GetSingleRegister(WhvRegisterName.Fs).Low; return true;
-                case Registers.UC_X86_REG_GS_BASE: value = GetSingleRegister(WhvRegisterName.Gs).Low; return true;
+                case Registers.UC_X86_REG_FS_BASE: value = _vp.FsBase != ulong.MaxValue ? _vp.FsBase : GetSingleRegister(WhvRegisterName.Fs).Low; return true;
+                case Registers.UC_X86_REG_GS_BASE: value = _vp.GsBase != ulong.MaxValue ? _vp.GsBase : GetSingleRegister(WhvRegisterName.Gs).Low; return true;
                 case Registers.UC_X86_REG_CS: value = SegmentSelector(WhvRegisterName.Cs); return true;
                 case Registers.UC_X86_REG_SS: value = SegmentSelector(WhvRegisterName.Ss); return true;
                 case Registers.UC_X86_REG_DS: value = SegmentSelector(WhvRegisterName.Ds); return true;
@@ -2823,27 +2994,27 @@ namespace Brovan.Core.Emulation
         // LastFpRdp/XmmStatusControlMask), so a write is a read-modify-write of the cached value.
         private bool WriteFpControl(Registers register, ulong value)
         {
-            if (!_xmmValid && !LoadXmmRegisters())
+            if (!_vp.XmmValid && !LoadXmmRegisters())
                 return false;
 
             if (register == Registers.UC_X86_REG_FPCW)
-                _xmmCache[FpControlSlot].Low = (_xmmCache[FpControlSlot].Low & ~0xFFFFUL) | (ushort)value;
+                _vp.Xmm[FpControlSlot].Low = (_vp.Xmm[FpControlSlot].Low & ~0xFFFFUL) | (ushort)value;
             else
-                _xmmCache[XmmControlSlot].High = (_xmmCache[XmmControlSlot].High & ~0xFFFFFFFFUL) | (uint)value;
+                _vp.Xmm[XmmControlSlot].High = (_vp.Xmm[XmmControlSlot].High & ~0xFFFFFFFFUL) | (uint)value;
 
-            _xmmDirty = true;
+            _vp.XmmDirty = true;
             return true;
         }
 
         private bool ReadFpControl(Registers register, out ulong value)
         {
             value = 0;
-            if (!_xmmValid && !LoadXmmRegisters())
+            if (!_vp.XmmValid && !LoadXmmRegisters())
                 return false;
 
             value = register == Registers.UC_X86_REG_FPCW
-                ? (ushort)_xmmCache[FpControlSlot].Low
-                : (uint)_xmmCache[XmmControlSlot].High;
+                ? (ushort)_vp.Xmm[FpControlSlot].Low
+                : (uint)_vp.Xmm[XmmControlSlot].High;
             return true;
         }
 
@@ -2858,9 +3029,14 @@ namespace Brovan.Core.Emulation
 
         private void WriteSegmentBase(WhvRegisterName name, ulong baseAddress)
         {
+            ref ulong cached = ref (name == WhvRegisterName.Gs ? ref _vp.GsBase : ref _vp.FsBase);
+            if (_guest64 && cached == baseAddress)
+                return;
+
             WhvRegisterValue v = GetSingleRegister(name);
             v.Low = baseAddress;
             SetSingleRegister(name, v);
+            cached = baseAddress;
 
             if (!_guest64)
                 SyncGdtDescriptorBase((ushort)(v.High >> 32), baseAddress);

@@ -40,6 +40,7 @@ namespace Brovan.Core.Emulation
         HypervisorPresent = 0x00000000,
         Features = 0x00000001,
         ProcessorFeatures = 0x00001001,
+        ProcessorClockFrequency = 0x00001004,
     }
 
     internal enum WhvPartitionPropertyCode : uint
@@ -134,6 +135,7 @@ namespace Brovan.Core.Emulation
         Dr6 = 0x00000025,
         Dr7 = 0x00000026,
 
+        Tsc = 0x00002000,
         Efer = 0x00002001,
         Star = 0x00002008,
         Lstar = 0x00002009,

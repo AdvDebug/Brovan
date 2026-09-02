@@ -1318,6 +1318,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Milliseconds * 10000;
         }
 
+        /// <summary>
+        /// Per-processor idle, kernel and user times since guest boot; the host process's own CPU time
+        /// stands in for the whole system's busy time.
+        /// </summary>
+        public void GetProcessorTimes(out long IdleTime, out long KernelTime, out long UserTime)
+        {
+            int CpuCount = Math.Max(1, Environment.ProcessorCount);
+            long Uptime = SaturatingMillisecondsToFileTimeDuration(Emulator.EmulatedTickCount64);
+            long HostUser = Math.Max(0, (HostProcess.UserProcessorTime - HostUserTimeAtBoot).Ticks);
+            long HostKernel = Math.Max(0, (HostProcess.PrivilegedProcessorTime - HostKernelTimeAtBoot).Ticks);
+
+            UserTime = HostUser / CpuCount;
+            long BusyKernelTime = HostKernel / CpuCount;
+            IdleTime = Math.Max(0, Uptime - UserTime - BusyKernelTime);
+            // NT: the idle thread runs in kernel mode, so KernelTime includes IdleTime.
+            KernelTime = BusyKernelTime + IdleTime;
+        }
+
+        private readonly System.Diagnostics.Process HostProcess;
+        private readonly TimeSpan HostUserTimeAtBoot;
+        private readonly TimeSpan HostKernelTimeAtBoot;
+
         // Current Process
         public uint PID = 0;
         public uint PPID = 0;
@@ -1618,6 +1640,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Shared = new WindowsSharedBuffer();
             this.Emulator = Emulator;
+            HostProcess = System.Diagnostics.Process.GetCurrentProcess();
+            HostUserTimeAtBoot = HostProcess.UserProcessorTime;
+            HostKernelTimeAtBoot = HostProcess.PrivilegedProcessorTime;
             HandleManager = new HandleManager(Emulator.WakeSignal);
             SyntheticVolumeGuid = Guid.NewGuid().ToString("D").ToLowerInvariant();
             SyntheticVolumeGuidSymbolicLink = $"\\??\\Volume{{{SyntheticVolumeGuid}}}";

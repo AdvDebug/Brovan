@@ -102,6 +102,18 @@ namespace Brovan.Core.Emulation
         /// </summary>
         bool TimestampCounterIsEmulated { get; }
 
+        /// <summary>
+        /// Rate of the counter RDTSC reads when the backend runs it on the real CPU, or zero when the
+        /// counter is emulated or the rate is unknown.
+        /// </summary>
+        ulong TimestampCounterFrequency => 0;
+
+        bool TryReadTimestampCounter(out ulong value)
+        {
+            value = 0;
+            return false;
+        }
+
         bool MapMemory(ulong address, ulong size, MemoryProtection protection);
 
         /// <summary>
@@ -168,6 +180,30 @@ namespace Brovan.Core.Emulation
         bool ReadXmmRegisters(ulong[] values) => false;
 
         bool WriteXmmRegisters(ulong[] values) => false;
+
+        /// <summary>
+        /// True when the backend can keep a guest thread's register file resident in its own processor,
+        /// so switching to that thread transfers no state.
+        /// </summary>
+        bool SupportsThreadResidency => false;
+
+        bool TryBindThread(uint threadId) => false;
+
+        void UnbindThread(uint threadId)
+        {
+        }
+
+        bool IsThreadResident(uint threadId) => false;
+
+        void SelectThread(uint threadId)
+        {
+        }
+
+        /// <summary>
+        /// Shortens the running slice so it ends within <paramref name="microseconds"/>. False when the
+        /// backend has no bounded slice to shorten, in which case the caller has to stop the slice itself.
+        /// </summary>
+        bool TryLimitSlice(int microseconds) => false;
 
         bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
         {

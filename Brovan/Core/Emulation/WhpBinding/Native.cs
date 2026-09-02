@@ -52,6 +52,12 @@ namespace Brovan.Core.Emulation
         public static extern int WHvSetVirtualProcessorRegisters(IntPtr Partition, uint VpIndex,
             uint* RegisterNames, uint RegisterCount, WhvRegisterValue* RegisterValues);
 
+        [DllImport("winmm.dll")]
+        public static extern uint timeBeginPeriod(uint uPeriod);
+
+        [DllImport("winmm.dll")]
+        public static extern uint timeEndPeriod(uint uPeriod);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern IntPtr VirtualAlloc(IntPtr lpAddress, UIntPtr dwSize, uint flAllocationType, uint flProtect);
 

@@ -1680,24 +1680,28 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Ends the running thread's slice after it made another thread runnable, leaving it Ready so it resumes
-        /// where it left off. A wake only unblocks the target; without giving up the rest of the quantum the waker
-        /// keeps running for up to a full MLFQ slice (1.6M instructions at the lowest queue) before the scheduler
-        /// looks at the target again, and any handoff the waker then waits on costs that whole slice. Real hardware
-        /// hides this by running the woken thread on another core.
+        /// Makes the thread the running thread just woke runnable. A wake only unblocks the target, and real
+        /// hardware runs it on another core at once. A waker whose slice can be capped keeps running, since it
+        /// usually wakes several threads or blocks within microseconds; otherwise its slice ends here rather
+        /// than holding the target for the rest of the quantum.
         /// </summary>
         internal void YieldSliceAfterWake(EmulatedThread WokenThread)
         {
-            if (CurrentThread != null && CurrentThread.State == EmulatedThreadState.Running)
-                CurrentThread.State = EmulatedThreadState.Ready;
-
             if (WokenThread != null && MlfqLevels > 0)
                 EnqueueMlfqThread(WokenThread, MlfqReadyQueues, MlfqQueuedThreads, MlfqLevels, MlfqSchedulerTick);
             else
                 SchedulerRefreshRequested = true;
 
+            if (_emulator.TryLimitSlice(WakeSliceLimitMicroseconds))
+                return;
+
+            if (CurrentThread != null && CurrentThread.State == EmulatedThreadState.Running)
+                CurrentThread.State = EmulatedThreadState.Ready;
+
             _emulator.StopEmulation();
         }
+
+        private const int WakeSliceLimitMicroseconds = 500;
 
         private void StopAfterSyntheticInstruction(ulong NextIp)
         {
@@ -2015,6 +2019,8 @@ namespace Brovan.Core.Emulation
         {
             if (t == null || t.Context == null) return;
             ReadGprBatch(t.Context);
+            if (_emulator.IsThreadResident(t.ThreadId))
+                return;
             _emulator.ReadXmmRegisters(t.Context.Xmm);
             t.Context.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
             t.Context.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
@@ -2062,6 +2068,14 @@ namespace Brovan.Core.Emulation
 
         public void LoadContext(EmulatedThread t)
         {
+            if (t == null) return;
+            LoadContext(t, !_emulator.IsThreadResident(t.ThreadId));
+        }
+
+        // A resident thread keeps its vector state in its own processor, so only a first load or a
+        // shared processor takes the saved copy.
+        private void LoadContext(EmulatedThread t, bool LoadVectorState)
+        {
             if (t == null || t.Context == null) return;
 
             if (t.SwitchingContext)
@@ -2072,9 +2086,12 @@ namespace Brovan.Core.Emulation
             }
 
             WriteGprBatch(t.Context);
-            _emulator.WriteXmmRegisters(t.Context.Xmm);
-            WriteRegister(Registers.UC_X86_REG_MXCSR, t.Context.MXCSR);
-            WriteRegister(Registers.UC_X86_REG_FPCW, t.Context.FPCW);
+            if (LoadVectorState)
+            {
+                _emulator.WriteXmmRegisters(t.Context.Xmm);
+                WriteRegister(Registers.UC_X86_REG_MXCSR, t.Context.MXCSR);
+                WriteRegister(Registers.UC_X86_REG_FPCW, t.Context.FPCW);
+            }
             Guest.OnThreadContextLoaded(this, t);
         }
 
@@ -2083,10 +2100,46 @@ namespace Brovan.Core.Emulation
             if (!Threads.TryGetValue((uint)ThreadId, out EmulatedThread next))
                 return;
             EmulatedThread cur = _currentThreadCache;
-            if (cur != null) SaveContext(cur);
+            if (cur != null)
+            {
+                SaveContext(cur);
+                if (cur.State == EmulatedThreadState.Terminated)
+                    ReleaseThreadProcessor(cur);
+            }
             CurrentThreadId = ThreadId;
             _currentThreadCache = next;
-            LoadContext(next);
+            bool FirstResidentLoad = !_emulator.IsThreadResident(next.ThreadId) && BindThreadProcessor(next);
+            _emulator.SelectThread(next.ThreadId);
+            LoadContext(next, FirstResidentLoad || !_emulator.IsThreadResident(next.ThreadId));
+        }
+
+        private bool _threadProcessorsExhausted;
+
+        private bool BindThreadProcessor(EmulatedThread Thread)
+        {
+            if (!_emulator.SupportsThreadResidency || _threadProcessorsExhausted || Thread.State == EmulatedThreadState.Terminated)
+                return false;
+
+            if (_emulator.TryBindThread(Thread.ThreadId))
+                return true;
+
+            foreach (EmulatedThread Other in Threads.Values)
+                if (Other.State == EmulatedThreadState.Terminated)
+                    _emulator.UnbindThread(Other.ThreadId);
+
+            if (_emulator.TryBindThread(Thread.ThreadId))
+                return true;
+
+            _threadProcessorsExhausted = true;
+            return false;
+        }
+
+        private void ReleaseThreadProcessor(EmulatedThread Thread)
+        {
+            if (!_emulator.IsThreadResident(Thread.ThreadId))
+                return;
+            _emulator.UnbindThread(Thread.ThreadId);
+            _threadProcessorsExhausted = false;
         }
 
         /// <summary>

@@ -399,10 +399,59 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public ulong HypervisorSharedPage { get; private set; }
 
-        private bool UsesSharedPage => Emulator._emulator.TimestampCounterIsEmulated;
+        private bool UsesSharedPage => Emulator._emulator.TimestampCounterIsEmulated || Emulator._emulator.TimestampCounterFrequency != 0;
 
         private static readonly ulong SharedPageMultiplier = (ulong)(((((UInt128)1) << 64)
             + BinaryEmulator.TscTicksPerQpcTick - 1) / BinaryEmulator.TscTicksPerQpcTick);
+
+        private const int OffsetSharedPageSequence = 0x00;
+        private const int OffsetSharedPageScale = 0x08;
+        private const int OffsetSharedPageOffset = 0x10;
+
+        // A skew jump moves the anchor; drift between two host clocks stays below this and would only show
+        // to the guest as a backward step.
+        private const long SharedPageReanchorTicks = 1000;
+
+        private ulong _sharedPageScale;
+        private ulong _sharedPageOffset;
+        private uint _sharedPageSequence = 1;
+        private bool _sharedPageAnchored;
+
+        private ulong SharedPageScale
+        {
+            get
+            {
+                if (_sharedPageScale != 0)
+                    return _sharedPageScale;
+
+                ulong Frequency = Emulator._emulator.TimestampCounterFrequency;
+                _sharedPageScale = Emulator._emulator.TimestampCounterIsEmulated || Frequency == 0
+                    ? SharedPageMultiplier
+                    : (ulong)((((UInt128)(ulong)QpcFrequency) << 64) / Frequency);
+                return _sharedPageScale;
+            }
+        }
+
+        private void RefreshSharedPageOffset()
+        {
+            if (HypervisorSharedPage == 0 || Emulator._emulator.TimestampCounterIsEmulated)
+                return;
+
+            if (!Emulator._emulator.TryReadTimestampCounter(out ulong Counter) || Counter == 0)
+                return;
+
+            ulong Scaled = (ulong)(((UInt128)Counter * SharedPageScale) >> 64);
+            ulong Offset = Emulator.GetEmulatedPerformanceCounter() - Scaled;
+            long Delta = unchecked((long)(Offset - _sharedPageOffset));
+            if (_sharedPageAnchored && Delta > -SharedPageReanchorTicks && Delta < SharedPageReanchorTicks)
+                return;
+
+            _sharedPageOffset = Offset;
+            _sharedPageAnchored = true;
+            _sharedPageSequence = _sharedPageSequence == uint.MaxValue ? 1 : _sharedPageSequence + 1;
+            Emulator._emulator.WriteMemory(HypervisorSharedPage + OffsetSharedPageOffset, Offset, 8);
+            Emulator._emulator.WriteMemory(HypervisorSharedPage + OffsetSharedPageSequence, _sharedPageSequence, 4);
+        }
 
         public KuserSharedDataManager(BinaryEmulator Emulator)
         {
@@ -459,8 +508,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             byte[] Page = new byte[PageSize];
-            BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(0, 4), 1);
-            BinaryPrimitives.WriteUInt64LittleEndian(Page.AsSpan(8, 8), SharedPageMultiplier);
+            BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(OffsetSharedPageSequence, 4), _sharedPageSequence);
+            BinaryPrimitives.WriteUInt64LittleEndian(Page.AsSpan(OffsetSharedPageScale, 8), SharedPageScale);
 
             if (!Emulator._emulator.WriteMemory(Address, Page))
             {
@@ -535,6 +584,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + OffsetTickCountLowDeprecated, (uint)TickCountQuad, 4);
             Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + (ulong)GetSystemCallOffset(), 0u, 4);
             Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + (ulong)OffsetQpcFrequency, (ulong)QpcFrequency, 8);
+            RefreshSharedPageOffset();
         }
 
         private static void WriteKsystemTimeToSpan(Span<byte> Page, int Offset, ulong Value)
