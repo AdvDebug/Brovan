@@ -44,40 +44,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return DelayMs;
         }
 
-        private static bool TryGetYieldTimeAdvanceMs(BinaryEmulator Instance, EmulatedThread CurrentThread, int MaxAdvanceMs, out int AdvanceMs)
-        {
-            AdvanceMs = 0;
-
-            long Now = Instance.EmulatedTickCount64;
-            long BestDelta = long.MaxValue;
-
-            foreach (EmulatedThread Thread in Instance.LiveThreads)
-            {
-                if (Thread == CurrentThread)
-                    continue;
-
-                if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive || Thread.WaitDeadline == -1)
-                    continue;
-
-                long Delta = Thread.WaitDeadline - Now;
-                if (Delta <= 0)
-                {
-                    AdvanceMs = 0;
-                    return true;
-                }
-
-                if (Delta < BestDelta)
-                    BestDelta = Delta;
-            }
-
-            if (BestDelta == long.MaxValue)
-                return false;
-
-            long Clamped = BestDelta > MaxAdvanceMs ? MaxAdvanceMs : BestDelta;
-            AdvanceMs = Clamped < 1 ? 1 : (int)Clamped;
-            return true;
-        }
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 
@@ -105,10 +71,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (DelayMs <= 0)
             {
-                const int MaxYieldAdvanceMs = 16;
-                if (TryGetYieldTimeAdvanceMs(Instance, Thread, MaxYieldAdvanceMs, out int AdvanceMs) && AdvanceMs > 0)
-                    Instance.AdvanceEmulatedTimeMilliseconds(AdvanceMs);
-
                 // A zero delay is a yield, so whoever the caller is standing aside for has to be looked at now.
                 Instance.WakeSignal.Bump();
                 Instance._emulator.WriteRegister(Instance.IPRegister, NextRip);
