@@ -349,6 +349,52 @@ void *brov_alloc_arena(size_t size)
     return p ? p : g_malloc0(size);
 }
 
+static int64_t brov_host_ticks(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return (int64_t)t.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+#endif
+}
+
+uint64_t brov_tsc_now(struct uc_struct *uc)
+{
+    brov_tsc_t *t = &uc->brov_tsc;
+    int64_t elapsed = brov_host_ticks() - t->host_start;
+    int64_t counts;
+
+    if (elapsed < 0) {
+        elapsed = 0;
+    }
+    if (t->host_freq == t->qpc_freq) {
+        counts = elapsed;
+    } else {
+        counts = (elapsed / t->host_freq) * t->qpc_freq + ((elapsed % t->host_freq) * t->qpc_freq) / t->host_freq;
+    }
+    return (uint64_t)(counts + t->skew_counts) * t->tsc_per_qpc;
+}
+
+UNICORN_EXPORT
+uc_err brov_tsc_configure(uc_engine *uc, int64_t host_start, int64_t host_freq, int64_t qpc_freq,
+                          uint64_t tsc_per_qpc, int64_t skew_counts, uint32_t armed)
+{
+    if (!uc || host_freq <= 0 || qpc_freq <= 0) {
+        return UC_ERR_ARG;
+    }
+    uc->brov_tsc.host_start = host_start;
+    uc->brov_tsc.host_freq = host_freq;
+    uc->brov_tsc.qpc_freq = qpc_freq;
+    uc->brov_tsc.tsc_per_qpc = tsc_per_qpc;
+    uc->brov_tsc.skew_counts = skew_counts;
+    uc->brov_tsc.armed = armed;
+    return UC_ERR_OK;
+}
+
 /* brov_budget_mode is armed by the first uc_emu_start(). A cache load runs before that and asks here. */
 uint32_t brov_budget_mode_wanted(struct uc_struct *uc)
 {
@@ -370,13 +416,30 @@ uint32_t brov_budget_mode_wanted(struct uc_struct *uc)
     return foreign_code_hooks > 0 ? 0u : 1u;
 }
 
-/* Picks between Unicorn's per-instruction count hook and the per-block budget,
- * and programs the counter for this uc_emu_start(). Exactness is only
- * observable through an embedder code hook, and that path already pays the
- * per-instruction preamble the budget exists to avoid, so it keeps the hook. */
+/* The per-access exit poll is only kept while a hook that fires on a successful
+ * access exists, and blocks translated under one hook set cannot serve another. */
+static uint32_t brov_mem_hook_signature(struct uc_struct *uc)
+{
+    return (uint32_t)(uc->hooks_count[UC_HOOK_MEM_READ_IDX] + uc->hooks_count[UC_HOOK_MEM_WRITE_IDX] +
+                      uc->hooks_count[UC_HOOK_MEM_FETCH_IDX] + uc->hooks_count[UC_HOOK_MEM_READ_AFTER_IDX]);
+}
+
+uint32_t brov_access_exit_check_elided(struct uc_struct *uc)
+{
+    return uc->brov_budget_mode && uc->brov_mem_hook_sig == 0;
+}
+
+/* A run with an embedder code hook keeps Unicorn's own counting, since it already
+ * pays the per-instruction preamble the budget exists to avoid. */
 void brov_arm_budget(struct uc_struct *uc, size_t count)
 {
     uint32_t want = brov_budget_mode_wanted(uc);
+    uint32_t sig = brov_mem_hook_signature(uc);
+
+    if (sig != uc->brov_mem_hook_sig) {
+        uc->brov_mem_hook_sig = sig;
+        uc->tb_flush(uc);
+    }
 
     if (want != uc->brov_budget_mode) {
         uc->brov_budget_mode = want;
@@ -588,4 +651,17 @@ uc_err brov_reg_ptr(uc_engine *uc, int regid, void **ptr, size_t *size, uint32_t
     err = uc->brov.reg_ptr ? (uc_err)uc->brov.reg_ptr(uc, regid, ptr, size, flags) : UC_ERR_RESOURCE;
     restore_jit_state(uc);
     return err;
+}
+
+/* The field never moves, because CPUState is allocated once. */
+UNICORN_EXPORT
+uc_err brov_budget_ptr(uc_engine *uc, int32_t **ptr)
+{
+    if (!uc || !ptr || !uc->brov.budget_ptr) {
+        return UC_ERR_ARG;
+    }
+    UC_INIT(uc);
+    *ptr = uc->brov.budget_ptr(uc);
+    restore_jit_state(uc);
+    return UC_ERR_OK;
 }

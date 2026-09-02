@@ -166,6 +166,18 @@ typedef struct brov_tb_record_t {
 
 struct uc_struct;
 
+/* rdtsc answered in helper_rdtsc from the embedder's clock, as counts since
+ * host_start at qpc_freq, plus the skew, times the TSC ticks per count. */
+typedef struct brov_tsc_t {
+    uint32_t armed;
+    uint32_t reserved;
+    int64_t host_start;
+    int64_t host_freq;
+    int64_t qpc_freq;
+    int64_t skew_counts;
+    uint64_t tsc_per_qpc;
+} brov_tsc_t;
+
 /* brov_reg_ptr flags. A register is only writable through its pointer when
  * uc_reg_write() would have done nothing but store to it: the program counter is
  * excluded because writing it also raises quit_request and flushes translated
@@ -184,6 +196,7 @@ struct brov_ops {
     int (*resolve)(struct uc_struct *uc, uint32_t *resolved, uint32_t *remaining);
     int (*reg_ptr)(struct uc_struct *uc, int regid, void **ptr, size_t *size, uint32_t *flags);
     void (*set_budget)(struct uc_struct *uc, int32_t budget);
+    int32_t *(*budget_ptr)(struct uc_struct *uc);
 };
 
 #define BROVAN_UC_FIELDS                                                       \
@@ -191,6 +204,8 @@ struct brov_ops {
     uint32_t brov_budget_mode;                                                 \
     void *brov_ram_starts;                                                     \
     unsigned brov_ram_starts_cap;                                              \
+    uint32_t brov_mem_hook_sig;                                                \
+    brov_tsc_t brov_tsc;                                                       \
     struct brov_ops brov;
 
 #define BROVAN_TCG_FIELDS                                                      \
@@ -277,5 +292,7 @@ bool brov_strict_audit(void);
 bool brov_commit_rwx(void *addr, uint64_t size);
 void brov_arm_budget(struct uc_struct *uc, size_t count);
 uint32_t brov_budget_mode_wanted(struct uc_struct *uc);
+uint32_t brov_access_exit_check_elided(struct uc_struct *uc);
+uint64_t brov_tsc_now(struct uc_struct *uc);
 
 #endif /* BROVAN_UC_H */

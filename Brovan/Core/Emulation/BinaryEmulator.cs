@@ -517,6 +517,18 @@ namespace Brovan.Core.Emulation
             return unchecked((ulong)(Elapsed > long.MaxValue - SkewCounts ? long.MaxValue : Elapsed + SkewCounts));
         }
 
+        // Only a hook-free run takes it. With hooks on, the RDTSC handler has to see every execution.
+        private void PublishTimestampCounterSource()
+        {
+            if (!Settings.NoHooks)
+                return;
+
+            const long QpcFrequency = OS.Windows.KuserSharedDataManager.QpcFrequency;
+            long HostStart = System.Diagnostics.Stopwatch.GetTimestamp() - _wallClock.ElapsedTicks;
+            long SkewCounts = Volatile.Read(ref _emulatedTimeSkewMilliseconds) * (QpcFrequency / 1000);
+            _emulator.ConfigureEmulatedTimestampCounter(HostStart, System.Diagnostics.Stopwatch.Frequency, QpcFrequency, TscTicksPerQpcTick, SkewCounts);
+        }
+
         /// <summary>
         /// Advances guest time for a wait that was not served in real time.
         /// </summary>
@@ -531,6 +543,7 @@ namespace Brovan.Core.Emulation
                 return;
 
             Interlocked.Add(ref _emulatedTimeSkewMilliseconds, AppliedMilliseconds);
+            PublishTimestampCounterSource();
 
             // A skew jump has no producer of its own: it can bring every timed wait due at once.
             WakeSignal.Bump();
@@ -2639,6 +2652,7 @@ namespace Brovan.Core.Emulation
         public bool RunMlfqScheduler(uint BaseQuantumInstructions = 200000, int Levels = 4, ulong MaxTotalInstructions = 0, uint MaxSlices = 0, long AgingThresholdSlices = 50)
         {
             _emulator.RestoreCodeCache();
+            PublishTimestampCounterSource();
             TrimDeadThreadsFromOrder();
             if (ThreadOrder.Count == 0)
             {

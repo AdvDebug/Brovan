@@ -68,4 +68,17 @@ static inline bool brov_notdirty_promote(CPUState *cpu, vaddr mem_vaddr,
     return brov_notdirty_allowed(cpu, mem_vaddr, tlbe);
 }
 
+/* A memory hook that declines an access leaves the loop from inside the helper,
+ * with the PC back on the faulting instruction. A hook-free run emits no
+ * check_exit_request after an access, so exit_request alone would not stop it.
+ * skip_sync_pc_on_exit is ignored here. An earlier PC write in the slice can
+ * leave it set, and honouring it would keep a stale lazy eip. */
+static inline void brov_fault_exit(struct uc_struct *uc, uintptr_t retaddr)
+{
+    cpu_exit(uc->cpu);
+    if (uc->nested_level > 0 && !uc->cpu->stopped) {
+        cpu_loop_exit_restore(uc->cpu, retaddr);
+    }
+}
+
 #endif

@@ -205,6 +205,11 @@ namespace Brovan.Core.Emulation
         /// </summary>
         bool TryLimitSlice(int microseconds) => false;
 
+        /// <summary>
+        /// Answers RDTSC inside the backend from the emulator's clock. False when the backend has no such path.
+        /// </summary>
+        bool ConfigureEmulatedTimestampCounter(long hostStart, long hostFrequency, long qpcFrequency, ulong tscPerQpc, long skewCounts) => false;
+
         bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
         {
             if (registers == null || values == null || count <= 0 || count > registers.Length || count > values.Length)

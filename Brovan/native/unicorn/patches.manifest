@@ -84,6 +84,25 @@ insert-in-body|qemu/accel/tcg/cputlb.c|static void notdirty_write(CPUState *cpu,
 insert-before|uc.c|if (remove_exec) {|    uc->tcg_flush_tlb(uc); /* brov: a cached TLB entry may predate these perms */
 replace-all|uc.c|if (count > 0 && uc->count_hook == 0) {|if (count > 0 && uc->count_hook == 0 && !uc->brov_budget_mode) {
 
+# --- no exit poll after every guest memory access, faults leave the helper ---
+replace-all|qemu/accel/tcg/cputlb.c|cpu_exit(uc->cpu);|brov_fault_exit(uc, retaddr);
+insert-in-body|qemu/tcg/tcg-op.c|void check_exit_request(TCGContext *tcg_ctx)|    if (brov_access_exit_check_elided(tcg_ctx->uc)) { return; }
+
+# --- block lookups, a bigger jump cache and the ram offset from the TLB entry
+replace-all|qemu/include/hw/core/cpu.h|#define TB_JMP_CACHE_BITS 12|#define TB_JMP_CACHE_BITS 15
+replace-all|qemu/accel/tcg/cputlb.c|return qemu_ram_addr_from_host_nofail(env->uc, p);|return (tb_page_addr_t)addr + env_tlb(env)->d[mmu_idx].iotlb[index].addr; /* brov: the entry already carries the ram offset */
+
+# --- eip and cc_op are stored before these helpers run, so no PC restore -----
+replace-all|qemu/target/i386/seg_helper.c|cpu_restore_state(uc->cpu, pc, false);|/* brov: eip and cc_op were stored ahead of this helper */
+replace-all|qemu/target/i386/misc_helper.c|cpu_restore_state(uc->cpu, pc, false);|/* brov: eip and cc_op were stored ahead of this helper */
+
+# --- rdtsc from the embedder's clock, no hook round trip ---------------------
+insert-in-body|qemu/target/i386/misc_helper.c|void helper_rdtsc(CPUX86State *env)|    if (env->uc->brov_tsc.armed) { uint64_t brov_val = brov_tsc_now(env->uc); env->regs[R_EAX] = (uint32_t)brov_val; env->regs[R_EDX] = (uint32_t)(brov_val >> 32); return; }
+
+# --- a pause loop gives up its slice early -----------------------------------
+insert-after|qemu/target/i386/misc_helper.c|#include "uc_priv.h"|#include "brovan_tcg_budget.inc.h"
+insert-in-body|qemu/target/i386/misc_helper.c|static void do_pause(X86CPU *cpu)|    brov_charge_pause(CPU(cpu));
+
 # --- helper calls route through the slot table ------------------------------
 insert-before|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)|#include "brovan_tcg_slots.inc.c"
 insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)|    if (brov_tcg_out_call_slot(s, dest)) { return; }

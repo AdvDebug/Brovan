@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Text;
 
 namespace Brovan.Core.Emulation
@@ -119,8 +120,59 @@ namespace Brovan.Core.Emulation
         public CPUFlags GetCPUFlags() => Inner.GetCPUFlags();
         public bool SetCPUFlags(CPUFlags flags) => Inner.SetCPUFlags(flags);
 
+        public bool ConfigureEmulatedTimestampCounter(long hostStart, long hostFrequency, long qpcFrequency, ulong tscPerQpc, long skewCounts)
+            => Inner.ConfigureTimestampCounter(hostStart, hostFrequency, qpcFrequency, tscPerQpc, skewCounts);
+
         public bool Emulate(ulong start, ulong end, uint timeout = 0, uint count = 0)
-            => Inner.Emulate(start, end, timeout, count);
+        {
+            _armedBudget = count;
+            _sliceLimit = count;
+            _sliceStart = Stopwatch.GetTimestamp();
+            bool Result = Inner.Emulate(start, end, timeout, count);
+            UpdateInstructionRate();
+            return Result;
+        }
+
+        private uint _armedBudget;
+        private uint _sliceLimit;
+        private long _sliceStart;
+        private double _instructionsPerMicrosecond = 200;
+        private const int MinimumLimitInstructions = 4000;
+        private const long RateSampleInstructions = 20_000;
+
+        // A short slice is mostly slice cost and syscall time, so only long ones feed the rate.
+        private unsafe void UpdateInstructionRate()
+        {
+            int* Budget = Inner.BudgetPointer;
+            if (_armedBudget == 0 || Budget == null)
+                return;
+
+            int Remaining = *Budget;
+            long Consumed = Remaining < 0 ? _sliceLimit : (long)_sliceLimit - Remaining;
+            double Microseconds = (Stopwatch.GetTimestamp() - _sliceStart) * 1_000_000.0 / Stopwatch.Frequency;
+            if (Consumed < RateSampleInstructions || Microseconds <= 0)
+                return;
+
+            _instructionsPerMicrosecond = _instructionsPerMicrosecond * 0.9 + (Consumed / Microseconds) * 0.1;
+        }
+
+        // The budget only counts in a hook-free run.
+        public unsafe bool TryLimitSlice(int microseconds)
+        {
+            int* Budget = Inner.BudgetPointer;
+            if (!NoHooks || _armedBudget == 0 || Budget == null)
+                return false;
+
+            double Wanted = microseconds * _instructionsPerMicrosecond;
+            int Limit = Wanted >= int.MaxValue / 2 ? int.MaxValue / 2 : Math.Max(MinimumLimitInstructions, (int)Wanted);
+            if (*Budget > Limit)
+            {
+                *Budget = Limit;
+                _sliceLimit = (uint)Limit;
+            }
+            return true;
+        }
+
         public bool StopEmulation() => Inner.StopEmulation();
 
         public IntPtr AddMemoryHook(ulong begin, ulong end, BackendHookType hookType, MemoryHookCallback callback)

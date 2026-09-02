@@ -1260,6 +1260,11 @@ static void brov_set_budget_impl(struct uc_struct *uc, int32_t budget)
     cpu_neg(uc->cpu)->brov_insn_budget = budget;
 }
 
+static int32_t *brov_budget_ptr_impl(struct uc_struct *uc)
+{
+    return &cpu_neg(uc->cpu)->brov_insn_budget;
+}
+
 static void brov_install(struct uc_struct *uc)
 {
     uc->brov.info = brov_info_impl;
@@ -1269,6 +1274,7 @@ static void brov_install(struct uc_struct *uc)
     uc->brov.resolve = brov_resolve_impl;
     uc->brov.reg_ptr = brov_reg_ptr_impl;
     uc->brov.set_budget = brov_set_budget_impl;
+    uc->brov.budget_ptr = brov_budget_ptr_impl;
 
     /* Starts on so that the first uc_emu_start() does not have to flush the
      * blocks a restored cache just installed. */

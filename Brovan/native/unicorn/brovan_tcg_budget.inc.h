@@ -40,4 +40,15 @@ static inline void brov_budget_expired(struct uc_struct *uc)
     uc_emu_stop(uc);
 }
 
+/* A guest spinning on pause makes no progress until another thread runs, so the
+ * slice ends early the way PAUSE-loop exiting does on a hypervisor. */
+#define BROV_PAUSE_BUDGET_COST 2048
+
+static inline void brov_charge_pause(CPUState *cs)
+{
+    if (cs->uc->brov_budget_mode) {
+        cpu_neg(cs)->brov_insn_budget -= BROV_PAUSE_BUDGET_COST;
+    }
+}
+
 #endif

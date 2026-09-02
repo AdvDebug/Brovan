@@ -1477,6 +1477,35 @@ namespace Brovan.Core.Emulation
             return brov_blob_reservation(Blob, (UIntPtr)Blob.Length, out ReservationBase, out ReservationSize) == UCErrors.UC_ERR_OK;
         }
 
+        /// <summary>
+        /// Answers RDTSC inside the engine as (counts since <paramref name="HostStart"/> at
+        /// <paramref name="QpcFrequency"/> plus <paramref name="SkewCounts"/>) times <paramref name="TscPerQpc"/>.
+        /// </summary>
+        public bool ConfigureTimestampCounter(long HostStart, long HostFrequency, long QpcFrequency, ulong TscPerQpc, long SkewCounts)
+        {
+            if (DisposedCheck())
+                return false;
+
+            _error = brov_tsc_configure(_uc, HostStart, HostFrequency, QpcFrequency, TscPerQpc, SkewCounts, 1);
+            return _error == UCErrors.UC_ERR_OK;
+        }
+
+        private unsafe int* _budget;
+
+        /// <summary>
+        /// The running slice's remaining instruction budget, or null when the engine keeps none. Negative once
+        /// exhausted. Storing a smaller value shortens the slice from the next block on.
+        /// </summary>
+        internal unsafe int* BudgetPointer
+        {
+            get
+            {
+                if (_budget == null && _uc != IntPtr.Zero && brov_budget_ptr(_uc, out IntPtr Pointer) == UCErrors.UC_ERR_OK)
+                    _budget = (int*)Pointer;
+                return _budget;
+            }
+        }
+
         internal bool GetCodeCacheInfo(out BrovCacheInfo Info)
         {
             Info = new BrovCacheInfo { StructSize = (uint)Marshal.SizeOf<BrovCacheInfo>() };
