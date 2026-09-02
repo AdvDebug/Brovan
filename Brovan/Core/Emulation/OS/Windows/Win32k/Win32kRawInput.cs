@@ -48,6 +48,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const ushort RI_MOUSE_LEFT_BUTTON_UP = 0x0002;
         private const ushort RI_MOUSE_RIGHT_BUTTON_DOWN = 0x0004;
         private const ushort RI_MOUSE_RIGHT_BUTTON_UP = 0x0008;
+        private const ushort RI_MOUSE_MIDDLE_BUTTON_DOWN = 0x0010;
+        private const ushort RI_MOUSE_MIDDLE_BUTTON_UP = 0x0020;
+        private const ushort RI_MOUSE_BUTTON_4_DOWN = 0x0040;
+        private const ushort RI_MOUSE_BUTTON_4_UP = 0x0080;
+        private const ushort RI_MOUSE_BUTTON_5_DOWN = 0x0100;
+        private const ushort RI_MOUSE_BUTTON_5_UP = 0x0200;
+        private const ushort RI_MOUSE_WHEEL = 0x0400;
+        private const ushort RI_MOUSE_HWHEEL = 0x0800;
 
         private const ushort MOUSE_MOVE_RELATIVE = 0x0000;
 
@@ -61,7 +69,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private const int RecordSlots = 128;
         private const uint CoalesceBacklog = 8;
-        private const uint MinConfineExtent = 64;
 
         private static readonly Win32kRawDevice[] Devices =
         {
@@ -83,6 +90,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public uint Type;
             public ulong Device;
             public ushort ButtonFlags;
+            public short ButtonData;
             public int LastX;
             public int LastY;
             public ushort MakeCode;
@@ -235,7 +243,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 case Win32kHelper.WM_LBUTTONUP:
                 case Win32kHelper.WM_RBUTTONDOWN:
                 case Win32kHelper.WM_RBUTTONUP:
-                    return DeliverMouse(Instance, Foreground, Message, LParam);
+                case Win32kHelper.WM_MBUTTONDOWN:
+                case Win32kHelper.WM_MBUTTONUP:
+                case Win32kHelper.WM_XBUTTONDOWN:
+                case Win32kHelper.WM_XBUTTONUP:
+                    return DeliverMouse(Instance, Foreground, Message, WParam, LParam);
+
+                case Win32kHelper.WM_MOUSEWHEEL:
+                case Win32kHelper.WM_MOUSEHWHEEL:
+                    return DeliverWheel(Instance, Foreground, Message, WParam);
 
                 case Win32kHelper.WM_KEYDOWN:
                 case Win32kHelper.WM_KEYUP:
@@ -265,7 +281,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Post(Instance, State, Target != 0 ? Target : Foreground, ref Record);
         }
 
-        private static bool DeliverMouse(BinaryEmulator Instance, ulong Foreground, uint Message, ulong LParam)
+        private static bool DeliverMouse(BinaryEmulator Instance, ulong Foreground, uint Message, ulong WParam, ulong LParam)
         {
             RawInputState State = GetState(Instance);
             bool HostReportsTravel = HostEventQueue.RawMouseAvailable;
@@ -295,6 +311,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Win32kHelper.WM_LBUTTONUP => RI_MOUSE_LEFT_BUTTON_UP,
                 Win32kHelper.WM_RBUTTONDOWN => RI_MOUSE_RIGHT_BUTTON_DOWN,
                 Win32kHelper.WM_RBUTTONUP => RI_MOUSE_RIGHT_BUTTON_UP,
+                Win32kHelper.WM_MBUTTONDOWN => RI_MOUSE_MIDDLE_BUTTON_DOWN,
+                Win32kHelper.WM_MBUTTONUP => RI_MOUSE_MIDDLE_BUTTON_UP,
+                Win32kHelper.WM_XBUTTONDOWN => XButtonFlag(WParam, true),
+                Win32kHelper.WM_XBUTTONUP => XButtonFlag(WParam, false),
                 _ => (ushort)0,
             };
 
@@ -310,6 +330,33 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             ConfineHostPointer(Instance, State, Foreground);
+            return !NoLegacy;
+        }
+
+        private static ushort XButtonFlag(ulong WParam, bool Down)
+        {
+            uint Button = (uint)((WParam >> 16) & 0xFFFF);
+            if (Button == 1)
+                return Down ? RI_MOUSE_BUTTON_4_DOWN : RI_MOUSE_BUTTON_4_UP;
+
+            return Down ? RI_MOUSE_BUTTON_5_DOWN : RI_MOUSE_BUTTON_5_UP;
+        }
+
+        /// <summary>
+        /// A wheel notch carries no pointer position, so it leaves the tracked position alone.
+        /// </summary>
+        private static bool DeliverWheel(BinaryEmulator Instance, ulong Foreground, uint Message, ulong WParam)
+        {
+            RawInputState State = GetState(Instance);
+            if (!TryResolveUsage(State, UsageMouse, out ulong Target, out bool NoLegacy))
+                return true;
+
+            RawRecord Record = default;
+            Record.Type = RimTypeMouse;
+            Record.Device = Devices[0].Handle;
+            Record.ButtonFlags = Message == Win32kHelper.WM_MOUSEWHEEL ? RI_MOUSE_WHEEL : RI_MOUSE_HWHEEL;
+            Record.ButtonData = (short)((WParam >> 16) & 0xFFFF);
+            Post(Instance, State, Target != 0 ? Target : Foreground, ref Record);
             return !NoLegacy;
         }
 
@@ -367,27 +414,30 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 State.LastDeliveredHandle = Handle;
         }
 
-        // A guest in relative mode hides the pointer and never moves it back, so the pointer walks out of the
-        // window and its clicks land somewhere else. It goes back to the middle of the client area before it can
-        // reach an edge.
         private static void ConfineHostPointer(BinaryEmulator Instance, RawInputState State, ulong Hwnd)
         {
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
-            if (Window == null || Window.Width < MinConfineExtent || Window.Height < MinConfineExtent)
+            if (Window == null)
                 return;
 
-            int Width = (int)Window.Width;
-            int Height = (int)Window.Height;
-            int MarginX = Width / 4;
-            int MarginY = Height / 4;
+            if (!Win32kHelper.TryGetCursorClip(Instance, out int Left, out int Top, out int Right, out int Bottom))
+                return;
 
-            if (State.PointerX >= MarginX && State.PointerX <= Width - MarginX &&
-                State.PointerY >= MarginY && State.PointerY <= Height - MarginY)
+            if (Right - Left < 1 || Bottom - Top < 1)
+                return;
+
+            int ScreenX = State.PointerX + Window.X;
+            int ScreenY = State.PointerY + Window.Y;
+
+            int ClampedX = Math.Clamp(ScreenX, Left, Right - 1);
+            int ClampedY = Math.Clamp(ScreenY, Top, Bottom - 1);
+
+            if (ClampedX == ScreenX && ClampedY == ScreenY)
                 return;
 
             State.WarpPending = true;
-            State.WarpX = Width / 2;
-            State.WarpY = Height / 2;
+            State.WarpX = ClampedX - Window.X;
+            State.WarpY = ClampedY - Window.Y;
             Instance.WinHelper.WarpHostCursor(State.WarpX, State.WarpY);
         }
 
@@ -496,6 +546,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(0, 2), MOUSE_MOVE_RELATIVE);
             BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(4, 2), Record.ButtonFlags);
+            BinaryPrimitives.WriteInt16LittleEndian(Buffer.Slice(6, 2), Record.ButtonData);
             BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(12, 4), Record.LastX);
             BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(16, 4), Record.LastY);
         }

@@ -1,4 +1,4 @@
-﻿using System.Buffers.Binary;
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -153,6 +153,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WM_LBUTTONUP = 0x0202;
         internal const uint WM_RBUTTONDOWN = 0x0204;
         internal const uint WM_RBUTTONUP = 0x0205;
+        internal const uint WM_MBUTTONDOWN = 0x0207;
+        internal const uint WM_MBUTTONUP = 0x0208;
+        internal const uint WM_MOUSEWHEEL = 0x020A;
+        internal const uint WM_XBUTTONDOWN = 0x020B;
+        internal const uint WM_XBUTTONUP = 0x020C;
+        internal const uint WM_MOUSEHWHEEL = 0x020E;
 
         internal const uint QS_KEY = 0x0001;
         internal const uint QS_MOUSEMOVE = 0x0002;
@@ -212,6 +218,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public bool CursorAssigned;
             public int CursorShowCount;
             public bool CursorHidden;
+            public bool CursorClipped;
+            public int ClipLeft;
+            public int ClipTop;
+            public int ClipRight;
+            public int ClipBottom;
             public bool CursorHiddenWhileTyping;
             public Win32kCaret Caret;
 
@@ -1424,7 +1435,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     continue;
                 }
 
-                if (Message >= WM_MOUSEMOVE && Message <= WM_RBUTTONUP)
+                if (Message >= WM_MOUSEMOVE && Message <= WM_XBUTTONUP && Message != WM_MOUSEWHEEL)
                 {
                     State.CursorX = (short)(LParam & 0xFFFF);
                     State.CursorY = (short)((LParam >> 16) & 0xFFFF);
@@ -1620,6 +1631,31 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             X += Foreground.X;
             Y += Foreground.Y;
+        }
+
+        internal static void SetCursorClip(BinaryEmulator Instance, int Left, int Top, int Right, int Bottom)
+        {
+            Win32kState State = GetState(Instance);
+            State.CursorClipped = true;
+            State.ClipLeft = Math.Min(Left, Right);
+            State.ClipTop = Math.Min(Top, Bottom);
+            State.ClipRight = Math.Max(Left, Right);
+            State.ClipBottom = Math.Max(Top, Bottom);
+        }
+
+        internal static void ClearCursorClip(BinaryEmulator Instance)
+        {
+            GetState(Instance).CursorClipped = false;
+        }
+
+        internal static bool TryGetCursorClip(BinaryEmulator Instance, out int Left, out int Top, out int Right, out int Bottom)
+        {
+            Win32kState State = GetState(Instance);
+            Left = State.ClipLeft;
+            Top = State.ClipTop;
+            Right = State.ClipRight;
+            Bottom = State.ClipBottom;
+            return State.CursorClipped;
         }
 
         internal static void SetCursorPosition(BinaryEmulator Instance, int X, int Y)

@@ -131,6 +131,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_LBUTTONUP = 0x0202;
         private const uint WM_RBUTTONDOWN = 0x0204;
         private const uint WM_RBUTTONUP = 0x0205;
+        private const uint WM_MBUTTONDOWN = 0x0207;
+        private const uint WM_MBUTTONUP = 0x0208;
+        private const uint WM_MOUSEWHEEL = 0x020A;
+        private const uint WM_XBUTTONDOWN = 0x020B;
+        private const uint WM_XBUTTONUP = 0x020C;
+        private const uint WM_MOUSEHWHEEL = 0x020E;
 
         private const uint WS_OVERLAPPEDWINDOW = 0x00CF0000;
         private const uint WS_POPUP = 0x80000000;
@@ -1024,6 +1030,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     case WM_LBUTTONUP:
                     case WM_RBUTTONDOWN:
                     case WM_RBUTTONUP:
+                    case WM_MBUTTONDOWN:
+                    case WM_MBUTTONUP:
+                    case WM_XBUTTONDOWN:
+                    case WM_XBUTTONUP:
+                    case WM_MOUSEWHEEL:
+                    case WM_MOUSEHWHEEL:
                     case WM_KEYDOWN:
                     case WM_KEYUP:
                     case WM_CHAR:

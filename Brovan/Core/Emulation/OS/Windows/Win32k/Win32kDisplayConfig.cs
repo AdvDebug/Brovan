@@ -10,107 +10,148 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     internal static class Win32kDisplayConfig
     {
         internal const uint PathCount = 1;
-        internal const uint ModeCount = 2;
 
-        internal const int PathInfoSize = 72;
-        internal const int ModeInfoSize = 64;
+        internal const int ModalitySize = 216;
+
+        private const int ModalityFlags = 0;
+        private const int ModalityAdapterId = 16;
+        private const int ModalitySourceId = 24;
+        private const int ModalityTargetId = 28;
+        private const int ModalitySignalInfo = 32;
+        private const int ModalityOutputTechnology = 80;
+        private const int ModalityRotation = 104;
+        private const int ModalityScalingLegacy = 108;
+        private const int ModalityScaling = 112;
+        private const int ModalitySourcePosition = 116;
+        private const int ModalitySourceWidth = 124;
+        private const int ModalitySourceHeight = 128;
+        private const int ModalityRemovalReason = 188;
+
+        private const ulong ModalityTargetMode = 0x0000000000000002;
+        private const ulong ModalitySourcePositionValid = 0x0000000000000800;
+        private const ulong ModalityScalingValid = 0x0000000000010000;
+        private const ulong ModalitySourceMode = 0x0000000000020000;
+        private const ulong ModalityScalingLegacyValid = 0x0000040000000000;
+        private const ulong ModalityTargetAvailable = 0x0100000000000000;
+        private const ulong ModalityTargetInUse = 0x2000000000000000;
+        private const ulong ModalitySourceInUse = 0x4000000000000000;
+        private const ulong ModalityPathActive = 0x8000000000000000;
+
+        internal const int SourceDeviceNameSize = 84;
+        internal const int TargetDeviceNameSize = 420;
+
+        internal const uint DeviceInfoGetSourceName = 1;
+        internal const uint DeviceInfoGetTargetName = 2;
 
         internal const uint TopologyInternal = 1;
 
         internal const uint SourceId = 0;
         internal const uint TargetId = 1;
 
-        private const uint PathActive = 0x00000001;
-        private const uint OutputTechnologyDisplayPort = 10;
+        internal const uint OutputTechnologyDisplayPort = 10;
         private const uint RotationIdentity = 1;
         private const uint ScalingIdentity = 1;
         private const uint ScanLineOrderingProgressive = 1;
-        private const uint PixelFormat32Bpp = 3;
-        private const uint ModeInfoTypeSource = 1;
-        private const uint ModeInfoTypeTarget = 2;
+
+        internal const int HeaderSize = 20;
+
+        private const uint FriendlyNameForced = 0x00000002;
+
+        private const string AdapterName = @"\\.\DISPLAY1";
+        private const string MonitorFriendlyName = "Generic PnP Monitor";
+        private const string MonitorDevicePath =
+            @"\\?\DISPLAY#Default_Monitor#1&0&UID0#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
 
         private const uint RefreshHz = 60;
-        private const int SourceModeIndex = 0;
-        private const int TargetModeIndex = 1;
 
         /// <summary>
-        /// The DisplayConfig syscalls answer in Win32 error codes, not NTSTATUS. Their callers retry on
-        /// ERROR_INSUFFICIENT_BUFFER, and an NTSTATUS in its place reads as a hard failure.
+        /// user32 runs the DisplayConfig results through RtlNtStatusToDosError, so the status has to reach it
+        /// in the return register rather than as the dispatcher's own result.
         /// </summary>
-        internal static NTSTATUS Complete(BinaryEmulator Instance, uint Win32Error)
+        internal static NTSTATUS Complete(BinaryEmulator Instance, NTSTATUS Status)
         {
-            Instance.SetRawSyscallReturn(Win32Error);
+            Instance.SetRawSyscallReturn((uint)Status);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        internal static bool WritePaths(BinaryEmulator Instance, ulong Destination)
-        {
-            Span<byte> Path = Instance.WinHelper.Shared.GetSpan(PathInfoSize).Slice(0, PathInfoSize);
-            Path.Clear();
-
-            // DISPLAYCONFIG_PATH_SOURCE_INFO
-            Win32kDxgk.WriteLuid(Path.Slice(0, 8));
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(8, 4), SourceId);
-            BinaryPrimitives.WriteInt32LittleEndian(Path.Slice(12, 4), SourceModeIndex);
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(16, 4), 0);
-
-            // DISPLAYCONFIG_PATH_TARGET_INFO
-            Win32kDxgk.WriteLuid(Path.Slice(20, 8));
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(28, 4), TargetId);
-            BinaryPrimitives.WriteInt32LittleEndian(Path.Slice(32, 4), TargetModeIndex);
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(36, 4), OutputTechnologyDisplayPort);
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(40, 4), RotationIdentity);
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(44, 4), ScalingIdentity);
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(48, 4), RefreshHz);
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(52, 4), 1);
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(56, 4), ScanLineOrderingProgressive);
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(60, 4), 1);
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(64, 4), 0);
-
-            BinaryPrimitives.WriteUInt32LittleEndian(Path.Slice(68, 4), PathActive);
-
-            return Instance.WriteMemory(Destination, Path);
-        }
-
-        internal static bool WriteModes(BinaryEmulator Instance, ulong Destination)
+        internal static bool WriteModality(BinaryEmulator Instance, ulong Destination)
         {
             uint Width = (uint)HostDisplayMetrics.ScreenWidth;
             uint Height = (uint)HostDisplayMetrics.ScreenHeight;
 
-            Span<byte> Modes = Instance.WinHelper.Shared.GetSpan(ModeInfoSize * (int)ModeCount)
-                                       .Slice(0, ModeInfoSize * (int)ModeCount);
-            Modes.Clear();
+            Span<byte> Record = Instance.WinHelper.Shared.GetSpan(ModalitySize).Slice(0, ModalitySize);
+            Record.Clear();
 
-            Span<byte> Source = Modes.Slice(SourceModeIndex * ModeInfoSize, ModeInfoSize);
-            BinaryPrimitives.WriteUInt32LittleEndian(Source.Slice(0, 4), ModeInfoTypeSource);
-            BinaryPrimitives.WriteUInt32LittleEndian(Source.Slice(4, 4), SourceId);
-            Win32kDxgk.WriteLuid(Source.Slice(8, 8));
-            BinaryPrimitives.WriteUInt32LittleEndian(Source.Slice(16, 4), Width);
-            BinaryPrimitives.WriteUInt32LittleEndian(Source.Slice(20, 4), Height);
-            BinaryPrimitives.WriteUInt32LittleEndian(Source.Slice(24, 4), PixelFormat32Bpp);
-            BinaryPrimitives.WriteInt32LittleEndian(Source.Slice(28, 4), 0);
-            BinaryPrimitives.WriteInt32LittleEndian(Source.Slice(32, 4), 0);
+            ulong Flags = ModalityPathActive | ModalitySourceMode | ModalityTargetMode
+                        | ModalitySourcePositionValid | ModalityScalingValid | ModalityScalingLegacyValid
+                        | ModalityTargetAvailable | ModalityTargetInUse | ModalitySourceInUse;
 
-            Span<byte> Target = Modes.Slice(TargetModeIndex * ModeInfoSize, ModeInfoSize);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(0, 4), ModeInfoTypeTarget);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(4, 4), TargetId);
-            Win32kDxgk.WriteLuid(Target.Slice(8, 8));
+            BinaryPrimitives.WriteUInt64LittleEndian(Record.Slice(ModalityFlags, 8), Flags);
+            Win32kDxgk.WriteLuid(Record.Slice(ModalityAdapterId, 8));
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalitySourceId, 4), SourceId);
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalityTargetId, 4), TargetId);
 
-            // DISPLAYCONFIG_VIDEO_SIGNAL_INFO
-            ulong PixelRate = (ulong)Width * Height * RefreshHz;
-            BinaryPrimitives.WriteUInt64LittleEndian(Target.Slice(16, 8), PixelRate);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(24, 4), Height * RefreshHz);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(28, 4), 1);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(32, 4), RefreshHz);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(36, 4), 1);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(40, 4), Width);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(44, 4), Height);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(48, 4), Width);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(52, 4), Height);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(56, 4), 0);
-            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(60, 4), ScanLineOrderingProgressive);
+            WriteVideoSignalInfo(Record.Slice(ModalitySignalInfo, 48), Width, Height);
 
-            return Instance.WriteMemory(Destination, Modes);
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalityOutputTechnology, 4), OutputTechnologyDisplayPort);
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalityRotation, 4), RotationIdentity);
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalityScalingLegacy, 4), ScalingIdentity);
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalityScaling, 4), ScalingIdentity);
+            BinaryPrimitives.WriteUInt64LittleEndian(Record.Slice(ModalitySourcePosition, 8), 0);
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalitySourceWidth, 4), Width);
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalitySourceHeight, 4), Height);
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalityRemovalReason, 4), 0);
+
+            return Instance.WriteMemory(Destination, Record);
         }
+
+        private static void WriteVideoSignalInfo(Span<byte> Signal, uint Width, uint Height)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(Signal.Slice(0, 8), (ulong)Width * Height * RefreshHz);
+            BinaryPrimitives.WriteUInt32LittleEndian(Signal.Slice(8, 4), Height * RefreshHz);
+            BinaryPrimitives.WriteUInt32LittleEndian(Signal.Slice(12, 4), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(Signal.Slice(16, 4), RefreshHz);
+            BinaryPrimitives.WriteUInt32LittleEndian(Signal.Slice(20, 4), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(Signal.Slice(24, 4), Width);
+            BinaryPrimitives.WriteUInt32LittleEndian(Signal.Slice(28, 4), Height);
+            BinaryPrimitives.WriteUInt32LittleEndian(Signal.Slice(32, 4), Width);
+            BinaryPrimitives.WriteUInt32LittleEndian(Signal.Slice(36, 4), Height);
+            BinaryPrimitives.WriteUInt32LittleEndian(Signal.Slice(40, 4), 0);
+            BinaryPrimitives.WriteUInt32LittleEndian(Signal.Slice(44, 4), ScanLineOrderingProgressive);
+        }
+
+        internal static bool WriteSourceName(BinaryEmulator Instance, ulong Destination)
+        {
+            Span<byte> Tail = Instance.WinHelper.Shared.GetSpan(SourceDeviceNameSize - HeaderSize)
+                                      .Slice(0, SourceDeviceNameSize - HeaderSize);
+            Tail.Clear();
+
+            WriteString(Tail.Slice(0, 64), AdapterName);
+
+            return Instance.WriteMemory(Destination + HeaderSize, Tail);
+        }
+
+        internal static bool WriteTargetName(BinaryEmulator Instance, ulong Destination)
+        {
+            Span<byte> Tail = Instance.WinHelper.Shared.GetSpan(TargetDeviceNameSize - HeaderSize)
+                                      .Slice(0, TargetDeviceNameSize - HeaderSize);
+            Tail.Clear();
+
+            BinaryPrimitives.WriteUInt32LittleEndian(Tail.Slice(0, 4), FriendlyNameForced);
+            BinaryPrimitives.WriteUInt32LittleEndian(Tail.Slice(4, 4), OutputTechnologyDisplayPort);
+            BinaryPrimitives.WriteUInt32LittleEndian(Tail.Slice(12, 4), 0);
+
+            WriteString(Tail.Slice(16, 128), MonitorFriendlyName);
+            WriteString(Tail.Slice(144, 256), MonitorDevicePath);
+
+            return Instance.WriteMemory(Destination + HeaderSize, Tail);
+        }
+
+        private static void WriteString(Span<byte> Field, string Value)
+        {
+            int Characters = Math.Min(Value.Length, Field.Length / sizeof(char) - 1);
+            System.Text.Encoding.Unicode.GetBytes(Value.AsSpan(0, Characters), Field);
+        }
+
     }
 }
