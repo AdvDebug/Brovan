@@ -19,9 +19,9 @@ namespace Brovan.Core.Emulation
 
         public long Current => Volatile.Read(ref Counter);
 
-        public void Bump()
+        public long Bump()
         {
-            Interlocked.Increment(ref Counter);
+            return Interlocked.Increment(ref Counter);
         }
     }
 

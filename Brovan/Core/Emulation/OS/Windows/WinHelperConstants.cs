@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -1107,13 +1107,25 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         internal WakeSignal WakeSignal;
 
+        // Epoch of the last signal, so a scan can skip a waiter whose objects have not signalled.
+        // Poisoned across a bump, so either store leaves a value above any epoch a scan checked at.
+        internal long LastSignalEpoch;
+
         public abstract string ObjectId { get; }
 
         public abstract HandleType ObjectType { get; }
 
         protected void Signal()
         {
-            WakeSignal?.Bump();
+            if (WakeSignal == null)
+            {
+                Volatile.Write(ref LastSignalEpoch, long.MaxValue);
+                return;
+            }
+
+            Volatile.Write(ref LastSignalEpoch, long.MaxValue);
+            long Epoch = WakeSignal.Bump();
+            Volatile.Write(ref LastSignalEpoch, Epoch);
         }
     }
 

@@ -51,6 +51,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool WaitCompleted { get; set; }
         public NTSTATUS WaitStatus { get; set; }
         public List<object> WaitObjects { get; set; }
+        public long WaitCheckedEpoch = -1;
+        public List<ulong> WaitCheckedHandles;
+        public WaitableHandleObject[] WaitCheckedObjects;
         public bool AlertByThreadIdPending { get; set; }
         public bool AlertByThreadIdWaitActive { get; set; }
         public ulong AlertByThreadIdAddress { get; set; }

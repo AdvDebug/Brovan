@@ -46,6 +46,26 @@ namespace Brovan.Core.Emulation
         [DllImport("libc", SetLastError = true)]
         public static extern int ioctl(int fd, uint request, ref LinuxKvmDebugRegisters arg);
 
+        [DllImport("libc")]
+        public static extern int getpid();
+
+        [DllImport("libc")]
+        public static extern int gettid();
+
+        [DllImport("libc", SetLastError = true)]
+        public static extern int tgkill(int tgid, int tid, int sig);
+
+        [DllImport("libc")]
+        public static extern int __libc_current_sigrtmin();
+
+        [DllImport("libc", SetLastError = true)]
+        public static extern int getrlimit(int resource, ref LinuxRlimit rlim);
+
+        [DllImport("libc", SetLastError = true)]
+        public static extern int setrlimit(int resource, ref LinuxRlimit rlim);
+
+        public const int RLIMIT_NOFILE = 7;
+
         public const int O_RDWR = 0x02;
         public const int O_CLOEXEC = 0x080000;
 
@@ -59,6 +79,13 @@ namespace Brovan.Core.Emulation
         public static readonly IntPtr MAP_FAILED = new IntPtr(-1);
 
         public const int ErrnoEintr = 4;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct LinuxRlimit
+    {
+        public ulong Current;
+        public ulong Maximum;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -327,7 +354,7 @@ namespace Brovan.Core.Emulation
         public ulong Data15;
     }
 
-    [StructLayout(LayoutKind.Explicit)]
+    [StructLayout(LayoutKind.Explicit, Size = 256)]
     internal unsafe struct LinuxKvmRunExit
     {
         [FieldOffset(0)] public LinuxKvmRunExitException Exception;
@@ -337,19 +364,23 @@ namespace Brovan.Core.Emulation
         [FieldOffset(0)] public LinuxKvmMmioExit Mmio;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
+    // struct kvm_run with the x86 kvm_sync_regs tail. The kernel stores Regs and Sregs on every return
+    // and applies the groups DirtyRegs names before the next entry.
+    [StructLayout(LayoutKind.Explicit)]
     internal struct LinuxKvmRun
     {
-        public byte RequestInterruptWindow;
-        public byte ImmediateExit;
-        public ushort Padding1A;
-        public uint Padding1B;
-        public uint ExitReason;
-        public byte ReadyForInterruptInjection;
-        public byte IfFlag;
-        public ushort Flags;
-        public ulong Cr8;
-        public ulong ApicBase;
-        public LinuxKvmRunExit Exit;
+        [FieldOffset(0)] public byte RequestInterruptWindow;
+        [FieldOffset(1)] public byte ImmediateExit;
+        [FieldOffset(8)] public uint ExitReason;
+        [FieldOffset(12)] public byte ReadyForInterruptInjection;
+        [FieldOffset(13)] public byte IfFlag;
+        [FieldOffset(14)] public ushort Flags;
+        [FieldOffset(16)] public ulong Cr8;
+        [FieldOffset(24)] public ulong ApicBase;
+        [FieldOffset(32)] public LinuxKvmRunExit Exit;
+        [FieldOffset(288)] public ulong ValidRegs;
+        [FieldOffset(296)] public ulong DirtyRegs;
+        [FieldOffset(304)] public LinuxKvmRegisters Regs;
+        [FieldOffset(448)] public LinuxKvmSpecialRegisters Sregs;
     }
 }

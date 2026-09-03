@@ -27,6 +27,8 @@ namespace Brovan.Core.Emulation
         public ulong MaxMappableAddress => KvmConstants.InternalPageTableBase - 1;
 
         public bool TimestampCounterIsEmulated => false;
+        public ulong TimestampCounterFrequency => Inner.TimestampCounterFrequency;
+        public bool TryReadTimestampCounter(out ulong value) => Inner.TryReadTimestampCounter(out value);
 
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
             => Inner.MapMemory(address, size, protection);
@@ -107,6 +109,13 @@ namespace Brovan.Core.Emulation
             => Inner.TransferXmmRegisters(values, false);
         public bool WriteXmmRegisters(ulong[] values)
             => Inner.TransferXmmRegisters(values, true);
+
+        public bool SupportsThreadResidency => Inner.SupportsThreadResidency;
+        public bool TryBindThread(uint threadId) => Inner.TryBindThread(threadId);
+        public void UnbindThread(uint threadId) => Inner.UnbindThread(threadId);
+        public bool IsThreadResident(uint threadId) => Inner.IsThreadResident(threadId);
+        public void SelectThread(uint threadId) => Inner.SelectThread(threadId);
+        public bool TryLimitSlice(int microseconds) => Inner.TryLimitSlice(microseconds);
         public uint ReadRegister32(Registers register)
             => Inner.ReadRegister32(register);
         public uint ReadRegister32(int register)

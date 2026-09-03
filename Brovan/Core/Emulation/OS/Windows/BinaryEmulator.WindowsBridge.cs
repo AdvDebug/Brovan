@@ -1,4 +1,4 @@
-﻿using System.Buffers;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Brovan.Core.Emulation.OS.Windows;
@@ -668,7 +668,64 @@ namespace Brovan.Core.Emulation
             return Reserved.Count > 0;
         }
 
-        internal bool TrySatisfyThreadWait(EmulatedThread Thread)
+        internal bool TrySatisfyThreadWait(EmulatedThread Thread) => TrySatisfyThreadWait(Thread, EmulatedTickCount64);
+
+        // A wait on objects alone stays unsatisfiable until one signals or the deadline passes.
+        internal bool CanSkipWaitCheck(EmulatedThread Thread, long Now)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State == null || State.WaitCheckedObjects == null || !ReferenceEquals(State.WaitCheckedHandles, Thread.WaitHandles))
+                return false;
+
+            if (IsDeadlineExpired(Thread.WaitDeadline, Now))
+                return false;
+
+            WaitableHandleObject[] Objects = State.WaitCheckedObjects;
+            long Checked = State.WaitCheckedEpoch;
+            for (int i = 0; i < Objects.Length; i++)
+            {
+                if (Volatile.Read(ref Objects[i].LastSignalEpoch) > Checked)
+                    return false;
+            }
+
+            return true;
+        }
+
+        internal void NoteWaitCheckFailed(EmulatedThread Thread, long ScanEpoch)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State == null)
+                return;
+
+            List<ulong> Handles = Thread.WaitHandles;
+            if (ReferenceEquals(State.WaitCheckedHandles, Handles))
+            {
+                State.WaitCheckedEpoch = ScanEpoch;
+                return;
+            }
+
+            State.WaitCheckedHandles = Handles;
+            State.WaitCheckedObjects = null;
+            State.WaitCheckedEpoch = ScanEpoch;
+
+            if (Handles == null || Handles.Count == 0 || WinHelper == null
+                || State.WorkerFactoryWaitActive || State.IoCompletionWaitActive || State.AlertByThreadIdWaitActive
+                || State.WaitMessageActive || State.GetMessageWaitActive || State.MsgWaitActive
+                || State.RetrySyscallActive || State.PipeWaitHandle != 0 || State.WaitAlertable || State.ApcAlertable)
+                return;
+
+            WaitableHandleObject[] Objects = new WaitableHandleObject[Handles.Count];
+            for (int i = 0; i < Handles.Count; i++)
+            {
+                if (WinHelper.HandleManager.GetObjectByHandle(Handles[i]) is not WaitableHandleObject Waitable)
+                    return;
+                Objects[i] = Waitable;
+            }
+
+            State.WaitCheckedObjects = Objects;
+        }
+
+        internal bool TrySatisfyThreadWait(EmulatedThread Thread, long Now)
         {
             if (Thread == null || !Thread.WaitActive)
                 return false;
@@ -695,7 +752,7 @@ namespace Brovan.Core.Emulation
                     }
                 }
 
-                if (IsEmulatedDeadlineExpired(Thread.WaitDeadline))
+                if (IsDeadlineExpired(Thread.WaitDeadline, Now))
                 {
                     Thread.WaitTimedOut = true;
                     return true;
@@ -712,7 +769,7 @@ namespace Brovan.Core.Emulation
                     return true;
                 }
 
-                if (IsEmulatedDeadlineExpired(Thread.WaitDeadline))
+                if (IsDeadlineExpired(Thread.WaitDeadline, Now))
                 {
                     Thread.WaitTimedOut = true;
                     return true;
@@ -730,7 +787,7 @@ namespace Brovan.Core.Emulation
                     return true;
                 }
 
-                if (IsEmulatedDeadlineExpired(Thread.WaitDeadline))
+                if (IsDeadlineExpired(Thread.WaitDeadline, Now))
                 {
                     Thread.WaitTimedOut = true;
                     return true;
@@ -895,7 +952,7 @@ namespace Brovan.Core.Emulation
             }
 
         CheckTimeout:
-            if (IsEmulatedDeadlineExpired(Thread.WaitDeadline))
+            if (IsDeadlineExpired(Thread.WaitDeadline, Now))
             {
                 Thread.WaitTimedOut = true;
                 return true;

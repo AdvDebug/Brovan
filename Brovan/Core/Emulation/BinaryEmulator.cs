@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using System.Reflection.PortableExecutable;
 using System.Text;
 using System.Net;
@@ -494,7 +494,12 @@ namespace Brovan.Core.Emulation
         /// </summary>
         internal bool IsEmulatedDeadlineExpired(long Deadline)
         {
-            return Deadline != -1 && EmulatedTickCount64 >= Deadline;
+            return Deadline != -1 && Deadline != long.MaxValue && EmulatedTickCount64 >= Deadline;
+        }
+
+        internal static bool IsDeadlineExpired(long Deadline, long Now)
+        {
+            return Deadline != -1 && Deadline != long.MaxValue && Now >= Deadline;
         }
 
         /// <summary>
@@ -2143,8 +2148,36 @@ namespace Brovan.Core.Emulation
             if (_emulator.TryBindThread(Thread.ThreadId))
                 return true;
 
+            if (EvictLeastRecentlyRunProcessor(Thread) && _emulator.TryBindThread(Thread.ThreadId))
+                return true;
+
             _threadProcessorsExhausted = true;
             return false;
+        }
+
+        // A resident thread's saved context has no vector state, so read the victim's before eviction.
+        private bool EvictLeastRecentlyRunProcessor(EmulatedThread Thread)
+        {
+            EmulatedThread Victim = null;
+            for (int i = 0; i < ThreadOrder.Count; i++)
+            {
+                if (!Threads.TryGetValue((uint)ThreadOrder[i], out EmulatedThread Candidate))
+                    continue;
+                if (ReferenceEquals(Candidate, Thread) || Candidate.Context == null || !_emulator.IsThreadResident(Candidate.ThreadId))
+                    continue;
+                if (Victim == null || Candidate.LastRunTick < Victim.LastRunTick)
+                    Victim = Candidate;
+            }
+
+            if (Victim == null)
+                return false;
+
+            _emulator.SelectThread(Victim.ThreadId);
+            _emulator.ReadXmmRegisters(Victim.Context.Xmm);
+            Victim.Context.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
+            Victim.Context.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
+            _emulator.UnbindThread(Victim.ThreadId);
+            return true;
         }
 
         private void ReleaseThreadProcessor(EmulatedThread Thread)
@@ -2382,7 +2415,7 @@ namespace Brovan.Core.Emulation
             Thread.State = EmulatedThreadState.Ready;
         }
 
-        private bool UpdateMlfqThreadWakeup(EmulatedThread Thread, Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, ref long EarliestDeadline)
+        private bool UpdateMlfqThreadWakeup(EmulatedThread Thread, Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, long Now, long ScanEpoch, ref long EarliestDeadline)
         {
             bool Changed = false;
 
@@ -2397,10 +2430,17 @@ namespace Brovan.Core.Emulation
                 Thread.State = EmulatedThreadState.Ready;
                 Changed = true;
             }
-            else if (Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive && TrySatisfyThreadWait(Thread))
+            else if (Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive && !CanSkipWaitCheck(Thread, Now))
             {
-                CompleteThreadWait(Thread);
-                Changed = true;
+                if (TrySatisfyThreadWait(Thread, Now))
+                {
+                    CompleteThreadWait(Thread);
+                    Changed = true;
+                }
+                else
+                {
+                    NoteWaitCheckFailed(Thread, ScanEpoch);
+                }
             }
 
             if (Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive && Thread.WaitDeadline != -1 && Thread.WaitDeadline < EarliestDeadline)
@@ -2412,18 +2452,21 @@ namespace Brovan.Core.Emulation
 
         private bool UpdateMlfqWakeups(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, bool ScanAllThreads = false)
         {
+            // Read before the timer refresh, so a timer that signals inside this scan counts as later.
+            long ScanEpoch = WakeSignal.Current;
             bool Changed = RefreshWindowsTimersAndWakeWaiters();
             long EarliestDeadline = long.MaxValue;
+            long Now = EmulatedTickCount64;
 
             if (ScanAllThreads)
             {
                 foreach (var kvp in Threads)
-                    Changed |= UpdateMlfqThreadWakeup(kvp.Value, ReadyQueues, InQueue, Levels, SchedulerTick, ref EarliestDeadline);
+                    Changed |= UpdateMlfqThreadWakeup(kvp.Value, ReadyQueues, InQueue, Levels, SchedulerTick, Now, ScanEpoch, ref EarliestDeadline);
             }
             else
             {
                 foreach (EmulatedThread Thread in LiveThreads)
-                    Changed |= UpdateMlfqThreadWakeup(Thread, ReadyQueues, InQueue, Levels, SchedulerTick, ref EarliestDeadline);
+                    Changed |= UpdateMlfqThreadWakeup(Thread, ReadyQueues, InQueue, Levels, SchedulerTick, Now, ScanEpoch, ref EarliestDeadline);
 
                 if (Debug)
                 {
