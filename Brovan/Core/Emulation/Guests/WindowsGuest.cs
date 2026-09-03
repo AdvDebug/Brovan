@@ -31,6 +31,7 @@ namespace Brovan.Core.Emulation.Guests
         public ulong NativePEB { get; internal set; }
         public ulong ProcessParams { get; internal set; }
         public ulong ApiSetMap { get; internal set; }
+        public ulong ProcessActivationContext { get; internal set; }
         public ulong WowSyscallGate { get; internal set; }
         public ulong GuestGdt { get; internal set; }
 
@@ -1425,6 +1426,7 @@ namespace Brovan.Core.Emulation.Guests
 
             ulong PageSize = 0x2000;
             PEB = Instance.MapUniqueAddress(PageSize, MemoryProtection.ReadWrite);
+            ProcessActivationContext = WinSxS.BuildProcessActivationContext(Instance, MainModule);
             byte[] ApiSetMapBlob = BinaryEmulator.GetApiSetMapBlob();
             if (ApiSetMapBlob.Length != 0)
             {
@@ -1451,6 +1453,7 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(PEB + 0x120, WindowsVersionInfo.BuildNumberShort, 2);
                 Instance._emulator.WriteMemory(PEB + 0x122, (ushort)0, 2);
                 Instance._emulator.WriteMemory(PEB + 0x124, WindowsVersionInfo.PlatformIdWin32Nt, 4);
+                Instance._emulator.WriteMemory(PEB + WinSxS.PebActivationContextData64, ProcessActivationContext, 8);
 
                 if (IsPeImage)
                 {
@@ -1545,6 +1548,7 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(PEB + 0xAC, WindowsVersionInfo.BuildNumberShort, 2);
                 Instance._emulator.WriteMemory(PEB + 0xAE, (ushort)0, 2);
                 Instance._emulator.WriteMemory(PEB + 0xB0, WindowsVersionInfo.PlatformIdWin32Nt, 4);
+                Instance._emulator.WriteMemory(PEB + WinSxS.PebActivationContextData32, (uint)ProcessActivationContext);
 
                 Instance._emulator.WriteMemory(PEB + 0x64, (uint)Environment.ProcessorCount);
                 Instance._emulator.WriteMemory(PEB + 0x68, 0u);
@@ -1598,6 +1602,7 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(NativePEB + 0x120, WindowsVersionInfo.BuildNumberShort, 2);
             Instance._emulator.WriteMemory(NativePEB + 0x122, (ushort)0, 2);
             Instance._emulator.WriteMemory(NativePEB + 0x124, WindowsVersionInfo.PlatformIdWin32Nt, 4);
+            Instance._emulator.WriteMemory(NativePEB + WinSxS.PebActivationContextData64, ProcessActivationContext, 8);
         }
 
         private ulong BuildProcessParameters32(BinaryEmulator Instance, WinModule MainModule)

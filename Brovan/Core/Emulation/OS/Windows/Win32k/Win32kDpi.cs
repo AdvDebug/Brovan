@@ -203,7 +203,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Module == null || Instance._binary?.FileFormat != BinaryFormat.PE)
                 return;
 
-            byte[] Manifest = ReadExternalManifest(Module) ?? ReadEmbeddedManifest(Instance, Module);
+            byte[] Manifest = ReadImageManifest(Instance, Module);
             if (Manifest == null)
                 return;
 
@@ -222,6 +222,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             catch (InvalidOperationException)
             {
             }
+        }
+
+        internal static byte[] ReadImageManifest(BinaryEmulator Instance, WinModule Module)
+        {
+            if (Module == null)
+                return null;
+
+            return ReadExternalManifest(Module) ?? ReadEmbeddedManifest(Instance, Module);
         }
 
         private static byte[] ReadExternalManifest(WinModule Module)
