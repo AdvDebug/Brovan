@@ -71,6 +71,9 @@ namespace Brovan
 
     internal class NativeWinImports
     {
+        [DllImport("winmm.dll")]
+        public static extern uint timeBeginPeriod(uint uPeriod);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern IntPtr VirtualAlloc(IntPtr lpAddress, UIntPtr dwSize, uint flAllocationType, uint flProtect);
 
@@ -168,6 +171,23 @@ namespace Brovan
     internal class GeneralHelper
     {
         public static bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+
+        // Windows sleeps in units of the system timer, 15.6 ms by default, so a wait of a few milliseconds
+        // overshoots several times over. The request is per process on Windows 10 2004 and later.
+        public static bool BeginHostTimerPeriod()
+        {
+            if (!IsWindows)
+                return false;
+
+            try
+            {
+                return NativeWinImports.timeBeginPeriod(1) == 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
         /// <summary>
         /// returns true for android too.
         /// </summary>
