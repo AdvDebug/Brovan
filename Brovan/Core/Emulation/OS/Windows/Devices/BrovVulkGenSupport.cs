@@ -234,6 +234,48 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
     }
 
+    internal sealed unsafe class GenArena
+    {
+        private const int ArenaCap = 1 << 20;
+
+        private IntPtr _arena;
+        private int _arenaUsed;
+        private readonly List<IntPtr> _overflow = new List<IntPtr>();
+
+        public IntPtr Alloc(int size)
+        {
+            if (size <= 0)
+                throw new InvalidOperationException($"Generic forwarding: invalid allocation size {size}.");
+
+            int aligned = (size + 15) & ~15;
+            if (_arena == IntPtr.Zero)
+                _arena = Marshal.AllocHGlobal(ArenaCap);
+
+            if (aligned <= ArenaCap - _arenaUsed)
+            {
+                IntPtr p = _arena + _arenaUsed;
+                _arenaUsed += aligned;
+                new Span<byte>((void*)p, size).Clear();
+                return p;
+            }
+
+            IntPtr q = Marshal.AllocHGlobal(size);
+            new Span<byte>((void*)q, size).Clear();
+            _overflow.Add(q);
+            return q;
+        }
+
+        public void FreeCallAllocs()
+        {
+            _arenaUsed = 0;
+            if (_overflow.Count == 0)
+                return;
+            foreach (IntPtr p in _overflow)
+                Marshal.FreeHGlobal(p);
+            _overflow.Clear();
+        }
+    }
+
     internal sealed class GenState
     {
         internal readonly struct MapEntry
@@ -270,8 +312,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private const int ArenaCap = 1 << 20;
-
         private const ulong WholeSize = ulong.MaxValue;
 
         private readonly Dictionary<uint, (IntPtr Ptr, string Type)> _handles = new Dictionary<uint, (IntPtr, string)>();
@@ -288,9 +328,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public readonly BrovVulkWsi Wsi = new BrovVulkWsi();
         public readonly VulkanStandInState StandIns = new VulkanStandInState();
 
-        private IntPtr _arena;
-        private int _arenaUsed;
-        private readonly List<IntPtr> _overflow = new List<IntPtr>();
+        private readonly GenArena _arena = new GenArena();
 
         public uint Register(IntPtr ptr, string type)
         {
@@ -434,37 +472,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public Dictionary<uint, MapEntry>.ValueCollection Mappings => _mappings.Values;
 
-        public unsafe IntPtr Alloc(int size)
-        {
-            if (size <= 0)
-                throw new InvalidOperationException($"BrovVulk generic: invalid allocation size {size}.");
+        public IntPtr Alloc(int size) => _arena.Alloc(size);
 
-            int aligned = (size + 15) & ~15;
-            if (_arena == IntPtr.Zero)
-                _arena = Marshal.AllocHGlobal(ArenaCap);
+        public void FreeCallAllocs() => _arena.FreeCallAllocs();
 
-            if (aligned <= ArenaCap - _arenaUsed)
-            {
-                IntPtr p = _arena + _arenaUsed;
-                _arenaUsed += aligned;
-                new Span<byte>((void*)p, size).Clear();
-                return p;
-            }
-
-            IntPtr q = Marshal.AllocHGlobal(size);
-            new Span<byte>((void*)q, size).Clear();
-            _overflow.Add(q);
-            return q;
-        }
-
-        public void FreeCallAllocs()
-        {
-            _arenaUsed = 0;
-            if (_overflow.Count == 0)
-                return;
-            foreach (IntPtr p in _overflow)
-                Marshal.FreeHGlobal(p);
-            _overflow.Clear();
-        }
     }
 }

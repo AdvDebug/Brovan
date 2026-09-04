@@ -9,6 +9,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Brovan.Generators", "Brovan
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BrovVulkIcd", "Brovan.Graphics\brovvulk-icd\BrovVulkIcd.csproj", "{C7E2F9A1-4B3D-4E6A-9F21-8D5C0B7A6E33}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BrovSteamClient", "Brovan.Steam\brovsteam-client\BrovSteamClient.csproj", "{DCF22FC6-0035-4497-B7C3-8713CB1069E5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SteamSpecConvert", "Brovan.Steam\tools\SteamSpecConvert\SteamSpecConvert.csproj", "{47958C83-2319-473F-B724-C5F7C8F49BE3}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -27,6 +31,14 @@ Global
 			{C7E2F9A1-4B3D-4E6A-9F21-8D5C0B7A6E33}.Debug|Any CPU.Build.0 = Debug|Any CPU
 			{C7E2F9A1-4B3D-4E6A-9F21-8D5C0B7A6E33}.Release|Any CPU.ActiveCfg = Release|Any CPU
 			{C7E2F9A1-4B3D-4E6A-9F21-8D5C0B7A6E33}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DCF22FC6-0035-4497-B7C3-8713CB1069E5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DCF22FC6-0035-4497-B7C3-8713CB1069E5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DCF22FC6-0035-4497-B7C3-8713CB1069E5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DCF22FC6-0035-4497-B7C3-8713CB1069E5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{47958C83-2319-473F-B724-C5F7C8F49BE3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{47958C83-2319-473F-B724-C5F7C8F49BE3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{47958C83-2319-473F-B724-C5F7C8F49BE3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{47958C83-2319-473F-B724-C5F7C8F49BE3}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

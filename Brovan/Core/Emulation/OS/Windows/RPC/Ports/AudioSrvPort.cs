@@ -22,6 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint ProcGetDefaultAudioEndpoint = 25;
         private const int PnpStateSize = 8;
         private const uint ProcGetMixFormat = 0;
+        private const uint ProcIsFormatSupported = 1;
         private const uint ProcGetDevicePeriod = 2;
         private const uint ProcInitialize = 4;
         private const uint ProcRelease = 5;
@@ -87,6 +88,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint ErrorNotEnoughMemory = 8;
 
         private const ushort WaveFormatExtensible = 0xFFFE;
+        private const ushort WaveFormatIeeeFloat = 0x0003;
+        private const ushort AudioShareModeExclusive = 1;
+        private const uint AudioClientUnsupportedFormat = 0x88890008;
         private const ushort MixChannels = 2;
         private const uint MixSampleRate = 48000;
         private const ushort MixBitsPerSample = 32;
@@ -213,6 +217,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             {
                 case ProcGetMixFormat:
                     return GetMixFormat(Message, Instance);
+
+                case ProcIsFormatSupported:
+                    return IsFormatSupported(Message, Instance);
 
                 case ProcGetDevicePeriod:
                     return GetDevicePeriod(Message, Instance);
@@ -346,6 +353,72 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.AlignTo(4);
             Writer.WriteInt32(0);
             return LrpcPacket.BuildResponse(Message, Writer.ToArray());
+        }
+
+        private static byte[] IsFormatSupported(in LrpcMessage Message, BinaryEmulator Instance)
+        {
+            Ndr20Reader Reader = new Ndr20Reader(Message.StubData);
+            Reader.TryReadConformantWideString(out string EndpointId);
+            Reader.TryReadUInt16(out ushort ShareMode);
+            Reader.Align(4);
+
+            bool Matches = TryReadRequestedFormat(ref Reader, out ushort Channels, out uint SampleRate, out ushort BitsPerSample)
+                && Channels == MixChannels
+                && SampleRate == MixSampleRate
+                && BitsPerSample == MixBitsPerSample;
+
+            if (Matches)
+            {
+                Log(Instance, $"format query on endpoint {EndpointId} matches the engine format.");
+
+                Ndr20Writer Exact = new Ndr20Writer(16);
+                Exact.WriteUInt32(0);
+                Exact.WriteInt32(0);
+                return LrpcPacket.BuildResponse(Message, Exact.ToArray());
+            }
+
+            // Exclusive mode has no closest match to offer, the caller either takes the engine format or fails.
+            if (ShareMode == AudioShareModeExclusive)
+            {
+                Log(Instance, $"format query on endpoint {EndpointId} refused, exclusive mode has one engine format.");
+
+                Ndr20Writer Refused = new Ndr20Writer(16);
+                Refused.WriteUInt32(0);
+                Refused.WriteInt32(unchecked((int)AudioClientUnsupportedFormat));
+                return LrpcPacket.BuildResponse(Message, Refused.ToArray());
+            }
+
+            Log(Instance, $"format query on endpoint {EndpointId} answered with the engine format as the closest match.");
+
+            Ndr20Writer Writer = new Ndr20Writer(96);
+            Writer.WriteUniqueReferent();
+            Writer.WriteUInt32(WaveFormatExtensibleTail);
+            Writer.WriteBytes(BuildMixFormat());
+            Writer.AlignTo(4);
+            Writer.WriteInt32(1);
+            return LrpcPacket.BuildResponse(Message, Writer.ToArray());
+        }
+
+        private static bool TryReadRequestedFormat(ref Ndr20Reader Reader, out ushort Channels, out uint SampleRate, out ushort BitsPerSample)
+        {
+            Channels = 0;
+            SampleRate = 0;
+            BitsPerSample = 0;
+
+            if (!Reader.TryReadUInt32(out uint Referent) || Referent == 0)
+                return false;
+
+            if (!Reader.TryReadUInt32(out _) || !Reader.TryReadUInt16(out ushort FormatTag) || !Reader.TryReadUInt16(out Channels))
+                return false;
+
+            if (!Reader.TryReadUInt32(out SampleRate) || !Reader.TryReadUInt32(out _))
+                return false;
+
+            if (!Reader.TryReadUInt16(out _) || !Reader.TryReadUInt16(out BitsPerSample))
+                return false;
+
+            // A plain PCM tag never describes the float engine format, whatever the rest of the fields say.
+            return FormatTag == WaveFormatExtensible || FormatTag == WaveFormatIeeeFloat;
         }
 
         private static byte[] GetDevicePeriod(in LrpcMessage Message, BinaryEmulator Instance)

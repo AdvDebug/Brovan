@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -1312,6 +1312,12 @@ namespace Brovan.Core.Emulation.Guests
                 { "PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC" },
                 { "PATH", @"C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\" }
             };
+
+            if (Instance.WinHelper != null && Instance.WinHelper.Steam != null && Instance.WinHelper.Steam.Enabled)
+            {
+                Env["SteamAppId"] = Instance.WinHelper.Steam.AppId.ToString();
+                Env["SteamGameId"] = Instance.WinHelper.Steam.AppId.ToString();
+            }
 
             if (Instance._binary.Architecture != BinaryArchitecture.x64)
             {

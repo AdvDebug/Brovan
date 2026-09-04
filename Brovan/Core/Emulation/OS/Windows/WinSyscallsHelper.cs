@@ -17,6 +17,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WindowsSharedBuffer Shared { get; private set; }
 
+        internal SteamAppContext Steam;
+
         private Random RandomGen = new Random();
         private HashSet<uint> PIDs = new HashSet<uint>();
         private IDisplayConnection DesktopDisplay;
@@ -76,6 +78,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else if (Normalized.Equals("BrovVulk", StringComparison.OrdinalIgnoreCase))
                 Normalized = "\\Device\\BrovVulk";
+            else if (Normalized.Equals("BrovSteam", StringComparison.OrdinalIgnoreCase))
+                Normalized = "\\Device\\BrovSteam";
             else if (Normalized.Equals("MountPointManager", StringComparison.OrdinalIgnoreCase))
                 Normalized = "\\Device\\MountPointManager";
             else if (Normalized.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
@@ -1675,6 +1679,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             DesktopWindowTitle = string.IsNullOrWhiteSpace(FileName) ? "Brovan" : FileName;
 
+            Steam = SteamAppContext.Resolve(Emulator, GenerateRandomPID());
+
             if (Binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui))
             {
                 STD_IN = HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Input), AccessMask.FileReadData);
@@ -1711,6 +1717,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 new WinProcess{ PID = GenerateRandomPID(), PPID = ServicesPID, Name = "MsMpEng.exe", Path = $"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.{MsMpRand.ToString()}\\MsMpEng.exe", Status = ProtectionStatus.LightAM, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = GenerateRandomPID(), PPID = ServicesPID, Name = "MpDefenderCoreService.exe", Path = $"C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\4.18.{MsMpRand.ToString()}\\MpDefenderCoreService.exe", Status = ProtectionStatus.LightAM, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
             };
+
+            if (Steam.Enabled)
+            {
+                WinProcesses.Add(new WinProcess { PID = Steam.ClientPid, PPID = ShellPID, Name = "steam.exe", Path = SteamAppContext.GuestExe, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = BinaryArchitecture.x86 });
+            }
 
             // Generate several random svchost.exe processes
             int RandomSvchostNumber = RandomGen.Next(10, 17);
@@ -6485,6 +6496,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             InitializeSyntheticWindowsVersionRegistryDefaults(KeyCache, DefaultHive);
             InitializeSyntheticKnownFolderDescriptions(KeyCache, DefaultHive);
+            InitializeSyntheticSteamRegistry(KeyCache, DefaultHive);
+
+            // clbcatq uses its built-in catalog only at version one. Later versions route class activation
+            // to the COM+ catalog server, which is not there.
+            SetSyntheticRegistryValueTrusted("\\Registry\\Machine\\Software\\Microsoft\\COM3", "REGDBVersion", 3,
+                new byte[] { 1, 0, 0, 0, 0, 0, 0, 0 }, KeyCache, DefaultHive);
 
             string KnownFolderSettings = "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\KnownFolderSettings";
             AddSyntheticRegistryKeyTrusted(KnownFolderSettings, KeyCache, DefaultHive);
@@ -6558,6 +6575,34 @@ namespace Brovan.Core.Emulation.OS.Windows
             SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Startup", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup", KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Templates", 2, "%ProgramData%\\Microsoft\\Windows\\Templates", KeyCache, DefaultHive);
             SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Templates", 1, "C:\\ProgramData\\Microsoft\\Windows\\Templates", KeyCache, DefaultHive);
+        }
+
+        private void InitializeSyntheticSteamRegistry(Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        {
+            if (Steam == null || !Steam.Enabled)
+                return;
+
+            string SteamRoot = "\\Registry\\User\\" + CurrentUserSid + "\\Software\\Valve\\Steam";
+            string ActiveProcess = SteamRoot + "\\ActiveProcess";
+
+            // The client writes SteamPath and SteamExe lower case with forward slashes.
+            SetSyntheticRegistryStringTrusted(SteamRoot, "SteamPath", 1, "c:/program files (x86)/steam", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(SteamRoot, "SteamExe", 1, "c:/program files (x86)/steam/steam.exe", KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(SteamRoot, "Language", 1, "english", KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(SteamRoot, "RunningAppID", Steam.AppId, KeyCache, DefaultHive);
+
+            SetSyntheticRegistryDwordTrusted(ActiveProcess, "pid", Steam.ClientPid, KeyCache, DefaultHive);
+            // Only the 64 bit client is built, and a 32 bit vtable needs the thiscall convention the
+            // trampolines do not carry, so SteamClientDll stays absent rather than dangling.
+            SetSyntheticRegistryStringTrusted(ActiveProcess, "SteamClientDll64", 1, SteamAppContext.GuestClientDll64, KeyCache, DefaultHive);
+            SetSyntheticRegistryStringTrusted(ActiveProcess, "Universe", 1, "Public", KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(ActiveProcess, "ActiveUser", (uint)(Steam.SteamId & 0xFFFFFFFF), KeyCache, DefaultHive);
+
+            string Apps = SteamRoot + "\\Apps\\" + Steam.AppId.ToString();
+            SetSyntheticRegistryDwordTrusted(Apps, "Installed", 1, KeyCache, DefaultHive);
+            SetSyntheticRegistryDwordTrusted(Apps, "Running", 1, KeyCache, DefaultHive);
+
+            SetSyntheticRegistryStringTrusted("\\Registry\\Machine\\Software\\Valve\\Steam", "InstallPath", 1, SteamAppContext.GuestDirectory, KeyCache, DefaultHive);
         }
 
         private void InitializeSyntheticWindowsVersionRegistryDefaults(Dictionary<string, bool> KeyCache, Hive DefaultHive)

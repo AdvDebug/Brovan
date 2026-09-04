@@ -65,6 +65,27 @@ jobs:
           cp -f "$shim/vulkan-1.dll" "$vfs/System32/vulkan-1.dll"
           cp -f "$shim/x86/vulkan-1.dll" "$vfs/SysWOW64/vulkan-1.dll"
 
+      - name: Build the BrovSteam client shim (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./Brovan.Steam/brovsteam-client/build.bat
+
+      - name: Build the BrovSteam client shim (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sh Brovan.Steam/brovsteam-client/build.sh
+
+      - name: Stage the Steam shim into the published VirtualFS
+        shell: bash
+        run: |
+          shim="Brovan.Steam/brovsteam-client/bin/steamclient64.dll"
+          vfs="artifacts/publish/${{ matrix.rid }}/VirtualFS/C/Program Files (x86)/Steam"
+
+          [ -f "$shim" ] || { echo "error: the Steam shim build produced no $shim" >&2; exit 1; }
+
+          mkdir -p "$vfs"
+          cp -f "$shim" "$vfs/steamclient64.dll"
+
       - name: Upload CI Artifact
         uses: actions/upload-artifact@v6
         with:

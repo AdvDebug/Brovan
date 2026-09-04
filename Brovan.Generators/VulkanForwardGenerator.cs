@@ -448,6 +448,21 @@ namespace Brovan.Generators
 
         private static readonly HashSet<string> GenAllowlist = new HashSet<string>
         {
+            "vkCmdBindIndexBuffer2",
+            "vkCmdBindDescriptorSets2",
+            "vkCmdPushConstants2",
+            "vkCmdPushDescriptorSet2",
+            "vkGetRenderingAreaGranularity",
+            "vkGetDeviceImageSubresourceLayout",
+            "vkGetImageSubresourceLayout2",
+            "vkQueueBindSparse",
+            "vkGetPhysicalDeviceSparseImageFormatProperties",
+            "vkGetImageSparseMemoryRequirements",
+            "vkGetImageSparseMemoryRequirements2",
+            "vkGetPhysicalDeviceExternalSemaphoreProperties",
+            "vkGetDeviceMemoryCommitment",
+            "vkCmdDrawIndirectCount",
+            "vkCmdDrawIndexedIndirectCount",
             "vkEnumerateInstanceVersion",
             "vkCreateInstance",
             "vkDestroyInstance",
@@ -685,10 +700,10 @@ namespace Brovan.Generators
             "VK_EXT_4444_formats",
             "VK_EXT_non_seamless_cube_map",
             "VK_KHR_maintenance5",
+            "VK_KHR_maintenance6",
             "VK_KHR_pipeline_library",
             "VK_KHR_load_store_op_none",
             "VK_EXT_load_store_op_none",
-            "VK_KHR_maintenance6",
         };
 
         private const double MaxCoreVersion = 1.3;

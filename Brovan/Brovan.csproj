@@ -64,6 +64,7 @@
 
     <ItemGroup>
         <AdditionalFiles Include="..\Brovan.Generators\vk.xml" />
+        <AdditionalFiles Include="..\Brovan.Generators\steam.xml" />
     </ItemGroup>
 
     <ItemGroup>

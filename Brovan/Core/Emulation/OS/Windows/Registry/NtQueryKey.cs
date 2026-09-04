@@ -146,6 +146,43 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
+                if (KeyInformationClass == KEY_INFORMATION_CLASS.KeyNodeInformation)
+                {
+                    if (!Instance.WinHelper.TryQueryRegistryKeyHeader(RegKey, out _, out _, out string NodeName))
+                    {
+                        Instance._emulator.WriteMemory(ResultLengthPtr, 0u);
+                        return NTSTATUS.STATUS_UNSUCCESSFUL;
+                    }
+
+                    Span<byte> NodeBytes = EncodeUnicodeString(Instance, NodeName ?? string.Empty);
+                    uint NodeLen = (uint)NodeBytes.Length;
+
+                    uint NodeHeader = 24;
+                    uint NodeRequired = NodeHeader + NodeLen;
+
+                    Instance._emulator.WriteMemory(ResultLengthPtr, NodeRequired);
+
+                    if (Length < NodeRequired || Length == 0)
+                        return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+
+                    if (!Instance.IsRegionMapped(KeyInformationPtr, NodeRequired))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    if (!Instance._emulator.WriteMemory(KeyInformationPtr + 0, (ulong)RegKey.LastWriteTime) ||
+                        !Instance._emulator.WriteMemory(KeyInformationPtr + 8, 0u) ||
+                        !Instance._emulator.WriteMemory(KeyInformationPtr + 12, NodeRequired) ||
+                        !Instance._emulator.WriteMemory(KeyInformationPtr + 16, 0u) ||
+                        !Instance._emulator.WriteMemory(KeyInformationPtr + 20, NodeLen))
+                    {
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    }
+
+                    if (NodeLen != 0 && !Instance._emulator.WriteMemory(KeyInformationPtr + NodeHeader, NodeBytes, NodeLen))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
                 if (KeyInformationClass == KEY_INFORMATION_CLASS.KeyFullInformation)
                 {
                     if (!Instance.WinHelper.TryQueryRegistryKeyFullInfo(RegKey, out int SubKeyCount, out int ValueCount, out int MaxSubKeyNameChars, out int MaxValueNameChars, out int MaxValueDataBytes))

@@ -61,6 +61,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (KeyInformationClass == KEY_INFORMATION_CLASS.KeyBasicInformation)
                     HeaderSize = 16;
+                else if (KeyInformationClass == KEY_INFORMATION_CLASS.KeyNodeInformation)
+                    HeaderSize = 24;
                 else if (KeyInformationClass == KEY_INFORMATION_CLASS.KeyNameInformation)
                     HeaderSize = 4;
                 else
@@ -102,6 +104,26 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                     if (!Instance._emulator.WriteMemory(NameOut, NameBytes, NameLen))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
+                if (KeyInformationClass == KEY_INFORMATION_CLASS.KeyNodeInformation)
+                {
+                    if (!Instance.IsRegionMapped(KeyInformationPtr, HeaderSize + NameLen))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    if (!Instance._emulator.WriteMemory(KeyInformationPtr + 0, 0UL) ||
+                        !Instance._emulator.WriteMemory(KeyInformationPtr + 8, 0u) ||
+                        !Instance._emulator.WriteMemory(KeyInformationPtr + 12, HeaderSize + NameLen) ||
+                        !Instance._emulator.WriteMemory(KeyInformationPtr + 16, 0u) ||
+                        !Instance._emulator.WriteMemory(KeyInformationPtr + 20, NameLen))
+                    {
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    }
+
+                    if (!Instance._emulator.WriteMemory(KeyInformationPtr + HeaderSize, NameBytes, NameLen))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                     return NTSTATUS.STATUS_SUCCESS;
