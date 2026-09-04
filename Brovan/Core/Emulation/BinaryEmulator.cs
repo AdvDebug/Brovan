@@ -624,6 +624,11 @@ namespace Brovan.Core.Emulation
 
         private EmulatedThread _currentThreadCache;
 
+        private bool _currentContextSaved;
+
+        // Never lowered. Windows releases the request when the process exits.
+        private static bool _hostTimerPeriodRaised;
+
         internal EmulatedThread CurrentThread
         {
             get
@@ -2120,10 +2125,12 @@ namespace Brovan.Core.Emulation
             EmulatedThread cur = _currentThreadCache;
             if (cur != null)
             {
-                SaveContext(cur);
+                if (!_currentContextSaved)
+                    SaveContext(cur);
                 if (cur.State == EmulatedThreadState.Terminated)
                     ReleaseThreadProcessor(cur);
             }
+            _currentContextSaved = false;
             CurrentThreadId = ThreadId;
             _currentThreadCache = next;
             bool FirstResidentLoad = !_emulator.IsThreadResident(next.ThreadId) && BindThreadProcessor(next);
@@ -2220,6 +2227,7 @@ namespace Brovan.Core.Emulation
             if (Thread.State == EmulatedThreadState.Terminated)
                 return false;
 
+            _currentContextSaved = false;
             SwitchToThread((int)ThreadId);
             return CurrentThreadId == (int)ThreadId;
         }
@@ -2750,6 +2758,12 @@ namespace Brovan.Core.Emulation
             RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
             SchedulerRefreshRequested = false;
 
+            // A register written from outside the loop is only captured by a fresh save.
+            _currentContextSaved = false;
+
+            if (!_hostTimerPeriodRaised)
+                _hostTimerPeriodRaised = GeneralHelper.BeginHostTimerPeriod();
+
             while (true)
             {
                 SchedulerTick++;
@@ -2761,7 +2775,7 @@ namespace Brovan.Core.Emulation
                 if (WinHelper != null)
                     OS.Windows.RemoteProcessRequests.Drain(this);
 
-                if (Interlocked.Exchange(ref TerminationRequested, 0) != 0)
+                if (Volatile.Read(ref TerminationRequested) != 0 && Interlocked.Exchange(ref TerminationRequested, 0) != 0)
                     StopEmulation();
 
                 bool ThreadOrderChanged = ThreadOrder.Count != KnownThreadOrderCount;
@@ -2894,7 +2908,10 @@ namespace Brovan.Core.Emulation
                 }
 
                 if (!ImmaBeEmulatedOOO.SwitchingContext)
+                {
                     SaveContext(ImmaBeEmulatedOOO);
+                    _currentContextSaved = true;
+                }
 
                 if (EscapeScheduler)
                 {

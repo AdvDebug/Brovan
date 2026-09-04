@@ -102,6 +102,7 @@ insert-in-body|qemu/target/i386/misc_helper.c|void helper_rdtsc(CPUX86State *env
 # --- a pause loop gives up its slice early -----------------------------------
 insert-after|qemu/target/i386/misc_helper.c|#include "uc_priv.h"|#include "brovan_tcg_budget.inc.h"
 insert-in-body|qemu/target/i386/misc_helper.c|static void do_pause(X86CPU *cpu)|    brov_charge_pause(CPU(cpu));
+replace-all|qemu/target/i386/translate.c|gen_helper_pause(tcg_ctx, tcg_ctx->cpu_env, tcg_const_i32(tcg_ctx, s->pc - pc_start));|if (tcg_ctx->uc->brov_budget_mode) { brov_gen_pause_charge(tcg_ctx); break; } gen_helper_pause(tcg_ctx, tcg_ctx->cpu_env, tcg_const_i32(tcg_ctx, s->pc - pc_start));
 
 # --- helper calls route through the slot table ------------------------------
 insert-before|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)|#include "brovan_tcg_slots.inc.c"

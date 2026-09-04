@@ -34,6 +34,18 @@
  * bug, so it is one that stands out in a disassembly. */
 #define BROV_BUDGET_INSNS_PLACEHOLDER 0xdeadbeef
 
+/* PAUSE is a hint, so budget mode only charges the budget and the block goes on.
+ * The entry check of the next block ends a slice that spent it. */
+static inline void brov_gen_pause_charge(TCGContext *tcg_ctx)
+{
+    TCGv_i32 budget = tcg_temp_new_i32(tcg_ctx);
+
+    tcg_gen_ld_i32(tcg_ctx, budget, tcg_ctx->cpu_env, BROV_BUDGET_OFF);
+    tcg_gen_subi_i32(tcg_ctx, budget, budget, BROV_PAUSE_BUDGET_COST);
+    tcg_gen_st_i32(tcg_ctx, budget, tcg_ctx->cpu_env, BROV_BUDGET_OFF);
+    tcg_temp_free_i32(tcg_ctx, budget);
+}
+
 static inline void brov_gen_budget(TCGContext *tcg_ctx, TCGv_i32 exitreq)
 {
     TCGv_i32 budget = tcg_temp_new_i32(tcg_ctx);

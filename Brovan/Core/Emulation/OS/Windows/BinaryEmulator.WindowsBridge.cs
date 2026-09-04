@@ -89,9 +89,6 @@ namespace Brovan.Core.Emulation
         private readonly byte[] _instructionDisasmBuffer = new byte[16];
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsTimerHandleSnapshot = new();
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsHandleScratch = new();
-        private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsNextTimerHandleSnapshot = new();
-        private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsNextTimerPacketSnapshot = new();
-        private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsWakePacketSnapshot = new();
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsMaterializePacketSnapshot = new();
         private readonly List<EmulatedThread> WindowsWakeThreadSnapshot = new();
 
@@ -340,22 +337,10 @@ namespace Brovan.Core.Emulation
             EarliestWindowsTimerDue = -1;
         }
 
-        internal bool RefreshWindowsTimersAndWakeWaiters()
+        // Rebuilt only when the handle table changes. Both views are read on every scheduler slice.
+        private List<KeyValuePair<ulong, IHandleObject>> GetWindowsTimerView()
         {
-            bool WokeThread = false;
-
-            if (WinHelper == null)
-                return false;
-
-            // The scheduler calls this on every slice. Snapshotting the whole handle table each time costs more
-            // than the timer work itself once a guest holds a few thousand handles, so keep the timers-only view
-            // and rebuild it when the table changes.
             long Version = WinHelper.HandleManager.Version;
-            long Now = EmulatedTickCount64;
-
-            if (Version == WindowsTimerSnapshotVersion && EarliestWindowsTimerDue >= 0 && Now < EarliestWindowsTimerDue)
-                return false;
-
             if (Version != WindowsTimerSnapshotVersion)
             {
                 WinHelper.HandleManager.SnapshotHandles(WindowsHandleScratch);
@@ -371,11 +356,48 @@ namespace Brovan.Core.Emulation
                 WindowsTimerSnapshotVersion = Version;
             }
 
+            return WindowsTimerHandleSnapshot;
+        }
+
+        private List<KeyValuePair<ulong, IHandleObject>> GetWaitCompletionPacketView()
+        {
+            long Version = WinHelper.HandleManager.Version;
+            if (Version != WindowsMaterializePacketVersion)
+            {
+                WinHelper.HandleManager.SnapshotHandles(WindowsHandleScratch);
+                WindowsMaterializePacketSnapshot.Clear();
+
+                for (int i = 0; i < WindowsHandleScratch.Count; i++)
+                {
+                    if (WindowsHandleScratch[i].Value is WinWaitCompletionPacket)
+                        WindowsMaterializePacketSnapshot.Add(WindowsHandleScratch[i]);
+                }
+
+                WindowsHandleScratch.Clear();
+                WindowsMaterializePacketVersion = Version;
+            }
+
+            return WindowsMaterializePacketSnapshot;
+        }
+
+        internal bool RefreshWindowsTimersAndWakeWaiters()
+        {
+            bool WokeThread = false;
+
+            if (WinHelper == null)
+                return false;
+
+            long Now = EmulatedTickCount64;
+
+            if (WinHelper.HandleManager.Version == WindowsTimerSnapshotVersion && EarliestWindowsTimerDue >= 0 && Now < EarliestWindowsTimerDue)
+                return false;
+
+            List<KeyValuePair<ulong, IHandleObject>> Timers = GetWindowsTimerView();
             long NextDue = long.MaxValue;
 
-            for (int i = 0; i < WindowsTimerHandleSnapshot.Count; i++)
+            for (int i = 0; i < Timers.Count; i++)
             {
-                KeyValuePair<ulong, IHandleObject> Pair = WindowsTimerHandleSnapshot[i];
+                KeyValuePair<ulong, IHandleObject> Pair = Timers[i];
                 if (Pair.Value is not WinTimer Timer)
                     continue;
 
@@ -415,15 +437,12 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            WinHelper.HandleManager.SnapshotHandles(WindowsNextTimerHandleSnapshot);
-            if (HasCompletionPacketWaiter)
-                WinHelper.HandleManager.SnapshotHandles(WindowsNextTimerPacketSnapshot);
-            else
-                WindowsNextTimerPacketSnapshot.Clear();
+            List<KeyValuePair<ulong, IHandleObject>> Timers = GetWindowsTimerView();
+            List<KeyValuePair<ulong, IHandleObject>> Packets = HasCompletionPacketWaiter ? GetWaitCompletionPacketView() : null;
 
-            for (int i = 0; i < WindowsNextTimerHandleSnapshot.Count; i++)
+            for (int i = 0; i < Timers.Count; i++)
             {
-                KeyValuePair<ulong, IHandleObject> Pair = WindowsNextTimerHandleSnapshot[i];
+                KeyValuePair<ulong, IHandleObject> Pair = Timers[i];
                 if (Pair.Value is not WinTimer Timer)
                     continue;
 
@@ -441,11 +460,11 @@ namespace Brovan.Core.Emulation
                 }
 
                 bool HasWorkerFactoryTimerWaiter = false;
-                if (HasCompletionPacketWaiter)
+                if (Packets != null)
                 {
-                    for (int PacketIndex = 0; PacketIndex < WindowsNextTimerPacketSnapshot.Count; PacketIndex++)
+                    for (int PacketIndex = 0; PacketIndex < Packets.Count; PacketIndex++)
                     {
-                        KeyValuePair<ulong, IHandleObject> WaitPair = WindowsNextTimerPacketSnapshot[PacketIndex];
+                        KeyValuePair<ulong, IHandleObject> WaitPair = Packets[PacketIndex];
                         if (WaitPair.Value is not WinWaitCompletionPacket Packet)
                             continue;
 
@@ -494,10 +513,10 @@ namespace Brovan.Core.Emulation
             if (WinHelper == null)
                 return false;
 
-            WinHelper.HandleManager.SnapshotHandles(WindowsWakePacketSnapshot);
-            for (int i = 0; i < WindowsWakePacketSnapshot.Count; i++)
+            List<KeyValuePair<ulong, IHandleObject>> Packets = GetWaitCompletionPacketView();
+            for (int i = 0; i < Packets.Count; i++)
             {
-                KeyValuePair<ulong, IHandleObject> Pair = WindowsWakePacketSnapshot[i];
+                KeyValuePair<ulong, IHandleObject> Pair = Packets[i];
                 if (Pair.Value is not WinWaitCompletionPacket Packet)
                     continue;
 
@@ -546,27 +565,10 @@ namespace Brovan.Core.Emulation
             if (Completion == null)
                 return;
 
-            // Reached once per worker-factory waiter per scheduler slice, so the packets-only view is kept and
-            // rebuilt on a handle-table change rather than copying every handle each time.
-            long PacketVersion = WinHelper.HandleManager.Version;
-            if (PacketVersion != WindowsMaterializePacketVersion)
+            List<KeyValuePair<ulong, IHandleObject>> Packets = GetWaitCompletionPacketView();
+            for (int i = 0; i < Packets.Count; i++)
             {
-                WinHelper.HandleManager.SnapshotHandles(WindowsHandleScratch);
-                WindowsMaterializePacketSnapshot.Clear();
-
-                for (int i = 0; i < WindowsHandleScratch.Count; i++)
-                {
-                    if (WindowsHandleScratch[i].Value is WinWaitCompletionPacket)
-                        WindowsMaterializePacketSnapshot.Add(WindowsHandleScratch[i]);
-                }
-
-                WindowsHandleScratch.Clear();
-                WindowsMaterializePacketVersion = PacketVersion;
-            }
-
-            for (int i = 0; i < WindowsMaterializePacketSnapshot.Count; i++)
-            {
-                KeyValuePair<ulong, IHandleObject> Pair = WindowsMaterializePacketSnapshot[i];
+                KeyValuePair<ulong, IHandleObject> Pair = Packets[i];
                 ulong PacketHandle = Pair.Key;
                 if (Pair.Value is not WinWaitCompletionPacket Packet)
                     continue;

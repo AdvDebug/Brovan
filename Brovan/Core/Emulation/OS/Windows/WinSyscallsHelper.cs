@@ -2037,7 +2037,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Section.MappedViewCount != 0)
                 return;
 
-            if (HandleManager.GetHandlesByObjectId(Section.ObjectId).Count != 0)
+            if (HandleManager.CountHandlesByObjectId(Section.ObjectId) != 0)
                 return;
 
             if (Section.BackingAddress != 0)
@@ -3826,7 +3826,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
 
                 // NT keeps an exited process queryable while a handle is open.
-                if (HandleManager.GetHandlesByObjectId(Candidate.ObjectId).Count != 0)
+                if (HandleManager.CountHandlesByObjectId(Candidate.ObjectId) != 0)
                     continue;
 
                 WinProcesses.RemoveAt(Index);
@@ -7600,10 +7600,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinHandle CreateSemaphoreHandle(string Name, int InitialCount, int MaximumCount, AccessMask Permissions)
         {
+            WinSemaphore Semaphore = null;
+
             if (string.IsNullOrEmpty(Name))
                 Name = GenerateAnonymousObjectName("Semaphore_");
+            else
+                Semaphore = WinSemaphores.FirstOrDefault(s => s.Name.Equals(Name, StringComparison.OrdinalIgnoreCase));
 
-            WinSemaphore Semaphore = WinSemaphores.FirstOrDefault(s => s.Name.Equals(Name, StringComparison.OrdinalIgnoreCase));
             if (Semaphore == null)
             {
                 Semaphore = new WinSemaphore { Name = Name, CurrentCount = InitialCount, MaximumCount = MaximumCount };
@@ -7691,7 +7694,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Entry.Object != null && Entry.Object.ObjectType == HandleType.FileHandle)
                 {
                     WinFile Closing = Entry.Object as WinFile;
-                    if (Closing?.Pipe != null && HandleManager.GetHandlesByObjectId(Closing.ObjectId).Count <= 1)
+                    if (Closing?.Pipe != null && HandleManager.CountHandlesByObjectId(Closing.ObjectId) <= 1)
                     {
                         Closing.Pipe.Dispose();
                         Closing.Pipe = null;
@@ -7736,7 +7739,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         private void ForgetNamedSyncObjectIfUnreferenced(IHandleObject? Object)
         {
-            if (Object == null || HandleManager.GetHandlesByObjectId(Object.ObjectId).Count != 0)
+            if (Object == null || HandleManager.CountHandlesByObjectId(Object.ObjectId) != 0)
                 return;
 
             switch (Object)

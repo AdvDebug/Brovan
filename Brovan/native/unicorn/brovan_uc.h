@@ -18,6 +18,12 @@
  * blob is only interchangeable with a run in the same mode. */
 #define BROV_BLOB_FLAG_BUDGET 0x1u
 
+/* A guest spinning on pause makes no progress until another thread runs, so a
+ * pause is charged against the slice budget, like PAUSE-loop exiting on a
+ * hypervisor. The cost leaves room for the spin ntdll runs before every wait,
+ * which is about a hundred pauses. */
+#define BROV_PAUSE_BUDGET_COST 512
+
 /* The reservation is laid out [slot table][arena][code gen buffer]. Replaying a
  * single base address therefore pins every object whose address gets baked into
  * generated code. */

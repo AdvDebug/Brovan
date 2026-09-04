@@ -42,6 +42,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static FileStream _stream;
         private static MemoryMappedFile _map;
         private static MemoryMappedViewAccessor _view;
+        private static unsafe byte* _viewBase;
         private static uint _handledSequence;
         private static bool _unavailable;
 
@@ -121,7 +122,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <paramref name="Length"/> is how many bytes the sender wants back for
         /// <see cref="SessionOperation.ReadMemory"/>, and how many it sent otherwise.
         /// </summary>
-        internal static bool TryReceive(out SessionOperation Operation, out ulong Address, out ulong Argument, out int Length, out byte[] Input)
+        internal static unsafe bool TryReceive(out SessionOperation Operation, out ulong Address, out ulong Argument, out int Length, out byte[] Input)
         {
             Operation = SessionOperation.None;
             Address = 0;
@@ -137,7 +138,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             long Base = ChannelOffset(Slot);
 
             // Peeked without the lock: the scheduler asks every slice, and the sender publishes the sequence last.
-            if (_view.ReadUInt32(Base + RequestSequenceOffset) == _handledSequence)
+            if (Volatile.Read(ref *(uint*)(_viewBase + Base + RequestSequenceOffset)) == _handledSequence)
                 return false;
 
             using SessionLock Lock = GuestSession.Acquire();
@@ -214,7 +215,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             _stream = null;
         }
 
-        private static bool TryOpen()
+        private static unsafe bool TryOpen()
         {
             if (_view != null)
                 return true;
@@ -239,6 +240,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 _map = MemoryMappedFile.CreateFromFile(_stream, null, Size, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, true);
                 _view = _map.CreateViewAccessor(0, Size);
+
+                byte* Pointer = null;
+                _view.SafeMemoryMappedViewHandle.AcquirePointer(ref Pointer);
+                _viewBase = Pointer + _view.PointerOffset;
                 return true;
             }
             catch (Exception Ex)
@@ -246,6 +251,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Utils.LogError($"[GuestSessionMailbox] Unavailable: {Ex.Message}");
                 _unavailable = true;
                 _view = null;
+                _viewBase = null;
                 return false;
             }
         }

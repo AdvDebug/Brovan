@@ -139,8 +139,10 @@ namespace Brovan.Core.Emulation
         private double _instructionsPerMicrosecond = 200;
         private const int MinimumLimitInstructions = 4000;
         private const long RateSampleInstructions = 20_000;
+        private const double RateSampleMicroseconds = 100;
 
-        // A short slice is mostly slice cost and syscall time, so only long ones feed the rate.
+        // A short slice is mostly slice cost and syscall time, so only long ones feed the rate. Pause
+        // charges count against the budget, so a short slice can also read as a very high rate.
         private unsafe void UpdateInstructionRate()
         {
             int* Budget = Inner.BudgetPointer;
@@ -150,7 +152,7 @@ namespace Brovan.Core.Emulation
             int Remaining = *Budget;
             long Consumed = Remaining < 0 ? _sliceLimit : (long)_sliceLimit - Remaining;
             double Microseconds = (Stopwatch.GetTimestamp() - _sliceStart) * 1_000_000.0 / Stopwatch.Frequency;
-            if (Consumed < RateSampleInstructions || Microseconds <= 0)
+            if (Consumed < RateSampleInstructions || Microseconds < RateSampleMicroseconds)
                 return;
 
             _instructionsPerMicrosecond = _instructionsPerMicrosecond * 0.9 + (Consumed / Microseconds) * 0.1;

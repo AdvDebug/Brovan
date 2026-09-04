@@ -235,6 +235,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             return new List<ulong>();
         }
 
+        public int CountHandlesByObjectId(string ObjectId)
+        {
+            return ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles) ? Handles.Count : 0;
+        }
+
         public T? GetObjectByObjectId<T>(string ObjectId) where T : class, IHandleObject
         {
             if (!ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles))

@@ -22,8 +22,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_CID;
 
             WindowsThreadState State = WinEmulatedThread.GetState(TargetThread);
+
+            // The alert is consumed by the target's next wait or by the wake below, so no epoch bump.
             State.AlertByThreadIdPending = true;
-            Instance.WakeSignal.Bump();
 
             if (TargetThread.WaitActive && State.AlertByThreadIdWaitActive && TargetThread.State == EmulatedThreadState.Waiting)
             {
