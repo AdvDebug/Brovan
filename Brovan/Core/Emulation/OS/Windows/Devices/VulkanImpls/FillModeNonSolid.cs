@@ -11,13 +11,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     /// </summary>
     internal static unsafe class FillModeNonSolid
     {
-        internal sealed class ModuleRecord
-        {
-            public IntPtr Device;
-            public uint Model;
-            public SpirvInterface Interface = null!;
-        }
-
         internal sealed class PipelineRecord
         {
             public IntPtr Device;
@@ -27,13 +20,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             public bool Tessellation;
             public bool VertexInputLibrary;
             public bool PreRasterizationLibrary;
-        }
-
-        internal sealed class CommandBufferRecord
-        {
-            public IntPtr Bound;
-            public bool BoundWireframe;
-            public int Topology = -1;
         }
 
         internal sealed class Plan
@@ -77,26 +63,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Reported.Add(reason))
                 Utils.LogError("[VulkanImpls] fillModeNonSolid: " + reason + ", drawn solid.");
-        }
-
-        internal static void NoteShaderModule(VulkanStandInState state, IntPtr device, IntPtr createInfo, IntPtr module)
-        {
-            ulong size = *(ulong*)(createInfo + VkOffsets.ShaderModuleCodeSize);
-            IntPtr code = *(IntPtr*)(createInfo + VkOffsets.ShaderModuleCode);
-            if (code == IntPtr.Zero || size < 20 || (size & 3) != 0 || size > int.MaxValue)
-                return;
-
-            int count = (int)(size / 4);
-            uint model = Spirv.ModelVertex;
-            SpirvInterface? stage = Spirv.ParseInterface((uint*)code, count, model, null);
-            if (stage == null)
-            {
-                model = Spirv.ModelTessellationEvaluation;
-                stage = Spirv.ParseInterface((uint*)code, count, model, null);
-            }
-
-            if (stage != null)
-                state.Modules[module] = new ModuleRecord { Device = device, Model = model, Interface = stage };
         }
 
         internal static void PreparePipeline(VulkanStandInState state, GenState st, IntPtr device, int bits, IntPtr info, int index)
@@ -272,7 +238,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             IntPtr module = *(IntPtr*)(stage + VkOffsets.StageModule);
             if (module != IntPtr.Zero)
-                return state.Modules.TryGetValue(module, out ModuleRecord? record) && record.Model == model ? record.Interface : null;
+                return state.Modules.TryGetValue(module, out ShaderModuleRecord? record) && record.InterfaceModel == model ? record.Interface : null;
 
             for (IntPtr node = *(IntPtr*)(stage + VkOffsets.StagePNext); node != IntPtr.Zero; node = *(IntPtr*)(node + VkOffsets.NodePNext))
             {
@@ -435,7 +401,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 state.Pipelines.Remove(key);
 
             gone.Clear();
-            foreach (KeyValuePair<IntPtr, ModuleRecord> entry in state.Modules)
+            foreach (KeyValuePair<IntPtr, ShaderModuleRecord> entry in state.Modules)
             {
                 if (device == IntPtr.Zero || entry.Value.Device == device)
                     gone.Add(entry.Key);
@@ -443,9 +409,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach (IntPtr key in gone)
                 state.Modules.Remove(key);
-
-            if (device == IntPtr.Zero)
-                state.CommandBuffers.Clear();
         }
 
         private static CommandBufferRecord Record(VulkanStandInState state, IntPtr commandBuffer)

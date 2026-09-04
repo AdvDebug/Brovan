@@ -320,7 +320,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<IntPtr, DeviceImport> _deviceImports = new Dictionary<IntPtr, DeviceImport>();
         private readonly Dictionary<IntPtr, IntPtr> _devicePhysical = new Dictionary<IntPtr, IntPtr>();
         private readonly Dictionary<IntPtr, int> _deviceStandIns = new Dictionary<IntPtr, int>();
-        private readonly Dictionary<IntPtr, int> _commandBufferStandIns = new Dictionary<IntPtr, int>();
         private readonly Dictionary<IntPtr, uint> _layoutSets = new Dictionary<IntPtr, uint>();
         private readonly Dictionary<IntPtr, ulong> _bufferSizes = new Dictionary<IntPtr, ulong>();
         private uint _next = 1;
@@ -444,22 +443,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public int DeviceStandIns(IntPtr device) => _deviceStandIns.TryGetValue(device, out int bits) ? bits : 0;
 
-        public void SetCommandBufferDevice(IntPtr commandBuffer, IntPtr device)
-        {
-            int bits = DeviceStandIns(device);
-            if (bits != 0)
-                _commandBufferStandIns[commandBuffer] = bits;
-            else
-                _commandBufferStandIns.Remove(commandBuffer);
-        }
+        public int CommandBufferStandIns(IntPtr commandBuffer) => StandIns.CommandBuffers.TryGetValue(commandBuffer, out CommandBufferRecord? record) ? record.Bits : 0;
 
-        public int CommandBufferStandIns(IntPtr commandBuffer) => _commandBufferStandIns.TryGetValue(commandBuffer, out int bits) ? bits : 0;
-
-        public void ForgetCommandBuffer(IntPtr commandBuffer)
-        {
-            _commandBufferStandIns.Remove(commandBuffer);
-            StandIns.CommandBuffers.Remove(commandBuffer);
-        }
+        public ulong BufferSize(IntPtr buffer) => _bufferSizes.TryGetValue(buffer, out ulong size) ? size : 0;
 
         public void AddMapping(uint id, IntPtr hostPtr, ulong guestVa, ulong mapOffset, ulong size, bool imported, bool shared) =>
             _mappings[id] = new MapEntry(hostPtr, guestVa, mapOffset, size, imported, shared);

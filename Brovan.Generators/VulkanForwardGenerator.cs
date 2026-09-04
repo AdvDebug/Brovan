@@ -1481,7 +1481,7 @@ namespace Brovan.Generators
                 }
             }
 
-            EmitStandInHooks(c, b, post);
+            bool early = EmitStandInHooks(c, b, post);
 
             EmitWsiHooks(c, b, check, post);
 
@@ -1506,7 +1506,7 @@ namespace Brovan.Generators
             }
             else
             {
-                head.Append("                int rr = (int)").Append(call).Append(";\n");
+                head.Append(early ? "                int rr = early < 0 ? early : (int)" : "                int rr = (int)").Append(call).Append(";\n");
                 foreach (string s in check) head.Append(s).Append("\n");
                 foreach (string s in post) head.Append(s).Append("\n");
                 head.Append("                return rr;\n            }\n");
@@ -1520,22 +1520,42 @@ namespace Brovan.Generators
             return i < 0 ? null : "p" + i;
         }
 
-        private static void EmitStandInHooks(Command c, StringBuilder b, List<string> post)
+        /// <summary>True when the pre-call code declared an `early` VkResult that replaces the host call while negative.</summary>
+        private static bool EmitStandInHooks(Command c, StringBuilder b, List<string> post)
         {
-            if (c.Name == "vkGetPhysicalDeviceFeatures")
-            {
-                post.Insert(0, "                VulkanStandIns.Advertise(p0, p1);");
-                return;
-            }
-
-            if (c.Name == "vkGetPhysicalDeviceFeatures2" || c.Name == "vkGetPhysicalDeviceFeatures2KHR")
-            {
-                post.Insert(0, "                VulkanStandIns.Advertise(p0, p1 + BrovVulkLayout.MemberOffset[\"VkPhysicalDeviceFeatures2.features\"]);");
-                return;
-            }
-
             string device = Arg(c, "device");
-            if (c.Name == "vkCreateGraphicsPipelines")
+            string commandBuffer = Arg(c, "commandBuffer");
+            string name = c.Name.EndsWith("KHR", StringComparison.Ordinal) ? c.Name.Substring(0, c.Name.Length - 3) : c.Name;
+
+            switch (name)
+            {
+                case "vkGetPhysicalDeviceFeatures":
+                    post.Insert(0, "                VulkanStandIns.Advertise(p0, p1);");
+                    return false;
+                case "vkGetPhysicalDeviceFeatures2":
+                    post.Insert(0, "                VulkanStandIns.Advertise(p0, p1 + BrovVulkLayout.MemberOffset[\"VkPhysicalDeviceFeatures2.features\"]);");
+                    return false;
+                case "vkGetPhysicalDeviceFormatProperties":
+                    post.Insert(0, "                VulkanStandIns.FormatProperties(p0, p1, p2);");
+                    return false;
+                case "vkGetPhysicalDeviceFormatProperties2":
+                    post.Insert(0, "                VulkanStandIns.FormatProperties2(p0, p1, p2);");
+                    return false;
+                case "vkGetPhysicalDeviceImageFormatProperties":
+                    b.Append("                int early = VulkanStandIns.ImageFormatProperties(p0, ref p1, p2, p3, ref p4, ref p5);\n");
+                    return true;
+                case "vkGetPhysicalDeviceImageFormatProperties2":
+                    b.Append("                int early = VulkanStandIns.ImageFormatProperties2(st, p0, p1);\n");
+                    return true;
+                case "vkGetPhysicalDeviceQueueFamilyProperties":
+                    post.Insert(0, "                VulkanStandIns.QueueFamilyProperties(p0, p1c, p1a, BrovVulkLayout.StructSize[\"VkQueueFamilyProperties\"], BrovVulkLayout.MemberOffset[\"VkQueueFamilyProperties.queueFlags\"]);");
+                    return false;
+                case "vkGetPhysicalDeviceQueueFamilyProperties2":
+                    post.Insert(0, "                VulkanStandIns.QueueFamilyProperties(p0, p1c, p1a, BrovVulkLayout.StructSize[\"VkQueueFamilyProperties2\"], BrovVulkLayout.MemberOffset[\"VkQueueFamilyProperties2.queueFamilyProperties\"] + BrovVulkLayout.MemberOffset[\"VkQueueFamilyProperties.queueFlags\"]);");
+                    return false;
+            }
+
+            if (name == "vkCreateGraphicsPipelines")
             {
                 int infoIdx = c.Params.FindIndex(x => x.Type == "VkGraphicsPipelineCreateInfo");
                 int countIdx = c.Params.FindIndex(x => x.Name == "createInfoCount");
@@ -1547,10 +1567,10 @@ namespace Brovan.Generators
                      .Append(", p").Append(countIdx).Append(", BrovVulkStructMeta.Sizes[").Append(sid).Append("]);\n");
                     post.Insert(0, "                VulkanStandIns.FinishPipelines(st, " + device + ", " + cache + ", " + pipelines + ", rr);");
                 }
-                return;
+                return false;
             }
 
-            if (c.Name == "vkCreateShaderModule")
+            if (name == "vkCreateShaderModule")
             {
                 string ci = Arg(c, "pCreateInfo");
                 string module = Arg(c, "pShaderModule");
@@ -1559,71 +1579,145 @@ namespace Brovan.Generators
                     b.Append("                if (").Append(ci).Append(" != System.IntPtr.Zero) VulkanStandIns.PatchShaderModule(st, ").Append(device).Append(", ").Append(ci).Append(");\n");
                     post.Add("                if (rr >= 0 && " + ci + " != System.IntPtr.Zero) VulkanStandIns.NoteShaderModule(st, " + device + ", " + ci + ", " + module + ");");
                 }
-                return;
+                return false;
             }
 
-            if (c.Name == "vkDestroyShaderModule")
+            if (name == "vkDestroyShaderModule")
             {
                 string module = Arg(c, "shaderModule");
                 if (module != null)
                     b.Append("                VulkanStandIns.ForgetShaderModule(st, ").Append(module).Append(");\n");
-                return;
+                return false;
             }
 
-            if (c.Name == "vkDestroyPipeline")
+            if (name == "vkDestroyPipeline")
             {
                 string pipeline = Arg(c, "pipeline");
                 if (device != null && pipeline != null)
                     b.Append("                VulkanStandIns.DestroyPipeline(st, ").Append(device).Append(", ").Append(pipeline).Append(");\n");
-                return;
+                return false;
             }
 
-            if (c.Name == "vkDestroyDevice" || c.Name == "vkDestroyInstance")
+            if (name == "vkDestroyDevice" || name == "vkDestroyInstance")
             {
-                b.Append("                VulkanStandIns.ReleaseDevice(st, ").Append(c.Name == "vkDestroyDevice" && device != null ? device : "System.IntPtr.Zero").Append(");\n");
-                return;
+                b.Append("                VulkanStandIns.ReleaseDevice(st, ").Append(name == "vkDestroyDevice" && device != null ? device : "System.IntPtr.Zero").Append(");\n");
+                return false;
             }
 
-            string commandBuffer = Arg(c, "commandBuffer");
-            if (c.Name == "vkCmdBindPipeline")
+            if (name == "vkCreateImage")
             {
-                string bindPoint = Arg(c, "pipelineBindPoint");
-                string pipeline = Arg(c, "pipeline");
-                if (commandBuffer != null && bindPoint != null && pipeline != null)
-                    b.Append("                ").Append(pipeline).Append(" = VulkanStandIns.BindPipeline(st, ").Append(commandBuffer).Append(", ").Append(bindPoint).Append(", ").Append(pipeline).Append(");\n");
-                return;
+                string image = Arg(c, "pImage");
+                if (device != null && image != null)
+                {
+                    b.Append("                int early = VulkanStandIns.CreateImage(st, ").Append(device).Append(", p1);\n");
+                    post.Insert(0, "                if (rr >= 0) VulkanStandIns.NoteImage(st, " + image + ");");
+                    return true;
+                }
+                return false;
             }
 
-            if (c.Name == "vkCmdSetPrimitiveTopology")
+            if (name == "vkDestroyImage")
             {
-                string topology = Arg(c, "primitiveTopology");
-                if (commandBuffer != null && topology != null)
-                    b.Append("                VulkanStandIns.SetPrimitiveTopology(st, ").Append(commandBuffer).Append(", ").Append(topology).Append(");\n");
-                return;
+                string image = Arg(c, "image");
+                if (device != null && image != null)
+                    b.Append("                VulkanStandIns.DestroyImage(st, ").Append(device).Append(", ").Append(image).Append(");\n");
+                return false;
             }
 
-            if (c.Name == "vkBeginCommandBuffer" || c.Name == "vkResetCommandBuffer")
+            if (name == "vkCreateImageView" && device != null)
             {
-                if (commandBuffer != null)
-                    b.Append("                VulkanStandIns.ResetCommandBuffer(st, ").Append(commandBuffer).Append(");\n");
-                return;
+                b.Append("                int early = VulkanStandIns.CreateImageView(st, ").Append(device).Append(", p1);\n");
+                return true;
+            }
+
+            if (name == "vkCreateBuffer" && device != null)
+            {
+                b.Append("                VulkanStandIns.CreateBuffer(st, ").Append(device).Append(", p1);\n");
+                return false;
+            }
+
+            if (name == "vkCreateCommandPool")
+            {
+                string pool = Arg(c, "pCommandPool");
+                if (device != null && pool != null)
+                    post.Add("                if (rr >= 0) VulkanStandIns.NoteCommandPool(st, " + device + ", p1, " + pool + ");");
+                return false;
+            }
+
+            if (name == "vkDestroyCommandPool" || name == "vkResetCommandPool")
+            {
+                string pool = Arg(c, "commandPool");
+                if (pool != null)
+                    b.Append("                VulkanStandIns.").Append(name == "vkDestroyCommandPool" ? "DestroyCommandPool" : "ResetCommandPool").Append("(st, ").Append(pool).Append(");\n");
+                return false;
             }
 
             int buffersIdx = c.Params.FindIndex(x => x.Name == "pCommandBuffers");
-            if (c.Name == "vkAllocateCommandBuffers" && device != null && buffersIdx >= 0)
+            if (name == "vkAllocateCommandBuffers" && device != null && buffersIdx >= 0)
             {
-                post.Add("                if (rr >= 0) for (uint k = 0; k < p" + buffersIdx + "n; k++) st.SetCommandBufferDevice(System.Runtime.InteropServices.Marshal.ReadIntPtr(p" + buffersIdx + ", (int)k * 8), " + device + ");");
-                return;
+                post.Add("                if (rr >= 0) VulkanStandIns.NoteCommandBuffers(st, " + device + ", p1, p" + buffersIdx + "n, p" + buffersIdx + ");");
+                return false;
             }
 
-            if (c.Name == "vkFreeCommandBuffers" && buffersIdx >= 0)
+            if (name == "vkFreeCommandBuffers" && buffersIdx >= 0)
             {
-                post.Add("                for (uint k = 0; k < p" + buffersIdx + "n; k++) st.ForgetCommandBuffer(System.Runtime.InteropServices.Marshal.ReadIntPtr(p" + buffersIdx + ", (int)k * 8));");
-                return;
+                post.Add("                VulkanStandIns.ForgetCommandBuffers(st, p" + buffersIdx + "n, p" + buffersIdx + ");");
+                return false;
             }
 
-            if (commandBuffer == null || !c.Name.StartsWith("vkCmdSet", StringComparison.Ordinal))
-                return;
+            if (commandBuffer == null)
+                return false;
+
+            switch (name)
+            {
+                case "vkCmdCopyBufferToImage":
+                    b.Append("                if (VulkanStandIns.CopyBufferToImage(st, p0, p1, p2, p3, p4, p5)) return 0;\n");
+                    return false;
+                case "vkCmdCopyBufferToImage2":
+                    b.Append("                if (VulkanStandIns.CopyBufferToImage2(st, p0, p1)) return 0;\n");
+                    return false;
+                case "vkCmdCopyImageToBuffer":
+                    b.Append("                if (VulkanStandIns.CopyImageToBuffer(st, p1)) return 0;\n");
+                    return false;
+                case "vkCmdCopyImageToBuffer2":
+                    b.Append("                if (VulkanStandIns.CopyImageToBuffer2(st, p1)) return 0;\n");
+                    return false;
+                case "vkCmdCopyImage":
+                    b.Append("                if (VulkanStandIns.CopyImage(st, p1, p3)) return 0;\n");
+                    return false;
+                case "vkCmdCopyImage2":
+                    b.Append("                if (VulkanStandIns.CopyImage2(st, p1)) return 0;\n");
+                    return false;
+                case "vkBeginCommandBuffer":
+                case "vkResetCommandBuffer":
+                    b.Append("                VulkanStandIns.ResetCommandBuffer(st, p0);\n");
+                    return false;
+                case "vkCmdBindPipeline":
+                    b.Append("                p2 = VulkanStandIns.BindPipeline(st, p0, p1, p2);\n");
+                    return false;
+                case "vkCmdBindDescriptorSets":
+                    b.Append("                VulkanStandIns.BindDescriptorSets(st, p0, p1, p2, p3, p4, p5, p6, p7);\n");
+                    return false;
+                case "vkCmdBindDescriptorSets2":
+                    b.Append("                VulkanStandIns.BindDescriptorSets2(st, p0, p1);\n");
+                    return false;
+                case "vkCmdPushConstants":
+                    b.Append("                VulkanStandIns.PushConstants(st, p0, p1, p2, p3, p4, p5);\n");
+                    return false;
+                case "vkCmdPushConstants2":
+                    b.Append("                VulkanStandIns.PushConstants2(st, p0, p1);\n");
+                    return false;
+                case "vkCmdSetPrimitiveTopology":
+                    b.Append("                VulkanStandIns.SetPrimitiveTopology(st, p0, p1);\n");
+                    return false;
+                case "vkCmdBeginQuery":
+                case "vkCmdBeginQueryIndexedEXT":
+                    b.Append("                p3 = VulkanStandIns.BeginQueryFlags(st, p0, p3);\n");
+                    return false;
+            }
+
+            if (!c.Name.StartsWith("vkCmdSet", StringComparison.Ordinal))
+                return false;
 
             for (int i = 0; i < c.Params.Count; i++)
             {
@@ -1638,6 +1732,8 @@ namespace Brovan.Generators
                 b.Append("                    p").Append(i).Append(" = MultiViewport.Clamp(p").Append(i).Append(");\n");
                 b.Append("                }\n");
             }
+
+            return false;
         }
 
         private static void EmitWsiHooks(Command c, StringBuilder b, List<string> check, List<string> post)

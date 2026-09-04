@@ -50,11 +50,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const uint Magic = 0x07230203;
 
         public const int OpName = 5;
+        public const int OpLine = 8;
         public const int OpMemoryModel = 14;
         public const int OpEntryPoint = 15;
         public const int OpExecutionMode = 16;
         public const int OpCapability = 17;
         public const int OpTypeVoid = 19;
+        public const int OpTypeBool = 20;
         public const int OpTypeInt = 21;
         public const int OpTypeFloat = 22;
         public const int OpTypeVector = 23;
@@ -73,10 +75,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const int OpAccessChain = 65;
         public const int OpDecorate = 71;
         public const int OpMemberDecorate = 72;
+        public const int OpLogicalOr = 166;
+        public const int OpFOrdLessThan = 184;
         public const int OpEmitVertex = 218;
         public const int OpEndPrimitive = 219;
+        public const int OpSelectionMerge = 247;
         public const int OpLabel = 248;
+        public const int OpBranchConditional = 250;
+        public const int OpKill = 252;
         public const int OpReturn = 253;
+        public const int OpNoLine = 317;
+        public const int OpDecorateId = 332;
+        public const int OpDecorateString = 5632;
+        public const int OpMemberDecorateString = 5633;
 
         public const uint StorageInput = 1;
         public const uint StorageOutput = 3;
@@ -84,6 +95,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const uint ModelVertex = 0;
         public const uint ModelTessellationEvaluation = 2;
         public const uint ModelGeometry = 3;
+        public const uint ModelFragment = 4;
 
         public const uint ModePointMode = 10;
         public const uint ModeTriangles = 22;
@@ -113,6 +125,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const uint BuiltInLayer = 9;
         public const uint BuiltInViewportIndex = 10;
 
+        public const uint CapabilityShader = 1;
         public const uint CapabilityGeometry = 2;
         public const uint CapabilityGeometryPointSize = 24;
         public const uint CapabilityClipDistance = 32;
@@ -351,128 +364,479 @@ namespace Brovan.Core.Emulation.OS.Windows
             return r;
         }
 
-        /// <summary>
-        /// Removes every write of the ViewportIndex built-in, and the capabilities that need it, from a
-        /// module. Returns the new word count, or -1 when the module uses the built-in in a way this
-        /// cannot remove.
-        /// </summary>
-        public static int StripViewportIndex(uint* words, int count)
+        private static int ArrayElements(uint* words, Dictionary<uint, int> typeAt, Dictionary<uint, uint> constants, uint pointerType)
         {
-            if (count < 5 || words[0] != Magic)
+            if (!typeAt.TryGetValue(pointerType, out int at) || (words[at] & 0xFFFF) != OpTypePointer)
                 return -1;
 
-            HashSet<uint> targets = new HashSet<uint>();
+            uint type = words[at + 3];
+            int elements = 1;
+            while (typeAt.TryGetValue(type, out at) && (words[at] & 0xFFFF) == OpTypeArray)
+            {
+                if (!constants.TryGetValue(words[at + 3], out uint length))
+                    return -1;
+                elements = (int)length;
+                type = words[at + 2];
+            }
+
+            return elements;
+        }
+
+        /// <summary>
+        /// Moves the built-ins a host cannot export onto user locations, in place. The word count never changes,
+        /// so a capability that becomes unnecessary turns into a repeated Shader capability.
+        /// </summary>
+        public static void Relocate(uint* words, int count, in SpirvRelocation where, out SpirvModuleInfo info)
+        {
+            info = default;
+            if (count < 5 || words[0] != Magic)
+                return;
+
+            List<int> capabilities = new List<int>();
+            List<(int At, uint Target, uint BuiltIn)> targets = new List<(int, uint, uint)>();
+            List<(uint Target, uint Location)> locations = new List<(uint, uint)>();
+            Dictionary<uint, (uint Storage, uint Type)> variables = new Dictionary<uint, (uint, uint)>();
+            Dictionary<uint, int> typeAt = new Dictionary<uint, int>();
+            Dictionary<uint, uint> constants = new Dictionary<uint, uint>();
             bool layer = false;
-            bool inFunction = false;
             for (int i = 5; i < count;)
             {
                 uint head = words[i];
                 int len = (int)(head >> 16);
                 int op = (int)(head & 0xFFFF);
                 if (len == 0 || i + len > count)
-                    return -1;
-
-                if (op == OpDecorate && len >= 4 && words[i + 2] == DecorationBuiltIn)
                 {
-                    if (words[i + 3] == BuiltInViewportIndex) targets.Add(words[i + 1]);
-                    if (words[i + 3] == BuiltInLayer) layer = true;
+                    info.Left = true;
+                    return;
                 }
-                else if (op == OpMemberDecorate && len >= 5 && words[i + 3] == DecorationBuiltIn && words[i + 4] == BuiltInViewportIndex)
-                    return -1;
-                else if (op == OpFunction)
-                    inFunction = true;
-                else if (inFunction && targets.Count != 0)
-                {
-                    // Only a plain store to the variable can go. Any other use keeps the module as it is.
-                    for (int k = 1; k < len; k++)
-                    {
-                        if (targets.Contains(words[i + k]) && !(op == OpStore && k == 1))
-                            return -1;
-                    }
-                }
-
-                i += len;
-            }
-
-            if (targets.Count == 0 && !HasCapability(words, count, CapabilityMultiViewport)
-                && !HasCapability(words, count, CapabilityShaderViewportIndex)
-                && (layer || !HasCapability(words, count, CapabilityShaderViewportIndexLayerEXT)))
-                return count;
-
-            int w = 5;
-            for (int i = 5; i < count;)
-            {
-                uint head = words[i];
-                int len = (int)(head >> 16);
-                int op = (int)(head & 0xFFFF);
-                bool drop = false;
 
                 switch (op)
                 {
                     case OpCapability:
-                        drop = words[i + 1] == CapabilityMultiViewport || words[i + 1] == CapabilityShaderViewportIndex
-                            || (words[i + 1] == CapabilityShaderViewportIndexLayerEXT && !layer);
-                        break;
-                    case OpVariable:
-                        drop = targets.Contains(words[i + 2]);
-                        break;
-                    case OpDecorate:
-                    case OpName:
-                        drop = targets.Contains(words[i + 1]);
-                        break;
-                    case OpStore:
-                        drop = targets.Contains(words[i + 1]);
+                        capabilities.Add(i);
                         break;
                     case OpEntryPoint:
-                    {
-                        int at = i + 3;
-                        ReadString(words, count, ref at);
-                        int kept = at - i;
-                        for (int k = 0; k < kept; k++)
-                            words[w + k] = words[i + k];
-                        int n = kept;
-                        for (int k = at; k < i + len; k++)
+                        if (words[i + 1] < 32)
+                            info.Models |= 1u << (int)words[i + 1];
+                        break;
+                    case OpDecorate:
+                        if (len >= 4 && words[i + 2] == DecorationBuiltIn)
                         {
-                            if (!targets.Contains(words[k]))
-                                words[w + n++] = words[k];
+                            uint builtIn = words[i + 3];
+                            if (builtIn == BuiltInLayer)
+                                layer = true;
+                            else if (builtIn == BuiltInViewportIndex || builtIn == BuiltInClipDistance || builtIn == BuiltInCullDistance)
+                                targets.Add((i, words[i + 1], builtIn));
                         }
-                        words[w] = ((uint)n << 16) | (uint)OpEntryPoint;
-                        w += n;
-                        i += len;
+                        else if (len >= 4 && words[i + 2] == DecorationLocation)
+                            locations.Add((words[i + 1], words[i + 3]));
+                        break;
+                    case OpMemberDecorate:
+                        if (len >= 5 && words[i + 3] == DecorationBuiltIn && where.LocationOf(words[i + 4]) >= 0)
+                            info.Left = true;
+                        break;
+                    case OpTypeArray:
+                    case OpTypePointer:
+                        typeAt[words[i + 1]] = i;
+                        break;
+                    case OpConstant:
+                        if (len == 4)
+                            constants[words[i + 2]] = words[i + 3];
+                        break;
+                    case OpVariable:
+                        variables[words[i + 2]] = (words[i + 3], words[i + 1]);
+                        break;
+                    case OpFunction:
+                        i = count;
                         continue;
-                    }
-                }
-
-                if (!drop)
-                {
-                    for (int k = 0; k < len; k++)
-                        words[w + k] = words[i + k];
-                    w += len;
                 }
 
                 i += len;
             }
 
-            return w;
+            int moved = 0;
+            int[] newLocation = new int[targets.Count];
+            for (int t = 0; t < targets.Count; t++)
+            {
+                (int at, uint target, uint builtIn) = targets[t];
+                newLocation[t] = -1;
+                int location = where.LocationOf(builtIn);
+                if (location < 0)
+                    continue;
+
+                if (!variables.TryGetValue(target, out (uint Storage, uint Type) variable))
+                {
+                    info.Left = true;
+                    continue;
+                }
+
+                int elements = ArrayElements(words, typeAt, constants, variable.Type);
+                if (elements < 1 || elements > SpirvRelocation.MaxElements
+                    || (builtIn == BuiltInViewportIndex && variable.Storage == StorageInput))
+                {
+                    info.Left = true;
+                    continue;
+                }
+
+                foreach ((uint other, uint used) in locations)
+                {
+                    if (used >= (uint)location && used < (uint)(location + elements)
+                        && variables.TryGetValue(other, out (uint Storage, uint Type) o) && o.Storage == variable.Storage)
+                        info.Left = true;
+                }
+
+                if (builtIn == BuiltInClipDistance && variable.Storage == StorageOutput)
+                    info.ClipOutputs = elements;
+
+                newLocation[t] = location;
+                moved++;
+            }
+
+            if (info.Left)
+            {
+                info.ClipOutputs = 0;
+                return;
+            }
+
+            for (int t = 0; t < targets.Count; t++)
+            {
+                if (newLocation[t] < 0)
+                    continue;
+
+                int at = targets[t].At;
+                words[at + 2] = DecorationLocation;
+                words[at + 3] = (uint)newLocation[t];
+            }
+
+            foreach (int at in capabilities)
+            {
+                uint capability = words[at + 1];
+                bool drop = (capability == CapabilityClipDistance && where.Clip >= 0)
+                    || (capability == CapabilityCullDistance && where.Cull >= 0)
+                    || ((capability == CapabilityMultiViewport || capability == CapabilityShaderViewportIndex) && where.Viewport >= 0)
+                    || (capability == CapabilityShaderViewportIndexLayerEXT && where.Viewport >= 0 && !layer);
+                if (!drop)
+                    continue;
+
+                words[at + 1] = CapabilityShader;
+                moved++;
+            }
+
+            info.Relocated = moved != 0;
+        }
+    }
+
+    /// <summary>User locations that stand in for the built-ins a host cannot export. -1 leaves a built-in as it is.</summary>
+    internal readonly struct SpirvRelocation
+    {
+        public const int MaxElements = 8;
+
+        public readonly int Viewport;
+        public readonly int Clip;
+        public readonly int Cull;
+
+        public SpirvRelocation(int viewport, int clip, int cull)
+        {
+            Viewport = viewport;
+            Clip = clip;
+            Cull = cull;
         }
 
-        private static bool HasCapability(uint* words, int count, uint capability)
+        public bool Any => Viewport >= 0 || Clip >= 0 || Cull >= 0;
+
+        public int LocationOf(uint builtIn)
         {
+            switch (builtIn)
+            {
+                case Spirv.BuiltInViewportIndex: return Viewport;
+                case Spirv.BuiltInClipDistance: return Clip;
+                case Spirv.BuiltInCullDistance: return Cull;
+                default: return -1;
+            }
+        }
+    }
+
+    internal struct SpirvModuleInfo
+    {
+        public uint Models;
+        public int ClipOutputs;
+        public bool Relocated;
+        public bool Left;
+
+        public bool Has(uint model) => (Models & (1u << (int)model)) != 0;
+    }
+
+    /// <summary>Fragment prologue that discards where a relocated clip distance is negative, as the clip planes would.</summary>
+    internal static unsafe class SpirvClipDiscard
+    {
+        private const uint FragmentModel = 4;
+
+        public static uint[]? Build(uint* words, int count, int location, int elements)
+        {
+            if (count < 5 || words[0] != Spirv.Magic || elements < 1 || elements > SpirvRelocation.MaxElements)
+                return null;
+
+            uint bound = words[3];
+            int entryAt = -1;
+            int annotationsEnd = -1;
+            int firstFunction = -1;
+            uint entryFunction = 0;
+            uint floatType = 0, boolType = 0, uintType = 0, pointerFloat = 0, zero = 0, variable = 0;
+            uint[] index = new uint[elements];
+            Dictionary<uint, int> typeAt = new Dictionary<uint, int>();
+            Dictionary<uint, (uint Type, uint Value)> constants = new Dictionary<uint, (uint, uint)>();
+            List<uint> located = new List<uint>();
             for (int i = 5; i < count;)
             {
                 uint head = words[i];
                 int len = (int)(head >> 16);
                 int op = (int)(head & 0xFFFF);
-                if (len == 0)
-                    return false;
-                if (op == OpCapability && words[i + 1] == capability)
-                    return true;
-                if (op != OpCapability)
-                    return false;
+                if (len == 0 || i + len > count)
+                    return null;
+
+                switch (op)
+                {
+                    case Spirv.OpEntryPoint:
+                        if (words[i + 1] == FragmentModel && entryAt < 0)
+                        {
+                            entryAt = i;
+                            entryFunction = words[i + 2];
+                        }
+                        break;
+                    case Spirv.OpDecorate:
+                    case Spirv.OpMemberDecorate:
+                    case Spirv.OpDecorateId:
+                    case Spirv.OpDecorateString:
+                    case Spirv.OpMemberDecorateString:
+                        annotationsEnd = i + len;
+                        if (op == Spirv.OpDecorate && len >= 4 && words[i + 2] == Spirv.DecorationLocation && words[i + 3] == (uint)location)
+                            located.Add(words[i + 1]);
+                        break;
+                    case Spirv.OpTypeFloat:
+                        if (words[i + 2] == 32)
+                            floatType = words[i + 1];
+                        break;
+                    case Spirv.OpTypeBool:
+                        boolType = words[i + 1];
+                        break;
+                    case Spirv.OpTypeInt:
+                        if (words[i + 2] == 32 && words[i + 3] == 0)
+                            uintType = words[i + 1];
+                        typeAt[words[i + 1]] = i;
+                        break;
+                    case Spirv.OpTypeArray:
+                    case Spirv.OpTypePointer:
+                        typeAt[words[i + 1]] = i;
+                        break;
+                    case Spirv.OpConstant:
+                        if (len == 4)
+                            constants[words[i + 2]] = (words[i + 1], words[i + 3]);
+                        break;
+                    case Spirv.OpVariable:
+                        if (words[i + 3] == Spirv.StorageInput && located.Contains(words[i + 2])
+                            && typeAt.TryGetValue(words[i + 1], out int pointerAt) && typeAt.TryGetValue(words[pointerAt + 3], out int arrayAt)
+                            && (words[arrayAt] & 0xFFFF) == Spirv.OpTypeArray && words[arrayAt + 2] == floatType
+                            && constants.TryGetValue(words[arrayAt + 3], out (uint Type, uint Value) length) && length.Value == (uint)elements)
+                            variable = words[i + 2];
+                        break;
+                    case Spirv.OpFunction:
+                        firstFunction = i;
+                        i = count;
+                        continue;
+                }
+
                 i += len;
             }
 
-            return false;
+            if (entryAt < 0 || firstFunction < 0)
+                return null;
+
+            foreach (KeyValuePair<uint, int> type in typeAt)
+            {
+                int at = type.Value;
+                if ((words[at] & 0xFFFF) == Spirv.OpTypePointer && words[at + 2] == Spirv.StorageInput && words[at + 3] == floatType)
+                    pointerFloat = type.Key;
+            }
+
+            foreach (KeyValuePair<uint, (uint Type, uint Value)> constant in constants)
+            {
+                if (floatType != 0 && constant.Value.Type == floatType && constant.Value.Value == 0)
+                    zero = constant.Key;
+                if (uintType != 0 && constant.Value.Type == uintType && constant.Value.Value < (uint)elements)
+                    index[constant.Value.Value] = constant.Key;
+            }
+
+            int functionAt = -1;
+            for (int i = firstFunction; i < count;)
+            {
+                uint head = words[i];
+                int len = (int)(head >> 16);
+                if (len == 0 || i + len > count)
+                    return null;
+                if ((head & 0xFFFF) == Spirv.OpFunction && words[i + 2] == entryFunction)
+                {
+                    functionAt = i;
+                    break;
+                }
+                i += len;
+            }
+
+            if (functionAt < 0)
+                return null;
+
+            int prologueAt = -1;
+            for (int i = functionAt; i < count;)
+            {
+                uint head = words[i];
+                int len = (int)(head >> 16);
+                if (len == 0 || i + len > count)
+                    return null;
+                if ((head & 0xFFFF) == Spirv.OpLabel)
+                {
+                    prologueAt = i + len;
+                    for (int k = prologueAt; k < count;)
+                    {
+                        uint h = words[k];
+                        int l = (int)(h >> 16);
+                        int o = (int)(h & 0xFFFF);
+                        if (l == 0 || (o != Spirv.OpVariable && o != Spirv.OpLine && o != Spirv.OpNoLine))
+                            break;
+                        prologueAt = k + l;
+                        k += l;
+                    }
+                    break;
+                }
+                i += len;
+            }
+
+            if (prologueAt < 0)
+                return null;
+
+            List<uint> globals = new List<uint>();
+            if (floatType == 0)
+                floatType = Emit(globals, ref bound, Spirv.OpTypeFloat, 32);
+            if (boolType == 0)
+                boolType = Emit(globals, ref bound, Spirv.OpTypeBool);
+            if (uintType == 0)
+                uintType = Emit(globals, ref bound, Spirv.OpTypeInt, 32, 0);
+            for (int k = 0; k < elements; k++)
+            {
+                if (index[k] == 0)
+                    index[k] = EmitTyped(globals, ref bound, Spirv.OpConstant, uintType, (uint)k);
+            }
+            if (zero == 0)
+                zero = EmitTyped(globals, ref bound, Spirv.OpConstant, floatType, 0);
+            if (pointerFloat == 0)
+                pointerFloat = Emit(globals, ref bound, Spirv.OpTypePointer, Spirv.StorageInput, floatType);
+
+            List<uint> annotations = new List<uint>();
+            bool created = variable == 0;
+            if (created)
+            {
+                uint length = EmitTyped(globals, ref bound, Spirv.OpConstant, uintType, (uint)elements);
+                uint array = Emit(globals, ref bound, Spirv.OpTypeArray, floatType, length);
+                uint pointer = Emit(globals, ref bound, Spirv.OpTypePointer, Spirv.StorageInput, array);
+                variable = EmitTyped(globals, ref bound, Spirv.OpVariable, pointer, Spirv.StorageInput);
+                annotations.Add((4u << 16) | Spirv.OpDecorate);
+                annotations.Add(variable);
+                annotations.Add(Spirv.DecorationLocation);
+                annotations.Add((uint)location);
+            }
+
+            List<uint> prologue = new List<uint>();
+            uint condition = 0;
+            for (int k = 0; k < elements; k++)
+            {
+                uint pointer = bound++;
+                prologue.Add((5u << 16) | Spirv.OpAccessChain);
+                prologue.Add(pointerFloat);
+                prologue.Add(pointer);
+                prologue.Add(variable);
+                prologue.Add(index[k]);
+                uint value = bound++;
+                prologue.Add((4u << 16) | Spirv.OpLoad);
+                prologue.Add(floatType);
+                prologue.Add(value);
+                prologue.Add(pointer);
+                uint negative = bound++;
+                prologue.Add((5u << 16) | Spirv.OpFOrdLessThan);
+                prologue.Add(boolType);
+                prologue.Add(negative);
+                prologue.Add(value);
+                prologue.Add(zero);
+                if (condition == 0)
+                {
+                    condition = negative;
+                    continue;
+                }
+
+                uint any = bound++;
+                prologue.Add((5u << 16) | Spirv.OpLogicalOr);
+                prologue.Add(boolType);
+                prologue.Add(any);
+                prologue.Add(condition);
+                prologue.Add(negative);
+                condition = any;
+            }
+
+            uint kill = bound++;
+            uint merge = bound++;
+            prologue.Add((3u << 16) | Spirv.OpSelectionMerge);
+            prologue.Add(merge);
+            prologue.Add(0);
+            prologue.Add((4u << 16) | Spirv.OpBranchConditional);
+            prologue.Add(condition);
+            prologue.Add(kill);
+            prologue.Add(merge);
+            prologue.Add((2u << 16) | Spirv.OpLabel);
+            prologue.Add(kill);
+            prologue.Add((1u << 16) | Spirv.OpKill);
+            prologue.Add((2u << 16) | Spirv.OpLabel);
+            prologue.Add(merge);
+
+            int entryLen = (int)(words[entryAt] >> 16);
+            if (annotationsEnd < 0)
+                annotationsEnd = firstFunction;
+            List<uint> result = new List<uint>(count + globals.Count + prologue.Count + annotations.Count + 1);
+            for (int i = 0; i < entryAt; i++)
+                result.Add(words[i]);
+            result.Add(((uint)(entryLen + (created ? 1 : 0)) << 16) | Spirv.OpEntryPoint);
+            for (int i = entryAt + 1; i < entryAt + entryLen; i++)
+                result.Add(words[i]);
+            if (created)
+                result.Add(variable);
+            for (int i = entryAt + entryLen; i < annotationsEnd; i++)
+                result.Add(words[i]);
+            result.AddRange(annotations);
+            for (int i = annotationsEnd; i < firstFunction; i++)
+                result.Add(words[i]);
+            result.AddRange(globals);
+            for (int i = firstFunction; i < prologueAt; i++)
+                result.Add(words[i]);
+            result.AddRange(prologue);
+            for (int i = prologueAt; i < count; i++)
+                result.Add(words[i]);
+            result[3] = bound;
+            return result.ToArray();
+        }
+
+        private static uint Emit(List<uint> section, ref uint bound, int op, params uint[] operands)
+        {
+            uint id = bound++;
+            section.Add(((uint)(operands.Length + 2) << 16) | (uint)op);
+            section.Add(id);
+            section.AddRange(operands);
+            return id;
+        }
+
+        private static uint EmitTyped(List<uint> section, ref uint bound, int op, uint type, uint operand)
+        {
+            uint id = bound++;
+            section.Add((4u << 16) | (uint)op);
+            section.Add(type);
+            section.Add(id);
+            section.Add(operand);
+            return id;
         }
     }
 

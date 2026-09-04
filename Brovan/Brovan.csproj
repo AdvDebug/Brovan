@@ -68,6 +68,10 @@
     </ItemGroup>
 
     <ItemGroup>
+        <EmbeddedResource Include="Core\Emulation\OS\Windows\Devices\VulkanImpls\Shaders\*.spv" LogicalName="VulkanImpls.%(Filename)%(Extension)" />
+    </ItemGroup>
+
+    <ItemGroup>
         <ProjectReference Include="../Brovan.Generators/Brovan.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false"
                           GlobalPropertiesToRemove="PlatformTarget;RuntimeIdentifier;SelfContained;PublishAot;NativeLib;PublishAotUsingRuntimePack" />
     </ItemGroup>
