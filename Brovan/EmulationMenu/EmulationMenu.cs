@@ -2348,7 +2348,7 @@ namespace Brovan.EmulationMenu
             }
         }
 
-        public static void RunEmulator(string FilePath, bool Quick, bool Silent, [AllowNull] string Command, [AllowNull] string RawProgramArguments, string[] ProgramArguments, NetworkAccessPolicy NetworkPolicyValue, bool NoHooks, EmulationBackendKind BackendKind, [AllowNull] string WorkingDirectory = null)
+        public static void RunEmulator(string FilePath, bool Quick, bool Silent, [AllowNull] string Command, [AllowNull] string RawProgramArguments, string[] ProgramArguments, NetworkAccessPolicy NetworkPolicyValue, bool NoHooks, EmulationBackendKind BackendKind, [AllowNull] string WorkingDirectory = null, bool Smp = true, int SmpWorkers = 0)
         {
             SilentMode = Silent;
 
@@ -2417,6 +2417,8 @@ namespace Brovan.EmulationMenu
                     ProgramArguments = ProgramArguments ?? Array.Empty<string>(),
                     NoHooks = NoHooks,
                     BackendKind = BackendKind,
+                    Smp = Smp,
+                    SmpWorkers = SmpWorkers,
                     StartSuspended = GuestProcessLauncher.StartedSuspended()
                 };
 

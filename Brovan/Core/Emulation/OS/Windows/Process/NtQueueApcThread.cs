@@ -43,7 +43,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Thread.State = EmulatedThreadState.Ready;
 
             if (SpecialApc || AlertableWait)
-                Instance._emulator.StopEmulation();
+            {
+                if (Instance.CurrentThreadId == (int)Thread.ThreadId)
+                    Instance._emulator.StopEmulation();
+                else
+                {
+                    Instance._emulator.StopThread(Thread.ThreadId);
+                    Instance.YieldSliceAfterWake(Thread);
+                }
+            }
 
             return NTSTATUS.STATUS_SUCCESS;
         }

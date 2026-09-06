@@ -37,6 +37,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteRegister(Instance.IPRegister, NextRip);
                 Instance._emulator.StopEmulation();
             }
+            else
+            {
+                Instance._emulator.StopThread(TargetThread.ThreadId);
+            }
 
             return NTSTATUS.STATUS_SUCCESS;
         }

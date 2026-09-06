@@ -337,6 +337,7 @@ namespace Brovan.Core.Emulation.Guests
             if (!Instance.IsArchX86Guest)
                 throw new Exception("Linux guest supports only x86/x64.");
 
+            Helper.Emulator = Instance;
             LoadedModules.Clear();
 
             ReadOnlySpan<byte> Data = Binary.GetBinaryData();
@@ -811,15 +812,17 @@ namespace Brovan.Core.Emulation.Guests
             return Thread;
         }
 
+        public void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+        }
+
         public void OnThreadContextLoaded(BinaryEmulator Instance, EmulatedThread Thread)
         {
             LinuxThreadState State = Thread?.GuestState as LinuxThreadState;
             if (State == null)
                 return;
 
-            Helper.CurrentThreadId = (int)Thread.ThreadId;
             Helper.RegisterThread(Thread);
-            Helper.CpuidEnabled = State.CpuidEnabled;
             if (Instance.IsX64Guest)
             {
                 Instance._emulator.WriteRegister((int)Registers.UC_X86_REG_FS_BASE, State.FsBase);
@@ -869,7 +872,6 @@ namespace Brovan.Core.Emulation.Guests
             ThreadState = Thread.GuestState as LinuxThreadState;
             if (ThreadState != null)
             {
-                ThreadState.CpuidEnabled = Helper.CpuidEnabled;
                 if (Instance.IsX64Guest)
                 {
                     ThreadState.FsBase = Instance.ReadRegister(Registers.UC_X86_REG_FS_BASE);

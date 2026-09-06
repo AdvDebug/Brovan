@@ -23,14 +23,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (TerminatingSelfByNullHandle && CountLiveThreads(Instance) <= 1)
                 return NTSTATUS.STATUS_CANT_TERMINATE_SELF;
 
+            bool TerminatingSelf = Instance.CurrentThread != null && TargetThread.ThreadId == (uint)Instance.CurrentThreadId;
+            if (!TerminatingSelf)
+                Instance.WaitUntilParked(TargetThread);
+
             Instance.WinHelper.AbandonMutexesOwnedByThread(TargetThread.ThreadId);
 
             TargetThread.ExitCode = unchecked((int)(uint)ExitStatus);
             Instance.WinHelper.ClearTerminationState(TargetThread);
             TargetThread.State = EmulatedThreadState.Terminated;
+            Instance.WinHelper.ReleaseThreadResources(TargetThread);
             Instance.WakeSignal.Bump();
 
-            if (Instance.CurrentThread != null && TargetThread.ThreadId == (uint)Instance.CurrentThreadId)
+            if (TerminatingSelf)
             {
                 Instance._emulator.WriteRegister(Instance.IPRegister, 0UL);
                 Instance._emulator.StopEmulation();

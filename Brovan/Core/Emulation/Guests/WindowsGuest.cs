@@ -274,6 +274,11 @@ namespace Brovan.Core.Emulation.Guests
             Instance.RunMlfqScheduler();
         }
 
+        public void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            Instance.WinHelper?.ReleaseThreadResources(Thread);
+        }
+
         public void OnThreadContextLoaded(BinaryEmulator Instance, EmulatedThread Thread)
         {
             if (Thread == null)
@@ -1237,6 +1242,7 @@ namespace Brovan.Core.Emulation.Guests
                 InitialRSP -= 0x20;
 
                 ulong ContextAddress = Instance.BuildInitialContext(RtlUserThreadStart, InitialRSP, StartAddress, Parameter);
+                State.InitialContext = ContextAddress;
                 Thread.Context.RSP = InitialRSP;
                 Thread.Context.RCX = ContextAddress;
                 Thread.Context.RDX = _ntdllModule?.MappedBase ?? 0;
@@ -1248,6 +1254,7 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(ContextEsp, 0u);
 
                 ulong ContextAddress = Instance.BuildInitialContext32(RtlUserThreadStart, ContextEsp, StartAddress, Parameter);
+                State.InitialContext = ContextAddress;
 
                 ulong ThunkEsp = StackTop - 0x40;
                 ThunkEsp -= 4;
@@ -1396,8 +1403,7 @@ namespace Brovan.Core.Emulation.Guests
                 {
                     Instance.TriggerEventMessage($"[!] Another process in the session asked this one to stop with exit code 0x{ExitCode:X}.", LogFlags.Important);
                     GuestSession.PublishExit(ExitCode);
-                    Instance.WinHelper.HideDesktopWindow();
-                    Instance.StopEmulation();
+                    Instance.RequestTermination();
                 });
         }
 

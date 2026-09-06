@@ -68,10 +68,15 @@ namespace Brovan.Core.Emulation
         public const uint KvmIoGetDebugRegisters = 0x8080AEA1;
         public const uint KvmIoSetDebugRegisters = 0x4080AEA2;
         public const uint KvmIoGetTscKhz = 0xAEA3;
+        public const uint KvmIoSetDeviceAttr = 0x4018AEE1;
+        public const uint KvmIoGetDeviceAttr = 0x4018AEE2;
+        public const uint VcpuTscCtrl = 0;
+        public const ulong VcpuTscOffset = 0;
 
         public const int CapNrMemslots = 10;
         public const int CapGetTscKhz = 61;
         public const int CapMaxVcpus = 66;
+        public const int CapVcpuAttributes = 127;
         public const int CapSyncRegs = 74;
         public const int CapXsave = 84;
         public const int CapImmediateExit = 136;

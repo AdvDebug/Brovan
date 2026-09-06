@@ -118,7 +118,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance.WinHelper.ClearTerminationState(CurrentThread);
                     CurrentThread.State = EmulatedThreadState.Terminated;
                     CurrentThread.ExitCode = unchecked((int)ExceptionCode);
-                    Instance.Threads[(uint)Instance.CurrentThreadId] = CurrentThread;
+                    Instance.WinHelper.ReleaseThreadResources(CurrentThread);
                     Instance._emulator.StopEmulation();
                     return NTSTATUS.STATUS_SUCCESS;
                 }

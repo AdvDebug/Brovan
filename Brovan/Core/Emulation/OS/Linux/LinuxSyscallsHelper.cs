@@ -1909,12 +1909,28 @@ namespace Brovan.Core.Emulation.OS.Linux
 
         public ulong ProgramBreak { get; set; }
         public ulong ProgramBreakBase { get; set; }
-        public bool CpuidEnabled { get; set; }
+        public bool CpuidEnabled
+        {
+            get => CurrentThreadState?.CpuidEnabled ?? true;
+            set
+            {
+                EmulatedThread Thread = Emulator?.CurrentThread;
+                if (Thread == null)
+                    return;
+
+                if (Thread.GuestState is not LinuxThreadState State)
+                    Thread.GuestState = State = new LinuxThreadState();
+
+                State.CpuidEnabled = value;
+            }
+        }
         public int PID { get; private set; }
         public int ParentPid { get; private set; }
         public int ProcessGroupId { get; private set; }
         public int SessionId { get; private set; }
-        public int CurrentThreadId { get; set; }
+        internal BinaryEmulator Emulator { get; set; }
+        public int CurrentThreadId => Emulator != null && Emulator.CurrentThreadId > 0 ? Emulator.CurrentThreadId : 0;
+        private LinuxThreadState CurrentThreadState => Emulator?.CurrentThread?.GuestState as LinuxThreadState;
         public byte[] AuxiliaryVector { get; set; } = Array.Empty<byte>();
         public Dictionary<int, LinuxResourceLimit> ResourceLimits { get; private set; }
         public FileDescriptorTable DescriptorTable { get; private set; }
@@ -1950,7 +1966,6 @@ namespace Brovan.Core.Emulation.OS.Linux
             ParentPid = 273;
             ProcessGroupId = 273;
             SessionId = 273;
-            CpuidEnabled = true;
             RealtimeClockBaseUtc = DateTimeOffset.UtcNow;
             MonotonicClock = Stopwatch.StartNew();
             SyntheticUptimeBase = TimeSpan.FromSeconds(RandomNumberGenerator.GetInt32(MinimumSyntheticUptimeSeconds, MaximumSyntheticUptimeSeconds + 1));
@@ -2195,7 +2210,6 @@ namespace Brovan.Core.Emulation.OS.Linux
                 return;
 
             SyncCurrentProcessMetadata();
-            CurrentThreadId = (int)Thread.ThreadId;
 
             if (!CurrentProcess.Threads.TryGetValue(Thread.ThreadId, out LinuxTaskInfo Task))
             {
@@ -2218,8 +2232,6 @@ namespace Brovan.Core.Emulation.OS.Linux
                 return;
 
             CurrentProcess.Threads.Remove(ThreadId);
-            if (CurrentThreadId == (int)ThreadId)
-                CurrentThreadId = 0;
         }
 
         public bool TryGetThreadInfo(uint ThreadId, out LinuxTaskInfo Task)

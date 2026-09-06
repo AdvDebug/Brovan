@@ -97,7 +97,7 @@ namespace Brovan
             {
                 string Arg = args[i];
 
-                if (Arg == "-c" || Arg == "--command" || Arg == "--net" || Arg == "--net-allow")
+                if (Arg == "-c" || Arg == "--command" || Arg == "--net" || Arg == "--net-allow" || Arg == "--cores")
                 {
                     i++;
                     continue;
@@ -129,6 +129,8 @@ namespace Brovan
             Console.WriteLine("  --net-allow=<ip>  Allow a specific IPv4 or IPv6 address in addition to the selected policy.");
             Console.WriteLine("  --no-hooks        Run the emulator with no hooks. useful when you want maximum performance and want to see some program output.");
             Console.WriteLine("  --backend=<name>  Choose the emulation backend: unicorn (default), kvm (Linux), or whp (Windows Hypervisor Platform).");
+            Console.WriteLine("  --cores=<n>       Guest threads a hypervisor backend runs at once. Defaults to the host's logical processors minus one.");
+            Console.WriteLine("  --no-smp          Run guest threads one at a time on a hypervisor backend, through the cooperative scheduler.");
             Console.WriteLine("  --cwd <dir>       Directory the emulated program starts in. Defaults to the directory of the binary.");
             Console.WriteLine("  --jit-cache[=<dir>]");
             Console.WriteLine("                    Directory for the persisted Unicorn JIT code cache, which lets a");
@@ -517,6 +519,8 @@ namespace Brovan
 
             bool Quick = true;
             bool NoHooks = false;
+            bool Smp = true;
+            int SmpWorkers = 0;
             bool Silent = false;
             string Command = null;
             string FilePath = null;
@@ -581,6 +585,18 @@ namespace Brovan
                         continue;
                     case "--no-hooks":
                         NoHooks = true;
+                        continue;
+                    case "--no-smp":
+                        Smp = false;
+                        continue;
+                    case "--cores":
+                        if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out SmpWorkers) || SmpWorkers < 1)
+                        {
+                            PrintHighlight("[-] Invalid core count. expected a positive number.", true);
+                            return;
+                        }
+
+                        i++;
                         continue;
                     case "--no-jit-cache":
                         UnicornCodeCache.Enabled = false;
@@ -675,6 +691,17 @@ namespace Brovan
                     continue;
                 }
 
+                if (Arg.StartsWith("--cores=", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!int.TryParse(Arg.Substring("--cores=".Length), out SmpWorkers) || SmpWorkers < 1)
+                    {
+                        PrintHighlight("[-] Invalid core count. expected a positive number.", true);
+                        return;
+                    }
+
+                    continue;
+                }
+
                 if (Arg.StartsWith("--jit-cache=", StringComparison.OrdinalIgnoreCase))
                 {
                     UnicornCodeCache.Enabled = true;
@@ -707,7 +734,7 @@ namespace Brovan
 
             // Set the dll import resolver based on the platform
             NativeLibraryResolver.Register();
-            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Quick, Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, NoHooks, BackendKind, WorkingDirectory);
+            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Quick, Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, NoHooks, BackendKind, WorkingDirectory, Smp, SmpWorkers);
         }
     }
 }

@@ -71,7 +71,7 @@ namespace Brovan.Core.Emulation
 
         public ulong KUSER_SHARED_DATA = 0x7FFE0000;
 
-        internal bool SuppressSyscallStatusWrite = false;
+        internal bool SuppressSyscallStatusWrite { get => Worker.SuppressStatusWrite; set => Worker.SuppressStatusWrite = value; }
 
         public ulong ProcessCookie = 0;
 
