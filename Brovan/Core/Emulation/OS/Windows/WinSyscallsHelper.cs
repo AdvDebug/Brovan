@@ -331,6 +331,59 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        // NT frees the TEB and the initial stack when a thread ends, and keeps the thread object while a
+        // handle refers to it. A thread still on a processor is released by its worker at the end of the slice.
+        public void ReleaseThreadResources(EmulatedThread Thread)
+        {
+            if (Thread == null || Thread.State != EmulatedThreadState.Terminated)
+                return;
+
+            bool Current = Emulator.CurrentThreadId == (int)Thread.ThreadId;
+            if (!Current && Thread.HostWorker != -1)
+                return;
+
+            if (!Current)
+                Emulator.ReleaseThreadProcessor(Thread);
+
+            if (Thread.StackAddress != 0)
+            {
+                if (!Emulator.ReleaseMemory(Thread.StackAddress))
+                    Emulator.UnmapMemoryRegion(Thread.StackAddress);
+                Thread.StackAddress = 0;
+            }
+
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State != null)
+            {
+                ulong TebBase = State.NativeTeb != 0 ? State.NativeTeb : State.Teb;
+                if (TebBase != 0)
+                    Emulator.UnmapMemoryRegion(TebBase);
+                State.Teb = 0;
+                State.NativeTeb = 0;
+
+                if (State.InitialContext != 0)
+                {
+                    Emulator.UnmapMemoryRegion(State.InitialContext);
+                    State.InitialContext = 0;
+                }
+            }
+
+            ForgetThreadIfUnreferenced(Thread);
+        }
+
+        public void ForgetThreadIfUnreferenced(EmulatedThread Thread)
+        {
+            if (Thread == null || Thread.State != EmulatedThreadState.Terminated || HandleManager.HasHandleToObject(Thread))
+                return;
+
+            Thread.Unreferenced = true;
+            if (Thread.HostWorker != -1 || Emulator.CurrentThreadId == (int)Thread.ThreadId)
+                return;
+
+            Emulator.ReleaseThreadProcessor(Thread);
+            Emulator.Threads.Remove(Thread.ThreadId);
+        }
+
         /// <summary>
         /// Clears wait, worker-factory, and exception state for a thread that is exiting.
         /// </summary>
@@ -7750,6 +7803,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case WinMutex Mutex:
                     WinMutexes.Remove(Mutex);
+                    break;
+
+                case EmulatedThread Thread:
+                    ForgetThreadIfUnreferenced(Thread);
                     break;
             }
         }

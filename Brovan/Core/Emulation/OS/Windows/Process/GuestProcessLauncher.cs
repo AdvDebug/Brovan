@@ -296,6 +296,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance.Settings.NoHooks)
                 Arguments.Add("--no-hooks");
 
+            if (!Instance.Settings.Smp)
+                Arguments.Add("--no-smp");
+            else if (Instance.Settings.SmpWorkers > 0)
+                Arguments.Add($"--cores={Instance.Settings.SmpWorkers}");
+
             if (!UnicornCodeCache.Enabled)
                 Arguments.Add("--no-jit-cache");
             else if (!string.IsNullOrEmpty(UnicornCodeCache.CacheDirectory))

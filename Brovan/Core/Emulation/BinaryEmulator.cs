@@ -299,6 +299,12 @@ namespace Brovan.Core.Emulation
         /// <summary>Backend implementation to use. Defaults to Unicorn.</summary>
         public EmulationBackendKind BackendKind;
 
+        /// <summary>Runs guest threads on several host threads at once. Hypervisor backends only.</summary>
+        public bool Smp;
+
+        /// <summary>Host threads that run guest code at once. Zero picks a count from the host.</summary>
+        public int SmpWorkers;
+
 #pragma warning disable
         public BinaryEmulatorSettings()
         {
@@ -315,6 +321,7 @@ namespace Brovan.Core.Emulation
             NetworkPolicy = null;
             Debug = false;
             BackendKind = EmulationBackendKind.Unicorn;
+            Smp = true;
 #pragma warning restore
         }
 
@@ -378,7 +385,6 @@ namespace Brovan.Core.Emulation
         private const int GprBatchCount = 18;
         private const int GprBatchCount32 = 10;
         private int[] _gprBatchRegs;
-        private ulong[] _gprBatchScratch;
         internal BinaryEmulatorSettings Settings;
         private InstructionHookCallback Syscall;
         private InstructionHookCallback Privileged;
@@ -438,6 +444,179 @@ namespace Brovan.Core.Emulation
         /// How long the scheduler blocks in one go when no guest thread can run.
         /// </summary>
         private const int IdleWaitSliceMs = 5;
+
+        // Held by every host thread that touches emulator state. A hypervisor backend releases it only for
+        // the time a processor spends in the guest, see IEmulationBackend.UseRunLock.
+        internal readonly object KernelLock = new();
+
+        private bool SmpEnabled;
+        private volatile bool SchedulerExiting;
+        private int IdleWorkers;
+        private int ParkWaiters;
+        private int DispatchedThreads;
+        private int SmpWorkerCount;
+        private ulong _schedulerTotal;
+        private uint _schedulerSlices;
+        private ulong _schedulerPendingInstructions;
+
+        private const int IdleWaitBackstopMs = 50;
+        private const int SweepIntervalMs = 1;
+        private const int SchedulerThreadStackSize = 4 * 1024 * 1024;
+
+        // An idle worker sleeps until a producer or the sweeper pulses it. The timeout is only a backstop
+        // against a lost pulse.
+        private void IdleWait(int Milliseconds)
+        {
+            if (!SmpEnabled)
+            {
+                Thread.Sleep(Milliseconds);
+                return;
+            }
+
+            IdleWorkers++;
+            Monitor.Wait(KernelLock, IdleWaitBackstopMs);
+            IdleWorkers--;
+        }
+
+        // A dispatched thread is invisible to every scan, so a worker leaving its slice by any route, an
+        // escaping exception included, has to give it back.
+        private void ReleaseDispatch(SchedulerWorker Worker)
+        {
+            EmulatedThread Dispatched = Worker.DispatchedThread;
+            if (Dispatched == null)
+                return;
+
+            Worker.DispatchedThread = null;
+            Dispatched.HostWorker = -1;
+            DispatchedThreads--;
+            if (ParkWaiters != 0)
+                Monitor.PulseAll(KernelLock);
+        }
+
+        private void WakeIdleWorker()
+        {
+            if (ParkWaiters != 0)
+                Monitor.PulseAll(KernelLock);
+            else
+                Monitor.Pulse(KernelLock);
+        }
+
+        // Timed wakes have no producer, so one thread wakes an idle worker at the idle cadence.
+        private void SweepLoop()
+        {
+            while (!SchedulerExiting)
+            {
+                Thread.Sleep(SweepIntervalMs);
+                lock (KernelLock)
+                {
+                    if (IdleWorkers != 0)
+                        WakeIdleWorker();
+                }
+            }
+        }
+
+        private void SignalSchedulerExit()
+        {
+            SchedulerExiting = true;
+            _emulator.StopAllProcessors();
+            Monitor.PulseAll(KernelLock);
+        }
+
+        private static Thread StartSchedulerThread(string Name, ThreadStart Body)
+        {
+            Thread Started = new Thread(Body, SchedulerThreadStackSize)
+            {
+                IsBackground = true,
+                Name = Name
+            };
+            Started.Start();
+            return Started;
+        }
+
+        private int ResolveSmpWorkerCount()
+        {
+            int Requested = Settings.SmpWorkers > 0 ? Settings.SmpWorkers : Math.Max(1, Environment.ProcessorCount - 1);
+
+            // One processor stays free, so a thread past the limit can always evict a parked one.
+            int Limit = _emulator.ProcessorLimit - 1;
+            return Math.Max(1, Math.Min(Requested, Limit));
+        }
+
+        // NT answers a context request on a running thread only once it reaches a safe point. False means it
+        // never reached one, so the saved context is not the one it runs on.
+        internal bool WaitUntilParked(EmulatedThread Thread)
+        {
+            if (!SmpEnabled || Thread == null || Thread.HostWorker == -1 || ReferenceEquals(Thread, CurrentThread))
+                return true;
+
+            _emulator.StopThread(Thread.ThreadId);
+
+            EmulatedThread Self = CurrentThread;
+            if (Self != null)
+            {
+                Self.ParkTarget = Thread;
+                Self.ParkWaiting = true;
+            }
+            ParkWaiters++;
+            try
+            {
+                long Deadline = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency / 4;
+                while (Thread.HostWorker != -1 && !SchedulerExiting)
+                {
+                    // Two threads inspecting each other are both inside a handler, so neither parks.
+                    if (Self != null && Thread.ParkWaiting && ReferenceEquals(Thread.ParkTarget, Self))
+                        return false;
+                    if (System.Diagnostics.Stopwatch.GetTimestamp() >= Deadline)
+                        return false;
+
+                    Monitor.Wait(KernelLock, 1);
+                }
+
+                return Thread.HostWorker == -1;
+            }
+            finally
+            {
+                ParkWaiters--;
+                if (Self != null)
+                {
+                    Self.ParkWaiting = false;
+                    Self.ParkTarget = null;
+                }
+            }
+        }
+
+        // The console thread's view of the guest follows the thread it last ran once the workers are gone.
+        private void ReselectCurrentThread()
+        {
+            SchedulerWorker Main = _mainWorker;
+            if (Main.CurrentThreadId == -1 && Main.LastThreadId != -1)
+                Main.CurrentThreadId = Main.LastThreadId;
+
+            EmulatedThread Current = CurrentThread;
+            if (Current == null || Current.Context == null)
+                return;
+
+            if (!_emulator.IsThreadResident(Current.ThreadId) && Current.State != EmulatedThreadState.Terminated && BindThreadProcessor(Current))
+            {
+                _emulator.SelectThread(Current.ThreadId);
+                LoadContext(Current, true);
+                CurrentContextSaved = true;
+                return;
+            }
+
+            _emulator.SelectThread(Current.ThreadId);
+        }
+
+        // A producer completes the waiters it woke before its own slice resumes. The thread it runs on is
+        // dispatched, so the scan skips it and its worker checks it after the slice.
+        private void ScanWakeupsAfterCallback(long EpochBeforeCallback)
+        {
+            if (!SmpEnabled || MlfqLevels == 0 || WakeSignal.Current == EpochBeforeCallback
+                || WakeSignal.Current == LastScannedWakeEpoch)
+                return;
+
+            UpdateMlfqWakeups(MlfqReadyQueues, MlfqQueuedThreads, MlfqLevels, MlfqSchedulerTick);
+        }
 
         private const ulong TscCyclesPerMillisecond = 3_000_000UL;
 
@@ -569,14 +748,15 @@ namespace Brovan.Core.Emulation
 
         private bool StartSuspendedReleased;
         internal readonly List<int> ThreadOrder = new();
-        internal int CurrentThreadId = -1;
         internal int NextThreadId = 1;
-        private bool SchedulerRefreshRequested;
-        internal bool EscapeScheduler;
+        internal volatile bool EscapeScheduler;
         private int TerminationRequested;
 
-        // Threads keeps terminated entries so thread-id lookups stay valid, so it grows with every thread the guest
-        // has ever created. ThreadOrder is the live set.
+        internal int CurrentThreadId { get => Worker.CurrentThreadId; set => Worker.CurrentThreadId = value; }
+        private bool SchedulerRefreshRequested { get => Worker.RefreshRequested; set => Worker.RefreshRequested = value; }
+
+        // Threads keeps a terminated entry while something still refers to it, so a thread-id lookup made
+        // with a handle open stays valid. ThreadOrder is the live set.
         internal LiveThreadCollection LiveThreads => new LiveThreadCollection(this);
 
         internal readonly struct LiveThreadCollection
@@ -622,24 +802,66 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private EmulatedThread _currentThreadCache;
-
-        private bool _currentContextSaved;
-
         // Never lowered. Windows releases the request when the process exits.
         private static bool _hostTimerPeriodRaised;
+
+        private sealed class SchedulerWorker
+        {
+            public readonly BinaryEmulator Owner;
+            public readonly int Index;
+            public int CurrentThreadId = -1;
+            public int LastThreadId = -1;
+            public EmulatedThread CurrentThreadCache;
+            public bool ContextSaved;
+            public bool RefreshRequested;
+            public bool SuppressStatusWrite;
+            public bool WakeupScanRequired;
+            public EmulatedThread DispatchedThread;
+            public ulong[] GprScratch;
+
+            public SchedulerWorker(BinaryEmulator Owner, int Index)
+            {
+                this.Owner = Owner;
+                this.Index = Index;
+            }
+        }
+
+        [ThreadStatic]
+        private static SchedulerWorker t_worker;
+        private SchedulerWorker _mainWorker;
+
+        private SchedulerWorker Worker
+        {
+            get
+            {
+                SchedulerWorker Bound = t_worker;
+                return Bound != null && ReferenceEquals(Bound.Owner, this) ? Bound : _mainWorker;
+            }
+        }
+
+        private void BindMainWorker()
+        {
+            _mainWorker = new SchedulerWorker(this, 0);
+            t_worker = _mainWorker;
+        }
+
+        private EmulatedThread CurrentThreadCache { get => Worker.CurrentThreadCache; set => Worker.CurrentThreadCache = value; }
+
+        private bool CurrentContextSaved { get => Worker.ContextSaved; set => Worker.ContextSaved = value; }
 
         internal EmulatedThread CurrentThread
         {
             get
             {
-                int tid = CurrentThreadId;
+                SchedulerWorker W = Worker;
+                int tid = W.CurrentThreadId;
                 if (tid == -1) return null;
-                if (_currentThreadCache != null && (int)_currentThreadCache.ThreadId == tid)
-                    return _currentThreadCache;
+                EmulatedThread Cached = W.CurrentThreadCache;
+                if (Cached != null && (int)Cached.ThreadId == tid)
+                    return Cached;
                 if (Threads.TryGetValue((uint)tid, out EmulatedThread t))
-                { _currentThreadCache = t; return t; }
-                _currentThreadCache = null;
+                { W.CurrentThreadCache = t; return t; }
+                W.CurrentThreadCache = null;
                 return null;
             }
         }
@@ -667,6 +889,7 @@ namespace Brovan.Core.Emulation
             if (Binary.Architecture == BinaryArchitecture.Unknown)
                 throw new BadImageFormatException("Unsupported binary architecture.");
 
+            BindMainWorker();
             _binary = Binary;
             BackendArch = Arch.X86;
             BackendMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
@@ -709,6 +932,7 @@ namespace Brovan.Core.Emulation
             if (Data == null || Data.Length == 0)
                 throw new NullReferenceException(nameof(Data));
 
+            BindMainWorker();
             _binary = Binary ?? new BinaryFile(Data, true);
             BackendArch = arch;
             BackendMode = mode;
@@ -1561,7 +1785,7 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            if (_emulator.UnmapMemory(Address, Region.Size))
+            if (_emulator.UnmapMemory(Address, AlignToPageSize(Region.Size)))
             {
                 RemoveMemoryRegion(Region);
                 _freedmemory.Add(Region);
@@ -1690,6 +1914,7 @@ namespace Brovan.Core.Emulation
         {
             SchedulerRefreshRequested = true;
             TriggerDebugMessage(() => $"cpu: interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}");
+            long EpochBeforeCallback = WakeSignal.Current;
             try
             {
                 // An unhandled vector leaves IP on the faulting instruction, which re-faults forever.
@@ -1700,6 +1925,8 @@ namespace Brovan.Core.Emulation
             {
                 Utils.LogError($"[GuestInterrupt] Error: {ex.Message}");
             }
+
+            ScanWakeupsAfterCallback(EpochBeforeCallback);
         }
 
         /// <summary>
@@ -1910,10 +2137,19 @@ namespace Brovan.Core.Emulation
             return Counter > ulong.MaxValue / TscTicksPerQpcTick ? ulong.MaxValue : Counter * TscTicksPerQpcTick;
         }
 
+        // A backend with a real TSC answers from it, so a thread's clock never steps into another domain.
+        private ulong ReadGuestTimestampCounter()
+        {
+            if (!_emulator.TimestampCounterIsEmulated && _emulator.TryReadTimestampCounter(out ulong Counter) && Counter != 0)
+                return Counter;
+
+            return GetEmulatedTimestampCounter();
+        }
+
         private bool RDTSC_Handler()
         {
             ulong IP = ReadRegister(IPRegister);
-            ulong ticks = GetEmulatedTimestampCounter();
+            ulong ticks = ReadGuestTimestampCounter();
 
             if (_binary.Architecture == BinaryArchitecture.x64)
             {
@@ -1935,7 +2171,7 @@ namespace Brovan.Core.Emulation
         private bool RDTSCP_Handler()
         {
             ulong IP = ReadRegister(IPRegister);
-            ulong ticks = GetEmulatedTimestampCounter();
+            ulong ticks = ReadGuestTimestampCounter();
 
             if (_binary.Architecture == BinaryArchitecture.x64)
             {
@@ -2053,7 +2289,7 @@ namespace Brovan.Core.Emulation
         {
             if (c == null) return false;
             int[] Regs = GetGprBatchRegs();
-            ulong[] Vals = _gprBatchScratch ??= new ulong[GprBatchCount];
+            ulong[] Vals = Worker.GprScratch ??= new ulong[GprBatchCount];
             if (!_emulator.ReadRegisterBatch(Regs, Vals, Regs.Length))
                 return false;
             c.RAX = Vals[0]; c.RBX = Vals[1]; c.RCX = Vals[2]; c.RDX = Vals[3];
@@ -2073,7 +2309,7 @@ namespace Brovan.Core.Emulation
         {
             if (c == null) return;
             int[] Regs = GetGprBatchRegs();
-            ulong[] Vals = _gprBatchScratch ??= new ulong[GprBatchCount];
+            ulong[] Vals = Worker.GprScratch ??= new ulong[GprBatchCount];
             Vals[0] = c.RAX; Vals[1] = c.RBX; Vals[2] = c.RCX; Vals[3] = c.RDX;
             Vals[4] = c.RSI; Vals[5] = c.RDI; Vals[6] = c.RBP; Vals[7] = c.RSP;
             if (Regs.Length == GprBatchCount32)
@@ -2118,22 +2354,17 @@ namespace Brovan.Core.Emulation
             Guest.OnThreadContextLoaded(this, t);
         }
 
-        private void SwitchToThread(int ThreadId)
+        private void SwitchToThread(int ThreadId, bool BoundThisSwitch = false)
         {
             if (!Threads.TryGetValue((uint)ThreadId, out EmulatedThread next))
                 return;
-            EmulatedThread cur = _currentThreadCache;
-            if (cur != null)
-            {
-                if (!_currentContextSaved)
-                    SaveContext(cur);
-                if (cur.State == EmulatedThreadState.Terminated)
-                    ReleaseThreadProcessor(cur);
-            }
-            _currentContextSaved = false;
+            EmulatedThread cur = CurrentThreadCache;
+            if (!SmpEnabled && cur != null && !CurrentContextSaved && cur.State != EmulatedThreadState.Terminated)
+                SaveContext(cur);
+            CurrentContextSaved = false;
             CurrentThreadId = ThreadId;
-            _currentThreadCache = next;
-            bool FirstResidentLoad = !_emulator.IsThreadResident(next.ThreadId) && BindThreadProcessor(next);
+            CurrentThreadCache = next;
+            bool FirstResidentLoad = BoundThisSwitch || (!_emulator.IsThreadResident(next.ThreadId) && BindThreadProcessor(next));
             _emulator.SelectThread(next.ThreadId);
             LoadContext(next, FirstResidentLoad || !_emulator.IsThreadResident(next.ThreadId));
         }
@@ -2149,7 +2380,7 @@ namespace Brovan.Core.Emulation
                 return true;
 
             foreach (EmulatedThread Other in Threads.Values)
-                if (Other.State == EmulatedThreadState.Terminated)
+                if (Other.State == EmulatedThreadState.Terminated && Other.HostWorker == -1)
                     _emulator.UnbindThread(Other.ThreadId);
 
             if (_emulator.TryBindThread(Thread.ThreadId))
@@ -2170,7 +2401,7 @@ namespace Brovan.Core.Emulation
             {
                 if (!Threads.TryGetValue((uint)ThreadOrder[i], out EmulatedThread Candidate))
                     continue;
-                if (ReferenceEquals(Candidate, Thread) || Candidate.Context == null || !_emulator.IsThreadResident(Candidate.ThreadId))
+                if (ReferenceEquals(Candidate, Thread) || Candidate.HostWorker != -1 || Candidate.Context == null || !_emulator.IsThreadResident(Candidate.ThreadId))
                     continue;
                 if (Victim == null || Candidate.LastRunTick < Victim.LastRunTick)
                     Victim = Candidate;
@@ -2187,7 +2418,7 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        private void ReleaseThreadProcessor(EmulatedThread Thread)
+        internal void ReleaseThreadProcessor(EmulatedThread Thread)
         {
             if (!_emulator.IsThreadResident(Thread.ThreadId))
                 return;
@@ -2224,10 +2455,10 @@ namespace Brovan.Core.Emulation
             if (!Threads.TryGetValue(ThreadId, out EmulatedThread Thread) || Thread == null || Thread.Context == null)
                 return false;
 
-            if (Thread.State == EmulatedThreadState.Terminated)
+            if (Thread.State == EmulatedThreadState.Terminated || Thread.HostWorker != -1)
                 return false;
 
-            _currentContextSaved = false;
+            CurrentContextSaved = false;
             SwitchToThread((int)ThreadId);
             return CurrentThreadId == (int)ThreadId;
         }
@@ -2293,6 +2524,8 @@ namespace Brovan.Core.Emulation
 
             if (CurrentThreadId == (int)ThreadId && Thread.Context != null)
                 SaveContext(Thread);
+            else
+                WaitUntilParked(Thread);
 
             Thread.ExitCode = ExitCode;
             Thread.WaitActive = false;
@@ -2331,6 +2564,10 @@ namespace Brovan.Core.Emulation
                 if (!IsX86Guest)
                     _emulator.WriteRegister(IPRegister, _emulator.ReadRegister(IPRegister) + 2);
                 _emulator.StopEmulation();
+            }
+            else
+            {
+                _emulator.StopThread(Thread.ThreadId);
             }
         }
 
@@ -2387,7 +2624,7 @@ namespace Brovan.Core.Emulation
 
         private bool IsMlfqRunnableThread(EmulatedThread Thread)
         {
-            if (Thread == null)
+            if (Thread == null || Thread.HostWorker != -1)
                 return false;
 
             if (Thread.State == EmulatedThreadState.Terminated)
@@ -2427,7 +2664,7 @@ namespace Brovan.Core.Emulation
         {
             bool Changed = false;
 
-            if (Thread == null)
+            if (Thread == null || Thread.HostWorker != -1)
                 return false;
 
             if (Thread.State == EmulatedThreadState.Suspended && Thread.SuspendCount == 0)
@@ -2573,6 +2810,11 @@ namespace Brovan.Core.Emulation
             t.LastReadyTick = SchedulerTick;
 
             ReadyQueues[Level].Enqueue(Tid);
+
+            // Any worker still awake reaches the queue within a slice, and a pulse for the same thread costs
+            // more in lock contention than the wait it saves. Only a fully parked guest has nobody to reach it.
+            if (IdleWorkers != 0 && IdleWorkers == SmpWorkerCount)
+                WakeIdleWorker();
         }
 
         private void EnsureMlfqRunnableThreadsEnqueued(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick)
@@ -2733,16 +2975,8 @@ namespace Brovan.Core.Emulation
             HashSet<int> InQueue = MlfqQueuedThreads;
             InQueue.Clear();
 
-            ulong Total = 0;
-            uint Slices = 0;
-            long SchedulerTick = 0;
-            ulong PendingSchedulerInstructions = 0;
-            const ulong SchedulerRescanInstructions = 1_000_000;
-            const long FullWakeupScanIntervalMs = 1;
-            const uint FullWakeupScanSliceLimit = 1024;
             long AgingThresholdBudget = AgingThresholdSlices <= 0 ? 0 : AgingThresholdSlices;
             int KnownThreadOrderCount = ThreadOrder.Count;
-            bool WakeupScanRequired = true;
 
             if (Debug)
                 TriggerDebugMessage($"scheduler: start threads={ThreadOrder.Count} levels={Levels} baseQuantum={BaseQuantumInstructions} maxInstructions={MaxTotalInstructions} maxSlices={MaxSlices}");
@@ -2755,19 +2989,111 @@ namespace Brovan.Core.Emulation
                     SuspendThread(Thread, out _, false);
             }
 
-            RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
+            RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, 0, AgingThresholdBudget, 1);
             SchedulerRefreshRequested = false;
 
             // A register written from outside the loop is only captured by a fresh save.
-            _currentContextSaved = false;
+            CurrentContextSaved = false;
 
             if (!_hostTimerPeriodRaised)
                 _hostTimerPeriodRaised = GeneralHelper.BeginHostTimerPeriod();
 
+            _schedulerTotal = 0;
+            _schedulerSlices = 0;
+            _schedulerPendingInstructions = 0;
+            MlfqSchedulerTick = 0;
+
+            SchedulerExiting = false;
+            IdleWorkers = 0;
+            ParkWaiters = 0;
+            DispatchedThreads = 0;
+            foreach (EmulatedThread Dispatched in Threads.Values)
+                Dispatched.HostWorker = -1;
+
+            SmpEnabled = Settings.Smp && _emulator.SupportsThreadResidency;
+            if (!SmpEnabled)
+            {
+                try
+                {
+                    return RunSchedulerLoop(ReadyQueues, InQueue, Levels, MaxTotalInstructions, MaxSlices, AgingThresholdSlices, AgingThresholdBudget, KnownThreadOrderCount);
+                }
+                finally
+                {
+                    ReleaseDispatch(_mainWorker);
+                }
+            }
+
+            // Another worker may dispatch the thread before this one switches again, so the context loaded
+            // before the run is captured here.
+            EmulatedThread Loaded = CurrentThread;
+            if (Loaded != null && !CurrentContextSaved && Loaded.State != EmulatedThreadState.Terminated)
+                SaveContext(Loaded);
+            CurrentContextSaved = true;
+
+            _emulator.UseRunLock(KernelLock);
+
+            int WorkerCount = ResolveSmpWorkerCount();
+            SmpWorkerCount = WorkerCount;
+            Thread[] Helpers = new Thread[WorkerCount];
+            Helpers[0] = StartSchedulerThread("BrovanSchedulerSweep", SweepLoop);
+            for (int i = 1; i < WorkerCount; i++)
+            {
+                SchedulerWorker Extra = new SchedulerWorker(this, i);
+                Helpers[i] = StartSchedulerThread($"BrovanScheduler-{i}",
+                    () => RunSchedulerWorker(Extra, ReadyQueues, InQueue, Levels, MaxTotalInstructions, MaxSlices, AgingThresholdSlices, AgingThresholdBudget));
+            }
+
+            try
+            {
+                return RunSchedulerWorker(_mainWorker, ReadyQueues, InQueue, Levels, MaxTotalInstructions, MaxSlices, AgingThresholdSlices, AgingThresholdBudget);
+            }
+            finally
+            {
+                for (int i = 0; i < Helpers.Length; i++)
+                    Helpers[i].Join();
+                SmpEnabled = false;
+                ReselectCurrentThread();
+            }
+        }
+
+        private bool RunSchedulerWorker(SchedulerWorker Worker, Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, ulong MaxTotalInstructions, uint MaxSlices, long AgingThresholdSlices, long AgingThresholdBudget)
+        {
+            t_worker = Worker;
+            lock (KernelLock)
+            {
+                try
+                {
+                    return RunSchedulerLoop(ReadyQueues, InQueue, Levels, MaxTotalInstructions, MaxSlices, AgingThresholdSlices, AgingThresholdBudget, ThreadOrder.Count);
+                }
+                catch (Exception ex) when (Worker.Index != 0)
+                {
+                    Utils.LogError($"[Scheduler] Worker {Worker.Index} stopped on an unhandled {ex.GetType().Name}: {ex.Message}");
+                    return false;
+                }
+                finally
+                {
+                    ReleaseDispatch(Worker);
+
+                    // Any worker leaving ends the run for all of them.
+                    SignalSchedulerExit();
+                }
+            }
+        }
+
+        private bool RunSchedulerLoop(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, ulong MaxTotalInstructions, uint MaxSlices, long AgingThresholdSlices, long AgingThresholdBudget, int KnownThreadOrderCount)
+        {
+            const ulong SchedulerRescanInstructions = 1_000_000;
+            const long FullWakeupScanIntervalMs = 1;
+            const uint FullWakeupScanSliceLimit = 1024;
+            SchedulerWorker Self = Worker;
+            Self.WakeupScanRequired = true;
+
             while (true)
             {
-                SchedulerTick++;
-                MlfqSchedulerTick = SchedulerTick;
+                if (SchedulerExiting)
+                    return true;
+
+                long SchedulerTick = ++MlfqSchedulerTick;
 
                 if ((SchedulerTick & 0x7) == 0)
                     _emulator.ResolveCodeCache();
@@ -2776,7 +3102,10 @@ namespace Brovan.Core.Emulation
                     OS.Windows.RemoteProcessRequests.Drain(this);
 
                 if (Volatile.Read(ref TerminationRequested) != 0 && Interlocked.Exchange(ref TerminationRequested, 0) != 0)
+                {
+                    WinHelper?.HideDesktopWindow();
                     StopEmulation();
+                }
 
                 bool ThreadOrderChanged = ThreadOrder.Count != KnownThreadOrderCount;
                 bool AgingDue = AgingThresholdSlices > 0 && SchedulerTick % AgingThresholdSlices == 0;
@@ -2784,7 +3113,7 @@ namespace Brovan.Core.Emulation
                 {
                     RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
                     KnownThreadOrderCount = ThreadOrder.Count;
-                    WakeupScanRequired = false;
+                    Self.WakeupScanRequired = false;
                 }
                 else
                 {
@@ -2797,15 +3126,15 @@ namespace Brovan.Core.Emulation
                     }
 
                     // Comparing against the epoch the last scan observed, rather than a per-slice difference
-                    if (WakeupScanRequired || SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch)
+                    if (Self.WakeupScanRequired || SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch)
                     {
                         if (Debug)
-                            TriggerDebugMessage($"scheduler: wakeup scan required={WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
+                            TriggerDebugMessage($"scheduler: wakeup scan required={Self.WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
 
                         UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
                         KnownThreadOrderCount = ThreadOrder.Count;
                         SchedulerRefreshRequested = false;
-                        WakeupScanRequired = false;
+                        Self.WakeupScanRequired = false;
                     }
                 }
 
@@ -2814,7 +3143,7 @@ namespace Brovan.Core.Emulation
                     UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick, true);
                     KnownThreadOrderCount = ThreadOrder.Count;
                     SchedulerRefreshRequested = false;
-                    WakeupScanRequired = false;
+                    Self.WakeupScanRequired = false;
 
                     if (!TryDequeueMlfqThread(ReadyQueues, InQueue, Levels, out ImmaBeEmulatedOOO, out SelectedLevel))
                     {
@@ -2825,15 +3154,23 @@ namespace Brovan.Core.Emulation
                         // session requests until its creator resumes it.
                         if (StartSuspendedApplied && !StartSuspendedReleased)
                         {
-                            Thread.Sleep(IdleWaitSliceMs);
-                            WakeupScanRequired = true;
+                            IdleWait(IdleWaitSliceMs);
+                            Self.WakeupScanRequired = true;
+                            continue;
+                        }
+
+                        // A slice on another worker can still make threads runnable.
+                        if (DispatchedThreads != 0)
+                        {
+                            IdleWait(IdleWaitSliceMs);
+                            Self.WakeupScanRequired = true;
                             continue;
                         }
 
                         if (!HasLiveMlfqThread())
                         {
                             if (Debug)
-                                TriggerDebugMessage($"scheduler: finished no live threads total={Total} slices={Slices}");
+                                TriggerDebugMessage($"scheduler: finished no live threads total={_schedulerTotal} slices={_schedulerSlices}");
                             return true;
                         }
 
@@ -2841,25 +3178,44 @@ namespace Brovan.Core.Emulation
                         {
                             if (Debug)
                                 TriggerDebugMessage($"scheduler: no runnable thread, waiting up to {SleepMs}ms");
-                            Thread.Sleep(Math.Min(SleepMs, IdleWaitSliceMs));
+                            IdleWait(Math.Min(SleepMs, IdleWaitSliceMs));
                             WinHelper?.KuserSharedData?.RefreshIfUnhooked();
-                            WakeupScanRequired = true;
+                            Self.WakeupScanRequired = true;
                             continue;
                         }
 
                         if (HasActiveGetMessageWait())
                         {
-                            Thread.Sleep(IdleWaitSliceMs);
+                            IdleWait(IdleWaitSliceMs);
                             WinHelper?.KuserSharedData?.RefreshIfUnhooked();
-                            WakeupScanRequired = true;
+                            Self.WakeupScanRequired = true;
                             continue;
                         }
 
                         if (Debug)
-                            TriggerDebugMessage($"scheduler: no runnable thread and no pending wakeup total={Total} slices={Slices}");
+                            TriggerDebugMessage($"scheduler: no runnable thread and no pending wakeup total={_schedulerTotal} slices={_schedulerSlices}");
                         return true;
                     }
                 }
+
+                // Without a processor of its own the thread waits for one rather than sharing processor 0.
+                bool BoundThisSwitch = false;
+                if (SmpEnabled && !_emulator.IsThreadResident(ImmaBeEmulatedOOO.ThreadId))
+                {
+                    if (!BindThreadProcessor(ImmaBeEmulatedOOO))
+                    {
+                        EnqueueMlfqThread(ImmaBeEmulatedOOO, ReadyQueues, InQueue, Levels, SchedulerTick);
+                        IdleWait(IdleWaitSliceMs);
+                        Self.WakeupScanRequired = true;
+                        continue;
+                    }
+
+                    BoundThisSwitch = true;
+                }
+
+                ImmaBeEmulatedOOO.HostWorker = Self.Index;
+                Self.DispatchedThread = ImmaBeEmulatedOOO;
+                DispatchedThreads++;
 
                 if (CurrentThreadId != (int)ImmaBeEmulatedOOO.ThreadId)
                 {
@@ -2869,14 +3225,15 @@ namespace Brovan.Core.Emulation
                         TriggerDebugMessage($"scheduler: switch {CurrentThreadId} -> {ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} state={ImmaBeEmulatedOOO.State} rip=0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X}");
                 }
 
-                SwitchToThread((int)ImmaBeEmulatedOOO.ThreadId);
+                SwitchToThread((int)ImmaBeEmulatedOOO.ThreadId, BoundThisSwitch);
+
                 EmulatedThreadState StateBeforeSlice = ImmaBeEmulatedOOO.State;
                 ulong RipBeforeSlice = ImmaBeEmulatedOOO.Context?.RIP ?? 0;
                 ImmaBeEmulatedOOO.State = EmulatedThreadState.Running;
 
                 uint QuantumInstructions = MlfqQuanta[Math.Max(0, SelectedLevel)];
 
-                if (Debug && (Slices < 64 || (Slices & 0xFF) == 0))
+                if (Debug && (_schedulerSlices < 64 || (_schedulerSlices & 0xFF) == 0))
                 {
                     TriggerDebugMessage($"scheduler: run tid={ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} quantum={QuantumInstructions} priority={ImmaBeEmulatedOOO.EffectivePriority} boost={ImmaBeEmulatedOOO.DynamicBoost} rip=0x{RipBeforeSlice:X}");
                 }
@@ -2907,11 +3264,10 @@ namespace Brovan.Core.Emulation
                     SchedulerRefreshRequested = false;
                 }
 
-                if (!ImmaBeEmulatedOOO.SwitchingContext)
-                {
-                    SaveContext(ImmaBeEmulatedOOO);
-                    _currentContextSaved = true;
-                }
+                SaveContext(ImmaBeEmulatedOOO);
+                CurrentContextSaved = true;
+
+                ReleaseDispatch(Self);
 
                 if (EscapeScheduler)
                 {
@@ -2933,15 +3289,15 @@ namespace Brovan.Core.Emulation
                 }
 
                 ImmaBeEmulatedOOO.InstructionsExecuted += SchedulerSliceWork;
-                Total += SchedulerSliceWork;
+                _schedulerTotal += SchedulerSliceWork;
 
                 bool TimedWaitRescanDue = false;
                 if (SchedulerSliceWork > 1)
                 {
-                    PendingSchedulerInstructions += SchedulerSliceWork;
-                    if (PendingSchedulerInstructions >= SchedulerRescanInstructions)
+                    _schedulerPendingInstructions += SchedulerSliceWork;
+                    if (_schedulerPendingInstructions >= SchedulerRescanInstructions)
                     {
-                        PendingSchedulerInstructions = 0;
+                        _schedulerPendingInstructions = 0;
                         TimedWaitRescanDue = true;
                     }
                 }
@@ -2957,7 +3313,7 @@ namespace Brovan.Core.Emulation
                         TimedWaitRescanDue = true;
                 }
 
-                Slices++;
+                _schedulerSlices++;
                 WinHelper?.KuserSharedData?.RefreshIfUnhooked();
                 ImmaBeEmulatedOOO.LastRunTick = SchedulerTick;
 
@@ -2989,10 +3345,24 @@ namespace Brovan.Core.Emulation
                 else if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
                     ImmaBeEmulatedOOO.DynamicBoost = ClampInt(ImmaBeEmulatedOOO.DynamicBoost - 1, -16, 16);
 
+                // Scans skipped the thread while it was dispatched, so its own wait is checked here.
+                if (SmpEnabled && ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting && ImmaBeEmulatedOOO.WaitActive)
+                {
+                    long EarliestDeadline = EarliestWaitDeadline;
+                    UpdateMlfqThreadWakeup(ImmaBeEmulatedOOO, ReadyQueues, InQueue, Levels, SchedulerTick, EmulatedTickCount64, WakeSignal.Current, ref EarliestDeadline);
+                    EarliestWaitDeadline = EarliestDeadline;
+                }
+
                 if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Ready || ImmaBeEmulatedOOO.State == EmulatedThreadState.Exception)
                     EnqueueMlfqThread(ImmaBeEmulatedOOO, ReadyQueues, InQueue, Levels, SchedulerTick);
                 else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Terminated)
                 {
+                    // The thread is off its worker now, so a release the terminating side skipped runs here.
+                    Guest.OnThreadTerminated(this, ImmaBeEmulatedOOO);
+                    ReleaseThreadProcessor(ImmaBeEmulatedOOO);
+                    // A thread that ended its own slice stays in the table until the slice is fully over.
+                    if (ImmaBeEmulatedOOO.Unreferenced)
+                        Threads.Remove(ImmaBeEmulatedOOO.ThreadId);
                     TrimDeadThreadsFromOrder();
                     KnownThreadOrderCount = ThreadOrder.Count;
                 }
@@ -3001,23 +3371,31 @@ namespace Brovan.Core.Emulation
                     && ImmaBeEmulatedOOO.WaitDeadline != -1 && ImmaBeEmulatedOOO.WaitDeadline < EarliestWaitDeadline)
                     EarliestWaitDeadline = ImmaBeEmulatedOOO.WaitDeadline;
 
-                WakeupScanRequired = SliceRequestedRefresh || TimedWaitRescanDue || ThreadOrder.Count != KnownThreadOrderCount;
+                Self.WakeupScanRequired = SliceRequestedRefresh || TimedWaitRescanDue || ThreadOrder.Count != KnownThreadOrderCount;
 
-                if (Debug && (Slices <= 64 || (Slices & 0xFF) == 0 || ImmaBeEmulatedOOO.State != StateBeforeSlice || SliceRequestedRefresh || TimedWaitRescanDue))
+                if (Debug && (_schedulerSlices <= 64 || (_schedulerSlices & 0xFF) == 0 || ImmaBeEmulatedOOO.State != StateBeforeSlice || SliceRequestedRefresh || TimedWaitRescanDue))
                 {
-                    TriggerDebugMessage($"scheduler: slice tid={ImmaBeEmulatedOOO.ThreadId} {StateBeforeSlice}->{ImmaBeEmulatedOOO.State} work={SchedulerSliceWork} total={Total} rip=0x{RipBeforeSlice:X}->0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X} refresh={SliceRequestedRefresh} rescanDue={TimedWaitRescanDue} boost={ImmaBeEmulatedOOO.DynamicBoost}");
+                    TriggerDebugMessage($"scheduler: slice tid={ImmaBeEmulatedOOO.ThreadId} {StateBeforeSlice}->{ImmaBeEmulatedOOO.State} work={SchedulerSliceWork} total={_schedulerTotal} rip=0x{RipBeforeSlice:X}->0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X} refresh={SliceRequestedRefresh} rescanDue={TimedWaitRescanDue} boost={ImmaBeEmulatedOOO.DynamicBoost}");
                 }
 
-                if (MaxTotalInstructions != 0 && Total >= MaxTotalInstructions)
+                // Between slices a worker runs no thread, so nothing may treat the parked one as current.
+                if (SmpEnabled)
+                {
+                    Self.LastThreadId = Self.CurrentThreadId;
+                    Self.CurrentThreadId = -1;
+                    Self.CurrentThreadCache = null;
+                }
+
+                if (MaxTotalInstructions != 0 && _schedulerTotal >= MaxTotalInstructions)
                 {
                     if (Debug)
-                        TriggerDebugMessage($"scheduler: max instruction budget reached total={Total} slices={Slices}");
+                        TriggerDebugMessage($"scheduler: max instruction budget reached total={_schedulerTotal} slices={_schedulerSlices}");
                     return true;
                 }
-                if (MaxSlices != 0 && Slices >= MaxSlices)
+                if (MaxSlices != 0 && _schedulerSlices >= MaxSlices)
                 {
                     if (Debug)
-                        TriggerDebugMessage($"scheduler: max slice budget reached total={Total} slices={Slices}");
+                        TriggerDebugMessage($"scheduler: max slice budget reached total={_schedulerTotal} slices={_schedulerSlices}");
                     return true;
                 }
             }
@@ -3148,6 +3526,7 @@ namespace Brovan.Core.Emulation
         {
             if (Debug)
                 TriggerDebugMessage($"cpu: syscall instruction at 0x{ReadRegister(IPRegister):X}");
+            long EpochBeforeCallback = WakeSignal.Current;
             try
             {
                 Guest.TryHandleSyscall(this);
@@ -3159,6 +3538,8 @@ namespace Brovan.Core.Emulation
                 SchedulerRefreshRequested = true;
                 Utils.LogError($"[GuestSyscall] Error: {ex.Message}");
             }
+
+            ScanWakeupsAfterCallback(EpochBeforeCallback);
         }
 
         public void Start()
@@ -3389,6 +3770,7 @@ namespace Brovan.Core.Emulation
             {
                 EmuThread.State = EmulatedThreadState.Terminated;
             }
+            _emulator.StopAllProcessors();
             return _emulator.StopEmulation();
         }
 

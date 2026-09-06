@@ -1,11 +1,12 @@
 using System;
-using System.Threading;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtLockFile : IWinSyscall
     {
+        private const int LockRetrySliceMilliseconds = 1;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 
@@ -55,20 +56,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return RangeStatus;
             }
 
-            while (true)
+            if (FileObj.GetConflictingLock(Offset, Length, Key, ExclusiveLock) != null)
             {
-                WinFile.WinLockFile Conflict = FileObj.GetConflictingLock(Offset, Length, Key, ExclusiveLock);
-                if (Conflict == null)
-                    break;
+                if (!FailImmediately && Instance.WinHelper.TryRetrySyscallAfterSlice(LockRetrySliceMilliseconds))
+                    return NTSTATUS.STATUS_PENDING;
 
-                if (FailImmediately)
-                {
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_LOCK_NOT_GRANTED, 0);
-                    SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_LOCK_NOT_GRANTED);
-                    return NTSTATUS.STATUS_LOCK_NOT_GRANTED;
-                }
-
-                Thread.Sleep(1);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_LOCK_NOT_GRANTED, 0);
+                SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_LOCK_NOT_GRANTED);
+                return NTSTATUS.STATUS_LOCK_NOT_GRANTED;
             }
 
             FileObj.AddLock(Offset, Length, Key, ExclusiveLock);

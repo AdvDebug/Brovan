@@ -200,6 +200,10 @@ namespace Brovan.Core.Emulation.Guests
         {
         }
 
+        public void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+        }
+
         public bool HasPendingGuestWork(BinaryEmulator Instance, EmulatedThread Thread)
         {
             return false;

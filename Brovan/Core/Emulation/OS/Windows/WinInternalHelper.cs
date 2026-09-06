@@ -6,6 +6,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -240,6 +241,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             return ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles) ? Handles.Count : 0;
         }
 
+        public bool HasHandleToObject(IHandleObject Object)
+        {
+            if (Object == null || !ObjectIdToHandles.TryGetValue(Object.ObjectId, out List<ulong> Handles))
+                return false;
+
+            for (int Index = 0; Index < Handles.Count; Index++)
+            {
+                if (HandleTable.TryGetValue(Handles[Index], out HandleEntry Entry) && ReferenceEquals(Entry.Object, Object))
+                    return true;
+            }
+
+            return false;
+        }
+
         public T? GetObjectByObjectId<T>(string ObjectId) where T : class, IHandleObject
         {
             if (!ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles))
@@ -416,6 +431,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // A skew jump moves the anchor; drift between two host clocks stays below this and would only show
         // to the guest as a backward step.
         private const long SharedPageReanchorTicks = 1000;
+        private const long SharedPageBackwardTicks = 100000;
 
         private ulong _sharedPageScale;
         private ulong _sharedPageOffset;
@@ -448,12 +464,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong Scaled = (ulong)(((UInt128)Counter * SharedPageScale) >> 64);
             ulong Offset = Emulator.GetEmulatedPerformanceCounter() - Scaled;
             long Delta = unchecked((long)(Offset - _sharedPageOffset));
-            if (_sharedPageAnchored && Delta > -SharedPageReanchorTicks && Delta < SharedPageReanchorTicks)
+
+            // A smaller offset steps a reader on another processor backwards, so it takes a much wider
+            // miss to be worth publishing.
+            if (_sharedPageAnchored && Delta < SharedPageReanchorTicks && Delta > -SharedPageBackwardTicks)
                 return;
 
             _sharedPageOffset = Offset;
             _sharedPageAnchored = true;
             _sharedPageSequence = _sharedPageSequence == uint.MaxValue ? 1 : _sharedPageSequence + 1;
+
+            // The offset store lands before the sequence that publishes it.
             Emulator._emulator.WriteMemory(HypervisorSharedPage + OffsetSharedPageOffset, Offset, 8);
             Emulator._emulator.WriteMemory(HypervisorSharedPage + OffsetSharedPageSequence, _sharedPageSequence, 4);
         }
@@ -597,9 +618,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint Low = (uint)(Value & 0xFFFFFFFF);
             uint High = (uint)(Value >> 32);
 
-            BitConverter.TryWriteBytes(Page.Slice(Offset, 4), Low);
-            BitConverter.TryWriteBytes(Page.Slice(Offset + 4, 4), High);
+            // NT: a reader retries while High1Time differs from High2Time, so High2Time lands first.
             BitConverter.TryWriteBytes(Page.Slice(Offset + 8, 4), High);
+            BitConverter.TryWriteBytes(Page.Slice(Offset, 4), Low);
+            Volatile.Write(ref MemoryMarshal.AsRef<uint>(Page.Slice(Offset + 4, 4)), High);
         }
 
         private int GetSystemCallOffset()
@@ -777,11 +799,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint Low = (uint)(Value & 0xFFFFFFFF);
             uint High = (uint)(Value >> 32);
 
-            Span<byte> Tmp = stackalloc byte[12];
-            BitConverter.TryWriteBytes(Tmp.Slice(0, 4), Low);
-            BitConverter.TryWriteBytes(Tmp.Slice(4, 4), High);
-            BitConverter.TryWriteBytes(Tmp.Slice(8, 4), High);
-            Emulator._emulator.WriteMemory(Emulator.KUSER_SHARED_DATA + (ulong)Offset, Tmp);
+            ulong Address = Emulator.KUSER_SHARED_DATA + (ulong)Offset;
+            Emulator._emulator.WriteMemory(Address + 8, High, 4);
+            Emulator._emulator.WriteMemory(Address, Low, 4);
+            Emulator._emulator.WriteMemory(Address + 4, High, 4);
         }
     }
 
@@ -827,6 +848,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private int DelayEdges;
 
         private long LastPumpTicks;
+        private ulong ListHead;
+        private ulong LastHeadFlink;
+        private ulong LastHeadBlink;
 
         private readonly Dictionary<ulong, ModuleInfo> LastSnapshot = new Dictionary<ulong, ModuleInfo>();
 
@@ -896,7 +920,36 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!PollDriven)
                 return;
 
+            PollListHead();
             Drain();
+        }
+
+        // Every load and unload touches the list head. Reading it costs less than a write watch on the page
+        // it shares with the loader lock.
+        private void PollListHead()
+        {
+            if (ListHead == 0)
+            {
+                ulong LdrData = SafeReadPointer(Emulator.PEB + (ulong)PebOffsetLdr);
+                if (LdrData == 0 || !Emulator.IsRegionMapped(LdrData, (uint)PebLdrSize))
+                    return;
+                ListHead = LdrData + (ulong)PebLdrOffsetInLoadOrder;
+                if (!Emulator.IsRegionMapped(ListHead, (uint)(PointerSize * 2)))
+                {
+                    ListHead = 0;
+                    return;
+                }
+            }
+
+            if (!TryReadHeadLinks(out ulong Flink, out ulong Blink))
+                return;
+            if (Flink == LastHeadFlink && Blink == LastHeadBlink)
+                return;
+
+            LastHeadFlink = Flink;
+            LastHeadBlink = Blink;
+            PendingSync = true;
+            DelayEdges = 2;
         }
 
         private void Drain()
@@ -976,7 +1029,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (PendingRefreshHooks)
             {
                 PendingRefreshHooks = false;
-                RefreshLdrHooks();
+                if (!PollDriven)
+                    RefreshLdrHooks();
             }
 
             if (!PendingSync)
@@ -1179,6 +1233,35 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 return false;
             }
+        }
+
+        // PEB_LDR_DATA stays mapped for the life of the process, so the range check made when the head was
+        // resolved still holds.
+        private bool TryReadHeadLinks(out ulong Flink, out ulong Blink)
+        {
+            Flink = 0;
+            Blink = 0;
+
+            Span<byte> Links = stackalloc byte[16];
+            try
+            {
+                Emulator.ReadMemory(ListHead, Links.Slice(0, PointerSize * 2));
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (PointerSize == 8)
+            {
+                Flink = BitConverter.ToUInt64(Links.Slice(0, 8));
+                Blink = BitConverter.ToUInt64(Links.Slice(8, 8));
+                return true;
+            }
+
+            Flink = BitConverter.ToUInt32(Links.Slice(0, 4));
+            Blink = BitConverter.ToUInt32(Links.Slice(4, 4));
+            return true;
         }
 
         private ulong SafeReadPointer(ulong address)

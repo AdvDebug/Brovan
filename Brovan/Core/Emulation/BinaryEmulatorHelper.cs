@@ -124,6 +124,7 @@ namespace Brovan.Core.Emulation
         ulong CreateInitialThread(BinaryEmulator Instance);
         EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8);
         void OnThreadContextLoaded(BinaryEmulator Instance, EmulatedThread Thread);
+        void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread);
         bool HasPendingGuestWork(BinaryEmulator Instance, EmulatedThread Thread);
         bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle);
         bool ExecuteThreadSlice(BinaryEmulator Instance, EmulatedThread Thread, uint QuantumInstructions, out bool State);

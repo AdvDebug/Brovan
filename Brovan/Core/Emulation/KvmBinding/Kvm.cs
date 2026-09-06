@@ -39,6 +39,9 @@ namespace Brovan.Core.Emulation
         private const int MaxVirtualProcessors = 1024;
         private int _maxMemslots;
         private bool _supportsXsave;
+        private bool _supportsVcpuAttributes;
+        private bool _tscOffsetKnown;
+        private ulong _tscOffset;
         private int _nextSlotId;
         private readonly List<int> _freeSlotIds = new();
         private readonly Dictionary<ulong, InstalledSlot> _activeSlots = new();
@@ -58,6 +61,8 @@ namespace Brovan.Core.Emulation
         private readonly Dictionary<ulong, InstalledSlot> _desiredSlots = new();
         private readonly List<ulong> _staleSlotKeys = new();
         private readonly List<ulong> _activeSlotStarts = new();
+        private readonly HashSet<ulong> _keptSlotStarts = new();
+        private const int SlotHeadroom = 64;
         private bool _fullRebuildRequired = true;
         private readonly List<DirtyRange> _dirtyRanges = new();
         private const int MaxDirtyRanges = 16;
@@ -73,40 +78,76 @@ namespace Brovan.Core.Emulation
         private ulong _syscallTrapPageGpa;
         private ulong _exceptionStubPageGpa;
         private ulong _exceptionIdtPageGpa;
-        private ulong _exceptionTssPageGpa;
-        private ulong _exceptionStackPageGpa;
         private ulong _gdtPageGpa;
+        private const ulong ExceptionStackPages = 2;
 
         private readonly object _vcpuLock = new();
 
         private sealed class VirtualProcessor
         {
+            public Kvm Owner;
             public int Index;
             public int Fd = -1;
             public IntPtr RunPtr;
             public uint ThreadId;
+            public ulong GdtPageGpa;
+            public ulong TssPageGpa;
 
             // Parked in the trap page with kernel CS/SS, so no segment write reaches the vCPU.
             public bool InSyscallStub;
+
+            public bool MmioCompletionPending;
+            public bool FaultRegistersSaved;
+            public LinuxKvmRegisters FaultRegisters;
+
+            public volatile bool StopRequested;
+            public volatile bool Running;
+            public int HostThreadId;
+            public int HostTid;
+            public bool SingleStepRequested;
+            public long SliceDeadlineTimestamp;
+
+            // Bumped when the vCPU leaves a guest thread. A selection made before the bump is stale.
+            public long Binding;
         }
 
         // The trap page holds hlt at 0 and sysretq at 8.
         private const ulong SyscallReturnOffset = 8;
 
-        // One vCPU per guest thread. Threads past the limit share vCPU 0 and swap state each slice.
-        private VirtualProcessor _vp;
+        // One vCPU per guest thread. A thread that cannot get one waits.
         private readonly List<VirtualProcessor> _processors = new();
+        private VirtualProcessor[] _processorSnapshot = Array.Empty<VirtualProcessor>();
         private readonly Stack<VirtualProcessor> _idleProcessors = new();
         private readonly Dictionary<uint, VirtualProcessor> _threadProcessors = new();
         private int _processorLimit;
-        private VirtualProcessor _runningProcessor;
-        private int _emulateManagedThreadId;
-        private int _emulateTid;
+
+        [ThreadStatic]
+        private static VirtualProcessor t_vp;
+        [ThreadStatic]
+        private static long t_vpBinding;
+
+        private VirtualProcessor CurrentVp
+        {
+            get
+            {
+                VirtualProcessor vp = t_vp;
+                return vp != null && ReferenceEquals(vp.Owner, this) && vp.Binding == t_vpBinding
+                    ? vp
+                    : _processors[0];
+            }
+        }
+
+        private static void SelectProcessor(VirtualProcessor vp)
+        {
+            t_vp = vp;
+            t_vpBinding = vp.Binding;
+        }
+
+        private object _runLock;
 
         // KVM cannot end a run after a set instruction count, so a slice is bounded by wall clock.
         private const int BoundedSliceMilliseconds = 10;
         private Thread _maintenanceThread;
-        private long _sliceDeadlineTimestamp;
 
         // A vCPU in guest mode leaves only for a signal.
         private static int _kickSignal;
@@ -120,8 +161,6 @@ namespace Brovan.Core.Emulation
         private readonly List<IntPtr> _liveHookHandles = new();
 
         private bool _hasCpuIdHook;
-        private bool _hasRdtscHook;
-        private bool _hasRdtscpHook;
         private bool _hasInvalidHook;
         private bool _scanPreRunInstructions;
 
@@ -130,11 +169,6 @@ namespace Brovan.Core.Emulation
 
         private int _disposed;
         private int _disposing;
-        private volatile bool _stopRequested;
-        private bool _mmioCompletionPending;
-        private bool _faultRegistersSaved;
-        private LinuxKvmRegisters _faultRegisters;
-        private bool _singleStepRequested;
 
         public bool NoHooks;
         public static bool ThrowDisposed = true;
@@ -143,7 +177,8 @@ namespace Brovan.Core.Emulation
         public bool SupportsXsave => _supportsXsave;
         private bool Disposing => Volatile.Read(ref _disposing) == 1;
 
-        private KvmErrors _error;
+        [ThreadStatic]
+        private static KvmErrors _error;
 
         private sealed class MappedPage
         {
@@ -231,7 +266,7 @@ namespace Brovan.Core.Emulation
             InitializeGdt();
             InitializeSyscallTrapPage();
             InitializeExceptionHandling();
-            _vp = CreateProcessor(0);
+            SelectProcessor(CreateProcessor(0));
             _timestampCounterFrequency = QueryTimestampCounterFrequency();
             RebuildMappings();
         }
@@ -244,7 +279,7 @@ namespace Brovan.Core.Emulation
         {
             if (KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapGetTscKhz) <= 0)
                 return 0;
-            int khz = KvmNative.ioctl(_vp.Fd, KvmConstants.KvmIoGetTscKhz, IntPtr.Zero);
+            int khz = KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoGetTscKhz, IntPtr.Zero);
             return khz <= 0 ? 0 : (ulong)khz * 1000;
         }
 
@@ -256,7 +291,7 @@ namespace Brovan.Core.Emulation
 
             try
             {
-                value = GetMsr(_vp, KvmConstants.MsrTsc);
+                value = GetMsr(CurrentVp, KvmConstants.MsrTsc);
                 return true;
             }
             catch (KvmException)
@@ -883,7 +918,7 @@ namespace Brovan.Core.Emulation
 
             if (_mappingsDirty) RebuildMappings();
 
-            VirtualProcessor vp = _vp;
+            VirtualProcessor vp = CurrentVp;
             ref LinuxKvmRun run = ref GetRunRef(vp);
 
             ClearTrapFlag();
@@ -891,40 +926,41 @@ namespace Brovan.Core.Emulation
             run.Regs.Rip = start;
             MarkRegistersDirty();
 
-            _stopRequested = false;
-            _mmioCompletionPending = false;
-            _faultRegistersSaved = false;
-            _singleStepRequested = count == 1;
+            vp.StopRequested = false;
+            vp.MmioCompletionPending = false;
+            vp.FaultRegistersSaved = false;
+            vp.SingleStepRequested = count == 1;
             run.ImmediateExit = 0;
 
-            if (_emulateManagedThreadId != Environment.CurrentManagedThreadId)
+            if (vp.HostThreadId != Environment.CurrentManagedThreadId)
             {
-                _emulateManagedThreadId = Environment.CurrentManagedThreadId;
-                Volatile.Write(ref _emulateTid, KvmNative.gettid());
+                vp.HostThreadId = Environment.CurrentManagedThreadId;
+                Volatile.Write(ref vp.HostTid, KvmNative.gettid());
             }
-            Volatile.Write(ref _runningProcessor, vp);
 
             bool bounded = count != 0;
             if (bounded)
             {
                 EnsureMaintenanceThread();
-                Volatile.Write(ref _sliceDeadlineTimestamp,
+                Volatile.Write(ref vp.SliceDeadlineTimestamp,
                     Stopwatch.GetTimestamp() + (Stopwatch.Frequency * BoundedSliceMilliseconds) / 1000);
             }
 
-            if (_singleStepRequested)
+            if (vp.SingleStepRequested)
             {
                 run.Regs.Rflags |= 0x100UL;
                 MarkRegistersDirty();
             }
+
+            bool releaseRunLock = _runLock != null && Monitor.IsEntered(_runLock);
 
             try
             {
                 while (true)
                 {
                     // Zero means the deadline was consumed, by the timer or by a kick.
-                    bool sliceOver = _stopRequested || (bounded && Volatile.Read(ref _sliceDeadlineTimestamp) == 0);
-                    if (sliceOver && !_mmioCompletionPending)
+                    bool sliceOver = vp.StopRequested || (bounded && Volatile.Read(ref vp.SliceDeadlineTimestamp) == 0);
+                    if (sliceOver && !vp.MmioCompletionPending)
                         break;
 
                     if (HandlePreRunInstruction()) continue;
@@ -933,30 +969,25 @@ namespace Brovan.Core.Emulation
 
                     if (vp.InSyscallStub) PrepareSyscallReturn(vp, ref run);
 
-                    int rc;
-                    lock (_vcpuLock)
-                    {
-                        rc = KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoRun, IntPtr.Zero);
-                    }
+                    int rc = RunProcessor(vp, releaseRunLock, out int errno);
 
                     if (vp.InSyscallStub) CompleteSyscallReturn(vp, ref run);
 
-                    if (_mmioCompletionPending)
+                    if (vp.MmioCompletionPending)
                     {
-                        _mmioCompletionPending = false;
-                        if (_faultRegistersSaved && (rc < 0 || run.ExitReason != KvmConstants.ExitMmio))
+                        vp.MmioCompletionPending = false;
+                        if (vp.FaultRegistersSaved && (rc < 0 || run.ExitReason != KvmConstants.ExitMmio))
                         {
-                            _faultRegistersSaved = false;
-                            SetRegisters(_faultRegisters);
+                            vp.FaultRegistersSaved = false;
+                            SetRegisters(vp.FaultRegisters);
                         }
                     }
 
                     if (rc < 0)
                     {
-                        int errno = Marshal.GetLastWin32Error();
                         if (errno == KvmNative.ErrnoEintr)
                         {
-                            ClearImmediateExit(ref run, bounded);
+                            ClearImmediateExit(vp, ref run, bounded);
                             continue;
                         }
 
@@ -967,10 +998,10 @@ namespace Brovan.Core.Emulation
                     switch (run.ExitReason)
                     {
                         case KvmConstants.ExitHlt:
-                            if (HandleHltExit()) continue;
+                            if (HandleHltExit(vp)) continue;
                             return _error == KvmErrors.Ok;
                         case KvmConstants.ExitMmio:
-                            if (!HandleMmioExit(ref run))
+                            if (!HandleMmioExit(vp, ref run))
                                 StopEmulation();
                             continue;
                         case KvmConstants.ExitException:
@@ -989,7 +1020,7 @@ namespace Brovan.Core.Emulation
                             _error = KvmErrors.Ok;
                             return true;
                         case KvmConstants.ExitIntr:
-                            ClearImmediateExit(ref run, bounded);
+                            ClearImmediateExit(vp, ref run, bounded);
                             continue;
                         case KvmConstants.ExitShutdown:
                             _error = KvmErrors.Exception;
@@ -1011,26 +1042,43 @@ namespace Brovan.Core.Emulation
             }
             finally
             {
-                Volatile.Write(ref _sliceDeadlineTimestamp, 0);
-                Volatile.Write(ref _runningProcessor, null);
+                Volatile.Write(ref vp.SliceDeadlineTimestamp, 0);
 
-                if (_singleStepRequested)
+                if (vp.SingleStepRequested)
                 {
-                    _singleStepRequested = false;
+                    vp.SingleStepRequested = false;
                     ClearTrapFlag();
                 }
             }
         }
 
-        // KVM never clears immediate_exit, and leaving it set makes every later KVM_RUN return -EINTR.
-        private void ClearImmediateExit(ref LinuxKvmRun run, bool bounded)
+        private int RunProcessor(VirtualProcessor vp, bool releaseRunLock, out int errno)
         {
-            if (_stopRequested) return;
-            if (bounded && Volatile.Read(ref _sliceDeadlineTimestamp) == 0) return;
+            int rc;
+            vp.Running = true;
+            if (releaseRunLock) Monitor.Exit(_runLock);
+            try
+            {
+                rc = KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoRun, IntPtr.Zero);
+                errno = rc < 0 ? Marshal.GetLastWin32Error() : 0;
+            }
+            finally
+            {
+                if (releaseRunLock) Monitor.Enter(_runLock);
+                vp.Running = false;
+            }
+            return rc;
+        }
+
+        // KVM never clears immediate_exit, and leaving it set makes every later KVM_RUN return -EINTR.
+        private static void ClearImmediateExit(VirtualProcessor vp, ref LinuxKvmRun run, bool bounded)
+        {
+            if (vp.StopRequested) return;
+            if (bounded && Volatile.Read(ref vp.SliceDeadlineTimestamp) == 0) return;
 
             run.ImmediateExit = 0;
             Interlocked.MemoryBarrier();
-            if (bounded && Volatile.Read(ref _sliceDeadlineTimestamp) == 0)
+            if (bounded && Volatile.Read(ref vp.SliceDeadlineTimestamp) == 0)
                 run.ImmediateExit = 1;
         }
 
@@ -1038,14 +1086,41 @@ namespace Brovan.Core.Emulation
         {
             if (DisposedCheck()) return false;
 
-            _stopRequested = true;
-            if (Environment.CurrentManagedThreadId == _emulateManagedThreadId)
-                GetRunRef().ImmediateExit = 1;
+            VirtualProcessor vp = CurrentVp;
+            vp.StopRequested = true;
+            if (Environment.CurrentManagedThreadId == vp.HostThreadId)
+                GetRunRef(vp).ImmediateExit = 1;
             else
-                KickRunningProcessor();
+                KickProcessor(vp);
 
             _error = KvmErrors.Ok;
             return true;
+        }
+
+        public void UseRunLock(object runLock) => _runLock = runLock;
+
+        public void StopThread(uint threadId)
+        {
+            if (Disposed || Disposing) return;
+            if (!_threadProcessors.TryGetValue(threadId, out VirtualProcessor vp)) return;
+
+            vp.StopRequested = true;
+            if (vp.Running)
+                KickProcessor(vp);
+        }
+
+        public void StopAllProcessors()
+        {
+            if (Disposed || Disposing) return;
+
+            VirtualProcessor[] processors = Volatile.Read(ref _processorSnapshot);
+            for (int i = 0; i < processors.Length; i++)
+            {
+                VirtualProcessor vp = processors[i];
+                vp.StopRequested = true;
+                if (vp.Running)
+                    KickProcessor(vp);
+            }
         }
 
         private void EnsureMaintenanceThread()
@@ -1066,52 +1141,55 @@ namespace Brovan.Core.Emulation
         {
             while (!Disposed && !Disposing)
             {
-                EnforceSliceDeadline();
+                EnforceSliceDeadlines();
                 Thread.Sleep(1);
             }
         }
 
         public bool TryLimitSlice(int microseconds)
         {
+            VirtualProcessor vp = CurrentVp;
             long limit = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * microseconds) / 1_000_000;
             while (true)
             {
-                long deadline = Volatile.Read(ref _sliceDeadlineTimestamp);
+                long deadline = Volatile.Read(ref vp.SliceDeadlineTimestamp);
                 if (deadline == 0)
                     return false;
                 if (limit >= deadline)
                     return true;
-                if (Interlocked.CompareExchange(ref _sliceDeadlineTimestamp, limit, deadline) == deadline)
+                if (Interlocked.CompareExchange(ref vp.SliceDeadlineTimestamp, limit, deadline) == deadline)
                     return true;
             }
         }
 
-        private void EnforceSliceDeadline()
+        private void EnforceSliceDeadlines()
         {
-            long deadline = Volatile.Read(ref _sliceDeadlineTimestamp);
-            if (deadline == 0 || Stopwatch.GetTimestamp() < deadline)
-                return;
-
             if (Disposed || Disposing)
                 return;
 
-            if (Interlocked.CompareExchange(ref _sliceDeadlineTimestamp, 0, deadline) != deadline)
-                return;
+            VirtualProcessor[] processors = Volatile.Read(ref _processorSnapshot);
+            long now = Stopwatch.GetTimestamp();
+            for (int i = 0; i < processors.Length; i++)
+            {
+                VirtualProcessor vp = processors[i];
+                long deadline = Volatile.Read(ref vp.SliceDeadlineTimestamp);
+                if (deadline == 0 || now < deadline)
+                    continue;
 
-            KickRunningProcessor();
+                if (Interlocked.CompareExchange(ref vp.SliceDeadlineTimestamp, 0, deadline) != deadline)
+                    continue;
+
+                KickProcessor(vp);
+            }
         }
 
         // immediate_exit stops a run that has not entered the guest yet, the signal stops one that has.
-        private void KickRunningProcessor()
+        private void KickProcessor(VirtualProcessor vp)
         {
-            VirtualProcessor vp = Volatile.Read(ref _runningProcessor);
-            if (vp == null)
-                return;
-
             Volatile.Write(ref GetRunRef(vp).ImmediateExit, 1);
             Interlocked.MemoryBarrier();
 
-            int tid = Volatile.Read(ref _emulateTid);
+            int tid = Volatile.Read(ref vp.HostTid);
             if (tid != 0)
                 KvmNative.tgkill(_pid, tid, _kickSignal);
         }
@@ -1512,7 +1590,7 @@ namespace Brovan.Core.Emulation
         }
 
         private unsafe ref LinuxKvmRun GetRunRef()
-            => ref Unsafe.AsRef<LinuxKvmRun>((void*)_vp.RunPtr);
+            => ref Unsafe.AsRef<LinuxKvmRun>((void*)CurrentVp.RunPtr);
 
         private static unsafe ref LinuxKvmRun GetRunRef(VirtualProcessor vp)
             => ref Unsafe.AsRef<LinuxKvmRun>((void*)vp.RunPtr);
@@ -1556,6 +1634,7 @@ namespace Brovan.Core.Emulation
                 _maxMemslots = DefaultMemslotCount;
 
             _supportsXsave = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapXsave) > 0;
+            _supportsVcpuAttributes = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapVcpuAttributes) > 0;
 
             const ulong requiredSync = KvmConstants.SyncGeneralRegisters | KvmConstants.SyncSpecialRegisters;
             int syncRegs = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapSyncRegs);
@@ -1612,11 +1691,69 @@ namespace Brovan.Core.Emulation
                 throw new KvmException("mmap(KVM_RUN) failed", errno);
             }
 
-            VirtualProcessor vp = new VirtualProcessor { Index = index, Fd = fd, RunPtr = runPtr };
+            VirtualProcessor vp = new VirtualProcessor { Owner = this, Index = index, Fd = fd, RunPtr = runPtr };
+
+            try
+            {
+                AllocateProcessorTables(vp);
+                InitializeCpuid(vp);
+                InitializeVirtualProcessorState(vp);
+                AlignTimestampCounter(vp);
+            }
+            catch
+            {
+                KvmNative.munmap(runPtr, (UIntPtr)_runMmapSize);
+                KvmNative.close(fd);
+                throw;
+            }
+
             _processors.Add(vp);
-            InitializeCpuid(vp);
-            InitializeVirtualProcessorState(vp);
+            Volatile.Write(ref _processorSnapshot, _processors.ToArray());
             return vp;
+        }
+
+        private unsafe void AllocateProcessorTables(VirtualProcessor vp)
+        {
+            vp.GdtPageGpa = AllocateInternalPage(false);
+            vp.TssPageGpa = AllocateInternalPage(false);
+            ulong stackSize = ExceptionStackPages * KvmConstants.PageSize;
+            ulong stackTop = AllocateInternalRange(stackSize, KvmMemoryPermission.ReadWrite) + stackSize;
+
+            if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage template)
+                || !_mappedPages.TryGetValue(vp.GdtPageGpa, out MappedPage gdtPage)
+                || !_mappedPages.TryGetValue(vp.TssPageGpa, out MappedPage tssPage))
+                throw new KvmException("Failed to allocate the processor tables.");
+
+            byte* gdt = (byte*)gdtPage.HostPage;
+            Unsafe.CopyBlockUnaligned(gdt, (byte*)template.HostPage, (uint)KvmConstants.PageSize);
+            WriteTssDescriptor(gdt, vp.TssPageGpa);
+
+            byte* tss = (byte*)tssPage.HostPage;
+            Unsafe.WriteUnaligned(tss + 0x04, stackTop);
+            Unsafe.WriteUnaligned(tss + 0x24, stackTop);
+            Unsafe.WriteUnaligned(tss + 0x66, (ushort)0x68);
+        }
+
+        private static unsafe void WriteTssDescriptor(byte* gdt, ulong tssBase)
+        {
+            int tssIndex = KvmConstants.TssSelector >> 3;
+            uint tssLimit = 0x67;
+            gdt[tssIndex * 8 + 0] = (byte)(tssLimit & 0xFF);
+            gdt[tssIndex * 8 + 1] = (byte)((tssLimit >> 8) & 0xFF);
+            gdt[tssIndex * 8 + 2] = (byte)(tssBase & 0xFF);
+            gdt[tssIndex * 8 + 3] = (byte)((tssBase >> 8) & 0xFF);
+            gdt[tssIndex * 8 + 4] = (byte)((tssBase >> 16) & 0xFF);
+            gdt[tssIndex * 8 + 5] = (byte)(0x89 | 0x80);
+            gdt[tssIndex * 8 + 6] = (byte)(((tssLimit >> 16) & 0xF) | 0x00);
+            gdt[tssIndex * 8 + 7] = (byte)((tssBase >> 24) & 0xFF);
+            gdt[tssIndex * 8 + 8] = (byte)((tssBase >> 32) & 0xFF);
+            gdt[tssIndex * 8 + 9] = (byte)((tssBase >> 40) & 0xFF);
+            gdt[tssIndex * 8 + 10] = (byte)((tssBase >> 48) & 0xFF);
+            gdt[tssIndex * 8 + 11] = (byte)((tssBase >> 56) & 0xFF);
+            gdt[tssIndex * 8 + 12] = 0;
+            gdt[tssIndex * 8 + 13] = 0;
+            gdt[tssIndex * 8 + 14] = 0;
+            gdt[tssIndex * 8 + 15] = 0;
         }
 
         private unsafe void InitializeCpuid(VirtualProcessor vp)
@@ -1664,12 +1801,12 @@ namespace Brovan.Core.Emulation
             sregs.Cr4 = 0x620UL;
             sregs.Cr3 = _pml4Gpa;
             sregs.Efer = (1UL << 0) | (1UL << 8) | (1UL << 10) | (1UL << 11);
-            sregs.Gdt.Base = _gdtPageGpa;
+            sregs.Gdt.Base = vp.GdtPageGpa;
             sregs.Gdt.Limit = 0x48;
             sregs.Idt.Base = _exceptionIdtPageGpa;
             sregs.Idt.Limit = (ushort)(KvmConstants.ExceptionVectorCount * 16 - 1);
             sregs.Tr.Selector = KvmConstants.TssSelector;
-            sregs.Tr.Base = _exceptionTssPageGpa;
+            sregs.Tr.Base = vp.TssPageGpa;
             sregs.Tr.Limit = 0x67;
             sregs.Tr.Type = 11;
             sregs.Tr.S = 0;
@@ -1708,6 +1845,8 @@ namespace Brovan.Core.Emulation
         }
 
         public bool SupportsThreadResidency => _processorLimit > 1;
+
+        public int ProcessorLimit => _processorLimit;
 
         public bool IsThreadResident(uint threadId) => _threadProcessors.ContainsKey(threadId);
 
@@ -1753,9 +1892,8 @@ namespace Brovan.Core.Emulation
                 return;
 
             vp.ThreadId = 0;
+            vp.Binding++;
             _idleProcessors.Push(vp);
-            if (ReferenceEquals(_vp, vp))
-                _vp = _processors[0];
         }
 
         public void SelectThread(uint threadId)
@@ -1766,7 +1904,7 @@ namespace Brovan.Core.Emulation
                 LeaveSyscallStub(vp);
                 vp.ThreadId = threadId;
             }
-            _vp = vp;
+            SelectProcessor(vp);
         }
 
         private void InitializeSyscallTrapPage()
@@ -1814,10 +1952,6 @@ namespace Brovan.Core.Emulation
         {
             _exceptionStubPageGpa = AllocateInternalPage(true);
             _exceptionIdtPageGpa = AllocateInternalPage(false);
-            _exceptionTssPageGpa = AllocateInternalPage(false);
-
-            ulong exceptionStackSize = 16 * KvmConstants.PageSize;
-            _exceptionStackPageGpa = AllocateInternalRange(exceptionStackSize, KvmMemoryPermission.ReadWrite);
 
             unsafe
             {
@@ -1844,43 +1978,6 @@ namespace Brovan.Core.Emulation
                         Unsafe.WriteUnaligned(idt + vector * 16, low);
                         Unsafe.WriteUnaligned(idt + vector * 16 + 8, (uint)high);
                     }
-                }
-
-                if (_mappedPages.TryGetValue(_exceptionTssPageGpa, out MappedPage tssPage))
-                {
-                    byte* tss = (byte*)tssPage.HostPage;
-                    ulong stackTop = _exceptionStackPageGpa + exceptionStackSize;
-                    Unsafe.WriteUnaligned(tss + 0x04, stackTop);
-                    Unsafe.WriteUnaligned(tss + 0x24, stackTop);
-                    ushort ioMapBase = 0x68;
-                    Unsafe.WriteUnaligned(tss + 0x66, ioMapBase);
-                }
-            }
-
-            if (_gdtPageGpa != 0 && _mappedPages.TryGetValue(_gdtPageGpa, out MappedPage gdtMapped) && gdtMapped.HostPage != IntPtr.Zero)
-            {
-                unsafe
-                {
-                    byte* gdt = (byte*)gdtMapped.HostPage;
-                    int tssIndex = KvmConstants.TssSelector >> 3;
-                    ulong tssBase = _exceptionTssPageGpa;
-                    uint tssLimit = 0x67;
-                    gdt[tssIndex * 8 + 0] = (byte)(tssLimit & 0xFF);
-                    gdt[tssIndex * 8 + 1] = (byte)((tssLimit >> 8) & 0xFF);
-                    gdt[tssIndex * 8 + 2] = (byte)(tssBase & 0xFF);
-                    gdt[tssIndex * 8 + 3] = (byte)((tssBase >> 8) & 0xFF);
-                    gdt[tssIndex * 8 + 4] = (byte)((tssBase >> 16) & 0xFF);
-                    gdt[tssIndex * 8 + 5] = (byte)(0x89 | 0x80);
-                    gdt[tssIndex * 8 + 6] = (byte)(((tssLimit >> 16) & 0xF) | 0x00);
-                    gdt[tssIndex * 8 + 7] = (byte)((tssBase >> 24) & 0xFF);
-                    gdt[tssIndex * 8 + 8] = (byte)((tssBase >> 32) & 0xFF);
-                    gdt[tssIndex * 8 + 9] = (byte)((tssBase >> 40) & 0xFF);
-                    gdt[tssIndex * 8 + 10] = (byte)((tssBase >> 48) & 0xFF);
-                    gdt[tssIndex * 8 + 11] = (byte)((tssBase >> 56) & 0xFF);
-                    gdt[tssIndex * 8 + 12] = 0;
-                    gdt[tssIndex * 8 + 13] = 0;
-                    gdt[tssIndex * 8 + 14] = 0;
-                    gdt[tssIndex * 8 + 15] = 0;
                 }
             }
         }
@@ -2114,6 +2211,70 @@ namespace Brovan.Core.Emulation
             return index > 0 ? index - 1 : 0;
         }
 
+        // A slot whose pages still map as installed stays as it is. Replacing it unmaps it for a moment, and
+        // a processor delivering an exception in that moment cannot recover. Slots merge only when they run out.
+        private void MarkIntactSlots(ulong spanStart, ulong spanEnd)
+        {
+            _keptSlotStarts.Clear();
+            if (_activeSlots.Count + SlotHeadroom >= _maxMemslots) return;
+
+            int firstIndex = FirstActiveSlotIndexAtOrBefore(spanStart);
+            for (int i = firstIndex; i < _activeSlotStarts.Count; i++)
+            {
+                ulong start = _activeSlotStarts[i];
+                if (start >= spanEnd) break;
+
+                InstalledSlot active = _activeSlots[start];
+                if (start + active.Size <= spanStart) continue;
+                if (!IsSlotIntact(start, active)) continue;
+
+                _keptSlotStarts.Add(start);
+                _desiredSlots[start] = active;
+            }
+        }
+
+        private bool IsSlotIntact(ulong start, InstalledSlot slot)
+        {
+            bool anyTrapped = _trappedPages.Count != 0;
+            for (ulong off = 0; off < slot.Size; off += KvmConstants.PageSize)
+            {
+                ulong address = start + off;
+                if (!_mappedPages.TryGetValue(address, out MappedPage page)
+                    || page == null
+                    || page.HostPage == IntPtr.Zero
+                    || page.Permissions == KvmMemoryPermission.None)
+                    return false;
+                if (page.HostPage.ToInt64() != slot.Host.ToInt64() + (long)off) return false;
+
+                uint flags;
+                if (anyTrapped && _trappedPages.TryGetValue(address, out bool writeOnly))
+                {
+                    if (!writeOnly || slot.Size != KvmConstants.PageSize) return false;
+                    flags = KvmConstants.MemSlotReadOnly;
+                }
+                else
+                {
+                    flags = ToKvmMapFlags(page.Permissions);
+                }
+                if (flags != slot.Flags) return false;
+            }
+            return true;
+        }
+
+        private bool TryGetKeptSlotEnd(ulong address, out ulong end)
+        {
+            end = 0;
+            if (_keptSlotStarts.Count == 0 || _activeSlotStarts.Count == 0) return false;
+
+            ulong start = _activeSlotStarts[FirstActiveSlotIndexAtOrBefore(address)];
+            if (start > address || !_keptSlotStarts.Contains(start)) return false;
+
+            InstalledSlot slot = _activeSlots[start];
+            if (address - start >= slot.Size) return false;
+            end = start + slot.Size;
+            return true;
+        }
+
         private void RebuildMappingsFull()
         {
             ulong[] sortedKeys = GetSortedPageKeys();
@@ -2121,10 +2282,18 @@ namespace Brovan.Core.Emulation
             bool anyTrapped = _trappedPages.Count != 0;
 
             _desiredSlots.Clear();
+            MarkIntactSlots(0, ulong.MaxValue);
+            bool anyKept = _keptSlotStarts.Count != 0;
 
             for (int i = 0; i < keyCount;)
             {
                 ulong runAddress = sortedKeys[i];
+                if (TryGetKeptSlotEnd(runAddress, out ulong keptEnd))
+                {
+                    while (i < keyCount && sortedKeys[i] < keptEnd) i++;
+                    continue;
+                }
+
                 if (!_mappedPages.TryGetValue(runAddress, out MappedPage page)
                     || page == null
                     || page.HostPage == IntPtr.Zero
@@ -2150,6 +2319,7 @@ namespace Brovan.Core.Emulation
                 while (j < keyCount)
                 {
                     if (sortedKeys[j] != runAddress + runSize) break;
+                    if (anyKept && _keptSlotStarts.Contains(sortedKeys[j])) break;
                     if (!_mappedPages.TryGetValue(sortedKeys[j], out MappedPage next) || next == null) break;
                     if (next.Permissions != page.Permissions) break;
                     if (anyTrapped && _trappedPages.ContainsKey(sortedKeys[j])) break;
@@ -2195,12 +2365,8 @@ namespace Brovan.Core.Emulation
             _activeSlotStarts.Sort();
         }
 
-        // One page either side of the change, so a neighbouring slot can absorb it.
         private void RebuildMappingsIncremental(ulong spanStart, ulong spanEnd)
         {
-            if (spanStart >= KvmConstants.PageSize) spanStart -= KvmConstants.PageSize;
-            if (spanEnd <= ulong.MaxValue - KvmConstants.PageSize) spanEnd += KvmConstants.PageSize;
-
             int firstIndex = FirstActiveSlotIndexAtOrBefore(spanStart);
             for (int i = firstIndex; i < _activeSlotStarts.Count; i++)
             {
@@ -2216,6 +2382,7 @@ namespace Brovan.Core.Emulation
             }
 
             _desiredSlots.Clear();
+            MarkIntactSlots(spanStart, spanEnd);
             BuildDesiredSlotsForSpan(spanStart, spanEnd);
 
             _staleSlotKeys.Clear();
@@ -2252,9 +2419,16 @@ namespace Brovan.Core.Emulation
         private void BuildDesiredSlotsForSpan(ulong spanStart, ulong spanEnd)
         {
             bool anyTrapped = _trappedPages.Count != 0;
+            bool anyKept = _keptSlotStarts.Count != 0;
 
             for (ulong address = spanStart; address < spanEnd;)
             {
+                if (TryGetKeptSlotEnd(address, out ulong keptEnd))
+                {
+                    address = keptEnd;
+                    continue;
+                }
+
                 if (!_mappedPages.TryGetValue(address, out MappedPage page)
                     || page == null
                     || page.HostPage == IntPtr.Zero
@@ -2278,6 +2452,7 @@ namespace Brovan.Core.Emulation
 
                 while (address + runSize < spanEnd)
                 {
+                    if (anyKept && _keptSlotStarts.Contains(address + runSize)) break;
                     if (!_mappedPages.TryGetValue(address + runSize, out MappedPage next) || next == null) break;
                     if (next.Permissions != page.Permissions) break;
                     if (next.HostPage == IntPtr.Zero) break;
@@ -2390,12 +2565,9 @@ namespace Brovan.Core.Emulation
 
             if (opcode[0] != 0x0F) return false;
 
+            // rdtsc and rdtscp run on the processor, so they never reach here.
             if (_hasCpuIdHook && opcode[1] == 0xA2)
                 return HandleInstructionHook(BackendInstructionHook.CpuId, 2);
-            if (_hasRdtscHook && opcode[1] == 0x31)
-                return HandleInstructionHook(BackendInstructionHook.Rdtsc, 2);
-            if (_hasRdtscpHook && opcode[1] == 0x01 && opcode[2] == 0xF9)
-                return HandleInstructionHook(BackendInstructionHook.Rdtscp, 3);
             if (_hasInvalidHook && opcode[1] == 0x0B)
                 return HandleInvalidInstructionHook();
             return false;
@@ -2404,8 +2576,6 @@ namespace Brovan.Core.Emulation
         private void RefreshInstructionHookFlags()
         {
             _hasCpuIdHook = false;
-            _hasRdtscHook = false;
-            _hasRdtscpHook = false;
             _hasInvalidHook = false;
 
             for (int i = 0; i < _instructionHooks.Count; i++)
@@ -2413,13 +2583,11 @@ namespace Brovan.Core.Emulation
                 switch (_instructionHooks[i].Type)
                 {
                     case BackendInstructionHook.CpuId: _hasCpuIdHook = true; break;
-                    case BackendInstructionHook.Rdtsc: _hasRdtscHook = true; break;
-                    case BackendInstructionHook.Rdtscp: _hasRdtscpHook = true; break;
                     case BackendInstructionHook.Invalid: _hasInvalidHook = true; break;
                 }
             }
 
-            _scanPreRunInstructions = _hasCpuIdHook || _hasRdtscHook || _hasRdtscpHook || _hasInvalidHook;
+            _scanPreRunInstructions = _hasCpuIdHook || _hasInvalidHook;
         }
 
         private unsafe bool TryReadMemoryInternal(ulong address, Span<byte> buffer)
@@ -2525,7 +2693,7 @@ namespace Brovan.Core.Emulation
             return consumed;
         }
 
-        private bool HandleHltExit()
+        private bool HandleHltExit(VirtualProcessor vp)
         {
             ulong rip = ReadRegister(Registers.UC_X86_REG_RIP);
 
@@ -2540,10 +2708,10 @@ namespace Brovan.Core.Emulation
                 KvmConstants.ExceptionVectorCount * KvmConstants.ExceptionStubStride;
             if (rip > _exceptionStubPageGpa && rip <= stubEnd)
             {
-                if (_singleStepRequested &&
+                if (vp.SingleStepRequested &&
                     (uint)((rip - 1 - _exceptionStubPageGpa) / KvmConstants.ExceptionStubStride) == 1)
                 {
-                    _singleStepRequested = false;
+                    vp.SingleStepRequested = false;
                     RestoreExceptionFrame(rip);
                     ClearTrapFlag();
                     _error = KvmErrors.Ok;
@@ -2561,7 +2729,7 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        private unsafe bool HandleMmioExit(ref LinuxKvmRun run)
+        private unsafe bool HandleMmioExit(VirtualProcessor vp, ref LinuxKvmRun run)
         {
             ref LinuxKvmMmioExit mmio = ref run.Exit.Mmio;
             ulong physAddr = mmio.PhysAddr;
@@ -2569,9 +2737,9 @@ namespace Brovan.Core.Emulation
             byte isWrite = mmio.IsWrite;
 
             // A later fragment of the faulted instruction.
-            if (_faultRegistersSaved)
+            if (vp.FaultRegistersSaved)
             {
-                _mmioCompletionPending = true;
+                vp.MmioCompletionPending = true;
                 return true;
             }
 
@@ -2637,9 +2805,9 @@ namespace Brovan.Core.Emulation
             {
                 // The completion writes back RIP and the loaded register. The fault-time registers go back
                 // after it.
-                _faultRegisters = GetRegisters();
-                _faultRegistersSaved = true;
-                _mmioCompletionPending = true;
+                vp.FaultRegisters = GetRegisters();
+                vp.FaultRegistersSaved = true;
+                vp.MmioCompletionPending = true;
                 return false;
             }
 
@@ -2689,7 +2857,7 @@ namespace Brovan.Core.Emulation
         private unsafe void CompleteMmioAccess(ref LinuxKvmMmioExit mmio)
         {
             // KVM retires the instruction on its next entry, before it reads immediate_exit.
-            _mmioCompletionPending = true;
+            CurrentVp.MmioCompletionPending = true;
 
             uint len = mmio.Len;
             if (len == 0 || len > sizeof(ulong)) return;
@@ -2810,7 +2978,7 @@ namespace Brovan.Core.Emulation
             lock (_vcpuLock)
             {
                 LinuxKvmVcpuEvents events = new LinuxKvmVcpuEvents();
-                if (KvmNative.ioctl(_vp.Fd, KvmConstants.KvmIoGetVcpuEvents, ref events) < 0)
+                if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoGetVcpuEvents, ref events) < 0)
                     return;
 
                 events.Exception.Injected = 0;
@@ -2824,7 +2992,7 @@ namespace Brovan.Core.Emulation
                 events.Nmi.Injected = 0;
                 events.Nmi.Pending = 0;
 
-                if (KvmNative.ioctl(_vp.Fd, KvmConstants.KvmIoSetVcpuEvents, ref events) < 0)
+                if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoSetVcpuEvents, ref events) < 0)
                     return;
             }
         }
@@ -2855,7 +3023,7 @@ namespace Brovan.Core.Emulation
             regs.Rflags = savedRflags;
             MarkRegistersDirty();
             ShowUserCodeAndStackSegments();
-            _vp.InSyscallStub = true;
+            CurrentVp.InSyscallStub = true;
 
             if (_syscallHook.Callback != null) _syscallHook.Callback();
             else if (_syscallHook.BoolCallback != null) _syscallHook.BoolCallback();
@@ -2881,7 +3049,7 @@ namespace Brovan.Core.Emulation
         private void NoteSyscallScratchWrite(GpRegisterName name, ulong before, ulong after)
         {
             if (before != after && (name == GpRegisterName.Rcx || name == GpRegisterName.R11))
-                LeaveSyscallStub(_vp);
+                LeaveSyscallStub(CurrentVp);
         }
 
         private static void LeaveSyscallStub(VirtualProcessor vp)
@@ -2894,7 +3062,7 @@ namespace Brovan.Core.Emulation
         // sysretq takes RIP from RCX and RFLAGS from R11, which is what NT leaves in them.
         private void PrepareSyscallReturn(VirtualProcessor vp, ref LinuxKvmRun run)
         {
-            if (_singleStepRequested)
+            if (vp.SingleStepRequested)
                 run.DirtyRegs |= KvmConstants.SyncSpecialRegisters;
 
             if ((run.DirtyRegs & KvmConstants.SyncSpecialRegisters) != 0)
@@ -2930,6 +3098,34 @@ namespace Brovan.Core.Emulation
         {
             GetRegistersRef().Rip += amount;
             MarkRegistersDirty();
+        }
+
+        // KVM starts every new vCPU TSC at zero, while the guest and the shared QPC page take one TSC for the
+        // whole partition. Later vCPUs get the offset of the first.
+        private unsafe void AlignTimestampCounter(VirtualProcessor vp)
+        {
+            if (!_supportsVcpuAttributes)
+                return;
+
+            ulong value = 0;
+            LinuxKvmDeviceAttr attr = new LinuxKvmDeviceAttr
+            {
+                Group = KvmConstants.VcpuTscCtrl,
+                Attr = KvmConstants.VcpuTscOffset,
+                Addr = (ulong)&value,
+            };
+
+            if (!_tscOffsetKnown)
+            {
+                if (KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoGetDeviceAttr, ref attr) < 0)
+                    return;
+                _tscOffset = value;
+                _tscOffsetKnown = true;
+                return;
+            }
+
+            value = _tscOffset;
+            KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoSetDeviceAttr, ref attr);
         }
 
         private ulong GetMsr(VirtualProcessor vp, uint msr)
@@ -2969,7 +3165,7 @@ namespace Brovan.Core.Emulation
         {
             ref LinuxKvmRegisters current = ref GetRegistersRef();
             if (regs.Rcx != current.Rcx || regs.R11 != current.R11)
-                LeaveSyscallStub(_vp);
+                LeaveSyscallStub(CurrentVp);
             current = regs;
             MarkRegistersDirty();
         }
@@ -3002,7 +3198,7 @@ namespace Brovan.Core.Emulation
 
             lock (_vcpuLock)
             {
-                if (KvmNative.ioctl(_vp.Fd, KvmConstants.KvmIoGetFpu, (IntPtr)(&Fpu)) < 0)
+                if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoGetFpu, (IntPtr)(&Fpu)) < 0)
                     return false;
 
                 if (Write)
@@ -3010,7 +3206,7 @@ namespace Brovan.Core.Emulation
                     for (int i = 0; i < XmmRegisterCount * 2; i++)
                         ((ulong*)Fpu.Xmm)[i] = Values[i];
 
-                    if (KvmNative.ioctl(_vp.Fd, KvmConstants.KvmIoSetFpu, (IntPtr)(&Fpu)) < 0)
+                    if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoSetFpu, (IntPtr)(&Fpu)) < 0)
                         return false;
                 }
                 else
@@ -3039,7 +3235,7 @@ namespace Brovan.Core.Emulation
         {
             lock (_vcpuLock)
             {
-                if (KvmNative.ioctl(_vp.Fd, KvmConstants.KvmIoSetVcpuEvents, ref events) < 0)
+                if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoSetVcpuEvents, ref events) < 0)
                     throw new KvmException("KVM_SET_VCPU_EVENTS failed", Marshal.GetLastWin32Error());
             }
         }
@@ -3049,7 +3245,7 @@ namespace Brovan.Core.Emulation
             lock (_vcpuLock)
             {
                 LinuxKvmDebugRegisters dr = new LinuxKvmDebugRegisters();
-                if (KvmNative.ioctl(_vp.Fd, KvmConstants.KvmIoGetDebugRegisters, ref dr) < 0)
+                if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoGetDebugRegisters, ref dr) < 0)
                     throw new KvmException("KVM_GET_DEBUGREGS failed", Marshal.GetLastWin32Error());
                 return dr;
             }
@@ -3059,7 +3255,7 @@ namespace Brovan.Core.Emulation
         {
             lock (_vcpuLock)
             {
-                if (KvmNative.ioctl(_vp.Fd, KvmConstants.KvmIoSetDebugRegisters, ref dr) < 0)
+                if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoSetDebugRegisters, ref dr) < 0)
                     throw new KvmException("KVM_SET_DEBUGREGS failed", Marshal.GetLastWin32Error());
             }
         }
@@ -3137,7 +3333,7 @@ namespace Brovan.Core.Emulation
 
             lock (_vcpuLock)
             {
-                if (KvmNative.ioctl(_vp.Fd, KvmConstants.KvmIoGetFpu, (IntPtr)(&Fpu)) < 0)
+                if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoGetFpu, (IntPtr)(&Fpu)) < 0)
                     return false;
 
                 if (!Write)
@@ -3151,7 +3347,7 @@ namespace Brovan.Core.Emulation
                 else
                     Fpu.Mxcsr = (uint)value;
 
-                return KvmNative.ioctl(_vp.Fd, KvmConstants.KvmIoSetFpu, (IntPtr)(&Fpu)) >= 0;
+                return KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoSetFpu, (IntPtr)(&Fpu)) >= 0;
             }
         }
 

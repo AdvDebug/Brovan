@@ -41,6 +41,9 @@ namespace Brovan.Core.Emulation
         public static extern int ioctl(int fd, uint request, ref LinuxKvmMsrs arg);
 
         [DllImport("libc", SetLastError = true)]
+        public static extern int ioctl(int fd, uint request, ref LinuxKvmDeviceAttr arg);
+
+        [DllImport("libc", SetLastError = true)]
         public static extern int ioctl(int fd, uint request, ref LinuxKvmVcpuEvents arg);
 
         [DllImport("libc", SetLastError = true)]
@@ -202,6 +205,15 @@ namespace Brovan.Core.Emulation
         public uint Count;
         public uint _pad0;
         public LinuxKvmMsrEntry FirstEntry;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct LinuxKvmDeviceAttr
+    {
+        public uint Flags;
+        public uint Group;
+        public ulong Attr;
+        public ulong Addr;
     }
 
     [StructLayout(LayoutKind.Sequential)]

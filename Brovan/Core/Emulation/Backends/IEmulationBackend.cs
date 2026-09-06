@@ -187,6 +187,8 @@ namespace Brovan.Core.Emulation
         /// </summary>
         bool SupportsThreadResidency => false;
 
+        int ProcessorLimit => 1;
+
         bool TryBindThread(uint threadId) => false;
 
         void UnbindThread(uint threadId)
@@ -204,6 +206,23 @@ namespace Brovan.Core.Emulation
         /// backend has no bounded slice to shorten, in which case the caller has to stop the slice itself.
         /// </summary>
         bool TryLimitSlice(int microseconds) => false;
+
+        /// <summary>
+        /// The lock the caller holds around <see cref="Emulate"/>. A backend releases it only for the time
+        /// the guest runs.
+        /// </summary>
+        void UseRunLock(object runLock)
+        {
+        }
+
+        /// <summary>Ends the slice of the thread's processor, not the thread.</summary>
+        void StopThread(uint threadId)
+        {
+        }
+
+        void StopAllProcessors()
+        {
+        }
 
         /// <summary>
         /// Answers RDTSC inside the backend from the emulator's clock. False when the backend has no such path.

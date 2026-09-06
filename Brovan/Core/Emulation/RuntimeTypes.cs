@@ -68,6 +68,10 @@ namespace Brovan.Core.Emulation
         public bool DisablePriorityBoost;
         public long LastReadyTick;
         public long LastRunTick = -1;
+        public int HostWorker = -1;
+        public bool ParkWaiting;
+        public EmulatedThread ParkTarget;
+        public bool Unreferenced;
 
         public int EffectivePriority
         {

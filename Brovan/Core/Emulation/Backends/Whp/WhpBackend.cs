@@ -129,11 +129,15 @@ namespace Brovan.Core.Emulation
             => Inner.TransferXmmRegisters(values, true);
 
         public bool SupportsThreadResidency => Inner.SupportsThreadResidency;
+        public int ProcessorLimit => Inner.ProcessorLimit;
         public bool TryBindThread(uint threadId) => Inner.TryBindThread(threadId);
         public void UnbindThread(uint threadId) => Inner.UnbindThread(threadId);
         public bool IsThreadResident(uint threadId) => Inner.IsThreadResident(threadId);
         public void SelectThread(uint threadId) => Inner.SelectThread(threadId);
         public bool TryLimitSlice(int microseconds) => Inner.TryLimitSlice(microseconds);
+        public void UseRunLock(object runLock) => Inner.UseRunLock(runLock);
+        public void StopThread(uint threadId) => Inner.StopThread(threadId);
+        public void StopAllProcessors() => Inner.StopAllProcessors();
 
         public IntPtr AddCodeHook(ulong begin, ulong end, CodeHookCallback callback)
             => Inner.AddCodeHook(begin, end, callback);
