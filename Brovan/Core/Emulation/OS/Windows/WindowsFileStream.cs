@@ -20,6 +20,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         private string CachedHandlePath;
         private bool CachedHandleWritable;
 
+        // The VFS write copy only appears when this layer materializes it, so both host probes are memoized
+        // per stream and dropped whenever anything reshapes the sandbox.
+        private static int VfsProbeVersion;
+        private int WriteProbeVersion = -1;
+        private int ReadProbeVersion = -1;
+        private bool WriteProbeIsFile;
+        private bool WriteProbeIsDirectory;
+        private bool ReadProbeIsFile;
+        private bool ReadProbeIsDirectory;
+
         public string GuestPath { get; }
         public string ReadHostPath { get; }
         public string WriteHostPath { get; }
@@ -59,14 +69,55 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        private void ProbeWriteStore()
+        {
+            int Version = Volatile.Read(ref VfsProbeVersion);
+            if (WriteProbeVersion == Version)
+                return;
+
+            if (string.IsNullOrWhiteSpace(WriteHostPath))
+            {
+                WriteProbeIsFile = false;
+                WriteProbeIsDirectory = false;
+            }
+            else
+            {
+                WriteProbeIsFile = File.Exists(WriteHostPath);
+                WriteProbeIsDirectory = !WriteProbeIsFile && Directory.Exists(WriteHostPath);
+            }
+
+            WriteProbeVersion = Version;
+        }
+
+        private void ProbeReadStore()
+        {
+            int Version = Volatile.Read(ref VfsProbeVersion);
+            if (ReadProbeVersion == Version)
+                return;
+
+            if (string.IsNullOrWhiteSpace(ReadHostPath))
+            {
+                ReadProbeIsFile = false;
+                ReadProbeIsDirectory = false;
+            }
+            else
+            {
+                ReadProbeIsFile = File.Exists(ReadHostPath);
+                ReadProbeIsDirectory = !ReadProbeIsFile && Directory.Exists(ReadHostPath);
+            }
+
+            ReadProbeVersion = Version;
+        }
+
+        // Another stream can hold a probe for the same path, so materializing a write copy has to reach all of them.
+        private static void DropStoreProbes() => Interlocked.Increment(ref VfsProbeVersion);
+
         public string EffectiveReadHostPath
         {
             get
             {
-                if (!string.IsNullOrWhiteSpace(WriteHostPath) && (File.Exists(WriteHostPath) || Directory.Exists(WriteHostPath)))
-                    return WriteHostPath;
-
-                return ReadHostPath;
+                ProbeWriteStore();
+                return WriteProbeIsFile || WriteProbeIsDirectory ? WriteHostPath : ReadHostPath;
             }
         }
 
@@ -74,13 +125,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             get
             {
-                if (!string.IsNullOrWhiteSpace(WriteHostPath) && File.Exists(WriteHostPath))
+                ProbeWriteStore();
+                if (WriteProbeIsFile)
                     return true;
 
-                if (!string.IsNullOrWhiteSpace(WriteHostPath) && Directory.Exists(WriteHostPath))
+                if (WriteProbeIsDirectory)
                     return false;
 
-                return !string.IsNullOrWhiteSpace(ReadHostPath) && File.Exists(ReadHostPath);
+                ProbeReadStore();
+                return ReadProbeIsFile;
             }
         }
 
@@ -165,18 +218,25 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             get
             {
-                if (!string.IsNullOrWhiteSpace(WriteHostPath) && Directory.Exists(WriteHostPath))
+                ProbeWriteStore();
+                if (WriteProbeIsDirectory)
                     return true;
 
-                if (!string.IsNullOrWhiteSpace(WriteHostPath) && File.Exists(WriteHostPath))
+                if (WriteProbeIsFile)
                     return false;
 
-                return !string.IsNullOrWhiteSpace(ReadHostPath) && Directory.Exists(ReadHostPath);
+                ProbeReadStore();
+                return ReadProbeIsDirectory;
             }
         }
 
         private static readonly Dictionary<string, (string Read, string Write)> GuestPathCache = new(StringComparer.OrdinalIgnoreCase);
-        public static void InvalidateGuestPathCache() => GuestPathCache.Clear();
+        public static void InvalidateGuestPathCache()
+        {
+            GuestPathCache.Clear();
+            Interlocked.Increment(ref VfsProbeVersion);
+            GeneralHelper.IO.InvalidateSandboxLinkCache();
+        }
         public static WindowsFileStream FromGuestPath(string GuestPath, bool CreateWriteDirectories = false, bool NativeSystemView = false)
         {
             bool Cacheable = !CreateWriteDirectories && !NativeSystemView && GuestPath != null;
@@ -435,10 +495,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 using FileStream Source = new FileStream(ReadHostPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                 using FileStream Destination = new FileStream(WriteHostPath, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
                 Source.CopyTo(Destination, CopyBufferSize);
+                DropStoreProbes();
                 return;
             }
 
             using FileStream Stream = new FileStream(WriteHostPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+            DropStoreProbes();
         }
 
         private void EnsureWriteParentExists()

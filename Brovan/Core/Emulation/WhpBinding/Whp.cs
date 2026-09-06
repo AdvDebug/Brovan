@@ -415,7 +415,6 @@ namespace Brovan.Core.Emulation
                     EnsureVirtualMapping(guest);
                 }
 
-                RebuildMappings();
                 _error = WhpErrors.Ok;
                 return true;
             }
@@ -452,7 +451,6 @@ namespace Brovan.Core.Emulation
                 EnsureVirtualMapping(guest);
             }
 
-            RebuildMappings();
             _error = WhpErrors.Ok;
             return true;
         }
@@ -2638,6 +2636,15 @@ namespace Brovan.Core.Emulation
 
             if (mapped && IsAccessInstalled(gpa, isWrite))
                 return true;
+
+            // Mapping installs are deferred, so a processor can reach a recorded page before its range is
+            // installed. Install it and retry the access instead of reporting a fault.
+            if (_mappingsDirty)
+            {
+                RebuildMappings();
+                if (mapped && IsAccessInstalled(gpa, isWrite))
+                    return true;
+            }
 
             BackendHookType required = mapped ? BackendHookType.MemoryProtected : BackendHookType.MemoryUnmapped;
             BackendMemoryAccessType type = mapped

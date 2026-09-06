@@ -497,6 +497,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Directory.CreateDirectory(Parent);
 
                     File.Move(SourceVirtual, TargetVirtual);
+                    WindowsFileStream.InvalidateGuestPathCache();
                     return true;
                 }
 
@@ -525,12 +526,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (DirectoryPath)
                 {
                     if (Directory.Exists(VirtualPath))
+                    {
                         Directory.Delete(VirtualPath, true);
+                        WindowsFileStream.InvalidateGuestPathCache();
+                    }
+
                     return true;
                 }
 
                 if (File.Exists(VirtualPath))
+                {
                     File.Delete(VirtualPath);
+                    WindowsFileStream.InvalidateGuestPathCache();
+                }
 
                 return true;
             }

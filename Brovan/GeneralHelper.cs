@@ -2975,9 +2975,32 @@ namespace Brovan
                 return Resolved;
             }
 
+            private const int SandboxLinkCacheLimit = 1 << 15;
+
+            private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> SandboxLinkCache =
+                new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+
+            /// <summary>
+            /// Drops the memoized reparse-point walks. Call whenever a link or a directory in the sandbox changes shape.
+            /// </summary>
+            public static void InvalidateSandboxLinkCache() => SandboxLinkCache.Clear();
+
             private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, bool EnforceAllowedRoots = true)
             {
-                return ResolveSandboxLinks(FullPath, IncludeFinal, EnforceAllowedRoots, 0);
+                if (string.IsNullOrEmpty(FullPath))
+                    return ResolveSandboxLinks(FullPath, IncludeFinal, EnforceAllowedRoots, 0);
+
+                string Key = string.Concat(IncludeFinal ? "1" : "0", EnforceAllowedRoots ? "1" : "0", FullPath);
+                if (SandboxLinkCache.TryGetValue(Key, out string Cached))
+                    return Cached;
+
+                string Resolved = ResolveSandboxLinks(FullPath, IncludeFinal, EnforceAllowedRoots, 0);
+
+                if (SandboxLinkCache.Count >= SandboxLinkCacheLimit)
+                    SandboxLinkCache.Clear();
+
+                SandboxLinkCache[Key] = Resolved;
+                return Resolved;
             }
 
             private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, bool EnforceAllowedRoots, int Hops)

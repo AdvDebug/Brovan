@@ -6810,6 +6810,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             try
             {
                 Directory.CreateDirectory(HostPath);
+                WindowsFileStream.InvalidateGuestPathCache();
             }
             catch (Exception Error)
             {

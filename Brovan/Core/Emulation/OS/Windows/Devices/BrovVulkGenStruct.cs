@@ -41,8 +41,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static void RebuildAt(int sid, GenReader r, GenState st, IntPtr dst)
         {
-            foreach (BvkM d in BrovVulkStructMeta.Members[sid])
+            // BvkM is wide enough that a by-value foreach copies it on every member of every array element.
+            BvkM[] Members = BrovVulkStructMeta.Members[sid];
+            for (int mi = 0; mi < Members.Length; mi++)
             {
+                ref readonly BvkM d = ref Members[mi];
                 IntPtr fp = dst + d.Offset;
                 switch (d.Kind)
                 {
@@ -209,8 +212,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static void WritebackBody(int sid, GenBuf w, IntPtr src)
         {
-            foreach (BvkM d in BrovVulkStructMeta.Members[sid])
+            BvkM[] Members = BrovVulkStructMeta.Members[sid];
+            for (int mi = 0; mi < Members.Length; mi++)
             {
+                ref readonly BvkM d = ref Members[mi];
                 switch (d.Kind)
                 {
                     case BvkMK.Scalar:
