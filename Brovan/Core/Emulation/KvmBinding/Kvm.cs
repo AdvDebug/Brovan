@@ -1420,6 +1420,12 @@ namespace Brovan.Core.Emulation
             {
                 RemoveHooks();
 
+                // The maintenance thread reads run pages and fds of every processor, so it has to be gone
+                // before they are released.
+                Thread Maintenance = _maintenanceThread;
+                _maintenanceThread = null;
+                Maintenance?.Join();
+
                 for (int i = 0; i < _processors.Count; i++)
                 {
                     VirtualProcessor vp = _processors[i];

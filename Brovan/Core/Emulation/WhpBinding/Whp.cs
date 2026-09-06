@@ -1818,6 +1818,10 @@ namespace Brovan.Core.Emulation
             if (!_threadProcessors.Remove(threadId, out VirtualProcessor vp))
                 return;
 
+            // A completion the next thread on this processor would finish against the wrong page.
+            AbandonSteppedCompletion(vp);
+            vp.StopRequested = false;
+            vp.SingleStepRequested = false;
             vp.ThreadId = 0;
             vp.Binding++;
             _idleProcessors.Push(vp);

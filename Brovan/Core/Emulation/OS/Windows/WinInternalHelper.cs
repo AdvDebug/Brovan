@@ -802,6 +802,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong Address = Emulator.KUSER_SHARED_DATA + (ulong)Offset;
             Emulator._emulator.WriteMemory(Address + 8, High, 4);
             Emulator._emulator.WriteMemory(Address, Low, 4);
+
+            // NT: a reader retries while High1Time differs from High2Time, so High1Time lands last.
+            Interlocked.MemoryBarrier();
             Emulator._emulator.WriteMemory(Address + 4, High, 4);
         }
     }
