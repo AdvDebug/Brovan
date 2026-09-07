@@ -52,6 +52,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public int Height;
         public bool Visible;
         public WindowState State;
+        public bool HostGeometryStale;
 
         public bool Matches(in PresentState other)
         {
@@ -179,6 +180,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 Height = height,
                 Visible = visible,
                 State = state,
+                HostGeometryStale = HostEventQueue.GeometryPending,
             };
 
             lock (_presentSync)
@@ -514,16 +516,29 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if ((!hasApplied || applied.Visible != present.Visible) && window.Visible != present.Visible)
                 window.Visible = present.Visible;
 
-            if ((!hasApplied || applied.State != present.State) && window.State != present.State)
-                window.State = present.State;
-
-            if (present.State == WindowState.Normal)
+            // A present built before the guest read the queued host resize describes the previous frame.
+            if (present.HostGeometryStale)
             {
-                if (present.Width > 0 && (!hasApplied || applied.Width != present.Width) && window.Width != present.Width)
-                    window.Width = present.Width;
+                if (hasApplied)
+                {
+                    present.State = applied.State;
+                    present.Width = applied.Width;
+                    present.Height = applied.Height;
+                }
+            }
+            else
+            {
+                if ((!hasApplied || applied.State != present.State) && window.State != present.State)
+                    window.State = present.State;
 
-                if (present.Height > 0 && (!hasApplied || applied.Height != present.Height) && window.Height != present.Height)
-                    window.Height = present.Height;
+                if (present.State == WindowState.Normal)
+                {
+                    if (present.Width > 0 && (!hasApplied || applied.Width != present.Width) && window.Width != present.Width)
+                        window.Width = present.Width;
+
+                    if (present.Height > 0 && (!hasApplied || applied.Height != present.Height) && window.Height != present.Height)
+                        window.Height = present.Height;
+                }
             }
 
             lock (_presentSync)

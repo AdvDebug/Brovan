@@ -1416,11 +1416,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Win32kDpi.DrainHostDpiChange(Instance);
 
             // The host surface holds no backing store, so a host repaint has erased every control with it.
-            if (HostEventQueue.ConsumeRepaint())
-            {
+            bool Repaint = HostEventQueue.ConsumeRepaint();
+            if (Repaint)
                 InvalidateWindowTree(Instance, Foreground);
-                Instance.WinHelper.PresentDesktop();
-            }
 
             Win32kState State = GetState(Instance);
             bool GeometryChanged = false;
@@ -1467,6 +1465,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (Resized != null)
                     Resized.PendingWindowPosChanged = true;
             }
+
+            if (Repaint || GeometryChanged)
+                Instance.WinHelper.PresentDesktop();
         }
 
         private static ulong ResolveInputTarget(BinaryEmulator Instance, ulong Foreground, uint Message, ref ulong LParam)
@@ -1597,14 +1598,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             uint Width = (uint)(LParam & 0xFFFF);
             uint Height = (uint)((LParam >> 16) & 0xFFFF);
 
-            // A frame with no client area is iconic whatever it calls itself, and its restore size has to survive:
-            // only the client rectangle the guest reads back collapses, so the size pushed back at the host on the
-            // next present is still the one to restore to.
+            // A frame with no client area is iconic whatever it calls itself. Only the client rectangle
+            // collapses, so the size and maximized flag keep the values to restore to.
             Window.Minimized = WParam == SIZE_MINIMIZED || Width == 0 || Height == 0;
-            Window.Maximized = WParam == SIZE_MAXIMIZED;
 
             if (!Window.Minimized)
             {
+                Window.Maximized = WParam == SIZE_MAXIMIZED;
                 Window.Width = Width;
                 Window.Height = Height;
             }

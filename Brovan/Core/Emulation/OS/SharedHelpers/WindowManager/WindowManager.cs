@@ -34,6 +34,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static int _closeRequested;
         private static int _pendingDpi;
 
+        private static int _pendingGeometry;
+
         // The GUI thread fills this queue, and DrainHostEvents on the scheduler thread is the only thing that
         // moves it into a guest message queue. Without the bump a scheduler that skips its wakeup scan never
         // reaches DrainHostEvents and host input stops arriving.
@@ -62,8 +64,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 _head = 0;
                 _count = 0;
+                Volatile.Write(ref _pendingGeometry, 0);
             }
         }
+
+        public static bool GeometryPending => Volatile.Read(ref _pendingGeometry) != 0;
 
         public static void MarkDpiChanged(uint dpi)
         {
@@ -143,6 +148,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 slot.WParam = wParam;
                 slot.LParam = lParam;
                 _count++;
+
+                if (message == WM_SIZE || message == WM_MOVE)
+                    Volatile.Write(ref _pendingGeometry, _pendingGeometry + 1);
             }
 
             Signal();
@@ -167,6 +175,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 _head = (_head + 1) & (_input.Length - 1);
                 _count--;
+
+                if (message == WM_SIZE || message == WM_MOVE)
+                    Volatile.Write(ref _pendingGeometry, _pendingGeometry - 1);
+
                 return true;
             }
         }
