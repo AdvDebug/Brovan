@@ -5836,6 +5836,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 GuiManager.EnqueueWarpCursor(ClientX, ClientY);
         }
 
+        public void SetHostCursorClip(bool Enabled, int ClientLeft, int ClientTop, int ClientRight, int ClientBottom)
+        {
+            if (DesktopDisplay is GuiThreadManager GuiManager)
+                GuiManager.EnqueueSetCursorClip(Enabled, ClientLeft, ClientTop, ClientRight, ClientBottom);
+        }
+
         /// <summary>
         /// Shows or hides the host pointer, for guests that draw their own or want none.
         /// </summary>

@@ -224,6 +224,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public int ClipRight;
             public int ClipBottom;
             public bool CursorHiddenWhileTyping;
+            public bool HostFocused = true;
+
+            // Zero when the key is up, 1 for WM_KEYDOWN, 2 for WM_SYSKEYDOWN.
+            public readonly byte[] KeyDownMessage = new byte[256];
+            public int KeysHeld;
+
             public Win32kCaret Caret;
 
             public uint QueuedWakeBits;
@@ -1433,6 +1439,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     continue;
                 }
 
+                if (Message == WM_SETFOCUS || Message == WM_KILLFOCUS)
+                {
+                    ApplyHostFocus(Instance, State, Foreground, Message == WM_SETFOCUS);
+                    continue;
+                }
+
+                if (Message >= WM_KEYDOWN && Message <= WM_SYSKEYUP)
+                    TrackKeyState(State, Message, WParam);
+
                 if (Message >= WM_MOUSEMOVE && Message <= WM_XBUTTONUP && Message != WM_MOUSEWHEEL)
                 {
                     State.CursorX = (short)(LParam & 0xFFFF);
@@ -1468,6 +1483,74 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (Repaint || GeometryChanged)
                 Instance.WinHelper.PresentDesktop();
+        }
+
+        private static void TrackKeyState(Win32kState State, uint Message, ulong WParam)
+        {
+            byte Vk = (byte)WParam;
+
+            switch (Message)
+            {
+                case WM_KEYDOWN:
+                case WM_SYSKEYDOWN:
+                    if (State.KeyDownMessage[Vk] == 0)
+                        State.KeysHeld++;
+
+                    State.KeyDownMessage[Vk] = (byte)(Message == WM_SYSKEYDOWN ? 2 : 1);
+                    return;
+
+                case WM_KEYUP:
+                case WM_SYSKEYUP:
+                    if (State.KeyDownMessage[Vk] != 0)
+                        State.KeysHeld--;
+
+                    State.KeyDownMessage[Vk] = 0;
+                    return;
+            }
+        }
+
+        // A key released while the window is not focused reports no key up, so held keys are released here.
+        private static void ApplyHostFocus(BinaryEmulator Instance, Win32kState State, ulong Foreground, bool Focused)
+        {
+            if (State.HostFocused == Focused)
+                return;
+
+            State.HostFocused = Focused;
+
+            if (Focused)
+            {
+                ApplyHostCursorClip(Instance, State);
+                PostMessage(Instance, Foreground, WM_ACTIVATE, WA_ACTIVE, 0);
+                PostMessage(Instance, Foreground, WM_SETFOCUS, 0, 0);
+                return;
+            }
+
+            ReleaseHeldKeys(Instance, State, Foreground);
+            PostMessage(Instance, Foreground, WM_ACTIVATE, WA_INACTIVE, 0);
+            PostMessage(Instance, Foreground, WM_KILLFOCUS, 0, 0);
+        }
+
+        private static void ReleaseHeldKeys(BinaryEmulator Instance, Win32kState State, ulong Foreground)
+        {
+            if (State.KeysHeld == 0)
+                return;
+
+            // Repeat count one, previous state down, transition up.
+            const ulong ReleaseLParam = 0xC0000001;
+
+            for (int Vk = 0; Vk < State.KeyDownMessage.Length && State.KeysHeld != 0; Vk++)
+            {
+                if (State.KeyDownMessage[Vk] == 0)
+                    continue;
+
+                uint Message = State.KeyDownMessage[Vk] == 2 ? WM_SYSKEYUP : WM_KEYUP;
+                State.KeyDownMessage[Vk] = 0;
+                State.KeysHeld--;
+
+                ulong LParam = ReleaseLParam;
+                if (Win32kRawInput.DeliverHostEvent(Instance, Foreground, Message, (ulong)Vk, LParam))
+                    PostMessage(Instance, ResolveInputTarget(Instance, Foreground, Message, ref LParam), Message, (ulong)Vk, LParam);
+            }
         }
 
         private static ulong ResolveInputTarget(BinaryEmulator Instance, ulong Foreground, uint Message, ref ulong LParam)
@@ -1587,6 +1670,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Window.X = (short)(LParam & 0xFFFF);
             Window.Y = (short)((LParam >> 16) & 0xFFFF);
             Instance.WinHelper.MaterializeUserWindow(Window);
+
+            // The clip is guest screen coordinates, so a move changes the client origin.
+            Win32kState State = GetState(Instance);
+            if (State.CursorClipped)
+                ApplyHostCursorClip(Instance, State);
         }
 
         private static void ApplyHostResize(BinaryEmulator Instance, ulong Hwnd, ulong WParam, ulong LParam)
@@ -1641,11 +1729,34 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             State.ClipTop = Math.Min(Top, Bottom);
             State.ClipRight = Math.Max(Left, Right);
             State.ClipBottom = Math.Max(Top, Bottom);
+            ApplyHostCursorClip(Instance, State);
         }
 
         internal static void ClearCursorClip(BinaryEmulator Instance)
         {
-            GetState(Instance).CursorClipped = false;
+            Win32kState State = GetState(Instance);
+            State.CursorClipped = false;
+            ApplyHostCursorClip(Instance, State);
+        }
+
+        // A pointer that has left the window reports no motion, so the host has to hold the clip.
+        private static void ApplyHostCursorClip(BinaryEmulator Instance, Win32kState State)
+        {
+            if (!State.CursorClipped)
+            {
+                Instance.WinHelper.SetHostCursorClip(false, 0, 0, 0, 0);
+                return;
+            }
+
+            WinWindow Foreground = Instance.WinHelper.GetWindow(Instance.WinHelper.GetForegroundWindow());
+            int OriginX = Foreground == null ? 0 : Foreground.X;
+            int OriginY = Foreground == null ? 0 : Foreground.Y;
+
+            Instance.WinHelper.SetHostCursorClip(true,
+                State.ClipLeft - OriginX,
+                State.ClipTop - OriginY,
+                State.ClipRight - OriginX,
+                State.ClipBottom - OriginY);
         }
 
         internal static bool TryGetCursorClip(BinaryEmulator Instance, out int Left, out int Top, out int Right, out int Bottom)

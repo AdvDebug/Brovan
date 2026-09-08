@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -10,6 +10,7 @@ using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Emulation.OS.Windows;
 using Brovan.Core.Helpers;
 using Brovan.Core.Helpers.WindowsImage;
+using Brovan.Core.Settings;
 
 namespace Brovan.Android
 {
@@ -153,15 +154,6 @@ namespace Brovan.Android
             }
         }
 
-        [UnmanagedCallersOnly(EntryPoint = "brovan_set_verbose")]
-        public static void SetVerbose(int enabled) => _verbose = enabled != 0;
-
-        [UnmanagedCallersOnly(EntryPoint = "brovan_set_jit_cache")]
-        public static void SetJitCache(int enabled) => UnicornCodeCache.Enabled = enabled != 0;
-
-        [UnmanagedCallersOnly(EntryPoint = "brovan_set_relax_vulkan")]
-        public static void SetRelaxVulkan(int enabled) => VulkanStandIns.Relax = enabled != 0;
-
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_surface")]
         public static void SetSurface(IntPtr nativeWindow, int width, int height, int densityDpi)
         {
@@ -182,7 +174,7 @@ namespace Brovan.Android
         }
 
         [UnmanagedCallersOnly(EntryPoint = "brovan_start")]
-        public static int Start(byte* binaryPath, byte* guestCommandLine, byte* workingDirectory, byte* commands, int networkMode)
+        public static int Start(byte* binaryPath, byte* guestCommandLine, byte* workingDirectory, byte* commands, byte* settingsJson)
         {
             if (Volatile.Read(ref _initialized) == 0)
                 return StatusNotInitialized;
@@ -207,17 +199,29 @@ namespace Brovan.Android
                     ? Array.Empty<string>()
                     : Program.SplitCommandLine(rawArguments);
 
-                NetworkAccessMode mode = networkMode switch
+                List<string> problems = new List<string>();
+                BrovanSettings settings = SettingsStore.Resolve(new[]
                 {
-                    0 => NetworkAccessMode.None,
-                    2 => NetworkAccessMode.Full,
-                    _ => NetworkAccessMode.Loopback,
-                };
+                    SettingsStore.LoadJson(SpanFromUtf8(settingsJson)),
+                }, problems);
+
+                foreach (string problem in problems)
+                    AndroidLog.Write(AndroidNative.LogError, $"[brovan_start] {problem}");
+
+                if (!SettingsStore.TryBuildNetworkPolicy(settings, out NetworkAccessPolicy policy))
+                {
+                    AndroidLog.Write(AndroidNative.LogError, "[brovan_start] net.allow holds an address that is not an IPv4 or IPv6 address");
+                    Volatile.Write(ref _running, 0);
+                    return StatusFailed;
+                }
+
+                SettingsStore.ApplyGlobals(settings);
+                _verbose = !settings.Silent;
 
                 Thread guestThread = new Thread(() =>
                 {
                     AndroidHost.PinToPerformanceCores();
-                    RunGuest(path, rawArguments, arguments, directory, command, EmulationBackendKind.Unicorn, new NetworkAccessPolicy(mode));
+                    RunGuest(path, rawArguments, arguments, directory, command, settings.Backend, policy);
                 })
                 {
                     IsBackground = false,
@@ -379,6 +383,18 @@ namespace Brovan.Android
                 return StatusApiSetMapFailed;
 
             return StatusOk;
+        }
+
+        private static ReadOnlySpan<byte> SpanFromUtf8(byte* Text)
+        {
+            if (Text == null)
+                return ReadOnlySpan<byte>.Empty;
+
+            int Length = 0;
+            while (Text[Length] != 0)
+                Length++;
+
+            return new ReadOnlySpan<byte>(Text, Length);
         }
 
         private static void RunGuest(string path, string rawArguments, string[] arguments, string workingDirectory, string command, EmulationBackendKind backend, NetworkAccessPolicy policy)

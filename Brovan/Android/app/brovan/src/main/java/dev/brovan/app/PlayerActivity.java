@@ -14,6 +14,9 @@ import android.text.SpannableString;
 import android.text.SpannableStringBuilder;
 import android.text.style.ForegroundColorSpan;
 import android.view.View;
+
+import org.json.JSONException;
+import org.json.JSONObject;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
@@ -55,6 +58,9 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private static final String EXTRA_DIRECTORY = "directory";
     private static final String EXTRA_EXECUTABLE = "executable";
     private static final String EXTRA_NAME = "name";
+    /** Same order as Settings.NETWORK_MODES. */
+    private static final String[] NETWORK_KEYS = {"none", "loopback", "full"};
+
     private static final String EXTRA_NETWORK = "network";
     private static final String EXTRA_DEVELOPER = "developer";
     private static final String EXTRA_CONTROLS = "controls";
@@ -247,9 +253,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
             return;
         }
 
-        BrovanNative.setVerbose(developerMode);
-        BrovanNative.setJitCache(getIntent().getBooleanExtra(EXTRA_JIT_CACHE, true));
-        BrovanNative.setRelaxVulkan(getIntent().getBooleanExtra(EXTRA_RELAX_VULKAN, false));
+        BrovanNative.setLogSink(developerMode);
         setStatus(getIntent().getStringExtra(EXTRA_NAME));
 
         String session = getIntent().getStringExtra(EXTRA_SESSION);
@@ -279,11 +283,31 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 getIntent().getStringExtra(EXTRA_ARGUMENTS),
                 directory,
                 null,
-                getIntent().getIntExtra(EXTRA_NETWORK, 1));
+                buildSettings(developerMode));
 
         if (result != BrovanNative.STATUS_OK) {
             fail(describe(result));
         }
+    }
+
+    private String buildSettings(boolean developerMode) {
+        JSONObject settings = new JSONObject();
+        try {
+            settings.put("net.mode", NETWORK_KEYS[clampNetwork(getIntent().getIntExtra(EXTRA_NETWORK, 1))]);
+            settings.put("jit.cache", getIntent().getBooleanExtra(EXTRA_JIT_CACHE, true));
+            settings.put("graphics.relax-vulkan", getIntent().getBooleanExtra(EXTRA_RELAX_VULKAN, false));
+
+            // The debugger prompt needs the emulator's own output.
+            settings.put("log.silent", !developerMode);
+        } catch (JSONException malformed) {
+            return "{}";
+        }
+
+        return settings.toString();
+    }
+
+    private static int clampNetwork(int value) {
+        return value < 0 || value >= NETWORK_KEYS.length ? 1 : value;
     }
 
     private void applySustainedPerformance() {

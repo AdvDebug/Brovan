@@ -179,6 +179,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             int sourceX, int sourceY, uint sourceWidth, uint sourceHeight, int destinationX, int destinationY);
 
         [LibraryImport("libX11.so.6")]
+        public static partial int XGrabPointer(IntPtr display, IntPtr grabWindow, int ownerEvents, uint eventMask,
+            int pointerMode, int keyboardMode, IntPtr confineTo, IntPtr cursor, IntPtr time);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XUngrabPointer(IntPtr display, IntPtr time);
+
+        public const int GrabModeAsync = 1;
+
+        [LibraryImport("libX11.so.6")]
         public static partial int XSync(IntPtr display, [MarshalAs(UnmanagedType.I4)] int discard);
 
         [LibraryImport("libX11.so.6")]
@@ -372,6 +381,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             [FieldOffset(52)] public int Y;
             [FieldOffset(56)] public int Width;
             [FieldOffset(60)] public int Height;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        public struct XFocusChangeEvent
+        {
+            [FieldOffset(0)] public int Type;
+            [FieldOffset(32)] public IntPtr Window;
         }
 
         [StructLayout(LayoutKind.Explicit)]
@@ -899,12 +915,17 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     }
 
                 case X11.FocusIn:
-                    HostEventQueue.Enqueue(WM_SETFOCUS, 0, 0);
-                    return;
-
                 case X11.FocusOut:
-                    HostEventQueue.Enqueue(WM_KILLFOCUS, 0, 0);
-                    return;
+                    {
+                        ref X11.XFocusChangeEvent focus = ref Unsafe.As<X11.XEvent, X11.XFocusChangeEvent>(ref nativeEvent);
+                        bool gained = nativeEvent.Type == X11.FocusIn;
+
+                        if (TryGetWindow(focus.Window, out LinuxWindow? focusWindow) && focusWindow != null)
+                            focusWindow.ApplyCursorClip(gained);
+
+                        HostEventQueue.Enqueue(gained ? WM_SETFOCUS : WM_KILLFOCUS, 0, 0);
+                        return;
+                    }
 
                 case X11.ClientMessage:
                     {
@@ -1795,6 +1816,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private bool _maximized;
             private readonly bool _resizable;
             private IntPtr _emptyCursor;
+            private bool _cursorClipped;
+
+            private const uint PointerGrabEventMask =
+                (uint)(X11.ButtonPressMask | X11.ButtonReleaseMask | X11.PointerMotionMask);
 
             internal LinuxWindow(LinuxWinManager manager, IntPtr display, IntPtr window, WindowOptions options)
             {
@@ -1901,6 +1926,29 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 X11.XFlush(_display);
             }
 
+            // X11 confines a grab to a window, never to a rectangle.
+            public void SetCursorClip(bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom)
+            {
+                EnsureAlive();
+
+                _cursorClipped = enabled;
+                ApplyCursorClip(true);
+            }
+
+            internal void ApplyCursorClip(bool focused)
+            {
+                if (!_cursorClipped || !focused)
+                {
+                    X11.XUngrabPointer(_display, IntPtr.Zero);
+                    X11.XFlush(_display);
+                    return;
+                }
+
+                X11.XGrabPointer(_display, _window, 0, PointerGrabEventMask, X11.GrabModeAsync, X11.GrabModeAsync,
+                    _window, IntPtr.Zero, IntPtr.Zero);
+                X11.XFlush(_display);
+            }
+
             public unsafe void SetCursorVisible(bool visible)
             {
                 EnsureAlive();
@@ -1968,6 +2016,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 if (_disposed)
                     return;
 
+                _cursorClipped = false;
+                ApplyCursorClip(false);
                 _disposed = true;
                 _manager.DestroyWindow(_window);
             }

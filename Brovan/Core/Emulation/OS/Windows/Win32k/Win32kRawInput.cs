@@ -105,6 +105,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly RawRecord[] Records = new RawRecord[RecordSlots];
             public uint NextHandle = 1;
             public uint LastDeliveredHandle;
+            public uint LastMotionHandle;
             public bool HavePointer;
             public int PointerX;
             public int PointerY;
@@ -302,6 +303,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             State.PointerX = X;
             State.PointerY = Y;
 
+            ConfineHostPointer(Instance, State, Foreground);
+
             if (!TryResolveUsage(State, UsageMouse, out ulong Target, out bool NoLegacy))
                 return true;
 
@@ -329,7 +332,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Post(Instance, State, Target != 0 ? Target : Foreground, ref Record);
             }
 
-            ConfineHostPointer(Instance, State, Foreground);
             return !NoLegacy;
         }
 
@@ -382,29 +384,43 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static void Post(BinaryEmulator Instance, RawInputState State, ulong Hwnd, ref RawRecord Record)
         {
-            // A guest slower than the host input rate outruns the ring and reads stale handles: fold
-            // pending travel into the newest unread move, drop what a full ring cannot hold. The NT raw
-            // input queue also drops on overflow.
+            // A guest slower than the host input rate outruns the ring. Only motion is folded or dropped,
+            // because a lost button or key release leaves the guest holding a key that is up.
             uint Backlog = State.NextHandle - 1 - State.LastDeliveredHandle;
-            if (Backlog >= CoalesceBacklog && Record.Type == RimTypeMouse && Record.ButtonFlags == 0)
-            {
-                ref RawRecord Previous = ref State.Records[(State.NextHandle - 1) % RecordSlots];
-                if (Previous.Handle == State.NextHandle - 1 && Previous.Type == RimTypeMouse && Previous.ButtonFlags == 0)
-                {
-                    Previous.LastX += Record.LastX;
-                    Previous.LastY += Record.LastY;
-                    return;
-                }
-            }
+            bool Motion = Record.Type == RimTypeMouse && Record.ButtonFlags == 0;
 
-            if (Backlog >= (uint)RecordSlots)
-                return;
+            if (Motion && Backlog >= CoalesceBacklog)
+            {
+                if (TryCoalesceMotion(State, ref Record))
+                    return;
+
+                if (Backlog >= (uint)RecordSlots)
+                    return;
+            }
 
             Record.Handle = State.NextHandle;
             State.NextHandle = State.NextHandle == uint.MaxValue ? 1 : State.NextHandle + 1;
             State.Records[Record.Handle % RecordSlots] = Record;
 
+            if (Motion)
+                State.LastMotionHandle = Record.Handle;
+
             Win32kHelper.PostMessage(Instance, Hwnd, Win32kHelper.WM_INPUT, 0, Record.Handle);
+        }
+
+        private static bool TryCoalesceMotion(RawInputState State, ref RawRecord Record)
+        {
+            uint Handle = State.LastMotionHandle;
+            if (Handle == 0 || (int)(Handle - State.LastDeliveredHandle) <= 0)
+                return false;
+
+            ref RawRecord Previous = ref State.Records[Handle % RecordSlots];
+            if (Previous.Handle != Handle || Previous.Type != RimTypeMouse || Previous.ButtonFlags != 0)
+                return false;
+
+            Previous.LastX += Record.LastX;
+            Previous.LastY += Record.LastY;
+            return true;
         }
 
         internal static void NoteInputDelivered(BinaryEmulator Instance, uint Handle)

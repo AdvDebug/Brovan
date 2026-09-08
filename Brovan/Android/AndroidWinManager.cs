@@ -266,6 +266,10 @@ namespace Brovan.Android
             {
             }
 
+            public void SetCursorClip(bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom)
+            {
+            }
+
             public void SetCursorVisible(bool visible)
             {
             }

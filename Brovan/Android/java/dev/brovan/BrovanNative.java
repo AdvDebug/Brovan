@@ -159,23 +159,13 @@ public final class BrovanNative {
     }
 
     public static int start(String binaryPath, String guestCommandLine, String workingDirectory,
-                            String debuggerCommands, int networkMode) {
-        return nativeStart(binaryPath, guestCommandLine, workingDirectory, debuggerCommands, networkMode);
+                            String debuggerCommands, String settingsJson) {
+        return nativeStart(binaryPath, guestCommandLine, workingDirectory, debuggerCommands, settingsJson);
     }
 
-    /** Enables the emulator's own trace into logcat. Must be called before {@link #start}. */
-    public static void setVerbose(boolean enabled) {
-        nativeSetVerbose(enabled ? 1 : 0);
-    }
-
-    /** Reuses translated guest code between runs. Must be called before {@link #start}. */
-    public static void setJitCache(boolean enabled) {
-        nativeSetJitCache(enabled ? 1 : 0);
-    }
-
-    /** Claims the core Vulkan features nothing stands in for. Call before {@link #start}. */
-    public static void setRelaxVulkan(boolean enabled) {
-        nativeSetRelaxVulkan(enabled ? 1 : 0);
+    /** Routes the emulator's own trace into logcat. Must be called before {@link #start}. */
+    public static void setLogSink(boolean enabled) {
+        nativeSetLogSink(enabled ? 1 : 0);
     }
 
     /** Feeds one line to the emulator's debugger prompt. Verbose mode only. */
@@ -407,15 +397,11 @@ public final class BrovanNative {
     private static native void nativeClearSurface();
 
     private static native int nativeStart(String binaryPath, String guestCommandLine, String workingDirectory,
-                                          String debuggerCommands, int networkMode);
+                                          String debuggerCommands, String settingsJson);
 
     private static native void nativeJoinSession(String sessionId, int spawnToken, int depth);
 
-    private static native void nativeSetVerbose(int enabled);
-
-    private static native void nativeSetJitCache(int enabled);
-
-    private static native void nativeSetRelaxVulkan(int enabled);
+    private static native void nativeSetLogSink(int enabled);
 
     private static native void nativeSendCommand(String command);
 

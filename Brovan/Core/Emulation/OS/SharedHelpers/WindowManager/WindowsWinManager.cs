@@ -120,6 +120,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_MOUSEMOVE = 0x0200;
         private const uint WM_SETCURSOR = 0x0020;
         private const uint WM_INPUT = 0x00FF;
+        private const uint WM_SETFOCUS = 0x0007;
+        private const uint WM_KILLFOCUS = 0x0008;
+        private const uint WM_ACTIVATE = 0x0006;
+        private const uint WA_INACTIVE = 0;
         private const uint RID_INPUT = 0x10000003;
         private const uint RIM_TYPEMOUSE = 0;
         private const ushort MOUSE_MOVE_ABSOLUTE = 0x0001;
@@ -820,6 +824,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private readonly bool _resizable;
             private uint _style;
             private bool _cursorVisible = true;
+            private bool _cursorClipped;
+            private RECT _cursorClip;
 
             private IntPtr _hdc;
             private IntPtr _selectedPen;
@@ -964,6 +970,50 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     SetCursorPos(Point.X, Point.Y);
             }
 
+            public void SetCursorClip(bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom)
+            {
+                EnsureAlive();
+
+                _cursorClipped = enabled;
+                _cursorClip = new RECT { Left = clientLeft, Top = clientTop, Right = clientRight, Bottom = clientBottom };
+                ApplyCursorClip();
+            }
+
+            // NT drops the clip on deactivation, so it is applied again on activate, move and resize.
+            private void ApplyCursorClip()
+            {
+                if (!_cursorClipped)
+                {
+                    ClipCursor(IntPtr.Zero);
+                    return;
+                }
+
+                if (!GetClientRect(_hwnd, out RECT Client))
+                    return;
+
+                int Left = Math.Max(_cursorClip.Left, Client.Left);
+                int Top = Math.Max(_cursorClip.Top, Client.Top);
+                int Right = Math.Min(_cursorClip.Right, Client.Right);
+                int Bottom = Math.Min(_cursorClip.Bottom, Client.Bottom);
+
+                if (Right - Left < 1 || Bottom - Top < 1)
+                    return;
+
+                POINT TopLeft = new POINT { X = Left, Y = Top };
+                POINT BottomRight = new POINT { X = Right, Y = Bottom };
+                if (!ClientToScreen(_hwnd, ref TopLeft) || !ClientToScreen(_hwnd, ref BottomRight))
+                    return;
+
+                RECT Screen = new RECT { Left = TopLeft.X, Top = TopLeft.Y, Right = BottomRight.X, Bottom = BottomRight.Y };
+                ClipCursor(ref Screen);
+            }
+
+            private void ReleaseCursorClip()
+            {
+                if (_cursorClipped)
+                    ClipCursor(IntPtr.Zero);
+            }
+
             public void SetCursorVisible(bool visible)
             {
                 EnsureAlive();
@@ -1012,6 +1062,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 if (_disposed)
                     return;
 
+                ReleaseCursorClip();
+                _cursorClipped = false;
                 _disposed = true;
                 _hdc = IntPtr.Zero;
                 _selectedPen = IntPtr.Zero;
@@ -1048,6 +1100,20 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         ForwardRawInput(lParam);
                         break;
 
+                    case WM_ACTIVATE:
+                        if ((unchecked((uint)(long)wParam) & 0xFFFF) == WA_INACTIVE)
+                        {
+                            ReleaseCursorClip();
+                            HostEventQueue.Enqueue(WM_KILLFOCUS, 0, 0);
+                        }
+                        else
+                        {
+                            ApplyCursorClip();
+                            HostEventQueue.Enqueue(WM_SETFOCUS, 0, 0);
+                        }
+
+                        break;
+
                     // The window class carries no cursor, so the shape the pointer keeps on the way in is the one
                     // it holds until this answers.
                     case WM_SETCURSOR:
@@ -1061,10 +1127,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                     case WM_SIZE:
                         TrackHostResize(unchecked((uint)(long)wParam), unchecked((ulong)(long)lParam));
+                        ApplyCursorClip();
                         HostEventQueue.MarkRepaint();
                         break;
 
                     case WM_MOVE:
+                        ApplyCursorClip();
                         HostEventQueue.Enqueue(WM_MOVE, 0, unchecked((ulong)(long)lParam));
                         break;
 
@@ -1166,6 +1234,18 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetCursorPos(int X, int Y);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ClipCursor(ref RECT lpRect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ClipCursor(IntPtr lpRect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetCursor(IntPtr hCursor);

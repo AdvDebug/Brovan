@@ -682,6 +682,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         void WarpCursor(int clientX, int clientY);
 
+        void SetCursorClip(bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom);
+
         void SetCursorVisible(bool visible);
 
         IntPtr NativeHandle { get; }

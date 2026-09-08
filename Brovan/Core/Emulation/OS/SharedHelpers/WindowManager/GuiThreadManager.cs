@@ -13,6 +13,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         GdiPrimitive,
         CreateWindow,
         WarpCursor,
+        SetCursorClip,
         SetCursorVisible,
         Shutdown,
     }
@@ -155,6 +156,22 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return;
 
             Submit(new GuiCommand { Kind = GuiCommandKind.WarpCursor, X = clientX, Y = clientY });
+        }
+
+        public void EnqueueSetCursorClip(bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom)
+        {
+            if (_disposed)
+                return;
+
+            Submit(new GuiCommand
+            {
+                Kind = GuiCommandKind.SetCursorClip,
+                X = enabled ? 1 : 0,
+                RectLeft = clientLeft,
+                RectTop = clientTop,
+                RectRight = clientRight,
+                RectBottom = clientBottom,
+            });
         }
 
         /// <summary>
@@ -446,6 +463,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 case GuiCommandKind.WarpCursor:
                     window?.WarpCursor(command.X, command.Y);
+                    return;
+
+                case GuiCommandKind.SetCursorClip:
+                    window?.SetCursorClip(command.X != 0, command.RectLeft, command.RectTop, command.RectRight, command.RectBottom);
                     return;
 
                 case GuiCommandKind.SetCursorVisible:

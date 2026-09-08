@@ -1,9 +1,10 @@
-using static Brovan.Core.Helpers.Utils;
+﻿using static Brovan.Core.Helpers.Utils;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Net;
 using Brovan.Core.Emulation;
 using Brovan.Core.Helpers.WindowsImage;
+using Brovan.Core.Settings;
 using static Brovan.GeneralHelper;
 
 namespace Brovan
@@ -69,48 +70,6 @@ namespace Brovan
                 PrintHighlight("[*] Elevated registry dump process completed.");
 
             return VerifyRegDump(RegDir, false);
-        }
-
-        private static bool ArgsSpecifyHardwareBackend(string[] args)
-        {
-            for (int i = 0; i < args.Length; i++)
-            {
-                string arg = args[i];
-                string value = null;
-                if (arg.StartsWith("--backend=", StringComparison.OrdinalIgnoreCase))
-                    value = arg.Substring("--backend=".Length);
-                else if (arg == "--backend" && i + 1 < args.Length)
-                    value = args[i + 1];
-
-                if (value == null)
-                    continue;
-
-                value = value.Trim().ToLowerInvariant();
-                return value == "kvm" || value == "whp";
-            }
-            return false;
-        }
-
-        private static bool HasSilentFlag(string[] args)
-        {
-            for (int i = 0; i < args.Length; i++)
-            {
-                string Arg = args[i];
-
-                if (Arg == "-c" || Arg == "--command" || Arg == "--net" || Arg == "--net-allow" || Arg == "--cores")
-                {
-                    i++;
-                    continue;
-                }
-
-                if (Arg == "-s" || Arg == "--silent")
-                    return true;
-
-                if (!Arg.StartsWith("-", StringComparison.Ordinal))
-                    return false;
-            }
-
-            return false;
         }
 
         static void ShowHelp()
@@ -203,15 +162,6 @@ namespace Brovan
                     Mode = NetworkAccessMode.None;
                     return false;
             }
-        }
-
-        private static bool TryAddAllowedNetworkAddress(NetworkAccessPolicy Policy, string Value)
-        {
-            if (!IPAddress.TryParse(Value, out IPAddress? Address))
-                return false;
-
-            Policy.AddAllowedAddress(Address);
-            return true;
         }
 
         private const string Base64ArgumentPrefix = "base64:";
@@ -394,12 +344,32 @@ namespace Brovan
                 return;
             }
 
-            SilentMode = HasSilentFlag(args);
+            List<string> RemainingArgs = new List<string>();
+            List<string> SettingProblems = new List<string>();
+            SettingsLayer CommandLineSettings = SettingsCommandLine.Parse(args, RemainingArgs, SettingProblems);
+            SettingsStore.EnsureConfigFile(SettingsStore.ConfigPath());
+            BrovanSettings Settings = SettingsStore.Resolve(new[]
+            {
+                SettingsStore.LoadFile(SettingsStore.ConfigPath()),
+                SettingsStore.LoadEnvironment(),
+                CommandLineSettings,
+            }, SettingProblems);
+
+            SilentMode = Settings.Silent;
+
+            if (SettingProblems.Count != 0)
+            {
+                // A refused option reports even in silent mode.
+                foreach (string Problem in SettingProblems)
+                    PrintHighlight($"[-] {Problem}", true, false, true);
+
+                return;
+            }
 
             if (TryInstallWindowsSystemFiles(args))
                 return;
 
-            bool HardwareBackendRequested = ArgsSpecifyHardwareBackend(args);
+            bool HardwareBackendRequested = Settings.Backend != EmulationBackendKind.Unicorn;
 
             if (!IsWindows && !Directory.Exists(WindowsLibsPath))
             {
@@ -517,22 +487,43 @@ namespace Brovan
                 }
             }
 
-            bool Quick = true;
-            bool NoHooks = false;
-            bool Smp = true;
-            int SmpWorkers = 0;
-            bool Silent = false;
             string Command = null;
             string FilePath = null;
             string WorkingDirectory = null;
             string GuestCommandLine = null;
-            EmulationBackendKind BackendKind = EmulationBackendKind.Unicorn;
-            NetworkAccessPolicy NetworkPolicy = new NetworkAccessPolicy(NetworkAccessMode.Loopback);
             List<string> ProgramArgumentsList = new List<string>();
 
-            for (int i = 0; i < args.Length; i++)
+            if (!SettingsStore.TryBuildNetworkPolicy(Settings, out NetworkAccessPolicy NetworkPolicy))
             {
-                string Arg = args[i];
+                PrintHighlight("[-] Invalid network allow address. expected an IPv4 or IPv6 address.", true, false, true);
+                return;
+            }
+
+            SettingsStore.ApplyGlobals(Settings);
+
+            if (IsWindows && Settings.Backend == EmulationBackendKind.Unicorn && !HardwareBackendRequested && Unicorn.IsCFGEnabled())
+            {
+                if (Environment.GetEnvironmentVariable("BROVAN_CFG_DISABLED") != "1")
+                {
+                    PrintHighlight("[!] Control Flow Guard is enabled, Brovan will try to restart the process with CFG disabled.", true);
+                    if (!RestartProcessWithCfgDisabled(true))
+                    {
+                        PrintHighlight("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process. Failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.", true);
+                        Environment.Exit(-1);
+                    }
+                }
+                else
+                {
+                    PrintHighlight("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process, and Brovan failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.", true);
+                    Environment.Exit(-1);
+                }
+
+                Environment.Exit(0); // it should exit by itself inside RestartProcessWithCfgDisabled but keep this here too just in case
+            }
+
+            for (int i = 0; i < RemainingArgs.Count; i++)
+            {
+                string Arg = RemainingArgs[i];
 
                 if (FilePath != null)
                 {
@@ -548,165 +539,28 @@ namespace Brovan
                     case "--help":
                         ShowHelp();
                         return;
-                    case "-q":
-                    case "--quick":
-                        Quick = true;
-                        continue;
-                    case "-s":
-                    case "--silent":
-                        Silent = true;
-                        continue;
                     case "-c":
                     case "--command":
-                        if (i + 1 >= args.Length)
+                        if (i + 1 >= RemainingArgs.Count)
                             continue;
 
-                        Command = args[i + 1];
+                        Command = RemainingArgs[i + 1];
                         i++;
-                        continue;
-                    case "--net":
-                        if (i + 1 >= args.Length || !TryParseNetworkMode(args[i + 1], out NetworkAccessMode ArgumentNetworkMode))
-                        {
-                            PrintHighlight("[-] Invalid network mode. expected: full, none, loopback.", true);
-                            return;
-                        }
-
-                        NetworkPolicy.Mode = ArgumentNetworkMode;
-                        i++;
-                        continue;
-                    case "--net-allow":
-                        if (i + 1 >= args.Length || !TryAddAllowedNetworkAddress(NetworkPolicy, args[i + 1]))
-                        {
-                            PrintHighlight("[-] Invalid network allow address. expected an IPv4 or IPv6 address.", true);
-                            return;
-                        }
-
-                        i++;
-                        continue;
-                    case "--no-hooks":
-                        NoHooks = true;
-                        continue;
-                    case "--no-smp":
-                        Smp = false;
-                        continue;
-                    case "--cores":
-                        if (i + 1 >= args.Length || !int.TryParse(args[i + 1], out SmpWorkers) || SmpWorkers < 1)
-                        {
-                            PrintHighlight("[-] Invalid core count. expected a positive number.", true);
-                            return;
-                        }
-
-                        i++;
-                        continue;
-                    case "--no-jit-cache":
-                        UnicornCodeCache.Enabled = false;
-                        continue;
-                    case "--jit-cache-stats":
-                        UnicornCodeCache.PrintStats = true;
-                        continue;
-                    case "--jit-cache":
-                        UnicornCodeCache.Enabled = true;
                         continue;
                     case "--cwd":
-                        if (i + 1 >= args.Length)
+                        if (i + 1 >= RemainingArgs.Count)
                             continue;
 
-                        WorkingDirectory = DecodeArgumentValue(args[i + 1]);
+                        WorkingDirectory = DecodeArgumentValue(RemainingArgs[i + 1]);
                         i++;
                         continue;
                     case "--guest-cmdline":
-                        if (i + 1 >= args.Length)
+                        if (i + 1 >= RemainingArgs.Count)
                             continue;
 
-                        GuestCommandLine = DecodeArgumentValue(args[i + 1]);
+                        GuestCommandLine = DecodeArgumentValue(RemainingArgs[i + 1]);
                         i++;
                         continue;
-                    case "--backend":
-                        if (i + 1 >= args.Length || !TryParseBackendKind(args[i + 1], out EmulationBackendKind ArgumentBackendKind))
-                        {
-                            PrintHighlight("[-] Invalid backend. expected: unicorn, kvm, whp.", true);
-                            return;
-                        }
-
-                        BackendKind = ArgumentBackendKind;
-                        i++;
-                        continue;
-                }
-
-                if (IsWindows && BackendKind == EmulationBackendKind.Unicorn && !HardwareBackendRequested && Unicorn.IsCFGEnabled())
-                {
-                    if (Environment.GetEnvironmentVariable("BROVAN_CFG_DISABLED") != "1")
-                    {
-                        PrintHighlight("[!] Control Flow Guard is enabled, Brovan will try to restart the process with CFG disabled.", true);
-                        if (!RestartProcessWithCfgDisabled(true))
-                        {
-                            PrintHighlight("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process. Failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.", true);
-                            Environment.Exit(-1);
-                        }
-                    }
-                    else
-                    {
-                        PrintHighlight("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process, and Brovan failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.", true);
-                        Environment.Exit(-1);
-                    }
-
-                    Environment.Exit(0); // it should exit by itself inside RestartProcessWithCfgDisabled but keep this here too just in case
-                }
-
-                if (Arg.StartsWith("--net=", StringComparison.OrdinalIgnoreCase))
-                {
-                    string Value = Arg.Substring("--net=".Length);
-                    if (!TryParseNetworkMode(Value, out NetworkAccessMode InlineNetworkMode))
-                    {
-                        PrintHighlight("[-] Invalid network mode. expected: full, none, loopback.", true);
-                        return;
-                    }
-
-                    NetworkPolicy.Mode = InlineNetworkMode;
-                    continue;
-                }
-
-                if (Arg.StartsWith("--net-allow=", StringComparison.OrdinalIgnoreCase))
-                {
-                    string Value = Arg.Substring("--net-allow=".Length);
-                    if (!TryAddAllowedNetworkAddress(NetworkPolicy, Value))
-                    {
-                        PrintHighlight("[-] Invalid network allow address. expected an IPv4 or IPv6 address.", true);
-                        return;
-                    }
-
-                    continue;
-                }
-
-                if (Arg.StartsWith("--backend=", StringComparison.OrdinalIgnoreCase))
-                {
-                    string Value = Arg.Substring("--backend=".Length);
-                    if (!TryParseBackendKind(Value, out EmulationBackendKind InlineBackendKind))
-                    {
-                        PrintHighlight("[-] Invalid backend. expected: unicorn, kvm.", true);
-                        return;
-                    }
-
-                    BackendKind = InlineBackendKind;
-                    continue;
-                }
-
-                if (Arg.StartsWith("--cores=", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!int.TryParse(Arg.Substring("--cores=".Length), out SmpWorkers) || SmpWorkers < 1)
-                    {
-                        PrintHighlight("[-] Invalid core count. expected a positive number.", true);
-                        return;
-                    }
-
-                    continue;
-                }
-
-                if (Arg.StartsWith("--jit-cache=", StringComparison.OrdinalIgnoreCase))
-                {
-                    UnicornCodeCache.Enabled = true;
-                    UnicornCodeCache.CacheDirectory = DecodeArgumentValue(Arg.Substring("--jit-cache=".Length));
-                    continue;
                 }
 
                 if (Arg.StartsWith("-", StringComparison.Ordinal))
@@ -734,7 +588,7 @@ namespace Brovan
 
             // Set the dll import resolver based on the platform
             NativeLibraryResolver.Register();
-            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Quick, Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, NoHooks, BackendKind, WorkingDirectory, Smp, SmpWorkers);
+            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Settings.Quick, Settings.Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, !Settings.Hooks, Settings.Backend, WorkingDirectory, Settings.Smp, Settings.Cores);
         }
     }
 }

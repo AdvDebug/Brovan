@@ -22,13 +22,10 @@ extern void brovan_set_install_progress_sink(void *sink);
 extern void brovan_set_text_sink(void *sink);
 extern void brovan_set_spawn_sink(void *sink);
 extern void brovan_join_session(const char *sessionId, unsigned int spawnToken, int depth);
-extern void brovan_set_verbose(int enabled);
-extern void brovan_set_jit_cache(int enabled);
-extern void brovan_set_relax_vulkan(int enabled);
 extern void brovan_set_surface(void *nativeWindow, int width, int height, int densityDpi);
 extern void brovan_clear_surface(void);
 extern int brovan_start(const char *binaryPath, const char *guestCommandLine, const char *workingDirectory,
-                        const char *commands, int networkMode);
+                        const char *commands, const char *settingsJson);
 extern int brovan_is_running(void);
 extern void brovan_send_command(const char *command);
 extern void brovan_request_close(void);
@@ -474,20 +471,22 @@ JNIEXPORT void JNICALL METHOD(ClearSurface)(JNIEnv *env, jclass clazz) {
 }
 
 JNIEXPORT jint JNICALL METHOD(Start)(JNIEnv *env, jclass clazz, jstring binaryPath, jstring guestCommandLine,
-                                     jstring workingDirectory, jstring commands, jint networkMode) {
+                                     jstring workingDirectory, jstring commands, jstring settingsJson) {
     (void)clazz;
 
     const char *path = borrow(env, binaryPath);
     const char *cmdline = borrow(env, guestCommandLine);
     const char *cwd = borrow(env, workingDirectory);
     const char *debuggerCommands = borrow(env, commands);
+    const char *settings = borrow(env, settingsJson);
 
-    int status = path != NULL ? brovan_start(path, cmdline, cwd, debuggerCommands, networkMode) : -3;
+    int status = path != NULL ? brovan_start(path, cmdline, cwd, debuggerCommands, settings) : -3;
 
     release(env, binaryPath, path);
     release(env, guestCommandLine, cmdline);
     release(env, workingDirectory, cwd);
     release(env, commands, debuggerCommands);
+    release(env, settingsJson, settings);
 
     return status;
 }
@@ -505,26 +504,11 @@ JNIEXPORT void JNICALL METHOD(JoinSession)(JNIEnv *env, jclass clazz, jstring se
     release(env, sessionId, session);
 }
 
-JNIEXPORT void JNICALL METHOD(SetVerbose)(JNIEnv *env, jclass clazz, jint enabled) {
+/* No sink stops the emulator encoding and marshalling lines that nothing reads. */
+JNIEXPORT void JNICALL METHOD(SetLogSink)(JNIEnv *env, jclass clazz, jint enabled) {
     (void)env;
     (void)clazz;
-    brovan_set_verbose(enabled);
-
-    /* Only the developer console reads the log sink. Dropping it otherwise keeps the emulator from
-       encoding and marshalling every line it writes for a listener that discards them. */
     brovan_set_log_sink(enabled ? (void *)&on_log : NULL);
-}
-
-JNIEXPORT void JNICALL METHOD(SetJitCache)(JNIEnv *env, jclass clazz, jint enabled) {
-    (void)env;
-    (void)clazz;
-    brovan_set_jit_cache(enabled);
-}
-
-JNIEXPORT void JNICALL METHOD(SetRelaxVulkan)(JNIEnv *env, jclass clazz, jint enabled) {
-    (void)env;
-    (void)clazz;
-    brovan_set_relax_vulkan(enabled);
 }
 
 JNIEXPORT void JNICALL METHOD(SendCommand)(JNIEnv *env, jclass clazz, jstring command) {
