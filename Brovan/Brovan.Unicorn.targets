@@ -29,6 +29,11 @@
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_softfloat_fast.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_softfloat_cmp.inc.c" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_sse_fastconv.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_fp_vec_opc.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_fp_vec_state.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_fp_vec.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_fp_vec_arm64.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_fp_vec_i386.inc.c" />
   </ItemGroup>
 
   <UsingTask TaskName="ApplyUnicornPatches" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
