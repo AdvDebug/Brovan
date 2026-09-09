@@ -17,6 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly GenState GenState = new GenState();
         private readonly GenReader Reader = new GenReader();
         private readonly GenBuf Writer = new GenBuf();
+        private readonly bool[] MissingReported = new bool[BrovVulkApi.CommandCount];
 
         public string DeviceName => "\\Device\\BrovVulk";
 
@@ -81,6 +82,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         {
                             uint SubId = Reader.ReadU32();
                             try { Result = BrovVulkGenDispatch.Dispatch(SubId, Reader, Writer, GenState, Instance); }
+                            catch (EntryPointNotFoundException Ex) { ReportMissingEntryPoint(SubId, Ex, Instance); }
                             finally { GenState.FreeCallAllocs(); }
                         }
                     }
@@ -92,6 +94,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 catch (Exception Ex)
                 {
+                    Utils.LogError($"[!] BrovVulk(gen): {Ex.Message}");
                     if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                         Instance.TriggerEventMessage($"[!] BrovVulk(gen): {Ex.Message}", LogFlags.Issues);
                     Writer.Reset();
@@ -108,6 +111,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             Data.OutputBuffer = OutBytes;
             Data.Information = (ulong)OutBytes.Length;
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // Raised at the call, after the sub-command's input was read, so the next sub-command still parses.
+        private void ReportMissingEntryPoint(uint Id, EntryPointNotFoundException Ex, BinaryEmulator Instance)
+        {
+            if (Id >= (uint)MissingReported.Length || MissingReported[Id])
+                return;
+
+            MissingReported[Id] = true;
+            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                Instance.TriggerEventMessage($"[!] BrovVulk(gen): batch skipped {BrovVulkApi.CommandNames[Id]}. {Ex.Message}", LogFlags.Issues);
         }
     }
 }

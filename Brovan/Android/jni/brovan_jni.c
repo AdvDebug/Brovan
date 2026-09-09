@@ -3,10 +3,17 @@
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <string.h>
+#include <ucontext.h>
+#include <unistd.h>
 
 #define TAG "BrovanJni"
 #define METHOD(name) Java_dev_brovan_BrovanNative_native##name
@@ -374,6 +381,66 @@ static void use_system_certificates(void) {
     setenv("SSL_CERT_DIR", combined, 0);
 }
 
+/* The tombstone does not carry the words around the faulting address, which say whether the thread ran
+   into never-written buffer or into the middle of another block. BROVAN_TRAP_SIGILL opts in. */
+static int sigill_readable(uintptr_t address) {
+    size_t page = (size_t)getpagesize();
+    void *base = (void *)(address & ~(uintptr_t)(page - 1));
+    return msync(base, page, MS_ASYNC) == 0;
+}
+
+static void report_sigill(int signal_number, siginfo_t *info, void *context) {
+    (void)info;
+
+    const ucontext_t *state = (const ucontext_t *)context;
+    uintptr_t pc = (uintptr_t)state->uc_mcontext.pc;
+    char text[320];
+    int used = 0;
+
+    /* The faulting page is mapped, the ones around it need not be, and a fault here would replace the
+       tombstone. */
+    uintptr_t first = sigill_readable(pc - 32) ? pc - 32 : pc;
+    uintptr_t last = sigill_readable(pc + 32) ? pc + 32 : pc + 4;
+
+    for (uintptr_t at = first; at < last && used < (int)sizeof(text) - 12; at += 4) {
+        used += snprintf(text + used, sizeof(text) - (size_t)used, "%s%08x", at == pc ? " | " : " ",
+                         *(const uint32_t *)at);
+    }
+
+    __android_log_print(ANDROID_LOG_ERROR, TAG, "[sigill] pc=%p lr=%p words:%s", (void *)pc,
+                        (void *)(uintptr_t)state->uc_mcontext.regs[30], text);
+
+    FILE *maps = fopen("/proc/self/maps", "re");
+    if (maps != NULL) {
+        char line[256];
+        while (fgets(line, sizeof(line), maps) != NULL) {
+            unsigned long long low = 0, high = 0;
+            if (sscanf(line, "%llx-%llx", &low, &high) == 2 && pc >= low && pc < high) {
+                __android_log_print(ANDROID_LOG_ERROR, TAG, "[sigill] mapping %s", line);
+                break;
+            }
+        }
+        fclose(maps);
+    }
+
+    struct sigaction restore;
+    memset(&restore, 0, sizeof(restore));
+    restore.sa_handler = SIG_DFL;
+    sigaction(signal_number, &restore, NULL);
+}
+
+static void trap_sigill(void) {
+    if (getenv("BROVAN_TRAP_SIGILL") == NULL) {
+        return;
+    }
+
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = &report_sigill;
+    action.sa_flags = SA_SIGINFO;
+    sigaction(SIGILL, &action, NULL);
+}
+
 JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirectory) {
     if (g_callbacks == NULL) {
         g_callbacks = (jclass)(*env)->NewGlobalRef(env, clazz);
@@ -404,6 +471,7 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
         brovan_set_install_progress_sink((void *)&on_install_progress);
         brovan_set_text_sink((void *)&on_text);
         brovan_set_spawn_sink((void *)&on_spawn);
+        trap_sigill();
     } else {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "brovan_init failed: %d", status);
     }

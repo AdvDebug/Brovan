@@ -8,6 +8,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint MaxElems = 1u << 20;
         private const long MaxBytes = 256L << 20;
 
+        // The slot is sized from the descriptor id, so a node whose sType names a different struct would let
+        // a reader of the chain write outside the slot.
+        internal static uint CheckedSType(uint sType, int sid)
+        {
+            uint want = BrovVulkStructMeta.STypes[sid];
+            if (want != 0 && sType != want)
+                throw new InvalidOperationException($"BrovVulk generic: sType {sType} does not match the chain node type.");
+
+            return sType;
+        }
+
         internal static int CheckedBytes(uint n, int elem)
         {
             if (elem <= 0)
@@ -25,6 +36,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static void VerifyArrayLen(IntPtr dst, in BvkM d, uint n)
         {
             uint Declared = *(uint*)(dst + d.LenOffset);
+            if (d.LenSamples)
+                Declared = (Declared + 31) / 32;
             if (n != 0 && n != Declared)
                 throw new InvalidOperationException("BrovVulk generic: array length mismatch.");
 
@@ -88,7 +101,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             {
                                 IntPtr h = st.Lookup(r.ReadU32(), d.HandleType);
 
-                                if (h == IntPtr.Zero && !d.Optional)
+                                if (h == IntPtr.Zero && !d.OptionalElements)
                                     throw new InvalidOperationException($"BrovVulk generic: null {d.HandleType} in a required array.");
 
                                 *(IntPtr*)(arr + (int)(k * 8)) = h;

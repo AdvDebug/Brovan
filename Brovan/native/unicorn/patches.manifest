@@ -71,6 +71,7 @@ replace-all|qemu/include/exec/gen-icount.h|tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_
 # --- instruction budget: a per-block decrement instead of a code hook --------
 insert-after|qemu/include/exec/cpu-defs.h|IcountDecr icount_decr;|    int32_t brov_insn_budget;
 insert-after|qemu/accel/tcg/tcg-runtime.c|#include <uc_priv.h>|#include "brovan_tcg_budget.inc.h"
+insert-in-body|qemu/accel/tcg/tcg-runtime.c|void *HELPER(lookup_tb_ptr)(CPUArchState *env)|    { void *brov_p; if (brov_lookup_tb_ptr(env, &brov_p)) { return brov_p; } }
 insert-after|qemu/accel/tcg/tcg-runtime.c|void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {|    brov_budget_expired((struct uc_struct *)p);
 insert-after|qemu/accel/tcg/cpu-exec.c|#include "uc_priv.h"|#include "brovan_tcg_budget.inc.h"
 insert-before|qemu/accel/tcg/cpu-exec.c|insns_left = cpu_neg(cpu)->icount_decr.u32;|    brov_budget_expired(cpu->uc);
@@ -85,6 +86,7 @@ insert-before|uc.c|if (remove_exec) {|    uc->tcg_flush_tlb(uc); /* brov: a cach
 replace-all|uc.c|if (count > 0 && uc->count_hook == 0) {|if (count > 0 && uc->count_hook == 0 && !uc->brov_budget_mode) {
 
 # --- no exit poll after every guest memory access, faults leave the helper ---
+insert-in-body|qemu/accel/tcg/cputlb.c|void tlb_reset_dirty_by_vaddr(CPUState *cpu, target_ulong start1, target_ulong length)|    if (brov_tlb_reset_dirty_pages(cpu, start1, length)) { return; }
 replace-all|qemu/accel/tcg/cputlb.c|cpu_exit(uc->cpu);|brov_fault_exit(uc, retaddr);
 insert-in-body|qemu/tcg/tcg-op.c|void check_exit_request(TCGContext *tcg_ctx)|    if (brov_access_exit_check_elided(tcg_ctx->uc)) { return; }
 
@@ -108,6 +110,13 @@ replace-all|qemu/target/i386/translate.c|gen_helper_pause(tcg_ctx, tcg_ctx->cpu_
 insert-before|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)|#include "brovan_tcg_slots.inc.c"
 insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)|    if (brov_tcg_out_call_slot(s, dest)) { return; }
 insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static void tcg_out_jmp(TCGContext *s, tcg_insn_unit *dest)|    if (brov_tcg_out_jmp_slot(s, dest)) { return; }
+# --- rotate left by a multiple of the operand width ------------------------
+# EXTR takes a shift below the operand width, so an amount of 0 has to stay 0.
+# Masking before the subtraction turns it into 32 or 64, which is an undefined
+# encoding, and the guest thread takes SIGILL inside its own translated code.
+# Upstream QEMU reaches the same helper as rotate right and masks afterwards.
+replace-all|qemu/tcg/aarch64/tcg-target.inc.c|tcg_out_extr(s, ext, rd, rn, rn, bits - (m & max));|tcg_out_extr(s, ext, rd, rn, rn, (bits - m) & max);
+
 insert-before|qemu/tcg/aarch64/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *target)|#include "brovan_tcg_slots.inc.c"
 insert-in-body|qemu/tcg/aarch64/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *target)|    if (brov_tcg_out_call_slot(s, target)) { return; }
 

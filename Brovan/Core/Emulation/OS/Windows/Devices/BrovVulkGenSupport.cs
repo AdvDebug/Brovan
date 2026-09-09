@@ -160,7 +160,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static int Instance(GenBuf w)
         {
-            _instance ??= Filter(QueryHost(IntPtr.Zero), BrovVulkExtensions.Instance);
+            _instance ??= Filter(QueryHost(IntPtr.Zero), BrovVulkExtensions.Instance, IntPtr.Zero);
             w.WriteBytes(_instance);
             return 0;
         }
@@ -169,14 +169,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (_device == null || _devicePd != physicalDevice)
             {
-                _device = Filter(QueryHost(physicalDevice), BrovVulkExtensions.Device);
+                _device = Filter(QueryHost(physicalDevice), BrovVulkExtensions.Device, physicalDevice);
                 _devicePd = physicalDevice;
             }
             w.WriteBytes(_device);
             return 0;
         }
 
-        private static Dictionary<string, uint> QueryHost(IntPtr physicalDevice)
+        internal static Dictionary<string, uint> QueryHost(IntPtr physicalDevice)
         {
             Dictionary<string, uint> map = new Dictionary<string, uint>(StringComparer.Ordinal);
             uint n = 0;
@@ -210,7 +210,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return map;
         }
 
-        private static byte[] Filter(Dictionary<string, uint> host, (string Name, uint Version)[] advertised)
+        private static byte[] Filter(Dictionary<string, uint> host, (string Name, uint Version)[] advertised, IntPtr physicalDevice)
         {
             List<(string Name, uint Version)> keep = new List<(string, uint)>();
             foreach ((string name, uint ver) in advertised)
@@ -221,6 +221,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     : name;
                 if (host.TryGetValue(hostName, out uint hv))
                     keep.Add((name, Math.Min(ver, hv)));
+                else if (physicalDevice != IntPtr.Zero && VulkanStandIns.AdvertisesExtension(physicalDevice, name))
+                    keep.Add((name, ver));
             }
             byte[] payload = new byte[4 + keep.Count * PropSize];
             BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0, 4), (uint)keep.Count);

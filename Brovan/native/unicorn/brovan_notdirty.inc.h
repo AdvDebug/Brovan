@@ -68,6 +68,46 @@ static inline bool brov_notdirty_promote(CPUState *cpu, vaddr mem_vaddr,
     return brov_notdirty_allowed(cpu, mem_vaddr, tlbe);
 }
 
+/* The inverse of tlb_set_dirty, which indexes the TLB. A block covers one or two
+ * pages, so index those and scan only the victim entries, which have no index. */
+static void tlb_reset_dirty_range_by_vaddr_locked(struct uc_struct *uc, CPUTLBEntry *tlb_entry,
+                                                  target_ulong start, target_ulong length);
+
+#define BROV_TLB_DIRTY_MAX_PAGES 4
+
+static inline bool brov_tlb_reset_dirty_pages(CPUState *cpu, target_ulong start1,
+                                              target_ulong length)
+{
+    struct uc_struct *uc = cpu->uc;
+    CPUArchState *env = cpu->env_ptr;
+    target_ulong page;
+    int mmu_idx;
+    unsigned i;
+    static int disabled = -1;
+
+    if (disabled < 0) {
+        disabled = getenv("BROVAN_NO_TLBDIRTY_FAST") != NULL;
+    }
+    if (disabled || length > BROV_TLB_DIRTY_MAX_PAGES * TARGET_PAGE_SIZE) {
+        return false;
+    }
+
+    for (page = start1; page - start1 < length; page += TARGET_PAGE_SIZE) {
+        for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+            tlb_reset_dirty_range_by_vaddr_locked(uc, tlb_entry(env, mmu_idx, page),
+                                                  start1, length);
+        }
+    }
+
+    for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+        for (i = 0; i < CPU_VTLB_SIZE; i++) {
+            tlb_reset_dirty_range_by_vaddr_locked(uc, &env_tlb(env)->d[mmu_idx].vtable[i],
+                                                  start1, length);
+        }
+    }
+    return true;
+}
+
 /* A memory hook that declines an access leaves the loop from inside the helper,
  * with the PC back on the faulting instruction. A hook-free run emits no
  * check_exit_request after an access, so exit_request alone would not stop it.

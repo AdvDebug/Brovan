@@ -334,6 +334,9 @@ void brov_free_uc(void *p)
         g_free(uc->brov_ram_starts);
         uc->brov_ram_starts = NULL;
         uc->brov_ram_starts_cap = 0;
+
+        free(uc->brov_jmp);
+        uc->brov_jmp = NULL;
     }
 
     if (g_brov.active && (uint8_t *)p >= g_brov.arena &&

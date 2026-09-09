@@ -116,6 +116,12 @@ static BVK_INLINE void bvk_r_scalar(void* field, const unsigned char* src, int n
     memcpy(field, src, (size_t)(nsize < wsize ? nsize : wsize));
 }
 
+static BVK_INLINE uint32_t bvk_handle_at(const unsigned char* p, uint32_t k, int nsize)
+{
+    const unsigned char* e = p + (size_t)k * (size_t)nsize;
+    return nsize == 8 ? (uint32_t)(*(const uint64_t*)e) : (uint32_t)(uintptr_t)(*(void* const*)e);
+}
+
 static int bvk_rq_send(uint32_t cmd, void* out, uint32_t outCap, uint32_t* outLen)
 {
     HANDLE h = brov_dev();
@@ -275,6 +281,12 @@ static void bvk_mem_remove(uint32_t id)
 
 #include "obj/generated/brovvulk_structs.h"
 
+static BVK_INLINE uint32_t bvk_arr_len(const BvkM* d, const unsigned char* s)
+{
+    uint32_t n = *(const uint32_t*)(s + d->lenOffset);
+    return d->lenSamples ? (n + 31) / 32 : n;
+}
+
 static void bvk_ser_struct(int sid, const unsigned char* s)
 {
     const BvkM* mm = bvk_structs[sid];
@@ -304,7 +316,7 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
         case 4:
         {
             const void* p = *(const void* const*)fp;
-            uint32_t n = *(const uint32_t*)(s + d->lenOffset);
+            uint32_t n = bvk_arr_len(d, s);
             if (p) { bvk_w_u32(n); for (uint32_t k = 0; k < n; k++) bvk_ser_struct(d->sub, (const unsigned char*)p + (size_t)k * bvk_struct_nsizes[d->sub]); }
             else bvk_w_u32(0);
             break;
@@ -312,16 +324,12 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
         case 5:
         {
             const unsigned char* p = *(const unsigned char* const*)fp;
-            uint32_t n = *(const uint32_t*)(s + d->lenOffset);
+            uint32_t n = bvk_arr_len(d, s);
             if (p)
             {
-                size_t esz = d->nsize > 0 ? (size_t)d->nsize : sizeof(void*);
                 bvk_w_u32(n);
                 for (uint32_t k = 0; k < n; k++)
-                {
-                    const unsigned char* e = p + (size_t)k * esz;
-                    bvk_w_u32(esz == 8 ? (uint32_t)(*(const uint64_t*)e) : (uint32_t)(uintptr_t)(*(void* const*)e));
-                }
+                    bvk_w_u32(bvk_handle_at(p, k, d->nsize));
             }
             else bvk_w_u32(0);
             break;
@@ -329,7 +337,7 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
         case 6:
         {
             const void* p = *(const void* const*)fp;
-            uint32_t n = *(const uint32_t*)(s + d->lenOffset);
+            uint32_t n = bvk_arr_len(d, s);
             if (p)
             {
                 bvk_w_u32(n);
@@ -352,7 +360,7 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
         case 8:
         {
             const char* const* p = *(const char* const* const*)fp;
-            uint32_t n = *(const uint32_t*)(s + d->lenOffset);
+            uint32_t n = bvk_arr_len(d, s);
             if (p) { bvk_w_u32(n); for (uint32_t k = 0; k < n; k++) { uint32_t l = (uint32_t)strlen(p[k]) + 1; bvk_w_u32(l); bvk_w_bytes(p[k], l); } }
             else bvk_w_u32(0);
             break;
@@ -401,7 +409,7 @@ static void bvk_ser_struct(int sid, const unsigned char* s)
                             bvk_ser_struct(d->sub, (const unsigned char*)p + (size_t)k * bvk_struct_nsizes[d->sub]);
                     else
                         for (uint32_t k = 0; k < n; k++)
-                            bvk_w_u32((uint32_t)(uintptr_t)((const void* const*)p)[k]);
+                            bvk_w_u32(bvk_handle_at((const unsigned char*)p, k, d->nsize));
                 }
                 else bvk_w_u32(0);
             }
@@ -835,10 +843,6 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
     M(vkUpdateDescriptorSetWithTemplate);
     M(vkCmdPushDescriptorSetWithTemplate);
     M(vkCmdPushDescriptorSetWithTemplate2);
-    if (strcmp(pName, "vkCmdPushDescriptorSetWithTemplateKHR") == 0)
-        return (PFN_vkVoidFunction)vkCmdPushDescriptorSetWithTemplate;
-    if (strcmp(pName, "vkCmdPushDescriptorSetWithTemplate2KHR") == 0)
-        return (PFN_vkVoidFunction)vkCmdPushDescriptorSetWithTemplate2;
     M(vkCreatePrivateDataSlot);
     M(vkDestroyPrivateDataSlot);
     M(vkSetPrivateData);

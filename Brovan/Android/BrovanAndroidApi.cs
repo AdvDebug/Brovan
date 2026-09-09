@@ -60,6 +60,7 @@ namespace Brovan.Android
                 AppContext.SetData("APP_CONTEXT_BASE_DIRECTORY", directory);
 
                 UseWritableTempDirectory(directory);
+                ApplyEnvironmentFile(directory);
 
                 AndroidHost.MarkActive();
 
@@ -519,6 +520,36 @@ namespace Brovan.Android
             {
                 AndroidLog.Write(AndroidNative.LogError, $"[brovan_start] ApiSetMap generation failed: {exception.Message}");
                 return false;
+            }
+        }
+
+        // An Android app has no shell to export a variable in. Native code reads getenv and managed code does
+        // not, so both forms are set.
+        private static void ApplyEnvironmentFile(string baseDirectory)
+        {
+            try
+            {
+                string path = Path.Combine(baseDirectory, "brovan.env");
+                if (!File.Exists(path))
+                    return;
+
+                foreach (string line in File.ReadAllLines(path))
+                {
+                    string text = line.Trim();
+                    int split = text.IndexOf('=');
+                    if (text.Length == 0 || text[0] == '#' || split <= 0)
+                        continue;
+
+                    string name = text.Substring(0, split).Trim();
+                    string value = text.Substring(split + 1).Trim();
+                    AndroidNative.SetEnvironment(name, value, 1);
+                    Environment.SetEnvironmentVariable(name, value);
+                    AndroidLog.Write(AndroidNative.LogInfo, $"[brovan_init] env {name}={value}");
+                }
+            }
+            catch (Exception exception)
+            {
+                AndroidLog.Write(AndroidNative.LogError, $"[brovan_init] environment file: {exception.Message}");
             }
         }
 

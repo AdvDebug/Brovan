@@ -205,6 +205,16 @@ struct brov_ops {
     int32_t *(*budget_ptr)(struct uc_struct *uc);
 };
 
+/* Key and code pointer for one jump cache slot, kept beside the block pointer
+ * so a hit touches a single line. See brovan_tcg_budget.inc.h. */
+typedef struct brov_jmp_entry {
+    uint64_t pc;
+    const void *tb;
+    const void *tc_ptr;
+    uint32_t flags;
+    uint32_t cf_mask;
+} brov_jmp_entry;
+
 #define BROVAN_UC_FIELDS                                                       \
     uint32_t brov_last_reason;                                                 \
     uint32_t brov_budget_mode;                                                 \
@@ -212,6 +222,9 @@ struct brov_ops {
     unsigned brov_ram_starts_cap;                                              \
     uint32_t brov_mem_hook_sig;                                                \
     brov_tsc_t brov_tsc;                                                       \
+    brov_jmp_entry *brov_jmp;                                                  \
+    unsigned brov_jmp_flush;                                                   \
+    unsigned char brov_jmp_off;                                                \
     struct brov_ops brov;
 
 #define BROVAN_TCG_FIELDS                                                      \

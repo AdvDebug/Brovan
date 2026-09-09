@@ -57,6 +57,7 @@ namespace Brovan.Generators
             public int ArrayLen = 1;
             public string Values;
             public bool Optional;
+            public bool OptionalElements;
         }
 
         private sealed class VkStruct
@@ -71,9 +72,12 @@ namespace Brovan.Generators
         {
             public string Name;
             public string Type;
+            public string Platform;
+            public string Depends;
             public uint SpecVersion;
             public readonly HashSet<string> Commands = new HashSet<string>();
             public readonly HashSet<string> Types = new HashSet<string>();
+            public readonly List<(string Depends, HashSet<string> Commands, HashSet<string> Types)> Gated = new List<(string, HashSet<string>, HashSet<string>)>();
         }
 
         private sealed class Param
@@ -83,6 +87,7 @@ namespace Brovan.Generators
             public int PtrDepth;
             public bool IsConst;
             public string Length;
+            public string AltLength;
             public int ArrayLen = 1;
             public bool Optional;
         }
@@ -108,13 +113,13 @@ namespace Brovan.Generators
             public readonly Dictionary<string, string> TypeAlias = new Dictionary<string, string>();
             public readonly Dictionary<string, VkExtension> Extensions = new Dictionary<string, VkExtension>();
             public readonly Dictionary<string, double> CoreTypeVersion = new Dictionary<string, double>();
-            public readonly Dictionary<string, HashSet<string>> TypeExtensions = new Dictionary<string, HashSet<string>>();
+            public readonly Dictionary<string, double> CoreCommandVersion = new Dictionary<string, double>();
         }
 
         private static readonly string[] SkipPlatform =
         {
             "Android", "ANDROID", "Xlib", "Xcb", "Wayland", "DirectFB", "Metal", "MacOS", "IOS",
-            "Screen", "ViSurface", "OHOS", "Fuchsia", "GGP", "QNX", "Winrt", "Stream",
+            "Screen", "ViSurface", "OHOS", "Fuchsia", "GGP", "QNX", "Winrt",
         };
 
         private static readonly Dictionary<string, string> ScalarCs = new Dictionary<string, string>
@@ -213,6 +218,21 @@ namespace Brovan.Generators
                     m.Constants[name] = cv;
             }
 
+            // An extension enum carries a block number and an offset instead of a value.
+            foreach (XElement e in root.Descendants("enum"))
+            {
+                string name = (string)e.Attribute("name");
+                string offset = (string)e.Attribute("offset");
+                if (name == null || offset == null || m.Constants.ContainsKey(name)
+                    || !TryParseIntLiteral(offset, out int off))
+                    continue;
+                string number = (string)e.Attribute("extnumber") ?? (string)e.Ancestors("extension").FirstOrDefault()?.Attribute("number");
+                if (number == null || !TryParseIntLiteral(number, out int ext))
+                    continue;
+                int value = 1000000000 + (ext - 1) * 1000 + off;
+                m.Constants[name] = (string)e.Attribute("dir") == "-" ? -value : value;
+            }
+
             foreach (XElement t in root.Descendants("type"))
             {
                 string cat = (string)t.Attribute("category");
@@ -249,7 +269,7 @@ namespace Brovan.Generators
                             continue;
                         ParseTyped(mem, out string ty, out string nm, out int pd, out bool isc);
                         int alen = pd == 0 ? ResolveArrayLen(mem, m.Constants) : 1;
-                        s.Members.Add(new Member { Name = nm, Type = ty, PtrDepth = pd, IsConst = isc, Length = (string)mem.Attribute("len"), AltLength = (string)mem.Attribute("altlen"), ArrayLen = alen, Values = (string)mem.Attribute("values"), Optional = ((string)mem.Attribute("optional") ?? "").StartsWith("true", StringComparison.Ordinal) });
+                        s.Members.Add(new Member { Name = nm, Type = ty, PtrDepth = pd, IsConst = isc, Length = (string)mem.Attribute("len"), AltLength = (string)mem.Attribute("altlen"), ArrayLen = alen, Values = (string)mem.Attribute("values"), Optional = OptionalAt(mem, 0), OptionalElements = OptionalElementsOf(mem) });
                     }
                     m.Structs[name] = s;
                 }
@@ -282,7 +302,7 @@ namespace Brovan.Generators
                         continue;
                     ParseTyped(p, out string ty, out string nm, out int pd, out bool isc);
                     int palen = pd == 0 ? ResolveArrayLen(p, m.Constants) : 1;
-                    cmd.Params.Add(new Param { Name = nm, Type = ty, PtrDepth = pd, IsConst = isc, Length = (string)p.Attribute("len"), ArrayLen = palen, Optional = ((string)p.Attribute("optional") ?? "").StartsWith("true", StringComparison.Ordinal) });
+                    cmd.Params.Add(new Param { Name = nm, Type = ty, PtrDepth = pd, IsConst = isc, Length = (string)p.Attribute("len"), AltLength = (string)p.Attribute("altlen"), ArrayLen = palen, Optional = ((string)p.Attribute("optional") ?? "").StartsWith("true", StringComparison.Ordinal) });
                 }
                 if (cmd.Name != null)
                     m.Commands[cmd.Name] = cmd;
@@ -307,6 +327,12 @@ namespace Brovan.Generators
                         if (!m.CoreTypeVersion.TryGetValue(tn, out double cur) || ver < cur)
                             m.CoreTypeVersion[tn] = ver;
                     }
+                    foreach (XElement cn in req.Elements("command"))
+                    {
+                        string cname = (string)cn.Attribute("name");
+                        if (cname != null && (!m.CoreCommandVersion.TryGetValue(cname, out double cv) || ver < cv))
+                            m.CoreCommandVersion[cname] = ver;
+                    }
                 }
             }
 
@@ -322,10 +348,10 @@ namespace Brovan.Generators
                     string platform = (string)e.Attribute("platform");
                     if (platform != null && platform != "win32")
                         continue;
-                    VkExtension ext = new VkExtension { Name = name, Type = (string)e.Attribute("type") };
+                    VkExtension ext = new VkExtension { Name = name, Type = (string)e.Attribute("type"), Platform = platform, Depends = (string)e.Attribute("depends") };
                     foreach (XElement req in e.Elements("require"))
                     {
-                        bool gated = req.Attribute("depends") != null;
+                        string gate = (string)req.Attribute("depends");
                         foreach (XElement en in req.Elements("enum"))
                         {
                             string enName = (string)en.Attribute("name");
@@ -333,8 +359,13 @@ namespace Brovan.Generators
                                 && TryParseIntLiteral((string)en.Attribute("value"), out int sv))
                                 ext.SpecVersion = (uint)sv;
                         }
-                        if (gated)
-                            continue;
+                        HashSet<string> cmdSet = ext.Commands, typeSet = ext.Types;
+                        if (gate != null)
+                        {
+                            cmdSet = new HashSet<string>();
+                            typeSet = new HashSet<string>();
+                            ext.Gated.Add((gate, cmdSet, typeSet));
+                        }
                         foreach (XElement cn in req.Elements("command"))
                         {
                             string cname = (string)cn.Attribute("name");
@@ -342,17 +373,13 @@ namespace Brovan.Generators
                                 continue;
                             if (m.Commands.TryGetValue(cname, out Command cc) && cc.Alias != null)
                                 cname = cc.Alias;
-                            ext.Commands.Add(cname);
+                            cmdSet.Add(cname);
                         }
                         foreach (XElement tn in req.Elements("type"))
                         {
                             string ty = Canonical((string)tn.Attribute("name") ?? "");
-                            if (ty.Length == 0)
-                                continue;
-                            ext.Types.Add(ty);
-                            if (!m.TypeExtensions.TryGetValue(ty, out HashSet<string> owners))
-                                m.TypeExtensions[ty] = owners = new HashSet<string>();
-                            owners.Add(name);
+                            if (ty.Length > 0)
+                                typeSet.Add(ty);
                         }
                     }
                     m.Extensions[name] = ext;
@@ -437,6 +464,20 @@ namespace Brovan.Generators
             return lay;
         }
 
+        private static bool OptionalAt(XElement e, int index)
+        {
+            string[] parts = ((string)e.Attribute("optional") ?? "").Split(',');
+            return parts.Length > index && parts[index] == "true";
+        }
+
+        // One optional component in vk.xml covers the pointer and its elements, so such an array may hold
+        // null handles.
+        private static bool OptionalElementsOf(XElement e)
+        {
+            string[] parts = ((string)e.Attribute("optional") ?? "").Split(',');
+            return parts.Length > 1 ? parts[1] == "true" : parts[0] == "true";
+        }
+
         private static bool Keep(Command c)
         {
             if (c.Alias != null) return false;
@@ -446,270 +487,90 @@ namespace Brovan.Generators
             return true;
         }
 
-        private static readonly HashSet<string> GenAllowlist = new HashSet<string>
+        private static readonly HashSet<string> GuestLocal = new HashSet<string>
         {
-            "vkCmdBindIndexBuffer2",
-            "vkCmdBindDescriptorSets2",
-            "vkCmdPushConstants2",
-            "vkCmdPushDescriptorSet2",
-            "vkGetRenderingAreaGranularity",
-            "vkGetDeviceImageSubresourceLayout",
-            "vkGetImageSubresourceLayout2",
-            "vkQueueBindSparse",
-            "vkGetPhysicalDeviceSparseImageFormatProperties",
-            "vkGetImageSparseMemoryRequirements",
-            "vkGetImageSparseMemoryRequirements2",
-            "vkGetPhysicalDeviceExternalSemaphoreProperties",
-            "vkGetDeviceMemoryCommitment",
-            "vkCmdDrawIndirectCount",
-            "vkCmdDrawIndexedIndirectCount",
-            "vkEnumerateInstanceVersion",
-            "vkCreateInstance",
-            "vkDestroyInstance",
-            "vkEnumeratePhysicalDevices",
-            "vkGetPhysicalDeviceProperties",
-            "vkGetPhysicalDeviceQueueFamilyProperties",
-            "vkCreateDevice",
-            "vkGetDeviceQueue",
-            "vkCreateCommandPool",
-            "vkDestroyCommandPool",
-            "vkAllocateCommandBuffers",
-            "vkBeginCommandBuffer",
-            "vkEndCommandBuffer",
-            "vkQueueSubmit",
-            "vkQueueWaitIdle",
-            "vkDestroyDevice",
-            "vkCreateWin32SurfaceKHR",
-            "vkDestroySurfaceKHR",
-            "vkGetPhysicalDeviceSurfaceSupportKHR",
-            "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
-            "vkGetPhysicalDeviceSurfaceFormatsKHR",
-            "vkGetPhysicalDeviceSurfacePresentModesKHR",
-            "vkCreateSwapchainKHR",
-            "vkDestroySwapchainKHR",
-            "vkGetSwapchainImagesKHR",
-            "vkCreateSemaphore",
-            "vkDestroySemaphore",
-            "vkCreateFence",
-            "vkDestroyFence",
-            "vkResetFences",
-            "vkWaitForFences",
-            "vkGetFenceStatus",
-            "vkAcquireNextImageKHR",
-            "vkCmdPipelineBarrier",
-            "vkCmdClearColorImage",
-            "vkQueuePresentKHR",
-            "vkCreateImageView",
-            "vkDestroyImageView",
-            "vkCreateRenderPass",
-            "vkDestroyRenderPass",
-            "vkCreateFramebuffer",
-            "vkDestroyFramebuffer",
-            "vkCreateShaderModule",
-            "vkDestroyShaderModule",
-            "vkCreatePipelineLayout",
-            "vkDestroyPipelineLayout",
-            "vkCreateGraphicsPipelines",
-            "vkDestroyPipeline",
-            "vkCmdBeginRenderPass",
-            "vkCmdEndRenderPass",
-            "vkCmdBindPipeline",
-            "vkCmdSetViewport",
-            "vkCmdSetScissor",
-            "vkCmdPushConstants",
-            "vkCmdDraw",
-            "vkCmdDrawIndexed",
-            "vkGetPhysicalDeviceMemoryProperties",
-            "vkAllocateMemory",
-            "vkFreeMemory",
-            "vkMapMemory",
-            "vkUnmapMemory",
-            "vkFlushMappedMemoryRanges",
-            "vkInvalidateMappedMemoryRanges",
-            "vkCreateBuffer",
-            "vkDestroyBuffer",
-            "vkCreateBufferView",
-            "vkDestroyBufferView",
-            "vkGetBufferMemoryRequirements",
-            "vkBindBufferMemory",
-            "vkCreateImage",
-            "vkDestroyImage",
-            "vkGetImageMemoryRequirements",
-            "vkBindImageMemory",
-            "vkCmdCopyBuffer",
-            "vkCmdCopyBufferToImage",
-            "vkCmdBindVertexBuffers",
-            "vkCmdBindIndexBuffer",
-            "vkDeviceWaitIdle",
-            "vkGetPhysicalDeviceFeatures",
-            "vkGetPhysicalDeviceFormatProperties",
-            "vkGetPhysicalDeviceImageFormatProperties",
-            "vkCreateSampler",
-            "vkDestroySampler",
-            "vkCreateDescriptorSetLayout",
-            "vkDestroyDescriptorSetLayout",
-            "vkCreateDescriptorPool",
-            "vkDestroyDescriptorPool",
-            "vkResetDescriptorPool",
-            "vkAllocateDescriptorSets",
-            "vkFreeDescriptorSets",
-            "vkUpdateDescriptorSets",
-            "vkCmdBindDescriptorSets",
-            "vkCmdPushDescriptorSet",
-            "vkCmdCopyImage",
-            "vkCmdBlitImage",
-            "vkCmdCopyImageToBuffer",
-            "vkCmdResolveImage",
-            "vkCmdClearDepthStencilImage",
-            "vkCmdClearAttachments",
-            "vkCmdUpdateBuffer",
-            "vkCmdFillBuffer",
-            "vkCmdSetLineWidth",
-            "vkCmdSetDepthBias",
-            "vkCmdSetBlendConstants",
-            "vkCmdSetDepthBounds",
-            "vkCmdSetStencilCompareMask",
-            "vkCmdSetStencilWriteMask",
-            "vkCmdSetStencilReference",
-            "vkCmdDrawIndirect",
-            "vkCmdDrawIndexedIndirect",
-            "vkGetPhysicalDeviceFeatures2",
-            "vkGetPhysicalDeviceProperties2",
-            "vkGetPhysicalDeviceMemoryProperties2",
-            "vkGetBufferMemoryRequirements2",
-            "vkGetImageMemoryRequirements2",
-            "vkBindBufferMemory2",
-            "vkBindImageMemory2",
-            "vkCreateComputePipelines",
-            "vkCmdDispatch",
-            "vkCmdDispatchIndirect",
-            "vkCreateQueryPool",
-            "vkDestroyQueryPool",
-            "vkCmdBeginQuery",
-            "vkCmdEndQuery",
-            "vkCmdResetQueryPool",
-            "vkCmdWriteTimestamp",
-            "vkCmdCopyQueryPoolResults",
-            "vkGetQueryPoolResults",
-            "vkResetQueryPool",
-            "vkCreateEvent",
-            "vkDestroyEvent",
-            "vkCmdSetEvent",
-            "vkCmdResetEvent",
-            "vkCmdWaitEvents",
-            "vkSetEvent",
-            "vkResetEvent",
-            "vkGetEventStatus",
-            "vkCmdExecuteCommands",
-            "vkFreeCommandBuffers",
-            "vkResetCommandPool",
-            "vkResetCommandBuffer",
-            "vkCmdNextSubpass",
-            "vkCreatePipelineCache",
-            "vkDestroyPipelineCache",
-            "vkMergePipelineCaches",
-            "vkWaitSemaphores",
-            "vkSignalSemaphore",
-            "vkGetSemaphoreCounterValue",
-            "vkEnumerateInstanceExtensionProperties",
-            "vkEnumerateDeviceExtensionProperties",
-            "vkQueueSubmit2",
-            "vkCmdPipelineBarrier2",
-            "vkCmdSetEvent2",
-            "vkCmdResetEvent2",
-            "vkCmdWaitEvents2",
-            "vkCmdWriteTimestamp2",
-            "vkCmdBeginRendering",
-            "vkCmdEndRendering",
-            "vkCmdSetCullMode",
-            "vkCmdSetFrontFace",
-            "vkCmdSetPrimitiveTopology",
-            "vkCmdSetViewportWithCount",
-            "vkCmdSetScissorWithCount",
-            "vkCmdBindVertexBuffers2",
-            "vkCmdSetDepthTestEnable",
-            "vkCmdSetDepthWriteEnable",
-            "vkCmdSetDepthCompareOp",
-            "vkCmdSetDepthBoundsTestEnable",
-            "vkCmdSetStencilTestEnable",
-            "vkCmdSetStencilOp",
-            "vkCmdSetRasterizerDiscardEnable",
-            "vkCmdSetDepthBiasEnable",
-            "vkCmdSetPrimitiveRestartEnable",
-            "vkCmdCopyBuffer2",
-            "vkCmdCopyImage2",
-            "vkCmdCopyBufferToImage2",
-            "vkCmdCopyImageToBuffer2",
-            "vkCmdBlitImage2",
-            "vkCmdResolveImage2",
-            "vkCreateRenderPass2",
-            "vkCmdBeginRenderPass2",
-            "vkCmdNextSubpass2",
-            "vkCmdEndRenderPass2",
-            "vkGetBufferDeviceAddress",
-            "vkGetBufferOpaqueCaptureAddress",
-            "vkGetDeviceMemoryOpaqueCaptureAddress",
-            "vkCmdBindTransformFeedbackBuffersEXT",
-            "vkCmdBeginTransformFeedbackEXT",
-            "vkCmdEndTransformFeedbackEXT",
-            "vkCmdBeginQueryIndexedEXT",
-            "vkCmdEndQueryIndexedEXT",
-            "vkCmdDrawIndirectByteCountEXT",
-            "vkGetPhysicalDeviceFormatProperties2",
-            "vkGetPhysicalDeviceImageFormatProperties2",
-            "vkGetPhysicalDeviceQueueFamilyProperties2",
-            "vkGetPhysicalDeviceSparseImageFormatProperties2",
-            "vkGetPhysicalDeviceSurfaceCapabilities2KHR",
-            "vkGetPhysicalDeviceSurfaceFormats2KHR",
-            "vkGetPhysicalDeviceToolProperties",
-            "vkGetPhysicalDeviceWin32PresentationSupportKHR",
-            "vkGetDeviceQueue2",
-            "vkGetImageSubresourceLayout",
-            "vkGetRenderAreaGranularity",
-            "vkTrimCommandPool",
-            "vkGetDescriptorSetLayoutSupport",
-            "vkGetDeviceBufferMemoryRequirements",
-            "vkGetDeviceImageMemoryRequirements",
-            "vkGetPipelineCacheData",
-            "vkCmdBindIndexBuffer2",
-            "vkCmdBindDescriptorSets2",
-            "vkCmdPushConstants2",
-            "vkGetRenderingAreaGranularity",
-            "vkGetDeviceImageSubresourceLayout",
-            "vkGetImageSubresourceLayout2",
+            "vkGetInstanceProcAddr",
+            "vkGetDeviceProcAddr",
+            "vkEnumerateInstanceLayerProperties",
+            "vkEnumerateDeviceLayerProperties",
+            "vkCreateDescriptorUpdateTemplate",
+            "vkDestroyDescriptorUpdateTemplate",
+            "vkUpdateDescriptorSetWithTemplate",
+            "vkCmdPushDescriptorSetWithTemplate",
+            "vkCmdPushDescriptorSetWithTemplate2",
+            "vkCreatePrivateDataSlot",
+            "vkDestroyPrivateDataSlot",
+            "vkSetPrivateData",
+            "vkGetPrivateData",
         };
 
-        private static readonly HashSet<string> ExtAllowlist = new HashSet<string>
+        private static readonly Dictionary<string, string> ExtDenylist = new Dictionary<string, string>
         {
-            "VK_KHR_surface",
-            "VK_KHR_win32_surface",
-            "VK_KHR_get_physical_device_properties2",
-            "VK_KHR_get_surface_capabilities2",
-            "VK_KHR_swapchain",
-            "VK_KHR_image_format_list",
-            "VK_KHR_swapchain_mutable_format",
-            "VK_EXT_robustness2",
-            "VK_KHR_robustness2",
-            "VK_EXT_transform_feedback",
-            "VK_EXT_custom_border_color",
-            "VK_EXT_depth_clip_enable",
-            "VK_EXT_vertex_attribute_divisor",
-            "VK_KHR_vertex_attribute_divisor",
-            "VK_EXT_memory_budget",
-            "VK_EXT_memory_priority",
-            "VK_EXT_4444_formats",
-            "VK_EXT_non_seamless_cube_map",
-            "VK_KHR_maintenance5",
-            "VK_KHR_maintenance6",
-            "VK_KHR_pipeline_library",
-            "VK_KHR_load_store_op_none",
-            "VK_EXT_load_store_op_none",
+            ["VK_KHR_external_memory_win32"] = "host handle crosses the boundary",
+            ["VK_KHR_external_semaphore_win32"] = "host handle crosses the boundary",
+            ["VK_KHR_external_fence_win32"] = "host handle crosses the boundary",
+            ["VK_KHR_win32_keyed_mutex"] = "host handle crosses the boundary",
+            ["VK_NV_external_memory_win32"] = "host handle crosses the boundary",
+            ["VK_NV_win32_keyed_mutex"] = "host handle crosses the boundary",
+            ["VK_KHR_external_memory_fd"] = "host file descriptor crosses the boundary",
+            ["VK_KHR_external_semaphore_fd"] = "host file descriptor crosses the boundary",
+            ["VK_KHR_external_fence_fd"] = "host file descriptor crosses the boundary",
+            ["VK_EXT_external_memory_dma_buf"] = "host file descriptor crosses the boundary",
+            ["VK_EXT_external_memory_host"] = "host and guest pointers cross the boundary",
+            ["VK_EXT_map_memory_placed"] = "host and guest pointers cross the boundary",
+            ["VK_KHR_map_memory2"] = "host and guest pointers cross the boundary",
+            ["VK_EXT_host_image_copy"] = "host and guest pointers cross the boundary",
+            ["VK_EXT_debug_utils"] = "guest callbacks and raw object handles",
+            ["VK_EXT_debug_report"] = "guest callbacks and raw object handles",
+            ["VK_EXT_debug_marker"] = "guest callbacks and raw object handles",
+            ["VK_EXT_device_memory_report"] = "guest callbacks and raw object handles",
+            ["VK_EXT_device_address_binding_report"] = "guest callbacks and raw object handles",
+            ["VK_EXT_validation_features"] = "layer only",
+            ["VK_EXT_validation_flags"] = "layer only",
+            ["VK_EXT_validation_cache"] = "layer only",
+            ["VK_EXT_layer_settings"] = "layer only",
+            ["VK_KHR_display"] = "host display and window ownership",
+            ["VK_KHR_display_swapchain"] = "host display and window ownership",
+            ["VK_KHR_get_display_properties2"] = "host display and window ownership",
+            ["VK_EXT_direct_mode_display"] = "host display and window ownership",
+            ["VK_EXT_display_control"] = "host display and window ownership",
+            ["VK_EXT_display_surface_counter"] = "host display and window ownership",
+            ["VK_EXT_acquire_drm_display"] = "host display and window ownership",
+            ["VK_NV_acquire_winrt_display"] = "host display and window ownership",
+            ["VK_EXT_headless_surface"] = "host display and window ownership",
+            ["VK_EXT_full_screen_exclusive"] = "host display and window ownership",
+            ["VK_KHR_calibrated_timestamps"] = "guest clock differs from the host clock",
+            ["VK_EXT_calibrated_timestamps"] = "guest clock differs from the host clock",
+            ["VK_NV_low_latency2"] = "blocks the dispatch thread without a timeout",
+            ["VK_NVX_binary_import"] = "host CUDA interop",
+            ["VK_NVX_image_view_handle"] = "host CUDA interop",
+            ["VK_EXT_multi_draw"] = "strided array parameters",
+            ["VK_EXT_shader_object"] = "bypasses the shader module stand-ins",
         };
+
+        // Advertised, but the listed chain structs are dropped and nothing is written back to them.
+        private static readonly Dictionary<string, string[]> ExtKnownGaps = new Dictionary<string, string[]>
+        {
+            ["VK_KHR_maintenance6"] = new[] { "VkBindMemoryStatus" },
+        };
+
+        private static HashSet<string> Advertised = new HashSet<string>();
+
+        private static HashSet<string> AdvertisedTypes = new HashSet<string>();
 
         private const double MaxCoreVersion = 1.3;
 
         private static bool IsWaitTimeoutParam(Model m, Param p)
             => p.Name == "timeout" && ParamKind(m, p) == "ScalarIn" && ScalarWidth(m, p.Type) == 8;
+
+        private static Param WaitTimeoutStructParam(Model m, Command c)
+        {
+            foreach (Param p in c.Params)
+                if (ParamKind(m, p) == "StructIn" && m.Structs.TryGetValue(p.Type, out VkStruct s)
+                    && s.Members.Any(x => x.Name == "timeout" && x.PtrDepth == 0 && ScalarWidth(m, x.Type) == 8))
+                    return p;
+            return null;
+        }
 
         private static HashSet<string> PNextSet = new HashSet<string>();
 
@@ -719,6 +580,13 @@ namespace Brovan.Generators
                 if (mem.Name == "sType" && mem.Values != null)
                     return mem.Values;
             return null;
+        }
+
+        // Zero when vk.xml gives no sType value, which the host then cannot check.
+        private static uint STypeValue(Model m, string name)
+        {
+            string tag = m.Structs.TryGetValue(name, out VkStruct s) ? StructSType(s) : null;
+            return tag != null && m.Constants.TryGetValue(tag, out int v) && v > 0 ? (uint)v : 0u;
         }
 
         private static int ScalarWidth(Model m, string ty)
@@ -741,6 +609,8 @@ namespace Brovan.Generators
                 case "Scalar":
                     return "(int)sizeof(" + field + ")";
                 case "ScalarArray":
+                case "HandleArray":
+                case "SelectArray":
                     return "(int)sizeof(*" + field + ")";
                 case "BlobPtr":
                     return d.LenName == null ? d.Size.ToString() : "(int)sizeof(((" + structName + "*)0)->" + d.LenName + ")";
@@ -771,8 +641,8 @@ namespace Brovan.Generators
         private static Dictionary<string, int> StructId = new Dictionary<string, int>();
 
         private static readonly DiagnosticDescriptor ExtGuard = new DiagnosticDescriptor(
-            "BVK001", "BrovVulk extension allowlist drift",
-            "Extension {0}: {1}", "BrovVulk", DiagnosticSeverity.Error, true);
+            "BVK001", "BrovVulk extension table drift",
+            "{0}: {1}", "BrovVulk", DiagnosticSeverity.Error, true);
 
         private sealed class MDesc
         {
@@ -789,6 +659,8 @@ namespace Brovan.Generators
             public string LenName;
             public string SelName;
             public bool Optional;
+            public bool OptionalElements;
+            public bool LenSamples;
         }
 
         private static readonly Dictionary<string, byte> KindNum = new Dictionary<string, byte>
@@ -843,9 +715,28 @@ namespace Brovan.Generators
             return o;
         }
 
+        private const string SampleWordsTail = " + 31) / 32";
+
+        private static bool SampleWordsLen(string altLen, out string samples)
+        {
+            samples = null;
+            if (altLen == null || altLen.Length <= SampleWordsTail.Length + 1 || altLen[0] != '(' || !altLen.EndsWith(SampleWordsTail, StringComparison.Ordinal))
+                return false;
+            samples = altLen.Substring(1, altLen.Length - SampleWordsTail.Length - 1);
+            return true;
+        }
+
+        private static int ArrayLenIndex(Command c, Param p, out bool samples)
+        {
+            samples = SampleWordsLen(p.AltLength, out string name);
+            if (!samples)
+                name = p.Length;
+            return name == null ? -1 : c.Params.FindIndex(x => x.Name == name);
+        }
+
         private static MDesc ClassifyMember(Model m, VkStruct owner, Member mem, Dictionary<string, int> offsets, Dictionary<string, Layout> cache)
         {
-            MDesc d = new MDesc { Offset = offsets.TryGetValue(mem.Name, out int mo) ? mo : 0, MemName = mem.Name, Optional = mem.Optional };
+            MDesc d = new MDesc { Offset = offsets.TryGetValue(mem.Name, out int mo) ? mo : 0, MemName = mem.Name, Optional = mem.Optional, OptionalElements = mem.OptionalElements };
             if (mem.Name == "pNext") { d.Kind = "PNext"; d.Size = 8; return d; }
             if (owner.Name == "VkWriteDescriptorSet" && (mem.Name == "pImageInfo" || mem.Name == "pBufferInfo" || mem.Name == "pTexelBufferView"))
             {
@@ -878,6 +769,11 @@ namespace Brovan.Generators
             {
                 if (mem.PtrDepth >= 2) { int lo = ResolveLen(mem, offsets, out string saLen); if (lo >= 0) { d.Kind = "StringArray"; d.LenOffset = lo; d.LenName = saLen; } else d.Kind = "Ignore"; return d; }
                 d.Kind = "StringZ"; return d;
+            }
+            if (SampleWordsLen(mem.AltLength, out string sampleCount) && offsets.TryGetValue(sampleCount, out int sco))
+            {
+                SizeAlign(m, mem.Type, 0, cache, out int sw, out _);
+                d.Kind = "ScalarArray"; d.Size = sw; d.LenOffset = sco; d.LenName = sampleCount; d.LenSamples = true; return d;
             }
             string blobLen = mem.AltLength != null && mem.AltLength.Contains("/") ? mem.AltLength
                            : mem.Length != null && mem.Length.Contains("/") ? mem.Length : null;
@@ -944,40 +840,104 @@ namespace Brovan.Generators
             return m.Structs.TryGetValue(type, out VkStruct s) && s.Members.Any(x => x.Name == "pNext");
         }
 
-        private static bool StructMarshallable(Model m, string name, HashSet<string> seen, Dictionary<string, Layout> cache)
+        private static string StructGap(Model m, string name, HashSet<string> seen, Dictionary<string, Layout> cache)
         {
             if (!m.Structs.TryGetValue(name, out VkStruct s))
-                return false;
+                return name + " is not a struct";
             if (!seen.Add(name))
-                return true;
+                return null;
             if (s.IsUnion)
-                return true;
+            {
+                foreach (Member mem in s.Members)
+                {
+                    if (mem.PtrDepth > 0 || m.Handles.ContainsKey(mem.Type) || m.FuncPointers.Contains(mem.Type))
+                        return name + "." + mem.Name + " is a pointer inside a union";
+                    if (m.Structs.ContainsKey(mem.Type))
+                    {
+                        string sub = StructGap(m, mem.Type, seen, cache);
+                        if (sub != null)
+                            return sub;
+                    }
+                }
+                return null;
+            }
             Layout lay = ComputeLayout(m, name, cache);
             foreach (Member mem in s.Members)
             {
                 if (mem.Name == "pNext")
                     continue;
                 if (m.FuncPointers.Contains(mem.Type))
-                    return false;
+                    return name + "." + mem.Name + " is a function pointer";
                 MDesc d = ClassifyMember(m, s, mem, lay.Offsets, cache);
                 if (d.Kind == "Ignore")
-                    return false;
-                if (d.SubName != null && !StructMarshallable(m, d.SubName, seen, cache))
-                    return false;
+                    return name + "." + mem.Name + " is not forwarded";
+                if (d.SubName != null)
+                {
+                    string sub = StructGap(m, d.SubName, seen, cache);
+                    if (sub != null)
+                        return sub;
+                }
             }
-            return true;
+            return null;
+        }
+
+        private static string WritebackGap(Model m, string name, HashSet<string> seen, Dictionary<string, Layout> cache)
+        {
+            if (!m.Structs.TryGetValue(name, out VkStruct s) || !seen.Add(name))
+                return null;
+            if (s.IsUnion)
+                return StructGap(m, name, new HashSet<string>(), cache);
+            Layout lay = ComputeLayout(m, name, cache);
+            foreach (Member mem in s.Members)
+            {
+                if (mem.Name == "pNext")
+                    continue;
+                if (mem.ArrayLen > 1 && m.Handles.ContainsKey(mem.Type))
+                    return name + "." + mem.Name + " holds handles";
+                MDesc d = ClassifyMember(m, s, mem, lay.Offsets, cache);
+                if (d.Kind == "StructValue")
+                {
+                    string sub = WritebackGap(m, d.SubName, seen, cache);
+                    if (sub != null)
+                        return sub;
+                }
+                else if (d.Kind != "Scalar")
+                    return name + "." + mem.Name + " is not written back";
+            }
+            return null;
         }
 
         private static bool PNextOwnerAllowed(Model m, string name)
         {
             if (m.CoreTypeVersion.TryGetValue(name, out double ver) && ver <= MaxCoreVersion)
                 return true;
-            return m.TypeExtensions.TryGetValue(name, out HashSet<string> owners) && owners.Overlaps(ExtAllowlist);
+            return AdvertisedTypes.Contains(name);
         }
 
-        private static HashSet<string> ComputePNextSet(Model m, List<Command> allowed, Dictionary<string, Layout> cache)
+        private static IEnumerable<string> EffectiveCommands(VkExtension ext)
+        {
+            foreach (string c in ext.Commands)
+                yield return c;
+            foreach ((string depends, HashSet<string> cmds, HashSet<string> _) in ext.Gated)
+                if (DependsSatisfied(depends, Advertised))
+                    foreach (string c in cmds)
+                        yield return c;
+        }
+
+        private static IEnumerable<string> EffectiveTypes(VkExtension ext)
+        {
+            foreach (string t in ext.Types)
+                yield return t;
+            foreach ((string depends, HashSet<string> _, HashSet<string> types) in ext.Gated)
+                if (DependsSatisfied(depends, Advertised))
+                    foreach (string t in types)
+                        yield return t;
+        }
+
+        private static HashSet<string> ComputePNextSet(Model m, List<Command> allowed, Dictionary<string, Layout> cache, out HashSet<string> closureOut)
         {
             HashSet<string> closure = new HashSet<string>();
+            closureOut = closure;
             Queue<string> q = new Queue<string>();
             foreach (Command c in allowed)
                 foreach (Param p in c.Params)
@@ -1014,7 +974,7 @@ namespace Brovan.Generators
                         continue;
                     if (!PNextOwnerAllowed(m, s.Name))
                         continue;
-                    if (!StructMarshallable(m, s.Name, new HashSet<string>(), cache))
+                    if (StructGap(m, s.Name, new HashSet<string>(), cache) != null)
                         continue;
                     pnext.Add(s.Name);
                     if (closure.Add(s.Name))
@@ -1024,6 +984,190 @@ namespace Brovan.Generators
                 if (!grew)
                     return pnext;
             }
+        }
+
+        private static string Canon(Model m, string ty) => m.TypeAlias.TryGetValue(ty, out string cx) ? cx : ty;
+
+        private static string InGap(Model m, Command c, Dictionary<string, Layout> cache)
+        {
+            foreach (Param p in c.Params)
+            {
+                string k = ParamKind(m, p);
+                if ((k == "StructIn" || k == "ArrayIn") && m.Structs.ContainsKey(p.Type))
+                {
+                    string gap = StructGap(m, p.Type, new HashSet<string>(), cache);
+                    if (gap != null)
+                        return gap;
+                }
+            }
+            return null;
+        }
+
+        private static string OutGap(Model m, Command c, Dictionary<string, Layout> cache)
+        {
+            foreach (Param p in c.Params)
+            {
+                string k = ParamKind(m, p);
+                if ((k == "ChainOut" || k == "StructOut" || k == "ArrayOut") && m.Structs.ContainsKey(p.Type))
+                {
+                    string gap = WritebackGap(m, p.Type, new HashSet<string>(), cache);
+                    if (gap != null)
+                        return gap;
+                }
+            }
+            return null;
+        }
+
+        private static HashSet<string> OutSideStructs(Model m, List<Command> exported)
+        {
+            HashSet<string> set = new HashSet<string>(StringComparer.Ordinal);
+            foreach (Command c in exported)
+                foreach (Param p in c.Params)
+                {
+                    string k = ParamKind(m, p);
+                    if ((k == "ChainOut" || k == "StructOut" || k == "ArrayOut") && m.Structs.ContainsKey(p.Type))
+                        set.Add(p.Type);
+                }
+            bool grew = true;
+            while (grew)
+            {
+                grew = false;
+                foreach (VkStruct s in m.Structs.Values)
+                {
+                    if (set.Contains(s.Name))
+                        continue;
+                    foreach (string target in s.Extends)
+                    {
+                        if (!set.Contains(Canon(m, target)))
+                            continue;
+                        set.Add(s.Name);
+                        grew = true;
+                        break;
+                    }
+                }
+            }
+            return set;
+        }
+
+        private static List<Command> ExportedCommands(Model m, List<Command> cmds, Dictionary<string, bool> hostOk, Dictionary<string, Layout> cache)
+        {
+            HashSet<string> owned = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string en in Advertised)
+                owned.UnionWith(EffectiveCommands(m.Extensions[en]));
+            List<Command> result = new List<Command>();
+            foreach (Command c in cmds)
+            {
+                if (GuestLocal.Contains(c.Name) || !hostOk[c.Name])
+                    continue;
+                bool core = m.CoreCommandVersion.TryGetValue(c.Name, out double ver) && ver <= MaxCoreVersion;
+                if (core ? OutGap(m, c, cache) == null : owned.Contains(c.Name))
+                    result.Add(c);
+            }
+            return result;
+        }
+
+        private static string ExtensionGap(Model m, VkExtension ext, Dictionary<string, bool> hostOk, HashSet<string> closure, HashSet<string> outSide, Dictionary<string, Layout> cache)
+        {
+            if (ExtDenylist.TryGetValue(ext.Name, out string denied))
+                return denied;
+            if (ext.Platform != null && ext.Name != "VK_KHR_win32_surface")
+                return "platform " + ext.Platform;
+            foreach (string cn in EffectiveCommands(ext).OrderBy(x => x, StringComparer.Ordinal))
+            {
+                if (GuestLocal.Contains(cn))
+                    continue;
+                if (!hostOk.TryGetValue(cn, out bool ok))
+                    return "command " + cn + " is platform specific";
+                if (!ok)
+                    return "command " + cn + " is not forwardable";
+                string gap = InGap(m, m.Commands[cn], cache) ?? OutGap(m, m.Commands[cn], cache);
+                if (gap != null)
+                    return "command " + cn + ": " + gap;
+            }
+            ExtKnownGaps.TryGetValue(ext.Name, out string[] known);
+            foreach (string ty in EffectiveTypes(ext).OrderBy(x => x, StringComparer.Ordinal))
+            {
+                if (!m.Structs.TryGetValue(ty, out VkStruct s) || s.Extends.Length == 0 || StructSType(s) == null)
+                    continue;
+                if (known != null && Array.IndexOf(known, ty) >= 0)
+                    continue;
+                string gap = StructGap(m, ty, new HashSet<string>(), cache);
+                if (gap != null)
+                    return gap;
+                foreach (string target in s.Extends)
+                {
+                    string ct = Canon(m, target);
+                    if (!closure.Contains(ct) || !outSide.Contains(ct))
+                        continue;
+                    gap = WritebackGap(m, ty, new HashSet<string>(), cache);
+                    if (gap != null)
+                        return gap;
+                }
+            }
+            return null;
+        }
+
+        private static List<string> ElementChainGaps(Model m, VkExtension ext, HashSet<string> closure, HashSet<string> outSide)
+        {
+            List<string> gaps = new List<string>();
+            foreach (string ty in EffectiveTypes(ext).OrderBy(x => x, StringComparer.Ordinal))
+            {
+                if (!m.Structs.TryGetValue(ty, out VkStruct s) || s.Extends.Length == 0 || StructSType(s) == null)
+                    continue;
+                if (s.Extends.Any(x => outSide.Contains(Canon(m, x)) && !closure.Contains(Canon(m, x))))
+                    gaps.Add(ty);
+            }
+            return gaps;
+        }
+
+        private static bool DependsSatisfied(string expr, HashSet<string> have)
+        {
+            int pos = 0;
+            return DependsOr(expr, ref pos, have);
+        }
+
+        private static bool DependsOr(string expr, ref int pos, HashSet<string> have)
+        {
+            bool v = DependsAnd(expr, ref pos, have);
+            while (pos < expr.Length && expr[pos] == ',')
+            {
+                pos++;
+                v |= DependsAnd(expr, ref pos, have);
+            }
+            return v;
+        }
+
+        private static bool DependsAnd(string expr, ref int pos, HashSet<string> have)
+        {
+            bool v = DependsTerm(expr, ref pos, have);
+            while (pos < expr.Length && expr[pos] == '+')
+            {
+                pos++;
+                v &= DependsTerm(expr, ref pos, have);
+            }
+            return v;
+        }
+
+        private static bool DependsTerm(string expr, ref int pos, HashSet<string> have)
+        {
+            if (pos < expr.Length && expr[pos] == '(')
+            {
+                pos++;
+                bool inner = DependsOr(expr, ref pos, have);
+                if (pos < expr.Length && expr[pos] == ')')
+                    pos++;
+                return inner;
+            }
+            int start = pos;
+            while (pos < expr.Length && expr[pos] != '+' && expr[pos] != ',' && expr[pos] != ')')
+                pos++;
+            string token = expr.Substring(start, pos - start);
+            if (!token.StartsWith("VK_VERSION_", StringComparison.Ordinal))
+                return have.Contains(token);
+            string[] parts = token.Substring(11).Split('_');
+            return parts.Length == 2
+                && double.TryParse(parts[0] + "." + parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double ver)
+                && ver <= MaxCoreVersion;
         }
 
         private static bool IsCountArrayPair(Model m, Command c, int i)
@@ -1057,6 +1201,18 @@ namespace Brovan.Generators
                 return -1;
             for (int j = 0; j < i; j++)
                 if (c.Params[j].Name == p.Length && c.Params[j].PtrDepth == 0 && c.Params[j].Type == "uint32_t")
+                    return j;
+            return -1;
+        }
+
+        // The length of a blob is not always uint32_t, and the driver takes it as the byte count it may touch.
+        private static int BlobLenIndex(Model m, Command c, Param p, int i)
+        {
+            if (p.Length == null)
+                return -1;
+            for (int j = 0; j < i; j++)
+                if (c.Params[j].Name == p.Length && ParamKind(m, c.Params[j]) == "ScalarIn"
+                    && c.Params[j].Type != "float" && c.Params[j].Type != "double")
                     return j;
             return -1;
         }
@@ -1263,16 +1419,17 @@ namespace Brovan.Generators
                     continue;
                 }
                 string kind = ParamKind(m, p);
+                int arrLen = ArrayLenIndex(c, p, out bool arrSamples);
                 if (kind == "ChainOut" && StructId.ContainsKey(p.Type))
                 {
                     int baseSid = StructId[p.Type];
                     b.Append("                uint ").Append(local).Append("bst = r.ReadU32();\n");
                     b.Append("                System.IntPtr ").Append(local).Append(" = st.Alloc(BrovVulkStructMeta.Sizes[").Append(baseSid).Append("]);\n");
-                    b.Append("                *(uint*)").Append(local).Append(" = ").Append(local).Append("bst;\n");
+                    b.Append("                *(uint*)").Append(local).Append(" = BrovVulkGenStruct.CheckedSType(").Append(local).Append("bst, ").Append(baseSid).Append(");\n");
                     b.Append("                System.IntPtr ").Append(local).Append("tail = ").Append(local).Append(";\n");
                     b.Append("                var ").Append(local).Append("ch = new System.Collections.Generic.List<(System.IntPtr, int)>();\n");
                     b.Append("                ").Append(local).Append("ch.Add((").Append(local).Append(", ").Append(baseSid).Append("));\n");
-                    b.Append("                while (r.ReadU32() == 1) { uint ").Append(local).Append("st = r.ReadU32(); int ").Append(local).Append("sd = (int)r.ReadU32(); if (").Append(local).Append("sd < 0 || ").Append(local).Append("sd >= BrovVulkStructMeta.PNext.Length || !BrovVulkStructMeta.PNext[").Append(local).Append("sd]) throw new System.InvalidOperationException(\"BrovVulk generic: pNext sid not allowed.\"); System.IntPtr ").Append(local).Append("nd = st.Alloc(BrovVulkStructMeta.Sizes[").Append(local).Append("sd]); *(uint*)").Append(local).Append("nd = ").Append(local).Append("st; *(System.IntPtr*)(").Append(local).Append("tail + 8) = ").Append(local).Append("nd; ").Append(local).Append("tail = ").Append(local).Append("nd; ").Append(local).Append("ch.Add((").Append(local).Append("nd, ").Append(local).Append("sd)); }\n");
+                    b.Append("                while (r.ReadU32() == 1) { uint ").Append(local).Append("st = r.ReadU32(); int ").Append(local).Append("sd = (int)r.ReadU32(); if (").Append(local).Append("sd < 0 || ").Append(local).Append("sd >= BrovVulkStructMeta.PNext.Length || !BrovVulkStructMeta.PNext[").Append(local).Append("sd]) throw new System.InvalidOperationException(\"BrovVulk generic: pNext sid not allowed.\"); System.IntPtr ").Append(local).Append("nd = st.Alloc(BrovVulkStructMeta.Sizes[").Append(local).Append("sd]); *(uint*)").Append(local).Append("nd = BrovVulkGenStruct.CheckedSType(").Append(local).Append("st, ").Append(local).Append("sd); *(System.IntPtr*)(").Append(local).Append("tail + 8) = ").Append(local).Append("nd; ").Append(local).Append("tail = ").Append(local).Append("nd; ").Append(local).Append("ch.Add((").Append(local).Append("nd, ").Append(local).Append("sd)); }\n");
                     b.Append("                *(System.IntPtr*)(").Append(local).Append("tail + 8) = System.IntPtr.Zero;\n");
                     callArgs.Add(local);
                     post.Add("                foreach (var e in " + local + "ch) BrovVulkGenStruct.WritebackBody(e.Item2, w, e.Item1);");
@@ -1281,7 +1438,12 @@ namespace Brovan.Generators
                 {
                     string ct = CsType(m, p.Type, 0);
                     int w = ScalarWidth(m, p.Type);
-                    b.Append("                ").Append(ct).Append(" ").Append(local).Append(" = (").Append(ct).Append(")r.Read").Append(w == 8 ? "U64" : "U32").Append("();\n");
+                    if (p.Type == "float")
+                        b.Append("                float ").Append(local).Append(" = System.BitConverter.Int32BitsToSingle((int)r.ReadU32());\n");
+                    else if (p.Type == "double")
+                        b.Append("                double ").Append(local).Append(" = System.BitConverter.Int64BitsToDouble((long)r.ReadU64());\n");
+                    else
+                        b.Append("                ").Append(ct).Append(" ").Append(local).Append(" = (").Append(ct).Append(")r.Read").Append(w == 8 ? "U64" : "U32").Append("();\n");
                     if (IsWaitTimeoutParam(m, p))
                         b.Append("                ").Append(local).Append(" = 0;\n");
                     callArgs.Add(local);
@@ -1334,6 +1496,8 @@ namespace Brovan.Generators
                 else if (kind == "StructIn" && StructId.ContainsKey(p.Type))
                 {
                     b.Append("                System.IntPtr ").Append(local).Append(" = r.ReadU32() != 0 ? BrovVulkGenStruct.Rebuild(").Append(StructId[p.Type]).Append(", r, st) : System.IntPtr.Zero;\n");
+                    if (p == WaitTimeoutStructParam(m, c))
+                        b.Append("                if (").Append(local).Append(" != System.IntPtr.Zero) *(ulong*)(").Append(local).Append(" + BrovVulkLayout.MemberOffset[\"").Append(p.Type).Append(".timeout\"]) = 0;\n");
                     callArgs.Add(local);
                 }
                 else if (kind == "StructOut")
@@ -1345,13 +1509,13 @@ namespace Brovan.Generators
                         ? "                BrovVulkGenStruct.WritebackBody(" + StructId[p.Type] + ", w, " + local + ");"
                         : "                w.WriteBytesFrom(" + local + ", (uint)sz" + i + ");");
                 }
-                else if (kind == "ArrayIn" && (!m.Structs.ContainsKey(p.Type) || StructId.ContainsKey(p.Type))
-                         && c.Params.Any(x => x.Name == p.Length))
+                else if (kind == "ArrayIn" && (!m.Structs.ContainsKey(p.Type) || StructId.ContainsKey(p.Type)) && arrLen >= 0)
                 {
                     b.Append("                uint ").Append(local).Append("n = r.ReadU32();\n");
-                    int liIn = ParamLenIndex(c, p, i);
-                    if (liIn >= 0)
-                        b.Append("                if (").Append(p.Optional ? local + "n != 0 && " : "").Append(local).Append("n != p").Append(liIn).Append(") throw new System.InvalidOperationException(\"BrovVulk generic: array count mismatch.\");\n");
+                    int liIn = arrSamples ? arrLen : ParamLenIndex(c, p, i);
+                    string declared = arrSamples ? "((uint)p" + liIn + " + 31) / 32" : "p" + liIn;
+                    if (liIn >= 0 && liIn < i)
+                        b.Append("                if (").Append(p.Optional ? local + "n != 0 && " : "").Append(local).Append("n != ").Append(declared).Append(") throw new System.InvalidOperationException(\"BrovVulk generic: array count mismatch.\");\n");
                     b.Append("                System.IntPtr ").Append(local).Append(" = System.IntPtr.Zero;\n");
                     if (m.Structs.ContainsKey(p.Type))
                     {
@@ -1424,9 +1588,9 @@ namespace Brovan.Generators
                 else if (kind == "VoidIn" && c.Params.Any(x => x.Name == p.Length))
                 {
                     b.Append("                uint ").Append(local).Append("n = r.ReadU32();\n");
-                    int lvIn = ParamLenIndex(c, p, i);
+                    int lvIn = BlobLenIndex(m, c, p, i);
                     if (lvIn >= 0)
-                        b.Append("                if (").Append(local).Append("n != p").Append(lvIn).Append(") throw new System.InvalidOperationException(\"BrovVulk generic: blob length mismatch.\");\n");
+                        b.Append("                if (").Append(local).Append("n != (ulong)p").Append(lvIn).Append(") throw new System.InvalidOperationException(\"BrovVulk generic: blob length mismatch.\");\n");
                     b.Append("                System.IntPtr ").Append(local).Append(" = ").Append(local).Append("n > 0 ? st.Alloc(BrovVulkGenStruct.CheckedBytes(").Append(local).Append("n, 1)) : System.IntPtr.Zero;\n");
                     b.Append("                if (").Append(local).Append("n > 0) r.CopyInto(").Append(local).Append(", ").Append(local).Append("n);\n");
                     callArgs.Add(local);
@@ -1434,6 +1598,9 @@ namespace Brovan.Generators
                 else if (kind == "VoidOut" && c.Params.Any(x => x.Name == p.Length))
                 {
                     b.Append("                uint ").Append(local).Append("n = r.ReadU32();\n");
+                    int lvOut = BlobLenIndex(m, c, p, i);
+                    if (lvOut >= 0)
+                        b.Append("                if (").Append(local).Append("n != (ulong)p").Append(lvOut).Append(") throw new System.InvalidOperationException(\"BrovVulk generic: blob length mismatch.\");\n");
                     b.Append("                System.IntPtr ").Append(local).Append(" = ").Append(local).Append("n > 0 ? st.Alloc(BrovVulkGenStruct.CheckedBytes(").Append(local).Append("n, 1)) : System.IntPtr.Zero;\n");
                     callArgs.Add(local);
                     post.Add("                if (" + local + "n > 0) w.WriteBytesFrom(" + local + ", " + local + "n);");
@@ -1481,7 +1648,7 @@ namespace Brovan.Generators
                 }
             }
 
-            bool early = EmitStandInHooks(c, b, post);
+            bool early = EmitStandInHooks(c, b, post, out string guard);
 
             EmitWsiHooks(c, b, check, post);
 
@@ -1493,7 +1660,10 @@ namespace Brovan.Generators
             string call = "BrovVulkApi." + c.Name + "(" + string.Join(", ", callArgs) + ")";
             if (c.Ret == "void")
             {
-                head.Append("                ").Append(call).Append(";\n");
+                head.Append("                ");
+                if (guard != null)
+                    head.Append("if (!").Append(guard).Append(") ");
+                head.Append(call).Append(";\n");
                 foreach (string s in post) head.Append(s).Append("\n");
                 head.Append("                return 0;\n            }\n");
             }
@@ -1520,9 +1690,11 @@ namespace Brovan.Generators
             return i < 0 ? null : "p" + i;
         }
 
-        /// <summary>True when the pre-call code declared an `early` VkResult that replaces the host call while negative.</summary>
-        private static bool EmitStandInHooks(Command c, StringBuilder b, List<string> post)
+        // True when the pre-call code declared an `early` VkResult that replaces the host call while negative.
+        // A non-null guard is a bool expression that replaces a void host call when true.
+        private static bool EmitStandInHooks(Command c, StringBuilder b, List<string> post, out string guard)
         {
+            guard = null;
             string device = Arg(c, "device");
             string commandBuffer = Arg(c, "commandBuffer");
             string name = c.Name.EndsWith("KHR", StringComparison.Ordinal) ? c.Name.Substring(0, c.Name.Length - 3) : c.Name;
@@ -1533,12 +1705,20 @@ namespace Brovan.Generators
                     post.Insert(0, "                VulkanStandIns.Advertise(p0, p1);");
                     return false;
                 case "vkGetPhysicalDeviceFeatures2":
-                    post.Insert(0, "                VulkanStandIns.Advertise(p0, p1 + BrovVulkLayout.MemberOffset[\"VkPhysicalDeviceFeatures2.features\"]);");
+                    post.Insert(0, "                VulkanStandIns.Advertise2(p0, p1);");
+                    return false;
+                case "vkGetPhysicalDeviceProperties":
+                    post.Insert(0, "                VulkanStandIns.Properties(p0, p1);");
+                    return false;
+                case "vkGetPhysicalDeviceProperties2":
+                    post.Insert(0, "                VulkanStandIns.Properties2(p0, p1);");
                     return false;
                 case "vkGetPhysicalDeviceFormatProperties":
+                    b.Append("                p1 = VulkanStandIns.QueryFormat(p0, p1);\n");
                     post.Insert(0, "                VulkanStandIns.FormatProperties(p0, p1, p2);");
                     return false;
                 case "vkGetPhysicalDeviceFormatProperties2":
+                    b.Append("                p1 = VulkanStandIns.QueryFormat(p0, p1);\n");
                     post.Insert(0, "                VulkanStandIns.FormatProperties2(p0, p1, p2);");
                     return false;
                 case "vkGetPhysicalDeviceImageFormatProperties":
@@ -1568,6 +1748,63 @@ namespace Brovan.Generators
                     post.Insert(0, "                VulkanStandIns.FinishPipelines(st, " + device + ", " + cache + ", " + pipelines + ", rr);");
                 }
                 return false;
+            }
+
+            if (name == "vkCreateComputePipelines")
+            {
+                int infoIdx = c.Params.FindIndex(x => x.Type == "VkComputePipelineCreateInfo");
+                int countIdx = c.Params.FindIndex(x => x.Name == "createInfoCount");
+                if (device != null && infoIdx >= 0 && countIdx >= 0 && StructId.TryGetValue("VkComputePipelineCreateInfo", out int sid))
+                {
+                    b.Append("                VulkanStandIns.PrepareComputePipelines(st, ").Append(device).Append(", p").Append(infoIdx)
+                     .Append(", p").Append(countIdx).Append(", BrovVulkStructMeta.Sizes[").Append(sid).Append("]);\n");
+                    post.Insert(0, "                VulkanStandIns.FinishComputePipelines(st, " + device + ");");
+                }
+                return false;
+            }
+
+            if (name == "vkCreateRayTracingPipelinesNV" || name == "vkCreateRayTracingPipelinesKHR")
+            {
+                int infoIdx = c.Params.FindIndex(x => x.Type == "VkRayTracingPipelineCreateInfoNV" || x.Type == "VkRayTracingPipelineCreateInfoKHR");
+                int countIdx = c.Params.FindIndex(x => x.Name == "createInfoCount");
+                if (device != null && infoIdx >= 0 && countIdx >= 0 && StructId.TryGetValue(c.Params[infoIdx].Type, out int rtSid))
+                {
+                    string t = c.Params[infoIdx].Type;
+                    b.Append("                VulkanStandIns.PrepareStagePipelines(st, ").Append(device).Append(", p").Append(infoIdx)
+                     .Append(", p").Append(countIdx).Append(", BrovVulkStructMeta.Sizes[").Append(rtSid)
+                     .Append("], BrovVulkLayout.MemberOffset[\"").Append(t).Append(".flags\"], BrovVulkLayout.MemberOffset[\"").Append(t)
+                     .Append(".pStages\"], BrovVulkLayout.MemberOffset[\"").Append(t).Append(".stageCount\"]);\n");
+                    post.Insert(0, "                VulkanStandIns.FinishComputePipelines(st, " + device + ");");
+                }
+                return false;
+            }
+
+            if ((name == "vkCreateBufferView" || name == "vkCreateSampler") && device != null)
+            {
+                b.Append("                VulkanStandIns.").Append(name == "vkCreateBufferView" ? "CreateBufferView" : "CreateSampler").Append("(st, ").Append(device).Append(", p1);\n");
+                return false;
+            }
+
+            if ((name == "vkCreateRenderPass" || name == "vkCreateRenderPass2") && device != null)
+            {
+                b.Append("                VulkanStandIns.CreateRenderPass(st, ").Append(device).Append(", p1, ").Append(name == "vkCreateRenderPass2" ? "true" : "false").Append(");\n");
+                return false;
+            }
+
+            if (device != null)
+            {
+                switch (name)
+                {
+                    case "vkGetImageSubresourceLayout2":
+                        guard = "VulkanStandIns.ImageSubresourceLayout2(st, p0, p1, p2, p3)";
+                        return false;
+                    case "vkGetDeviceImageSubresourceLayout":
+                        guard = "VulkanStandIns.DeviceImageSubresourceLayout(st, p0, p1, p2)";
+                        return false;
+                    case "vkGetRenderingAreaGranularity":
+                        guard = "VulkanStandIns.RenderingAreaGranularity(st, p0, p2)";
+                        return false;
+                }
             }
 
             if (name == "vkCreateShaderModule")
@@ -1697,15 +1934,51 @@ namespace Brovan.Generators
                     return false;
                 case "vkCmdBindDescriptorSets":
                     b.Append("                VulkanStandIns.BindDescriptorSets(st, p0, p1, p2, p3, p4, p5, p6, p7);\n");
+                    b.Append("                if (VulkanStandIns.TranslateBindDescriptorSets(st, p0, p1, p2, p3, p4, p5, p6, p7)) return 0;\n");
                     return false;
                 case "vkCmdBindDescriptorSets2":
                     b.Append("                VulkanStandIns.BindDescriptorSets2(st, p0, p1);\n");
+                    b.Append("                if (VulkanStandIns.TranslateBindDescriptorSets2(st, p0, p1)) return 0;\n");
                     return false;
                 case "vkCmdPushConstants":
                     b.Append("                VulkanStandIns.PushConstants(st, p0, p1, p2, p3, p4, p5);\n");
                     return false;
                 case "vkCmdPushConstants2":
                     b.Append("                VulkanStandIns.PushConstants2(st, p0, p1);\n");
+                    b.Append("                if (VulkanStandIns.TranslatePushConstants2(st, p0, p1)) return 0;\n");
+                    return false;
+                case "vkCmdBindIndexBuffer":
+                    b.Append("                p1 = VulkanStandIns.IndexBuffer(st, p0, p1, ref p2);\n");
+                    return false;
+                case "vkCmdBindIndexBuffer2":
+                    b.Append("                p1 = VulkanStandIns.IndexBuffer(st, p0, p1, ref p2);\n");
+                    b.Append("                if (VulkanStandIns.BindIndexBuffer2(st, p0, p1, p2, p4)) return 0;\n");
+                    return false;
+                case "vkCmdBindVertexBuffers2":
+                    b.Append("                VulkanStandIns.VertexBufferSizes(st, p0, p2, p3, p4, p5);\n");
+                    return false;
+                case "vkCmdBeginRendering":
+                    b.Append("                VulkanStandIns.BeginRendering(st, p0, p1);\n");
+                    return false;
+                case "vkCmdPushDescriptorSet2":
+                    b.Append("                if (VulkanStandIns.TranslatePushDescriptorSet2(st, p0, p1)) return 0;\n");
+                    return false;
+                case "vkCmdDrawIndirect":
+                case "vkCmdDrawIndexedIndirect":
+                case "vkCmdDrawMeshTasksIndirectEXT":
+                case "vkCmdDrawMeshTasksIndirectNV":
+                    b.Append("                if (VulkanStandIns.DrawIndirect(st, p0, p1, p2, p3, p4, VulkanStandIns.IndirectKind")
+                     .Append(name == "vkCmdDrawIndexedIndirect" ? "Indexed" : name == "vkCmdDrawIndirect" ? "Draw" : name == "vkCmdDrawMeshTasksIndirectEXT" ? "MeshExt" : "MeshNv")
+                     .Append(")) return 0;\n");
+                    return false;
+                case "vkCmdDrawIndirectCount":
+                case "vkCmdDrawIndexedIndirectCount":
+                case "vkCmdDrawMeshTasksIndirectCountEXT":
+                case "vkCmdDrawMeshTasksIndirectCountNV":
+                    b.Append("                p5 = VulkanStandIns.IndirectDrawCount(st, p0, p5);\n");
+                    return false;
+                case "vkCmdSetPolygonModeEXT":
+                    b.Append("                p1 = VulkanStandIns.SetPolygonMode(st, p0, p1);\n");
                     return false;
                 case "vkCmdSetPrimitiveTopology":
                     b.Append("                VulkanStandIns.SetPrimitiveTopology(st, p0, p1);\n");
@@ -2023,10 +2296,14 @@ namespace Brovan.Generators
                     continue;
                 }
                 string kind = ParamKind(m, p);
+                int arrLen = ArrayLenIndex(c, p, out bool arrSamples);
                 if (kind == "ScalarIn")
                 {
                     int w = ScalarWidth(m, p.Type);
-                    b.Append("    bvk_w_u").Append(w == 8 ? "64" : "32").Append("((").Append(w == 8 ? "uint64_t" : "uint32_t").Append(")").Append(p.Name).Append(");\n");
+                    if (p.Type == "float" || p.Type == "double")
+                        b.Append("    { uint").Append(w == 8 ? "64" : "32").Append("_t bvk_bits; memcpy(&bvk_bits, &").Append(p.Name).Append(", sizeof bvk_bits); bvk_w_u").Append(w == 8 ? "64" : "32").Append("(bvk_bits); }\n");
+                    else
+                        b.Append("    bvk_w_u").Append(w == 8 ? "64" : "32").Append("((").Append(w == 8 ? "uint64_t" : "uint32_t").Append(")").Append(p.Name).Append(");\n");
                 }
                 else if (kind == "HandleIn")
                 {
@@ -2044,10 +2321,11 @@ namespace Brovan.Generators
                 {
                     b.Append("    if (").Append(p.Name).Append(") { bvk_w_u32(1); bvk_ser_struct(").Append(StructId[p.Type]).Append(", (const unsigned char*)").Append(p.Name).Append("); } else bvk_w_u32(0);\n");
                 }
-                else if (kind == "ArrayIn" && c.Params.Any(x => x.Name == p.Length))
+                else if (kind == "ArrayIn" && arrLen >= 0)
                 {
-                    b.Append("    bvk_w_u32(").Append(p.Name).Append(" ? (uint32_t)").Append(p.Length).Append(" : 0);\n");
-                    b.Append("    if (").Append(p.Name).Append(") for (uint32_t k = 0; k < (uint32_t)").Append(p.Length).Append("; k++) ");
+                    string count = arrSamples ? "(((uint32_t)" + c.Params[arrLen].Name + " + 31) / 32)" : "(uint32_t)" + c.Params[arrLen].Name;
+                    b.Append("    bvk_w_u32(").Append(p.Name).Append(" ? ").Append(count).Append(" : 0);\n");
+                    b.Append("    if (").Append(p.Name).Append(") for (uint32_t k = 0; k < ").Append(count).Append("; k++) ");
                     if (m.Structs.ContainsKey(p.Type))
                         b.Append("bvk_ser_struct(").Append(StructId[p.Type]).Append(", (const unsigned char*)&").Append(p.Name).Append("[k]);\n");
                     else if (m.Handles.ContainsKey(p.Type))
@@ -2087,14 +2365,16 @@ namespace Brovan.Generators
                 return b.ToString();
             }
             b.Append("    unsigned char bvk_out[").Append(GuestOutSize(m, c)).Append("]; unsigned int bvk_outLen = 0;\n");
-            if (c.Params.Any(x => IsWaitTimeoutParam(m, x)))
+            Param waitStruct = WaitTimeoutStructParam(m, c);
+            if (waitStruct != null || c.Params.Any(x => IsWaitTimeoutParam(m, x)))
             {
                 b.Append("    int bvk_r;\n");
+                b.Append("    uint64_t bvk_timeout = ").Append(waitStruct == null ? "timeout" : waitStruct.Name + " ? " + waitStruct.Name + "->timeout : 0").Append(";\n");
                 b.Append("    uint64_t bvk_start = GetTickCount64();\n");
                 b.Append("    for (;;)\n    {\n");
                 b.Append("        bvk_r = bvk_rq_send(BVK_").Append(c.Name).Append(", bvk_out, sizeof(bvk_out), &bvk_outLen);\n");
-                b.Append("        if ((bvk_r != VK_TIMEOUT && bvk_r != VK_NOT_READY) || timeout == 0) break;\n");
-                b.Append("        if (timeout != UINT64_MAX && (GetTickCount64() - bvk_start) * 1000000ull >= timeout)\n");
+                b.Append("        if ((bvk_r != VK_TIMEOUT && bvk_r != VK_NOT_READY) || bvk_timeout == 0) break;\n");
+                b.Append("        if (bvk_timeout != UINT64_MAX && (GetTickCount64() - bvk_start) * 1000000ull >= bvk_timeout)\n");
                 b.Append("        {\n            if (bvk_r == VK_NOT_READY) bvk_r = VK_TIMEOUT;\n            break;\n        }\n");
                 b.Append("        Sleep(0);\n    }\n");
             }
@@ -2278,7 +2558,7 @@ namespace Brovan.Generators
                 StringBuilder fnPtr = new StringBuilder("delegate* unmanaged<");
                 for (int i = 0; i < c.Params.Count; i++)
                 {
-                    string ty = CsType(m, c.Params[i].Type, c.Params[i].PtrDepth);
+                    string ty = c.Params[i].ArrayLen > 1 ? "IntPtr" : CsType(m, c.Params[i].Type, c.Params[i].PtrDepth);
                     if (i > 0) { args.Append(", "); call.Append(", "); }
                     args.Append(ty).Append(" a").Append(i);
                     call.Append('a').Append(i);
@@ -2287,7 +2567,8 @@ namespace Brovan.Generators
                 string ret = CsRet(m, c.Ret);
                 fnPtr.Append(ret).Append('>');
 
-                if (!promotedFrom.TryGetValue(c.Name, out List<string> aliases))
+                promotedFrom.TryGetValue(c.Name, out List<string> aliases);
+                if (aliases == null && m.CoreCommandVersion.ContainsKey(c.Name))
                 {
                     b.AppendLine("        [DllImport(\"vulkan-1.dll\", EntryPoint = \"" + c.Name + "\", CallingConvention = CallingConvention.Winapi)]");
                     b.AppendLine("        internal static extern " + ret + " " + c.Name + "(" + args + ");");
@@ -2295,8 +2576,9 @@ namespace Brovan.Generators
                 }
 
                 StringBuilder aliasArgs = new StringBuilder();
-                foreach (string alias in aliases)
-                    aliasArgs.Append(", \"").Append(alias).Append('"');
+                if (aliases != null)
+                    foreach (string alias in aliases)
+                        aliasArgs.Append(", \"").Append(alias).Append('"');
 
                 b.AppendLine("        private static IntPtr Pfn" + c.Name + ";");
                 b.AppendLine("        internal static " + ret + " " + c.Name + "(" + args + ")");
@@ -2411,23 +2693,56 @@ namespace Brovan.Generators
             gh.Append("#endif\n");
             WriteIfChanged(Path.Combine(GuestGenDir(vkXmlPath), "brovvulk_gen.h"), gh.ToString());
 
-            List<Command> allowed = cmds.Where(x => GenAllowlist.Contains(x.Name)).ToList();
-            foreach (string en in ExtAllowlist)
-            {
-                if (!m.Extensions.TryGetValue(en, out VkExtension ext))
-                {
+            foreach (string en in ExtDenylist.Keys.Concat(ExtKnownGaps.Keys))
+                if (!m.Extensions.ContainsKey(en))
                     spc.ReportDiagnostic(Diagnostic.Create(ExtGuard, Location.None, en, "not found in vk.xml"));
-                    continue;
+            foreach (string[] gaps in ExtKnownGaps.Values)
+                foreach (string sn in gaps)
+                    if (!m.Structs.ContainsKey(sn))
+                        spc.ReportDiagnostic(Diagnostic.Create(ExtGuard, Location.None, sn, "not found in vk.xml"));
+
+            PNextSet = new HashSet<string>();
+            List<string> probe = ComputeNeededStructs(m, cmds, cache);
+            StructId = new Dictionary<string, int>();
+            for (int i = 0; i < probe.Count; i++)
+                StructId[probe[i]] = i;
+            Dictionary<string, bool> hostOk = new Dictionary<string, bool>(StringComparer.Ordinal);
+            for (int i = 0; i < cmds.Count; i++)
+                hostOk[cmds[i].Name] = EmitHostCase(m, cmds[i], i) != null;
+
+            Dictionary<string, string> blocked = new Dictionary<string, string>(StringComparer.Ordinal);
+            Advertised = new HashSet<string>(m.Extensions.Keys, StringComparer.Ordinal);
+            List<Command> exported;
+            HashSet<string> closure;
+            while (true)
+            {
+                AdvertisedTypes = new HashSet<string>(StringComparer.Ordinal);
+                foreach (string en in Advertised)
+                    AdvertisedTypes.UnionWith(EffectiveTypes(m.Extensions[en]));
+                exported = ExportedCommands(m, cmds, hostOk, cache);
+                PNextSet = ComputePNextSet(m, exported, cache, out closure);
+                HashSet<string> outSide = OutSideStructs(m, exported);
+                bool changed = false;
+                foreach (string en in Advertised.OrderBy(x => x, StringComparer.Ordinal).ToList())
+                {
+                    VkExtension ext = m.Extensions[en];
+                    string gap = ExtensionGap(m, ext, hostOk, closure, outSide, cache);
+                    if (gap == null && ext.Depends != null && !DependsSatisfied(ext.Depends, Advertised))
+                        gap = "needs " + ext.Depends;
+                    if (gap == null)
+                        continue;
+                    Advertised.Remove(en);
+                    blocked[en] = gap;
+                    changed = true;
                 }
-                foreach (string cn in ext.Commands)
-                    if (!GenAllowlist.Contains(cn))
-                        spc.ReportDiagnostic(Diagnostic.Create(ExtGuard, Location.None, en, "requires command " + cn + " missing from GenAllowlist"));
+                if (!changed)
+                    break;
             }
-            PNextSet = ComputePNextSet(m, allowed, cache);
-            List<string> needed = ComputeNeededStructs(m, allowed, cache);
+            List<string> needed = ComputeNeededStructs(m, exported, cache);
             StructId = new Dictionary<string, int>();
             for (int i = 0; i < needed.Count; i++)
                 StructId[needed[i]] = i;
+            HashSet<string> exportedNames = new HashSet<string>(exported.Select(x => x.Name), StringComparer.Ordinal);
 
             StringBuilder sm = new StringBuilder();
             sm.AppendLine("// <auto-generated> Vulkan struct member descriptors from vk.xml.");
@@ -2436,8 +2751,8 @@ namespace Brovan.Generators
             sm.AppendLine("    internal enum BvkMK : byte { Scalar, Handle, StructValue, StructPtr, StructArray, HandleArray, ScalarArray, StringZ, StringArray, PNext, Ignore, BlobPtr, SelectArray }");
             sm.AppendLine("    internal readonly struct BvkM");
             sm.AppendLine("    {");
-            sm.AppendLine("        public readonly BvkMK Kind; public readonly int Offset; public readonly int Size; public readonly int Sub; public readonly int LenOffset; public readonly string HandleType; public readonly int SelOffset; public readonly uint SelMask; public readonly bool Optional;");
-            sm.AppendLine("        public BvkM(BvkMK k, int o, int s, int sub, int lo, string ht, int so, uint sm, bool opt = false) { Kind = k; Offset = o; Size = s; Sub = sub; LenOffset = lo; HandleType = ht; SelOffset = so; SelMask = sm; Optional = opt; }");
+            sm.AppendLine("        public readonly BvkMK Kind; public readonly int Offset; public readonly int Size; public readonly int Sub; public readonly int LenOffset; public readonly string HandleType; public readonly int SelOffset; public readonly uint SelMask; public readonly bool Optional; public readonly bool LenSamples; public readonly bool OptionalElements;");
+            sm.AppendLine("        public BvkM(BvkMK k, int o, int s, int sub, int lo, string ht, int so, uint sm, bool opt = false, bool lenSamples = false, bool optElems = false) { Kind = k; Offset = o; Size = s; Sub = sub; LenOffset = lo; HandleType = ht; SelOffset = so; SelMask = sm; Optional = opt; LenSamples = lenSamples; OptionalElements = optElems; }");
             sm.AppendLine("    }");
             sm.AppendLine("    internal static class BrovVulkStructMeta");
             sm.AppendLine("    {");
@@ -2447,6 +2762,9 @@ namespace Brovan.Generators
             sm.Append("        internal static readonly bool[] PNext = { ");
             foreach (string n in needed) sm.Append(PNextSet.Contains(n) ? "true" : "false").Append(", ");
             sm.AppendLine("};");
+            sm.Append("        internal static readonly uint[] STypes = { ");
+            foreach (string n in needed) sm.Append(STypeValue(m, n)).Append("u, ");
+            sm.AppendLine("};");
             sm.AppendLine("        internal static readonly BvkM[][] Members = new BvkM[][]");
             sm.AppendLine("        {");
 
@@ -2454,7 +2772,7 @@ namespace Brovan.Generators
             gs.Append("/* <auto-generated> Vulkan struct member descriptors from vk.xml. */\n");
             gs.Append("#ifndef BROVVULK_STRUCTS_H\n#define BROVVULK_STRUCTS_H\n");
             gs.Append("#include <stddef.h>\n");
-            gs.Append("typedef struct { unsigned char kind; int offset; int size; int nsize; int sub; int lenOffset; int selOffset; unsigned int selMask; } BvkM;\n");
+            gs.Append("typedef struct { unsigned char kind; int offset; int size; int nsize; int sub; int lenOffset; int selOffset; unsigned int selMask; unsigned char lenSamples; } BvkM;\n");
             gs.Append("#define BVK_PNEXT_OFF ((int)offsetof(VkBaseInStructure, pNext))\n");
             gs.Append("#define BVK_SAME_SIZE(tag, expr, want) typedef char bvk_sz_##tag[((int)(expr) == (want)) ? 1 : -1]\n");
             StringBuilder ga = new StringBuilder();
@@ -2469,7 +2787,7 @@ namespace Brovan.Generators
                 if (s.IsUnion || StructIsFlat(m, n, new HashSet<string>()))
                 {
                     sm.Append("new BvkM(BvkMK.Scalar, 0, ").Append(lay.Size).Append(", -1, -1, \"\", -1, 0u), ");
-                    gs.Append("{0,0,").Append(lay.Size).Append(",(int)sizeof(").Append(n).Append("),-1,-1,-1,0}, ");
+                    gs.Append("{0,0,").Append(lay.Size).Append(",(int)sizeof(").Append(n).Append("),-1,-1,-1,0,0}, ");
                     ga.Append("BVK_SAME_SIZE(u").Append(si).Append(", sizeof(").Append(n).Append("), ").Append(lay.Size).Append(");\n");
                 }
                 else
@@ -2481,13 +2799,13 @@ namespace Brovan.Generators
                         if (d.Kind == "Scalar" && d.Size > 8 && d.MemName != null)
                             ga.Append("BVK_SAME_SIZE(s").Append(si).Append('_').Append(d.MemName)
                               .Append(", sizeof(((").Append(n).Append("*)0)->").Append(d.MemName).Append("), ").Append(d.Size).Append(");\n");
-                        sm.Append("new BvkM(BvkMK.").Append(d.Kind).Append(", ").Append(d.Offset).Append(", ").Append(d.Size).Append(", ").Append(sub).Append(", ").Append(d.LenOffset).Append(", \"").Append(d.HandleType).Append("\", ").Append(d.SelOffset).Append(", ").Append(d.SelMask).Append("u, ").Append(d.Optional ? "true" : "false").Append("), ");
+                        sm.Append("new BvkM(BvkMK.").Append(d.Kind).Append(", ").Append(d.Offset).Append(", ").Append(d.Size).Append(", ").Append(sub).Append(", ").Append(d.LenOffset).Append(", \"").Append(d.HandleType).Append("\", ").Append(d.SelOffset).Append(", ").Append(d.SelMask).Append("u, ").Append(d.Optional ? "true" : "false").Append(", ").Append(d.LenSamples ? "true" : "false").Append(", ").Append(d.OptionalElements ? "true" : "false").Append("), ");
                         gs.Append("{").Append(KindNum[d.Kind]).Append(",").Append(GuestOffset(n, d.MemName, d.Offset)).Append(",").Append(d.Size)
                           .Append(",").Append(GuestNativeSize(n, d))
                           .Append(",").Append(sub)
                           .Append(",").Append(GuestOffset(n, d.LenName, d.LenOffset))
                           .Append(",").Append(GuestOffset(n, d.SelName, d.SelOffset))
-                          .Append(",").Append(d.SelMask).Append("u}, ");
+                          .Append(",").Append(d.SelMask).Append("u,").Append(d.LenSamples ? 1 : 0).Append("}, ");
                     }
                 }
                 sm.AppendLine("},");
@@ -2524,7 +2842,7 @@ namespace Brovan.Generators
                 string field = scope == "instance" ? "Instance" : "Device";
                 xb.AppendLine("        internal static readonly (string Name, uint Version)[] " + field + " =");
                 xb.AppendLine("        {");
-                foreach (string en in ExtAllowlist.OrderBy(x => x, StringComparer.Ordinal))
+                foreach (string en in Advertised.OrderBy(x => x, StringComparer.Ordinal))
                     if (m.Extensions.TryGetValue(en, out VkExtension ext) && ext.Type == scope)
                         xb.AppendLine("            (\"" + en + "\", " + ext.SpecVersion + "u),");
                 xb.AppendLine("        };");
@@ -2571,15 +2889,13 @@ namespace Brovan.Generators
             StringBuilder procB = new StringBuilder();
             StringBuilder defB = new StringBuilder();
             defB.Append("LIBRARY vulkan-1\nEXPORTS\n");
-            defB.Append("vkGetInstanceProcAddr\nvkGetDeviceProcAddr\n");
-            defB.Append("vkEnumerateInstanceLayerProperties\n");
-            defB.Append("vkCreateDescriptorUpdateTemplate\nvkDestroyDescriptorUpdateTemplate\nvkUpdateDescriptorSetWithTemplate\n");
-            defB.Append("vkCreatePrivateDataSlot\nvkDestroyPrivateDataSlot\nvkSetPrivateData\nvkGetPrivateData\n");
+            foreach (string n in GuestLocal.OrderBy(x => x, StringComparer.Ordinal))
+                defB.Append(n).Append('\n');
             pb.Append("#ifndef BROVVULK_GEN_PROTOS_H\n#define BROVVULK_GEN_PROTOS_H\n");
             for (int i = 0; i < cmds.Count; i++)
             {
                 Command c = cmds[i];
-                if (!GenAllowlist.Contains(c.Name))
+                if (!exportedNames.Contains(c.Name))
                     continue;
                 string hostCase = EmitHostCase(m, c, i);
                 if (hostCase == null)
@@ -2591,13 +2907,12 @@ namespace Brovan.Generators
                 else
                     pb.Append("VKAPI_ATTR ").Append(c.Ret).Append(" VKAPI_CALL ").Append(c.Name).Append("(").Append(GuestSig(c)).Append(");\n");
                 procB.Append("M(").Append(c.Name).Append(");\n");
-                if (c.Name != "vkGetInstanceProcAddr" && c.Name != "vkGetDeviceProcAddr"
-                    && c.Name != "vkEnumerateInstanceLayerProperties")
-                    defB.Append(c.Name).Append("\n");
+                defB.Append(c.Name).Append("\n");
             }
             foreach (Command alias in m.Commands.Values)
             {
-                if (alias.Alias == null || !GenAllowlist.Contains(alias.Alias) || GenAllowlist.Contains(alias.Name))
+                if (alias.Alias == null || exportedNames.Contains(alias.Name)
+                    || !(exportedNames.Contains(alias.Alias) || GuestLocal.Contains(alias.Alias)))
                     continue;
                 procB.Append("if (strcmp(pName, \"").Append(alias.Name).Append("\") == 0) return (PFN_vkVoidFunction)")
                      .Append(alias.Alias).Append(";\n");
@@ -2609,6 +2924,39 @@ namespace Brovan.Generators
             db.AppendLine("    }");
             db.AppendLine("}");
             spc.AddSource("BrovVulkGenDispatch.g.cs", SourceText.From(db.ToString(), Encoding.UTF8));
+
+            StringBuilder rb = new StringBuilder();
+            HashSet<string> outSideFinal = OutSideStructs(m, exported);
+            foreach (string en in Advertised.OrderBy(x => x, StringComparer.Ordinal))
+            {
+                rb.Append("advertised\t").Append(en);
+                if (ExtKnownGaps.TryGetValue(en, out string[] gaps))
+                    rb.Append("\tnot forwarded: ").Append(string.Join(", ", gaps));
+                List<string> elementChains = ElementChainGaps(m, m.Extensions[en], closure, outSideFinal);
+                if (elementChains.Count > 0)
+                    rb.Append("\telement chain not forwarded: ").Append(string.Join(", ", elementChains));
+                rb.Append('\n');
+            }
+            foreach (KeyValuePair<string, string> kv in blocked.OrderBy(x => x.Key, StringComparer.Ordinal))
+                rb.Append(ExtDenylist.ContainsKey(kv.Key) ? "denied\t" : "blocked\t").Append(kv.Key).Append('\t').Append(kv.Value).Append('\n');
+            foreach (Command c in cmds)
+            {
+                if (exportedNames.Contains(c.Name) || GuestLocal.Contains(c.Name)
+                    || !m.CoreCommandVersion.TryGetValue(c.Name, out double cv) || cv > MaxCoreVersion)
+                    continue;
+                rb.Append("core command not exported\t").Append(c.Name).Append('\t').Append(hostOk[c.Name] ? OutGap(m, c, cache) : "not forwardable").Append('\n');
+            }
+            foreach (string n in needed)
+            {
+                VkStruct s = m.Structs[n];
+                if (s.IsUnion || StructIsFlat(m, n, new HashSet<string>()))
+                    continue;
+                Layout lay = ComputeLayout(m, n, cache);
+                foreach (Member mem in s.Members)
+                    if (ClassifyMember(m, s, mem, lay.Offsets, cache).Kind == "Ignore")
+                        rb.Append("member not forwarded\t").Append(n).Append('.').Append(mem.Name).Append('\n');
+            }
+            WriteIfChanged(Path.Combine(GuestGenDir(vkXmlPath), "brovvulk_extensions.txt"), rb.ToString());
 
             WriteIfChanged(Path.Combine(GuestGenDir(vkXmlPath), "brovvulk_gen.c"), cb.ToString());
             WriteIfChanged(Path.Combine(GuestGenDir(vkXmlPath), "brovvulk_gen_protos.h"), pb.ToString());
