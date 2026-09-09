@@ -199,3 +199,29 @@ replace-all|qemu/exec.c|new_block->max_length > uc->target_page_size|brov_ramblo
 replace-all|qemu/exec.c|if (uc->ram_list.freed|if (0 /* brov: a freed block no longer forces the walk */ 
 replace-all|qemu/exec.c|if (!uc->ram_list.freed) {|{ ram_addr_t brov_off; if (brov_find_ram_offset(uc, size, &brov_off)) { return brov_off; } } if (!uc->ram_list.freed) {
 
+
+# --- SSE floating point arithmetic emitted as host vector instructions -------
+copy|brovan_fp_vec_opc.inc.h|include/brovan_fp_vec_opc.inc.h
+copy|brovan_fp_vec_state.inc.h|include/brovan_fp_vec_state.inc.h
+copy|brovan_fp_vec.inc.h|include/brovan_fp_vec.inc.h
+copy|brovan_fp_vec_arm64.inc.c|include/brovan_fp_vec_arm64.inc.c
+copy|brovan_fp_vec_i386.inc.c|include/brovan_fp_vec_i386.inc.c
+insert-before|qemu/include/tcg/tcg-opc.h|DEF(last_generic, 0, 0, 0, TCG_OPF_NOT_PRESENT)|#include "brovan_fp_vec_opc.inc.h"
+insert-after|qemu/tcg/aarch64/tcg-target.h|#define TCG_TARGET_HAS_cmpsel_vec       0|#define TCG_TARGET_HAS_brov_fpvec       1
+insert-after|qemu/tcg/i386/tcg-target.h|#define TCG_TARGET_HAS_cmpsel_vec       -1|#define TCG_TARGET_HAS_brov_fpvec       1
+insert-before|qemu/tcg/aarch64/tcg-target.inc.c|static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,|#include "brovan_fp_vec_arm64.inc.c"
+insert-in-body|qemu/tcg/aarch64/tcg-target.inc.c|static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,|    if (brov_fp_vec_out(s, opc, vecl, vece, args)) { return; }
+insert-in-body|qemu/tcg/aarch64/tcg-target.inc.c|int tcg_can_emit_vec_op(TCGContext *tcg_ctx, TCGOpcode opc, TCGType type, unsigned vece)|    if (brov_fp_vec_can_emit(opc, type, vece) >= 0) { return brov_fp_vec_can_emit(opc, type, vece); }
+insert-in-body|qemu/tcg/aarch64/tcg-target.inc.c|static const TCGTargetOpDef *tcg_target_op_def(TCGOpcode op)|    if (brov_fp_vec_op_def(op)) { return brov_fp_vec_op_def(op); }
+insert-before|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)|#include "brovan_fp_vec_i386.inc.c"
+insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,|    if (brov_fp_vec_out(s, opc, vecl, vece, args)) { return; }
+insert-in-body|qemu/tcg/i386/tcg-target.inc.c|int tcg_can_emit_vec_op(TCGContext *tcg_ctx, TCGOpcode opc, TCGType type, unsigned vece)|    if (brov_fp_vec_can_emit(opc, type, vece) >= 0) { return brov_fp_vec_can_emit(opc, type, vece); }
+insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static const TCGTargetOpDef *tcg_target_op_def(TCGOpcode op)|    if (brov_fp_vec_op_def(op)) { return brov_fp_vec_op_def(op); }
+insert-before|qemu/target/i386/cpu.h|static inline void cpu_get_tb_cpu_state(CPUX86State *env, target_ulong *pc,|#include "brovan_fp_vec_state.inc.h"
+insert-in-body|qemu/target/i386/cpu.h|static inline void cpu_get_tb_cpu_state(CPUX86State *env, target_ulong *pc,|    brov_tb_cpu_state(env, pc, cs_base, flags); return;
+insert-before|qemu/target/i386/translate.c|static void gen_sse(CPUX86State *env, DisasContext *s, int b,|#include "brovan_fp_vec.inc.h"
+replace-all|qemu/target/i386/translate.c|sse_fn_epp(tcg_ctx, tcg_ctx->cpu_env, s->ptr0, s->ptr1);|if (!brov_gen_sse_fp(s, b, b1, op1_offset, op2_offset)) sse_fn_epp(tcg_ctx, tcg_ctx->cpu_env, s->ptr0, s->ptr1);
+replace-all|qemu/target/i386/translate.c|gen_helper_ldmxcsr(tcg_ctx, tcg_ctx->cpu_env, s->tmp2_i32);|gen_helper_ldmxcsr(tcg_ctx, tcg_ctx->cpu_env, s->tmp2_i32); brov_gen_mxcsr_eob(s);
+replace-all|qemu/target/i386/translate.c|gen_helper_fxrstor(tcg_ctx, tcg_ctx->cpu_env, s->A0);|gen_helper_fxrstor(tcg_ctx, tcg_ctx->cpu_env, s->A0); brov_gen_mxcsr_eob(s);
+replace-all|qemu/target/i386/translate.c|gen_helper_xrstor(tcg_ctx, tcg_ctx->cpu_env, s->A0, s->tmp1_i64);|gen_helper_xrstor(tcg_ctx, tcg_ctx->cpu_env, s->A0, s->tmp1_i64); brov_gen_mxcsr_eob(s);
+insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)|    brov_fp_vec_pre_call(s);
