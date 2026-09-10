@@ -46,8 +46,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
             else
             {
-                RectRight = (int)Window.Width;
-                RectBottom = (int)Window.Height;
+                Win32kHelper.GetClientSize(Instance, Window, out RectRight, out RectBottom);
             }
 
             Instance.WinHelper.EnqueueTextRender(Hwnd, Hdc, Win32kHelper.ResolveDcFont(Instance, Hdc), Text, X, Y, RectLeft, RectTop, RectRight, RectBottom, Options);

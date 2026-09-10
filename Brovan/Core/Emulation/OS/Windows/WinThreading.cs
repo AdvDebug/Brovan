@@ -61,6 +61,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool MsgWaitActive { get; set; }
         public uint MsgWaitMask { get; set; }
         public ulong ClientThreadInfo { get; set; }
+        public ulong ClientFocusInfo { get; set; }
         public bool WaitMessageActive { get; set; }
         public bool GetMessageWaitActive { get; set; }
         public bool RetrySyscallActive { get; set; }

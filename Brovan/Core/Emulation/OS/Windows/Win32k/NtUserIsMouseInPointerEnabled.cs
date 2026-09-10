@@ -6,7 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            Instance.SetBooleanSyscallReturn(false);
+            Instance.SetBooleanSyscallReturn(Win32kHelper.GetMouseInPointer(Instance));
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

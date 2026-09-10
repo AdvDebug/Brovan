@@ -209,6 +209,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
                 if (Message.Type == LrpcMessageType.Request)
                 {
+                    if (ScmPortHandler.TryHandle(Port?.Name, Message.ProcNumber, Message.StubData, out byte[] ScmReply))
+                        return LrpcPacket.BuildResponse(Message, ScmReply);
+
                     if ((Instance.Settings.Flags & LogFlags.General) != 0)
                         Instance.TriggerEventMessage($"[!] No server for proc {Message.ProcNumber} on \"{Port?.Name}\"; faulting.", LogFlags.General);
 

@@ -1576,6 +1576,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int Win32ClientInfoDesktopSlot = 4;
         private const int Win32ClientInfoActiveWindowSlot = 8;
         private const int Win32ClientInfoThreadInfoSlot = 35;
+        private const int Win32ClientInfoFocusInfoSlot = 12;
+        private const uint ClientFocusInfoSize = 0x40;
+        private const ulong ClientFocusInfoFocusOffset = 0x20;
+        private const ulong ClientFocusInfoActiveOffset = 0x28;
+
+        private const ulong ClientFocusInfoWakeBitsOffset = 0x08;
+        internal const uint QueueStatusRawInput = 0x0400;
         private const uint ClientThreadInfoSize = 0x40;
         private const int Win32ClientInfoActiveWindowPointerSlot = 9;
         private const ulong UserSharedInfoMirrorSize = 0x1B54;
@@ -1621,6 +1628,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int MessageBoxStringStride = 40;
         private const int MessageBoxStringCaptionBytes = 32;
         private const ulong UserServerInfoLogPixelsOffset = 0x1B56;
+        private const ulong UserServerInfoKeyStateGenerationOffset = 0x1B48;
+        private const ulong UserServerInfoAsyncKeyStateGenerationOffset = 0x1B4C;
         private const int LogFontSize = 92;
         private const int LogFontFaceNameOffset = 28;
         private const int LogFontFaceNameChars = 32;
@@ -3649,13 +3658,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Creation.Step == WinWindowCreationStep.Create)
                 return Win32kHelper.SendWindowCreateMessage(Emulator, Window, Win32kHelper.WM_CREATE, Creation);
 
+            Win32kHelper.GetClientRect(Emulator, Window, out int ClientLeft, out int ClientTop, out int ClientWidth, out int ClientHeight);
+
             // A control sizes itself from WM_SIZE, not from the CREATESTRUCT.
             if (Creation.Step == WinWindowCreationStep.Size)
                 return Win32kHelper.InvokeWindowProc(Emulator, Window.Hwnd, Window.WndProc, Win32kHelper.WM_SIZE,
-                    SizeRestored, PackCoordinates((int)Window.Width, (int)Window.Height), Creation);
+                    SizeRestored, PackCoordinates(ClientWidth, ClientHeight), Creation);
 
             return Win32kHelper.InvokeWindowProc(Emulator, Window.Hwnd, Window.WndProc, Win32kHelper.WM_MOVE,
-                0, PackCoordinates(Window.X, Window.Y), Creation);
+                0, PackCoordinates(ClientLeft, ClientTop), Creation);
         }
 
         private static ulong PackCoordinates(int Low, int High)
@@ -4564,6 +4575,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (int i = 0; i < UserServerInfoWindowExtraBytes.Length; i++)
                 Emulator._emulator.WriteMemory(Address + UserServerInfoWindowExtraOffset + (ulong)(i * 2), UserServerInfoWindowExtraBytes[i], 2);
 
+            // user32 answers GetKeyState for VK codes below 0x20 from a CLIENTINFO array nothing fills,
+            // and syscalls only while these counters differ from its cached copy.
+            Emulator._emulator.WriteMemory(Address + UserServerInfoKeyStateGenerationOffset, uint.MaxValue, 4);
+            Emulator._emulator.WriteMemory(Address + UserServerInfoAsyncKeyStateGenerationOffset, uint.MaxValue, 4);
+
             UserServerInfoAddress = Address;
             PublishUserDisplayDpi();
             WriteMessageBoxStrings(Address + UserServerInfoMessageBoxStringsOffset);
@@ -4690,6 +4706,66 @@ namespace Brovan.Core.Emulation.OS.Windows
             return UserHandleTableAddress;
         }
 
+        private ulong PublishedFocusHwnd;
+        private ulong PublishedActiveHwnd;
+
+        // user32 answers GetFocus and GetActiveWindow from the calling thread's own copy.
+        public void PublishFocusState(ulong FocusHwnd, ulong ActiveHwnd)
+        {
+            PublishedFocusHwnd = FocusHwnd;
+            PublishedActiveHwnd = ActiveHwnd;
+
+            foreach (EmulatedThread Thread in Emulator.LiveThreads)
+                PublishThreadFocusState(Thread, FocusHwnd, ActiveHwnd);
+        }
+
+        public void PublishThreadFocusState(EmulatedThread Thread, ulong FocusHwnd, ulong ActiveHwnd)
+        {
+            if (Thread == null)
+                return;
+
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (State.Teb == 0)
+                return;
+
+            if (!EnsureClientFocusInfo(State))
+                return;
+
+            Emulator._emulator.WriteMemory(State.ClientFocusInfo + ClientFocusInfoFocusOffset, FocusHwnd, 8);
+            Emulator._emulator.WriteMemory(State.ClientFocusInfo + ClientFocusInfoActiveOffset, ActiveHwnd, 8);
+        }
+
+        private bool EnsureClientFocusInfo(WindowsThreadState State)
+        {
+            if (State.ClientFocusInfo != 0)
+                return true;
+
+            ulong Block = Emulator.MapUniqueAddress(ClientFocusInfoSize, MemoryProtection.ReadWrite);
+            if (Block == 0 || !WriteZeroMemory(Block, ClientFocusInfoSize))
+                return false;
+
+            State.ClientFocusInfo = Block;
+            WriteWin32ClientInfoSlot(State, Win32ClientInfoFocusInfoSlot, Block);
+            return true;
+        }
+
+        // A message pump reads these bits without a syscall.
+        public void PublishThreadWakeBit(EmulatedThread Thread, uint Bit, bool Set)
+        {
+            if (Thread == null)
+                return;
+
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (State.Teb == 0 || !EnsureClientFocusInfo(State))
+                return;
+
+            ulong Address = State.ClientFocusInfo + ClientFocusInfoWakeBitsOffset;
+            uint Bits = Emulator.ReadMemoryUInt(Address);
+            uint Updated = Set ? Bits | Bit : Bits & ~Bit;
+            if (Updated != Bits)
+                Emulator._emulator.WriteMemory(Address, Updated, 4);
+        }
+
         /// <summary>
         /// Ensures the current thread has the minimal user32 client desktop fields needed for handle validation.
         /// </summary>
@@ -4722,6 +4798,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             WriteWin32ClientInfoSlot(State, Win32ClientInfoThreadInfoSlot, State.ClientThreadInfo);
+
+            // A thread that starts after the activation still has to see it.
+            if (State.ClientFocusInfo == 0 && (PublishedFocusHwnd != 0 || PublishedActiveHwnd != 0))
+                PublishThreadFocusState(Thread, PublishedFocusHwnd, PublishedActiveHwnd);
         }
 
         public void SetThreadWindowContext(WinWindow Window)
@@ -5220,22 +5300,22 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             int OuterLeft = Window.X;
             int OuterTop = Window.Y;
-            int OuterWidth = (int)Window.Width;
-            int OuterHeight = (int)Window.Height;
-            int OuterRight = OuterLeft + OuterWidth;
-            int OuterBottom = OuterTop + OuterHeight;
+            int OuterRight = OuterLeft + (int)Window.Width;
+            int OuterBottom = OuterTop + (int)Window.Height;
+
+            Win32kHelper.GetClientRect(Emulator, Window, out int ClientLeft, out int ClientTop, out int ClientWidth, out int ClientHeight);
 
             // user32 answers GetClientRect from rcClient without a syscall, and win32k leaves that rectangle empty
             // while a window is iconic. Renderers test it to stop drawing at a size their surface no longer has.
-            int ClientRight = Window.Minimized ? OuterLeft : OuterRight;
-            int ClientBottom = Window.Minimized ? OuterTop : OuterBottom;
+            int ClientRight = Window.Minimized ? ClientLeft : ClientLeft + ClientWidth;
+            int ClientBottom = Window.Minimized ? ClientTop : ClientTop + ClientHeight;
 
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x58, (uint)OuterLeft, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x5C, (uint)OuterTop, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x60, (uint)OuterRight, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x64, (uint)OuterBottom, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x68, (uint)OuterLeft, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x6C, (uint)OuterTop, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x68, (uint)ClientLeft, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x6C, (uint)ClientTop, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x70, (uint)ClientRight, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x74, (uint)ClientBottom, 4);
 
@@ -5919,9 +5999,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Window != null)
                 {
+                    // The host frame carries its own decoration, so it is given the client size.
+                    Win32kHelper.GetClientSize(Emulator, Window, out int ClientWidth, out int ClientHeight);
+
                     title = string.IsNullOrWhiteSpace(Window.Title) ? DesktopWindowTitle : Window.Title;
-                    width = Math.Max((int)Window.Width, 1);
-                    height = Math.Max((int)Window.Height, 1);
+                    width = Math.Max(ClientWidth, 1);
+                    height = Math.Max(ClientHeight, 1);
                     visible = Window.Visible && !Window.Destroyed;
                     state = Window.Minimized ? WindowState.Minimized : Window.Maximized ? WindowState.Maximized : WindowState.Normal;
                 }

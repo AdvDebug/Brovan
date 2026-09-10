@@ -406,6 +406,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 State.LastMotionHandle = Record.Handle;
 
             Win32kHelper.PostMessage(Instance, Hwnd, Win32kHelper.WM_INPUT, 0, Record.Handle);
+            PublishPending(Instance);
         }
 
         private static bool TryCoalesceMotion(RawInputState State, ref RawRecord Record)
@@ -442,8 +443,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Right - Left < 1 || Bottom - Top < 1)
                 return;
 
-            int ScreenX = State.PointerX + Window.X;
-            int ScreenY = State.PointerY + Window.Y;
+            Win32kHelper.GetClientOrigin(Instance, Window, out int OriginX, out int OriginY);
+            int ScreenX = State.PointerX + OriginX;
+            int ScreenY = State.PointerY + OriginY;
 
             int ClampedX = Math.Clamp(ScreenX, Left, Right - 1);
             int ClampedY = Math.Clamp(ScreenY, Top, Bottom - 1);
@@ -452,8 +454,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return;
 
             State.WarpPending = true;
-            State.WarpX = ClampedX - Window.X;
-            State.WarpY = ClampedY - Window.Y;
+            State.WarpX = ClampedX - OriginX;
+            State.WarpY = ClampedY - OriginY;
             Instance.WinHelper.WarpHostCursor(State.WarpX, State.WarpY);
         }
 
@@ -529,7 +531,102 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             Instance.SetLastWinError(0);
+            PublishPending(Instance);
             return Required;
+        }
+
+        internal static bool HasPendingRecords(BinaryEmulator Instance)
+        {
+            RawInputState State = GetState(Instance);
+            return (int)(State.NextHandle - 1 - State.LastDeliveredHandle) > 0;
+        }
+
+        internal static void PublishPending(BinaryEmulator Instance)
+        {
+            Instance.WinHelper.PublishThreadWakeBit(Instance.CurrentThread, WinSysHelper.QueueStatusRawInput, HasPendingRecords(Instance));
+        }
+
+        // Returns the record count, or -1 on failure.
+        internal static uint ReadBuffer(BinaryEmulator Instance, ulong DataPtr, ulong SizePtr, uint HeaderSizeArg)
+        {
+            uint Header = HeaderSize(Instance);
+            if (HeaderSizeArg != Header || SizePtr == 0 || !Instance.IsRegionMapped(SizePtr, 4))
+            {
+                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
+                return uint.MaxValue;
+            }
+
+            RawInputState State = GetState(Instance);
+
+            // NEXTRAWINPUTBLOCK steps over each record by its aligned size.
+            uint Alignment = Instance.WinHelper.PointerSize == 8 ? 8u : 4u;
+
+            if (DataPtr == 0)
+            {
+                uint Largest = Header + PayloadSize(RimTypeMouse);
+                Instance._emulator.WriteMemory(SizePtr, Align(Largest, Alignment), 4);
+                Instance.SetLastWinError(0);
+                return 0;
+            }
+
+            uint Capacity = Instance.ReadMemoryUInt(SizePtr);
+            uint Used = 0;
+            uint Count = 0;
+            uint Consumed = State.LastDeliveredHandle;
+
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(Capacity);
+
+            while ((int)(State.NextHandle - 1 - Consumed) > 0)
+            {
+                uint Handle = Consumed + 1;
+                ref RawRecord Record = ref State.Records[Handle % RecordSlots];
+                if (Record.Handle != Handle)
+                {
+                    Consumed = Handle;
+                    continue;
+                }
+
+                uint TotalSize = Header + PayloadSize(Record.Type);
+                uint Step = Align(TotalSize, Alignment);
+                if (Used + Step > Capacity)
+                    break;
+
+                Span<byte> Slot = Buffer.Slice((int)Used, (int)Step);
+                Slot.Clear();
+                WriteHeader(Instance, Slot, Record, TotalSize);
+                WritePayload(Slot.Slice((int)Header), Record);
+
+                Used += Step;
+                Consumed = Handle;
+                Count++;
+            }
+
+            if (Count == 0)
+            {
+                Instance.SetLastWinError(0);
+                PublishPending(Instance);
+                return 0;
+            }
+
+            if (!Instance.IsRegionMapped(DataPtr, Used) || !Instance.WriteMemory(DataPtr, Buffer.Slice(0, (int)Used)))
+            {
+                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
+                return uint.MaxValue;
+            }
+
+            State.LastDeliveredHandle = Consumed;
+
+            // A WM_INPUT left behind would announce a record that is already gone.
+            Win32kHelper.DropRawInputMessages(Instance, Consumed);
+            PublishPending(Instance);
+
+            Instance.SetLastWinError(0);
+            return Count;
+        }
+
+        private static uint Align(uint Value, uint Alignment)
+        {
+            return (Value + Alignment - 1) & ~(Alignment - 1);
         }
 
         private static void WriteHeader(BinaryEmulator Instance, Span<byte> Buffer, in RawRecord Record, uint TotalSize)

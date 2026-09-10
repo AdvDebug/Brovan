@@ -6,8 +6,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            Instance.SetLastWinError(Win32kHelper.ERROR_CALL_NOT_IMPLEMENTED);
-            Instance.SetBooleanSyscallReturn(false);
+            Win32kHelper.SetMouseInPointer(Instance, Instance.WinHelper.GetArg(0) != 0);
+
+            Instance.SetLastWinError(0);
+            Instance.SetBooleanSyscallReturn(true);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

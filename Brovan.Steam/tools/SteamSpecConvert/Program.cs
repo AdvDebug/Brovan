@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
@@ -28,6 +29,10 @@ static class Program
         ["ManifestId_t"] = "u64", ["SiteId_t"] = "u64", ["PartyBeaconID_t"] = "u64", ["SteamInventoryUpdateHandle_t"] = "u64",
         ["SteamItemInstanceID_t"] = "u64", ["uint64_steamid"] = "u64", ["uint64_gameid"] = "u64", ["UGCQueryHandle_t"] = "u64",
         ["UGCUpdateHandle_t"] = "u64", ["HSteamCall"] = "i32",
+        ["HTTPRequestHandle"] = "u32", ["HTTPCookieContainerHandle"] = "u32", ["RemotePlayCursorID_t"] = "u32",
+        ["TimelineEventHandle_t"] = "u64", ["lint64"] = "i64", ["ulint64"] = "u64",
+        ["intp"] = "i64", ["uintp"] = "u64", ["intptr_t"] = "i64",
+        ["HServerListRequest"] = "u64",
     };
 
     // By-value structs: x64 size, and whether a constructor forces a hidden-pointer return.
@@ -99,7 +104,9 @@ static class Program
                 return 2;
             }
 
-            List<Method> methods = Parse(File.ReadAllText(parts[0]), parts[1], ref errors);
+            string headerText = File.ReadAllText(parts[0]);
+            CollectEnumsFrom(Path.GetDirectoryName(Path.GetFullPath(parts[0])));
+            List<Method> methods = Parse(headerText, parts[1], ref errors);
             XElement iface = new XElement("interface", new XAttribute("name", parts[1]), new XAttribute("version", parts[2]));
             foreach (Method m in methods)
             {
@@ -147,6 +154,7 @@ static class Program
         Stack<(bool Active, bool ParentActive, bool Taken)> cond = new Stack<(bool, bool, bool)>();
         bool active = true;
         StringBuilder body = null;
+        int depth = 0;
         List<Method> methods = new List<Method>();
 
         foreach (string raw in lines)
@@ -210,12 +218,18 @@ static class Program
                 continue;
             }
 
-            if (t == "};")
+            // A nested enum ends with "};" too.
+            if (t == "};" && depth == 0)
                 break;
 
-            if (t == "{" || t == "public:")
+            if (t == "public:")
                 continue;
 
+            // A nested brace has to stay for StripInlineBodies.
+            if (t == "{" && body.Length == 0)
+                continue;
+
+            depth += t.Count(c => c == '{') - t.Count(c => c == '}');
             body.Append(line).Append('\n');
         }
 
@@ -223,8 +237,10 @@ static class Program
             throw new Exception("class " + className + " not found");
 
         string b = body.ToString();
-        b = Regex.Replace(b, @"STEAM_PRIVATE_API\s*\(\s*(virtual[^;]*;)\s*\)", "$1");
+        b = Regex.Replace(b, @"STEAM_PRIVATE_API\s*\(\s*((?:virtual[^;]*;\s*)+)\)", "$1");
         b = Regex.Replace(b, @"STEAM_(CALL_RESULT|CALL_BACK|METHOD_DESC|IGNOREATTR)\s*\([^)]*\)", " ");
+
+        b = StripInlineBodies(b);
 
         string pendingFlat = null;
         foreach (string stmtRaw in b.Split(';'))
@@ -247,6 +263,14 @@ static class Program
                 continue;
             }
 
+            // A virtual destructor owns a vtable slot.
+            Match dtor = Regex.Match(stmt, @"^virtual\s+~\w+\s*\(\s*\)");
+            if (dtor.Success)
+            {
+                methods.Add(new Method { Name = "Destructor", CName = "Destructor", Ret = "void", Local = true });
+                continue;
+            }
+
             Match m = Regex.Match(stmt, @"^virtual\s+(?<ret>.+?)\s*\b(?<name>\w+)\s*\((?<params>.*)\)\s*(const\s*)?=\s*0\s*$");
             if (!m.Success)
             {
@@ -263,6 +287,14 @@ static class Program
                 ParseParam(method, p, className, ref errors);
 
             ResolveCounts(method, className, ref errors);
+
+            // An interface return is registered under the version string the caller passes.
+            if (method.Ret == "iface" && !HasVersionParam(method))
+            {
+                Console.Error.WriteLine($"  local (interface return with no version) in {className}::{method.Name}");
+                method.Local = true;
+            }
+
             methods.Add(method);
         }
 
@@ -368,11 +400,75 @@ static class Program
         }
         else if (IsEnum(ret))
             m.Ret = "enum";
+        else if (ret.EndsWith("*", StringComparison.Ordinal))
+        {
+            // An address in the client's own heap, which the guest cannot read.
+            Console.Error.WriteLine($"  local (unmarshallable return {ret}) in {m.Name}");
+            m.Ret = "iface";
+            m.Local = true;
+        }
         else
             throw new Exception("unknown return type " + ret + " in " + m.Name);
     }
 
-    static bool IsEnum(string t) => Regex.IsMatch(t, @"^E[A-Z]\w*$");
+    // A declaration with an inline body carries no ';', so the closing brace becomes one.
+    static string StripInlineBodies(string text)
+    {
+        StringBuilder Out = new StringBuilder(text.Length);
+        int Depth = 0;
+
+        foreach (char C in text)
+        {
+            if (C == '{')
+            {
+                Depth++;
+            }
+            else if (C == '}')
+            {
+                if (Depth > 0 && --Depth == 0)
+                    Out.Append(';');
+            }
+            else if (Depth == 0)
+            {
+                Out.Append(C);
+            }
+        }
+
+        return Out.ToString();
+    }
+
+    static bool HasVersionParam(Method m)
+    {
+        foreach (Param p in m.Params)
+        {
+            if (p.Kind == "str" && p.Name.IndexOf("version", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+
+        return false;
+    }
+
+    // Not every Steam enum is named EFoo.
+    static readonly HashSet<string> KnownEnums = new HashSet<string>();
+
+    static readonly HashSet<string> ScannedDirectories = new HashSet<string>();
+
+    static void CollectEnumsFrom(string directory)
+    {
+        if (directory == null || !ScannedDirectories.Add(directory))
+            return;
+
+        foreach (string file in Directory.GetFiles(directory, "*.h"))
+            CollectEnums(File.ReadAllText(file));
+    }
+
+    static void CollectEnums(string text)
+    {
+        foreach (Match m in Regex.Matches(text, @"\benum\s+(?:class\s+)?(\w+)"))
+            KnownEnums.Add(m.Groups[1].Value);
+    }
+
+    static bool IsEnum(string t) => Regex.IsMatch(t, @"^E[A-Z]\w*$") || KnownEnums.Contains(t);
 
     static void ParseParam(Method m, string raw, string className, ref int errors)
     {
@@ -465,8 +561,11 @@ static class Program
                 param.Kind = isConst ? "inarray" : "out";
             else
             {
-                Console.Error.WriteLine($"  unknown struct {elem} in {className}::{m.Name}.{param.Name}");
-                errors++;
+                // Dropping the parameter would put the wire format out of step with the ABI.
+                Console.Error.WriteLine($"  local (unrepresentable {elem}) in {className}::{m.Name}.{param.Name}");
+                m.Local = true;
+                param.Kind = "in";
+                param.Wire = "u64";
             }
         }
 
@@ -481,8 +580,10 @@ static class Program
                 param.Wire = "u64";
             else
             {
-                Console.Error.WriteLine($"  unknown type {e} in {className}::{m.Name}.{param.Name}");
-                errors++;
+                Console.Error.WriteLine($"  local (unrepresentable {e}) in {className}::{m.Name}.{param.Name}");
+                m.Local = true;
+                param.Kind = "in";
+                param.Wire = "u64";
             }
         }
 
@@ -512,8 +613,10 @@ static class Program
 
             if (p.Count == null)
             {
-                Console.Error.WriteLine($"  no count for {className}::{m.Name}.{p.Name}");
-                errors++;
+                Console.Error.WriteLine($"  local (no count) in {className}::{m.Name}.{p.Name}");
+                m.Local = true;
+                p.Kind = "in";
+                p.Wire = "u64";
                 continue;
             }
 

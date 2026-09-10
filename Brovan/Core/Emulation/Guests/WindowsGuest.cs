@@ -1493,7 +1493,7 @@ namespace Brovan.Core.Emulation.Guests
                     static byte[] Wz(string s) => Encoding.Unicode.GetBytes(s + "\0");
 
                     byte[] EnvBlock = BuildEnvironment(Instance, out ulong envSize);
-                    ulong HeaderSize = 0x448;
+                    ulong HeaderSize = 0x450;
                     ulong TotalSize = HeaderSize + (ulong)Wz(CurrentDir).Length + (ulong)Wz(ImagePath).Length + (ulong)Wz(CommandLine).Length + (ulong)Wz(WindowTitle).Length + (ulong)Wz(DesktopInfo).Length + envSize;
                     TotalSize = BinaryEmulator.AlignUp(TotalSize, 0x10);
 

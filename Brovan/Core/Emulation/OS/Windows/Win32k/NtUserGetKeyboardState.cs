@@ -16,10 +16,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Span<byte> KeyState = Instance.WinHelper.Shared.GetSpan(KeyStateSize);
-            KeyState.Slice(0, KeyStateSize).Clear();
+            Span<byte> KeyState = Instance.WinHelper.Shared.GetSpan(KeyStateSize).Slice(0, KeyStateSize);
+            Win32kHelper.CopyKeyboardState(Instance, KeyState);
 
-            Instance.SetRawSyscallReturn(Instance.WriteMemory(KeyStatePtr, KeyState.Slice(0, KeyStateSize)) ? 1ul : 0ul);
+            Instance.SetRawSyscallReturn(Instance.WriteMemory(KeyStatePtr, KeyState) ? 1ul : 0ul);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

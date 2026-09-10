@@ -158,6 +158,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WM_MOUSEWHEEL = 0x020A;
         internal const uint WM_XBUTTONDOWN = 0x020B;
         internal const uint WM_XBUTTONUP = 0x020C;
+        internal const uint WM_POINTERUPDATE = 0x0245;
+        internal const uint WM_POINTERDOWN = 0x0246;
+        internal const uint WM_POINTERUP = 0x0247;
         internal const uint WM_MOUSEHWHEEL = 0x020E;
 
         internal const uint QS_KEY = 0x0001;
@@ -230,6 +233,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly byte[] KeyDownMessage = new byte[256];
             public int KeysHeld;
 
+            // 0x80 held, 0x01 flips on every press. Mouse buttons live here too.
+            public readonly byte[] KeyState = new byte[256];
+            public readonly byte[] KeyPressedSinceQuery = new byte[256];
+
             public Win32kCaret Caret;
 
             public uint QueuedWakeBits;
@@ -237,6 +244,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             public IReadOnlyList<uint> KeyboardLayouts;
             public uint KeyboardLayoutsGeneration;
+
+            public bool MouseInPointer;
+            public uint PointerFlags;
+            public uint PointerFrameId;
+            public uint PointerButtonChange;
+            public int PointerScreenX;
+            public int PointerScreenY;
+            public ulong PointerTargetHwnd;
         }
 
         internal sealed class Win32kCaret
@@ -1295,11 +1310,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             else
                 BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), (uint)Hdc);
 
+            GetClientSize(Instance, Window, out int ClientWidth, out int ClientHeight);
+
             BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset - 4, 4), 1);
             BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset + 0, 4), 0);
             BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset + 4, 4), 0);
-            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset + 8, 4), (int)Math.Min(Window.Width, (uint)int.MaxValue));
-            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset + 12, 4), (int)Math.Min(Window.Height, (uint)int.MaxValue));
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset + 8, 4), ClientWidth);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(RectOffset + 12, 4), ClientHeight);
             return Instance.WriteMemory(PaintStructPtr, Buffer.Slice(0, Size));
         }
 
@@ -1445,8 +1462,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     continue;
                 }
 
-                if (Message >= WM_KEYDOWN && Message <= WM_SYSKEYUP)
-                    TrackKeyState(State, Message, WParam);
+                TrackKeyState(State, Message, WParam, LParam);
 
                 if (Message >= WM_MOUSEMOVE && Message <= WM_XBUTTONUP && Message != WM_MOUSEWHEEL)
                 {
@@ -1471,7 +1487,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 }
 
                 if (Win32kRawInput.DeliverHostEvent(Instance, Foreground, Message, WParam, LParam))
-                    PostMessage(Instance, ResolveInputTarget(Instance, Foreground, Message, ref LParam), Message, WParam, LParam);
+                {
+                    ulong Target = ResolveInputTarget(Instance, Foreground, Message, ref LParam);
+                    PostMessage(Instance, Target, Message, WParam, LParam);
+
+                    if (State.MouseInPointer)
+                        PostPointerMessage(Instance, State, Target, Message, WParam);
+                }
             }
 
             if (GeometryChanged)
@@ -1485,28 +1507,255 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Instance.WinHelper.PresentDesktop();
         }
 
-        private static void TrackKeyState(Win32kState State, uint Message, ulong WParam)
-        {
-            byte Vk = (byte)WParam;
+        private const byte VkLButton = 0x01;
+        private const byte VkRButton = 0x02;
+        private const byte VkMButton = 0x04;
+        private const byte VkXButton1 = 0x05;
+        private const uint KeyLParamExtended = 0x01000000;
 
+        private static void TrackKeyState(Win32kState State, uint Message, ulong WParam, ulong LParam)
+        {
             switch (Message)
             {
                 case WM_KEYDOWN:
                 case WM_SYSKEYDOWN:
+                {
+                    byte Vk = (byte)WParam;
                     if (State.KeyDownMessage[Vk] == 0)
                         State.KeysHeld++;
 
                     State.KeyDownMessage[Vk] = (byte)(Message == WM_SYSKEYDOWN ? 2 : 1);
+                    SetKeyDown(State, Vk, true);
+                    SetKeyDown(State, SideKey(Vk, LParam), true);
                     return;
+                }
 
                 case WM_KEYUP:
                 case WM_SYSKEYUP:
+                {
+                    byte Vk = (byte)WParam;
                     if (State.KeyDownMessage[Vk] != 0)
                         State.KeysHeld--;
 
                     State.KeyDownMessage[Vk] = 0;
+                    SetKeyDown(State, Vk, false);
+                    SetKeyDown(State, SideKey(Vk, LParam), false);
+                    return;
+                }
+
+                case WM_LBUTTONDOWN: SetKeyDown(State, VkLButton, true); return;
+                case WM_LBUTTONUP: SetKeyDown(State, VkLButton, false); return;
+                case WM_RBUTTONDOWN: SetKeyDown(State, VkRButton, true); return;
+                case WM_RBUTTONUP: SetKeyDown(State, VkRButton, false); return;
+                case WM_MBUTTONDOWN: SetKeyDown(State, VkMButton, true); return;
+                case WM_MBUTTONUP: SetKeyDown(State, VkMButton, false); return;
+                case WM_XBUTTONDOWN: SetKeyDown(State, XButtonKey(WParam), true); return;
+                case WM_XBUTTONUP: SetKeyDown(State, XButtonKey(WParam), false); return;
+            }
+        }
+
+        private static byte XButtonKey(ulong WParam)
+        {
+            return (byte)(VkXButton1 + (((WParam >> 16) & 0xFFFF) == 2 ? 1 : 0));
+        }
+
+        // WM_KEYDOWN names the unsided modifier. win32k also holds the side the scan code names.
+        private static byte SideKey(byte Vk, ulong LParam)
+        {
+            byte ScanCode = (byte)((LParam >> 16) & 0xFF);
+            bool Extended = (LParam & KeyLParamExtended) != 0;
+
+            for (int i = 0; i < KeyMappings.Length; i++)
+            {
+                Win32kKeyMapping Mapping = KeyMappings[i];
+                if (Mapping.ScanCode != ScanCode || Mapping.Extended != Extended || Mapping.VirtualKey != Vk)
+                    continue;
+
+                return Mapping.SidedVirtualKey == Vk ? (byte)0 : Mapping.SidedVirtualKey;
+            }
+
+            return 0;
+        }
+
+        private static void SetKeyDown(Win32kState State, byte Vk, bool Down)
+        {
+            if (Vk == 0)
+                return;
+
+            byte Previous = State.KeyState[Vk];
+            if (!Down)
+            {
+                State.KeyState[Vk] = (byte)(Previous & 0x01);
+                return;
+            }
+
+            if ((Previous & 0x80) != 0)
+                return;
+
+            State.KeyState[Vk] = (byte)(0x80 | ((Previous & 0x01) ^ 0x01));
+            State.KeyPressedSinceQuery[Vk] = 1;
+        }
+
+        internal static ulong GetKeyState(BinaryEmulator Instance, byte Vk)
+        {
+            DrainHostEvents(Instance);
+
+            byte Value = GetState(Instance).KeyState[Vk];
+            
+            // A held key reads 0xFF80, matching what user32 builds from its own cache.
+            return (ulong)(((Value & 0x80) != 0 ? 0xFF80 : 0) | (Value & 0x01));
+        }
+
+        internal static ulong GetAsyncKeyState(BinaryEmulator Instance, byte Vk)
+        {
+            DrainHostEvents(Instance);
+
+            Win32kState State = GetState(Instance);
+            ulong Result = (ulong)(((State.KeyState[Vk] & 0x80) != 0 ? 0x8000 : 0) | State.KeyPressedSinceQuery[Vk]);
+            State.KeyPressedSinceQuery[Vk] = 0;
+            return Result;
+        }
+
+        internal static bool GetMouseInPointer(BinaryEmulator Instance)
+        {
+            return GetState(Instance).MouseInPointer;
+        }
+
+        internal const uint PointerIdMouse = 1;
+        internal const uint PointerTypeMouse = 4;
+
+        private const uint PointerFlagNew = 0x00000001;
+        private const uint PointerFlagInRange = 0x00000002;
+        private const uint PointerFlagInContact = 0x00000004;
+        private const uint PointerFlagFirstButton = 0x00000010;
+        private const uint PointerFlagSecondButton = 0x00000020;
+        private const uint PointerFlagThirdButton = 0x00000040;
+        private const uint PointerFlagPrimary = 0x00002000;
+        private const uint PointerFlagConfidence = 0x00004000;
+        private const uint PointerFlagDown = 0x00010000;
+        private const uint PointerFlagUpdate = 0x00020000;
+        private const uint PointerFlagUp = 0x00040000;
+
+        private const uint PointerChangeNone = 0;
+        private const uint PointerChangeFirstDown = 1;
+        private const uint PointerChangeFirstUp = 2;
+        private const uint PointerChangeSecondDown = 3;
+        private const uint PointerChangeSecondUp = 4;
+        private const uint PointerChangeThirdDown = 5;
+        private const uint PointerChangeThirdUp = 6;
+
+        // While mouse-in-pointer is on, Windows raises both messages.
+        private static void PostPointerMessage(BinaryEmulator Instance, Win32kState State, ulong Target, uint Message, ulong WParam)
+        {
+            uint PointerMessage;
+            uint Change = PointerChangeNone;
+            uint Buttons = State.PointerFlags & (PointerFlagFirstButton | PointerFlagSecondButton | PointerFlagThirdButton);
+
+            switch (Message)
+            {
+                case WM_MOUSEMOVE:
+                    PointerMessage = WM_POINTERUPDATE;
+                    break;
+                case WM_LBUTTONDOWN:
+                    PointerMessage = WM_POINTERDOWN;
+                    Buttons |= PointerFlagFirstButton;
+                    Change = PointerChangeFirstDown;
+                    break;
+                case WM_LBUTTONUP:
+                    PointerMessage = WM_POINTERUP;
+                    Buttons &= ~PointerFlagFirstButton;
+                    Change = PointerChangeFirstUp;
+                    break;
+                case WM_RBUTTONDOWN:
+                    PointerMessage = WM_POINTERUPDATE;
+                    Buttons |= PointerFlagSecondButton;
+                    Change = PointerChangeSecondDown;
+                    break;
+                case WM_RBUTTONUP:
+                    PointerMessage = WM_POINTERUPDATE;
+                    Buttons &= ~PointerFlagSecondButton;
+                    Change = PointerChangeSecondUp;
+                    break;
+                case WM_MBUTTONDOWN:
+                    PointerMessage = WM_POINTERUPDATE;
+                    Buttons |= PointerFlagThirdButton;
+                    Change = PointerChangeThirdDown;
+                    break;
+                case WM_MBUTTONUP:
+                    PointerMessage = WM_POINTERUPDATE;
+                    Buttons &= ~PointerFlagThirdButton;
+                    Change = PointerChangeThirdUp;
+                    break;
+                default:
                     return;
             }
+
+            WinWindow Window = Instance.WinHelper.GetWindow(Target);
+            if (Window == null)
+                return;
+
+            GetClientOrigin(Instance, Window, out int OriginX, out int OriginY);
+            State.PointerScreenX = State.CursorX + OriginX;
+            State.PointerScreenY = State.CursorY + OriginY;
+            State.PointerTargetHwnd = Target;
+            State.PointerButtonChange = Change;
+            State.PointerFrameId++;
+
+            uint Flags = PointerFlagInRange | PointerFlagPrimary | PointerFlagConfidence | Buttons;
+            if (Buttons != 0)
+                Flags |= PointerFlagInContact;
+
+            Flags |= PointerMessage switch
+            {
+                WM_POINTERDOWN => PointerFlagDown,
+                WM_POINTERUP => PointerFlagUp,
+                _ => PointerFlagUpdate,
+            };
+
+            if (State.PointerFrameId == 1)
+                Flags |= PointerFlagNew;
+
+            State.PointerFlags = Flags;
+
+            ulong PointerWParam = PointerIdMouse | ((ulong)(ushort)(Flags & 0xFFFF) << 16);
+            ulong PointerLParam = (ulong)(uint)((State.PointerScreenY << 16) | (State.PointerScreenX & 0xFFFF));
+            PostMessage(Instance, Target, PointerMessage, PointerWParam, PointerLParam);
+        }
+
+        internal static bool TryWritePointerInfo(BinaryEmulator Instance, uint PointerId, Span<byte> Buffer)
+        {
+            Win32kState State = GetState(Instance);
+            if (PointerId != PointerIdMouse || Buffer.Length < 0x60)
+                return false;
+
+            Buffer.Slice(0, 0x60).Clear();
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), PointerTypeMouse);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), PointerIdMouse);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x08, 4), State.PointerFrameId);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x0C, 4), State.PointerFlags);
+            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x10, 8), Win32kRawInput.GetDevice(0).Handle);
+            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x18, 8), State.PointerTargetHwnd);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x20, 4), State.PointerScreenX);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x24, 4), State.PointerScreenY);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x30, 4), State.PointerScreenX);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x34, 4), State.PointerScreenY);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x40, 4), (uint)Environment.TickCount);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x44, 4), 1);
+            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x50, 8), (ulong)System.Diagnostics.Stopwatch.GetTimestamp());
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x58, 4), State.PointerButtonChange);
+            return true;
+        }
+
+        internal static void SetMouseInPointer(BinaryEmulator Instance, bool Enabled)
+        {
+            GetState(Instance).MouseInPointer = Enabled;
+        }
+
+        internal static void CopyKeyboardState(BinaryEmulator Instance, Span<byte> Destination)
+        {
+            DrainHostEvents(Instance);
+
+            GetState(Instance).KeyState.AsSpan().CopyTo(Destination);
         }
 
         // A key released while the window is not focused reports no key up, so held keys are released here.
@@ -1522,16 +1771,59 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 ApplyHostCursorClip(Instance, State);
                 PostMessage(Instance, Foreground, WM_ACTIVATE, WA_ACTIVE, 0);
                 PostMessage(Instance, Foreground, WM_SETFOCUS, 0, 0);
+                PublishFocusState(Instance, State, Foreground);
                 return;
             }
 
             ReleaseHeldKeys(Instance, State, Foreground);
             PostMessage(Instance, Foreground, WM_ACTIVATE, WA_INACTIVE, 0);
             PostMessage(Instance, Foreground, WM_KILLFOCUS, 0, 0);
+            PublishFocusState(Instance, State, Foreground);
+        }
+
+        // A deactivated thread reports no focus and no active window.
+        private static void PublishFocusState(BinaryEmulator Instance, Win32kState State, ulong Foreground)
+        {
+            ulong Active = State.HostFocused ? Foreground : 0;
+            Instance.WinHelper.PublishFocusState(Active, Active);
+        }
+
+        private static readonly (byte Vk, uint Message)[] MouseButtonReleases =
+        {
+            (VkLButton, WM_LBUTTONUP),
+            (VkRButton, WM_RBUTTONUP),
+            (VkMButton, WM_MBUTTONUP),
+            (VkXButton1, WM_XBUTTONUP),
+            (VkXButton1 + 1, WM_XBUTTONUP),
+        };
+
+        private static void ReleaseHeldButtons(BinaryEmulator Instance, Win32kState State, ulong Foreground)
+        {
+            ulong Position = (ulong)(uint)(((State.CursorY & 0xFFFF) << 16) | (State.CursorX & 0xFFFF));
+
+            for (int i = 0; i < MouseButtonReleases.Length; i++)
+            {
+                (byte Vk, uint Message) = MouseButtonReleases[i];
+                if ((State.KeyState[Vk] & 0x80) == 0)
+                    continue;
+
+                SetKeyDown(State, Vk, false);
+
+                ulong WParam = Message == WM_XBUTTONUP ? (ulong)(Vk - VkXButton1 + 1) << 16 : 0;
+                ulong LParam = Position;
+                if (Win32kRawInput.DeliverHostEvent(Instance, Foreground, Message, WParam, LParam))
+                    PostMessage(Instance, ResolveInputTarget(Instance, Foreground, Message, ref LParam), Message, WParam, LParam);
+            }
         }
 
         private static void ReleaseHeldKeys(BinaryEmulator Instance, Win32kState State, ulong Foreground)
         {
+            ReleaseHeldButtons(Instance, State, Foreground);
+
+            // A deactivated queue holds nothing down, key up posted or not.
+            for (int Vk = 0; Vk < State.KeyState.Length; Vk++)
+                State.KeyState[Vk] &= 0x01;
+
             if (State.KeysHeld == 0)
                 return;
 
@@ -1635,6 +1927,25 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             PostMessage(Instance, Foreground, WM_ACTIVATE, WA_ACTIVE, Previous);
             PostMessage(Instance, Foreground, WM_SETFOCUS, Previous, 0);
+            PublishFocusState(Instance, State, Foreground);
+        }
+
+        internal static void DropRawInputMessages(BinaryEmulator Instance, uint LastHandle)
+        {
+            Win32kState State = GetState(Instance);
+            Queue<Win32kMessage> Queue = State.MessageQueue;
+            int Count = Queue.Count;
+            if (Count == 0)
+                return;
+
+            for (int i = 0; i < Count; i++)
+            {
+                Win32kMessage Message = Queue.Dequeue();
+                if (Message.Message == WM_INPUT && (int)(LastHandle - (uint)Message.LParam) >= 0)
+                    continue;
+
+                Queue.Enqueue(Message);
+            }
         }
 
         internal static bool TryDeliverWindowPosChanged(BinaryEmulator Instance, ulong SyscallResult)
@@ -1661,14 +1972,97 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return true;
         }
 
+        private const uint WindowStyleBorder = 0x00800000;
+        private const uint WindowStyleDlgFrame = 0x00400000;
+        private const uint WindowStyleCaption = WindowStyleBorder | WindowStyleDlgFrame;
+        private const uint WindowStyleThickFrame = 0x00040000;
+        private const uint WindowExStyleDlgModalFrame = 0x00000001;
+        private const uint WindowExStyleToolWindow = 0x00000080;
+        private const uint WindowExStyleClientEdge = 0x00000200;
+        private const uint WindowExStyleStaticEdge = 0x00020000;
+
+        // AdjustWindowRectExForDpi metrics at 96 DPI.
+        private const int FrameSizeBorder = 4;
+        private const int FramePaddedBorder = 4;
+        private const int FrameFixedBorder = 3;
+        private const int FrameEdge = 2;
+        private const int FrameCaption = 23;
+        private const int FrameSmallCaption = 23;
+
+        private static int ScaleMetric(int Value, uint Dpi)
+        {
+            return Dpi == 96 || Dpi == 0 ? Value : (int)((long)Value * Dpi / 96);
+        }
+
+        // Follows AdjustWindowRectEx. No menu is ever drawn, so a menu bar adds no height.
+        internal static void GetFrameInsets(BinaryEmulator Instance, WinWindow Window, out int Left, out int Top, out int Right, out int Bottom)
+        {
+            uint Style = Window.Style;
+            uint ExStyle = Window.ExStyle;
+            uint Dpi = Win32kDpi.GetEffectiveDpi(Instance);
+
+            int Border = 0;
+            if ((ExStyle & (WindowExStyleStaticEdge | WindowExStyleDlgModalFrame)) == WindowExStyleStaticEdge)
+                Border = 1;
+            else if ((ExStyle & WindowExStyleDlgModalFrame) != 0 || (Style & (WindowStyleThickFrame | WindowStyleDlgFrame)) != 0)
+                Border = 2;
+
+            if ((Style & WindowStyleThickFrame) != 0)
+                Border += ScaleMetric(FrameSizeBorder, Dpi) + ScaleMetric(FramePaddedBorder, Dpi) - ScaleMetric(FrameFixedBorder, Dpi);
+
+            if ((Style & (WindowStyleBorder | WindowStyleDlgFrame)) != 0 || (ExStyle & WindowExStyleDlgModalFrame) != 0)
+                Border++;
+
+            if ((ExStyle & WindowExStyleClientEdge) != 0)
+                Border += ScaleMetric(FrameEdge, Dpi);
+
+            Left = Border;
+            Top = Border;
+            Right = Border;
+            Bottom = Border;
+
+            if ((Style & WindowStyleCaption) == WindowStyleCaption)
+                Top += ScaleMetric((ExStyle & WindowExStyleToolWindow) != 0 ? FrameSmallCaption : FrameCaption, Dpi);
+        }
+
+        // Left and Top are in the window rect's space, not the Win32 client origin.
+        internal static void GetClientRect(BinaryEmulator Instance, WinWindow Window, out int Left, out int Top, out int Width, out int Height)
+        {
+            GetFrameInsets(Instance, Window, out int InsetLeft, out int InsetTop, out int InsetRight, out int InsetBottom);
+
+            Left = Window.X + InsetLeft;
+            Top = Window.Y + InsetTop;
+            Width = Math.Max((int)Window.Width - InsetLeft - InsetRight, 0);
+            Height = Math.Max((int)Window.Height - InsetTop - InsetBottom, 0);
+        }
+
+        internal static void GetClientSize(BinaryEmulator Instance, WinWindow Window, out int Width, out int Height)
+        {
+            GetClientRect(Instance, Window, out _, out _, out Width, out Height);
+        }
+
+        internal static void GetClientOrigin(BinaryEmulator Instance, WinWindow Window, out int Left, out int Top)
+        {
+            if (Window == null)
+            {
+                Left = 0;
+                Top = 0;
+                return;
+            }
+
+            GetClientRect(Instance, Window, out Left, out Top, out _, out _);
+        }
+
         private static void ApplyHostMove(BinaryEmulator Instance, ulong Hwnd, ulong LParam)
         {
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
                 return;
 
-            Window.X = (short)(LParam & 0xFFFF);
-            Window.Y = (short)((LParam >> 16) & 0xFFFF);
+            // The host reports its client origin, and the guest frame hangs off that.
+            GetFrameInsets(Instance, Window, out int InsetLeft, out int InsetTop, out _, out _);
+            Window.X = (short)(LParam & 0xFFFF) - InsetLeft;
+            Window.Y = (short)((LParam >> 16) & 0xFFFF) - InsetTop;
             Instance.WinHelper.MaterializeUserWindow(Window);
 
             // The clip is guest screen coordinates, so a move changes the client origin.
@@ -1692,9 +2086,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (!Window.Minimized)
             {
+                GetFrameInsets(Instance, Window, out int InsetLeft, out int InsetTop, out int InsetRight, out int InsetBottom);
+
                 Window.Maximized = WParam == SIZE_MAXIMIZED;
-                Window.Width = Width;
-                Window.Height = Height;
+                Window.Width = Width + (uint)(InsetLeft + InsetRight);
+                Window.Height = Height + (uint)(InsetTop + InsetBottom);
             }
 
             Window.Dirty = true;
@@ -1717,8 +2113,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Foreground == null)
                 return;
 
-            X += Foreground.X;
-            Y += Foreground.Y;
+            GetClientRect(Instance, Foreground, out int ClientLeft, out int ClientTop, out _, out _);
+            X += ClientLeft;
+            Y += ClientTop;
         }
 
         internal static void SetCursorClip(BinaryEmulator Instance, int Left, int Top, int Right, int Bottom)
@@ -1749,8 +2146,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             WinWindow Foreground = Instance.WinHelper.GetWindow(Instance.WinHelper.GetForegroundWindow());
-            int OriginX = Foreground == null ? 0 : Foreground.X;
-            int OriginY = Foreground == null ? 0 : Foreground.Y;
+            GetClientOrigin(Instance, Foreground, out int OriginX, out int OriginY);
 
             Instance.WinHelper.SetHostCursorClip(true,
                 State.ClipLeft - OriginX,
@@ -1774,8 +2170,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             DrainHostEvents(Instance);
 
             WinWindow Foreground = Instance.WinHelper.GetWindow(Instance.WinHelper.GetForegroundWindow());
-            int ClientX = Foreground == null ? X : X - Foreground.X;
-            int ClientY = Foreground == null ? Y : Y - Foreground.Y;
+            GetClientOrigin(Instance, Foreground, out int OriginX, out int OriginY);
+            int ClientX = X - OriginX;
+            int ClientY = Y - OriginY;
 
             Win32kState State = GetState(Instance);
             State.CursorX = ClientX;
@@ -2065,8 +2462,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 ? Instance.WinHelper.GetSystemColor((int)Background - 1)
                 : ResolvePenBrush(Instance, Background, false).ColorRef;
 
-            Instance.WinHelper.EnqueueGdiFillRect(Window.Hwnd, Hdc, 0, 0,
-                (int)Window.Width, (int)Window.Height, Color, PatCopy);
+            GetClientSize(Instance, Window, out int ClientWidth, out int ClientHeight);
+            Instance.WinHelper.EnqueueGdiFillRect(Window.Hwnd, Hdc, 0, 0, ClientWidth, ClientHeight, Color, PatCopy);
             return true;
         }
 

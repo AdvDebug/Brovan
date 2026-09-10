@@ -54,8 +54,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (Parent == null)
                     break;
 
-                Left += Parent.X;
-                Top += Parent.Y;
+                Win32kHelper.GetClientRect(Instance, Parent, out int ClientLeft, out int ClientTop, out _, out _);
+                Left += ClientLeft;
+                Top += ClientTop;
                 ParentHwnd = Parent.ParentHwnd;
             }
         }
