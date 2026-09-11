@@ -33,8 +33,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int FormatBc5Snorm = 142;
         private const int FormatBc6hUfloat = 143;
         private const int FormatBc6hSfloat = 144;
+        private const int FormatBc3Srgb = 138;
         private const int FormatBc7Srgb = 146;
+        internal const int FormatEtc2Rgba8Unorm = 151;
+        internal const int FormatEtc2Rgba8Srgb = 152;
 
+        private const uint StMemoryAllocateInfo = 5;
+        private const uint StBufferCreateInfo = 12;
         private const uint StImageViewCreateInfo = 15;
         private const uint StShaderModuleCreateInfo = 16;
         private const uint StPipelineShaderStageCreateInfo = 18;
@@ -57,6 +62,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint ImageCreateBlockTexelViewCompatible = 0x80;
         private const uint ImageCreateExtendedUsage = 0x100;
         private const uint ImageUsageTransferSrc = 0x1;
+        private const uint ImageUsageTransferDst = 0x2;
         private const uint ImageUsageStorage = 0x8;
         private const uint BufferUsageTransferSrc = 0x1;
         private const uint BufferUsageStorage = 0x20;
@@ -70,20 +76,27 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint ShaderStageCompute = 0x20;
         private const int PipelineBindPointCompute = 1;
         private const uint PipelineStageComputeShader = 0x800;
+        private const uint PipelineStageTransfer = 0x1000;
         private const uint PipelineStageAllCommands = 0x10000;
         private const uint AccessShaderRead = 0x20;
         private const uint AccessShaderWrite = 0x40;
+        private const uint AccessTransferRead = 0x800;
         private const uint AccessMemoryRead = 0x8000;
         private const uint AccessMemoryWrite = 0x10000;
         private const uint QueueCompute = 2;
         private const uint QueueFamilyIgnored = 0xFFFFFFFFu;
         private const ulong WholeSize = ulong.MaxValue;
         private const int ErrorFormatNotSupported = -11;
+        private const int SharingModeExclusive = 0;
+        private const uint MemoryPropertyDeviceLocal = 0x1;
 
         private const uint ModePunchThrough = 0x10;
         private const uint ModeSigned = 0x20;
         private const int PushBytes = 40;
         private const int PoolSets = 128;
+        private const int VariantEtc2 = 4;
+        private const int Etc2BlockBytes = 16;
+        private const ulong ScratchChunkBytes = 2 << 20;
         private const int MaxReplayCalls = 32;
         private const int MaxPushBytes = 256;
 
@@ -91,13 +104,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint AdvertisedFeatures = 0x1 | 0x400 | 0x1000 | 0x2000 | 0x4000 | 0x8000 | 0x10000;
 
         private const string ResourcePrefix = "VulkanImpls.bcdecode_";
-        private static readonly string[] VariantNames = { "rgba8", "rg8", "r8", "rgba16" };
-        private static readonly byte[]?[] VariantCode = new byte[]?[4];
+        private static readonly string[] VariantNames = { "rgba8", "rg8", "r8", "rgba16", "etc2" };
+        private static readonly byte[]?[] VariantCode = new byte[]?[5];
 
         private static readonly int[] Rgba8Views = { FormatRgba8Unorm, FormatRgba8Srgb, FormatRgba8Snorm, FormatRgba8Uint };
         private static readonly int[] R8Views = { FormatR8Unorm, FormatR8Snorm, FormatR8Uint };
         private static readonly int[] Rg8Views = { FormatRg8Unorm, FormatRg8Snorm, FormatRg8Uint };
         private static readonly int[] Rgba16Views = { FormatRgba16Sfloat, FormatRgba16Uint };
+        private static readonly int[] Etc2Views = { FormatEtc2Rgba8Unorm, FormatEtc2Rgba8Srgb };
 
         private static readonly HashSet<string> Reported = new HashSet<string>();
 
@@ -124,7 +138,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             internal static readonly int ViewUsageSize = BrovVulkLayout.StructSize["VkImageViewUsageCreateInfo"];
             internal static readonly int ViewUsageUsage = BrovVulkLayout.MemberOffset["VkImageViewUsageCreateInfo.usage"];
 
+            internal static readonly int BufferCreateSize = BrovVulkLayout.StructSize["VkBufferCreateInfo"];
+            internal static readonly int BufferBytes = BrovVulkLayout.MemberOffset["VkBufferCreateInfo.size"];
+            internal static readonly int BufferSharing = BrovVulkLayout.MemberOffset["VkBufferCreateInfo.sharingMode"];
             internal static readonly int BufferUsage = BrovVulkLayout.MemberOffset["VkBufferCreateInfo.usage"];
+
+            internal static readonly int RequirementsSize = BrovVulkLayout.StructSize["VkMemoryRequirements"];
+            internal static readonly int RequirementsBytes = BrovVulkLayout.MemberOffset["VkMemoryRequirements.size"];
+            internal static readonly int RequirementsTypes = BrovVulkLayout.MemberOffset["VkMemoryRequirements.memoryTypeBits"];
+            internal static readonly int AllocateInfoSize = BrovVulkLayout.StructSize["VkMemoryAllocateInfo"];
+            internal static readonly int AllocateBytes = BrovVulkLayout.MemberOffset["VkMemoryAllocateInfo.allocationSize"];
+            internal static readonly int AllocateType = BrovVulkLayout.MemberOffset["VkMemoryAllocateInfo.memoryTypeIndex"];
+            internal static readonly int MemoryPropertiesSize = BrovVulkLayout.StructSize["VkPhysicalDeviceMemoryProperties"];
+            internal static readonly int MemoryTypeCount = BrovVulkLayout.MemberOffset["VkPhysicalDeviceMemoryProperties.memoryTypeCount"];
+            internal static readonly int MemoryTypes = BrovVulkLayout.MemberOffset["VkPhysicalDeviceMemoryProperties.memoryTypes"];
+            internal static readonly int MemoryTypeSize = BrovVulkLayout.StructSize["VkMemoryType"];
+            internal static readonly int MemoryTypeFlags = BrovVulkLayout.MemberOffset["VkMemoryType.propertyFlags"];
             internal static readonly int BufferUsage2 = BrovVulkLayout.MemberOffset["VkBufferUsageFlags2CreateInfo.usage"];
 
             internal static readonly int FormatPropertiesSize = BrovVulkLayout.StructSize["VkFormatProperties"];
@@ -292,10 +321,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal sealed class DeviceRecord
         {
             public IntPtr Device;
+            public IntPtr Physical;
             public VulkanStandIns.DeviceGaps Gaps = null!;
             public IntPtr SetLayout;
             public IntPtr Layout;
-            public readonly IntPtr[] Pipelines = new IntPtr[4];
+            public readonly IntPtr[] Pipelines = new IntPtr[5];
             public bool Failed;
         }
 
@@ -315,12 +345,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             public byte[] Data = Array.Empty<byte>();
         }
 
+        /// <summary>A buffer the transcode writes encoded blocks into, read back by a copy in the same submit.</summary>
+        internal sealed class Scratch
+        {
+            public IntPtr Buffer;
+            public IntPtr Memory;
+            public ulong Size;
+        }
+
         /// <summary>What a decode leaves behind in a command buffer, and the guest state it has to put back.</summary>
         internal sealed class DecodeState
         {
             public readonly List<IntPtr> Pools = new List<IntPtr>();
             public int PoolIndex;
             public int PoolUsed;
+            public readonly List<Scratch> Scratches = new List<Scratch>();
+            public int ScratchIndex;
+            public ulong ScratchUsed;
             public IntPtr ComputePipeline;
             public readonly List<BindCall> Binds = new List<BindCall>();
             public readonly List<PushCall> Pushes = new List<PushCall>();
@@ -336,7 +377,41 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool IsSrgb(int format) => format == 132 || format == 134 || format == 136 || format == 138 || format == FormatBc7Srgb;
 
+        internal static bool Transcodes(in Family family) => family.Variant == VariantEtc2;
+
+        // The colour families transcode to ETC2 where they can, which keeps the four to one expansion
+        // of an uncompressed substitute off a device that has no BC.
         private static Family Describe(int format, VulkanStandIns.DeviceGaps gaps)
+        {
+            return gaps.Etc2Transcode && format <= FormatBc3Srgb ? Transcoded(format) : Uncompressed(format, gaps);
+        }
+
+        // ETC2 has no three dimensional form, so a volume texture keeps the uncompressed substitute.
+        private static Family Describe(int format, VulkanStandIns.DeviceGaps gaps, int type)
+        {
+            return type == ImageType3D ? Uncompressed(format, gaps) : Describe(format, gaps);
+        }
+
+        private static Family Transcoded(int format)
+        {
+            int target = IsSrgb(format) ? FormatEtc2Rgba8Srgb : FormatEtc2Rgba8Unorm;
+            switch (format)
+            {
+                case 131:
+                case 132:
+                    return new Family(target, Etc2Views, 0, VariantEtc2, 1, 8);
+                case 133:
+                case 134:
+                    return new Family(target, Etc2Views, 0, VariantEtc2, 1 | ModePunchThrough, 8);
+                case 135:
+                case 136:
+                    return new Family(target, Etc2Views, 0, VariantEtc2, 2, 16);
+                default:
+                    return new Family(target, Etc2Views, 0, VariantEtc2, 3, 16);
+            }
+        }
+
+        private static Family Uncompressed(int format, VulkanStandIns.DeviceGaps gaps)
         {
             switch (format)
             {
@@ -387,6 +462,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return half ? FormatRgba16Sfloat : 0;
             if (half)
                 return 0;
+            if (views == Etc2Views)
+                return IsSrgb(viewFormat) ? FormatEtc2Rgba8Srgb : FormatEtc2Rgba8Unorm;
 
             bool snorm = viewFormat == FormatBc4Snorm || viewFormat == FormatBc5Snorm;
             if (views == R8Views)
@@ -438,13 +515,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static uint SubstituteFlags(uint flags, int type)
+        private static uint SubstituteFlags(uint flags, int type, bool transcodes)
         {
             flags &= ~ImageCreateBlockTexelViewCompatible;
-            flags |= ImageCreateMutableFormat | ImageCreateExtendedUsage;
+            flags |= ImageCreateMutableFormat;
+            if (transcodes)
+                return flags;
+
+            flags |= ImageCreateExtendedUsage;
             if (type == ImageType3D)
                 flags |= ImageCreate2DArrayCompatible;
             return flags;
+        }
+
+        private static uint SubstituteUsage(uint usage, bool transcodes)
+        {
+            return usage | (transcodes ? ImageUsageTransferDst : ImageUsageStorage);
         }
 
         internal static int ImageFormatProperties(VulkanStandIns.DeviceGaps gaps, ref int format, int type, int tiling, ref uint usage, ref uint flags)
@@ -452,9 +538,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (tiling != ImageTilingOptimal)
                 return ErrorFormatNotSupported;
 
-            format = Describe(format, gaps).Format;
-            flags = SubstituteFlags(flags, type);
-            usage |= ImageUsageStorage;
+            Family family = Describe(format, gaps, type);
+            format = family.Format;
+            flags = SubstituteFlags(flags, type, Transcodes(family));
+            usage = SubstituteUsage(usage, Transcodes(family));
             return 0;
         }
 
@@ -463,10 +550,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (*(int*)(info + L.ImageFormatInfoTiling) != ImageTilingOptimal)
                 return ErrorFormatNotSupported;
 
-            Family family = Describe(*(int*)(info + L.ImageFormatInfoFormat), gaps);
+            int type = *(int*)(info + L.ImageFormatInfoType);
+            Family family = Describe(*(int*)(info + L.ImageFormatInfoFormat), gaps, type);
             *(int*)(info + L.ImageFormatInfoFormat) = family.Format;
-            *(uint*)(info + L.ImageFormatInfoFlags) = SubstituteFlags(*(uint*)(info + L.ImageFormatInfoFlags), *(int*)(info + L.ImageFormatInfoType));
-            *(uint*)(info + L.ImageFormatInfoUsage) |= ImageUsageStorage;
+            *(uint*)(info + L.ImageFormatInfoFlags) = SubstituteFlags(*(uint*)(info + L.ImageFormatInfoFlags), type, Transcodes(family));
+            *(uint*)(info + L.ImageFormatInfoUsage) = SubstituteUsage(*(uint*)(info + L.ImageFormatInfoUsage), Transcodes(family));
             ReplaceFormatList(st, info, family, false);
             return 0;
         }
@@ -514,12 +602,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             st.TryGetDevicePhysical(device, out IntPtr physicalDevice);
             VulkanStandIns.DeviceGaps gaps = VulkanStandIns.Gaps(physicalDevice);
-            Family family = Describe(format, gaps);
             int type = *(int*)(createInfo + L.ImageType);
+            Family family = Describe(format, gaps, type);
             uint usage = *(uint*)(createInfo + L.ImageUsage);
             *(int*)(createInfo + L.ImageFormat) = family.Format;
-            *(uint*)(createInfo + L.ImageFlags) = SubstituteFlags(*(uint*)(createInfo + L.ImageFlags), type);
-            *(uint*)(createInfo + L.ImageUsage) = usage | ImageUsageStorage;
+            *(uint*)(createInfo + L.ImageFlags) = SubstituteFlags(*(uint*)(createInfo + L.ImageFlags), type, Transcodes(family));
+            *(uint*)(createInfo + L.ImageUsage) = SubstituteUsage(usage, Transcodes(family));
             ReplaceFormatList(st, createInfo, family, true);
 
             uint* extent = (uint*)(createInfo + L.ImageExtent);
@@ -683,11 +771,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
             }
 
+            bool transcode = Transcodes(record.Family);
+            uint blockAlignment = Math.Max(alignment, Etc2BlockBytes);
             IntPtr writes = st.Alloc(BrovVulkGenStruct.CheckedBytes(count * 2, L.WriteSize));
-            IntPtr bufferInfos = st.Alloc(BrovVulkGenStruct.CheckedBytes(count, L.BufferInfoSize));
-            IntPtr imageInfos = st.Alloc(BrovVulkGenStruct.CheckedBytes(count, L.ImageInfoSize));
-            IntPtr before = st.Alloc(BrovVulkGenStruct.CheckedBytes(count, L.ImageBarrierSize));
-            IntPtr after = st.Alloc(BrovVulkGenStruct.CheckedBytes(count, L.ImageBarrierSize));
+            IntPtr bufferInfos = st.Alloc(BrovVulkGenStruct.CheckedBytes(count * 2, L.BufferInfoSize));
+            IntPtr imageInfos = transcode ? IntPtr.Zero : st.Alloc(BrovVulkGenStruct.CheckedBytes(count, L.ImageInfoSize));
+            IntPtr before = transcode ? IntPtr.Zero : st.Alloc(BrovVulkGenStruct.CheckedBytes(count, L.ImageBarrierSize));
+            IntPtr after = transcode ? IntPtr.Zero : st.Alloc(BrovVulkGenStruct.CheckedBytes(count, L.ImageBarrierSize));
+            IntPtr copies = transcode ? st.Alloc(BrovVulkGenStruct.CheckedBytes(count, Region1.Stride)) : IntPtr.Zero;
+            IntPtr copySources = transcode ? st.Alloc(BrovVulkGenStruct.CheckedBytes(count, 8)) : IntPtr.Zero;
             IntPtr pushes = st.Alloc(BrovVulkGenStruct.CheckedBytes(count, PushBytes));
             uint* groups = (uint*)st.Alloc(BrovVulkGenStruct.CheckedBytes(count, 12));
 
@@ -732,31 +824,70 @@ namespace Brovan.Core.Emulation.OS.Windows
                     range = device.Gaps.StorageRange;
                 }
 
-                uint viewLayer = record.ThreeDimensional ? 0 : baseLayer;
-                uint viewLayers = record.ThreeDimensional ? Math.Max(1, record.Depth >> (int)level) : layerCount;
-                IntPtr view = StorageView(record, level, viewLayer, viewLayers);
-                if (view == IntPtr.Zero)
-                {
-                    Complain("a storage view of a BCn image could not be created");
-                    continue;
-                }
-
                 IntPtr set = Marshal.ReadIntPtr(sets, (int)prepared * 8);
-                IntPtr bufferInfo = bufferInfos + (int)(prepared * (uint)L.BufferInfoSize);
+                IntPtr bufferInfo = bufferInfos + (int)(prepared * 2 * (uint)L.BufferInfoSize);
                 *(IntPtr*)(bufferInfo + L.BufferInfoBuffer) = buffer;
                 *(ulong*)(bufferInfo + L.BufferInfoOffset) = bound;
                 *(ulong*)(bufferInfo + L.BufferInfoRange) = range;
-                IntPtr imageInfo = imageInfos + (int)(prepared * (uint)L.ImageInfoSize);
-                *(IntPtr*)(imageInfo + L.ImageInfoView) = view;
-                *(int*)(imageInfo + L.ImageInfoLayout) = ImageLayoutGeneral;
                 IntPtr write = writes + (int)(prepared * 2 * (uint)L.WriteSize);
                 FillWrite(write, set, 0, DescriptorTypeStorageBuffer, IntPtr.Zero, bufferInfo);
-                FillWrite(write + L.WriteSize, set, 1, DescriptorTypeStorageImage, imageInfo, IntPtr.Zero);
 
-                uint barrierLayer = record.ThreeDimensional ? 0 : baseLayer;
-                uint barrierLayers = record.ThreeDimensional ? 1 : layerCount;
-                FillImageBarrier(before + (int)(prepared * (uint)L.ImageBarrierSize), image, AccessMemoryWrite, AccessShaderWrite, layout, ImageLayoutGeneral, level, barrierLayer, barrierLayers);
-                FillImageBarrier(after + (int)(prepared * (uint)L.ImageBarrierSize), image, AccessShaderWrite, AccessMemoryRead | AccessMemoryWrite, ImageLayoutGeneral, layout, level, barrierLayer, barrierLayers);
+                if (transcode)
+                {
+                    ulong encoded = (ulong)blocksX * blocksY * slices * Etc2BlockBytes;
+                    if (encoded > device.Gaps.StorageRange
+                        || !Reserve(st, device, decode, encoded, blockAlignment, out IntPtr scratch, out ulong scratchAt))
+                    {
+                        Complain("a scratch buffer for the ETC2 transcode could not be had, the blocks were dropped");
+                        continue;
+                    }
+
+                    IntPtr scratchInfo = bufferInfo + L.BufferInfoSize;
+                    *(IntPtr*)(scratchInfo + L.BufferInfoBuffer) = scratch;
+                    *(ulong*)(scratchInfo + L.BufferInfoOffset) = scratchAt;
+                    *(ulong*)(scratchInfo + L.BufferInfoRange) = encoded;
+                    FillWrite(write + L.WriteSize, set, 2, DescriptorTypeStorageBuffer, IntPtr.Zero, scratchInfo);
+
+                    Marshal.WriteIntPtr(copySources, (int)prepared * 8, scratch);
+                    IntPtr copy = copies + (int)(prepared * (uint)Region1.Stride);
+                    *(ulong*)(copy + Region1.BufferOffset) = scratchAt;
+                    *(uint*)(copy + Region1.RowLength) = blocksX * 4;
+                    *(uint*)(copy + Region1.ImageHeight) = blocksY * 4;
+                    uint* copySubresource = (uint*)(copy + Region1.Subresource);
+                    copySubresource[0] = ImageAspectColor;
+                    copySubresource[1] = level;
+                    copySubresource[2] = baseLayer;
+                    copySubresource[3] = layerCount;
+                    int* copyOffset = (int*)(copy + Region1.Offset);
+                    copyOffset[0] = offset[0];
+                    copyOffset[1] = offset[1];
+                    copyOffset[2] = offset[2];
+                    uint* copyExtent = (uint*)(copy + Region1.Extent);
+                    copyExtent[0] = width;
+                    copyExtent[1] = height;
+                    copyExtent[2] = depth;
+                }
+                else
+                {
+                    uint viewLayer = record.ThreeDimensional ? 0 : baseLayer;
+                    uint viewLayers = record.ThreeDimensional ? Math.Max(1, record.Depth >> (int)level) : layerCount;
+                    IntPtr view = StorageView(record, level, viewLayer, viewLayers);
+                    if (view == IntPtr.Zero)
+                    {
+                        Complain("a storage view of a BCn image could not be created");
+                        continue;
+                    }
+
+                    IntPtr imageInfo = imageInfos + (int)(prepared * (uint)L.ImageInfoSize);
+                    *(IntPtr*)(imageInfo + L.ImageInfoView) = view;
+                    *(int*)(imageInfo + L.ImageInfoLayout) = ImageLayoutGeneral;
+                    FillWrite(write + L.WriteSize, set, 1, DescriptorTypeStorageImage, imageInfo, IntPtr.Zero);
+
+                    uint barrierLayer = record.ThreeDimensional ? 0 : baseLayer;
+                    uint barrierLayers = record.ThreeDimensional ? 1 : layerCount;
+                    FillImageBarrier(before + (int)(prepared * (uint)L.ImageBarrierSize), image, AccessMemoryWrite, AccessShaderWrite, layout, ImageLayoutGeneral, level, barrierLayer, barrierLayers);
+                    FillImageBarrier(after + (int)(prepared * (uint)L.ImageBarrierSize), image, AccessShaderWrite, AccessMemoryRead | AccessMemoryWrite, ImageLayoutGeneral, layout, level, barrierLayer, barrierLayers);
+                }
 
                 uint* push = (uint*)(pushes + (int)(prepared * PushBytes));
                 push[0] = (uint)((bufferOffset - bound) / 4);
@@ -784,7 +915,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             *(uint*)memoryBarrier = StMemoryBarrier;
             *(uint*)(memoryBarrier + L.MemoryBarrierSrc) = AccessMemoryWrite;
             *(uint*)(memoryBarrier + L.MemoryBarrierDst) = AccessShaderRead | AccessShaderWrite;
-            BrovVulkApi.vkCmdPipelineBarrier(commandBuffer, PipelineStageAllCommands, PipelineStageComputeShader, 0, 1, memoryBarrier, 0, IntPtr.Zero, prepared, before);
+            BrovVulkApi.vkCmdPipelineBarrier(commandBuffer, PipelineStageAllCommands, PipelineStageComputeShader, 0, 1, memoryBarrier,
+                0, IntPtr.Zero, transcode ? 0 : prepared, before);
 
             BrovVulkApi.vkCmdBindPipeline(commandBuffer, PipelineBindPointCompute, pipeline);
             for (uint i = 0; i < prepared; i++)
@@ -794,7 +926,31 @@ namespace Brovan.Core.Emulation.OS.Windows
                 BrovVulkApi.vkCmdDispatch(commandBuffer, groups[i * 3], groups[i * 3 + 1], groups[i * 3 + 2]);
             }
 
-            BrovVulkApi.vkCmdPipelineBarrier(commandBuffer, PipelineStageComputeShader, PipelineStageAllCommands, 0, 0, IntPtr.Zero, 0, IntPtr.Zero, prepared, after);
+            if (transcode)
+            {
+                IntPtr encoded = st.Alloc(L.MemoryBarrierSize);
+                *(uint*)encoded = StMemoryBarrier;
+                *(uint*)(encoded + L.MemoryBarrierSrc) = AccessShaderWrite;
+                *(uint*)(encoded + L.MemoryBarrierDst) = AccessTransferRead;
+                BrovVulkApi.vkCmdPipelineBarrier(commandBuffer, PipelineStageComputeShader, PipelineStageTransfer, 0, 1, encoded, 0, IntPtr.Zero, 0, IntPtr.Zero);
+
+                // No trailing barrier: the guest's own barrier after the copy covers a transfer write.
+                for (uint i = 0; i < prepared; i++)
+                {
+                    BrovVulkApi.vkCmdCopyBufferToImage(commandBuffer, Marshal.ReadIntPtr(copySources, (int)i * 8), image, layout,
+                        1, copies + (int)(i * (uint)Region1.Stride));
+                }
+
+                // The scratch is reused by the next copy in the same recording, which keeps it to the size
+                // of one call rather than the whole command buffer. The leading barrier orders that reuse.
+                decode.ScratchIndex = 0;
+                decode.ScratchUsed = 0;
+            }
+            else
+            {
+                BrovVulkApi.vkCmdPipelineBarrier(commandBuffer, PipelineStageComputeShader, PipelineStageAllCommands, 0, 0, IntPtr.Zero, 0, IntPtr.Zero, prepared, after);
+            }
+
             Restore(st, commandBuffer, decode);
             return true;
         }
@@ -862,28 +1018,124 @@ namespace Brovan.Core.Emulation.OS.Windows
             return view;
         }
 
+        // The bump pointer is put back by ResetCommandBuffer, so a range stays untouched from the moment
+        // it is recorded until the command buffer is reset, which cannot happen while it is executing.
+        private static bool Reserve(GenState st, DeviceRecord device, DecodeState decode, ulong bytes, uint alignment,
+            out IntPtr buffer, out ulong offset)
+        {
+            buffer = IntPtr.Zero;
+            offset = 0;
+
+            while (decode.ScratchIndex < decode.Scratches.Count)
+            {
+                Scratch chunk = decode.Scratches[decode.ScratchIndex];
+                ulong at = (decode.ScratchUsed + alignment - 1) & ~((ulong)alignment - 1);
+                if (at + bytes <= chunk.Size)
+                {
+                    decode.ScratchUsed = at + bytes;
+                    buffer = chunk.Buffer;
+                    offset = at;
+                    return true;
+                }
+
+                decode.ScratchIndex++;
+                decode.ScratchUsed = 0;
+            }
+
+            Scratch? made = CreateScratch(st, device, Math.Max(bytes, ScratchChunkBytes));
+            if (made == null)
+                return false;
+
+            decode.Scratches.Add(made);
+            decode.ScratchIndex = decode.Scratches.Count - 1;
+            decode.ScratchUsed = bytes;
+            buffer = made.Buffer;
+            return true;
+        }
+
+        private static Scratch? CreateScratch(GenState st, DeviceRecord device, ulong bytes)
+        {
+            IntPtr info = st.Alloc(L.BufferCreateSize);
+            *(uint*)info = StBufferCreateInfo;
+            *(ulong*)(info + L.BufferBytes) = bytes;
+            *(uint*)(info + L.BufferUsage) = BufferUsageStorage | BufferUsageTransferSrc;
+            *(int*)(info + L.BufferSharing) = SharingModeExclusive;
+
+            IntPtr buffer = IntPtr.Zero;
+            if (BrovVulkApi.vkCreateBuffer(device.Device, info, IntPtr.Zero, (IntPtr)(&buffer)) < 0 || buffer == IntPtr.Zero)
+                return null;
+
+            byte* requirements = stackalloc byte[L.RequirementsSize];
+            new Span<byte>(requirements, L.RequirementsSize).Clear();
+            BrovVulkApi.vkGetBufferMemoryRequirements(device.Device, buffer, (IntPtr)requirements);
+
+            int type = MemoryType(device, *(uint*)(requirements + L.RequirementsTypes));
+            IntPtr memory = IntPtr.Zero;
+            if (type >= 0)
+            {
+                IntPtr allocate = st.Alloc(L.AllocateInfoSize);
+                *(uint*)allocate = StMemoryAllocateInfo;
+                *(ulong*)(allocate + L.AllocateBytes) = *(ulong*)(requirements + L.RequirementsBytes);
+                *(uint*)(allocate + L.AllocateType) = (uint)type;
+                if (BrovVulkApi.vkAllocateMemory(device.Device, allocate, IntPtr.Zero, (IntPtr)(&memory)) < 0)
+                    memory = IntPtr.Zero;
+            }
+
+            if (memory != IntPtr.Zero && BrovVulkApi.vkBindBufferMemory(device.Device, buffer, memory, 0) >= 0)
+                return new Scratch { Buffer = buffer, Memory = memory, Size = bytes };
+
+            if (memory != IntPtr.Zero)
+                BrovVulkApi.vkFreeMemory(device.Device, memory, IntPtr.Zero);
+            BrovVulkApi.vkDestroyBuffer(device.Device, buffer, IntPtr.Zero);
+            return null;
+        }
+
+        private static int MemoryType(DeviceRecord device, uint mask)
+        {
+            byte* properties = stackalloc byte[L.MemoryPropertiesSize];
+            new Span<byte>(properties, L.MemoryPropertiesSize).Clear();
+            BrovVulkApi.vkGetPhysicalDeviceMemoryProperties(device.Physical, (IntPtr)properties);
+
+            uint count = Math.Min(*(uint*)(properties + L.MemoryTypeCount), 32);
+            int fallback = -1;
+            for (uint k = 0; k < count; k++)
+            {
+                if ((mask & (1u << (int)k)) == 0)
+                    continue;
+
+                if ((*(uint*)(properties + L.MemoryTypes + (int)k * L.MemoryTypeSize + L.MemoryTypeFlags) & MemoryPropertyDeviceLocal) != 0)
+                    return (int)k;
+                if (fallback < 0)
+                    fallback = (int)k;
+            }
+
+            return fallback;
+        }
+
         private static DeviceRecord Decoder(VulkanStandInState state, GenState st, IntPtr device)
         {
             if (state.Decoders.TryGetValue(device, out DeviceRecord? record))
                 return record;
 
             st.TryGetDevicePhysical(device, out IntPtr physicalDevice);
-            record = new DeviceRecord { Device = device, Gaps = VulkanStandIns.Gaps(physicalDevice) };
+            record = new DeviceRecord { Device = device, Physical = physicalDevice, Gaps = VulkanStandIns.Gaps(physicalDevice) };
             state.Decoders[device] = record;
 
-            IntPtr bindings = st.Alloc(2 * L.LayoutBindingSize);
-            for (uint b = 0; b < 2; b++)
+            // Binding 1 is the decode destination and binding 2 the transcode destination. Each pipeline
+            // uses one of them, and a descriptor a pipeline does not statically use need not be written.
+            IntPtr bindings = st.Alloc(3 * L.LayoutBindingSize);
+            for (uint b = 0; b < 3; b++)
             {
                 IntPtr binding = bindings + (int)(b * (uint)L.LayoutBindingSize);
                 *(uint*)(binding + L.LayoutBindingBinding) = b;
-                *(int*)(binding + L.LayoutBindingType) = b == 0 ? DescriptorTypeStorageBuffer : DescriptorTypeStorageImage;
+                *(int*)(binding + L.LayoutBindingType) = b == 1 ? DescriptorTypeStorageImage : DescriptorTypeStorageBuffer;
                 *(uint*)(binding + L.LayoutBindingCount) = 1;
                 *(uint*)(binding + L.LayoutBindingStages) = ShaderStageCompute;
             }
 
             IntPtr setLayoutInfo = st.Alloc(L.SetLayoutSize);
             *(uint*)setLayoutInfo = StDescriptorSetLayoutCreateInfo;
-            *(uint*)(setLayoutInfo + L.SetLayoutBindingCount) = 2;
+            *(uint*)(setLayoutInfo + L.SetLayoutBindingCount) = 3;
             *(IntPtr*)(setLayoutInfo + L.SetLayoutBindings) = bindings;
             IntPtr setLayout = IntPtr.Zero;
             if (BrovVulkApi.vkCreateDescriptorSetLayout(device, setLayoutInfo, IntPtr.Zero, (IntPtr)(&setLayout)) < 0 || setLayout == IntPtr.Zero)
@@ -1042,7 +1294,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             IntPtr sizes = st.Alloc(2 * L.PoolSizeSize);
             *(int*)(sizes + L.PoolSizeType) = DescriptorTypeStorageBuffer;
-            *(uint*)(sizes + L.PoolSizeCount) = PoolSets;
+            *(uint*)(sizes + L.PoolSizeCount) = PoolSets * 2;
             *(int*)(sizes + L.PoolSizeSize + L.PoolSizeType) = DescriptorTypeStorageImage;
             *(uint*)(sizes + L.PoolSizeSize + L.PoolSizeCount) = PoolSets;
             IntPtr info = st.Alloc(L.PoolCreateSize);
@@ -1159,6 +1411,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 BrovVulkApi.vkResetDescriptorPool(record.Device, pool, 0);
             decode.PoolIndex = 0;
             decode.PoolUsed = 0;
+            decode.ScratchIndex = 0;
+            decode.ScratchUsed = 0;
             decode.ComputePipeline = IntPtr.Zero;
             decode.Binds.Clear();
             decode.Pushes.Clear();
@@ -1172,6 +1426,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach (IntPtr pool in decode.Pools)
                 BrovVulkApi.vkDestroyDescriptorPool(record.Device, pool, IntPtr.Zero);
+
+            foreach (Scratch chunk in decode.Scratches)
+            {
+                BrovVulkApi.vkDestroyBuffer(record.Device, chunk.Buffer, IntPtr.Zero);
+                BrovVulkApi.vkFreeMemory(record.Device, chunk.Memory, IntPtr.Zero);
+            }
+
             record.Decode = null;
         }
 

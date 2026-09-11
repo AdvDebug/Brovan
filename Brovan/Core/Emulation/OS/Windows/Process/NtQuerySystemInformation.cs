@@ -509,6 +509,56 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_SUCCESS;
                         }
 
+                    // GlobalMemoryStatusEx reads its figures here, not from SystemBasicInformation. The class
+                    // number moved between builds, and 10.0.26100 asks for 0xC0 under a name this table gives
+                    // to something else. The record did not move and is the same on x86 and x64.
+                    case SYSTEM_INFORMATION_CLASS.SystemMemoryUsageInformation:
+                    case (SYSTEM_INFORMATION_CLASS)0xC0:
+                        {
+                            const uint RequiredLength = 0x38;
+
+                            if (SystemInformationLength < RequiredLength)
+                            {
+                                if (ReturnLengthPtr != 0)
+                                {
+                                    if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                    Instance._emulator.WriteMemory(ReturnLengthPtr, RequiredLength);
+                                }
+
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            if (!Instance.IsRegionMapped(SystemInformationPtr, RequiredLength))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            ulong TotalBytes = Settings.MemoryBudget.GuestPhysicalBytes;
+                            ulong AvailableBytes = TotalBytes / 4 * 3;
+                            ulong CommitLimitBytes = TotalBytes * 2;
+                            ulong CommittedBytes = TotalBytes - AvailableBytes;
+
+                            Span<byte> Usage = Instance.WinHelper.Shared.GetSpan(RequiredLength);
+                            Usage.Clear();
+                            BinaryPrimitives.WriteUInt64LittleEndian(Usage.Slice(0x00), TotalBytes);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Usage.Slice(0x08), AvailableBytes);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Usage.Slice(0x18), CommittedBytes);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Usage.Slice(0x28), CommitLimitBytes);
+
+                            if (!Instance._emulator.WriteMemory(SystemInformationPtr, Usage))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            if (ReturnLengthPtr != 0)
+                            {
+                                if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                                Instance._emulator.WriteMemory(ReturnLengthPtr, RequiredLength);
+                            }
+
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
+
                     case SYSTEM_INFORMATION_CLASS.SystemEmulationBasicInformation:
                     case SYSTEM_INFORMATION_CLASS.SystemBasicInformation:
                         {
@@ -530,7 +580,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            uint NumberOfPhysicalPages = 0x200000;
+                            uint NumberOfPhysicalPages = Settings.MemoryBudget.GuestPhysicalPages;
                             uint LowestPhysicalPageNumber = 0x00000001;
                             uint HighestPhysicalPageNumber = LowestPhysicalPageNumber + NumberOfPhysicalPages - 1;
                             uint AllocationGranularity = 0x10000;

@@ -61,7 +61,6 @@ namespace Brovan.Core.Helpers
         private readonly long Length;
 
         private readonly Dictionary<string, HiveKey> PathCache = new(StringComparer.OrdinalIgnoreCase);
-        private const int MaxCachedPaths = 8192;
         private HiveKey CachedRootKey;
 
         public RegistryHiveReader(SafeFileHandle Handle, long Length)
@@ -83,7 +82,7 @@ namespace Brovan.Core.Helpers
 
         private void StorePathResult(string Path, HiveKey Key)
         {
-            if (PathCache.Count >= MaxCachedPaths)
+            if (PathCache.Count >= Settings.MemoryBudget.RegistryPathCacheEntries)
                 PathCache.Clear();
 
             PathCache[Path] = Key;

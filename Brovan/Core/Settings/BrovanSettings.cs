@@ -133,6 +133,15 @@ namespace Brovan.Core.Settings
             Help = "Claim the core Vulkan features nothing stands in for.")]
         public bool RelaxVulkan { get; set; }
 
+        [Setting("graphics.render-scale", SettingCategory.Graphics, Cli = "--render-scale", Min = 0.25, Max = 1.0,
+            Platforms = SettingPlatforms.Android,
+            Help = "Fraction of the window the guest renders at. Below 1 every render target the program sizes from the surface gets smaller and the display scales the result back up.")]
+        public float RenderScale { get; set; } = 1f;
+
+        [Setting("platform.low-memory", SettingCategory.Platform, Cli = "--low-memory",
+            Help = "How hard to trade throughput for a smaller footprint. Each step shrinks the caches and pools further and tells the program the machine has less memory.")]
+        public MemoryProfile LowMemory { get; set; }
+
         [Setting("net.mode", SettingCategory.Network, Cli = "--net",
             Help = "Host networking policy.")]
         public NetworkAccessMode NetworkMode { get; set; } = NetworkAccessMode.Loopback;

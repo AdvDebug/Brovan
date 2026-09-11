@@ -9,15 +9,13 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Brovan.Core.Helpers;
+using Brovan.Core.Settings;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
     public class WindowsSharedBuffer
     {
-        private const int MaxRetainedLength = 0x40000;
-        private const int TrimAfterSmallRequests = 256;
-
         private byte[] Buffer;
         private int SmallRequestRun;
 
@@ -66,11 +64,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void EnsureCapacity(int Size)
         {
+            int Retained = MemoryBudget.SharedBufferBytes;
+
             if (Size <= Buffer.Length)
             {
-                if (Buffer.Length > MaxRetainedLength && Size <= MaxRetainedLength && ++SmallRequestRun >= TrimAfterSmallRequests)
+                if (Buffer.Length > Retained && Size <= Retained && ++SmallRequestRun >= MemoryBudget.SharedBufferTrimAfter)
                 {
-                    Buffer = new byte[MaxRetainedLength];
+                    Buffer = new byte[Retained];
                     SmallRequestRun = 0;
                 }
 

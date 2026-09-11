@@ -1,8 +1,10 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Brovan.Android;
 using Brovan.Core.Emulation;
 using Brovan.Core.Emulation.OS.Windows;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Settings
 {
@@ -112,9 +114,13 @@ namespace Brovan.Core.Settings
         // Settings that reach the emulator as process state rather than as an argument.
         public static void ApplyGlobals(BrovanSettings Settings)
         {
+            MemoryBudget.Profile = Settings.LowMemory;
             UnicornCodeCache.Enabled = Settings.JitCache;
             UnicornCodeCache.PrintStats = Settings.JitCacheStats;
             VulkanStandIns.Relax = Settings.RelaxVulkan;
+
+            // Win32 and X11 report one extent the swapchain has to match, so only Android can present smaller.
+            BrovVulkWsi.RenderScale = AndroidHost.IsActive ? Settings.RenderScale : 1f;
 
             if (Settings.JitCacheDirectory.Length != 0)
                 UnicornCodeCache.CacheDirectory = Settings.JitCacheDirectory;

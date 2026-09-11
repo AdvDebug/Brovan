@@ -78,7 +78,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(SystemInformationPtr, BasicInformationSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            uint NumberOfPhysicalPages = 0x200000;
+            uint NumberOfPhysicalPages = Settings.MemoryBudget.GuestPhysicalPages;
             uint LowestPhysicalPageNumber = 0x00000001;
             uint HighestPhysicalPageNumber = LowestPhysicalPageNumber + NumberOfPhysicalPages - 1;
             const ulong AffinityMask = 0x1;

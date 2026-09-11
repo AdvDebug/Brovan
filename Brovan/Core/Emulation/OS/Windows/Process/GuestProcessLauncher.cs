@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using Brovan.Core.Helpers;
+using Brovan.Core.Settings;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -292,6 +293,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Utils.SilentMode)
                 Arguments.Add("--silent");
+
+            if (MemoryBudget.Profile != MemoryProfile.Off)
+                Arguments.Add($"--low-memory={MemoryBudget.Profile.ToString().ToLowerInvariant()}");
 
             if (Instance.Settings.NoHooks)
                 Arguments.Add("--no-hooks");

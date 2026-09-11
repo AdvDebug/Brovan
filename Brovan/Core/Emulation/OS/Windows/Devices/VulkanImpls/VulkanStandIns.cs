@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
+using Brovan.Core.Settings;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -64,6 +65,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int MaxLocations = 32;
         private const int ErrorFormatNotSupported = -11;
         private const int PolygonModeFill = 0;
+
+        // SAMPLED_IMAGE | TRANSFER_DST, all a transcode target has to answer for.
+        private const uint TranscodeFeatures = 0x1 | 0x4000;
 
         // One guest multi draw becomes this many host draws at most, and the limit is reported to match.
         internal const uint MaxStandInDrawCount = 1024;
@@ -165,6 +169,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             public ulong StorageRange = 1 << 27;
             public bool R8Storage;
             public bool Rg8Storage;
+            public bool Etc2Transcode;
             public uint[] QueueFamilies = Array.Empty<uint>();
         }
 
@@ -307,6 +312,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 gaps.R8Storage = SupportsStorage(physicalDevice, TextureCompressionBC.FormatR8Uint);
                 gaps.Rg8Storage = SupportsStorage(physicalDevice, TextureCompressionBC.FormatRg8Uint);
+                gaps.Etc2Transcode = MemoryBudget.Profile != MemoryProfile.Off
+                    && SupportsTranscode(physicalDevice, TextureCompressionBC.FormatEtc2Rgba8Unorm)
+                    && SupportsTranscode(physicalDevice, TextureCompressionBC.FormatEtc2Rgba8Srgb);
 
                 uint count = 0;
                 BrovVulkApi.vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, (IntPtr)(&count), IntPtr.Zero);
@@ -328,6 +336,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             new Span<byte>(properties, FormatPropertiesSize).Clear();
             BrovVulkApi.vkGetPhysicalDeviceFormatProperties(physicalDevice, format, (IntPtr)properties);
             return (*(uint*)(properties + FormatPropertiesOptimal) & TextureCompressionBC.FormatFeatureStorageImage) != 0;
+        }
+
+        // A transcode target is never written as a storage image, only sampled and copied into.
+        private static bool SupportsTranscode(IntPtr physicalDevice, int format)
+        {
+            byte* properties = stackalloc byte[FormatPropertiesSize];
+            new Span<byte>(properties, FormatPropertiesSize).Clear();
+            BrovVulkApi.vkGetPhysicalDeviceFormatProperties(physicalDevice, format, (IntPtr)properties);
+            return (*(uint*)(properties + FormatPropertiesOptimal) & TranscodeFeatures) == TranscodeFeatures;
         }
 
         internal static void Advertise(IntPtr physicalDevice, IntPtr features)

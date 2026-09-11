@@ -589,7 +589,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                             }
 
-                            uint NumberOfPhysicalPages = 0x200000;
+                            uint NumberOfPhysicalPages = Settings.MemoryBudget.GuestPhysicalPages;
                             uint LowestPhysicalPageNumber = 0x00000001;
                             uint HighestPhysicalPageNumber = LowestPhysicalPageNumber + NumberOfPhysicalPages - 1;
                             uint AllocationGranularity = 0x10000;

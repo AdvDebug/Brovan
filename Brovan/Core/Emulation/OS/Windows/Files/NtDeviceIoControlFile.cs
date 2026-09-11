@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using Brovan.Core.Settings;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -8,7 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const uint LargeObjectThreshold = 85000;
         // The shared pool keeps what it is handed for the process lifetime, so guest-sized buffers stay unpooled.
-        private const uint MaxPooledIoBytes = 1 << 26;
+        private static uint MaxPooledIoBytes => MemoryBudget.PooledIoBytes;
 
 
         public NTSTATUS Handle(BinaryEmulator Instance)

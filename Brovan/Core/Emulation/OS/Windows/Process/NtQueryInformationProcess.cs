@@ -29,6 +29,97 @@ namespace Brovan.Core.Emulation.OS.Windows
                 bool CurrentProcess = HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle);
                 switch (InfoClass)
                 {
+                    // GlobalMemoryStatusEx reads PagefileLimit here and takes all-ones as no quota.
+                    case PROCESSINFOCLASS.ProcessQuotaLimits:
+                    {
+                        bool Wide = Instance.WinHelper.PointerSize == 8;
+                        uint QuotaSize = Wide ? 0x30u : 0x20u;
+
+                        if (OutBufferLength < QuotaSize)
+                        {
+                            SetReturnLength(QuotaSize);
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                        }
+
+                        if (!Instance.IsRegionMapped(OutBufferPtr, QuotaSize))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                        Span<byte> Quota = Instance.WinHelper.Shared.GetSpan(QuotaSize);
+                        Quota.Clear();
+
+                        ulong NoLimit = Wide ? ulong.MaxValue : uint.MaxValue;
+                        ulong WorkingSetMinimum = 200 * 4096;
+                        ulong WorkingSetMaximum = 1380 * 4096;
+
+                        if (Wide)
+                        {
+                            BinaryPrimitives.WriteUInt64LittleEndian(Quota.Slice(0x00), NoLimit);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Quota.Slice(0x08), NoLimit);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Quota.Slice(0x10), WorkingSetMinimum);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Quota.Slice(0x18), WorkingSetMaximum);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Quota.Slice(0x20), NoLimit);
+                        }
+                        else
+                        {
+                            BinaryPrimitives.WriteUInt32LittleEndian(Quota.Slice(0x00), (uint)NoLimit);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Quota.Slice(0x04), (uint)NoLimit);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Quota.Slice(0x08), (uint)WorkingSetMinimum);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Quota.Slice(0x0C), (uint)WorkingSetMaximum);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Quota.Slice(0x10), (uint)NoLimit);
+                        }
+
+                        if (!Instance._emulator.WriteMemory(OutBufferPtr, Quota))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                        SetReturnLength(QuotaSize);
+                        return NTSTATUS.STATUS_SUCCESS;
+                    }
+
+                    case PROCESSINFOCLASS.ProcessVmCounters:
+                    {
+                        bool Wide = Instance.WinHelper.PointerSize == 8;
+                        uint CountersSize = Wide ? 0x58u : 0x2Cu;
+
+                        if (OutBufferLength < CountersSize)
+                        {
+                            SetReturnLength(CountersSize);
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                        }
+
+                        if (!Instance.IsRegionMapped(OutBufferPtr, CountersSize))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                        Instance.SumGuestMemoryUsage(out ulong VirtualSize, out ulong CommittedSize);
+
+                        Span<byte> Counters = Instance.WinHelper.Shared.GetSpan(CountersSize);
+                        Counters.Clear();
+
+                        if (Wide)
+                        {
+                            BinaryPrimitives.WriteUInt64LittleEndian(Counters.Slice(0x00), VirtualSize);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Counters.Slice(0x08), VirtualSize);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Counters.Slice(0x18), CommittedSize);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Counters.Slice(0x20), CommittedSize);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Counters.Slice(0x48), CommittedSize);
+                            BinaryPrimitives.WriteUInt64LittleEndian(Counters.Slice(0x50), CommittedSize);
+                        }
+                        else
+                        {
+                            BinaryPrimitives.WriteUInt32LittleEndian(Counters.Slice(0x00), (uint)VirtualSize);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Counters.Slice(0x04), (uint)VirtualSize);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Counters.Slice(0x0C), (uint)CommittedSize);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Counters.Slice(0x10), (uint)CommittedSize);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Counters.Slice(0x24), (uint)CommittedSize);
+                            BinaryPrimitives.WriteUInt32LittleEndian(Counters.Slice(0x28), (uint)CommittedSize);
+                        }
+
+                        if (!Instance._emulator.WriteMemory(OutBufferPtr, Counters))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                        SetReturnLength(CountersSize);
+                        return NTSTATUS.STATUS_SUCCESS;
+                    }
+
                     case PROCESSINFOCLASS.ProcessBasicInformation:
                     {
                         uint PbiSize = (uint)(Instance.WinHelper.PointerSize == 8 ? 48 : 24);

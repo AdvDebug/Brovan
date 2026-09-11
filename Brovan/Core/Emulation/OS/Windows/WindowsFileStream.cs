@@ -397,9 +397,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void Truncate()
         {
             EnsureWriteParentExists();
-            using FileStream Stream = new FileStream(WriteHostPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
-            Stream.SetLength(0);
+
+            using (FileStream Stream = new FileStream(WriteHostPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+                Stream.SetLength(0);
+
             PositionValue = 0;
+            DropStoreProbes();
         }
 
         public void CreateDirectory()
@@ -411,6 +414,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 throw new IOException("The Windows VFS write path is a file.");
 
             Directory.CreateDirectory(WriteHostPath);
+            DropStoreProbes();
         }
 
         private string GetReadableFilePath()

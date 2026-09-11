@@ -91,6 +91,10 @@
     <string name="settings_relax_vulkan_summary">Tells programs the GPU has every core Vulkan feature it is missing, whatever those are on this device. Some Direct3D programs refuse to start otherwise, but anything that really uses one will draw wrong or fail.</string>
     <string name="settings_sustained">Sustained performance</string>
     <string name="settings_sustained_summary">Holds a steady speed on long runs instead of a fast start that slows down as the device gets hot. Peak speed is lower.</string>
+    <string name="settings_low_memory">Low memory mode</string>
+    <string name="settings_low_memory_summary">Each step keeps less translated code, uses smaller buffers, and tells the program the device has less memory. A device that is short of memory has a better chance of holding a program, and programs run and start slower.</string>
+    <string name="settings_render_scale">Render scale</string>
+    <string name="settings_render_scale_summary">Draws at a fraction of the screen size and scales the picture back up. Uses much less memory and runs faster, and the picture is softer.</string>
     <string name="settings_pointer">Touch behaviour</string>
     <string name="settings_edit_controls">Edit the on-screen controls</string>
     <string name="settings_edit_controls_summary">Put your own buttons, joysticks and touchpads on the screen. Give a key to each one. When you save, Brovan uses your layout.</string>

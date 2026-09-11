@@ -97,6 +97,13 @@ namespace Brovan
             Console.WriteLine("                    .jitcache next to Brovan, and is enabled by default.");
             Console.WriteLine("  --no-jit-cache    Do not reuse or write a persisted JIT code cache.");
             Console.WriteLine("  --jit-cache-stats Print code cache statistics when the emulated program exits.");
+            Console.WriteLine("  --low-memory=<level>");
+            Console.WriteLine("                    How hard to save memory: off (default), minimal, medium, high, aggressive.");
+            Console.WriteLine("                    Each step shrinks the code cache, the pools and the retained buffers, and");
+            Console.WriteLine("                    tells the program the machine has less memory. Costs throughput.");
+            Console.WriteLine("  --render-scale <f>");
+            Console.WriteLine("                    Fraction of the window the program renders at, from 0.25 to 1. Below 1 its");
+            Console.WriteLine("                    render targets get smaller and the display scales the result back up. Android only.");
             Console.WriteLine("  --install-windows Download Windows installation media from Microsoft and extract the system");
             Console.WriteLine("                    libraries, NLS tables and registry hives Brovan needs, then the Visual C++");
             Console.WriteLine("                    runtimes, then exit.");

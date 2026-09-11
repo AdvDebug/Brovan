@@ -711,6 +711,11 @@ public class MainActivity extends AppCompatActivity {
             pointerLabels[i] = pointers[i].label();
         }
 
+        MaterialAutoCompleteTextView renderScale = view.findViewById(R.id.render_scale);
+        renderScale.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, Settings.RENDER_SCALE_LABELS));
+        renderScale.setText(Settings.RENDER_SCALE_LABELS[settings.renderScale()], false);
+        renderScale.setOnItemClickListener((parent, item, position, id) -> settings.setRenderScale(position));
+
         MaterialAutoCompleteTextView pointer = view.findViewById(R.id.pointer);
         pointer.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, pointerLabels));
         pointer.setText(pointerLabels[settings.pointerMode()], false);
@@ -730,6 +735,11 @@ public class MainActivity extends AppCompatActivity {
         MaterialSwitch sustained = view.findViewById(R.id.sustained);
         sustained.setChecked(settings.sustainedPerformance());
         sustained.setOnCheckedChangeListener((button, checked) -> settings.setSustainedPerformance(checked));
+
+        MaterialAutoCompleteTextView lowMemory = view.findViewById(R.id.low_memory);
+        lowMemory.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, Settings.LOW_MEMORY_LABELS));
+        lowMemory.setText(Settings.LOW_MEMORY_LABELS[settings.lowMemory()], false);
+        lowMemory.setOnItemClickListener((parent, item, position, id) -> settings.setLowMemory(position));
 
         MaterialSwitch developer = view.findViewById(R.id.developer);
         developer.setChecked(settings.developerMode());

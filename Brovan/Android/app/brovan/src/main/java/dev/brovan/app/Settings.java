@@ -8,6 +8,13 @@ final class Settings {
 
     static final String[] NETWORK_MODES = {"None", "Loopback", "Full"};
 
+    static final float[] RENDER_SCALES = {1f, 0.85f, 0.75f, 0.6f, 0.5f};
+    static final String[] RENDER_SCALE_LABELS = {"Full", "85%", "75%", "60%", "50%"};
+
+    /** Must match the platform.low-memory values the emulator accepts. */
+    static final String[] LOW_MEMORY_LEVELS = {"off", "minimal", "medium", "high", "aggressive"};
+    static final String[] LOW_MEMORY_LABELS = {"Off", "Minimal", "Medium", "High", "Aggressive"};
+
     private static final String FILE = "brovan";
     private static final String KEY_NETWORK = "network";
     private static final String KEY_DEVELOPER = "developer";
@@ -15,6 +22,8 @@ final class Settings {
     private static final String KEY_CONTROLS = "controls";
     private static final String KEY_JIT_CACHE = "jit_cache";
     private static final String KEY_RELAX_VULKAN = "relax_vulkan";
+    private static final String KEY_LOW_MEMORY = "low_memory";
+    private static final String KEY_RENDER_SCALE = "render_scale";
     private static final String KEY_SUSTAINED = "sustained";
     private static final String KEY_SETUP_DISMISSED = "setup_dismissed";
     private static final String KEY_CONTROL_LAYOUT = "control_layout";
@@ -75,6 +84,47 @@ final class Settings {
 
     void setJitCache(boolean value) {
         preferences.edit().putBoolean(KEY_JIT_CACHE, value).apply();
+    }
+
+    /** Index into LOW_MEMORY_LEVELS. */
+    int lowMemory() {
+        try {
+            return clampLowMemory(preferences.getInt(KEY_LOW_MEMORY, 0));
+        } catch (ClassCastException storedAsSwitch) {
+            // Older builds stored this key as a boolean, with true meaning the strongest level.
+            int level = preferences.getBoolean(KEY_LOW_MEMORY, false) ? LOW_MEMORY_LEVELS.length - 1 : 0;
+            setLowMemory(level);
+            return level;
+        }
+    }
+
+    void setLowMemory(int value) {
+        preferences.edit().putInt(KEY_LOW_MEMORY, clampLowMemory(value)).apply();
+    }
+
+    String lowMemoryLevel() {
+        return LOW_MEMORY_LEVELS[lowMemory()];
+    }
+
+    private static int clampLowMemory(int value) {
+        return value < 0 || value >= LOW_MEMORY_LEVELS.length ? 0 : value;
+    }
+
+    /** Index into RENDER_SCALES. */
+    int renderScale() {
+        return clampScale(preferences.getInt(KEY_RENDER_SCALE, 0));
+    }
+
+    void setRenderScale(int value) {
+        preferences.edit().putInt(KEY_RENDER_SCALE, clampScale(value)).apply();
+    }
+
+    float renderScaleValue() {
+        return RENDER_SCALES[renderScale()];
+    }
+
+    private static int clampScale(int value) {
+        return value < 0 || value >= RENDER_SCALES.length ? 0 : value;
     }
 
     /** Trades peak clocks for a rate the device can hold once it is warm. */

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection.Metadata.Ecma335;
 using System.Runtime.CompilerServices;
@@ -9,6 +10,7 @@ using System.Threading.Tasks;
 using static Brovan.Core.Emulation.Native;
 using Brovan.Core.Emulation;
 using Brovan.Core.Helpers;
+using Brovan.Core.Settings;
 using System.Buffers;
 
 namespace Brovan.Core.Emulation
@@ -166,8 +168,6 @@ namespace Brovan.Core.Emulation
                 return true;
             }
         }
-
-        private const ulong PendingFreeSliceLimit = 64UL * 1024 * 1024;
 
         private static unsafe byte* AllocateBacking(nuint size)
         {
@@ -349,7 +349,7 @@ namespace Brovan.Core.Emulation
 
             // Buffers are released at the end of the slice, so a guest that commits and decommits large
             // blocks inside one slice keeps every dead buffer resident. Cut the slice short instead.
-            if (_pendingFreeBytes >= PendingFreeSliceLimit && _uc != IntPtr.Zero)
+            if (_pendingFreeBytes >= MemoryBudget.PendingFreeBytes && _uc != IntPtr.Zero)
                 uc_emu_stop(_uc);
         }
 
@@ -1466,15 +1466,15 @@ namespace Brovan.Core.Emulation
         /// <summary>
         /// Read the reservation a saved blob needs, so it can be requested before uc_open.
         /// </summary>
-        public static bool GetBlobReservation(byte[] Blob, out ulong ReservationBase, out ulong ReservationSize)
+        public static bool GetBlobReservation(IntPtr Blob, long Length, out ulong ReservationBase, out ulong ReservationSize)
         {
             ReservationBase = 0;
             ReservationSize = 0;
 
-            if (Blob == null || Blob.Length == 0)
+            if (Blob == IntPtr.Zero || Length <= 0)
                 return false;
 
-            return brov_blob_reservation(Blob, (UIntPtr)Blob.Length, out ReservationBase, out ReservationSize) == UCErrors.UC_ERR_OK;
+            return brov_blob_reservation(Blob, (UIntPtr)Length, out ReservationBase, out ReservationSize) == UCErrors.UC_ERR_OK;
         }
 
         /// <summary>
@@ -1533,23 +1533,32 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Serialize the TCG code cache. Returns null when the cache cannot be saved;
+        /// Serialize the TCG code cache. Returns false when it cannot be saved;
         /// <see cref="GetCodeCacheReason"/> says why.
         /// </summary>
-        public byte[] SaveCodeCache()
+        public unsafe bool SaveCodeCacheTo(Stream Destination)
         {
-            if (DisposedCheck())
-                return null;
+            if (DisposedCheck() || Destination == null)
+                return false;
 
             _error = brov_cc_save(_uc, out IntPtr Blob, out UIntPtr Length);
             if (_error != UCErrors.UC_ERR_OK || Blob == IntPtr.Zero)
-                return null;
+                return false;
 
             try
             {
-                byte[] Managed = new byte[(int)Length];
-                Marshal.Copy(Blob, Managed, 0, Managed.Length);
-                return Managed;
+                ulong Remaining = (ulong)Length;
+                byte* Cursor = (byte*)Blob;
+
+                while (Remaining != 0)
+                {
+                    int Chunk = Remaining > int.MaxValue ? int.MaxValue : (int)Remaining;
+                    Destination.Write(new ReadOnlySpan<byte>(Cursor, Chunk));
+                    Cursor += Chunk;
+                    Remaining -= (ulong)Chunk;
+                }
+
+                return true;
             }
             finally
             {
@@ -1562,12 +1571,12 @@ namespace Brovan.Core.Emulation
         /// mapped: every restored block is verified against the guest bytes it was
         /// translated from.
         /// </summary>
-        public bool LoadCodeCache(byte[] Blob)
+        public bool LoadCodeCache(IntPtr Blob, long Length)
         {
-            if (DisposedCheck() || Blob == null || Blob.Length == 0)
+            if (DisposedCheck() || Blob == IntPtr.Zero || Length <= 0)
                 return false;
 
-            _error = brov_cc_load(_uc, Blob, (UIntPtr)Blob.Length);
+            _error = brov_cc_load(_uc, Blob, (UIntPtr)Length);
             return _error == UCErrors.UC_ERR_OK;
         }
 

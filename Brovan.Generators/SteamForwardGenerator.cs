@@ -850,6 +850,10 @@ namespace Brovan.Generators
             if (Index < 0)
                 throw new InvalidOperationException($"{M.Name}: count {P.Count} is not a parameter.");
 
+            // An out count reaches the guest as a pointer, so the length is behind it.
+            if (M.Params[Index].Kind == "out")
+                return $"p{Index} ? *(const uint32_t*)p{Index} : 0u";
+
             return "p" + Index;
         }
 

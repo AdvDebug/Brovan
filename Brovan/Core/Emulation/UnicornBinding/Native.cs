@@ -207,7 +207,7 @@ namespace Brovan.Core.Emulation
         public static extern UCErrors brov_reservation_info(out ulong reservationBase, out ulong size);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
-        public static extern UCErrors brov_blob_reservation(byte[] blob, UIntPtr length, out ulong reservationBase, out ulong size);
+        public static extern UCErrors brov_blob_reservation(IntPtr blob, UIntPtr length, out ulong reservationBase, out ulong size);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         public static extern UCErrors brov_last_reason(IntPtr uc, out uint reason);
@@ -222,7 +222,7 @@ namespace Brovan.Core.Emulation
         public static extern UCErrors brov_cc_save(IntPtr uc, out IntPtr blob, out UIntPtr length);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
-        public static extern UCErrors brov_cc_load(IntPtr uc, byte[] blob, UIntPtr length);
+        public static extern UCErrors brov_cc_load(IntPtr uc, IntPtr blob, UIntPtr length);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         public static extern UCErrors brov_cc_resolve(IntPtr uc, out uint resolved, out uint remaining);

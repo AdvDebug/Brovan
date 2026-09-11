@@ -2,8 +2,10 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using Brovan.Core.Helpers;
+using Brovan.Core.Settings;
 using static Brovan.Core.Emulation.Native;
 
 namespace Brovan.Core.Emulation
@@ -18,8 +20,6 @@ namespace Brovan.Core.Emulation
         // Brovan/native/unicorn/brovan_uc.h.
         private const ulong ReserveHeaderSize = 128 * 1024;
         private const uint BlobMagic = 0x4356524B;
-        private const ulong DefaultCodeBufferSize = 2UL * 1024 * 1024 * 1024;
-        private const long CacheDirectoryBudget = 512L * 1024 * 1024;
         private const int TrimGraceSeconds = 60;
 
         private static readonly object Gate = new object();
@@ -35,7 +35,9 @@ namespace Brovan.Core.Emulation
             "budget-mode-mismatch",
         };
 
-        private static byte[] PendingBlob;
+        // Off the managed heap: as large as the last run's translated code, and alive across image mapping.
+        private static IntPtr PendingBlob;
+        private static long PendingBlobLength;
         private static string BlobPath;
         private static string MarkerPath;
         private static bool Configured;
@@ -108,44 +110,75 @@ namespace Brovan.Core.Emulation
                     DiscardIfPreviousRunDied();
 
                     ulong ReserveBase = 0;
-                    ulong ReserveSize = ReserveHeaderSize + DefaultCodeBufferSize;
+                    // The engine takes the smaller of this and the TCG default, so it caps resident translated code.
+                    ulong ReserveSize = ReserveHeaderSize + MemoryBudget.CodeBufferBytes;
 
-                    if (File.Exists(BlobPath))
+                    if (File.Exists(BlobPath) && TryReadBlob(BlobPath))
                     {
-                        PendingBlob = File.ReadAllBytes(BlobPath);
-
-                        if (Unicorn.GetBlobReservation(PendingBlob, out ulong BlobBase, out ulong BlobSize))
+                        if (Unicorn.GetBlobReservation(PendingBlob, PendingBlobLength, out ulong BlobBase, out ulong BlobSize))
                         {
                             ReserveBase = BlobBase;
                             ReserveSize = BlobSize;
                         }
                         else
                         {
-                            PendingBlob = null;
+                            ReleaseBlob();
                         }
                     }
 
                     if (!Unicorn.ConfigureCodeCache(ReserveBase, ReserveSize, true))
                     {
                         Utils.LogError("[jit-cache] address reservation failed; running without a code cache.");
-                        PendingBlob = null;
+                        ReleaseBlob();
                         return;
                     }
 
-                    if (PendingBlob != null && Unicorn.GetCodeCacheReservation(out ulong GotBase, out _) && GotBase != ReserveBase)
+                    if (PendingBlob != IntPtr.Zero && Unicorn.GetCodeCacheReservation(out ulong GotBase, out _) && GotBase != ReserveBase)
                     {
                         // The recorded range was taken by something else. This run still
                         // records a fresh base for next time, it just cannot load today.
                         Utils.LogError($"[jit-cache] wanted reservation 0x{ReserveBase:X} but got 0x{GotBase:X}; running cold.");
-                        PendingBlob = null;
+                        ReleaseBlob();
                     }
                 }
                 catch (Exception Error)
                 {
                     Utils.LogError("[jit-cache] configure failed: " + Error.Message);
-                    PendingBlob = null;
+                    ReleaseBlob();
                 }
             }
+        }
+
+        private static unsafe bool TryReadBlob(string Path)
+        {
+            using FileStream Stream = File.OpenRead(Path);
+            long Length = Stream.Length;
+
+            if (Length <= 0 || Length > int.MaxValue)
+                return false;
+
+            PendingBlob = (IntPtr)NativeMemory.Alloc((nuint)Length);
+            PendingBlobLength = Length;
+
+            try
+            {
+                Stream.ReadExactly(new Span<byte>((void*)PendingBlob, (int)Length));
+                return true;
+            }
+            catch (Exception)
+            {
+                ReleaseBlob();
+                return false;
+            }
+        }
+
+        private static unsafe void ReleaseBlob()
+        {
+            if (PendingBlob != IntPtr.Zero)
+                NativeMemory.Free((void*)PendingBlob);
+
+            PendingBlob = IntPtr.Zero;
+            PendingBlobLength = 0;
         }
 
         /// <summary>
@@ -156,18 +189,22 @@ namespace Brovan.Core.Emulation
         {
             lock (Gate)
             {
-                if (!Enabled || Loaded || PendingBlob == null || Engine == null)
+                if (!Enabled || Loaded || PendingBlob == IntPtr.Zero || Engine == null)
                     return;
 
                 Loaded = true;
 
-                byte[] Blob = PendingBlob;
-                PendingBlob = null;
-
-                if (!Engine.LoadCodeCache(Blob))
+                try
                 {
-                    Utils.PrintHighlight($"[!] JIT cache not reused ({ReasonName(Engine.GetCodeCacheReason())}).", true);
-                    return;
+                    if (!Engine.LoadCodeCache(PendingBlob, PendingBlobLength))
+                    {
+                        Utils.PrintHighlight($"[!] JIT cache not reused ({ReasonName(Engine.GetCodeCacheReason())}).", true);
+                        return;
+                    }
+                }
+                finally
+                {
+                    ReleaseBlob();
                 }
 
                 WriteMarker();
@@ -225,9 +262,15 @@ namespace Brovan.Core.Emulation
                         SavedUsedBytes = Before.CodeGenUsed;
                     }
 
-                    byte[] Blob = Engine.SaveCodeCache();
-                    if (Blob == null)
+                    string Temporary = BlobPath + "." + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".tmp";
+                    bool Written;
+
+                    using (FileStream Stream = File.Create(Temporary))
+                        Written = Engine.SaveCodeCacheTo(Stream);
+
+                    if (!Written)
                     {
+                        File.Delete(Temporary);
                         Utils.LogError($"[jit-cache] not saved ({ReasonName(Engine.GetCodeCacheReason())}).");
 
                         if (!Engine.ValidateCodeCache(out BrovAuditResult Audit) && Audit.HitCount != 0)
@@ -239,8 +282,6 @@ namespace Brovan.Core.Emulation
                         return;
                     }
 
-                    string Temporary = BlobPath + "." + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + ".tmp";
-                    File.WriteAllBytes(Temporary, Blob);
                     File.Move(Temporary, BlobPath, true);
                     TrimCacheDirectory(Path.GetDirectoryName(BlobPath));
                 }
@@ -391,12 +432,13 @@ namespace Brovan.Core.Emulation
         {
             DirectoryInfo Info = new DirectoryInfo(Directory);
             FileInfo[] Blobs = Info.GetFiles("*.bjc");
+            long Budget = MemoryBudget.CodeCacheDirectoryBytes;
             long Total = 0;
 
             foreach (FileInfo Blob in Blobs)
                 Total += Blob.Length;
 
-            if (Total <= CacheDirectoryBudget)
+            if (Total <= Budget)
                 return;
 
             Array.Sort(Blobs, (a, b) => a.LastWriteTimeUtc.CompareTo(b.LastWriteTimeUtc));
@@ -404,7 +446,7 @@ namespace Brovan.Core.Emulation
 
             foreach (FileInfo Blob in Blobs)
             {
-                if (Total <= CacheDirectoryBudget)
+                if (Total <= Budget)
                     break;
 
                 // Another Brovan may be mid-load on a blob it just wrote.
@@ -433,6 +475,9 @@ namespace Brovan.Core.Emulation
             MixFile(ref Hash, HostImagePath);
             MixFile(ref Hash, Path.Combine(AppContext.BaseDirectory, GeneralHelper.IsWindows ? "unicorn.dll" : "libunicorn.so"));
             MixNumber(ref Hash, (ulong)IntPtr.Size);
+
+            // A blob records the reservation it was written against, so each size keeps its own file.
+            MixNumber(ref Hash, MemoryBudget.CodeBufferBytes);
 
             return Hash.ToString("x16", CultureInfo.InvariantCulture);
         }

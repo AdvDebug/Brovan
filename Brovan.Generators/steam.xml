@@ -466,6 +466,2931 @@
     </method>
     <method name="DestroyAllInterfaces" ret="void" />
   </interface>
+  <interface name="ISteamFriends" version="SteamFriends018">
+    <method name="GetPersonaName" ret="str" />
+    <method name="GetPersonaState" ret="enum" />
+    <method name="GetFriendCount" ret="i32">
+      <param name="iFriendFlags" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetFriendByIndex" ret="struct" retstruct="CSteamID">
+      <param name="iFriend" type="int" kind="in" wire="i32" />
+      <param name="iFriendFlags" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetFriendRelationship" ret="enum">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetFriendPersonaState" ret="enum">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetFriendPersonaName" ret="str">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetFriendGamePlayed" ret="bool">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+      <param name="pFriendGameInfo" type="FriendGameInfo_t*" kind="outstruct" struct="FriendGameInfo_t" />
+    </method>
+    <method name="GetFriendPersonaNameHistory" ret="str">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+      <param name="iPersonaName" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetFriendSteamLevel" ret="i32">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetPlayerNickname" ret="str">
+      <param name="steamIDPlayer" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetFriendsGroupCount" ret="i32" />
+    <method name="GetFriendsGroupIDByIndex" ret="i16">
+      <param name="iFG" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetFriendsGroupName" ret="str">
+      <param name="friendsGroupID" type="FriendsGroupID_t" kind="in" wire="i16" />
+    </method>
+    <method name="GetFriendsGroupMembersCount" ret="i32">
+      <param name="friendsGroupID" type="FriendsGroupID_t" kind="in" wire="i16" />
+    </method>
+    <method name="GetFriendsGroupMembersList" ret="void">
+      <param name="friendsGroupID" type="FriendsGroupID_t" kind="in" wire="i16" />
+      <param name="pOutSteamIDMembers" type="CSteamID*" kind="outarray" wire="u64" count="nMembersCount" />
+      <param name="nMembersCount" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="HasFriend" ret="bool">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+      <param name="iFriendFlags" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetClanCount" ret="i32" />
+    <method name="GetClanByIndex" ret="struct" retstruct="CSteamID">
+      <param name="iClan" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetClanName" ret="str">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetClanTag" ret="str">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetClanActivityCounts" ret="bool">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+      <param name="pnOnline" type="int*" kind="out" wire="i32" />
+      <param name="pnInGame" type="int*" kind="out" wire="i32" />
+      <param name="pnChatting" type="int*" kind="out" wire="i32" />
+    </method>
+    <method name="DownloadClanActivityCounts" ret="u64">
+      <param name="psteamIDClans" type="CSteamID*" kind="inarray" wire="u64" count="cClansToRequest" />
+      <param name="cClansToRequest" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetFriendCountFromSource" ret="i32">
+      <param name="steamIDSource" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetFriendFromSourceByIndex" ret="struct" retstruct="CSteamID">
+      <param name="steamIDSource" type="CSteamID" kind="in" wire="u64" />
+      <param name="iFriend" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="IsUserInSource" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="steamIDSource" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="SetInGameVoiceSpeaking" ret="void">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="bSpeaking" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="ActivateGameOverlay" ret="void">
+      <param name="pchDialog" type="const char*" kind="str" />
+    </method>
+    <method name="ActivateGameOverlayToUser" ret="void">
+      <param name="pchDialog" type="const char*" kind="str" />
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="ActivateGameOverlayToWebPage" ret="void">
+      <param name="pchURL" type="const char*" kind="str" />
+      <param name="eMode" type="EActivateGameOverlayToWebPageMode" kind="in" wire="enum" />
+    </method>
+    <method name="ActivateGameOverlayToStore" ret="void">
+      <param name="nAppID" type="AppId_t" kind="in" wire="u32" />
+      <param name="eFlag" type="EOverlayToStoreFlag" kind="in" wire="enum" />
+    </method>
+    <method name="SetPlayedWith" ret="void">
+      <param name="steamIDUserPlayedWith" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="ActivateGameOverlayInviteDialog" ret="void">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetSmallFriendAvatar" ret="i32">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetMediumFriendAvatar" ret="i32">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetLargeFriendAvatar" ret="i32">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="RequestUserInformation" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="bRequireNameOnly" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="RequestClanOfficerList" ret="u64">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetClanOwner" ret="struct" retstruct="CSteamID">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetClanOfficerCount" ret="i32">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetClanOfficerByIndex" ret="struct" retstruct="CSteamID">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+      <param name="iOfficer" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="SetRichPresence" ret="bool">
+      <param name="pchKey" type="const char*" kind="str" />
+      <param name="pchValue" type="const char*" kind="str" />
+    </method>
+    <method name="ClearRichPresence" ret="void" />
+    <method name="GetFriendRichPresence" ret="str">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchKey" type="const char*" kind="str" />
+    </method>
+    <method name="GetFriendRichPresenceKeyCount" ret="i32">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetFriendRichPresenceKeyByIndex" ret="str">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+      <param name="iKey" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="RequestFriendRichPresence" ret="void">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="InviteUserToGame" ret="bool">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchConnectString" type="const char*" kind="str" />
+    </method>
+    <method name="GetCoplayFriendCount" ret="i32" />
+    <method name="GetCoplayFriend" ret="struct" retstruct="CSteamID">
+      <param name="iCoplayFriend" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetFriendCoplayTime" ret="i32">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetFriendCoplayGame" ret="u32">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="JoinClanChatRoom" ret="u64">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="LeaveClanChatRoom" ret="bool">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetClanChatMemberCount" ret="i32">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetChatMemberByIndex" ret="struct" retstruct="CSteamID">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+      <param name="iUser" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="SendClanChatMessage" ret="bool">
+      <param name="steamIDClanChat" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchText" type="const char*" kind="str" />
+    </method>
+    <method name="GetClanChatMessage" ret="i32">
+      <param name="steamIDClanChat" type="CSteamID" kind="in" wire="u64" />
+      <param name="iMessage" type="int" kind="in" wire="i32" />
+      <param name="prgchText" type="void*" kind="outbuf" count="cchTextMax" />
+      <param name="cchTextMax" type="int" kind="in" wire="i32" />
+      <param name="peChatEntryType" type="EChatEntryType*" kind="out" wire="enum" />
+      <param name="psteamidChatter" type="CSteamID*" kind="outstruct" struct="CSteamID" />
+    </method>
+    <method name="IsClanChatAdmin" ret="bool">
+      <param name="steamIDClanChat" type="CSteamID" kind="in" wire="u64" />
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="IsClanChatWindowOpenInSteam" ret="bool">
+      <param name="steamIDClanChat" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="OpenClanChatWindowInSteam" ret="bool">
+      <param name="steamIDClanChat" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="CloseClanChatWindowInSteam" ret="bool">
+      <param name="steamIDClanChat" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="SetListenForFriendsMessages" ret="bool">
+      <param name="bInterceptEnabled" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="ReplyToFriendMessage" ret="bool">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchMsgToSend" type="const char*" kind="str" />
+    </method>
+    <method name="GetFriendMessage" ret="i32">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+      <param name="iMessageID" type="int" kind="in" wire="i32" />
+      <param name="pvData" type="void*" kind="outbuf" count="cubData" />
+      <param name="cubData" type="int" kind="in" wire="i32" />
+      <param name="peChatEntryType" type="EChatEntryType*" kind="out" wire="enum" />
+    </method>
+    <method name="GetFollowerCount" ret="u64">
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="IsFollowing" ret="u64">
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="EnumerateFollowingList" ret="u64">
+      <param name="unStartIndex" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="IsClanPublic" ret="bool">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="IsClanOfficialGameGroup" ret="bool">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetNumChatsWithUnreadPriorityMessages" ret="i32" />
+    <method name="ActivateGameOverlayRemotePlayTogetherInviteDialog" ret="void">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="RegisterProtocolInOverlayBrowser" ret="bool">
+      <param name="pchProtocol" type="const char*" kind="str" />
+    </method>
+    <method name="ActivateGameOverlayInviteDialogConnectString" ret="void">
+      <param name="pchConnectString" type="const char*" kind="str" />
+    </method>
+    <method name="RequestEquippedProfileItems" ret="u64">
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="BHasEquippedProfileItem" ret="bool">
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+      <param name="itemType" type="ECommunityProfileItemType" kind="in" wire="enum" />
+    </method>
+    <method name="GetProfileItemPropertyString" ret="str">
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+      <param name="itemType" type="ECommunityProfileItemType" kind="in" wire="enum" />
+      <param name="prop" type="ECommunityProfileItemProperty" kind="in" wire="enum" />
+    </method>
+    <method name="GetProfileItemPropertyUint" ret="u32">
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+      <param name="itemType" type="ECommunityProfileItemType" kind="in" wire="enum" />
+      <param name="prop" type="ECommunityProfileItemProperty" kind="in" wire="enum" />
+    </method>
+  </interface>
+  <interface name="ISteamGameCoordinator" version="SteamGameCoordinator001">
+    <method name="SendMessage" ret="enum">
+      <param name="unMsgType" type="uint32" kind="in" wire="u32" />
+      <param name="pubData" type="const void*" kind="inbuf" count="cubData" />
+      <param name="cubData" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="IsMessageAvailable" ret="bool">
+      <param name="pcubMsgSize" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="RetrieveMessage" ret="enum">
+      <param name="punMsgType" type="uint32*" kind="out" wire="u32" />
+      <param name="pubDest" type="void*" kind="outbuf" count="cubDest" />
+      <param name="cubDest" type="uint32" kind="in" wire="u32" />
+      <param name="pcubMsgSize" type="uint32*" kind="out" wire="u32" />
+    </method>
+  </interface>
+  <interface name="ISteamGameServer" version="SteamGameServer015">
+    <method name="InitGameServer" ret="bool">
+      <param name="unIP" type="uint32" kind="in" wire="u32" />
+      <param name="usGamePort" type="uint16" kind="in" wire="u16" />
+      <param name="usQueryPort" type="uint16" kind="in" wire="u16" />
+      <param name="unFlags" type="uint32" kind="in" wire="u32" />
+      <param name="nGameAppId" type="AppId_t" kind="in" wire="u32" />
+      <param name="pchVersionString" type="const char*" kind="str" />
+    </method>
+    <method name="SetProduct" ret="void">
+      <param name="pszProduct" type="const char*" kind="str" />
+    </method>
+    <method name="SetGameDescription" ret="void">
+      <param name="pszGameDescription" type="const char*" kind="str" />
+    </method>
+    <method name="SetModDir" ret="void">
+      <param name="pszModDir" type="const char*" kind="str" />
+    </method>
+    <method name="SetDedicatedServer" ret="void">
+      <param name="bDedicated" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="LogOn" ret="void">
+      <param name="pszToken" type="const char*" kind="str" />
+    </method>
+    <method name="LogOnAnonymous" ret="void" />
+    <method name="LogOff" ret="void" />
+    <method name="BLoggedOn" ret="bool" />
+    <method name="BSecure" ret="bool" />
+    <method name="GetSteamID" ret="struct" retstruct="CSteamID" />
+    <method name="WasRestartRequested" ret="bool" />
+    <method name="SetMaxPlayerCount" ret="void">
+      <param name="cPlayersMax" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="SetBotPlayerCount" ret="void">
+      <param name="cBotplayers" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="SetServerName" ret="void">
+      <param name="pszServerName" type="const char*" kind="str" />
+    </method>
+    <method name="SetMapName" ret="void">
+      <param name="pszMapName" type="const char*" kind="str" />
+    </method>
+    <method name="SetPasswordProtected" ret="void">
+      <param name="bPasswordProtected" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetSpectatorPort" ret="void">
+      <param name="unSpectatorPort" type="uint16" kind="in" wire="u16" />
+    </method>
+    <method name="SetSpectatorServerName" ret="void">
+      <param name="pszSpectatorServerName" type="const char*" kind="str" />
+    </method>
+    <method name="ClearAllKeyValues" ret="void" />
+    <method name="SetKeyValue" ret="void">
+      <param name="pKey" type="const char*" kind="str" />
+      <param name="pValue" type="const char*" kind="str" />
+    </method>
+    <method name="SetGameTags" ret="void">
+      <param name="pchGameTags" type="const char*" kind="str" />
+    </method>
+    <method name="SetGameData" ret="void">
+      <param name="pchGameData" type="const char*" kind="str" />
+    </method>
+    <method name="SetRegion" ret="void">
+      <param name="pszRegion" type="const char*" kind="str" />
+    </method>
+    <method name="SetAdvertiseServerActive" ret="void">
+      <param name="bActive" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="GetAuthSessionTicket" ret="u32">
+      <param name="pTicket" type="void*" kind="outbuf" count="cbMaxTicket" />
+      <param name="cbMaxTicket" type="int" kind="in" wire="i32" />
+      <param name="pcbTicket" type="uint32*" kind="out" wire="u32" />
+      <param name="pSnid" type="const SteamNetworkingIdentity*" kind="instruct" struct="SteamNetworkingIdentity" />
+    </method>
+    <method name="BeginAuthSession" ret="enum">
+      <param name="pAuthTicket" type="const void*" kind="inbuf" count="cbAuthTicket" />
+      <param name="cbAuthTicket" type="int" kind="in" wire="i32" />
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="EndAuthSession" ret="void">
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="CancelAuthTicket" ret="void">
+      <param name="hAuthTicket" type="HAuthTicket" kind="in" wire="u32" />
+    </method>
+    <method name="UserHasLicenseForApp" ret="enum">
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+      <param name="appID" type="AppId_t" kind="in" wire="u32" />
+    </method>
+    <method name="RequestUserGroupStatus" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="steamIDGroup" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetGameplayStats" ret="void" />
+    <method name="GetServerReputation" ret="u64" />
+    <method name="GetPublicIP" ret="struct" retstruct="SteamIPAddress_t" />
+    <method name="HandleIncomingPacket" ret="bool">
+      <param name="pData" type="const void*" kind="inbuf" count="cbData" />
+      <param name="cbData" type="int" kind="in" wire="i32" />
+      <param name="srcIP" type="uint32" kind="in" wire="u32" />
+      <param name="srcPort" type="uint16" kind="in" wire="u16" />
+    </method>
+    <method name="GetNextOutgoingPacket" ret="i32">
+      <param name="pOut" type="void*" kind="outbuf" count="cbMaxOut" />
+      <param name="cbMaxOut" type="int" kind="in" wire="i32" />
+      <param name="pNetAdr" type="uint32*" kind="out" wire="u32" />
+      <param name="pPort" type="uint16*" kind="out" wire="u16" />
+    </method>
+    <method name="AssociateWithClan" ret="u64">
+      <param name="steamIDClan" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="ComputeNewPlayerCompatibility" ret="u64">
+      <param name="steamIDNewPlayer" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="SendUserConnectAndAuthenticate_DEPRECATED" ret="bool">
+      <param name="unIPClient" type="uint32" kind="in" wire="u32" />
+      <param name="pvAuthBlob" type="const void*" kind="inbuf" count="cubAuthBlobSize" />
+      <param name="cubAuthBlobSize" type="uint32" kind="in" wire="u32" />
+      <param name="pSteamIDUser" type="CSteamID*" kind="out" wire="u64" />
+    </method>
+    <method name="CreateUnauthenticatedUserConnection" ret="struct" retstruct="CSteamID" />
+    <method name="SendUserDisconnect_DEPRECATED" ret="void">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="BUpdateUserData" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchPlayerName" type="const char*" kind="str" />
+      <param name="uScore" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SetMasterServerHeartbeatInterval_DEPRECATED" ret="void">
+      <param name="iHeartbeatInterval" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="ForceMasterServerHeartbeat_DEPRECATED" ret="void" />
+  </interface>
+  <interface name="ISteamGameServerStats" version="SteamGameServerStats001">
+    <method name="RequestUserStats" ret="u64">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetUserStat" cname="GetUserStatInt32" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pData" type="int32*" kind="out" wire="i32" />
+    </method>
+    <method name="GetUserStat" cname="GetUserStatFloat" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pData" type="float*" kind="out" wire="f32" />
+    </method>
+    <method name="GetUserAchievement" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pbAchieved" type="bool*" kind="out" wire="bool" />
+    </method>
+    <method name="SetUserStat" cname="SetUserStatInt32" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="nData" type="int32" kind="in" wire="i32" />
+    </method>
+    <method name="SetUserStat" cname="SetUserStatFloat" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="fData" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="UpdateUserAvgRateStat" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="flCountThisSession" type="float" kind="in" wire="f32" />
+      <param name="dSessionLength" type="double" kind="in" wire="f64" />
+    </method>
+    <method name="SetUserAchievement" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+    </method>
+    <method name="ClearUserAchievement" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+    </method>
+    <method name="StoreUserStats" ret="u64">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+    </method>
+  </interface>
+  <interface name="ISteamHTTP" version="STEAMHTTP_INTERFACE_VERSION003">
+    <method name="CreateHTTPRequest" ret="u32">
+      <param name="eHTTPRequestMethod" type="EHTTPMethod" kind="in" wire="enum" />
+      <param name="pchAbsoluteURL" type="const char*" kind="str" />
+    </method>
+    <method name="SetHTTPRequestContextValue" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="ulContextValue" type="uint64" kind="in" wire="u64" />
+    </method>
+    <method name="SetHTTPRequestNetworkActivityTimeout" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="unTimeoutSeconds" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SetHTTPRequestHeaderValue" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pchHeaderName" type="const char*" kind="str" />
+      <param name="pchHeaderValue" type="const char*" kind="str" />
+    </method>
+    <method name="SetHTTPRequestGetOrPostParameter" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pchParamName" type="const char*" kind="str" />
+      <param name="pchParamValue" type="const char*" kind="str" />
+    </method>
+    <method name="SendHTTPRequest" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pCallHandle" type="SteamAPICall_t*" kind="out" wire="u64" />
+    </method>
+    <method name="SendHTTPRequestAndStreamResponse" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pCallHandle" type="SteamAPICall_t*" kind="out" wire="u64" />
+    </method>
+    <method name="DeferHTTPRequest" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+    </method>
+    <method name="PrioritizeHTTPRequest" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+    </method>
+    <method name="GetHTTPResponseHeaderSize" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pchHeaderName" type="const char*" kind="str" />
+      <param name="unResponseHeaderSize" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="GetHTTPResponseHeaderValue" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pchHeaderName" type="const char*" kind="str" />
+      <param name="pHeaderValueBuffer" type="uint8*" kind="outbuf" count="unBufferSize" />
+      <param name="unBufferSize" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetHTTPResponseBodySize" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="unBodySize" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="GetHTTPResponseBodyData" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pBodyDataBuffer" type="uint8*" kind="outbuf" count="unBufferSize" />
+      <param name="unBufferSize" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetHTTPStreamingResponseBodyData" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="cOffset" type="uint32" kind="in" wire="u32" />
+      <param name="pBodyDataBuffer" type="uint8*" kind="outbuf" count="unBufferSize" />
+      <param name="unBufferSize" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="ReleaseHTTPRequest" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+    </method>
+    <method name="GetHTTPDownloadProgressPct" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pflPercentOut" type="float*" kind="out" wire="f32" />
+    </method>
+    <method name="SetHTTPRequestRawPostBody" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pchContentType" type="const char*" kind="str" />
+      <param name="pubBody" type="uint8*" kind="outbuf" count="unBodyLen" />
+      <param name="unBodyLen" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="CreateCookieContainer" ret="u32">
+      <param name="bAllowResponsesToModify" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="ReleaseCookieContainer" ret="bool">
+      <param name="hCookieContainer" type="HTTPCookieContainerHandle" kind="in" wire="u32" />
+    </method>
+    <method name="SetCookie" ret="bool">
+      <param name="hCookieContainer" type="HTTPCookieContainerHandle" kind="in" wire="u32" />
+      <param name="pchHost" type="const char*" kind="str" />
+      <param name="pchUrl" type="const char*" kind="str" />
+      <param name="pchCookie" type="const char*" kind="str" />
+    </method>
+    <method name="SetHTTPRequestCookieContainer" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="hCookieContainer" type="HTTPCookieContainerHandle" kind="in" wire="u32" />
+    </method>
+    <method name="SetHTTPRequestUserAgentInfo" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pchUserAgentInfo" type="const char*" kind="str" />
+    </method>
+    <method name="SetHTTPRequestRequiresVerifiedCertificate" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="bRequireVerifiedCertificate" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetHTTPRequestAbsoluteTimeoutMS" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="unMilliseconds" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetHTTPRequestWasTimedOut" ret="bool">
+      <param name="hRequest" type="HTTPRequestHandle" kind="in" wire="u32" />
+      <param name="pbWasTimedOut" type="bool*" kind="out" wire="bool" />
+    </method>
+  </interface>
+  <interface name="ISteamInput" version="SteamInput006">
+    <method name="Init" ret="bool">
+      <param name="bExplicitlyCallRunFrame" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="Shutdown" ret="bool" />
+    <method name="SetInputActionManifestFilePath" ret="bool">
+      <param name="pchInputActionManifestAbsolutePath" type="const char*" kind="str" />
+    </method>
+    <method name="RunFrame" ret="void">
+      <param name="bReservedValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="BWaitForData" ret="bool">
+      <param name="bWaitForever" type="bool" kind="in" wire="bool" />
+      <param name="unTimeout" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="BNewDataAvailable" ret="bool" />
+    <method name="GetConnectedControllers" ret="i32">
+      <param name="handlesOut" type="InputHandle_t*" kind="outarray" wire="u64" count="16" />
+    </method>
+    <method name="EnableDeviceCallbacks" ret="void" />
+    <method name="EnableActionEventCallbacks" ret="void" local="true">
+      <param name="pCallback" type="SteamInputActionEventCallbackPointer" kind="in" wire="u64" />
+    </method>
+    <method name="GetActionSetHandle" ret="u64">
+      <param name="pszActionSetName" type="const char*" kind="str" />
+    </method>
+    <method name="ActivateActionSet" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="actionSetHandle" type="InputActionSetHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetCurrentActionSet" ret="u64">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="ActivateActionSetLayer" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="actionSetLayerHandle" type="InputActionSetHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="DeactivateActionSetLayer" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="actionSetLayerHandle" type="InputActionSetHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="DeactivateAllActionSetLayers" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetActiveActionSetLayers" ret="i32">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="handlesOut" type="InputActionSetHandle_t*" kind="outarray" wire="u64" count="16" />
+    </method>
+    <method name="GetDigitalActionHandle" ret="u64">
+      <param name="pszActionName" type="const char*" kind="str" />
+    </method>
+    <method name="GetDigitalActionData" ret="struct" retstruct="InputDigitalActionData_t">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="digitalActionHandle" type="InputDigitalActionHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetDigitalActionOrigins" ret="i32">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="actionSetHandle" type="InputActionSetHandle_t" kind="in" wire="u64" />
+      <param name="digitalActionHandle" type="InputDigitalActionHandle_t" kind="in" wire="u64" />
+      <param name="originsOut" type="EInputActionOrigin*" kind="outarray" wire="enum" count="8" />
+    </method>
+    <method name="GetStringForDigitalActionName" ret="str">
+      <param name="eActionHandle" type="InputDigitalActionHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetAnalogActionHandle" ret="u64">
+      <param name="pszActionName" type="const char*" kind="str" />
+    </method>
+    <method name="GetAnalogActionData" ret="struct" retstruct="InputAnalogActionData_t">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="analogActionHandle" type="InputAnalogActionHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetAnalogActionOrigins" ret="i32">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="actionSetHandle" type="InputActionSetHandle_t" kind="in" wire="u64" />
+      <param name="analogActionHandle" type="InputAnalogActionHandle_t" kind="in" wire="u64" />
+      <param name="originsOut" type="EInputActionOrigin*" kind="outarray" wire="enum" count="8" />
+    </method>
+    <method name="GetGlyphPNGForActionOrigin" ret="str">
+      <param name="eOrigin" type="EInputActionOrigin" kind="in" wire="enum" />
+      <param name="eSize" type="ESteamInputGlyphSize" kind="in" wire="enum" />
+      <param name="unFlags" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetGlyphSVGForActionOrigin" ret="str">
+      <param name="eOrigin" type="EInputActionOrigin" kind="in" wire="enum" />
+      <param name="unFlags" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetGlyphForActionOrigin_Legacy" ret="str">
+      <param name="eOrigin" type="EInputActionOrigin" kind="in" wire="enum" />
+    </method>
+    <method name="GetStringForActionOrigin" ret="str">
+      <param name="eOrigin" type="EInputActionOrigin" kind="in" wire="enum" />
+    </method>
+    <method name="GetStringForAnalogActionName" ret="str">
+      <param name="eActionHandle" type="InputAnalogActionHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="StopAnalogActionMomentum" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="eAction" type="InputAnalogActionHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetMotionData" ret="struct" retstruct="InputMotionData_t">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="TriggerVibration" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="usLeftSpeed" type="unsigned short" kind="in" wire="u16" />
+      <param name="usRightSpeed" type="unsigned short" kind="in" wire="u16" />
+    </method>
+    <method name="TriggerVibrationExtended" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="usLeftSpeed" type="unsigned short" kind="in" wire="u16" />
+      <param name="usRightSpeed" type="unsigned short" kind="in" wire="u16" />
+      <param name="usLeftTriggerSpeed" type="unsigned short" kind="in" wire="u16" />
+      <param name="usRightTriggerSpeed" type="unsigned short" kind="in" wire="u16" />
+    </method>
+    <method name="TriggerSimpleHapticEvent" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="eHapticLocation" type="EControllerHapticLocation" kind="in" wire="enum" />
+      <param name="nIntensity" type="uint8" kind="in" wire="u8" />
+      <param name="nGainDB" type="char" kind="in" wire="i8" />
+      <param name="nOtherIntensity" type="uint8" kind="in" wire="u8" />
+      <param name="nOtherGainDB" type="char" kind="in" wire="i8" />
+    </method>
+    <method name="SetLEDColor" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="nColorR" type="uint8" kind="in" wire="u8" />
+      <param name="nColorG" type="uint8" kind="in" wire="u8" />
+      <param name="nColorB" type="uint8" kind="in" wire="u8" />
+      <param name="nFlags" type="unsigned int" kind="in" wire="u32" />
+    </method>
+    <method name="Legacy_TriggerHapticPulse" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="eTargetPad" type="ESteamControllerPad" kind="in" wire="enum" />
+      <param name="usDurationMicroSec" type="unsigned short" kind="in" wire="u16" />
+    </method>
+    <method name="Legacy_TriggerRepeatedHapticPulse" ret="void">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="eTargetPad" type="ESteamControllerPad" kind="in" wire="enum" />
+      <param name="usDurationMicroSec" type="unsigned short" kind="in" wire="u16" />
+      <param name="usOffMicroSec" type="unsigned short" kind="in" wire="u16" />
+      <param name="unRepeat" type="unsigned short" kind="in" wire="u16" />
+      <param name="nFlags" type="unsigned int" kind="in" wire="u32" />
+    </method>
+    <method name="ShowBindingPanel" ret="bool">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetInputTypeForHandle" ret="enum">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetControllerForGamepadIndex" ret="u64">
+      <param name="nIndex" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetGamepadIndexForController" ret="i32">
+      <param name="ulinputHandle" type="InputHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetStringForXboxOrigin" ret="str">
+      <param name="eOrigin" type="EXboxOrigin" kind="in" wire="enum" />
+    </method>
+    <method name="GetGlyphForXboxOrigin" ret="str">
+      <param name="eOrigin" type="EXboxOrigin" kind="in" wire="enum" />
+    </method>
+    <method name="GetActionOriginFromXboxOrigin" ret="enum">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="eOrigin" type="EXboxOrigin" kind="in" wire="enum" />
+    </method>
+    <method name="TranslateActionOrigin" ret="enum">
+      <param name="eDestinationInputType" type="ESteamInputType" kind="in" wire="enum" />
+      <param name="eSourceOrigin" type="EInputActionOrigin" kind="in" wire="enum" />
+    </method>
+    <method name="GetDeviceBindingRevision" ret="bool">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="pMajor" type="int*" kind="out" wire="i32" />
+      <param name="pMinor" type="int*" kind="out" wire="i32" />
+    </method>
+    <method name="GetRemotePlaySessionID" ret="u32">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetSessionInputConfigurationSettings" ret="u16" />
+    <method name="SetDualSenseTriggerEffect" ret="void" local="true">
+      <param name="inputHandle" type="InputHandle_t" kind="in" wire="u64" />
+      <param name="pParam" type="const ScePadTriggerEffectParam*" kind="in" wire="u64" />
+    </method>
+  </interface>
+  <interface name="ISteamInventory" version="STEAMINVENTORY_INTERFACE_V003">
+    <method name="GetResultStatus" ret="enum">
+      <param name="resultHandle" type="SteamInventoryResult_t" kind="in" wire="i32" />
+    </method>
+    <method name="GetResultItems" ret="bool" local="true">
+      <param name="resultHandle" type="SteamInventoryResult_t" kind="in" wire="i32" />
+      <param name="pOutItemsArray" type="SteamItemDetails_t*" kind="in" wire="u64" count="punOutItemsArraySize" />
+      <param name="punOutItemsArraySize" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="GetResultItemProperty" ret="bool">
+      <param name="resultHandle" type="SteamInventoryResult_t" kind="in" wire="i32" />
+      <param name="unItemIndex" type="uint32" kind="in" wire="u32" />
+      <param name="pchPropertyName" type="const char*" kind="str" />
+      <param name="pchValueBuffer" type="char*" kind="outstr" count="punValueBufferSizeOut" />
+      <param name="punValueBufferSizeOut" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="GetResultTimestamp" ret="u32">
+      <param name="resultHandle" type="SteamInventoryResult_t" kind="in" wire="i32" />
+    </method>
+    <method name="CheckResultSteamID" ret="bool">
+      <param name="resultHandle" type="SteamInventoryResult_t" kind="in" wire="i32" />
+      <param name="steamIDExpected" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="DestroyResult" ret="void">
+      <param name="resultHandle" type="SteamInventoryResult_t" kind="in" wire="i32" />
+    </method>
+    <method name="GetAllItems" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+    </method>
+    <method name="GetItemsByID" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="pInstanceIDs" type="const SteamItemInstanceID_t*" kind="inarray" wire="u64" count="unCountInstanceIDs" />
+      <param name="unCountInstanceIDs" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SerializeResult" ret="bool">
+      <param name="resultHandle" type="SteamInventoryResult_t" kind="in" wire="i32" />
+      <param name="pOutBuffer" type="void*" kind="outbuf" count="punOutBufferSize" />
+      <param name="punOutBufferSize" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="DeserializeResult" ret="bool" local="true">
+      <param name="pOutResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="pBuffer" type="STEAM_BUFFER_COUNT(punOutBufferSize) const void*" kind="in" wire="u64" />
+      <param name="unBufferSize" type="uint32" kind="in" wire="u32" />
+      <param name="bRESERVED_MUST_BE_FALSE" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="GenerateItems" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="pArrayItemDefs" type="const SteamItemDef_t*" kind="inarray" wire="i32" count="unArrayLength" />
+      <param name="punArrayQuantity" type="const uint32*" kind="inarray" wire="u32" count="unArrayLength" />
+      <param name="unArrayLength" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GrantPromoItems" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+    </method>
+    <method name="AddPromoItem" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="itemDef" type="SteamItemDef_t" kind="in" wire="i32" />
+    </method>
+    <method name="AddPromoItems" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="pArrayItemDefs" type="const SteamItemDef_t*" kind="inarray" wire="i32" count="unArrayLength" />
+      <param name="unArrayLength" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="ConsumeItem" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="itemConsume" type="SteamItemInstanceID_t" kind="in" wire="u64" />
+      <param name="unQuantity" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="ExchangeItems" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="pArrayGenerate" type="const SteamItemDef_t*" kind="inarray" wire="i32" count="unArrayGenerateLength" />
+      <param name="punArrayGenerateQuantity" type="const uint32*" kind="inarray" wire="u32" count="unArrayGenerateLength" />
+      <param name="unArrayGenerateLength" type="uint32" kind="in" wire="u32" />
+      <param name="pArrayDestroy" type="const SteamItemInstanceID_t*" kind="inarray" wire="u64" count="unArrayDestroyLength" />
+      <param name="punArrayDestroyQuantity" type="const uint32*" kind="inarray" wire="u32" count="unArrayDestroyLength" />
+      <param name="unArrayDestroyLength" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="TransferItemQuantity" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="itemIdSource" type="SteamItemInstanceID_t" kind="in" wire="u64" />
+      <param name="unQuantity" type="uint32" kind="in" wire="u32" />
+      <param name="itemIdDest" type="SteamItemInstanceID_t" kind="in" wire="u64" />
+    </method>
+    <method name="SendItemDropHeartbeat" ret="void" />
+    <method name="TriggerItemDrop" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="dropListDefinition" type="SteamItemDef_t" kind="in" wire="i32" />
+    </method>
+    <method name="TradeItems" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="steamIDTradePartner" type="CSteamID" kind="in" wire="u64" />
+      <param name="pArrayGive" type="const SteamItemInstanceID_t*" kind="inarray" wire="u64" count="nArrayGiveLength" />
+      <param name="pArrayGiveQuantity" type="const uint32*" kind="inarray" wire="u32" count="nArrayGiveLength" />
+      <param name="nArrayGiveLength" type="uint32" kind="in" wire="u32" />
+      <param name="pArrayGet" type="const SteamItemInstanceID_t*" kind="inarray" wire="u64" count="nArrayGetLength" />
+      <param name="pArrayGetQuantity" type="const uint32*" kind="inarray" wire="u32" count="nArrayGetLength" />
+      <param name="nArrayGetLength" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="LoadItemDefinitions" ret="bool" />
+    <method name="GetItemDefinitionIDs" ret="bool" local="true">
+      <param name="pItemDefIDs" type="SteamItemDef_t*" kind="outarray" wire="i32" count="punItemDefIDsArraySize" />
+      <param name="punItemDefIDsArraySize" type="STEAM_DESC(Size of array is passed in and actual size used is returned in this param) uint32*" kind="in" wire="u64" />
+    </method>
+    <method name="GetItemDefinitionProperty" ret="bool">
+      <param name="iDefinition" type="SteamItemDef_t" kind="in" wire="i32" />
+      <param name="pchPropertyName" type="const char*" kind="str" />
+      <param name="pchValueBuffer" type="char*" kind="outstr" count="punValueBufferSizeOut" />
+      <param name="punValueBufferSizeOut" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="RequestEligiblePromoItemDefinitionsIDs" ret="u64">
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetEligiblePromoItemDefinitionIDs" ret="bool" local="true">
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+      <param name="pItemDefIDs" type="SteamItemDef_t*" kind="outarray" wire="i32" count="punItemDefIDsArraySize" />
+      <param name="punItemDefIDsArraySize" type="STEAM_DESC(Size of array is passed in and actual size used is returned in this param) uint32*" kind="in" wire="u64" />
+    </method>
+    <method name="StartPurchase" ret="u64">
+      <param name="pArrayItemDefs" type="const SteamItemDef_t*" kind="inarray" wire="i32" count="unArrayLength" />
+      <param name="punArrayQuantity" type="const uint32*" kind="inarray" wire="u32" count="unArrayLength" />
+      <param name="unArrayLength" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="RequestPrices" ret="u64" />
+    <method name="GetNumItemsWithPrices" ret="u32" />
+    <method name="GetItemsWithPrices" ret="bool" local="true">
+      <param name="pArrayItemDefs" type="STEAM_OUT_ARRAY_COUNT(pArrayItemDefs, Items with prices) SteamItemDef_t*" kind="in" wire="u64" count="unArrayLength" />
+      <param name="pCurrentPrices" type="STEAM_OUT_ARRAY_COUNT(pPrices, List of prices for the given item defs) uint64*" kind="in" wire="u64" count="unArrayLength" />
+      <param name="pBasePrices" type="STEAM_OUT_ARRAY_COUNT(pPrices, List of prices for the given item defs) uint64*" kind="in" wire="u64" count="unArrayLength" />
+      <param name="unArrayLength" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetItemPrice" ret="bool">
+      <param name="iDefinition" type="SteamItemDef_t" kind="in" wire="i32" />
+      <param name="pCurrentPrice" type="uint64*" kind="out" wire="u64" />
+      <param name="pBasePrice" type="uint64*" kind="out" wire="u64" />
+    </method>
+    <method name="StartUpdateProperties" ret="u64" />
+    <method name="RemoveProperty" ret="bool">
+      <param name="handle" type="SteamInventoryUpdateHandle_t" kind="in" wire="u64" />
+      <param name="nItemID" type="SteamItemInstanceID_t" kind="in" wire="u64" />
+      <param name="pchPropertyName" type="const char*" kind="str" />
+    </method>
+    <method name="SetProperty" cname="SetPropertyString" ret="bool">
+      <param name="handle" type="SteamInventoryUpdateHandle_t" kind="in" wire="u64" />
+      <param name="nItemID" type="SteamItemInstanceID_t" kind="in" wire="u64" />
+      <param name="pchPropertyName" type="const char*" kind="str" />
+      <param name="pchPropertyValue" type="const char*" kind="str" />
+    </method>
+    <method name="SetProperty" cname="SetPropertyBool" ret="bool">
+      <param name="handle" type="SteamInventoryUpdateHandle_t" kind="in" wire="u64" />
+      <param name="nItemID" type="SteamItemInstanceID_t" kind="in" wire="u64" />
+      <param name="pchPropertyName" type="const char*" kind="str" />
+      <param name="bValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetProperty" cname="SetPropertyInt64" ret="bool">
+      <param name="handle" type="SteamInventoryUpdateHandle_t" kind="in" wire="u64" />
+      <param name="nItemID" type="SteamItemInstanceID_t" kind="in" wire="u64" />
+      <param name="pchPropertyName" type="const char*" kind="str" />
+      <param name="nValue" type="int64" kind="in" wire="i64" />
+    </method>
+    <method name="SetProperty" cname="SetPropertyFloat" ret="bool">
+      <param name="handle" type="SteamInventoryUpdateHandle_t" kind="in" wire="u64" />
+      <param name="nItemID" type="SteamItemInstanceID_t" kind="in" wire="u64" />
+      <param name="pchPropertyName" type="const char*" kind="str" />
+      <param name="flValue" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="SubmitUpdateProperties" ret="bool">
+      <param name="handle" type="SteamInventoryUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+    </method>
+    <method name="InspectItem" ret="bool">
+      <param name="pResultHandle" type="SteamInventoryResult_t*" kind="out" wire="i32" />
+      <param name="pchItemToken" type="const char*" kind="str" />
+    </method>
+  </interface>
+  <interface name="ISteamMatchmaking" version="SteamMatchMaking009">
+    <method name="GetFavoriteGameCount" ret="i32" />
+    <method name="GetFavoriteGame" ret="bool">
+      <param name="iGame" type="int" kind="in" wire="i32" />
+      <param name="pnAppID" type="AppId_t*" kind="out" wire="u32" />
+      <param name="pnIP" type="uint32*" kind="out" wire="u32" />
+      <param name="pnConnPort" type="uint16*" kind="out" wire="u16" />
+      <param name="pnQueryPort" type="uint16*" kind="out" wire="u16" />
+      <param name="punFlags" type="uint32*" kind="out" wire="u32" />
+      <param name="pRTime32LastPlayedOnServer" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="AddFavoriteGame" ret="i32">
+      <param name="nAppID" type="AppId_t" kind="in" wire="u32" />
+      <param name="nIP" type="uint32" kind="in" wire="u32" />
+      <param name="nConnPort" type="uint16" kind="in" wire="u16" />
+      <param name="nQueryPort" type="uint16" kind="in" wire="u16" />
+      <param name="unFlags" type="uint32" kind="in" wire="u32" />
+      <param name="rTime32LastPlayedOnServer" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="RemoveFavoriteGame" ret="bool">
+      <param name="nAppID" type="AppId_t" kind="in" wire="u32" />
+      <param name="nIP" type="uint32" kind="in" wire="u32" />
+      <param name="nConnPort" type="uint16" kind="in" wire="u16" />
+      <param name="nQueryPort" type="uint16" kind="in" wire="u16" />
+      <param name="unFlags" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="RequestLobbyList" ret="u64" />
+    <method name="AddRequestLobbyListStringFilter" ret="void">
+      <param name="pchKeyToMatch" type="const char*" kind="str" />
+      <param name="pchValueToMatch" type="const char*" kind="str" />
+      <param name="eComparisonType" type="ELobbyComparison" kind="in" wire="enum" />
+    </method>
+    <method name="AddRequestLobbyListNumericalFilter" ret="void">
+      <param name="pchKeyToMatch" type="const char*" kind="str" />
+      <param name="nValueToMatch" type="int" kind="in" wire="i32" />
+      <param name="eComparisonType" type="ELobbyComparison" kind="in" wire="enum" />
+    </method>
+    <method name="AddRequestLobbyListNearValueFilter" ret="void">
+      <param name="pchKeyToMatch" type="const char*" kind="str" />
+      <param name="nValueToBeCloseTo" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="AddRequestLobbyListFilterSlotsAvailable" ret="void">
+      <param name="nSlotsAvailable" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="AddRequestLobbyListDistanceFilter" ret="void">
+      <param name="eLobbyDistanceFilter" type="ELobbyDistanceFilter" kind="in" wire="enum" />
+    </method>
+    <method name="AddRequestLobbyListResultCountFilter" ret="void">
+      <param name="cMaxResults" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="AddRequestLobbyListCompatibleMembersFilter" ret="void">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetLobbyByIndex" ret="struct" retstruct="CSteamID">
+      <param name="iLobby" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="CreateLobby" ret="u64">
+      <param name="eLobbyType" type="ELobbyType" kind="in" wire="enum" />
+      <param name="cMaxMembers" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="JoinLobby" ret="u64">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="LeaveLobby" ret="void">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="InviteUserToLobby" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="steamIDInvitee" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetNumLobbyMembers" ret="i32">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetLobbyMemberByIndex" ret="struct" retstruct="CSteamID">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="iMember" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetLobbyData" ret="str">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchKey" type="const char*" kind="str" />
+    </method>
+    <method name="SetLobbyData" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchKey" type="const char*" kind="str" />
+      <param name="pchValue" type="const char*" kind="str" />
+    </method>
+    <method name="GetLobbyDataCount" ret="i32">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetLobbyDataByIndex" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="iLobbyData" type="int" kind="in" wire="i32" />
+      <param name="pchKey" type="char*" kind="outstr" count="cchKeyBufferSize" />
+      <param name="cchKeyBufferSize" type="int" kind="in" wire="i32" />
+      <param name="pchValue" type="char*" kind="outstr" count="cchValueBufferSize" />
+      <param name="cchValueBufferSize" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="DeleteLobbyData" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchKey" type="const char*" kind="str" />
+    </method>
+    <method name="GetLobbyMemberData" ret="str">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchKey" type="const char*" kind="str" />
+    </method>
+    <method name="SetLobbyMemberData" ret="void">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchKey" type="const char*" kind="str" />
+      <param name="pchValue" type="const char*" kind="str" />
+    </method>
+    <method name="SendLobbyChatMsg" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="pvMsgBody" type="const void*" kind="inbuf" count="cubMsgBody" />
+      <param name="cubMsgBody" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetLobbyChatEntry" ret="i32">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="iChatID" type="int" kind="in" wire="i32" />
+      <param name="pSteamIDUser" type="CSteamID*" kind="outstruct" struct="CSteamID" />
+      <param name="pvData" type="void*" kind="outbuf" count="cubData" />
+      <param name="cubData" type="int" kind="in" wire="i32" />
+      <param name="peChatEntryType" type="EChatEntryType*" kind="out" wire="enum" />
+    </method>
+    <method name="RequestLobbyData" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="SetLobbyGameServer" ret="void">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="unGameServerIP" type="uint32" kind="in" wire="u32" />
+      <param name="unGameServerPort" type="uint16" kind="in" wire="u16" />
+      <param name="steamIDGameServer" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetLobbyGameServer" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="punGameServerIP" type="uint32*" kind="out" wire="u32" />
+      <param name="punGameServerPort" type="uint16*" kind="out" wire="u16" />
+      <param name="psteamIDGameServer" type="CSteamID*" kind="outstruct" struct="CSteamID" />
+    </method>
+    <method name="SetLobbyMemberLimit" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="cMaxMembers" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetLobbyMemberLimit" ret="i32">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="SetLobbyType" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="eLobbyType" type="ELobbyType" kind="in" wire="enum" />
+    </method>
+    <method name="SetLobbyJoinable" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="bLobbyJoinable" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="GetLobbyOwner" ret="struct" retstruct="CSteamID">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="SetLobbyOwner" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="steamIDNewOwner" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="SetLinkedLobby" ret="bool">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="steamIDLobbyDependent" type="CSteamID" kind="in" wire="u64" />
+    </method>
+  </interface>
+  <interface name="ISteamParties" version="SteamParties002">
+    <method name="GetNumActiveBeacons" ret="u32" />
+    <method name="GetBeaconByIndex" ret="u64">
+      <param name="unIndex" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetBeaconDetails" ret="bool" local="true">
+      <param name="ulBeaconID" type="PartyBeaconID_t" kind="in" wire="u64" />
+      <param name="pSteamIDBeaconOwner" type="CSteamID*" kind="out" wire="u64" />
+      <param name="pLocation" type="SteamPartyBeaconLocation_t*" kind="in" wire="u64" />
+      <param name="pchMetadata" type="char*" kind="outstr" count="cchMetadata" />
+      <param name="cchMetadata" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="JoinParty" ret="u64">
+      <param name="ulBeaconID" type="PartyBeaconID_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetNumAvailableBeaconLocations" ret="bool">
+      <param name="puNumLocations" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="GetAvailableBeaconLocations" ret="bool" local="true">
+      <param name="pLocationList" type="SteamPartyBeaconLocation_t*" kind="in" wire="u64" />
+      <param name="uMaxNumLocations" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="CreateBeacon" ret="u64" local="true">
+      <param name="unOpenSlots" type="uint32" kind="in" wire="u32" />
+      <param name="pBeaconLocation" type="SteamPartyBeaconLocation_t*" kind="in" wire="u64" />
+      <param name="pchConnectString" type="const char*" kind="str" />
+      <param name="pchMetadata" type="const char*" kind="str" />
+    </method>
+    <method name="OnReservationCompleted" ret="void">
+      <param name="ulBeacon" type="PartyBeaconID_t" kind="in" wire="u64" />
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="CancelReservation" ret="void">
+      <param name="ulBeacon" type="PartyBeaconID_t" kind="in" wire="u64" />
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="ChangeNumOpenSlots" ret="u64">
+      <param name="ulBeacon" type="PartyBeaconID_t" kind="in" wire="u64" />
+      <param name="unOpenSlots" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="DestroyBeacon" ret="bool">
+      <param name="ulBeacon" type="PartyBeaconID_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetBeaconLocationData" ret="bool" local="true">
+      <param name="BeaconLocation" type="SteamPartyBeaconLocation_t" kind="in" wire="u64" />
+      <param name="eData" type="ESteamPartyBeaconLocationData" kind="in" wire="enum" />
+      <param name="pchDataStringOut" type="char*" kind="outstr" count="cchDataStringOut" />
+      <param name="cchDataStringOut" type="int" kind="in" wire="i32" />
+    </method>
+  </interface>
+  <interface name="ISteamMusicRemote" version="STEAMMUSICREMOTE_INTERFACE_VERSION001">
+    <method name="RegisterSteamMusicRemote" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+    </method>
+    <method name="DeregisterSteamMusicRemote" ret="bool" />
+    <method name="BIsCurrentMusicRemote" ret="bool" />
+    <method name="BActivationSuccess" ret="bool">
+      <param name="bValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetDisplayName" ret="bool">
+      <param name="pchDisplayName" type="const char*" kind="str" />
+    </method>
+    <method name="SetPNGIcon_64x64" ret="bool">
+      <param name="pvBuffer" type="void*" kind="outbuf" count="cbBufferLength" />
+      <param name="cbBufferLength" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="EnablePlayPrevious" ret="bool">
+      <param name="bValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="EnablePlayNext" ret="bool">
+      <param name="bValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="EnableShuffled" ret="bool">
+      <param name="bValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="EnableLooped" ret="bool">
+      <param name="bValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="EnableQueue" ret="bool">
+      <param name="bValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="EnablePlaylists" ret="bool">
+      <param name="bValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="UpdatePlaybackStatus" ret="bool">
+      <param name="nStatus" type="AudioPlayback_Status" kind="in" wire="enum" />
+    </method>
+    <method name="UpdateShuffled" ret="bool">
+      <param name="bValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="UpdateLooped" ret="bool">
+      <param name="bValue" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="UpdateVolume" ret="bool">
+      <param name="flValue" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="CurrentEntryWillChange" ret="bool" />
+    <method name="CurrentEntryIsAvailable" ret="bool">
+      <param name="bAvailable" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="UpdateCurrentEntryText" ret="bool">
+      <param name="pchText" type="const char*" kind="str" />
+    </method>
+    <method name="UpdateCurrentEntryElapsedSeconds" ret="bool">
+      <param name="nValue" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="UpdateCurrentEntryCoverArt" ret="bool">
+      <param name="pvBuffer" type="void*" kind="outbuf" count="cbBufferLength" />
+      <param name="cbBufferLength" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="CurrentEntryDidChange" ret="bool" />
+    <method name="QueueWillChange" ret="bool" />
+    <method name="ResetQueueEntries" ret="bool" />
+    <method name="SetQueueEntry" ret="bool">
+      <param name="nID" type="int" kind="in" wire="i32" />
+      <param name="nPosition" type="int" kind="in" wire="i32" />
+      <param name="pchEntryText" type="const char*" kind="str" />
+    </method>
+    <method name="SetCurrentQueueEntry" ret="bool">
+      <param name="nID" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="QueueDidChange" ret="bool" />
+    <method name="PlaylistWillChange" ret="bool" />
+    <method name="ResetPlaylistEntries" ret="bool" />
+    <method name="SetPlaylistEntry" ret="bool">
+      <param name="nID" type="int" kind="in" wire="i32" />
+      <param name="nPosition" type="int" kind="in" wire="i32" />
+      <param name="pchEntryText" type="const char*" kind="str" />
+    </method>
+    <method name="SetCurrentPlaylistEntry" ret="bool">
+      <param name="nID" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="PlaylistDidChange" ret="bool" />
+  </interface>
+  <interface name="ISteamNetworking" version="SteamNetworking006">
+    <method name="SendP2PPacket" ret="bool">
+      <param name="steamIDRemote" type="CSteamID" kind="in" wire="u64" />
+      <param name="pubData" type="const void*" kind="inbuf" count="cubData" />
+      <param name="cubData" type="uint32" kind="in" wire="u32" />
+      <param name="eP2PSendType" type="EP2PSend" kind="in" wire="enum" />
+      <param name="nChannel" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="IsP2PPacketAvailable" ret="bool">
+      <param name="pcubMsgSize" type="uint32*" kind="out" wire="u32" />
+      <param name="nChannel" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="ReadP2PPacket" ret="bool">
+      <param name="pubDest" type="void*" kind="outbuf" count="cubDest" />
+      <param name="cubDest" type="uint32" kind="in" wire="u32" />
+      <param name="pcubMsgSize" type="uint32*" kind="out" wire="u32" />
+      <param name="psteamIDRemote" type="CSteamID*" kind="out" wire="u64" />
+      <param name="nChannel" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="AcceptP2PSessionWithUser" ret="bool">
+      <param name="steamIDRemote" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="CloseP2PSessionWithUser" ret="bool">
+      <param name="steamIDRemote" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="CloseP2PChannelWithUser" ret="bool">
+      <param name="steamIDRemote" type="CSteamID" kind="in" wire="u64" />
+      <param name="nChannel" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetP2PSessionState" ret="bool" local="true">
+      <param name="steamIDRemote" type="CSteamID" kind="in" wire="u64" />
+      <param name="pConnectionState" type="P2PSessionState_t*" kind="in" wire="u64" />
+    </method>
+    <method name="AllowP2PPacketRelay" ret="bool">
+      <param name="bAllow" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="CreateListenSocket" ret="u32" local="true">
+      <param name="nVirtualP2PPort" type="int" kind="in" wire="i32" />
+      <param name="nIP" type="SteamIPAddress_t" kind="in" wire="u64" />
+      <param name="nPort" type="uint16" kind="in" wire="u16" />
+      <param name="bAllowUseOfPacketRelay" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="CreateP2PConnectionSocket" ret="u32">
+      <param name="steamIDTarget" type="CSteamID" kind="in" wire="u64" />
+      <param name="nVirtualPort" type="int" kind="in" wire="i32" />
+      <param name="nTimeoutSec" type="int" kind="in" wire="i32" />
+      <param name="bAllowUseOfPacketRelay" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="CreateConnectionSocket" ret="u32" local="true">
+      <param name="nIP" type="SteamIPAddress_t" kind="in" wire="u64" />
+      <param name="nPort" type="uint16" kind="in" wire="u16" />
+      <param name="nTimeoutSec" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="DestroySocket" ret="bool">
+      <param name="hSocket" type="SNetSocket_t" kind="in" wire="u32" />
+      <param name="bNotifyRemoteEnd" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="DestroyListenSocket" ret="bool">
+      <param name="hSocket" type="SNetListenSocket_t" kind="in" wire="u32" />
+      <param name="bNotifyRemoteEnd" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SendDataOnSocket" ret="bool">
+      <param name="hSocket" type="SNetSocket_t" kind="in" wire="u32" />
+      <param name="pubData" type="void*" kind="outbuf" count="cubData" />
+      <param name="cubData" type="uint32" kind="in" wire="u32" />
+      <param name="bReliable" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="IsDataAvailableOnSocket" ret="bool">
+      <param name="hSocket" type="SNetSocket_t" kind="in" wire="u32" />
+      <param name="pcubMsgSize" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="RetrieveDataFromSocket" ret="bool">
+      <param name="hSocket" type="SNetSocket_t" kind="in" wire="u32" />
+      <param name="pubDest" type="void*" kind="outbuf" count="cubDest" />
+      <param name="cubDest" type="uint32" kind="in" wire="u32" />
+      <param name="pcubMsgSize" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="IsDataAvailable" ret="bool">
+      <param name="hListenSocket" type="SNetListenSocket_t" kind="in" wire="u32" />
+      <param name="pcubMsgSize" type="uint32*" kind="out" wire="u32" />
+      <param name="phSocket" type="SNetSocket_t*" kind="out" wire="u32" />
+    </method>
+    <method name="RetrieveData" ret="bool">
+      <param name="hListenSocket" type="SNetListenSocket_t" kind="in" wire="u32" />
+      <param name="pubDest" type="void*" kind="outbuf" count="cubDest" />
+      <param name="cubDest" type="uint32" kind="in" wire="u32" />
+      <param name="pcubMsgSize" type="uint32*" kind="out" wire="u32" />
+      <param name="phSocket" type="SNetSocket_t*" kind="out" wire="u32" />
+    </method>
+    <method name="GetSocketInfo" ret="bool">
+      <param name="hSocket" type="SNetSocket_t" kind="in" wire="u32" />
+      <param name="pSteamIDRemote" type="CSteamID*" kind="out" wire="u64" />
+      <param name="peSocketStatus" type="int*" kind="out" wire="i32" />
+      <param name="punIPRemote" type="SteamIPAddress_t*" kind="outstruct" struct="SteamIPAddress_t" />
+      <param name="punPortRemote" type="uint16*" kind="out" wire="u16" />
+    </method>
+    <method name="GetListenSocketInfo" ret="bool">
+      <param name="hListenSocket" type="SNetListenSocket_t" kind="in" wire="u32" />
+      <param name="pnIP" type="SteamIPAddress_t*" kind="outstruct" struct="SteamIPAddress_t" />
+      <param name="pnPort" type="uint16*" kind="out" wire="u16" />
+    </method>
+    <method name="GetSocketConnectionType" ret="enum">
+      <param name="hSocket" type="SNetSocket_t" kind="in" wire="u32" />
+    </method>
+    <method name="GetMaxPacketSize" ret="i32">
+      <param name="hSocket" type="SNetSocket_t" kind="in" wire="u32" />
+    </method>
+  </interface>
+  <interface name="ISteamNetworkingMessages" version="SteamNetworkingMessages002">
+    <method name="SendMessageToUser" ret="enum">
+      <param name="identityRemote" type="const SteamNetworkingIdentity&amp;" kind="instruct" struct="SteamNetworkingIdentity" />
+      <param name="pubData" type="const void*" kind="inbuf" count="cubData" />
+      <param name="cubData" type="uint32" kind="in" wire="u32" />
+      <param name="nSendFlags" type="int" kind="in" wire="i32" />
+      <param name="nRemoteChannel" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="ReceiveMessagesOnChannel" ret="i32" local="true">
+      <param name="nLocalChannel" type="int" kind="in" wire="i32" />
+      <param name="ppOutMessages" type="SteamNetworkingMessage_t**" kind="in" wire="u64" />
+      <param name="nMaxMessages" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="AcceptSessionWithUser" ret="bool">
+      <param name="identityRemote" type="const SteamNetworkingIdentity&amp;" kind="instruct" struct="SteamNetworkingIdentity" />
+    </method>
+    <method name="CloseSessionWithUser" ret="bool">
+      <param name="identityRemote" type="const SteamNetworkingIdentity&amp;" kind="instruct" struct="SteamNetworkingIdentity" />
+    </method>
+    <method name="CloseChannelWithUser" ret="bool">
+      <param name="identityRemote" type="const SteamNetworkingIdentity&amp;" kind="instruct" struct="SteamNetworkingIdentity" />
+      <param name="nLocalChannel" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetSessionConnectionInfo" ret="enum" local="true">
+      <param name="identityRemote" type="const SteamNetworkingIdentity&amp;" kind="instruct" struct="SteamNetworkingIdentity" />
+      <param name="pConnectionInfo" type="SteamNetConnectionInfo_t*" kind="in" wire="u64" />
+      <param name="pQuickStatus" type="SteamNetConnectionRealTimeStatus_t*" kind="in" wire="u64" />
+    </method>
+  </interface>
+  <interface name="ISteamNetworkingSockets" version="SteamNetworkingSockets012">
+    <method name="CreateListenSocketIP" ret="u32" local="true">
+      <param name="localAddress" type="const SteamNetworkingIPAddr&amp;" kind="in" wire="u64" />
+      <param name="nOptions" type="int" kind="in" wire="i32" />
+      <param name="pOptions" type="const SteamNetworkingConfigValue_t*" kind="in" wire="u64" />
+    </method>
+    <method name="ConnectByIPAddress" ret="u32" local="true">
+      <param name="address" type="const SteamNetworkingIPAddr&amp;" kind="in" wire="u64" />
+      <param name="nOptions" type="int" kind="in" wire="i32" />
+      <param name="pOptions" type="const SteamNetworkingConfigValue_t*" kind="in" wire="u64" />
+    </method>
+    <method name="CreateListenSocketP2P" ret="u32" local="true">
+      <param name="nLocalVirtualPort" type="int" kind="in" wire="i32" />
+      <param name="nOptions" type="int" kind="in" wire="i32" />
+      <param name="pOptions" type="const SteamNetworkingConfigValue_t*" kind="in" wire="u64" />
+    </method>
+    <method name="ConnectP2P" ret="u32" local="true">
+      <param name="identityRemote" type="const SteamNetworkingIdentity&amp;" kind="instruct" struct="SteamNetworkingIdentity" />
+      <param name="nRemoteVirtualPort" type="int" kind="in" wire="i32" />
+      <param name="nOptions" type="int" kind="in" wire="i32" />
+      <param name="pOptions" type="const SteamNetworkingConfigValue_t*" kind="in" wire="u64" />
+    </method>
+    <method name="AcceptConnection" ret="enum">
+      <param name="hConn" type="HSteamNetConnection" kind="in" wire="u32" />
+    </method>
+    <method name="CloseConnection" ret="bool">
+      <param name="hPeer" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="nReason" type="int" kind="in" wire="i32" />
+      <param name="pszDebug" type="const char*" kind="str" />
+      <param name="bEnableLinger" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="CloseListenSocket" ret="bool">
+      <param name="hSocket" type="HSteamListenSocket" kind="in" wire="u32" />
+    </method>
+    <method name="SetConnectionUserData" ret="bool">
+      <param name="hPeer" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="nUserData" type="int64" kind="in" wire="i64" />
+    </method>
+    <method name="GetConnectionUserData" ret="i64">
+      <param name="hPeer" type="HSteamNetConnection" kind="in" wire="u32" />
+    </method>
+    <method name="SetConnectionName" ret="void">
+      <param name="hPeer" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="pszName" type="const char*" kind="str" />
+    </method>
+    <method name="GetConnectionName" ret="bool">
+      <param name="hPeer" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="pszName" type="char*" kind="outstr" count="nMaxLen" />
+      <param name="nMaxLen" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="SendMessageToConnection" ret="enum">
+      <param name="hConn" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="pData" type="const void*" kind="inbuf" count="cbData" />
+      <param name="cbData" type="uint32" kind="in" wire="u32" />
+      <param name="nSendFlags" type="int" kind="in" wire="i32" />
+      <param name="pOutMessageNumber" type="int64*" kind="out" wire="i64" />
+    </method>
+    <method name="SendMessages" ret="void" local="true">
+      <param name="nMessages" type="int" kind="in" wire="i32" />
+      <param name="pMessages" type="SteamNetworkingMessage_t*const*" kind="in" wire="u64" />
+      <param name="pOutMessageNumberOrResult" type="int64*" kind="out" wire="i64" />
+    </method>
+    <method name="FlushMessagesOnConnection" ret="enum">
+      <param name="hConn" type="HSteamNetConnection" kind="in" wire="u32" />
+    </method>
+    <method name="ReceiveMessagesOnConnection" ret="i32" local="true">
+      <param name="hConn" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="ppOutMessages" type="SteamNetworkingMessage_t**" kind="in" wire="u64" />
+      <param name="nMaxMessages" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetConnectionInfo" ret="bool" local="true">
+      <param name="hConn" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="pInfo" type="SteamNetConnectionInfo_t*" kind="in" wire="u64" />
+    </method>
+    <method name="GetConnectionRealTimeStatus" ret="enum" local="true">
+      <param name="hConn" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="pStatus" type="SteamNetConnectionRealTimeStatus_t*" kind="in" wire="u64" />
+      <param name="nLanes" type="int" kind="in" wire="i32" />
+      <param name="pLanes" type="SteamNetConnectionRealTimeLaneStatus_t*" kind="in" wire="u64" />
+    </method>
+    <method name="GetDetailedConnectionStatus" ret="i32">
+      <param name="hConn" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="pszBuf" type="char*" kind="outstr" count="cbBuf" />
+      <param name="cbBuf" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetListenSocketAddress" ret="bool" local="true">
+      <param name="hSocket" type="HSteamListenSocket" kind="in" wire="u32" />
+      <param name="address" type="SteamNetworkingIPAddr*" kind="in" wire="u64" />
+    </method>
+    <method name="CreateSocketPair" ret="bool">
+      <param name="pOutConnection1" type="HSteamNetConnection*" kind="out" wire="u32" />
+      <param name="pOutConnection2" type="HSteamNetConnection*" kind="out" wire="u32" />
+      <param name="bUseNetworkLoopback" type="bool" kind="in" wire="bool" />
+      <param name="pIdentity1" type="const SteamNetworkingIdentity*" kind="instruct" struct="SteamNetworkingIdentity" />
+      <param name="pIdentity2" type="const SteamNetworkingIdentity*" kind="instruct" struct="SteamNetworkingIdentity" />
+    </method>
+    <method name="ConfigureConnectionLanes" ret="enum" local="true">
+      <param name="hConn" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="nNumLanes" type="int" kind="in" wire="i32" />
+      <param name="pLanePriorities" type="const int*" kind="in" wire="u64" />
+      <param name="pLaneWeights" type="const uint16*" kind="in" wire="u64" />
+    </method>
+    <method name="GetIdentity" ret="bool">
+      <param name="pIdentity" type="SteamNetworkingIdentity*" kind="outstruct" struct="SteamNetworkingIdentity" />
+    </method>
+    <method name="InitAuthentication" ret="enum" />
+    <method name="GetAuthenticationStatus" ret="enum" local="true">
+      <param name="pDetails" type="SteamNetAuthenticationStatus_t*" kind="in" wire="u64" />
+    </method>
+    <method name="CreatePollGroup" ret="u32" />
+    <method name="DestroyPollGroup" ret="bool">
+      <param name="hPollGroup" type="HSteamNetPollGroup" kind="in" wire="u32" />
+    </method>
+    <method name="SetConnectionPollGroup" ret="bool">
+      <param name="hConn" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="hPollGroup" type="HSteamNetPollGroup" kind="in" wire="u32" />
+    </method>
+    <method name="ReceiveMessagesOnPollGroup" ret="i32" local="true">
+      <param name="hPollGroup" type="HSteamNetPollGroup" kind="in" wire="u32" />
+      <param name="ppOutMessages" type="SteamNetworkingMessage_t**" kind="in" wire="u64" />
+      <param name="nMaxMessages" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="ReceivedRelayAuthTicket" ret="bool" local="true">
+      <param name="pvTicket" type="const void*" kind="inbuf" count="cbTicket" />
+      <param name="cbTicket" type="int" kind="in" wire="i32" />
+      <param name="pOutParsedTicket" type="SteamDatagramRelayAuthTicket*" kind="in" wire="u64" />
+    </method>
+    <method name="FindRelayAuthTicketForServer" ret="i32" local="true">
+      <param name="identityGameServer" type="const SteamNetworkingIdentity&amp;" kind="instruct" struct="SteamNetworkingIdentity" />
+      <param name="nRemoteVirtualPort" type="int" kind="in" wire="i32" />
+      <param name="pOutParsedTicket" type="SteamDatagramRelayAuthTicket*" kind="in" wire="u64" />
+    </method>
+    <method name="ConnectToHostedDedicatedServer" ret="u32" local="true">
+      <param name="identityTarget" type="const SteamNetworkingIdentity&amp;" kind="instruct" struct="SteamNetworkingIdentity" />
+      <param name="nRemoteVirtualPort" type="int" kind="in" wire="i32" />
+      <param name="nOptions" type="int" kind="in" wire="i32" />
+      <param name="pOptions" type="const SteamNetworkingConfigValue_t*" kind="in" wire="u64" />
+    </method>
+    <method name="GetHostedDedicatedServerPort" ret="u16" />
+    <method name="GetHostedDedicatedServerPOPID" ret="u32" />
+    <method name="GetHostedDedicatedServerAddress" ret="enum" local="true">
+      <param name="pRouting" type="SteamDatagramHostedAddress*" kind="in" wire="u64" />
+    </method>
+    <method name="CreateHostedDedicatedServerListenSocket" ret="u32" local="true">
+      <param name="nLocalVirtualPort" type="int" kind="in" wire="i32" />
+      <param name="nOptions" type="int" kind="in" wire="i32" />
+      <param name="pOptions" type="const SteamNetworkingConfigValue_t*" kind="in" wire="u64" />
+    </method>
+    <method name="GetGameCoordinatorServerLogin" ret="enum" local="true">
+      <param name="pLoginInfo" type="SteamDatagramGameCoordinatorServerLogin*" kind="in" wire="u64" />
+      <param name="pcbSignedBlob" type="int*" kind="out" wire="i32" />
+      <param name="pBlob" type="void*" kind="in" wire="u64" />
+    </method>
+    <method name="ConnectP2PCustomSignaling" ret="u32" local="true">
+      <param name="pSignaling" type="ISteamNetworkingConnectionSignaling*" kind="in" wire="u64" />
+      <param name="pPeerIdentity" type="const SteamNetworkingIdentity*" kind="instruct" struct="SteamNetworkingIdentity" />
+      <param name="nRemoteVirtualPort" type="int" kind="in" wire="i32" />
+      <param name="nOptions" type="int" kind="in" wire="i32" />
+      <param name="pOptions" type="const SteamNetworkingConfigValue_t*" kind="in" wire="u64" />
+    </method>
+    <method name="ReceivedP2PCustomSignal" ret="bool" local="true">
+      <param name="pMsg" type="const void*" kind="inbuf" count="cbMsg" />
+      <param name="cbMsg" type="int" kind="in" wire="i32" />
+      <param name="pContext" type="ISteamNetworkingSignalingRecvContext*" kind="in" wire="u64" />
+    </method>
+    <method name="GetCertificateRequest" ret="bool" local="true">
+      <param name="pcbBlob" type="int*" kind="out" wire="i32" />
+      <param name="pBlob" type="void*" kind="in" wire="u64" />
+      <param name="errMsg" type="SteamNetworkingErrMsg&amp;" kind="in" wire="u64" />
+    </method>
+    <method name="SetCertificate" ret="bool" local="true">
+      <param name="pCertificate" type="const void*" kind="inbuf" count="cbCertificate" />
+      <param name="cbCertificate" type="int" kind="in" wire="i32" />
+      <param name="errMsg" type="SteamNetworkingErrMsg&amp;" kind="in" wire="u64" />
+    </method>
+    <method name="ResetIdentity" ret="void">
+      <param name="pIdentity" type="const SteamNetworkingIdentity*" kind="instruct" struct="SteamNetworkingIdentity" />
+    </method>
+    <method name="RunCallbacks" ret="void" />
+    <method name="BeginAsyncRequestFakeIP" ret="bool">
+      <param name="nNumPorts" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetFakeIP" ret="void" local="true">
+      <param name="idxFirstPort" type="int" kind="in" wire="i32" />
+      <param name="pInfo" type="SteamNetworkingFakeIPResult_t*" kind="in" wire="u64" />
+    </method>
+    <method name="CreateListenSocketP2PFakeIP" ret="u32" local="true">
+      <param name="idxFakePort" type="int" kind="in" wire="i32" />
+      <param name="nOptions" type="int" kind="in" wire="i32" />
+      <param name="pOptions" type="const SteamNetworkingConfigValue_t*" kind="in" wire="u64" />
+    </method>
+    <method name="GetRemoteFakeIPForConnection" ret="enum" local="true">
+      <param name="hConn" type="HSteamNetConnection" kind="in" wire="u32" />
+      <param name="pOutAddr" type="SteamNetworkingIPAddr*" kind="in" wire="u64" />
+    </method>
+    <method name="CreateFakeUDPPort" ret="iface" local="true">
+      <param name="idxFakeServerPort" type="int" kind="in" wire="i32" />
+    </method>
+  </interface>
+  <interface name="ISteamParentalSettings" version="STEAMPARENTALSETTINGS_INTERFACE_VERSION001">
+    <method name="BIsParentalLockEnabled" ret="bool" />
+    <method name="BIsParentalLockLocked" ret="bool" />
+    <method name="BIsAppBlocked" ret="bool">
+      <param name="nAppID" type="AppId_t" kind="in" wire="u32" />
+    </method>
+    <method name="BIsAppInBlockList" ret="bool">
+      <param name="nAppID" type="AppId_t" kind="in" wire="u32" />
+    </method>
+    <method name="BIsFeatureBlocked" ret="bool">
+      <param name="eFeature" type="EParentalFeature" kind="in" wire="enum" />
+    </method>
+    <method name="BIsFeatureInBlockList" ret="bool">
+      <param name="eFeature" type="EParentalFeature" kind="in" wire="enum" />
+    </method>
+  </interface>
+  <interface name="ISteamRemotePlay" version="STEAMREMOTEPLAY_INTERFACE_VERSION003">
+    <method name="GetSessionCount" ret="u32" />
+    <method name="GetSessionID" ret="u32">
+      <param name="iSessionIndex" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetSessionSteamID" ret="struct" retstruct="CSteamID">
+      <param name="unSessionID" type="RemotePlaySessionID_t" kind="in" wire="u32" />
+    </method>
+    <method name="GetSessionClientName" ret="str">
+      <param name="unSessionID" type="RemotePlaySessionID_t" kind="in" wire="u32" />
+    </method>
+    <method name="GetSessionClientFormFactor" ret="enum">
+      <param name="unSessionID" type="RemotePlaySessionID_t" kind="in" wire="u32" />
+    </method>
+    <method name="BGetSessionClientResolution" ret="bool">
+      <param name="unSessionID" type="RemotePlaySessionID_t" kind="in" wire="u32" />
+      <param name="pnResolutionX" type="int*" kind="out" wire="i32" />
+      <param name="pnResolutionY" type="int*" kind="out" wire="i32" />
+    </method>
+    <method name="ShowRemotePlayTogetherUI" ret="bool" />
+    <method name="BSendRemotePlayTogetherInvite" ret="bool">
+      <param name="steamIDFriend" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="BEnableRemotePlayTogetherDirectInput" ret="bool" />
+    <method name="DisableRemotePlayTogetherDirectInput" ret="void" />
+    <method name="GetInput" ret="u32" local="true">
+      <param name="pInput" type="RemotePlayInput_t*" kind="in" wire="u64" />
+      <param name="unMaxEvents" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SetMouseVisibility" ret="void">
+      <param name="unSessionID" type="RemotePlaySessionID_t" kind="in" wire="u32" />
+      <param name="bVisible" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetMousePosition" ret="void">
+      <param name="unSessionID" type="RemotePlaySessionID_t" kind="in" wire="u32" />
+      <param name="flNormalizedX" type="float" kind="in" wire="f32" />
+      <param name="flNormalizedY" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="CreateMouseCursor" ret="u32">
+      <param name="nWidth" type="int" kind="in" wire="i32" />
+      <param name="nHeight" type="int" kind="in" wire="i32" />
+      <param name="nHotX" type="int" kind="in" wire="i32" />
+      <param name="nHotY" type="int" kind="in" wire="i32" />
+      <param name="pBGRA" type="const void*" kind="inbuf" count="nPitch" />
+      <param name="nPitch" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="SetMouseCursor" ret="void">
+      <param name="unSessionID" type="RemotePlaySessionID_t" kind="in" wire="u32" />
+      <param name="unCursorID" type="RemotePlayCursorID_t" kind="in" wire="u32" />
+    </method>
+  </interface>
+  <interface name="ISteamScreenshots" version="STEAMSCREENSHOTS_INTERFACE_VERSION003">
+    <method name="WriteScreenshot" ret="u32">
+      <param name="pubRGB" type="void*" kind="outbuf" count="cubRGB" />
+      <param name="cubRGB" type="uint32" kind="in" wire="u32" />
+      <param name="nWidth" type="int" kind="in" wire="i32" />
+      <param name="nHeight" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="AddScreenshotToLibrary" ret="u32">
+      <param name="pchFilename" type="const char*" kind="str" />
+      <param name="pchThumbnailFilename" type="const char*" kind="str" />
+      <param name="nWidth" type="int" kind="in" wire="i32" />
+      <param name="nHeight" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="TriggerScreenshot" ret="void" />
+    <method name="HookScreenshots" ret="void">
+      <param name="bHook" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetLocation" ret="bool">
+      <param name="hScreenshot" type="ScreenshotHandle" kind="in" wire="u32" />
+      <param name="pchLocation" type="const char*" kind="str" />
+    </method>
+    <method name="TagUser" ret="bool">
+      <param name="hScreenshot" type="ScreenshotHandle" kind="in" wire="u32" />
+      <param name="steamID" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="TagPublishedFile" ret="bool">
+      <param name="hScreenshot" type="ScreenshotHandle" kind="in" wire="u32" />
+      <param name="unPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="IsScreenshotsHooked" ret="bool" />
+    <method name="AddVRScreenshotToLibrary" ret="u32">
+      <param name="eType" type="EVRScreenshotType" kind="in" wire="enum" />
+      <param name="pchFilename" type="const char*" kind="str" />
+      <param name="pchVRFilename" type="const char*" kind="str" />
+    </method>
+  </interface>
+  <interface name="ISteamTimeline" version="STEAMTIMELINE_INTERFACE_V004">
+    <method name="SetTimelineTooltip" ret="void">
+      <param name="pchDescription" type="const char*" kind="str" />
+      <param name="flTimeDelta" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="ClearTimelineTooltip" ret="void">
+      <param name="flTimeDelta" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="SetTimelineGameMode" ret="void">
+      <param name="eMode" type="ETimelineGameMode" kind="in" wire="enum" />
+    </method>
+    <method name="AddInstantaneousTimelineEvent" ret="u64">
+      <param name="pchTitle" type="const char*" kind="str" />
+      <param name="pchDescription" type="const char*" kind="str" />
+      <param name="pchIcon" type="const char*" kind="str" />
+      <param name="unIconPriority" type="uint32" kind="in" wire="u32" />
+      <param name="flStartOffsetSeconds" type="float" kind="in" wire="f32" />
+      <param name="ePossibleClip" type="ETimelineEventClipPriority" kind="in" wire="enum" />
+    </method>
+    <method name="AddRangeTimelineEvent" ret="u64">
+      <param name="pchTitle" type="const char*" kind="str" />
+      <param name="pchDescription" type="const char*" kind="str" />
+      <param name="pchIcon" type="const char*" kind="str" />
+      <param name="unIconPriority" type="uint32" kind="in" wire="u32" />
+      <param name="flStartOffsetSeconds" type="float" kind="in" wire="f32" />
+      <param name="flDuration" type="float" kind="in" wire="f32" />
+      <param name="ePossibleClip" type="ETimelineEventClipPriority" kind="in" wire="enum" />
+    </method>
+    <method name="StartRangeTimelineEvent" ret="u64">
+      <param name="pchTitle" type="const char*" kind="str" />
+      <param name="pchDescription" type="const char*" kind="str" />
+      <param name="pchIcon" type="const char*" kind="str" />
+      <param name="unPriority" type="uint32" kind="in" wire="u32" />
+      <param name="flStartOffsetSeconds" type="float" kind="in" wire="f32" />
+      <param name="ePossibleClip" type="ETimelineEventClipPriority" kind="in" wire="enum" />
+    </method>
+    <method name="UpdateRangeTimelineEvent" ret="void">
+      <param name="ulEvent" type="TimelineEventHandle_t" kind="in" wire="u64" />
+      <param name="pchTitle" type="const char*" kind="str" />
+      <param name="pchDescription" type="const char*" kind="str" />
+      <param name="pchIcon" type="const char*" kind="str" />
+      <param name="unPriority" type="uint32" kind="in" wire="u32" />
+      <param name="ePossibleClip" type="ETimelineEventClipPriority" kind="in" wire="enum" />
+    </method>
+    <method name="EndRangeTimelineEvent" ret="void">
+      <param name="ulEvent" type="TimelineEventHandle_t" kind="in" wire="u64" />
+      <param name="flEndOffsetSeconds" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="RemoveTimelineEvent" ret="void">
+      <param name="ulEvent" type="TimelineEventHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="DoesEventRecordingExist" ret="u64">
+      <param name="ulEvent" type="TimelineEventHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="StartGamePhase" ret="void" />
+    <method name="EndGamePhase" ret="void" />
+    <method name="SetGamePhaseID" ret="void">
+      <param name="pchPhaseID" type="const char*" kind="str" />
+    </method>
+    <method name="DoesGamePhaseRecordingExist" ret="u64">
+      <param name="pchPhaseID" type="const char*" kind="str" />
+    </method>
+    <method name="AddGamePhaseTag" ret="void">
+      <param name="pchTagName" type="const char*" kind="str" />
+      <param name="pchTagIcon" type="const char*" kind="str" />
+      <param name="pchTagGroup" type="const char*" kind="str" />
+      <param name="unPriority" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SetGamePhaseAttribute" ret="void">
+      <param name="pchAttributeGroup" type="const char*" kind="str" />
+      <param name="pchAttributeValue" type="const char*" kind="str" />
+      <param name="unPriority" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="OpenOverlayToGamePhase" ret="void">
+      <param name="pchPhaseID" type="const char*" kind="str" />
+    </method>
+    <method name="OpenOverlayToTimelineEvent" ret="void" local="true">
+      <param name="ulEvent" type="const TimelineEventHandle_t" kind="in" wire="u64" />
+    </method>
+  </interface>
+  <interface name="ISteamUGC" version="STEAMUGC_INTERFACE_VERSION021">
+    <method name="CreateQueryUserUGCRequest" ret="u64">
+      <param name="unAccountID" type="AccountID_t" kind="in" wire="u32" />
+      <param name="eListType" type="EUserUGCList" kind="in" wire="enum" />
+      <param name="eMatchingUGCType" type="EUGCMatchingUGCType" kind="in" wire="enum" />
+      <param name="eSortOrder" type="EUserUGCListSortOrder" kind="in" wire="enum" />
+      <param name="nCreatorAppID" type="AppId_t" kind="in" wire="u32" />
+      <param name="nConsumerAppID" type="AppId_t" kind="in" wire="u32" />
+      <param name="unPage" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="CreateQueryAllUGCRequest" cname="CreateQueryAllUGCRequestPage" ret="u64">
+      <param name="eQueryType" type="EUGCQuery" kind="in" wire="enum" />
+      <param name="eMatchingeMatchingUGCTypeFileType" type="EUGCMatchingUGCType" kind="in" wire="enum" />
+      <param name="nCreatorAppID" type="AppId_t" kind="in" wire="u32" />
+      <param name="nConsumerAppID" type="AppId_t" kind="in" wire="u32" />
+      <param name="unPage" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="CreateQueryAllUGCRequest" cname="CreateQueryAllUGCRequestCursor" ret="u64">
+      <param name="eQueryType" type="EUGCQuery" kind="in" wire="enum" />
+      <param name="eMatchingeMatchingUGCTypeFileType" type="EUGCMatchingUGCType" kind="in" wire="enum" />
+      <param name="nCreatorAppID" type="AppId_t" kind="in" wire="u32" />
+      <param name="nConsumerAppID" type="AppId_t" kind="in" wire="u32" />
+      <param name="pchCursor" type="const char*" kind="str" />
+    </method>
+    <method name="CreateQueryUGCDetailsRequest" ret="u64">
+      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="unNumPublishedFileIDs" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SendQueryUGCRequest" ret="u64">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetQueryUGCResult" ret="bool" local="true">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="pDetails" type="SteamUGCDetails_t*" kind="in" wire="u64" />
+    </method>
+    <method name="GetQueryUGCNumTags" ret="u32">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetQueryUGCTag" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="indexTag" type="uint32" kind="in" wire="u32" />
+      <param name="pchValue" type="char*" kind="outstr" count="cchValueSize" />
+      <param name="cchValueSize" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetQueryUGCTagDisplayName" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="indexTag" type="uint32" kind="in" wire="u32" />
+      <param name="pchValue" type="char*" kind="outstr" count="cchValueSize" />
+      <param name="cchValueSize" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetQueryUGCPreviewURL" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="pchURL" type="char*" kind="outstr" count="cchURLSize" />
+      <param name="cchURLSize" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetQueryUGCMetadata" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="pchMetadata" type="char*" kind="outstr" count="cchMetadatasize" />
+      <param name="cchMetadatasize" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetQueryUGCChildren" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="cMaxEntries" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetQueryUGCStatistic" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="eStatType" type="EItemStatistic" kind="in" wire="enum" />
+      <param name="pStatValue" type="uint64*" kind="out" wire="u64" />
+    </method>
+    <method name="GetQueryUGCNumAdditionalPreviews" ret="u32">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetQueryUGCAdditionalPreview" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="previewIndex" type="uint32" kind="in" wire="u32" />
+      <param name="pchURLOrVideoID" type="char*" kind="outstr" count="cchURLSize" />
+      <param name="cchURLSize" type="uint32" kind="in" wire="u32" />
+      <param name="pchOriginalFileName" type="char*" kind="outstr" count="cchOriginalFileNameSize" />
+      <param name="cchOriginalFileNameSize" type="uint32" kind="in" wire="u32" />
+      <param name="pPreviewType" type="EItemPreviewType*" kind="out" wire="enum" />
+    </method>
+    <method name="GetQueryUGCNumKeyValueTags" ret="u32">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetQueryUGCKeyValueTag" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="keyValueTagIndex" type="uint32" kind="in" wire="u32" />
+      <param name="pchKey" type="char*" kind="outstr" count="cchKeySize" />
+      <param name="cchKeySize" type="uint32" kind="in" wire="u32" />
+      <param name="pchValue" type="char*" kind="outstr" count="cchValueSize" />
+      <param name="cchValueSize" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetQueryUGCKeyValueTag" cname="GetQueryFirstUGCKeyValueTag" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="pchKey" type="const char*" kind="str" />
+      <param name="pchValue" type="char*" kind="outstr" count="cchValueSize" />
+      <param name="cchValueSize" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetNumSupportedGameVersions" ret="u32">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetSupportedGameVersionData" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="versionIndex" type="uint32" kind="in" wire="u32" />
+      <param name="pchGameBranchMin" type="char*" kind="outstr" count="cchGameBranchSize" />
+      <param name="pchGameBranchMax" type="char*" kind="outstr" count="cchGameBranchSize" />
+      <param name="cchGameBranchSize" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetQueryUGCContentDescriptors" ret="u32">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="pvecDescriptors" type="EUGCContentDescriptorID*" kind="out" wire="enum" />
+      <param name="cMaxEntries" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="ReleaseQueryUGCRequest" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="AddRequiredTag" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="pTagName" type="const char*" kind="str" />
+    </method>
+    <method name="AddRequiredTagGroup" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="pTagGroups" type="const SteamParamStringArray_t*" kind="stringarray" />
+    </method>
+    <method name="AddExcludedTag" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="pTagName" type="const char*" kind="str" />
+    </method>
+    <method name="SetReturnOnlyIDs" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="bReturnOnlyIDs" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetReturnKeyValueTags" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="bReturnKeyValueTags" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetReturnLongDescription" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="bReturnLongDescription" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetReturnMetadata" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="bReturnMetadata" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetReturnChildren" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="bReturnChildren" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetReturnAdditionalPreviews" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="bReturnAdditionalPreviews" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetReturnTotalOnly" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="bReturnTotalOnly" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetReturnPlaytimeStats" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="unDays" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SetLanguage" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="pchLanguage" type="const char*" kind="str" />
+    </method>
+    <method name="SetAllowCachedResponse" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="unMaxAgeSeconds" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SetAdminQuery" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="bAdminQuery" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetCloudFileNameFilter" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="pMatchCloudFileName" type="const char*" kind="str" />
+    </method>
+    <method name="SetMatchAnyTag" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="bMatchAnyTag" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetSearchText" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="pSearchText" type="const char*" kind="str" />
+    </method>
+    <method name="SetRankedByTrendDays" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="unDays" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SetTimeCreatedDateRange" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="rtStart" type="RTime32" kind="in" wire="u32" />
+      <param name="rtEnd" type="RTime32" kind="in" wire="u32" />
+    </method>
+    <method name="SetTimeUpdatedDateRange" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="rtStart" type="RTime32" kind="in" wire="u32" />
+      <param name="rtEnd" type="RTime32" kind="in" wire="u32" />
+    </method>
+    <method name="AddRequiredKeyValueTag" ret="bool">
+      <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
+      <param name="pKey" type="const char*" kind="str" />
+      <param name="pValue" type="const char*" kind="str" />
+    </method>
+    <method name="RequestUGCDetails" ret="u64">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+      <param name="unMaxAgeSeconds" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="CreateItem" ret="u64">
+      <param name="nConsumerAppId" type="AppId_t" kind="in" wire="u32" />
+      <param name="eFileType" type="EWorkshopFileType" kind="in" wire="enum" />
+    </method>
+    <method name="StartItemUpdate" ret="u64">
+      <param name="nConsumerAppId" type="AppId_t" kind="in" wire="u32" />
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="SetItemTitle" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pchTitle" type="const char*" kind="str" />
+    </method>
+    <method name="SetItemDescription" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pchDescription" type="const char*" kind="str" />
+    </method>
+    <method name="SetItemUpdateLanguage" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pchLanguage" type="const char*" kind="str" />
+    </method>
+    <method name="SetItemMetadata" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pchMetaData" type="const char*" kind="str" />
+    </method>
+    <method name="SetItemVisibility" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="eVisibility" type="ERemoteStoragePublishedFileVisibility" kind="in" wire="enum" />
+    </method>
+    <method name="SetItemTags" ret="bool">
+      <param name="updateHandle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pTags" type="const SteamParamStringArray_t*" kind="stringarray" />
+      <param name="bAllowAdminTags" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetItemContent" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pszContentFolder" type="const char*" kind="str" />
+    </method>
+    <method name="SetItemPreview" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pszPreviewFile" type="const char*" kind="str" />
+    </method>
+    <method name="SetAllowLegacyUpload" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="bAllowLegacyUpload" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="RemoveAllItemKeyValueTags" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="RemoveItemKeyValueTags" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pchKey" type="const char*" kind="str" />
+    </method>
+    <method name="AddItemKeyValueTag" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pchKey" type="const char*" kind="str" />
+      <param name="pchValue" type="const char*" kind="str" />
+    </method>
+    <method name="AddItemPreviewFile" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pszPreviewFile" type="const char*" kind="str" />
+      <param name="type" type="EItemPreviewType" kind="in" wire="enum" />
+    </method>
+    <method name="AddItemPreviewVideo" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pszVideoID" type="const char*" kind="str" />
+    </method>
+    <method name="UpdateItemPreviewFile" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="pszPreviewFile" type="const char*" kind="str" />
+    </method>
+    <method name="UpdateItemPreviewVideo" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+      <param name="pszVideoID" type="const char*" kind="str" />
+    </method>
+    <method name="RemoveItemPreview" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="index" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="AddContentDescriptor" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="descid" type="EUGCContentDescriptorID" kind="in" wire="enum" />
+    </method>
+    <method name="RemoveContentDescriptor" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="descid" type="EUGCContentDescriptorID" kind="in" wire="enum" />
+    </method>
+    <method name="SetRequiredGameVersions" ret="bool">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pszGameBranchMin" type="const char*" kind="str" />
+      <param name="pszGameBranchMax" type="const char*" kind="str" />
+    </method>
+    <method name="SubmitItemUpdate" ret="u64">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="pchChangeNote" type="const char*" kind="str" />
+    </method>
+    <method name="GetItemUpdateProgress" ret="enum">
+      <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
+      <param name="punBytesProcessed" type="uint64*" kind="out" wire="u64" />
+      <param name="punBytesTotal" type="uint64*" kind="out" wire="u64" />
+    </method>
+    <method name="SetUserItemVote" ret="u64">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+      <param name="bVoteUp" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="GetUserItemVote" ret="u64">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="AddItemToFavorites" ret="u64">
+      <param name="nAppId" type="AppId_t" kind="in" wire="u32" />
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="RemoveItemFromFavorites" ret="u64">
+      <param name="nAppId" type="AppId_t" kind="in" wire="u32" />
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="SubscribeItem" ret="u64">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="UnsubscribeItem" ret="u64">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetNumSubscribedItems" ret="u32">
+      <param name="bIncludeLocallyDisabled" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="GetSubscribedItems" ret="u32">
+      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="cMaxEntries" type="uint32" kind="in" wire="u32" />
+      <param name="bIncludeLocallyDisabled" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="GetItemState" ret="u32">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetItemInstallInfo" ret="bool">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+      <param name="punSizeOnDisk" type="uint64*" kind="out" wire="u64" />
+      <param name="pchFolder" type="char*" kind="outstr" count="cchFolderSize" />
+      <param name="cchFolderSize" type="uint32" kind="in" wire="u32" />
+      <param name="punTimeStamp" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="GetItemDownloadInfo" ret="bool">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+      <param name="punBytesDownloaded" type="uint64*" kind="out" wire="u64" />
+      <param name="punBytesTotal" type="uint64*" kind="out" wire="u64" />
+    </method>
+    <method name="DownloadItem" ret="bool">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+      <param name="bHighPriority" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="BInitWorkshopForGameServer" ret="bool">
+      <param name="unWorkshopDepotID" type="DepotId_t" kind="in" wire="u32" />
+      <param name="pszFolder" type="const char*" kind="str" />
+    </method>
+    <method name="SuspendDownloads" ret="void">
+      <param name="bSuspend" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="StartPlaytimeTracking" ret="u64">
+      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="unNumPublishedFileIDs" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="StopPlaytimeTracking" ret="u64">
+      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="unNumPublishedFileIDs" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="StopPlaytimeTrackingForAllItems" ret="u64" />
+    <method name="AddDependency" ret="u64">
+      <param name="nParentPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+      <param name="nChildPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="RemoveDependency" ret="u64">
+      <param name="nParentPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+      <param name="nChildPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="AddAppDependency" ret="u64">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+      <param name="nAppID" type="AppId_t" kind="in" wire="u32" />
+    </method>
+    <method name="RemoveAppDependency" ret="u64">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+      <param name="nAppID" type="AppId_t" kind="in" wire="u32" />
+    </method>
+    <method name="GetAppDependencies" ret="u64">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="DeleteItem" ret="u64">
+      <param name="nPublishedFileID" type="PublishedFileId_t" kind="in" wire="u64" />
+    </method>
+    <method name="ShowWorkshopEULA" ret="bool" />
+    <method name="GetWorkshopEULAStatus" ret="u64" />
+    <method name="GetUserContentDescriptorPreferences" ret="u32">
+      <param name="pvecDescriptors" type="EUGCContentDescriptorID*" kind="out" wire="enum" />
+      <param name="cMaxEntries" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SetItemsDisabledLocally" ret="bool">
+      <param name="pvecPublishedFileIDs" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="unNumPublishedFileIDs" type="uint32" kind="in" wire="u32" />
+      <param name="bDisabledLocally" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetSubscriptionsLoadOrder" ret="bool">
+      <param name="pvecPublishedFileIDs" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="unNumPublishedFileIDs" type="uint32" kind="in" wire="u32" />
+    </method>
+  </interface>
+  <interface name="ISteamUserStats" version="STEAMUSERSTATS_INTERFACE_VERSION013">
+    <method name="GetStat" cname="GetStatInt32" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pData" type="int32*" kind="out" wire="i32" />
+    </method>
+    <method name="GetStat" cname="GetStatFloat" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pData" type="float*" kind="out" wire="f32" />
+    </method>
+    <method name="SetStat" cname="SetStatInt32" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="nData" type="int32" kind="in" wire="i32" />
+    </method>
+    <method name="SetStat" cname="SetStatFloat" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="fData" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="UpdateAvgRateStat" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="flCountThisSession" type="float" kind="in" wire="f32" />
+      <param name="dSessionLength" type="double" kind="in" wire="f64" />
+    </method>
+    <method name="GetAchievement" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pbAchieved" type="bool*" kind="out" wire="bool" />
+    </method>
+    <method name="SetAchievement" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+    </method>
+    <method name="ClearAchievement" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+    </method>
+    <method name="GetAchievementAndUnlockTime" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pbAchieved" type="bool*" kind="out" wire="bool" />
+      <param name="punUnlockTime" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="StoreStats" ret="bool" />
+    <method name="GetAchievementIcon" ret="i32">
+      <param name="pchName" type="const char*" kind="str" />
+    </method>
+    <method name="GetAchievementDisplayAttribute" ret="str">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pchKey" type="const char*" kind="str" />
+    </method>
+    <method name="IndicateAchievementProgress" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="nCurProgress" type="uint32" kind="in" wire="u32" />
+      <param name="nMaxProgress" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetNumAchievements" ret="u32" />
+    <method name="GetAchievementName" ret="str">
+      <param name="iAchievement" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="RequestUserStats" ret="u64">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+    </method>
+    <method name="GetUserStat" cname="GetUserStatInt32" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pData" type="int32*" kind="out" wire="i32" />
+    </method>
+    <method name="GetUserStat" cname="GetUserStatFloat" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pData" type="float*" kind="out" wire="f32" />
+    </method>
+    <method name="GetUserAchievement" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pbAchieved" type="bool*" kind="out" wire="bool" />
+    </method>
+    <method name="GetUserAchievementAndUnlockTime" ret="bool">
+      <param name="steamIDUser" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pbAchieved" type="bool*" kind="out" wire="bool" />
+      <param name="punUnlockTime" type="uint32*" kind="out" wire="u32" />
+    </method>
+    <method name="ResetAllStats" ret="bool">
+      <param name="bAchievementsToo" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="FindOrCreateLeaderboard" ret="u64">
+      <param name="pchLeaderboardName" type="const char*" kind="str" />
+      <param name="eLeaderboardSortMethod" type="ELeaderboardSortMethod" kind="in" wire="enum" />
+      <param name="eLeaderboardDisplayType" type="ELeaderboardDisplayType" kind="in" wire="enum" />
+    </method>
+    <method name="FindLeaderboard" ret="u64">
+      <param name="pchLeaderboardName" type="const char*" kind="str" />
+    </method>
+    <method name="GetLeaderboardName" ret="str">
+      <param name="hSteamLeaderboard" type="SteamLeaderboard_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetLeaderboardEntryCount" ret="i32">
+      <param name="hSteamLeaderboard" type="SteamLeaderboard_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetLeaderboardSortMethod" ret="enum">
+      <param name="hSteamLeaderboard" type="SteamLeaderboard_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetLeaderboardDisplayType" ret="enum">
+      <param name="hSteamLeaderboard" type="SteamLeaderboard_t" kind="in" wire="u64" />
+    </method>
+    <method name="DownloadLeaderboardEntries" ret="u64">
+      <param name="hSteamLeaderboard" type="SteamLeaderboard_t" kind="in" wire="u64" />
+      <param name="eLeaderboardDataRequest" type="ELeaderboardDataRequest" kind="in" wire="enum" />
+      <param name="nRangeStart" type="int" kind="in" wire="i32" />
+      <param name="nRangeEnd" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="DownloadLeaderboardEntriesForUsers" ret="u64">
+      <param name="hSteamLeaderboard" type="SteamLeaderboard_t" kind="in" wire="u64" />
+      <param name="prgUsers" type="CSteamID*" kind="inarray" wire="u64" count="cUsers" />
+      <param name="cUsers" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetDownloadedLeaderboardEntry" ret="bool">
+      <param name="hSteamLeaderboardEntries" type="SteamLeaderboardEntries_t" kind="in" wire="u64" />
+      <param name="index" type="int" kind="in" wire="i32" />
+      <param name="pLeaderboardEntry" type="LeaderboardEntry_t*" kind="outstruct" struct="LeaderboardEntry_t" />
+      <param name="pDetails" type="int32*" kind="out" wire="i32" />
+      <param name="cDetailsMax" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="UploadLeaderboardScore" ret="u64">
+      <param name="hSteamLeaderboard" type="SteamLeaderboard_t" kind="in" wire="u64" />
+      <param name="eLeaderboardUploadScoreMethod" type="ELeaderboardUploadScoreMethod" kind="in" wire="enum" />
+      <param name="nScore" type="int32" kind="in" wire="i32" />
+      <param name="pScoreDetails" type="const int32*" kind="inarray" wire="i32" count="cScoreDetailsCount" />
+      <param name="cScoreDetailsCount" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="AttachLeaderboardUGC" ret="u64">
+      <param name="hSteamLeaderboard" type="SteamLeaderboard_t" kind="in" wire="u64" />
+      <param name="hUGC" type="UGCHandle_t" kind="in" wire="u64" />
+    </method>
+    <method name="GetNumberOfCurrentPlayers" ret="u64" />
+    <method name="RequestGlobalAchievementPercentages" ret="u64" />
+    <method name="GetMostAchievedAchievementInfo" ret="i32">
+      <param name="pchName" type="char*" kind="outstr" count="unNameBufLen" />
+      <param name="unNameBufLen" type="uint32" kind="in" wire="u32" />
+      <param name="pflPercent" type="float*" kind="out" wire="f32" />
+      <param name="pbAchieved" type="bool*" kind="out" wire="bool" />
+    </method>
+    <method name="GetNextMostAchievedAchievementInfo" ret="i32">
+      <param name="iIteratorPrevious" type="int" kind="in" wire="i32" />
+      <param name="pchName" type="char*" kind="outstr" count="unNameBufLen" />
+      <param name="unNameBufLen" type="uint32" kind="in" wire="u32" />
+      <param name="pflPercent" type="float*" kind="out" wire="f32" />
+      <param name="pbAchieved" type="bool*" kind="out" wire="bool" />
+    </method>
+    <method name="GetAchievementAchievedPercent" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pflPercent" type="float*" kind="out" wire="f32" />
+    </method>
+    <method name="RequestGlobalStats" ret="u64">
+      <param name="nHistoryDays" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetGlobalStat" cname="GetGlobalStatInt64" ret="bool">
+      <param name="pchStatName" type="const char*" kind="str" />
+      <param name="pData" type="int64*" kind="out" wire="i64" />
+    </method>
+    <method name="GetGlobalStat" cname="GetGlobalStatDouble" ret="bool">
+      <param name="pchStatName" type="const char*" kind="str" />
+      <param name="pData" type="double*" kind="out" wire="f64" />
+    </method>
+    <method name="GetGlobalStatHistory" cname="GetGlobalStatHistoryInt64" ret="i32">
+      <param name="pchStatName" type="const char*" kind="str" />
+      <param name="pData" type="int64*" kind="inarray" wire="i64" count="cubData" bytes="true" />
+      <param name="cubData" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetGlobalStatHistory" cname="GetGlobalStatHistoryDouble" ret="i32">
+      <param name="pchStatName" type="const char*" kind="str" />
+      <param name="pData" type="double*" kind="inarray" wire="f64" count="cubData" bytes="true" />
+      <param name="cubData" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetAchievementProgressLimits" cname="GetAchievementProgressLimitsInt32" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pnMinProgress" type="int32*" kind="out" wire="i32" />
+      <param name="pnMaxProgress" type="int32*" kind="out" wire="i32" />
+    </method>
+    <method name="GetAchievementProgressLimits" cname="GetAchievementProgressLimitsFloat" ret="bool">
+      <param name="pchName" type="const char*" kind="str" />
+      <param name="pfMinProgress" type="float*" kind="out" wire="f32" />
+      <param name="pfMaxProgress" type="float*" kind="out" wire="f32" />
+    </method>
+  </interface>
+  <interface name="ISteamVideo" version="STEAMVIDEO_INTERFACE_V007">
+    <method name="GetVideoURL" ret="void">
+      <param name="unVideoAppID" type="AppId_t" kind="in" wire="u32" />
+    </method>
+    <method name="IsBroadcasting" ret="bool">
+      <param name="pnNumViewers" type="int*" kind="out" wire="i32" />
+    </method>
+    <method name="GetOPFSettings" ret="void">
+      <param name="unVideoAppID" type="AppId_t" kind="in" wire="u32" />
+    </method>
+    <method name="GetOPFStringForApp" ret="bool" local="true">
+      <param name="unVideoAppID" type="AppId_t" kind="in" wire="u32" />
+      <param name="pchBuffer" type="char*" kind="in" wire="u64" />
+      <param name="pnBufferSize" type="int32*" kind="out" wire="i32" />
+    </method>
+  </interface>
+  <interface name="ISteamHTMLSurface" version="STEAMHTMLSURFACE_INTERFACE_VERSION_005">
+    <method name="Destructor" ret="void" local="true" />
+    <method name="Init" ret="bool" />
+    <method name="Shutdown" ret="bool" />
+    <method name="CreateBrowser" ret="u64">
+      <param name="pchUserAgent" type="const char*" kind="str" />
+      <param name="pchUserCSS" type="const char*" kind="str" />
+    </method>
+    <method name="RemoveBrowser" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+    </method>
+    <method name="LoadURL" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="pchURL" type="const char*" kind="str" />
+      <param name="pchPostData" type="const char*" kind="str" />
+    </method>
+    <method name="SetSize" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="unWidth" type="uint32" kind="in" wire="u32" />
+      <param name="unHeight" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="StopLoad" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+    </method>
+    <method name="Reload" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+    </method>
+    <method name="GoBack" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+    </method>
+    <method name="GoForward" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+    </method>
+    <method name="AddHeader" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="pchKey" type="const char*" kind="str" />
+      <param name="pchValue" type="const char*" kind="str" />
+    </method>
+    <method name="ExecuteJavascript" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="pchScript" type="const char*" kind="str" />
+    </method>
+    <method name="MouseUp" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="eMouseButton" type="EHTMLMouseButton" kind="in" wire="enum" />
+    </method>
+    <method name="MouseDown" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="eMouseButton" type="EHTMLMouseButton" kind="in" wire="enum" />
+    </method>
+    <method name="MouseDoubleClick" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="eMouseButton" type="EHTMLMouseButton" kind="in" wire="enum" />
+    </method>
+    <method name="MouseMove" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="x" type="int" kind="in" wire="i32" />
+      <param name="y" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="MouseWheel" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="nDelta" type="int32" kind="in" wire="i32" />
+    </method>
+    <method name="KeyDown" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="nNativeKeyCode" type="uint32" kind="in" wire="u32" />
+      <param name="eHTMLKeyModifiers" type="EHTMLKeyModifiers" kind="in" wire="enum" />
+      <param name="bIsSystemKey" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="KeyUp" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="nNativeKeyCode" type="uint32" kind="in" wire="u32" />
+      <param name="eHTMLKeyModifiers" type="EHTMLKeyModifiers" kind="in" wire="enum" />
+    </method>
+    <method name="KeyChar" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="cUnicodeChar" type="uint32" kind="in" wire="u32" />
+      <param name="eHTMLKeyModifiers" type="EHTMLKeyModifiers" kind="in" wire="enum" />
+    </method>
+    <method name="SetHorizontalScroll" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="nAbsolutePixelScroll" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SetVerticalScroll" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="nAbsolutePixelScroll" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="SetKeyFocus" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="bHasKeyFocus" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="ViewSource" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+    </method>
+    <method name="CopyToClipboard" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+    </method>
+    <method name="PasteFromClipboard" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+    </method>
+    <method name="Find" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="pchSearchStr" type="const char*" kind="str" />
+      <param name="bCurrentlyInFind" type="bool" kind="in" wire="bool" />
+      <param name="bReverse" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="StopFind" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+    </method>
+    <method name="GetLinkAtPosition" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="x" type="int" kind="in" wire="i32" />
+      <param name="y" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="SetCookie" ret="void">
+      <param name="pchHostname" type="const char*" kind="str" />
+      <param name="pchKey" type="const char*" kind="str" />
+      <param name="pchValue" type="const char*" kind="str" />
+      <param name="pchPath" type="const char*" kind="str" />
+      <param name="nExpires" type="RTime32" kind="in" wire="u32" />
+      <param name="bSecure" type="bool" kind="in" wire="bool" />
+      <param name="bHTTPOnly" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetPageScaleFactor" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="flZoom" type="float" kind="in" wire="f32" />
+      <param name="nPointX" type="int" kind="in" wire="i32" />
+      <param name="nPointY" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="SetBackgroundMode" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="bBackgroundMode" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SetDPIScalingFactor" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="flDPIScaling" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="OpenDeveloperTools" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+    </method>
+    <method name="AllowStartRequest" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="bAllowed" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="JSDialogResponse" ret="void">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="bResult" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="FileLoadDialogResponse" ret="void" local="true">
+      <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
+      <param name="pchSelectedFiles" type="const char**" kind="in" wire="u64" />
+    </method>
+  </interface>
+  <interface name="ISteamGameSearch" version="SteamMatchGameSearch001">
+    <method name="AddGameSearchParams" ret="enum">
+      <param name="pchKeyToFind" type="const char*" kind="str" />
+      <param name="pchValuesToFind" type="const char*" kind="str" />
+    </method>
+    <method name="SearchForGameWithLobby" ret="enum">
+      <param name="steamIDLobby" type="CSteamID" kind="in" wire="u64" />
+      <param name="nPlayerMin" type="int" kind="in" wire="i32" />
+      <param name="nPlayerMax" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="SearchForGameSolo" ret="enum">
+      <param name="nPlayerMin" type="int" kind="in" wire="i32" />
+      <param name="nPlayerMax" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="AcceptGame" ret="enum" />
+    <method name="DeclineGame" ret="enum" />
+    <method name="RetrieveConnectionDetails" ret="enum">
+      <param name="steamIDHost" type="CSteamID" kind="in" wire="u64" />
+      <param name="pchConnectionDetails" type="char*" kind="outstr" count="cubConnectionDetails" />
+      <param name="cubConnectionDetails" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="EndGameSearch" ret="enum" />
+    <method name="SetGameHostParams" ret="enum">
+      <param name="pchKey" type="const char*" kind="str" />
+      <param name="pchValue" type="const char*" kind="str" />
+    </method>
+    <method name="SetConnectionDetails" ret="enum">
+      <param name="pchConnectionDetails" type="const char*" kind="str" />
+      <param name="cubConnectionDetails" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="RequestPlayersForGame" ret="enum">
+      <param name="nPlayerMin" type="int" kind="in" wire="i32" />
+      <param name="nPlayerMax" type="int" kind="in" wire="i32" />
+      <param name="nMaxTeamSize" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="HostConfirmGameStart" ret="enum">
+      <param name="ullUniqueGameID" type="uint64" kind="in" wire="u64" />
+    </method>
+    <method name="CancelRequestPlayersForGame" ret="enum" />
+    <method name="SubmitPlayerResult" ret="enum">
+      <param name="ullUniqueGameID" type="uint64" kind="in" wire="u64" />
+      <param name="steamIDPlayer" type="CSteamID" kind="in" wire="u64" />
+      <param name="EPlayerResult" type="EPlayerResult_t" kind="in" wire="enum" />
+    </method>
+    <method name="EndGame" ret="enum">
+      <param name="ullUniqueGameID" type="uint64" kind="in" wire="u64" />
+    </method>
+  </interface>
+  <interface name="ISteamClient" version="SteamClient021">
+    <method name="CreateSteamPipe" ret="i32" />
+    <method name="BReleaseSteamPipe" ret="bool">
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+    </method>
+    <method name="ConnectToGlobalUser" ret="i32">
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+    </method>
+    <method name="CreateLocalUser" ret="i32">
+      <param name="phSteamPipe" type="HSteamPipe*" kind="out" wire="i32" />
+      <param name="eAccountType" type="EAccountType" kind="in" wire="enum" />
+    </method>
+    <method name="ReleaseUser" ret="void">
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="hUser" type="HSteamUser" kind="in" wire="i32" />
+    </method>
+    <method name="GetISteamUser" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamGameServer" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="SetLocalIPBinding" ret="void">
+      <param name="unIP" type="const SteamIPAddress_t&amp;" kind="instruct" struct="SteamIPAddress_t" />
+      <param name="usPort" type="uint16" kind="in" wire="u16" />
+    </method>
+    <method name="GetISteamFriends" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamUtils" ret="iface">
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamMatchmaking" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamMatchmakingServers" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamGenericInterface" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamUserStats" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamGameServerStats" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamApps" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamNetworking" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamRemoteStorage" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamScreenshots" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamGameSearch" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="RunFrame" ret="void" />
+    <method name="GetIPCCallCount" ret="u32" />
+    <method name="SetWarningMessageHook" ret="void" local="true">
+      <param name="hook0" type="SteamAPIWarningMessageHook_t pFunction" kind="in" wire="u64" />
+    </method>
+    <method name="BShutdownIfAllPipesClosed" ret="bool" />
+    <method name="GetISteamHTTP" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamController" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamUGC" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamMusic" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamMusicRemote" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamHTMLSurface" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="DEPRECATED_Set_SteamAPI_CPostAPIResultInProcess" ret="void" local="true">
+      <param name="hook0" type="void (*)()" kind="in" wire="u64" />
+    </method>
+    <method name="DEPRECATED_Remove_SteamAPI_CPostAPIResultInProcess" ret="void" local="true">
+      <param name="hook0" type="void (*)()" kind="in" wire="u64" />
+    </method>
+    <method name="Set_SteamAPI_CCheckCallbackRegisteredInProcess" ret="void" local="true">
+      <param name="hook0" type="SteamAPI_CheckCallbackRegistered_t func" kind="in" wire="u64" />
+    </method>
+    <method name="GetISteamInventory" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamVideo" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamParentalSettings" ret="iface">
+      <param name="hSteamuser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamInput" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamParties" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="GetISteamRemotePlay" ret="iface">
+      <param name="hSteamUser" type="HSteamUser" kind="in" wire="i32" />
+      <param name="hSteamPipe" type="HSteamPipe" kind="in" wire="i32" />
+      <param name="pchVersion" type="const char*" kind="str" />
+    </method>
+    <method name="DestroyAllInterfaces" ret="void" />
+  </interface>
+  <interface name="ISteamNetworkingUtils" version="SteamNetworkingUtils004">
+    <method name="AllocateMessage" ret="iface" local="true">
+      <param name="cbAllocateBuffer" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetRelayNetworkStatus" ret="enum" local="true">
+      <param name="pDetails" type="SteamRelayNetworkStatus_t*" kind="in" wire="u64" />
+    </method>
+    <method name="GetLocalPingLocation" ret="f32" local="true">
+      <param name="result" type="SteamNetworkPingLocation_t&amp;" kind="in" wire="u64" />
+    </method>
+    <method name="EstimatePingTimeBetweenTwoLocations" ret="i32" local="true">
+      <param name="location1" type="const SteamNetworkPingLocation_t&amp;" kind="in" wire="u64" />
+      <param name="location2" type="const SteamNetworkPingLocation_t&amp;" kind="in" wire="u64" />
+    </method>
+    <method name="EstimatePingTimeFromLocalHost" ret="i32" local="true">
+      <param name="remoteLocation" type="const SteamNetworkPingLocation_t&amp;" kind="in" wire="u64" />
+    </method>
+    <method name="ConvertPingLocationToString" ret="void" local="true">
+      <param name="location" type="const SteamNetworkPingLocation_t&amp;" kind="in" wire="u64" />
+      <param name="pszBuf" type="char*" kind="outstr" count="cchBufSize" />
+      <param name="cchBufSize" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="ParsePingLocationString" ret="bool" local="true">
+      <param name="pszString" type="const char*" kind="str" />
+      <param name="result" type="SteamNetworkPingLocation_t&amp;" kind="in" wire="u64" />
+    </method>
+    <method name="CheckPingDataUpToDate" ret="bool">
+      <param name="flMaxAgeSeconds" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="GetPingToDataCenter" ret="i32">
+      <param name="popID" type="SteamNetworkingPOPID" kind="in" wire="u32" />
+      <param name="pViaRelayPoP" type="SteamNetworkingPOPID*" kind="out" wire="u32" />
+    </method>
+    <method name="GetDirectPingToPOP" ret="i32">
+      <param name="popID" type="SteamNetworkingPOPID" kind="in" wire="u32" />
+    </method>
+    <method name="GetPOPCount" ret="i32" />
+    <method name="GetPOPList" ret="i32">
+      <param name="list" type="SteamNetworkingPOPID*" kind="out" wire="u32" />
+      <param name="nListSz" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="GetLocalTimestamp" ret="i64" />
+    <method name="SetDebugOutputFunction" ret="void" local="true">
+      <param name="eDetailLevel" type="ESteamNetworkingSocketsDebugOutputType" kind="in" wire="enum" />
+      <param name="pfnFunc" type="FSteamNetworkingSocketsDebugOutput" kind="in" wire="u64" />
+    </method>
+    <method name="GetIPv4FakeIPType" ret="enum">
+      <param name="nIPv4" type="uint32" kind="in" wire="u32" />
+    </method>
+    <method name="GetRealIdentityForFakeIP" ret="enum" local="true">
+      <param name="fakeIP" type="const SteamNetworkingIPAddr&amp;" kind="in" wire="u64" />
+      <param name="pOutRealIdentity" type="SteamNetworkingIdentity*" kind="outstruct" struct="SteamNetworkingIdentity" />
+    </method>
+    <method name="SetConfigValue" ret="bool" local="true">
+      <param name="eValue" type="ESteamNetworkingConfigValue" kind="in" wire="enum" />
+      <param name="eScopeType" type="ESteamNetworkingConfigScope" kind="in" wire="enum" />
+      <param name="scopeObj" type="intptr_t" kind="in" wire="i64" />
+      <param name="eDataType" type="ESteamNetworkingConfigDataType" kind="in" wire="enum" />
+      <param name="pArg" type="const void*" kind="in" wire="u64" />
+    </method>
+    <method name="GetConfigValue" ret="enum" local="true">
+      <param name="eValue" type="ESteamNetworkingConfigValue" kind="in" wire="enum" />
+      <param name="eScopeType" type="ESteamNetworkingConfigScope" kind="in" wire="enum" />
+      <param name="scopeObj" type="intptr_t" kind="in" wire="i64" />
+      <param name="pOutDataType" type="ESteamNetworkingConfigDataType*" kind="out" wire="enum" />
+      <param name="pResult" type="void*" kind="in" wire="u64" />
+      <param name="cbResult" type="size_t*" kind="out" wire="u64" />
+    </method>
+    <method name="GetConfigValueInfo" ret="str">
+      <param name="eValue" type="ESteamNetworkingConfigValue" kind="in" wire="enum" />
+      <param name="pOutDataType" type="ESteamNetworkingConfigDataType*" kind="out" wire="enum" />
+      <param name="pOutScope" type="ESteamNetworkingConfigScope*" kind="out" wire="enum" />
+    </method>
+    <method name="IterateGenericEditableConfigValues" ret="enum">
+      <param name="eCurrent" type="ESteamNetworkingConfigValue" kind="in" wire="enum" />
+      <param name="bEnumerateDevVars" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SteamNetworkingIPAddr_ToString" ret="void" local="true">
+      <param name="addr" type="const SteamNetworkingIPAddr&amp;" kind="in" wire="u64" />
+      <param name="buf" type="char*" kind="in" wire="u64" />
+      <param name="cbBuf" type="size_t" kind="in" wire="u64" />
+      <param name="bWithPort" type="bool" kind="in" wire="bool" />
+    </method>
+    <method name="SteamNetworkingIPAddr_ParseString" ret="bool" local="true">
+      <param name="pAddr" type="SteamNetworkingIPAddr*" kind="in" wire="u64" />
+      <param name="pszStr" type="const char*" kind="str" />
+    </method>
+    <method name="SteamNetworkingIPAddr_GetFakeIPType" ret="enum" local="true">
+      <param name="addr" type="const SteamNetworkingIPAddr&amp;" kind="in" wire="u64" />
+    </method>
+    <method name="SteamNetworkingIdentity_ToString" ret="void" local="true">
+      <param name="identity" type="const SteamNetworkingIdentity&amp;" kind="instruct" struct="SteamNetworkingIdentity" />
+      <param name="buf" type="char*" kind="in" wire="u64" />
+      <param name="cbBuf" type="size_t" kind="in" wire="u64" />
+    </method>
+    <method name="SteamNetworkingIdentity_ParseString" ret="bool">
+      <param name="pIdentity" type="SteamNetworkingIdentity*" kind="outstruct" struct="SteamNetworkingIdentity" />
+      <param name="pszStr" type="const char*" kind="str" />
+    </method>
+  </interface>
+  <interface name="ISteamMatchmakingServers" version="SteamMatchMakingServers002">
+    <method name="RequestInternetServerList" ret="u64" local="true">
+      <param name="iApp" type="AppId_t" kind="in" wire="u32" />
+      <param name="ppchFilters" type="MatchMakingKeyValuePair_t**" kind="in" wire="u64" count="nFilters" />
+      <param name="nFilters" type="uint32" kind="in" wire="u32" />
+      <param name="pRequestServersResponse" type="ISteamMatchmakingServerListResponse*" kind="in" wire="u64" />
+    </method>
+    <method name="RequestLANServerList" ret="u64" local="true">
+      <param name="iApp" type="AppId_t" kind="in" wire="u32" />
+      <param name="pRequestServersResponse" type="ISteamMatchmakingServerListResponse*" kind="in" wire="u64" />
+    </method>
+    <method name="RequestFriendsServerList" ret="u64" local="true">
+      <param name="iApp" type="AppId_t" kind="in" wire="u32" />
+      <param name="ppchFilters" type="MatchMakingKeyValuePair_t**" kind="in" wire="u64" count="nFilters" />
+      <param name="nFilters" type="uint32" kind="in" wire="u32" />
+      <param name="pRequestServersResponse" type="ISteamMatchmakingServerListResponse*" kind="in" wire="u64" />
+    </method>
+    <method name="RequestFavoritesServerList" ret="u64" local="true">
+      <param name="iApp" type="AppId_t" kind="in" wire="u32" />
+      <param name="ppchFilters" type="MatchMakingKeyValuePair_t**" kind="in" wire="u64" count="nFilters" />
+      <param name="nFilters" type="uint32" kind="in" wire="u32" />
+      <param name="pRequestServersResponse" type="ISteamMatchmakingServerListResponse*" kind="in" wire="u64" />
+    </method>
+    <method name="RequestHistoryServerList" ret="u64" local="true">
+      <param name="iApp" type="AppId_t" kind="in" wire="u32" />
+      <param name="ppchFilters" type="MatchMakingKeyValuePair_t**" kind="in" wire="u64" count="nFilters" />
+      <param name="nFilters" type="uint32" kind="in" wire="u32" />
+      <param name="pRequestServersResponse" type="ISteamMatchmakingServerListResponse*" kind="in" wire="u64" />
+    </method>
+    <method name="RequestSpectatorServerList" ret="u64" local="true">
+      <param name="iApp" type="AppId_t" kind="in" wire="u32" />
+      <param name="ppchFilters" type="MatchMakingKeyValuePair_t**" kind="in" wire="u64" count="nFilters" />
+      <param name="nFilters" type="uint32" kind="in" wire="u32" />
+      <param name="pRequestServersResponse" type="ISteamMatchmakingServerListResponse*" kind="in" wire="u64" />
+    </method>
+    <method name="ReleaseRequest" ret="void">
+      <param name="hServerListRequest" type="HServerListRequest" kind="in" wire="u64" />
+    </method>
+    <method name="GetServerDetails" ret="iface" local="true">
+      <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
+      <param name="iServer" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="CancelQuery" ret="void">
+      <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
+    </method>
+    <method name="RefreshQuery" ret="void">
+      <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
+    </method>
+    <method name="IsRefreshing" ret="bool">
+      <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
+    </method>
+    <method name="GetServerCount" ret="i32">
+      <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
+    </method>
+    <method name="RefreshServer" ret="void">
+      <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
+      <param name="iServer" type="int" kind="in" wire="i32" />
+    </method>
+    <method name="PingServer" ret="i32" local="true">
+      <param name="unIP" type="uint32" kind="in" wire="u32" />
+      <param name="usPort" type="uint16" kind="in" wire="u16" />
+      <param name="pRequestServersResponse" type="ISteamMatchmakingPingResponse*" kind="in" wire="u64" />
+    </method>
+    <method name="PlayerDetails" ret="i32" local="true">
+      <param name="unIP" type="uint32" kind="in" wire="u32" />
+      <param name="usPort" type="uint16" kind="in" wire="u16" />
+      <param name="pRequestServersResponse" type="ISteamMatchmakingPlayersResponse*" kind="in" wire="u64" />
+    </method>
+    <method name="ServerRules" ret="i32" local="true">
+      <param name="unIP" type="uint32" kind="in" wire="u32" />
+      <param name="usPort" type="uint16" kind="in" wire="u16" />
+      <param name="pRequestServersResponse" type="ISteamMatchmakingRulesResponse*" kind="in" wire="u64" />
+    </method>
+    <method name="CancelServerQuery" ret="void">
+      <param name="hServerQuery" type="HServerQuery" kind="in" wire="i32" />
+    </method>
+  </interface>
+  <interface name="ISteamMusic" version="STEAMMUSIC_INTERFACE_VERSION001">
+    <method name="BIsEnabled" ret="bool" />
+    <method name="BIsPlaying" ret="bool" />
+    <method name="GetPlaybackStatus" ret="enum" />
+    <method name="Play" ret="void" />
+    <method name="Pause" ret="void" />
+    <method name="PlayPrevious" ret="void" />
+    <method name="PlayNext" ret="void" />
+    <method name="SetVolume" ret="void">
+      <param name="flVolume" type="float" kind="in" wire="f32" />
+    </method>
+    <method name="GetVolume" ret="f32" />
+  </interface>
   <interface name="ISteamUser" version="SteamUser017">
     <method name="GetHSteamUser" ret="i32" />
     <method name="BLoggedOn" ret="bool" />

@@ -1,4 +1,6 @@
 using System;
+using System.Buffers;
+using System.IO;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -60,7 +62,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             string Path = null;
-            byte[] Data = null;
+            WindowsFileStream Source = null;
 
             if (FileHandle != 0)
             {
@@ -73,17 +75,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!string.IsNullOrEmpty(Path))
                 {
                     WindowsFileStream Stream = FileObj.GetFileStream();
-                    if (Stream != null && Stream.ExistsAsFile)
+                    if (Stream != null && Stream.ExistsAsFile && Stream.Length != 0)
                     {
-                        if (IsImage)
-                        {
-                            if (Stream.Length != 0)
-                                Size = (ulong)Stream.Length;
-                        }
-                        else if (Stream.TryReadAllBytes(out Data) && Data.Length != 0)
-                        {
-                            Size = (ulong)Data.Length;
-                        }
+                        Size = (ulong)Stream.Length;
+
+                        if (!IsImage)
+                            Source = Stream;
                     }
                 }
             }
@@ -109,11 +106,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (BackingAddress == 0)
                     return NTSTATUS.STATUS_NO_MEMORY;
 
-                if (Data != null && Data.Length != 0)
-                {
-                    if (!Instance.WriteMemory(BackingAddress, Data))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                }
+                if (Source != null && !CopyToBacking(Instance, Source, BackingAddress, Size))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
             WinHandle Handle = Instance.WinHelper.CreateSectionHandle(FullName, Size, SectionPageProtection, AllocationAttributes, Path, BackingAddress, (AccessMask)(uint)DesiredAccess);
@@ -125,6 +119,42 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.TriggerEventMessage($"[+] NtCreateSection: Name=\"{FullName}\", Handle=0x{Handle.Handle:X}, Size=0x{Size:X}, Attr=0x{AllocationAttributes:X}, Prot=0x{SectionPageProtection:X}, File=0x{FileHandle:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // A data section is as large as the file behind it, so the backing fills through a pooled window.
+        private static bool CopyToBacking(BinaryEmulator Instance, WindowsFileStream Source, ulong Address, ulong Size)
+        {
+            const int WindowSize = 256 * 1024;
+
+            byte[] Window = ArrayPool<byte>.Shared.Rent((int)Math.Min(Size, WindowSize));
+
+            try
+            {
+                ulong Offset = 0;
+
+                while (Offset < Size)
+                {
+                    int Want = (int)Math.Min(Size - Offset, (ulong)Window.Length);
+                    int Read = Source.ReadAt((long)Offset, Window.AsSpan(0, Want));
+                    if (Read <= 0)
+                        break;
+
+                    if (!Instance.WriteMemory(Address + Offset, Window.AsSpan(0, Read)))
+                        return false;
+
+                    Offset += (ulong)Read;
+                }
+
+                return true;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Window);
+            }
         }
     }
 }

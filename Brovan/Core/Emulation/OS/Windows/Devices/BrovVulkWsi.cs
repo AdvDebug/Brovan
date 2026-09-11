@@ -11,16 +11,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             public readonly uint GuestFormat;
             public readonly uint HostFormat;
             public readonly bool HiddenTransform;
+            public readonly bool ExtentDiffers;
 
-            public SwapchainPlan(IntPtr surface, uint guestFormat, uint hostFormat, bool hiddenTransform)
+            public SwapchainPlan(IntPtr surface, uint guestFormat, uint hostFormat, bool hiddenTransform, bool extentDiffers)
             {
                 Surface = surface;
                 GuestFormat = guestFormat;
                 HostFormat = hostFormat;
                 HiddenTransform = hiddenTransform;
+                ExtentDiffers = extentDiffers;
             }
 
             public bool Substituted => GuestFormat != HostFormat;
+
+            public bool SuboptimalExpected => HiddenTransform || ExtentDiffers;
         }
 
         private sealed class SurfaceState
@@ -30,6 +34,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             public uint[] PresentModes = Array.Empty<uint>();
             public bool HiddenTransform;
         }
+
+        public static float RenderScale { get; set; } = 1f;
 
         private readonly struct ImageFormat
         {
@@ -65,6 +71,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int CapsSize = BrovVulkLayout.StructSize["VkSurfaceCapabilitiesKHR"];
         private static readonly int CapsMinImageCount = BrovVulkLayout.MemberOffset["VkSurfaceCapabilitiesKHR.minImageCount"];
         private static readonly int CapsMaxImageCount = BrovVulkLayout.MemberOffset["VkSurfaceCapabilitiesKHR.maxImageCount"];
+        private static readonly int CapsCurrentExtent = BrovVulkLayout.MemberOffset["VkSurfaceCapabilitiesKHR.currentExtent"];
         private static readonly int CapsMinImageExtent = BrovVulkLayout.MemberOffset["VkSurfaceCapabilitiesKHR.minImageExtent"];
         private static readonly int CapsMaxImageExtent = BrovVulkLayout.MemberOffset["VkSurfaceCapabilitiesKHR.maxImageExtent"];
         private static readonly int CapsMaxArrayLayers = BrovVulkLayout.MemberOffset["VkSurfaceCapabilitiesKHR.maxImageArrayLayers"];
@@ -122,7 +129,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<IntPtr, SwapchainPlan> _swapchains = new Dictionary<IntPtr, SwapchainPlan>();
         private readonly Dictionary<IntPtr, List<IntPtr>> _swapchainImages = new Dictionary<IntPtr, List<IntPtr>>();
         private readonly Dictionary<IntPtr, ImageFormat> _imageFormats = new Dictionary<IntPtr, ImageFormat>();
-        private int _hiddenTransforms;
+        private int _expectedSuboptimal;
 
         public void NoteSurface(IntPtr physicalDevice, IntPtr surface) => Describe(physicalDevice, surface);
 
@@ -136,6 +143,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             byte* caps = (byte*)capabilities;
+            ScaleCurrentExtent(caps);
+
             uint supported = *(uint*)(caps + CapsSupportedTransforms);
             uint current = *(uint*)(caps + CapsCurrentTransform);
             if (current == TransformIdentity || (supported & TransformIdentity) == 0)
@@ -148,6 +157,36 @@ namespace Brovan.Core.Emulation.OS.Windows
             // preTransform and still renders unrotated. Report identity and let the compositor rotate.
             *(uint*)(caps + CapsCurrentTransform) = TransformIdentity;
             state.HiddenTransform = true;
+        }
+
+        // A guest sizes its swapchain, and every render target it derives from the surface, off
+        // currentExtent, so the presentation engine scales a smaller one back up to the window.
+        private static void ScaleCurrentExtent(byte* caps)
+        {
+            float scale = RenderScale;
+            if (scale >= 1f || scale <= 0f)
+                return;
+
+            uint width = *(uint*)(caps + CapsCurrentExtent + ExtentWidth);
+            uint height = *(uint*)(caps + CapsCurrentExtent + ExtentHeight);
+
+            // 0xFFFFFFFF means the surface takes its size from the swapchain, not the other way round.
+            if (width == 0 || height == 0 || width == uint.MaxValue || height == uint.MaxValue)
+                return;
+
+            *(uint*)(caps + CapsCurrentExtent + ExtentWidth) =
+                ScaleAxis(width, scale, *(uint*)(caps + CapsMinImageExtent + ExtentWidth));
+            *(uint*)(caps + CapsCurrentExtent + ExtentHeight) =
+                ScaleAxis(height, scale, *(uint*)(caps + CapsMinImageExtent + ExtentHeight));
+        }
+
+        private static uint ScaleAxis(uint value, float scale, uint minimum)
+        {
+            uint scaled = (uint)(value * scale);
+            if (scaled < minimum)
+                scaled = minimum;
+
+            return scaled == 0 ? 1u : scaled;
         }
 
         public void NormalizeCapabilities2(IntPtr physicalDevice, IntPtr surfaceInfo, IntPtr capabilities2)
@@ -181,6 +220,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             byte* caps = stackalloc byte[CapsSize];
             new Span<byte>(caps, CapsSize).Clear();
+            bool extentDiffers = false;
+
+            // Straight from the host, so these still carry the surface's real extent.
             if (BrovVulkApi.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(described.PhysicalDevice, surface, (IntPtr)caps) >= 0)
             {
                 ClampImageCount(info, caps);
@@ -189,12 +231,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ReconcileUsage(info, caps);
                 ReconcileCompositeAlpha(info, caps);
                 ReconcilePreTransform(info, caps);
+                extentDiffers = ExtentsDiffer(info, caps);
             }
 
             ReconcileFormat(info, described, instance);
             ReconcilePresentMode(info, described);
 
-            return new SwapchainPlan(surface, guestFormat, *(uint*)(info + SwapImageFormat), described.HiddenTransform);
+            return new SwapchainPlan(surface, guestFormat, *(uint*)(info + SwapImageFormat), described.HiddenTransform, extentDiffers);
         }
 
         public void NoteSwapchain(IntPtr swapchain, in SwapchainPlan plan)
@@ -204,8 +247,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ForgetSwapchain(swapchain);
             _swapchains[swapchain] = plan;
-            if (plan.HiddenTransform)
-                _hiddenTransforms++;
+            if (plan.SuboptimalExpected)
+                _expectedSuboptimal++;
         }
 
         public void NoteSwapchainImages(IntPtr swapchain, IntPtr images, uint count)
@@ -277,20 +320,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        // Reporting identity for a rotated surface leaves the swapchain permanently disagreeing with it,
-        // so a guest that rebuilds on VK_SUBOPTIMAL_KHR would never stop. A real geometry change still
-        // reaches the guest as VK_ERROR_OUT_OF_DATE_KHR.
+        // Reporting identity for a rotated surface, or a smaller extent for a scaled one, leaves the
+        // swapchain permanently disagreeing with it, so a guest that rebuilds on VK_SUBOPTIMAL_KHR would
+        // never stop. A real geometry change still reaches the guest as VK_ERROR_OUT_OF_DATE_KHR.
         public int FilterAcquireResult(int result, IntPtr swapchain)
         {
-            if (result != Suboptimal || _hiddenTransforms == 0)
+            if (result != Suboptimal || _expectedSuboptimal == 0)
                 return result;
 
-            return _swapchains.TryGetValue(swapchain, out SwapchainPlan plan) && plan.HiddenTransform ? 0 : result;
+            return _swapchains.TryGetValue(swapchain, out SwapchainPlan plan) && plan.SuboptimalExpected ? 0 : result;
         }
 
         public int FilterPresentResult(int result, IntPtr presentInfo)
         {
-            if (result != Suboptimal || _hiddenTransforms == 0 || presentInfo == IntPtr.Zero)
+            if (result != Suboptimal || _expectedSuboptimal == 0 || presentInfo == IntPtr.Zero)
                 return result;
 
             byte* info = (byte*)presentInfo;
@@ -302,7 +345,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (uint k = 0; k < count; k++)
             {
                 IntPtr swapchain = *(IntPtr*)(swapchains + k * 8);
-                if (!_swapchains.TryGetValue(swapchain, out SwapchainPlan plan) || !plan.HiddenTransform)
+                if (!_swapchains.TryGetValue(swapchain, out SwapchainPlan plan) || !plan.SuboptimalExpected)
                     return result;
             }
 
@@ -321,8 +364,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (_swapchains.TryGetValue(swapchain, out SwapchainPlan plan))
             {
-                if (plan.HiddenTransform)
-                    _hiddenTransforms--;
+                if (plan.SuboptimalExpected)
+                    _expectedSuboptimal--;
                 _swapchains.Remove(swapchain);
             }
 
@@ -430,6 +473,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 *(uint*)(info + SwapImageExtent + ExtentWidth) = useWidth;
             if (useHeight != height)
                 *(uint*)(info + SwapImageExtent + ExtentHeight) = useHeight;
+        }
+
+        private static bool ExtentsDiffer(byte* info, byte* caps)
+        {
+            uint surfaceWidth = *(uint*)(caps + CapsCurrentExtent + ExtentWidth);
+            uint surfaceHeight = *(uint*)(caps + CapsCurrentExtent + ExtentHeight);
+            if (surfaceWidth == uint.MaxValue || surfaceHeight == uint.MaxValue)
+                return false;
+
+            return *(uint*)(info + SwapImageExtent + ExtentWidth) != surfaceWidth
+                || *(uint*)(info + SwapImageExtent + ExtentHeight) != surfaceHeight;
         }
 
         private static void ClampArrayLayers(byte* info, byte* caps)

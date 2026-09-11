@@ -1484,6 +1484,25 @@ namespace Brovan.Core.Emulation
                 yield return _memory[i];
         }
 
+        // NT splits these: a reserved-only region counts towards the virtual size and not the committed size.
+        internal void SumGuestMemoryUsage(out ulong VirtualSize, out ulong CommittedSize)
+        {
+            ulong Reserved = 0;
+            ulong Committed = 0;
+
+            for (int i = 0; i < _memory.Count; i++)
+            {
+                MemoryRegion Region = _memory[i];
+                Reserved += Region.Size;
+
+                if (Region.IsCommitted)
+                    Committed += Region.Size;
+            }
+
+            VirtualSize = Reserved;
+            CommittedSize = Committed;
+        }
+
         private int FindFirstRegionStartingBefore(ulong Address)
         {
             int Left = 0;

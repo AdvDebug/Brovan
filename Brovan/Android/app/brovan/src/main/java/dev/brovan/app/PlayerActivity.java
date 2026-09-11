@@ -66,6 +66,8 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private static final String EXTRA_CONTROLS = "controls";
     private static final String EXTRA_JIT_CACHE = "jit_cache";
     private static final String EXTRA_RELAX_VULKAN = "relax_vulkan";
+    private static final String EXTRA_LOW_MEMORY = "low_memory";
+    private static final String EXTRA_RENDER_SCALE = "render_scale";
     private static final String EXTRA_SUSTAINED = "sustained";
     private static final String EXTRA_LAYOUT = "layout";
     private static final String EXTRA_POINTER = "pointer";
@@ -128,6 +130,8 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .putExtra(EXTRA_CONTROLS, own.controlScheme())
                 .putExtra(EXTRA_JIT_CACHE, settings.jitCache())
                 .putExtra(EXTRA_RELAX_VULKAN, settings.relaxVulkan())
+                .putExtra(EXTRA_LOW_MEMORY, settings.lowMemoryLevel())
+                .putExtra(EXTRA_RENDER_SCALE, settings.renderScaleValue())
                 .putExtra(EXTRA_SUSTAINED, settings.sustainedPerformance())
                 .putExtra(EXTRA_LAYOUT, settings.controlLayout())
                 .putExtra(EXTRA_POINTER, own.pointerMode());
@@ -152,6 +156,8 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .putExtra(EXTRA_CONTROLS, own.controlScheme())
                 .putExtra(EXTRA_JIT_CACHE, settings.jitCache())
                 .putExtra(EXTRA_RELAX_VULKAN, settings.relaxVulkan())
+                .putExtra(EXTRA_LOW_MEMORY, settings.lowMemoryLevel())
+                .putExtra(EXTRA_RENDER_SCALE, settings.renderScaleValue())
                 .putExtra(EXTRA_SUSTAINED, settings.sustainedPerformance())
                 .putExtra(EXTRA_LAYOUT, settings.controlLayout())
                 .putExtra(EXTRA_POINTER, own.pointerMode());
@@ -296,6 +302,11 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
             settings.put("net.mode", NETWORK_KEYS[clampNetwork(getIntent().getIntExtra(EXTRA_NETWORK, 1))]);
             settings.put("jit.cache", getIntent().getBooleanExtra(EXTRA_JIT_CACHE, true));
             settings.put("graphics.relax-vulkan", getIntent().getBooleanExtra(EXTRA_RELAX_VULKAN, false));
+            // Widening the float straight to a double would write 0.6000000238418579 into the JSON.
+            settings.put("graphics.render-scale",
+                    Math.round(getIntent().getFloatExtra(EXTRA_RENDER_SCALE, 1f) * 100f) / 100.0);
+            String lowMemory = getIntent().getStringExtra(EXTRA_LOW_MEMORY);
+            settings.put("platform.low-memory", lowMemory == null ? "off" : lowMemory);
 
             // The debugger prompt needs the emulator's own output.
             settings.put("log.silent", !developerMode);

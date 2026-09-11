@@ -71,6 +71,27 @@
                     style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:hint="@string/settings_render_scale">
+
+                    <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                        android:id="@+id/render_scale"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="none"
+                        android:textColor="@color/text_primary" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <TextView
+                    style="@style/SettingsSummary"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/settings_render_scale_summary" />
+
+                <View style="@style/SettingsDivider" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
                     android:hint="@string/settings_controls">
 
                     <com.google.android.material.textfield.MaterialAutoCompleteTextView
@@ -278,6 +299,27 @@
                         android:layout_height="wrap_content"
                         android:layout_gravity="center_vertical" />
                 </LinearLayout>
+
+                <View style="@style/SettingsDivider" />
+
+                <com.google.android.material.textfield.TextInputLayout
+                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/settings_low_memory">
+
+                    <com.google.android.material.textfield.MaterialAutoCompleteTextView
+                        android:id="@+id/low_memory"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="none"
+                        android:textColor="@color/text_primary" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <TextView
+                    style="@style/SettingsSummary"
+                    android:layout_marginTop="6dp"
+                    android:text="@string/settings_low_memory_summary" />
 
                 <View style="@style/SettingsDivider" />
 

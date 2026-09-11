@@ -22,8 +22,11 @@ layout(set = 0, binding = 1, r8ui) uniform writeonly restrict uimage2DArray dst;
 #elif defined(BC_OUT_RGBA16)
 layout(set = 0, binding = 1, rgba16ui) uniform writeonly restrict uimage2DArray dst;
 #define BC_DECODE_BC6H 1
+#elif defined(BC_OUT_ETC2)
+layout(set = 0, binding = 2, std430) writeonly restrict buffer Encoded { uint words[]; } encoded;
+#define BC_DECODE_COLOR 1
 #else
-#error "define one of BC_OUT_RGBA8, BC_OUT_RG8, BC_OUT_R8, BC_OUT_RGBA16"
+#error "define one of BC_OUT_RGBA8, BC_OUT_RG8, BC_OUT_R8, BC_OUT_RGBA16, BC_OUT_ETC2"
 #endif
 
 layout(push_constant) uniform Push {
@@ -128,11 +131,25 @@ uint anchor3Third(uint shape)
     return (kAnchor3Third[shape >> 3u] >> (4u * (shape & 7u))) & 15u;
 }
 
+#ifdef BC_OUT_ETC2
+
+// No bounds check: the encoded block covers edge texels either way, and the copy places it by imageOffset.
+uint gTexel[16];
+
+void store(uvec2 texel, uint z, uvec4 value)
+{
+    gTexel[(texel.y & 3u) * 4u + (texel.x & 3u)] = value.r | (value.g << 8u) | (value.b << 16u) | (value.a << 24u);
+}
+
+#else
+
 void store(uvec2 texel, uint z, uvec4 value)
 {
     if (texel.x < pc.width && texel.y < pc.height)
         imageStore(dst, ivec3(int(pc.dstX + texel.x), int(pc.dstY + texel.y), int(pc.dstZ + z)), value);
 }
+
+#endif
 
 void fill(uvec2 origin, uint z, uvec4 value)
 {
@@ -911,6 +928,274 @@ void decodeBc6h(uvec2 origin, uint z, uvec4 block, bool signedFormat)
 
 #endif
 
+#ifdef BC_OUT_ETC2
+
+// ETC1 intensity modifiers and EAC alpha modifiers, both [table][index], from the Khronos data format
+// specification. Only the ETC1 individual and differential modes are emitted, so a differential
+// candidate whose second base leaves 0..31 has to be rejected: ETC2 reads those as T, H or planar.
+const int kIntensity[32] = int[32](
+      2,   8,  -2,   -8,
+      5,  17,  -5,  -17,
+      9,  29,  -9,  -29,
+     13,  42, -13,  -42,
+     18,  60, -18,  -60,
+     24,  80, -24,  -80,
+     33, 106, -33, -106,
+     47, 183, -47, -183
+);
+
+const int kAlpha[128] = int[128](
+    -3, -6,  -9, -15, 2, 5, 8, 14,
+    -3, -7, -10, -13, 2, 6, 9, 12,
+    -2, -5,  -8, -13, 1, 4, 7, 12,
+    -2, -4,  -6, -13, 1, 3, 5, 12,
+    -3, -6,  -8, -12, 2, 5, 7, 11,
+    -3, -7,  -9, -11, 2, 6, 8, 10,
+    -4, -7,  -8, -11, 3, 6, 7, 10,
+    -3, -5,  -8, -11, 2, 4, 7, 10,
+    -2, -6,  -8, -10, 1, 5, 7,  9,
+    -2, -5,  -8, -10, 1, 4, 7,  9,
+    -2, -4,  -8, -10, 1, 3, 7,  9,
+    -2, -5,  -7, -10, 1, 4, 6,  9,
+    -3, -4,  -7, -10, 2, 3, 6,  9,
+    -1, -2,  -3, -10, 0, 1, 2,  9,
+    -4, -6,  -8,  -9, 3, 5, 7,  8,
+    -3, -5,  -7,  -9, 2, 4, 6,  8
+);
+
+uint bswap(uint value)
+{
+    return ((value & 0xFFu) << 24u) | ((value & 0xFF00u) << 8u) | ((value >> 8u) & 0xFF00u) | (value >> 24u);
+}
+
+ivec3 rgbOf(uint at)
+{
+    uint texel = gTexel[at];
+    return ivec3(int(texel & 255u), int((texel >> 8u) & 255u), int((texel >> 16u) & 255u));
+}
+
+// The eight texels of one half, in the order the two flips lay them out.
+uint texelAt(uint flip, uint part, uint i)
+{
+    return flip != 0u ? (part * 8u + i) : ((i >> 1u) * 4u + (i & 1u) + part * 2u);
+}
+
+int pickTable(ivec3 base, uint flip, uint part, out uint indices, out int error)
+{
+    int bestTable = 0;
+    int bestError = 0x7FFFFFFF;
+    uint bestIndices = 0u;
+
+    for (uint table = 0u; table < 8u; table++)
+    {
+        int total = 0;
+        uint packed = 0u;
+
+        for (uint i = 0u; i < 8u; i++)
+        {
+            uint at = texelAt(flip, part, i);
+            ivec3 want = rgbOf(at);
+            int texelBest = 0x7FFFFFFF;
+            uint texelIndex = 0u;
+
+            for (uint index = 0u; index < 4u; index++)
+            {
+                ivec3 difference = clamp(base + kIntensity[table * 4u + index], 0, 255) - want;
+                int sum = difference.x * difference.x + difference.y * difference.y + difference.z * difference.z;
+                if (sum < texelBest)
+                {
+                    texelBest = sum;
+                    texelIndex = index;
+                }
+            }
+
+            total += texelBest;
+            uint bit = (at & 3u) * 4u + (at >> 2u);
+            packed |= (texelIndex & 1u) << bit;
+            packed |= ((texelIndex >> 1u) & 1u) << (bit + 16u);
+        }
+
+        if (total < bestError)
+        {
+            bestError = total;
+            bestTable = int(table);
+            bestIndices = packed;
+        }
+    }
+
+    indices = bestIndices;
+    error = bestError;
+    return bestTable;
+}
+
+void encodeColor(out uint high, out uint low)
+{
+    high = 0u;
+    low = 0u;
+    int bestError = 0x7FFFFFFF;
+
+    for (uint flip = 0u; flip < 2u; flip++)
+    {
+        ivec3 average[2];
+        for (uint part = 0u; part < 2u; part++)
+        {
+            ivec3 sum = ivec3(0);
+            for (uint i = 0u; i < 8u; i++)
+                sum += rgbOf(texelAt(flip, part, i));
+            average[part] = (sum + 4) >> 3;
+        }
+
+        for (uint mode = 0u; mode < 2u; mode++)
+        {
+            ivec3 base0, base1, quant0, quant1;
+
+            if (mode == 0u)
+            {
+                quant0 = (average[0] * 15 + 127) / 255;
+                quant1 = (average[1] * 15 + 127) / 255;
+                base0 = (quant0 << 4) | quant0;
+                base1 = (quant1 << 4) | quant1;
+            }
+            else
+            {
+                ivec3 first = (average[0] * 31 + 127) / 255;
+                ivec3 second = (average[1] * 31 + 127) / 255;
+                ivec3 delta = second - first;
+                if (any(lessThan(delta, ivec3(-4))) || any(greaterThan(delta, ivec3(3))))
+                    continue;
+
+                quant0 = first;
+                quant1 = delta;
+                base0 = (first << 3) | (first >> 2);
+                base1 = (second << 3) | (second >> 2);
+            }
+
+            uint indices0, indices1;
+            int error0, error1;
+            int table0 = pickTable(base0, flip, 0u, indices0, error0);
+            int table1 = pickTable(base1, flip, 1u, indices1, error1);
+            if (error0 + error1 >= bestError)
+                continue;
+
+            bestError = error0 + error1;
+            uint packed = 0u;
+            for (int c = 0; c < 3; c++)
+            {
+                int at = (mode == 0u ? 28 : 27) - 8 * c;
+                packed |= uint(quant0[c] & (mode == 0u ? 15 : 31)) << at;
+                packed |= uint(quant1[c] & (mode == 0u ? 15 : 7)) << (at - (mode == 0u ? 4 : 3));
+            }
+
+            high = packed | (uint(table0 & 7) << 5u) | (uint(table1 & 7) << 2u) | (mode << 1u) | flip;
+            low = indices0 | indices1;
+        }
+    }
+}
+
+void encodeAlpha(out uint high, out uint low)
+{
+    int minimum = 255;
+    int maximum = 0;
+    for (uint i = 0u; i < 16u; i++)
+    {
+        int value = int(gTexel[i] >> 24u);
+        minimum = min(minimum, value);
+        maximum = max(maximum, value);
+    }
+
+    // Table 13 has a zero modifier at index 4, so a flat block is exact with no search.
+    if (minimum == maximum)
+    {
+        high = (uint(minimum) << 24u) | (1u << 20u) | (13u << 16u) | 0x9249u;
+        low = 0x24924924u;
+        return;
+    }
+
+    high = 0u;
+    low = 0u;
+    int bestError = 0x7FFFFFFF;
+    int centre = (minimum + maximum + 1) / 2;
+
+    for (uint table = 0u; table < 16u; table++)
+    {
+        int span = kAlpha[table * 8u + 7u] - kAlpha[table * 8u + 3u];
+        int fitted = (maximum - minimum + span - 1) / span;
+
+        for (uint step = 0u; step < 2u; step++)
+        {
+            int multiplier = clamp(fitted - 1 + int(step), 1, 15);
+
+            for (int shift = -1; shift <= 1; shift++)
+            {
+                int base = clamp(centre + shift, 0, 255);
+                int palette[8];
+                for (uint index = 0u; index < 8u; index++)
+                    palette[index] = clamp(base + kAlpha[table * 8u + index] * multiplier, 0, 255);
+
+                int total = 0;
+                uint indexHigh = 0u;
+                uint indexLow = 0u;
+
+                for (uint y = 0u; y < 4u; y++)
+                {
+                    for (uint x = 0u; x < 4u; x++)
+                    {
+                        int want = int(gTexel[y * 4u + x] >> 24u);
+                        int texelBest = 0x7FFFFFFF;
+                        uint texelIndex = 0u;
+
+                        for (uint index = 0u; index < 8u; index++)
+                        {
+                            int difference = palette[index] - want;
+                            int sum = difference * difference;
+                            if (sum < texelBest)
+                            {
+                                texelBest = sum;
+                                texelIndex = index;
+                            }
+                        }
+
+                        total += texelBest;
+                        int at = 45 - 3 * int(x * 4u + y);
+                        if (at >= 32)
+                        {
+                            indexHigh |= texelIndex << uint(at - 32);
+                        }
+                        else
+                        {
+                            indexLow |= texelIndex << uint(at);
+                            if (at > 29)
+                                indexHigh |= texelIndex >> uint(32 - at);
+                        }
+                    }
+                }
+
+                if (total >= bestError)
+                    continue;
+
+                bestError = total;
+                high = (uint(base) << 24u) | (uint(multiplier) << 20u) | (table << 16u) | indexHigh;
+                low = indexLow;
+            }
+        }
+    }
+}
+
+// One ETC2_R8G8B8A8 block: the EAC alpha half first, then the colour half, each big endian.
+void writeEtc2(uint at)
+{
+    uint colorHigh, colorLow, alphaHigh, alphaLow;
+    encodeColor(colorHigh, colorLow);
+    encodeAlpha(alphaHigh, alphaLow);
+
+    encoded.words[at] = bswap(alphaHigh);
+    encoded.words[at + 1u] = bswap(alphaLow);
+    encoded.words[at + 2u] = bswap(colorHigh);
+    encoded.words[at + 3u] = bswap(colorLow);
+}
+
+#endif
+
 void main()
 {
     uvec3 id = gl_GlobalInvocationID;
@@ -965,4 +1250,8 @@ void main()
         default:
             break;
     }
+
+#ifdef BC_OUT_ETC2
+    writeEtc2(((id.z * blocksY + id.y) * blocksX + id.x) * 4u);
+#endif
 }
