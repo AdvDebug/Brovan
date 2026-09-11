@@ -8,6 +8,9 @@
  * pair: a 4 byte store feeding an 8 byte load of the same address does not
  * forward on x86 and costs more than the helper call this replaces.
  *
+ * fmax_vec and fmin_vec are x86 max and min, not the ARM operations of the
+ * same name: an unordered or equal pair gives the second operand.
+ *
  * No include guard. tcg-opc.h is read once per DEF macro. */
 #ifndef TCG_TARGET_HAS_brov_fpvec
 #define TCG_TARGET_HAS_brov_fpvec 0
@@ -18,5 +21,7 @@ DEF(fsub_vec, 1, 2, 0, IMPLVEC | IMPL(TCG_TARGET_HAS_brov_fpvec))
 DEF(fmul_vec, 1, 2, 0, IMPLVEC | IMPL(TCG_TARGET_HAS_brov_fpvec))
 DEF(fdiv_vec, 1, 2, 0, IMPLVEC | IMPL(TCG_TARGET_HAS_brov_fpvec))
 DEF(fsqrt_vec, 1, 1, 0, IMPLVEC | IMPL(TCG_TARGET_HAS_brov_fpvec))
+DEF(fmax_vec, 1, 2, 0, IMPLVEC | IMPL(TCG_TARGET_HAS_brov_fpvec))
+DEF(fmin_vec, 1, 2, 0, IMPLVEC | IMPL(TCG_TARGET_HAS_brov_fpvec))
 DEF(ld32_vec, 1, 1, 1, IMPLVEC | IMPL(TCG_TARGET_HAS_brov_fpvec))
 DEF(st32_vec, 0, 2, 1, IMPLVEC | IMPL(TCG_TARGET_HAS_brov_fpvec))

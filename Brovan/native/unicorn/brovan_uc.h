@@ -28,7 +28,9 @@
  * single base address therefore pins every object whose address gets baked into
  * generated code. */
 #define BROV_SLOT_AREA_SIZE (64u * 1024u)
-#define BROV_ARENA_SIZE (64u * 1024u)
+/* Holds uc, tcg_ctx and the jump table. Changing it moves the code buffer, and
+ * the blob header records that base, so an older jit cache is rejected. */
+#define BROV_ARENA_SIZE (512u * 1024u)
 #define BROV_RESERVE_HEADER_SIZE (BROV_SLOT_AREA_SIZE + BROV_ARENA_SIZE)
 #define BROV_MAX_SLOTS (BROV_SLOT_AREA_SIZE / sizeof(void *))
 #define BROV_DEFAULT_SLOTS 4096u
@@ -205,15 +207,45 @@ struct brov_ops {
     int32_t *(*budget_ptr)(struct uc_struct *uc);
 };
 
-/* Key and code pointer for one jump cache slot, kept beside the block pointer
- * so a hit touches a single line. See brovan_tcg_budget.inc.h. */
+/* One jump cache entry. See brovan_tcg_budget.inc.h.
+ *
+ * tc_ptr comes first so a probe loading both fields gets the branch target
+ * before the key it compares. The key is the guest pc with a small id for the
+ * flag set above bit 48, which a guest pc never reaches, so one 64 bit compare
+ * covers pc, flags and cflags together.
+ *
+ * The table address is baked into blocks that probe it and the code buffer
+ * outlives the process through the jit cache, so the table comes from the same
+ * pinned reservation as uc. */
+#define BROV_JMP_BITS 14
+#define BROV_JMP_SIZE (1u << BROV_JMP_BITS)
+#define BROV_JMP_MASK (BROV_JMP_SIZE - 1u)
+#define BROV_JMP_ENTRY_SHIFT 4
+#define BROV_JMP_HASH_SHIFT 16
+#define BROV_JMP_ID_SHIFT 48
+#define BROV_JMP_FLAGSETS 64
+
 typedef struct brov_jmp_entry {
-    uint64_t pc;
-    const void *tb;
     const void *tc_ptr;
+    uint64_t key;
+} brov_jmp_entry;
+
+typedef struct brov_flagset {
     uint32_t flags;
     uint32_t cf_mask;
-} brov_jmp_entry;
+} brov_flagset;
+
+/* brovan_tcg_lookup.inc.h emits the same hash and key inline. The two must
+ * agree or a block is taken for the wrong guest address. */
+static inline unsigned brov_jmp_slot(uint64_t pc)
+{
+    return (unsigned)((pc ^ (pc >> BROV_JMP_HASH_SHIFT)) & BROV_JMP_MASK);
+}
+
+static inline uint64_t brov_jmp_key(uint64_t pc, unsigned id)
+{
+    return pc | ((uint64_t)id << BROV_JMP_ID_SHIFT);
+}
 
 #define BROVAN_UC_FIELDS                                                       \
     uint32_t brov_last_reason;                                                 \
@@ -222,6 +254,8 @@ typedef struct brov_jmp_entry {
     unsigned brov_ram_starts_cap;                                              \
     uint32_t brov_mem_hook_sig;                                                \
     brov_tsc_t brov_tsc;                                                       \
+    brov_flagset brov_flagsets[BROV_JMP_FLAGSETS];                             \
+    unsigned brov_flagset_n;                                                   \
     brov_jmp_entry *brov_jmp;                                                  \
     unsigned brov_jmp_flush;                                                   \
     unsigned char brov_jmp_off;                                                \
@@ -305,6 +339,11 @@ uint64_t brov_arena_offset(const void *p);
 uint64_t brov_arena_used(void);
 uintptr_t brov_image_base(void);
 bool brov_image_range(uint64_t *lo, uint64_t *hi);
+void brov_jmp_clear_pc(struct uc_struct *uc, uint64_t pc);
+void brov_jmp_clear_page(struct uc_struct *uc, uint64_t page_addr);
+void brov_jmp_clear_all(struct uc_struct *uc);
+brov_jmp_entry *brov_jmp_ensure(struct uc_struct *uc);
+unsigned brov_flagkey(struct uc_struct *uc, uint32_t flags, uint32_t cf_mask);
 uint64_t brov_hash_bytes(const void *data, size_t len, uint64_t seed);
 bool brov_cache_requested(void);
 bool brov_strict_audit(void);

@@ -668,3 +668,86 @@ uc_err brov_budget_ptr(uc_engine *uc, int32_t **ptr)
     restore_jit_state(uc);
     return UC_ERR_OK;
 }
+
+/* The table address is baked into blocks that probe it, so it is allocated
+ * once and never moved. */
+brov_jmp_entry *brov_jmp_ensure(struct uc_struct *uc)
+{
+    static int disabled = -1;
+
+    if (!uc) {
+        return NULL;
+    }
+    if (uc->brov_jmp) {
+        return uc->brov_jmp;
+    }
+    if (disabled < 0) {
+        disabled = getenv("BROVAN_NO_JMP_FAST") != NULL;
+    }
+    if (disabled || uc->brov_jmp_off) {
+        uc->brov_jmp_off = 1;
+        return NULL;
+    }
+    uc->brov_jmp = (brov_jmp_entry *)brov_arena_alloc(BROV_JMP_SIZE * sizeof(brov_jmp_entry));
+    if (!uc->brov_jmp) {
+        uc->brov_jmp_off = 1;
+    }
+    return uc->brov_jmp;
+}
+
+/* Ids start at 1, so a cleared entry never matches a real pc. */
+unsigned brov_flagkey(struct uc_struct *uc, uint32_t flags, uint32_t cf_mask)
+{
+    unsigned i;
+
+    for (i = 0; i < uc->brov_flagset_n; i++) {
+        if (uc->brov_flagsets[i].flags == flags &&
+            uc->brov_flagsets[i].cf_mask == cf_mask) {
+            return i + 1;
+        }
+    }
+    if (uc->brov_flagset_n >= BROV_JMP_FLAGSETS) {
+        return 0;
+    }
+    uc->brov_flagsets[uc->brov_flagset_n].flags = flags;
+    uc->brov_flagsets[uc->brov_flagset_n].cf_mask = cf_mask;
+    uc->brov_flagset_n++;
+    return uc->brov_flagset_n;
+}
+
+/* Unconditional and by index. tb_phys_invalidate clears its jump cache slot
+ * only when the slot still holds the block, but this table can hold it when
+ * the jump cache no longer does. */
+void brov_jmp_clear_pc(struct uc_struct *uc, uint64_t pc)
+{
+    if (uc && uc->brov_jmp) {
+        unsigned slot = brov_jmp_slot(pc);
+
+        uc->brov_jmp[slot].key = 0;
+        uc->brov_jmp[slot].tc_ptr = NULL;
+    }
+}
+
+/* The slots of one page are not contiguous, so the page is retired by walking
+ * its addresses. */
+void brov_jmp_clear_page(struct uc_struct *uc, uint64_t page_addr)
+{
+    uint64_t off;
+
+    if (!uc || !uc->brov_jmp) {
+        return;
+    }
+    for (off = 0; off < 4096; off++) {
+        unsigned slot = brov_jmp_slot(page_addr + off);
+
+        uc->brov_jmp[slot].key = 0;
+        uc->brov_jmp[slot].tc_ptr = NULL;
+    }
+}
+
+void brov_jmp_clear_all(struct uc_struct *uc)
+{
+    if (uc && uc->brov_jmp) {
+        memset(uc->brov_jmp, 0, BROV_JMP_SIZE * sizeof(brov_jmp_entry));
+    }
+}

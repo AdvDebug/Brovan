@@ -54,42 +54,16 @@ static inline void brov_charge_pause(CPUState *cs)
  * exec/tb-lookup.h has already been included. misc_helper.c takes this header
  * for the budget alone and does not include it.
  *
- * An entry is believed only while cpu->tb_jmp_cache[hash] still holds the block
- * it was built from, so every path that clears or replaces a jump cache slot
- * retires the matching entry. The flush count closes the rest: a flush frees
- * every block, and a later block can land on the freed address with the same
- * key.
+ * The entry carries the whole key, so it answers without reading
+ * cpu->tb_jmp_cache. Every site that retires a jump cache slot has to retire
+ * this one too: cpu_tb_jmp_cache_clear, the single slot clear in
+ * tb_phys_invalidate and tb_jmp_cache_clear_page. An insert needs no hook,
+ * because it only means another pc took that slot. The flush count closes the
+ * rest, because a flush frees every block and a later block can land on the
+ * freed address with the same key.
  *
  * BROVAN_NO_JMP_FAST=1 is the kill switch. */
 #ifdef EXEC_TB_LOOKUP_H
-
-/* Entries are wider than a jump cache slot, so the table indexes fewer of them. */
-#define BROV_JMP_BITS (TB_JMP_CACHE_BITS - 1)
-#define BROV_JMP_SIZE (1 << BROV_JMP_BITS)
-#define BROV_JMP_MASK (BROV_JMP_SIZE - 1)
-
-/* brov_jmp_off keeps the decision in the hot struct: one load per lookup, not a
- * call. */
-static inline bool brov_jmp_alloc(struct uc_struct *uc)
-{
-    static int disabled = -1;
-
-    if (disabled < 0) {
-        disabled = getenv("BROVAN_NO_JMP_FAST") != NULL;
-    }
-    if (disabled) {
-        uc->brov_jmp_off = 1;
-        return false;
-    }
-
-    uc->brov_jmp = calloc(BROV_JMP_SIZE, sizeof(brov_jmp_entry));
-    if (!uc->brov_jmp) {
-        uc->brov_jmp_off = 1;
-        return false;
-    }
-    uc->brov_jmp_flush = uc->tcg_ctx->tb_ctx.tb_flush_count;
-    return true;
-}
 
 static inline bool brov_lookup_tb_ptr(CPUArchState *env, void **out)
 {
@@ -99,9 +73,9 @@ static inline bool brov_lookup_tb_ptr(CPUArchState *env, void **out)
     TranslationBlock *tb;
     target_ulong cs_base, pc;
     uint32_t flags, cf_mask;
-    unsigned int hash;
+    unsigned id;
 
-    if (unlikely(!uc->brov_jmp) && (uc->brov_jmp_off || !brov_jmp_alloc(uc))) {
+    if (unlikely(!uc->brov_jmp) && !brov_jmp_ensure(uc)) {
         return false;
     }
 
@@ -111,16 +85,16 @@ static inline bool brov_lookup_tb_ptr(CPUArchState *env, void **out)
     }
 
     cpu_get_tb_cpu_state(env, &pc, &cs_base, &flags);
-    hash = tb_jmp_cache_hash_func(uc, pc);
-    e = &uc->brov_jmp[hash & BROV_JMP_MASK];
+    e = &uc->brov_jmp[brov_jmp_slot((uint64_t)pc)];
 
     cf_mask = curr_cflags() & ~CF_CLUSTER_MASK;
     cf_mask |= ((uint32_t)cpu->cluster_index) << CF_CLUSTER_SHIFT;
+    id = brov_flagkey(uc, flags, cf_mask);
 
-    /* cs_base and the trace state are not in the entry, so anything but a flat
+    /* cs_base and the trace state are not in the key, so anything but a flat
      * code segment with tracing off takes the ordinary path. */
-    if (likely(e->tb == (const void *)cpu->tb_jmp_cache[hash] && e->tb != NULL &&
-               e->pc == (uint64_t)pc && e->flags == flags && e->cf_mask == cf_mask &&
+    if (likely(id != 0 && e->tc_ptr != NULL &&
+               e->key == brov_jmp_key((uint64_t)pc, id) &&
                cs_base == 0 && *cpu->trace_dstate == 0)) {
         *out = (void *)e->tc_ptr;
         return true;
@@ -132,12 +106,9 @@ static inline bool brov_lookup_tb_ptr(CPUArchState *env, void **out)
         return true;
     }
 
-    if (cs_base == 0 && *cpu->trace_dstate == 0) {
-        e->tb = tb;
+    if (cs_base == 0 && *cpu->trace_dstate == 0 && id != 0) {
         e->tc_ptr = tb->tc.ptr;
-        e->pc = (uint64_t)pc;
-        e->flags = flags;
-        e->cf_mask = cf_mask;
+        e->key = brov_jmp_key((uint64_t)pc, id);
     }
 
     *out = tb->tc.ptr;

@@ -34,6 +34,8 @@ static const TCGTargetOpDef *brov_fp_vec_op_def(TCGOpcode op)
     case INDEX_op_fsub_vec:
     case INDEX_op_fmul_vec:
     case INDEX_op_fdiv_vec:
+    case INDEX_op_fmax_vec:
+    case INDEX_op_fmin_vec:
         return &brov_x_x_x;
     case INDEX_op_fsqrt_vec:
         return &brov_x_x;
@@ -53,6 +55,8 @@ static int brov_fp_vec_can_emit(TCGOpcode opc, TCGType type, unsigned vece)
     case INDEX_op_fsub_vec:
     case INDEX_op_fmul_vec:
     case INDEX_op_fdiv_vec:
+    case INDEX_op_fmax_vec:
+    case INDEX_op_fmin_vec:
     case INDEX_op_fsqrt_vec:
     case INDEX_op_ld32_vec:
     case INDEX_op_st32_vec:
@@ -77,6 +81,8 @@ static bool brov_fp_vec_out(TCGContext *s, TCGOpcode opc, unsigned vecl,
     static const int sub_fp[4] = BROV_FP_OPC(0x5c);
     static const int div_fp[4] = BROV_FP_OPC(0x5e);
     static const int sqrt_fp[4] = BROV_FP_OPC(0x51);
+    static const int max_fp[4] = BROV_FP_OPC(0x5f);
+    static const int min_fp[4] = BROV_FP_OPC(0x5d);
 
     int scalar = vecl == 0;
     int idx = scalar * 2 + (vece == MO_64);
@@ -101,6 +107,8 @@ static bool brov_fp_vec_out(TCGContext *s, TCGOpcode opc, unsigned vecl,
     case INDEX_op_fsub_vec: insn = sub_fp[idx]; break;
     case INDEX_op_fmul_vec: insn = mul_fp[idx]; break;
     case INDEX_op_fdiv_vec: insn = div_fp[idx]; break;
+    case INDEX_op_fmax_vec: insn = max_fp[idx]; break;
+    case INDEX_op_fmin_vec: insn = min_fp[idx]; break;
     default:
         return false;
     }

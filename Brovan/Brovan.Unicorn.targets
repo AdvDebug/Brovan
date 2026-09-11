@@ -1,4 +1,4 @@
-<Project>
+﻿<Project>
   <PropertyGroup>
     <UnicornTag>2.1.4</UnicornTag>
     <UnicornCacheDir>$([MSBuild]::NormalizeDirectory($(MSBuildProjectDirectory), '.cache', 'unicorn'))</UnicornCacheDir>
@@ -22,6 +22,7 @@
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_slots.inc.c" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_exitcheck.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_budget.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_lookup.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_mem_hooks.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_notdirty.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_flatview.inc.c" />
