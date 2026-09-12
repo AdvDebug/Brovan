@@ -204,6 +204,7 @@ namespace Brovan.Generators
                 ValueShape.Boolean => "false",
                 ValueShape.Integer => "0",
                 ValueShape.Real => "0",
+                ValueShape.Enum => Result.EnumMembers.Count != 0 ? Result.EnumMembers[0] : string.Empty,
                 _ => string.Empty,
             };
         }
