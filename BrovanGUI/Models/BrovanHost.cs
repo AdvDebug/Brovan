@@ -74,13 +74,13 @@ namespace BrovanGUI.Models
             {
                 State.HypervisorName = "Windows Hypervisor Platform";
                 State.HypervisorAvailable = HypervisorPresent();
-                State.HypervisorHint = "Turn it on under Windows Features, as \"Windows Hypervisor Platform\", then restart.";
+                State.HypervisorHint = "Not available. Turn it on under Windows Features, as \"Windows Hypervisor Platform\", then restart.";
             }
             else
             {
                 State.HypervisorName = "KVM";
-                State.HypervisorAvailable = KvmUsable();
-                State.HypervisorHint = "Needs /dev/kvm, which the kvm_intel or kvm_amd module provides, and read and write access to it.";
+                State.HypervisorAvailable = KvmUsable(out string Hint);
+                State.HypervisorHint = Hint;
             }
 
             return State;
@@ -106,16 +106,22 @@ namespace BrovanGUI.Models
         [DllImport("WinHvPlatform.dll")]
         private static extern int WHvGetCapability(uint Code, out int Buffer, uint BufferSize, out uint Written);
 
-        // Presence is not access. The backend opens it read-write.
-        private static bool KvmUsable()
+        private static bool KvmUsable(out string Hint)
         {
             try
             {
                 using SafeFileHandle Device = File.OpenHandle("/dev/kvm", FileMode.Open, FileAccess.ReadWrite);
+                Hint = string.Empty;
                 return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                Hint = "KVM is on, but this user may not open /dev/kvm. Run \"sudo usermod -aG kvm $USER\", then log out and in again.";
+                return false;
             }
             catch (Exception)
             {
+                Hint = "Not available. Needs /dev/kvm, which the kvm_intel or kvm_amd module provides. Turn virtualisation on in the firmware if the module will not load.";
                 return false;
             }
         }

@@ -63,7 +63,7 @@ namespace BrovanGUI.ViewModels
         public StatusKind HypervisorStatus => State.HypervisorAvailable ? StatusKind.Good : StatusKind.Warn;
         public string HypervisorDescription => State.HypervisorAvailable
             ? "Available. Games run at near native speed on it. Pick it as the backend in a profile or in Settings."
-            : "Not available. " + State.HypervisorHint;
+            : State.HypervisorHint;
 
         public StatusKind DxvkStatus => State.DxvkVersion != null ? StatusKind.Good : StatusKind.Warn;
         public string DxvkDescription => State.DxvkVersion != null

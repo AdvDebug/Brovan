@@ -82,6 +82,8 @@ namespace Brovan.Core.Emulation
         public static readonly IntPtr MAP_FAILED = new IntPtr(-1);
 
         public const int ErrnoEintr = 4;
+        public const int ErrnoNoEntry = 2;
+        public const int ErrnoAccess = 13;
     }
 
     [StructLayout(LayoutKind.Sequential)]

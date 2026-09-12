@@ -1627,7 +1627,17 @@ namespace Brovan.Core.Emulation
         {
             _systemFd = KvmNative.open("/dev/kvm", KvmNative.O_RDWR | KvmNative.O_CLOEXEC, 0);
             if (_systemFd < 0)
-                throw new KvmException("open(/dev/kvm) failed", Marshal.GetLastWin32Error());
+            {
+                int Errno = Marshal.GetLastWin32Error();
+
+                if (Errno == KvmNative.ErrnoAccess)
+                    throw new KvmException("open(/dev/kvm) failed, this user may not open it. Add the user to the kvm group with \"sudo usermod -aG kvm $USER\" and log in again", Errno);
+
+                if (Errno == KvmNative.ErrnoNoEntry)
+                    throw new KvmException("open(/dev/kvm) failed, it does not exist. Load the kvm_intel or kvm_amd module and turn virtualisation on in the firmware", Errno);
+
+                throw new KvmException("open(/dev/kvm) failed", Errno);
+            }
 
             int apiVersion = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoGetApiVersion, IntPtr.Zero);
             if (apiVersion < 0)
