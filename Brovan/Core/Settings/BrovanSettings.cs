@@ -83,6 +83,7 @@ namespace Brovan.Core.Settings
         public string DefaultText = string.Empty;
         public string DefaultJson = "null";
         public string[] AllowedValues = Array.Empty<string>();
+        public string Type = "string";
         public SettingCategory Category;
         public SettingScope Scope;
         public SettingApplies Applies;

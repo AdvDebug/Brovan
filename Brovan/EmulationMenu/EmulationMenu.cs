@@ -1243,7 +1243,7 @@ namespace Brovan.EmulationMenu
                     Console.ResetColor();
                     Console.ForegroundColor = ConsoleColor.White;
                     Console.BackgroundColor = ConsoleColor.Black;
-                    Environment.Exit(0);
+                    Environment.Exit(Environment.ExitCode);
                     break;
 
                 case "showinstrs":
@@ -2593,7 +2593,7 @@ namespace Brovan.EmulationMenu
                         Console.ResetColor();
                         Console.ForegroundColor = ConsoleColor.White;
                         Console.BackgroundColor = ConsoleColor.Black;
-                        Environment.Exit(0);
+                        Environment.Exit(Environment.ExitCode);
                     }
 
                     if (string.IsNullOrWhiteSpace(Input))

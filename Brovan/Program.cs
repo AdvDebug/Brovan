@@ -351,6 +351,13 @@ namespace Brovan
                 return;
             }
 
+            // A schema query must not create the config file or print anything before the JSON.
+            if (Array.IndexOf(args, "--settings-schema") >= 0)
+            {
+                Console.Out.Write(SettingsStore.SchemaJson());
+                return;
+            }
+
             List<string> RemainingArgs = new List<string>();
             List<string> SettingProblems = new List<string>();
             SettingsLayer CommandLineSettings = SettingsCommandLine.Parse(args, RemainingArgs, SettingProblems);

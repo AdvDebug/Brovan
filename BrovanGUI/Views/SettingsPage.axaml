@@ -1,0 +1,60 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:BrovanGUI.ViewModels"
+             xmlns:views="using:BrovanGUI.Views"
+             x:Class="BrovanGUI.Views.SettingsPage"
+             x:DataType="vm:SettingsViewModel">
+
+    <ScrollViewer>
+        <StackPanel Margin="40,16,40,32" Spacing="24" MaxWidth="1000" HorizontalAlignment="Left">
+
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Spacing="4" VerticalAlignment="Center">
+                    <TextBlock Classes="h1" Text="Settings" />
+                    <TextBlock Classes="muted" Text="Defaults for every program. A profile can override any of them." />
+                </StackPanel>
+                <Button Grid.Column="1" Classes="secondary" Command="{Binding ResetDefaultsCommand}" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Path Classes="icon" Width="14" Height="14" Data="{StaticResource IconReset}" />
+                        <TextBlock Text="Reset defaults" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+
+            <Border Classes="banner" IsVisible="{Binding SchemaStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                    <Path Classes="icon warn" Data="{StaticResource IconWarning}" />
+                    <TextBlock Text="{Binding SchemaStatus}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <StackPanel>
+                <TextBlock Classes="group" Text="Appearance" />
+                <views:SettingCard Header="Theme" Description="How this window looks.">
+                    <ComboBox Classes="setting" ItemsSource="{Binding Themes}" SelectedItem="{Binding SelectedTheme}">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate DataType="vm:Choice">
+                                <TextBlock Text="{Binding Label}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                </views:SettingCard>
+            </StackPanel>
+
+            <ItemsControl ItemsSource="{Binding Categories}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="24" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+            </ItemsControl>
+
+            <StackPanel>
+                <TextBlock Classes="group" Text="Library" />
+                <views:SettingCard Header="Library file" Description="{Binding LibraryPath}">
+                    <Button Classes="secondary" Command="{Binding OpenLibraryFolderCommand}" Content="Open folder" />
+                </views:SettingCard>
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

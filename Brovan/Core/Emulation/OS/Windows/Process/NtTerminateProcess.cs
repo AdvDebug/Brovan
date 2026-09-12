@@ -33,6 +33,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if ((Instance.Settings.Flags & LogFlags.Important) != 0)
                         Instance.TriggerEventMessage($"[{(ExitCode == 0 ? '+' : '!')}] Process asked to be terminated with exit code 0x{ExitCode:X}", LogFlags.Important);
                     GuestSession.PublishExit((uint)ExitCode);
+                    Environment.ExitCode = (int)ExitCode;
                     foreach (EmulatedThread ProcessThreads in Instance.Threads.Values)
                     {
                         if (ProcessThreads == null)
@@ -59,6 +60,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if ((Instance.Settings.Flags & LogFlags.Important) != 0)
                             Instance.TriggerEventMessage($"[{(ExitCode == 0 ? '+' : '!')}] Process asked to be terminated with exit code 0x{ExitCode:X}", LogFlags.Important);
                         GuestSession.PublishExit((uint)ExitCode);
+                        Environment.ExitCode = (int)ExitCode;
                         foreach (EmulatedThread ProcessThreads in Instance.Threads.Values)
                         {
                             if (ProcessThreads == null)

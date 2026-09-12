@@ -1,0 +1,81 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:BrovanGUI.ViewModels"
+             xmlns:views="using:BrovanGUI.Views"
+             x:Class="BrovanGUI.Views.SetupPage"
+             x:DataType="vm:SetupViewModel">
+
+    <ScrollViewer>
+        <StackPanel Margin="40,16,40,32" Spacing="24" MaxWidth="1000" HorizontalAlignment="Left">
+
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Spacing="4" VerticalAlignment="Center">
+                    <TextBlock Classes="h1" Text="Setup" />
+                    <TextBlock Classes="muted" Text="What Brovan needs on this computer before a program can run." />
+                </StackPanel>
+                <Button Grid.Column="1" Classes="secondary" Command="{Binding RefreshCommand}" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Path Classes="icon" Width="14" Height="14" Data="{StaticResource IconRefresh}" />
+                        <TextBlock Text="Check again" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+
+            <StackPanel>
+                <TextBlock Classes="group" Text="Emulator" />
+                <views:SettingCard Header="Brovan" Description="{Binding BrovanPath}" Status="{Binding BrovanStatus}">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Classes="secondary" Command="{Binding BrowseBrovanCommand}" Content="Locate" />
+                        <Button Classes="secondary" Command="{Binding OpenFolderCommand}" IsEnabled="{Binding BrovanFound}" Content="Open folder" />
+                        <Button Classes="secondary" Command="{Binding OpenLogCommand}" IsEnabled="{Binding LogExists}" Content="Open log" />
+                    </StackPanel>
+                </views:SettingCard>
+            </StackPanel>
+
+            <StackPanel IsVisible="{Binding HostIsWindows}">
+                <TextBlock Classes="group" Text="Windows system files" />
+                <StackPanel Spacing="4">
+                    <views:SettingCard Header="System libraries" Description="Provided by this Windows installation." Status="Good" />
+                    <views:SettingCard Header="Registry hives" Description="{Binding RegistryDescription}" Status="{Binding RegistryStatus}" />
+                </StackPanel>
+            </StackPanel>
+
+            <StackPanel IsVisible="{Binding HostIsLinux}">
+                <TextBlock Classes="group" Text="Windows system files" />
+                <StackPanel Spacing="4">
+                    <views:SettingCard Header="Windows license" Description="Using the extracted files needs a valid Windows license. The installation media is downloaded from Microsoft, about 2 GB, and only the needed files are kept.">
+                        <CheckBox IsChecked="{Binding LicenseAccepted}" Content="I have one" />
+                    </views:SettingCard>
+                    <views:SettingCard Header="System libraries and registry" Description="{Binding SystemFilesDescription}" Status="{Binding SystemFilesStatus}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Classes="accent secondary" Command="{Binding InstallWindowsCommand}">
+                                <TextBlock Text="Install from Microsoft" Foreground="White" />
+                            </Button>
+                            <Button Classes="secondary" Command="{Binding InstallFromIsoCommand}" Content="Use an ISO or WIM" />
+                        </StackPanel>
+                    </views:SettingCard>
+                    <views:SettingCard Header="Visual C++ runtimes" Description="{Binding RuntimesDescription}" Status="{Binding RuntimesStatus}">
+                        <Button Classes="secondary" Command="{Binding InstallRuntimesCommand}" Content="Install" />
+                    </views:SettingCard>
+                </StackPanel>
+            </StackPanel>
+
+            <StackPanel>
+                <TextBlock Classes="group" Text="Direct3D games" />
+                <views:SettingCard Header="DXVK" Description="{Binding DxvkDescription}" Status="{Binding DxvkStatus}">
+                    <Button Classes="accent secondary" Command="{Binding InstallDxvkCommand}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Path Classes="icon onaccent" Width="14" Height="14" Data="{StaticResource IconDownload}" />
+                            <TextBlock Text="Install the latest" Foreground="White" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                </views:SettingCard>
+            </StackPanel>
+
+            <StackPanel>
+                <TextBlock Classes="group" Text="Speed" />
+                <views:SettingCard Header="{Binding HypervisorName}" Description="{Binding HypervisorDescription}" Status="{Binding HypervisorStatus}" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

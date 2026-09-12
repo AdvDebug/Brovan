@@ -1,0 +1,240 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:BrovanGUI.ViewModels"
+        xmlns:views="using:BrovanGUI.Views"
+        x:Class="BrovanGUI.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="Brovan"
+        Width="1180" Height="800" MinWidth="900" MinHeight="600"
+        Background="{DynamicResource BgWindow}"
+        WindowStartupLocation="CenterScreen">
+
+    <Window.DataTemplates>
+        <DataTemplate DataType="vm:ProfileViewModel">
+            <views:ProfilePage />
+        </DataTemplate>
+        <DataTemplate DataType="vm:SetupViewModel">
+            <views:SetupPage />
+        </DataTemplate>
+        <DataTemplate DataType="vm:SettingsViewModel">
+            <views:SettingsPage />
+        </DataTemplate>
+        <DataTemplate DataType="vm:WelcomeViewModel">
+            <views:WelcomePage />
+        </DataTemplate>
+
+        <DataTemplate DataType="vm:CategoryViewModel">
+            <StackPanel>
+                <TextBlock Classes="group" Text="{Binding Title}" />
+                <ItemsControl ItemsSource="{Binding Rows}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="4" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                </ItemsControl>
+            </StackPanel>
+        </DataTemplate>
+
+        <DataTemplate DataType="vm:ToggleRow">
+            <views:SettingCard Header="{Binding Label}" Description="{Binding Help}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button Classes="iconbtn" Command="{Binding ResetCommand}" IsVisible="{Binding IsOverridden}" ToolTip.Tip="Back to the default">
+                        <Path Classes="icon muted" Width="13" Height="13" Data="{StaticResource IconReset}" />
+                    </Button>
+                    <ToggleSwitch IsChecked="{Binding IsOn}" VerticalAlignment="Center" />
+                </StackPanel>
+            </views:SettingCard>
+        </DataTemplate>
+
+        <DataTemplate DataType="vm:ChoiceRow">
+            <views:SettingCard Header="{Binding Label}" Description="{Binding Help}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button Classes="iconbtn" Command="{Binding ResetCommand}" IsVisible="{Binding IsOverridden}" ToolTip.Tip="Back to the default">
+                        <Path Classes="icon muted" Width="13" Height="13" Data="{StaticResource IconReset}" />
+                    </Button>
+                    <ComboBox Classes="setting" ItemsSource="{Binding Choices}" SelectedItem="{Binding SelectedChoice}" VerticalAlignment="Center">
+                        <ComboBox.Styles>
+                            <Style Selector="ComboBoxItem" x:DataType="vm:Choice">
+                                <Setter Property="IsEnabled" Value="{Binding IsEnabled}" />
+                            </Style>
+                        </ComboBox.Styles>
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate DataType="vm:Choice">
+                                <TextBlock Text="{Binding Label}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+                </StackPanel>
+            </views:SettingCard>
+        </DataTemplate>
+
+        <DataTemplate DataType="vm:NumberRow">
+            <views:SettingCard Header="{Binding Label}" Description="{Binding Help}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button Classes="iconbtn" Command="{Binding ResetCommand}" IsVisible="{Binding IsOverridden}" ToolTip.Tip="Back to the default">
+                        <Path Classes="icon muted" Width="13" Height="13" Data="{StaticResource IconReset}" />
+                    </Button>
+                    <NumericUpDown Classes="setting" Value="{Binding NumberValue}" Minimum="{Binding Minimum}" Maximum="{Binding Maximum}"
+                                   Increment="{Binding Increment}" FormatString="{Binding FormatString}" VerticalAlignment="Center" />
+                </StackPanel>
+            </views:SettingCard>
+        </DataTemplate>
+
+        <DataTemplate DataType="vm:TextRow">
+            <views:SettingCard Header="{Binding Label}" Description="{Binding Help}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button Classes="iconbtn" Command="{Binding ResetCommand}" IsVisible="{Binding IsOverridden}" ToolTip.Tip="Back to the default">
+                        <Path Classes="icon muted" Width="13" Height="13" Data="{StaticResource IconReset}" />
+                    </Button>
+                    <TextBox Classes="setting" Text="{Binding TextValue}" Watermark="Default" VerticalAlignment="Center" />
+                </StackPanel>
+            </views:SettingCard>
+        </DataTemplate>
+
+        <DataTemplate DataType="vm:ListRow">
+            <views:SettingCard Header="{Binding Label}" Description="{Binding Help}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Button Classes="iconbtn" Command="{Binding ResetCommand}" IsVisible="{Binding IsOverridden}" ToolTip.Tip="Back to the default">
+                        <Path Classes="icon muted" Width="13" Height="13" Data="{StaticResource IconReset}" />
+                    </Button>
+                    <TextBox Classes="list" Text="{Binding TextValue}" Watermark="None" VerticalAlignment="Center" />
+                </StackPanel>
+            </views:SettingCard>
+        </DataTemplate>
+    </Window.DataTemplates>
+
+    <Grid ColumnDefinitions="256,*">
+
+        <Border Grid.Column="0" Background="{DynamicResource BgSidebar}" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="0,0,1,0">
+            <Grid RowDefinitions="40,Auto,*,Auto">
+
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="16,0" VerticalAlignment="Center" IsHitTestVisible="False">
+                    <TextBlock Text="Brovan" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
+                </StackPanel>
+
+                <Grid Grid.Row="1" ColumnDefinitions="*,Auto,Auto" Margin="16,12,10,4">
+                    <TextBlock Classes="section" Text="Library" VerticalAlignment="Center" />
+                    <Button Grid.Column="1" Classes="iconbtn" Command="{Binding AddProfileCommand}" ToolTip.Tip="Add a program">
+                        <Path Classes="icon" Data="{StaticResource IconPlus}" />
+                    </Button>
+                    <Button Grid.Column="2" Classes="iconbtn" x:Name="RemoveButton" IsEnabled="{Binding HasSelection}" ToolTip.Tip="Remove from the library">
+                        <Button.Flyout>
+                            <Flyout Placement="BottomEdgeAlignedRight">
+                                <StackPanel Spacing="12" Width="240">
+                                    <TextBlock Text="Remove this program from the library? The files on disk stay where they are." TextWrapping="Wrap" />
+                                    <Button Classes="danger" Content="Remove" HorizontalAlignment="Right" Click="RemoveClick" />
+                                </StackPanel>
+                            </Flyout>
+                        </Button.Flyout>
+                        <Path Classes="icon" Data="{StaticResource IconTrash}" />
+                    </Button>
+                </Grid>
+
+                <ListBox Grid.Row="2" x:Name="ProfileList" ItemsSource="{Binding Profiles}" SelectedItem="{Binding ListSelection}"
+                         Background="Transparent" Margin="8,0" DragDrop.AllowDrop="True">
+                    <ListBox.Resources>
+                        <SolidColorBrush x:Key="SystemControlHighlightListAccentLowBrush" Color="#00000000" />
+                        <SolidColorBrush x:Key="SystemControlHighlightListAccentMediumBrush" Color="#00000000" />
+                        <SolidColorBrush x:Key="SystemControlHighlightListAccentHighBrush" Color="#00000000" />
+                    </ListBox.Resources>
+                    <ListBox.Styles>
+                        <Style Selector="ListBoxItem">
+                            <Setter Property="Padding" Value="10,7" />
+                            <Setter Property="CornerRadius" Value="6" />
+                            <Setter Property="Margin" Value="0,1" />
+                        </Style>
+                        <Style Selector="ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+                            <Setter Property="Background" Value="{DynamicResource BgHover}" />
+                        </Style>
+                        <Style Selector="ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+                            <Setter Property="Background" Value="{DynamicResource BgSelected}" />
+                        </Style>
+                        <Style Selector="ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+                            <Setter Property="Background" Value="{DynamicResource BgSelected}" />
+                        </Style>
+                    </ListBox.Styles>
+                    <ListBox.ItemTemplate>
+                        <DataTemplate DataType="vm:ProfileViewModel">
+                            <Grid ColumnDefinitions="Auto,Auto,*,Auto">
+                                <Border Grid.Column="0" Width="3" Height="16" CornerRadius="2" Background="{DynamicResource Accent}" Margin="-8,0,8,0"
+                                        IsVisible="{Binding $parent[ListBoxItem].IsSelected}" />
+                                <Border Grid.Column="1" Width="28" Height="28" CornerRadius="6" Background="{DynamicResource BgTile}" ClipToBounds="True">
+                                    <Panel>
+                                        <TextBlock Text="{Binding Initial}" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="{Binding !HasIcon}" />
+                                        <Image Source="{Binding Icon}" Width="22" Height="22" IsVisible="{Binding HasIcon}" />
+                                    </Panel>
+                                </Border>
+                                <TextBlock Grid.Column="2" Text="{Binding Name}" Margin="10,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                <Ellipse Grid.Column="3" Classes="dot" Fill="{DynamicResource Good}" IsVisible="{Binding IsRunning}" Margin="6,0,2,0" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <StackPanel Grid.Row="3" Margin="8,4,8,10" Spacing="2">
+                    <Button Classes="nav" Classes.active="{Binding IsSetupPage}" Command="{Binding ShowSetupCommand}">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <Path Classes="icon" Data="{StaticResource IconWrench}" />
+                            <TextBlock Text="Setup" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                    <Button Classes="nav" Classes.active="{Binding IsSettingsPage}" Command="{Binding ShowSettingsCommand}">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <Path Classes="icon" Data="{StaticResource IconGear}" />
+                            <TextBlock Text="Settings" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                    <Button Classes="nav" Command="{Binding OpenManualCommand}">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <Path Classes="icon" Data="{StaticResource IconBook}" />
+                            <TextBlock Text="Manual" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Column="1" RowDefinitions="*,Auto" x:Name="ContentHost">
+            <ContentControl Grid.Row="0" Content="{Binding CurrentPage}" />
+
+            <Border Grid.Row="1" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="0,1,0,0" Background="{DynamicResource BgSidebar}">
+                <Grid RowDefinitions="Auto,Auto">
+                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="12,0,10,0" Height="38">
+                        <Button Classes="iconbtn" Command="{Binding Output.ToggleCommand}" ToolTip.Tip="Show or hide the output">
+                            <Panel>
+                                <Path Classes="icon" Data="{StaticResource IconChevronUp}" IsVisible="{Binding !Output.IsOpen}" />
+                                <Path Classes="icon" Data="{StaticResource IconChevronDown}" IsVisible="{Binding Output.IsOpen}" />
+                            </Panel>
+                        </Button>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" Margin="4,0,0,0">
+                            <Path Classes="icon muted" Data="{StaticResource IconTerminal}" Width="14" Height="14" />
+                            <TextBlock Text="Output" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        </StackPanel>
+                        <TextBlock Grid.Column="2" Classes="muted" Text="{Binding Output.Status}" Margin="12,0,0,0" VerticalAlignment="Center" />
+                        <Button Grid.Column="3" Classes="iconbtn" Click="CopyOutputClick" ToolTip.Tip="Copy the selected lines, or everything">
+                            <Path Classes="icon muted" Data="{StaticResource IconCopy}" Width="14" Height="14" />
+                        </Button>
+                        <Button Grid.Column="4" Classes="iconbtn" Command="{Binding Output.ClearCommand}" ToolTip.Tip="Clear the output">
+                            <Path Classes="icon muted" Data="{StaticResource IconTrash}" Width="14" Height="14" />
+                        </Button>
+                    </Grid>
+                    <Grid Grid.Row="1" RowDefinitions="*,Auto,Auto" ColumnDefinitions="*,Auto" Height="260" IsVisible="{Binding Output.IsOpen}" Background="{DynamicResource BgOutput}">
+                        <views:LogView x:Name="Log" Lines="{Binding Output.Lines}" Margin="4,2,0,0"
+                                       FontFamily="Cascadia Mono, Consolas, DejaVu Sans Mono, Menlo, monospace" FontSize="12"
+                                       Foreground="{DynamicResource TextPrimary}" GoodBrush="{DynamicResource Good}" WarnBrush="{DynamicResource Warn}"
+                                       BadBrush="{DynamicResource Bad}" AccentBrush="{DynamicResource Accent}" SelectionBrush="{DynamicResource BgSelected}" />
+                        <ScrollBar Grid.Column="1" Orientation="Vertical" Visibility="Auto" Minimum="0" Maximum="{Binding #Log.ScrollMaximum}"
+                                   ViewportSize="{Binding #Log.ViewportLines}" Value="{Binding #Log.LineOffset, Mode=TwoWay}"
+                                   SmallChange="1" LargeChange="{Binding #Log.ViewportLines}" />
+                        <ScrollBar Grid.Row="1" Orientation="Horizontal" Visibility="Auto" Minimum="0" Maximum="{Binding #Log.HorizontalMaximum}"
+                                   ViewportSize="{Binding #Log.Bounds.Width}" Value="{Binding #Log.HorizontalOffset, Mode=TwoWay}"
+                                   SmallChange="20" LargeChange="200" />
+                        <TextBox Grid.Row="2" Grid.ColumnSpan="2" Classes="output" Text="{Binding Output.Input}" KeyDown="InputKeyDown" Margin="12,4,12,8"
+                                 Watermark="Type a line for the program and press Enter" />
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

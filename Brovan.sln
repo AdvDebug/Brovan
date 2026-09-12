@@ -13,6 +13,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BrovSteamClient", "Brovan.S
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SteamSpecConvert", "Brovan.Steam\tools\SteamSpecConvert\SteamSpecConvert.csproj", "{47958C83-2319-473F-B724-C5F7C8F49BE3}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BrovanGUI", "BrovanGUI\BrovanGUI.csproj", "{5B1E6C2A-7D3F-4A9E-8C41-2F0B9D6E1A57}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -39,6 +41,10 @@ Global
 		{47958C83-2319-473F-B724-C5F7C8F49BE3}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{47958C83-2319-473F-B724-C5F7C8F49BE3}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{47958C83-2319-473F-B724-C5F7C8F49BE3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5B1E6C2A-7D3F-4A9E-8C41-2F0B9D6E1A57}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5B1E6C2A-7D3F-4A9E-8C41-2F0B9D6E1A57}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5B1E6C2A-7D3F-4A9E-8C41-2F0B9D6E1A57}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5B1E6C2A-7D3F-4A9E-8C41-2F0B9D6E1A57}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

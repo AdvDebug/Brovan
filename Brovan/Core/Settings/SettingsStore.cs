@@ -251,6 +251,61 @@ namespace Brovan.Core.Settings
             return Builder.ToString();
         }
 
+        // The launcher binds to these field names and value spellings.
+        public static string SchemaJson()
+        {
+            using MemoryStream Buffer = new MemoryStream();
+            using (Utf8JsonWriter Writer = new Utf8JsonWriter(Buffer, new JsonWriterOptions { Indented = true }))
+            {
+                Writer.WriteStartArray();
+
+                foreach (SettingDescriptor Item in BrovanSettings.Descriptors)
+                {
+                    Writer.WriteStartObject();
+                    Writer.WriteString("key", Item.Key);
+                    Writer.WriteString("type", Item.Type);
+                    Writer.WriteString("category", Item.Category.ToString().ToLowerInvariant());
+                    Writer.WriteString("scope", Item.Scope.ToString().ToLowerInvariant());
+                    Writer.WriteString("applies", Item.Applies.ToString().ToLowerInvariant());
+                    Writer.WriteString("help", Item.Help);
+                    Writer.WriteString("cli", Item.Cli);
+                    Writer.WriteBoolean("repeatable", Item.Repeatable);
+
+                    Writer.WriteStartArray("platforms");
+                    if ((Item.Platforms & SettingPlatforms.Windows) != 0)
+                        Writer.WriteStringValue("windows");
+                    if ((Item.Platforms & SettingPlatforms.Linux) != 0)
+                        Writer.WriteStringValue("linux");
+                    if ((Item.Platforms & SettingPlatforms.Android) != 0)
+                        Writer.WriteStringValue("android");
+                    Writer.WriteEndArray();
+
+                    Writer.WriteStartArray("values");
+                    foreach (string Value in Item.AllowedValues)
+                        Writer.WriteStringValue(Value);
+                    Writer.WriteEndArray();
+
+                    if (double.IsNaN(Item.Min))
+                        Writer.WriteNull("min");
+                    else
+                        Writer.WriteNumber("min", Item.Min);
+
+                    if (double.IsNaN(Item.Max))
+                        Writer.WriteNull("max");
+                    else
+                        Writer.WriteNumber("max", Item.Max);
+
+                    Writer.WritePropertyName("default");
+                    Writer.WriteRawValue(Item.DefaultJson);
+                    Writer.WriteEndObject();
+                }
+
+                Writer.WriteEndArray();
+            }
+
+            return Encoding.UTF8.GetString(Buffer.ToArray());
+        }
+
         private static string ElementText(JsonElement Element)
         {
             return Element.ValueKind switch

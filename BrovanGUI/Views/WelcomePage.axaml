@@ -1,0 +1,21 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:BrovanGUI.ViewModels"
+             x:Class="BrovanGUI.Views.WelcomePage"
+             x:DataType="vm:WelcomeViewModel">
+
+    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="14" MaxWidth="420">
+        <TextBlock Classes="h1" Text="Add a program to get started" HorizontalAlignment="Center" />
+        <TextBlock Classes="muted" TextAlignment="Center" FontSize="13"
+                   Text="Pick a Windows or Linux executable. It gets a profile with its own settings, and Brovan runs it from here. You can also drop files onto the list on the left." />
+        <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center" Margin="0,10,0,0">
+            <Button Classes="accent launch" Command="{Binding AddProgramCommand}">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Path Classes="icon onaccent" Width="14" Height="14" Data="{StaticResource IconPlus}" />
+                    <TextBlock Text="Add a program" Foreground="White" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
+            <Button Classes="launch" Command="{Binding OpenSetupCommand}" Content="Open setup" />
+        </StackPanel>
+    </StackPanel>
+</UserControl>

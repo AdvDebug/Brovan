@@ -1,0 +1,89 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:BrovanGUI.ViewModels"
+             xmlns:views="using:BrovanGUI.Views"
+             x:Class="BrovanGUI.Views.ProfilePage"
+             x:DataType="vm:ProfileViewModel">
+
+    <ScrollViewer>
+        <StackPanel Margin="40,16,40,32" Spacing="24" MaxWidth="1000" HorizontalAlignment="Left">
+
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Spacing="4" VerticalAlignment="Center" Margin="0,0,24,0">
+                    <TextBlock Classes="h1">
+                        <Run Text="Profile: &quot;" /><Run Text="{Binding Name}" /><Run Text="&quot;" />
+                    </TextBlock>
+                    <TextBlock Classes="muted" Text="{Binding Executable}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Executable}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Button Classes="accent launch" Command="{Binding LaunchCommand}" IsVisible="{Binding !IsRunning}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Path Classes="icon fill onaccent" Width="11" Height="11" Data="{StaticResource IconPlay}" />
+                            <TextBlock Text="Launch" Foreground="White" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                    <Button Classes="danger launch" Command="{Binding StopCommand}" IsVisible="{Binding IsRunning}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Path Classes="icon fill onaccent" Width="11" Height="11" Data="{StaticResource IconStop}" />
+                            <TextBlock Text="Stop" Foreground="White" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <Border Classes="banner" IsVisible="{Binding ExecutableMissing}">
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                    <Path Classes="icon warn" Data="{StaticResource IconWarning}" />
+                    <TextBlock Text="The program file was not found. Pick it again below." VerticalAlignment="Center" />
+                </StackPanel>
+            </Border>
+
+            <Border Classes="banner" IsVisible="{Binding SchemaStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                <StackPanel Orientation="Horizontal" Spacing="10">
+                    <Path Classes="icon warn" Data="{StaticResource IconWarning}" />
+                    <TextBlock Text="{Binding SchemaStatus}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <StackPanel>
+                <TextBlock Classes="group" Text="Program" />
+                <StackPanel Spacing="4">
+                    <views:SettingCard Header="Name" Description="Shown in the library.">
+                        <TextBox Classes="form" Text="{Binding Name}" />
+                    </views:SettingCard>
+                    <views:SettingCard Header="Executable" Description="The Windows or Linux program Brovan runs.">
+                        <TextBox Classes="form" Text="{Binding Executable}">
+                            <TextBox.InnerRightContent>
+                                <Button Classes="iconbtn inner" Command="{Binding BrowseExecutableCommand}" ToolTip.Tip="Browse">
+                                    <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconFolder}" />
+                                </Button>
+                            </TextBox.InnerRightContent>
+                        </TextBox>
+                    </views:SettingCard>
+                    <views:SettingCard Header="Arguments" Description="Command line passed to the program.">
+                        <TextBox Classes="form" Text="{Binding Arguments}" Watermark="None" />
+                    </views:SettingCard>
+                    <views:SettingCard Header="Start in" Description="The folder the program starts in.">
+                        <TextBox Classes="form" Text="{Binding WorkingDirectory}" Watermark="The program's own folder">
+                            <TextBox.InnerRightContent>
+                                <Button Classes="iconbtn inner" Command="{Binding BrowseWorkingDirectoryCommand}" ToolTip.Tip="Browse">
+                                    <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconFolder}" />
+                                </Button>
+                            </TextBox.InnerRightContent>
+                        </TextBox>
+                    </views:SettingCard>
+                </StackPanel>
+            </StackPanel>
+
+            <ItemsControl ItemsSource="{Binding Categories}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="24" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+            </ItemsControl>
+
+            <TextBlock Classes="muted" Text="A setting with the reset arrow next to it is set for this profile only. The rest follow the defaults in Settings." />
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

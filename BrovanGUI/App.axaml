@@ -1,0 +1,116 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="using:BrovanGUI.Views"
+             x:Class="BrovanGUI.App"
+             RequestedThemeVariant="Dark">
+
+    <Application.Styles>
+        <FluentTheme>
+            <FluentTheme.Palettes>
+                <ColorPaletteResources x:Key="Light" Accent="#3B82F6" RegionColor="#F3F3F3" />
+                <ColorPaletteResources x:Key="Dark" Accent="#3B82F6" RegionColor="#141414" />
+            </FluentTheme.Palettes>
+        </FluentTheme>
+        <StyleInclude Source="avares://BrovanGUI/Styles/Brovan.axaml" />
+    </Application.Styles>
+
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="BgWindow" Color="#141414" />
+                    <SolidColorBrush x:Key="BgSidebar" Color="#191919" />
+                    <SolidColorBrush x:Key="BgCard" Color="#1F1F1F" />
+                    <SolidColorBrush x:Key="BgHover" Color="#262626" />
+                    <SolidColorBrush x:Key="BgSelected" Color="#2D2D2D" />
+                    <SolidColorBrush x:Key="BgTile" Color="#2A2A2A" />
+                    <SolidColorBrush x:Key="BgOutput" Color="#0E0E0E" />
+                    <SolidColorBrush x:Key="BorderSubtle" Color="#2B2B2B" />
+                    <SolidColorBrush x:Key="TextPrimary" Color="#F2F2F2" />
+                    <SolidColorBrush x:Key="TextSecondary" Color="#9B9B9B" />
+                    <SolidColorBrush x:Key="Accent" Color="#3B82F6" />
+                    <SolidColorBrush x:Key="Good" Color="#4ADE80" />
+                    <SolidColorBrush x:Key="Warn" Color="#FBBF24" />
+                    <SolidColorBrush x:Key="Bad" Color="#F87171" />
+                    <SolidColorBrush x:Key="WarnBanner" Color="#33FBBF24" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="BgWindow" Color="#F3F3F3" />
+                    <SolidColorBrush x:Key="BgSidebar" Color="#EAEAEA" />
+                    <SolidColorBrush x:Key="BgCard" Color="#FFFFFF" />
+                    <SolidColorBrush x:Key="BgHover" Color="#E0E0E0" />
+                    <SolidColorBrush x:Key="BgSelected" Color="#D6D6D6" />
+                    <SolidColorBrush x:Key="BgTile" Color="#E4E4E4" />
+                    <SolidColorBrush x:Key="BgOutput" Color="#FAFAFA" />
+                    <SolidColorBrush x:Key="BorderSubtle" Color="#DCDCDC" />
+                    <SolidColorBrush x:Key="TextPrimary" Color="#1B1B1B" />
+                    <SolidColorBrush x:Key="TextSecondary" Color="#666666" />
+                    <SolidColorBrush x:Key="Accent" Color="#2563EB" />
+                    <SolidColorBrush x:Key="Good" Color="#16A34A" />
+                    <SolidColorBrush x:Key="Warn" Color="#D97706" />
+                    <SolidColorBrush x:Key="Bad" Color="#DC2626" />
+                    <SolidColorBrush x:Key="WarnBanner" Color="#33D97706" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+
+            <ControlTheme x:Key="{x:Type views:SettingCard}" TargetType="views:SettingCard">
+                <Setter Property="Background" Value="{DynamicResource BgCard}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtle}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="6" />
+                <Setter Property="Padding" Value="16,11" />
+                <Setter Property="MinHeight" Value="60" />
+                <Setter Property="HorizontalAlignment" Value="Stretch" />
+                <Setter Property="Template">
+                    <ControlTemplate>
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"
+                                Padding="{TemplateBinding Padding}" MinHeight="{TemplateBinding MinHeight}">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <Ellipse Name="PART_Status" Width="8" Height="8" Margin="0,0,14,0" VerticalAlignment="Center" IsVisible="False" />
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,24,0" Spacing="2">
+                                    <TextBlock Text="{TemplateBinding Header}" FontSize="14" Foreground="{DynamicResource TextPrimary}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{TemplateBinding Description}" FontSize="12" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap"
+                                               IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent}, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                                </StackPanel>
+                                <ContentPresenter Grid.Column="2" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+                    </ControlTemplate>
+                </Setter>
+                <Style Selector="^:good /template/ Ellipse#PART_Status">
+                    <Setter Property="IsVisible" Value="True" />
+                    <Setter Property="Fill" Value="{DynamicResource Good}" />
+                </Style>
+                <Style Selector="^:warn /template/ Ellipse#PART_Status">
+                    <Setter Property="IsVisible" Value="True" />
+                    <Setter Property="Fill" Value="{DynamicResource Warn}" />
+                </Style>
+                <Style Selector="^:bad /template/ Ellipse#PART_Status">
+                    <Setter Property="IsVisible" Value="True" />
+                    <Setter Property="Fill" Value="{DynamicResource Bad}" />
+                </Style>
+            </ControlTheme>
+
+            <StreamGeometry x:Key="IconPlus">M12 5v14M5 12h14</StreamGeometry>
+            <StreamGeometry x:Key="IconTrash">M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6</StreamGeometry>
+            <StreamGeometry x:Key="IconPlay">M6 4l14 8-14 8z</StreamGeometry>
+            <StreamGeometry x:Key="IconStop">M6 6h12v12H6z</StreamGeometry>
+            <StreamGeometry x:Key="IconWrench">M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z</StreamGeometry>
+            <StreamGeometry x:Key="IconGear">M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2zM12 15a3 3 0 100-6 3 3 0 000 6z</StreamGeometry>
+            <StreamGeometry x:Key="IconBook">M4 19.5A2.5 2.5 0 016.5 17H20M4 19.5A2.5 2.5 0 006.5 22H20V2H6.5A2.5 2.5 0 004 4.5v15z</StreamGeometry>
+            <StreamGeometry x:Key="IconFolder">M4 20h16a2 2 0 002-2V8a2 2 0 00-2-2h-7.9a2 2 0 01-1.69-.9L9.6 3.9A2 2 0 007.93 3H4a2 2 0 00-2 2v13c0 1.1.9 2 2 2z</StreamGeometry>
+            <StreamGeometry x:Key="IconChevronDown">M6 9l6 6 6-6</StreamGeometry>
+            <StreamGeometry x:Key="IconChevronUp">M18 15l-6-6-6 6</StreamGeometry>
+            <StreamGeometry x:Key="IconReset">M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8M3 3v5h5</StreamGeometry>
+            <StreamGeometry x:Key="IconCheck">M20 6L9 17l-5-5</StreamGeometry>
+            <StreamGeometry x:Key="IconWarning">M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01</StreamGeometry>
+            <StreamGeometry x:Key="IconDownload">M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3</StreamGeometry>
+            <StreamGeometry x:Key="IconTerminal">M4 17l6-6-6-6M12 19h8</StreamGeometry>
+            <StreamGeometry x:Key="IconExternal">M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3</StreamGeometry>
+            <StreamGeometry x:Key="IconRefresh">M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15</StreamGeometry>
+            <StreamGeometry x:Key="IconCopy">M20 9h-9a2 2 0 00-2 2v9a2 2 0 002 2h9a2 2 0 002-2v-9a2 2 0 00-2-2zM5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1</StreamGeometry>
+            <StreamGeometry x:Key="IconFile">M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8</StreamGeometry>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

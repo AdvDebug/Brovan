@@ -277,6 +277,7 @@ namespace Brovan.Generators
                 Builder.AppendLine($"                DefaultText = {Quote(Item.DefaultText)},");
                 Builder.AppendLine($"                DefaultJson = {Quote(DefaultJson(Item))},");
                 Builder.AppendLine($"                AllowedValues = {AllowedValues(Item)},");
+                Builder.AppendLine($"                Type = {Quote(TypeName(Item))},");
                 Builder.AppendLine($"                Category = SettingCategory.{Item.Category},");
                 Builder.AppendLine($"                Scope = SettingScope.{Item.Scope},");
                 Builder.AppendLine($"                Applies = SettingApplies.{Item.Applies},");
@@ -301,7 +302,7 @@ namespace Brovan.Generators
 
                 case ValueShape.Integer:
                 case ValueShape.Real:
-                    return Item.DefaultText.Length == 0 ? "0" : Item.DefaultText;
+                    return Item.DefaultText.Length == 0 ? "0" : NumberJson(Item.DefaultText);
 
                 case ValueShape.StringArray:
                     return "[]";
@@ -312,6 +313,43 @@ namespace Brovan.Generators
                 default:
                     return "\"" + Item.DefaultText.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
             }
+        }
+
+        private static string TypeName(Entry Item)
+        {
+            switch (Item.Shape)
+            {
+                case ValueShape.Boolean:
+                    return "boolean";
+
+                case ValueShape.Integer:
+                    return "integer";
+
+                case ValueShape.Real:
+                    return "real";
+
+                case ValueShape.StringArray:
+                    return "list";
+
+                case ValueShape.Enum:
+                    return "choice";
+
+                default:
+                    return "string";
+            }
+        }
+
+        // A C# literal keeps its suffix, as 1f does. JSON takes none.
+        private static string NumberJson(string Text)
+        {
+            if (Text.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                return Text;
+
+            int End = Text.Length;
+            while (End > 0 && "fFdDmMuUlL".IndexOf(Text[End - 1]) >= 0)
+                End--;
+
+            return End == 0 ? "0" : Text.Substring(0, End);
         }
 
         private static string AllowedValues(Entry Item)

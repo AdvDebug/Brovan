@@ -36,10 +36,29 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore Brovan/Brovan.csproj
+        run: |
+          dotnet restore Brovan/Brovan.csproj
+          dotnet restore BrovanGUI/BrovanGUI.csproj
 
       - name: Publish
         run: dotnet publish Brovan/Brovan.csproj -c Release -r ${{ matrix.rid }} --self-contained false -o artifacts/publish/${{ matrix.rid }}
+
+      - name: Publish the launcher beside the emulator
+        shell: bash
+        run: |
+          out="artifacts/publish/${{ matrix.rid }}"
+
+          # Native symbols come to several times the size of the binary.
+          dotnet publish BrovanGUI/BrovanGUI.csproj -c Release -r ${{ matrix.rid }} --self-contained false \
+            -p:NativeDebugSymbols=false -o "$out"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            launcher="$out/BrovanGUI.exe"
+          else
+            launcher="$out/BrovanGUI"
+          fi
+
+          [ -f "$launcher" ] || { echo "error: the launcher publish produced no $launcher" >&2; exit 1; }
 
       - name: Build the BrovVulk Vulkan shim (Windows)
         if: runner.os == 'Windows'
@@ -173,7 +192,7 @@ jobs:
         run: |
           mkdir -p release-assets
           ( cd "release-artifacts/Brovan Windows x64" && zip -qr "$GITHUB_WORKSPACE/release-assets/Brovan-win-x64.zip" . )
-          chmod +x "release-artifacts/Brovan Linux x64/Brovan"
+          chmod +x "release-artifacts/Brovan Linux x64/Brovan" "release-artifacts/Brovan Linux x64/BrovanGUI"
           tar -C "release-artifacts/Brovan Linux x64" -czf release-assets/Brovan-linux-x64.tar.gz .
           cp release-artifacts/"Brovan Android arm64"/*.apk release-assets/
 
