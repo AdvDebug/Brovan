@@ -451,6 +451,11 @@ public class MainActivity extends AppCompatActivity {
             CharSequence typed = source.getText();
             String media = typed == null || typed.toString().trim().isEmpty() ? null : typed.toString().trim();
 
+            if (media == null && selectedIso == null) {
+                snack(getString(R.string.windows_needs_media));
+                return;
+            }
+
             licensed.setEnabled(false);
             startInstall(bar, detail, R.string.windows_working, install, runtimes);
             WindowsInstall.windows(this, worker, media, selectedIso, new WindowsInstall.Listener() {

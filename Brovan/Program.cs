@@ -104,8 +104,8 @@ namespace Brovan
             Console.WriteLine("  --render-scale <f>");
             Console.WriteLine("                    Fraction of the window the program renders at, from 0.25 to 1. Below 1 its");
             Console.WriteLine("                    render targets get smaller and the display scales the result back up. Android only.");
-            Console.WriteLine("  --install-windows Download Windows installation media from Microsoft and extract the system");
-            Console.WriteLine("                    libraries, NLS tables and registry hives Brovan needs, then the Visual C++");
+            Console.WriteLine("  --install-windows Extract the system libraries, NLS tables and registry hives Brovan needs from");
+            Console.WriteLine("                    the Windows installation media given by --windows-iso, then the Visual C++");
             Console.WriteLine("                    runtimes, then exit.");
             Console.WriteLine("  --install-runtimes");
             Console.WriteLine("                    Download only the Visual C++ runtimes into WindowsLibs, then exit. Useful when");
@@ -388,7 +388,7 @@ namespace Brovan
             if (!IsWindows && !Directory.Exists(WindowsLibsPath))
             {
                 PrintHighlight($"[-] Couldn't find the windows libs directory inside. expected path: {WindowsLibsPath}", true);
-                PrintHighlight("[*] Run Brovan with --install-windows to fetch them from Microsoft's installation media.", true);
+                PrintHighlight("[*] Run Brovan with --install-windows --windows-iso <path> to extract them from Windows installation media.", true);
                 Environment.Exit(0);
             }
 
@@ -485,7 +485,7 @@ namespace Brovan
                 }
                 else
                 {
-                    PrintHighlight("[-] Cannot dump Registry because you are not running on Windows. Dump one from a Windows machine into a 'WinReg' directory next to the emulator, or run Brovan with --install-windows.", true);
+                    PrintHighlight("[-] Cannot dump Registry because you are not running on Windows. Dump one from a Windows machine into a 'WinReg' directory next to the emulator, or run Brovan with --install-windows --windows-iso <path>.", true);
                     Environment.Exit(-1);
                 }
             }

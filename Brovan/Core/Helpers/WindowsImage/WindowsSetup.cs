@@ -10,17 +10,16 @@ namespace Brovan.Core.Helpers.WindowsImage
         public string? Media;
         public int MediaDescriptor = -1;
         public bool LicenseAccepted;
-        public string Locale = "English (United States)";
         public int ImageIndex = 1;
     }
 
     internal static class WindowsSetup
     {
         public const string LicenseNotice =
-            "Brovan is about to download Windows installation media from Microsoft's servers and extract the system\n" +
-            "libraries and registry hives it needs to run Windows programs, followed by the Visual C++ runtimes that\n" +
-            "most Windows programs are built against. Brovan does not include or redistribute any Microsoft software.\n" +
-            "Using these files requires a valid Windows license.";
+            "Brovan is about to extract the system libraries and registry hives it needs to run Windows programs from\n" +
+            "the installation media you supply, followed by the Visual C++ runtimes that most Windows programs are\n" +
+            "built against. Brovan does not include or redistribute any Microsoft software. Using these files requires\n" +
+            "a valid Windows license.";
 
         public static bool InstallRuntimes(string BaseDirectory, bool LicenseAccepted, Action<string> Report, Func<bool>? Confirm, Action<long, long, long, long>? Progress = null)
         {
@@ -47,7 +46,7 @@ namespace Brovan.Core.Helpers.WindowsImage
 
                 if (Confirm == null || !Confirm())
                 {
-                    Report("[-] Aborted; nothing was downloaded.");
+                    Report("[-] Aborted; nothing was installed.");
                     return false;
                 }
             }
@@ -66,10 +65,8 @@ namespace Brovan.Core.Helpers.WindowsImage
                 }
                 else if (string.IsNullOrWhiteSpace(Location))
                 {
-                    Client = HttpImageDataSource.CreateClient();
-                    Uri Resolved = MicrosoftIsoDownload.Resolve(Client, Options.Locale, Report);
-                    Report($"[+] Microsoft returned a link for {Resolved.Host}.");
-                    Media = new HttpImageDataSource(Resolved, Client);
+                    Report("[-] No installation media. Give a path to an ISO, WIM or ESD file, or a direct link to one.");
+                    return false;
                 }
                 else if (Location.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || Location.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                 {

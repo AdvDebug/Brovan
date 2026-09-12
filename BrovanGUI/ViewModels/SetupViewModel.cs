@@ -14,7 +14,6 @@ namespace BrovanGUI.ViewModels
 
             BrowseBrovanCommand = new AsyncCommand(BrowseBrovan, Owner.ReportError);
             RefreshCommand = new RelayCommand(Refresh);
-            InstallWindowsCommand = new AsyncCommand(() => Run("Installing the Windows system files", "--install-windows", "--accept-windows-license"), Owner.ReportError, () => CanInstallWindows);
             InstallFromIsoCommand = new AsyncCommand(InstallFromIso, Owner.ReportError, () => CanInstallWindows);
             InstallRuntimesCommand = new AsyncCommand(() => Run("Installing the Visual C++ runtimes", "--install-runtimes", "--accept-windows-license"), Owner.ReportError, () => CanInstallWindows);
             InstallDxvkCommand = new AsyncCommand(() => Run("Installing DXVK", "--install-dxvk"), Owner.ReportError, () => CanRunTool);
@@ -32,7 +31,6 @@ namespace BrovanGUI.ViewModels
 
         public AsyncCommand BrowseBrovanCommand { get; }
         public RelayCommand RefreshCommand { get; }
-        public AsyncCommand InstallWindowsCommand { get; }
         public AsyncCommand InstallFromIsoCommand { get; }
         public AsyncCommand InstallRuntimesCommand { get; }
         public AsyncCommand InstallDxvkCommand { get; }
@@ -135,7 +133,6 @@ namespace BrovanGUI.ViewModels
         {
             Raise(nameof(CanRunTool));
             Raise(nameof(CanInstallWindows));
-            InstallWindowsCommand.Refresh();
             InstallFromIsoCommand.Refresh();
             InstallRuntimesCommand.Refresh();
             InstallDxvkCommand.Refresh();

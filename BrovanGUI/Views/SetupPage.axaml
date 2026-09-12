@@ -43,16 +43,13 @@
             <StackPanel IsVisible="{Binding HostIsLinux}">
                 <TextBlock Classes="group" Text="Windows system files" />
                 <StackPanel Spacing="4">
-                    <views:SettingCard Header="Windows license" Description="Using the extracted files needs a valid Windows license. The installation media is downloaded from Microsoft, about 2 GB, and only the needed files are kept.">
+                    <views:SettingCard Header="Windows license" Description="Using the extracted files needs a valid Windows license. Supply your own Windows installation media. only the needed files are kept.">
                         <CheckBox IsChecked="{Binding LicenseAccepted}" Content="I have one" />
                     </views:SettingCard>
                     <views:SettingCard Header="System libraries and registry" Description="{Binding SystemFilesDescription}" Status="{Binding SystemFilesStatus}">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Classes="accent secondary" Command="{Binding InstallWindowsCommand}">
-                                <TextBlock Text="Install from Microsoft" Foreground="White" />
-                            </Button>
-                            <Button Classes="secondary" Command="{Binding InstallFromIsoCommand}" Content="Use an ISO or WIM" />
-                        </StackPanel>
+                        <Button Classes="accent secondary" Command="{Binding InstallFromIsoCommand}">
+                            <TextBlock Text="Use an ISO or WIM" Foreground="White" />
+                        </Button>
                     </views:SettingCard>
                     <views:SettingCard Header="Visual C++ runtimes" Description="{Binding RuntimesDescription}" Status="{Binding RuntimesStatus}">
                         <Button Classes="secondary" Command="{Binding InstallRuntimesCommand}" Content="Install" />

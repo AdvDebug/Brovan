@@ -194,11 +194,6 @@ public class SetupActivity extends AppCompatActivity {
 
         showWindowsState(state);
 
-        target.findViewById(R.id.windows_download).setOnClickListener(button -> {
-            if (!busy && licensed(licensed)) {
-                installWindows(null, null);
-            }
-        });
         target.findViewById(R.id.windows_iso_pick).setOnClickListener(button -> {
             if (!busy && licensed(licensed)) {
                 pick(new Intent(Intent.ACTION_OPEN_DOCUMENT)
@@ -249,11 +244,11 @@ public class SetupActivity extends AppCompatActivity {
     private void installWindows(String url, Uri isoFile) {
         View target = page;
         TextView state = target.findViewById(R.id.windows_state);
-        MaterialButton download = target.findViewById(R.id.windows_download);
+        MaterialButton pick = target.findViewById(R.id.windows_iso_pick);
         LinearProgressIndicator bar = target.findViewById(R.id.windows_progress);
         TextView detail = target.findViewById(R.id.windows_progress_text);
 
-        startWork(download, bar, detail, R.string.windows_working);
+        startWork(pick, bar, detail, R.string.windows_working);
         WindowsInstall.windows(this, worker, url, isoFile, new WindowsInstall.Listener() {
             @Override
             public void onProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal) {
@@ -268,7 +263,7 @@ public class SetupActivity extends AppCompatActivity {
 
             @Override
             public void onFinished(int status) {
-                finishWork(download, bar, detail, status, R.string.windows_done);
+                finishWork(pick, bar, detail, status, R.string.windows_done);
                 showWindowsState(state);
                 pulse(state);
             }
