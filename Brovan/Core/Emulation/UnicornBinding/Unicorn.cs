@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -44,6 +44,10 @@ namespace Brovan.Core.Emulation
         private readonly Dictionary<IntPtr, nuint> _bufferSizes = new Dictionary<IntPtr, nuint>();
         private ulong _pendingFreeBytes;
         private readonly List<MappedRegion> _unmapSurvivors = new List<MappedRegion>();
+        private ulong[] _regionStarts = Array.Empty<ulong>();
+        private int _regionStartCount;
+        private bool _regionIndexValid;
+        private MappedRegion _regionCache;
         private readonly List<IntPtr> _unmapReleasedBuffers = new List<IntPtr>();
         private List<IntPtr> HooksList = new List<IntPtr>();
 
@@ -287,6 +291,7 @@ namespace Brovan.Core.Emulation
                 ulong OverlapEnd = RegionEnd < end ? RegionEnd : end;
 
                 _mappedRegions.RemoveAt(i);
+                InvalidateRegionIndex();
                 changed = true;
 
                 if (OverlapStart > Region.Address)
@@ -529,9 +534,35 @@ namespace Brovan.Core.Emulation
         /// <returns>True if the write succeeded; otherwise, false.</returns>
         public bool WriteMemory(ulong address, ulong value, uint length = 0)
         {
+            return WriteScalar(address, value, sizeof(ulong), length);
+        }
+
+        private unsafe bool WriteScalar(ulong Address, ulong Value, uint ValueBytes, uint Length)
+        {
+            uint WriteLen = Length == 0 || Length > ValueBytes ? ValueBytes : Length;
+
+            if (TryGetHostPointer(Address, (int)WriteLen, out byte* Destination, out long Offset))
+            {
+                byte* Target = Destination + Offset;
+                _error = UCErrors.UC_ERR_OK;
+
+                if (WriteLen == ValueBytes)
+                {
+                    switch (ValueBytes)
+                    {
+                        case 8: Unsafe.WriteUnaligned(Target, Value); return true;
+                        case 4: Unsafe.WriteUnaligned(Target, (uint)Value); return true;
+                        case 2: Unsafe.WriteUnaligned(Target, (ushort)Value); return true;
+                    }
+                }
+
+                Unsafe.CopyBlockUnaligned(Target, (byte*)&Value, WriteLen);
+                return true;
+            }
+
             Span<byte> Buffer = stackalloc byte[sizeof(ulong)];
-            BitConverter.TryWriteBytes(Buffer, value);
-            return WriteMemory(address, Buffer, length);
+            BitConverter.TryWriteBytes(Buffer, Value);
+            return WriteMemory(Address, Buffer.Slice(0, (int)WriteLen));
         }
 
         /// <summary>
@@ -558,9 +589,7 @@ namespace Brovan.Core.Emulation
         /// <returns>True if the write succeeded; otherwise, false.</returns>
         public bool WriteMemory(ulong address, uint value, uint length = 0)
         {
-            Span<byte> Buffer = stackalloc byte[sizeof(uint)];
-            BitConverter.TryWriteBytes(Buffer, value);
-            return WriteMemory(address, Buffer, length);
+            return WriteScalar(address, value, sizeof(uint), length);
         }
 
         /// <summary>
@@ -605,9 +634,7 @@ namespace Brovan.Core.Emulation
         /// <returns>True if the write succeeded; otherwise, false.</returns>
         public bool WriteMemory(ulong address, int value, uint length = 0)
         {
-            Span<byte> Buffer = stackalloc byte[sizeof(int)];
-            BitConverter.TryWriteBytes(Buffer, value);
-            return WriteMemory(address, Buffer, length);
+            return WriteScalar(address, unchecked((uint)value), sizeof(int), length);
         }
 
         /// <summary>
@@ -619,9 +646,7 @@ namespace Brovan.Core.Emulation
         /// <returns>True if the write succeeded; otherwise, false.</returns>
         public bool WriteMemory(ulong address, ushort value, uint length = 0)
         {
-            Span<byte> Buffer = stackalloc byte[sizeof(ushort)];
-            BitConverter.TryWriteBytes(Buffer, value);
-            return WriteMemory(address, Buffer, length);
+            return WriteScalar(address, value, sizeof(ushort), length);
         }
 
         /// <summary>
@@ -788,54 +813,45 @@ namespace Brovan.Core.Emulation
             if (address == 0 || length <= 0)
                 return string.Empty;
 
+            if (TryGetHostPointer(address, length, out byte* src, out long offset))
+            {
+                _error = UCErrors.UC_ERR_OK;
+                return DecodeMemoryString(new ReadOnlySpan<byte>(src + offset, length), encoding);
+            }
+
             byte[] Buffer = ArrayPool<byte>.Shared.Rent(length);
             try
             {
-                if (TryGetHostPointer(address, length, out byte* src, out long offset))
-                {
-                    _error = UCErrors.UC_ERR_OK;
-                    Unsafe.CopyBlockUnaligned(ref Buffer[0], ref Unsafe.AsRef<byte>(src + offset), (uint)length);
-                }
-                else
-                {
-                    _error = uc_mem_read(_uc, address, Buffer, (uint)length);
-                    if (_error != UCErrors.UC_ERR_OK)
-                        return string.Empty;
-                }
+                _error = uc_mem_read(_uc, address, Buffer, (uint)length);
+                if (_error != UCErrors.UC_ERR_OK)
+                    return string.Empty;
 
-                int BytesRead;
-                if (encoding == Encoding.Unicode || encoding == Encoding.BigEndianUnicode)
-                {
-                    int NulIdx = SimdStringHelpers.IndexOfUtf16Nul(Buffer.AsSpan(0, length));
-                    if (NulIdx < 0)
-                    {
-                        BytesRead = length;
-                        if ((BytesRead & 1) != 0)
-                            BytesRead--;
-                    }
-                    else
-                    {
-                        BytesRead = NulIdx;
-                    }
-
-                    if (BytesRead == 0)
-                        return string.Empty;
-                }
-                else
-                {
-                    int TerminatorIndex = Array.IndexOf(Buffer, (byte)0, 0, length);
-                    BytesRead = TerminatorIndex >= 0 ? TerminatorIndex : length;
-
-                    if (BytesRead == 0)
-                        return string.Empty;
-                }
-
-                return encoding.GetString(Buffer, 0, BytesRead);
+                return DecodeMemoryString(new ReadOnlySpan<byte>(Buffer, 0, length), encoding);
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(Buffer);
             }
+        }
+
+        private static string DecodeMemoryString(ReadOnlySpan<byte> Bytes, Encoding encoding)
+        {
+            int BytesRead;
+            if (encoding == Encoding.Unicode || encoding == Encoding.BigEndianUnicode)
+            {
+                int NulIdx = SimdStringHelpers.IndexOfUtf16Nul(Bytes);
+                BytesRead = NulIdx < 0 ? Bytes.Length & ~1 : NulIdx;
+            }
+            else
+            {
+                int TerminatorIndex = Bytes.IndexOf((byte)0);
+                BytesRead = TerminatorIndex >= 0 ? TerminatorIndex : Bytes.Length;
+            }
+
+            if (BytesRead == 0)
+                return string.Empty;
+
+            return encoding.GetString(Bytes.Slice(0, BytesRead));
         }
 
         /// <summary>
@@ -854,16 +870,16 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck())
                 return false;
 
+            ulong* Slot = DirectRegister(Register, DirectWritable);
+            if (Slot != null)
+            {
+                *Slot = Value;
+                _error = UCErrors.UC_ERR_OK;
+                return true;
+            }
+
             lock (_registerLock)
             {
-                ulong* Slot = DirectRegister(Register, DirectWritable);
-                if (Slot != null)
-                {
-                    *Slot = Value;
-                    _error = UCErrors.UC_ERR_OK;
-                    return true;
-                }
-
                 _error = uc_reg_write_raw(_uc, Register, ref Value);
                 return _error == UCErrors.UC_ERR_OK;
             }
@@ -1041,19 +1057,39 @@ namespace Brovan.Core.Emulation
             if (Registers == null || Values == null || Count <= 0 || Count > Registers.Length || Count > Values.Length)
                 return false;
 
-            lock (_registerLock)
+            fixed (int* RegsPtr = Registers)
+            fixed (ulong* ValsPtr = Values)
             {
-                if (_uc == IntPtr.Zero)
-                    return false;
+                int* NativeRegs = stackalloc int[Count];
+                void** PtrArray = stackalloc void*[Count];
+                int NativeCount = 0;
 
-                fixed (int* RegsPtr = Registers)
-                fixed (ulong* ValsPtr = Values)
+                for (int i = 0; i < Count; i++)
                 {
-                    void** PtrArray = stackalloc void*[Count];
-                    for (int i = 0; i < Count; i++)
-                        PtrArray[i] = &ValsPtr[i];
+                    ulong* Slot = DirectRegister(RegsPtr[i], DirectReadable);
+                    if (Slot != null)
+                    {
+                        ValsPtr[i] = *Slot;
+                        continue;
+                    }
 
-                    _error = uc_reg_read_batch(_uc, RegsPtr, PtrArray, Count);
+                    NativeRegs[NativeCount] = RegsPtr[i];
+                    PtrArray[NativeCount] = &ValsPtr[i];
+                    NativeCount++;
+                }
+
+                if (NativeCount == 0)
+                {
+                    _error = UCErrors.UC_ERR_OK;
+                    return true;
+                }
+
+                lock (_registerLock)
+                {
+                    if (_uc == IntPtr.Zero)
+                        return false;
+
+                    _error = uc_reg_read_batch(_uc, NativeRegs, PtrArray, NativeCount);
                     return _error == UCErrors.UC_ERR_OK;
                 }
             }
@@ -1070,19 +1106,39 @@ namespace Brovan.Core.Emulation
             if (Registers == null || Values == null || Count <= 0 || Count > Registers.Length || Count > Values.Length)
                 return false;
 
-            lock (_registerLock)
+            fixed (int* RegsPtr = Registers)
+            fixed (ulong* ValsPtr = Values)
             {
-                if (_uc == IntPtr.Zero)
-                    return false;
+                int* NativeRegs = stackalloc int[Count];
+                void** PtrArray = stackalloc void*[Count];
+                int NativeCount = 0;
 
-                fixed (int* RegsPtr = Registers)
-                fixed (ulong* ValsPtr = Values)
+                for (int i = 0; i < Count; i++)
                 {
-                    void** PtrArray = stackalloc void*[Count];
-                    for (int i = 0; i < Count; i++)
-                        PtrArray[i] = &ValsPtr[i];
+                    ulong* Slot = DirectRegister(RegsPtr[i], DirectWritable);
+                    if (Slot != null)
+                    {
+                        *Slot = ValsPtr[i];
+                        continue;
+                    }
 
-                    _error = uc_reg_write_batch(_uc, RegsPtr, PtrArray, Count);
+                    NativeRegs[NativeCount] = RegsPtr[i];
+                    PtrArray[NativeCount] = &ValsPtr[i];
+                    NativeCount++;
+                }
+
+                if (NativeCount == 0)
+                {
+                    _error = UCErrors.UC_ERR_OK;
+                    return true;
+                }
+
+                lock (_registerLock)
+                {
+                    if (_uc == IntPtr.Zero)
+                        return false;
+
+                    _error = uc_reg_write_batch(_uc, NativeRegs, PtrArray, NativeCount);
                     return _error == UCErrors.UC_ERR_OK;
                 }
             }
@@ -1776,25 +1832,55 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        private void InvalidateRegionIndex()
+        {
+            _regionCache = null;
+            Volatile.Write(ref _regionIndexValid, false);
+        }
+
+        private void RebuildRegionIndex()
+        {
+            int Count = _mappedRegions.Count;
+            if (_regionStarts.Length < Count)
+                _regionStarts = new ulong[Count < 16 ? 16 : Count * 2];
+
+            ulong[] Starts = _regionStarts;
+            for (int i = 0; i < Count; i++)
+                Starts[i] = _mappedRegions[i].Address;
+
+            _regionStartCount = Count;
+            Volatile.Write(ref _regionIndexValid, true);
+        }
+
         private bool TryFindMappedRegion(ulong address, out MappedRegion found)
         {
-            found = null;
-
             if (Volatile.Read(ref _disposing) != 0 || Volatile.Read(ref _disposed) != 0)
+            {
+                found = null;
                 return false;
+            }
 
-            if (_mappedRegions.Count == 0)
-                return false;
+            MappedRegion Cached = _regionCache;
+            if (Cached != null && address - Cached.Address < Cached.Size)
+            {
+                found = Cached;
+                return true;
+            }
+
+            if (!Volatile.Read(ref _regionIndexValid))
+                RebuildRegionIndex();
+
+            ulong[] Starts = _regionStarts;
+            int Count = _regionStartCount;
 
             int left = 0;
-            int right = _mappedRegions.Count - 1;
+            int right = Count - 1;
             int candidate = -1;
 
             while (left <= right)
             {
                 int mid = left + ((right - left) >> 1);
-                MappedRegion r = _mappedRegions[mid];
-                if (r.Address <= address)
+                if (Starts[mid] <= address)
                 {
                     candidate = mid;
                     left = mid + 1;
@@ -1806,16 +1892,21 @@ namespace Brovan.Core.Emulation
             }
 
             if (candidate < 0)
-                return false;
-
-            found = _mappedRegions[candidate];
-
-            if (address < found.Address || address >= found.Address + found.Size)
             {
                 found = null;
                 return false;
             }
 
+            MappedRegion Region = _mappedRegions[candidate];
+
+            if (address - Region.Address >= Region.Size)
+            {
+                found = null;
+                return false;
+            }
+
+            _regionCache = Region;
+            found = Region;
             return true;
         }
 
@@ -1850,6 +1941,7 @@ namespace Brovan.Core.Emulation
             }
 
             _mappedRegions.Insert(Left, Region);
+            InvalidateRegionIndex();
         }
 
         public void Dispose()
@@ -1912,6 +2004,7 @@ namespace Brovan.Core.Emulation
                                 _unmapReleasedBuffers.Clear();
                                 _unmapSurvivors.Clear();
                                 _mappedRegions.Clear();
+                                InvalidateRegionIndex();
 
                                 foreach (IntPtr ptr in _pendingFrees)
                                     ReleaseBacking(ptr);

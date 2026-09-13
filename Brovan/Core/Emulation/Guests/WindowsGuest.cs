@@ -685,7 +685,7 @@ namespace Brovan.Core.Emulation.Guests
             try
             {
                 uint Syscall = Instance._binary.Architecture == BinaryArchitecture.x64
-                    ? Instance.ReadRegister32(Registers.UC_X86_REG_RAX)
+                    ? (uint)Instance.ReadRegister(Registers.UC_X86_REG_RAX)
                     : Instance.ReadRegister32(Registers.UC_X86_REG_EAX);
                 SyscallAbi Abi = Instance._binary.Architecture == BinaryArchitecture.x64 ? SyscallAbi.X64 : SyscallAbi.X86;
                 ulong Rip = Instance.WinHelper != null ? Instance.WinHelper.GetSyscallRip(null, false) : Instance.ReadRegister(Instance.IPRegister);

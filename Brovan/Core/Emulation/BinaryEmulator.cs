@@ -1287,16 +1287,17 @@ namespace Brovan.Core.Emulation
         {
             Index = -1;
 
+            Span<MemoryRegion> Regions = CollectionsMarshal.AsSpan(_memory);
+
             int Left = 0;
-            int Right = _memory.Count - 1;
+            int Right = Regions.Length - 1;
             int Candidate = -1;
 
             while (Left <= Right)
             {
                 int Middle = Left + ((Right - Left) >> 1);
-                MemoryRegion Region = _memory[Middle];
 
-                if (Region.BaseAddress <= Address)
+                if (Regions[Middle].BaseAddress <= Address)
                 {
                     Candidate = Middle;
                     Left = Middle + 1;
@@ -1310,13 +1311,14 @@ namespace Brovan.Core.Emulation
             if (Candidate < 0)
                 return false;
 
-            Index = Candidate;
-            MemoryRegion Found = _memory[Index];
+            ref MemoryRegion Found = ref Regions[Candidate];
             ulong End = GetRangeEnd(Found.BaseAddress, Found.Size);
             if (Address >= Found.BaseAddress && Address < End)
+            {
+                Index = Candidate;
                 return true;
+            }
 
-            Index = -1;
             return false;
         }
 
