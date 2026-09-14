@@ -28,6 +28,10 @@ internal static class Program
             : "[ioctl] no host Vulkan device, only the framing and the reader are reachable");
     }
 
+    // Unlike Environment.Exit, this does not run managed shutdown.
+    [DllImport("libc", EntryPoint = "_exit")]
+    private static extern void HardExit(int code);
+
     private static int Main(string[] args)
     {
         if (args.Length == 0)
@@ -54,6 +58,10 @@ internal static class Program
                 body(d);
                 MemoryGuard.Check();
             });
+
+            // Run unmaps the shared memory that instrumented code traces through, so a managed
+            // shutdown hook which reaches that code faults.
+            HardExit(0);
             return 0;
         }
 

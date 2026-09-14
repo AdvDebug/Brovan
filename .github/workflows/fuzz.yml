@@ -71,8 +71,9 @@ jobs:
           # Instrumented assemblies expect libFuzzer's shared memory, so seed, dict and replay keep
           # the plain build and only this copy is rewritten.
           cp -r "$OUT" fuzzbin
+          # Trace.SharedMem stays null until Fuzzer.LibFuzzer.Run maps it, so an instrumented
+          # entry point faults before the run starts. Brovan.Fuzz.dll carries Main.
           sharpfuzz fuzzbin/Brovan.dll
-          sharpfuzz fuzzbin/Brovan.Fuzz.dll
 
       - name: Restore the accumulated corpus
         uses: actions/cache@v4
@@ -101,7 +102,9 @@ jobs:
           MINUTES="${{ github.event.inputs.minutes || '120' }}"
           WANT="${{ github.event.inputs.target }}"
           if [ -n "$WANT" ] && [ "$WANT" != "${{ matrix.target }}" ]; then
-            echo "skipping ${{ matrix.target }}"; exit 0
+            echo "skipping ${{ matrix.target }}"
+            echo "FUZZ_STATUS=0" >> "$GITHUB_ENV"
+            exit 0
           fi
 
           mkdir -p crashes
@@ -124,7 +127,8 @@ jobs:
             -rss_limit_mb=2048 \
             -timeout=25 \
             -print_final_stats=1
-          echo "status=$?" >> "$GITHUB_OUTPUT"
+          # $? must stay on the line after the run.
+          echo "FUZZ_STATUS=$?" >> "$GITHUB_ENV"
 
           # -jobs sends each worker to its own file rather than to stdout.
           for f in fuzz-*.log; do
@@ -140,14 +144,14 @@ jobs:
         run: |
           set +e
           OUT=Brovan.Fuzz/bin/Release/net8.0
-          mkdir -p corpus-min/${{ matrix.target }}
+          mkdir -p corpus-min/${{ matrix.target }} artifacts
           timeout 600 ./libfuzzer-dotnet \
             --target_path=fuzzbin/Brovan.Fuzz \
             --target_arg="libfuzzer:${{ matrix.target }}" \
             -merge=1 corpus-min/${{ matrix.target }} corpus/${{ matrix.target }} \
             -max_len=65536 -rss_limit_mb=2048 > artifacts/merge-${{ matrix.target }}.log 2>&1
-          if [ -s corpus-min/${{ matrix.target }} ] 2>/dev/null || \
-             [ "$(ls -A corpus-min/${{ matrix.target }} 2>/dev/null | wc -l)" -gt 0 ]; then
+          # A directory is never 0 bytes, so [ -s ] cannot test one for emptiness.
+          if [ "$(ls -A corpus-min/${{ matrix.target }} 2>/dev/null | wc -l)" -gt 0 ]; then
             rm -rf corpus/${{ matrix.target }}
             mv corpus-min/${{ matrix.target }} corpus/${{ matrix.target }}
           fi
@@ -159,9 +163,12 @@ jobs:
           set +e
           shopt -s nullglob
           OUT=Brovan.Fuzz/bin/Release/net8.0
-          FOUND=0
-          for f in crashes/*; do
-            FOUND=1
+          mkdir -p artifacts
+          # The loop is piped into tee, and a pipeline runs its left side in a subshell, so a
+          # flag set inside it never reaches this shell.
+          found=(crashes/*)
+          if [ "${#found[@]}" -gt 0 ]; then FOUND=1; else FOUND=0; fi
+          for f in "${found[@]}"; do
             echo "=============================================================="
             echo "crash input: $f  ($(stat -c%s "$f") bytes)"
             echo "sha256: $(sha256sum "$f" | cut -d' ' -f1)"
@@ -232,8 +239,15 @@ jobs:
               });
             }
 
-      - name: Fail the job if the fuzzer crashed
-        if: always() && env.CRASHES_FOUND == '1'
+      - name: Fail the job if the fuzzer crashed or died
+        # FUZZ_STATUS is unset when the Fuzz step never ran. An earlier failure already fails
+        # the job on its own.
+        if: always() && (env.CRASHES_FOUND == '1' || (env.FUZZ_STATUS != '' && env.FUZZ_STATUS != '0'))
         run: |
-          echo "::error::the ${{ matrix.target }} target crashed; see the uploaded artifact"
+          if [ "${CRASHES_FOUND:-0}" = "1" ]; then
+            echo "::error::the ${{ matrix.target }} target crashed; see the uploaded artifact"
+          else
+            echo "::error::the ${{ matrix.target }} fuzzer exited ${FUZZ_STATUS} without writing a"\
+                 "crash input, so it never fuzzed; see the uploaded logs"
+          fi
           exit 1
