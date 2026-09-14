@@ -340,7 +340,7 @@ namespace Brovan.Core.Emulation
     /// <summary>
     /// Binary emulator class which is a high-level wrapper for the unicorn emulator to emulate binaries.
     /// </summary>
-    public partial class BinaryEmulator : IDisposable
+    public partial class BinaryEmulator : IDisposable, IGuestMemory
     {
         internal BinaryFile _binary;
 

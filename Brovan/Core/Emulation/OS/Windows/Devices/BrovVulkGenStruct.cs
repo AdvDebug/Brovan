@@ -45,6 +45,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 throw new InvalidOperationException("BrovVulk generic: required array is null but its count is non-zero.");
         }
 
+        // The loader ends the process on a NULL pointer the spec marks required.
+        public static IntPtr RebuildRequired(int sid, GenReader r, GenState st, string type)
+        {
+            if (r.ReadU32() == 0)
+                throw new InvalidOperationException($"BrovVulk generic: null pointer where {type} is required.");
+            return Rebuild(sid, r, st);
+        }
+
         public static IntPtr Rebuild(int sid, GenReader r, GenState st)
         {
             IntPtr p = st.Alloc(BrovVulkStructMeta.Sizes[sid]);
@@ -66,7 +74,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                         r.CopyInto(fp, (uint)d.Size);
                         break;
                     case BvkMK.Handle:
-                        *(IntPtr*)fp = st.Lookup(r.ReadU32(), d.HandleType);
+                        *(IntPtr*)fp = d.Optional
+                            ? st.Lookup(r.ReadU32(), d.HandleType)
+                            : st.LookupRequired(r.ReadU32(), d.HandleType);
                         break;
                     case BvkMK.StructValue:
                         RebuildAt(d.Sub, r, st, fp);

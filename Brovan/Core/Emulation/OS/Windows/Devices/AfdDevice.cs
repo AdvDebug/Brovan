@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Net;
@@ -78,14 +78,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
         }
 
+        // A raw socket has no endpoint the policy can hold it to.
         private static SocketType TranslateWinType(int WinType)
         {
             return WinType switch
             {
                 1 => SocketType.Stream,
                 2 => SocketType.Dgram,
-                3 => SocketType.Raw,
-                4 => SocketType.Rdm,
                 _ => SocketType.Unknown
             };
         }
@@ -96,8 +95,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 6 => ProtocolType.Tcp,
                 17 => ProtocolType.Udp,
-                255 => ProtocolType.Raw,
                 _ => ProtocolType.Unspecified
+            };
+        }
+
+        private static bool IsSupportedSocketShape(SocketType Type, ProtocolType Protocol)
+        {
+            return Type switch
+            {
+                SocketType.Stream => Protocol is ProtocolType.Tcp or ProtocolType.Unspecified,
+                SocketType.Dgram => Protocol is ProtocolType.Udp or ProtocolType.Unspecified,
+                _ => false
             };
         }
 
@@ -113,8 +121,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Family == AddressFamily.Unspecified)
                 Family = AddressFamily.InterNetwork;
 
-            if (Type == SocketType.Unknown)
+            if (Type == SocketType.Unknown && WinType == 0)
                 Type = SocketType.Stream;
+
+            if (!IsSupportedSocketShape(Type, Protocol))
+                throw new NotSupportedException("The requested socket type is not available to the guest.");
 
             _socket = new BrovanSocket(Family, Type, Protocol, _policy);
             _socket.SendTimeout = DefaultIoTimeoutMs;
@@ -142,16 +153,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static IPEndPoint? ParseSockaddr(byte[] Data, int Offset)
+        // InputBuffer can be pooled, so only Length bounds the guest data.
+        private static IPEndPoint? ParseSockaddr(byte[] Data, uint Length, int Offset)
         {
-            if (Data.Length < Offset + 4)
+            uint Available = Math.Min(Length, (uint)Data.Length);
+            if (Offset < 0 || Available < (uint)Offset + 4)
                 return null;
 
             short Family = BitConverter.ToInt16(Data, Offset + 0);
 
             if (Family == 2)
             {
-                if (Data.Length < Offset + 16)
+                if (Available < (uint)Offset + 16)
                     return null;
 
                 ushort PortNetwork = BitConverter.ToUInt16(Data, Offset + 2);
@@ -162,7 +175,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Family == 23)
             {
-                if (Data.Length < Offset + 28)
+                if (Available < (uint)Offset + 28)
                     return null;
 
                 ushort PortNetwork = BitConverter.ToUInt16(Data, Offset + 2);
@@ -224,6 +237,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             return BitConverter.ToUInt32(Data, Offset);
         }
+
+        private static uint GuestInputLength(in DeviceData Data) =>
+            Data.InputBuffer == null ? 0u : Math.Min(Data.InputLength, (uint)Data.InputBuffer.Length);
 
         private static (uint Length, ulong BufferPtr)? ReadWsabuf(BinaryEmulator Emulator, ulong WsaBufPtr)
         {
@@ -372,10 +388,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (_socket == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            if (Data.InputBuffer == null || Data.InputLength < 4 + 16)
+            uint InputLength = GuestInputLength(in Data);
+            if (Data.InputBuffer == null || InputLength < 4 + 16)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-            IPEndPoint? IpEndPoint = ParseSockaddr(Data.InputBuffer, 4);
+            IPEndPoint? IpEndPoint = ParseSockaddr(Data.InputBuffer, InputLength, 4);
             if (IpEndPoint == null)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -399,10 +416,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (_socket == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            if (Data.InputBuffer == null || Data.InputLength < 24 + 16)
+            uint InputLength = GuestInputLength(in Data);
+            if (Data.InputBuffer == null || InputLength < 24 + 16)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-            IPEndPoint? IpEndPoint = ParseSockaddr(Data.InputBuffer, 24);
+            IPEndPoint? IpEndPoint = ParseSockaddr(Data.InputBuffer, InputLength, 24);
             if (IpEndPoint == null)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -428,7 +446,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
             }
 
-            if (Data.InputBuffer == null || Data.InputLength < 8)
+            if (Data.InputBuffer == null || GuestInputLength(in Data) < 8)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             int Backlog = (int)ReadU32(Data.InputBuffer, 4);
@@ -496,7 +514,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             int MinSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 16 : 12;
-            if (Data.InputLength < MinSize)
+            if (GuestInputLength(in Data) < MinSize)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             int Sequence = BitConverter.ToInt32(Data.InputBuffer, 4);
@@ -531,7 +549,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             int PtrSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
             int HeaderSize = PtrSize + 4 + 4 + 4;
-            if (Data.InputLength < HeaderSize)
+            if (GuestInputLength(in Data) < HeaderSize)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             ulong WsaBufArrayPtr = ReadPtr(Instance, Data.InputBuffer, 0);
@@ -592,7 +610,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             int PtrSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
             int HeaderSize = PtrSize + 4 + 4 + 4;
-            if (Data.InputLength < HeaderSize)
+            if (GuestInputLength(in Data) < HeaderSize)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             ulong WsaBufArrayPtr = ReadPtr(Instance, Data.InputBuffer, 0);
@@ -687,18 +705,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Data.InputBuffer == null || Data.OutputBuffer == null)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (Data.OutputBuffer.Length < 16)
+            int HeaderSize = 16;
+            if (Data.OutputBuffer.Length < HeaderSize || GuestInputLength(in Data) < HeaderSize)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             uint Count = ReadU32(Data.InputBuffer, 8);
             if (Count == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            int HeaderSize = 16;
             int EntrySize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 16 : 12;
-            int Needed = HeaderSize + (int)Count * EntrySize;
+            long Needed = HeaderSize + (long)Count * EntrySize;
 
-            if (Data.InputLength < Needed || Data.OutputBuffer.Length < Needed)
+            if (GuestInputLength(in Data) < Needed || Data.OutputBuffer.Length < Needed)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             int OutIndex = 0;

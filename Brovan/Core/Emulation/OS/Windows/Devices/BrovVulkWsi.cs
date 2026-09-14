@@ -197,7 +197,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             NormalizeCapabilities(physicalDevice, *(IntPtr*)((byte*)surfaceInfo + SurfaceInfo2Surface), capabilities2 + Caps2Inner);
         }
 
-        public SwapchainPlan ReconcileSwapchain(IntPtr device, IntPtr createInfo, GenState state, BinaryEmulator instance)
+        public SwapchainPlan ReconcileSwapchain(IntPtr device, IntPtr createInfo, GenState state, IGuestMemory instance)
         {
             if (createInfo == IntPtr.Zero)
                 return default;
@@ -549,7 +549,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             *(uint*)(info + SwapPresentMode) = use == uint.MaxValue ? modes[0] : use;
         }
 
-        private static void ReconcileFormat(byte* info, SurfaceState state, BinaryEmulator instance)
+        private static void ReconcileFormat(byte* info, SurfaceState state, IGuestMemory instance)
         {
             uint[] offered = state.Formats;
             if (offered.Length == 0)
@@ -567,7 +567,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             *(uint*)(info + SwapColorSpace) = useSpace;
             RewriteViewFormatList(info, wantFormat, useFormat);
 
-            if (instance != null && (instance.Settings.Flags & LogFlags.Issues) != 0)
+            if (instance != null && (instance.GuestLogFlags & LogFlags.Issues) != 0)
                 instance.TriggerEventMessage($"[BrovVulk] surface does not offer swapchain format {wantFormat}/{wantSpace}; using {useFormat}/{useSpace}.", LogFlags.Issues);
         }
 

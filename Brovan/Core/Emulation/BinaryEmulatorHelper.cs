@@ -131,6 +131,33 @@ namespace Brovan.Core.Emulation
         void OnThreadWaitSatisfied(BinaryEmulator Instance, EmulatedThread Thread);
     }
 
+    public interface IGuestMemory
+    {
+        // Overlap, not containment.
+        bool IsRegionMapped(ulong Address, ulong Size);
+
+        bool ReadMemory(ulong Address, Span<byte> Destination);
+
+        bool WriteMemory(ulong Address, ReadOnlySpan<byte> Source);
+
+        IntPtr GetHostPointer(ulong Address, ulong Size);
+
+        bool RebackRegionWithHostMemory(ulong BaseAddress, ulong Size, IntPtr HostPointer);
+
+        // Contents are lost.
+        bool RestoreRegionBacking(ulong BaseAddress, ulong Size);
+
+        LogFlags GuestLogFlags { get; }
+
+        void TriggerEventMessage(string Message, LogFlags Flags);
+
+        OS.SharedHelpers.DpiAwareness GuestDpiAwareness { get; }
+
+        IntPtr EnsureHostWindowHandle();
+
+        void EnsureHostXlibSurfaceHandles(out IntPtr Connection, out IntPtr Window);
+    }
+
     [Flags]
     public enum SpecialProtections
     {

@@ -319,6 +319,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<uint, (IntPtr Ptr, string Type)> _handles = new Dictionary<uint, (IntPtr, string)>();
         private readonly Dictionary<uint, MapEntry> _mappings = new Dictionary<uint, MapEntry>();
         private readonly HashSet<uint> _importedMem = new HashSet<uint>();
+        private readonly Dictionary<uint, ulong> _memorySizes = new Dictionary<uint, ulong>();
         private readonly Dictionary<IntPtr, DeviceImport> _deviceImports = new Dictionary<IntPtr, DeviceImport>();
         private readonly Dictionary<IntPtr, IntPtr> _devicePhysical = new Dictionary<IntPtr, IntPtr>();
         private readonly Dictionary<IntPtr, int> _deviceStandIns = new Dictionary<IntPtr, int>();
@@ -338,6 +339,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint id = _next++;
             _handles[id] = (ptr, type);
             return id;
+        }
+
+        // A driver may dereference a required handle without checking it.
+        public IntPtr LookupRequired(uint id, string type)
+        {
+            if (id == 0)
+                throw new InvalidOperationException($"BrovVulk generic: null handle where {type} is required.");
+            return Lookup(id, type);
         }
 
         public IntPtr Lookup(uint id, string type)
@@ -387,6 +396,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             _handles.Remove(id);
             _mappings.Remove(id);
             _importedMem.Remove(id);
+            _memorySizes.Remove(id);
         }
 
         public void SetPipelineLayoutSets(IntPtr layout, uint setLayoutCount)
@@ -420,6 +430,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public bool HasMapping(uint id) => _mappings.ContainsKey(id);
+
+        public void SetMemorySize(uint id, ulong size) => _memorySizes[id] = size;
+
+        // vkMapMemory returns base + offset with no bound of its own.
+        public bool IsMemoryRangeInsideAllocation(uint id, ulong offset, ulong size)
+        {
+            if (!_memorySizes.TryGetValue(id, out ulong allocated))
+                return false;
+
+            return offset <= allocated && size <= allocated - offset;
+        }
 
         public void MarkImported(uint id) => _importedMem.Add(id);
 

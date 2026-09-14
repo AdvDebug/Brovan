@@ -230,7 +230,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static readonly Dictionary<string, (string Read, string Write)> GuestPathCache = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Read, string Write)> GuestPathCache =
+            new(StringComparer.OrdinalIgnoreCase);
         public static void InvalidateGuestPathCache()
         {
             GuestPathCache.Clear();

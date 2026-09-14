@@ -14,7 +14,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int VK_ERROR_INITIALIZATION_FAILED = -3;
 
         private readonly object Lock = new object();
-        private readonly GenState GenState = new GenState();
+        internal readonly GenState GenState = new GenState();
         private readonly GenReader Reader = new GenReader();
         private readonly GenBuf Writer = new GenBuf();
         private readonly bool[] MissingReported = new bool[BrovVulkApi.CommandCount];
@@ -28,25 +28,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private NTSTATUS HandleIoctl(uint Ioctl, ref DeviceData Data, BinaryEmulator Instance)
+        private NTSTATUS HandleIoctl(uint Ioctl, ref DeviceData Data, BinaryEmulator Instance) =>
+            HandleIoctl(Ioctl, ref Data, (IGuestMemory)Instance);
+
+        internal NTSTATUS HandleIoctl(uint Ioctl, ref DeviceData Data, IGuestMemory Instance)
         {
             if (Ioctl == IOCTL_BROVVULK_GEN)
                 return HandleGenIoctl(ref Data, Instance);
 
-            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+            if ((Instance.GuestLogFlags & LogFlags.Issues) != 0)
                 Instance.TriggerEventMessage($"[BrovVulk] unknown IOCTL 0x{Ioctl:X}.", LogFlags.Issues);
 
             return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
         }
 
-        private NTSTATUS HandleGenIoctl(ref DeviceData Data, BinaryEmulator Instance)
+        private NTSTATUS HandleGenIoctl(ref DeviceData Data, IGuestMemory Instance)
         {
             byte[] Input = Data.InputBuffer;
             // InputBuffer can be pooled, so only InputLength bounds the guest data.
             uint InputLength = Input == null ? 0 : Math.Min(Data.InputLength, (uint)Input.Length);
             if (Input == null || InputLength < 8)
             {
-                if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                if ((Instance.GuestLogFlags & LogFlags.Issues) != 0)
                     Instance.TriggerEventMessage($"[BrovVulk] rejected IOCTL with a {(Input == null ? -1 : (int)InputLength)} byte input buffer.", LogFlags.Issues);
 
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -56,7 +59,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint PayloadLen = BinaryPrimitives.ReadUInt32LittleEndian(Input.AsSpan(4, 4));
             if (PayloadLen > InputLength - 8 || PayloadLen > MaxGenPayload)
             {
-                if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                if ((Instance.GuestLogFlags & LogFlags.Issues) != 0)
                     Instance.TriggerEventMessage($"[BrovVulk] rejected command {Id} with payload length {PayloadLen} in a {InputLength} byte input buffer.", LogFlags.Issues);
 
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -68,7 +71,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Reader.Reset(Input, 8, (int)PayloadLen);
                 Writer.Reset();
                 int Result;
-                IntPtr PreviousDpiContext = HostDisplayMetrics.EnterWindowDpiContext(Win32k.Win32kDpi.GetHostAwareness(Instance));
+                IntPtr PreviousDpiContext = HostDisplayMetrics.EnterWindowDpiContext(Instance.GuestDpiAwareness);
                 try
                 {
                     if (Id == BatchId)
@@ -95,7 +98,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 catch (Exception Ex)
                 {
                     Utils.LogError($"[!] BrovVulk(gen): {Ex.Message}");
-                    if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                    if ((Instance.GuestLogFlags & LogFlags.Issues) != 0)
                         Instance.TriggerEventMessage($"[!] BrovVulk(gen): {Ex.Message}", LogFlags.Issues);
                     Writer.Reset();
                     Result = VK_ERROR_INITIALIZATION_FAILED;
@@ -114,13 +117,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // Raised at the call, after the sub-command's input was read, so the next sub-command still parses.
-        private void ReportMissingEntryPoint(uint Id, EntryPointNotFoundException Ex, BinaryEmulator Instance)
+        private void ReportMissingEntryPoint(uint Id, EntryPointNotFoundException Ex, IGuestMemory Instance)
         {
             if (Id >= (uint)MissingReported.Length || MissingReported[Id])
                 return;
 
             MissingReported[Id] = true;
-            if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+            if ((Instance.GuestLogFlags & LogFlags.Issues) != 0)
                 Instance.TriggerEventMessage($"[!] BrovVulk(gen): batch skipped {BrovVulkApi.CommandNames[Id]}. {Ex.Message}", LogFlags.Issues);
         }
     }

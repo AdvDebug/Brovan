@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 
 [assembly: InternalsVisibleTo("Brovan.Tests")]
+[assembly: InternalsVisibleTo("Brovan.Fuzz")]
 [assembly: AssemblyCompany("AdvDebug")]
 [assembly: AssemblyConfiguration("Release")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 AdvDebug. Licensed under the GNU General Public License v2.0.")]

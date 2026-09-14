@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
@@ -802,6 +802,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (uint i = 0; i < count; i++)
             {
                 IntPtr info = createInfos + (int)(i * (uint)stride);
+
+                // pStages is optional, so stageCount can be non-zero with no array behind it.
+                if (*(IntPtr*)(info + VkOffsets.PipelineStages) == IntPtr.Zero && *(uint*)(info + VkOffsets.PipelineStageCount) != 0)
+                    continue;
 
                 if ((bits & Maintenance5Bit) != 0)
                 {

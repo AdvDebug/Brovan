@@ -1,0 +1,239 @@
+name: Fuzz Brovvulk
+
+# The Brovvulk generic IOCTL is the widest attacker-controlled parse surface in the emulator. This
+# runs the harness against it nightly and carries the corpus forward.
+
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: 'Fuzzing minutes per target'
+        required: false
+        default: '120'
+      target:
+        description: 'Single target to run (blank = all)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    # The fuzzing budget plus room for build, corpus restore and minimisation.
+    timeout-minutes: 170
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [struct, spirv, ioctl]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install clang and a software Vulkan driver
+        run: |
+          sudo apt-get update
+          # libclang-rt-dev carries libclang_rt.fuzzer, which --no-install-recommends would leave
+          # out. lavapipe lets the ioctl target reach a real driver with no GPU on the runner.
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-rt-dev gdb mesa-vulkan-drivers
+          echo "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json" >> "$GITHUB_ENV"
+
+      - name: Build libfuzzer-dotnet
+        run: |
+          curl -sSLo libfuzzer-dotnet.cc \
+            https://raw.githubusercontent.com/Metalnem/libfuzzer-dotnet/master/libfuzzer-dotnet.cc
+          clang -fsanitize=fuzzer libfuzzer-dotnet.cc -o libfuzzer-dotnet
+          ./libfuzzer-dotnet -help=1 > /dev/null && echo "libfuzzer-dotnet ready"
+
+      - name: Build the harness
+        # The fuzzer never runs a guest, so SkipUnicornNative drops the native emulator core.
+        run: dotnet build Brovan.Fuzz/Brovan.Fuzz.csproj -c Release -p:SkipUnicornNative=true
+
+      - name: Instrument a copy for coverage feedback
+        run: |
+          # The instrumentor version has to match the SharpFuzz package the harness references, or
+          # the injected trace calls hit a different SharpFuzz.Common and fault.
+          dotnet tool install --global SharpFuzz.CommandLine --version 2.3.0
+          OUT=Brovan.Fuzz/bin/Release/net8.0
+          # Instrumented assemblies expect libFuzzer's shared memory, so seed, dict and replay keep
+          # the plain build and only this copy is rewritten.
+          cp -r "$OUT" fuzzbin
+          sharpfuzz fuzzbin/Brovan.dll
+          sharpfuzz fuzzbin/Brovan.Fuzz.dll
+
+      - name: Restore the accumulated corpus
+        uses: actions/cache@v4
+        with:
+          path: corpus/${{ matrix.target }}
+          # Rolling cache: a key that never hits, so every run writes a fresh entry and restores
+          # the newest previous one.
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Seed the corpus and build the dictionary
+        run: |
+          OUT=Brovan.Fuzz/bin/Release/net8.0
+          mkdir -p corpus/${{ matrix.target }} artifacts
+          # Seeds come from the vk.xml-generated tables. Adding them is idempotent.
+          dotnet "$OUT/Brovan.Fuzz.dll" seed ${{ matrix.target }} corpus/${{ matrix.target }}
+          dotnet "$OUT/Brovan.Fuzz.dll" dict artifacts/brovvulk.dict
+          echo "corpus entries: $(ls corpus/${{ matrix.target }} | wc -l)"
+
+      - name: Fuzz
+        id: fuzz
+        run: |
+          set +e
+          OUT=Brovan.Fuzz/bin/Release/net8.0
+          MINUTES="${{ github.event.inputs.minutes || '120' }}"
+          WANT="${{ github.event.inputs.target }}"
+          if [ -n "$WANT" ] && [ "$WANT" != "${{ matrix.target }}" ]; then
+            echo "skipping ${{ matrix.target }}"; exit 0
+          fi
+
+          mkdir -p crashes
+          # No -seed: it would give every worker the same schedule. Each draws from its own pid
+          # and clock and prints what it drew.
+          WORKERS=$(nproc)
+
+          # -rss_limit_mb bounds the driver, which runs the target in a child, so MemoryGuard
+          # watches the harness itself.
+
+          ./libfuzzer-dotnet \
+            --target_path=fuzzbin/Brovan.Fuzz \
+            --target_arg="libfuzzer:${{ matrix.target }}" \
+            corpus/${{ matrix.target }} \
+            -dict=artifacts/brovvulk.dict \
+            -artifact_prefix=crashes/ \
+            -max_total_time=$(( MINUTES * 60 )) \
+            -jobs=$WORKERS -workers=$WORKERS \
+            -max_len=8192 \
+            -rss_limit_mb=2048 \
+            -timeout=25 \
+            -print_final_stats=1
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+          # -jobs sends each worker to its own file rather than to stdout.
+          for f in fuzz-*.log; do
+            [ -e "$f" ] || continue
+            echo "===== $f ====="
+            tail -40 "$f"
+            mv "$f" "artifacts/${{ matrix.target }}-$f"
+          done
+
+      - name: Minimise the corpus
+        # Keeps the cached corpus from growing without bound across nightly runs.
+        if: always()
+        run: |
+          set +e
+          OUT=Brovan.Fuzz/bin/Release/net8.0
+          mkdir -p corpus-min/${{ matrix.target }}
+          timeout 600 ./libfuzzer-dotnet \
+            --target_path=fuzzbin/Brovan.Fuzz \
+            --target_arg="libfuzzer:${{ matrix.target }}" \
+            -merge=1 corpus-min/${{ matrix.target }} corpus/${{ matrix.target }} \
+            -max_len=65536 -rss_limit_mb=2048 > artifacts/merge-${{ matrix.target }}.log 2>&1
+          if [ -s corpus-min/${{ matrix.target }} ] 2>/dev/null || \
+             [ "$(ls -A corpus-min/${{ matrix.target }} 2>/dev/null | wc -l)" -gt 0 ]; then
+            rm -rf corpus/${{ matrix.target }}
+            mv corpus-min/${{ matrix.target }} corpus/${{ matrix.target }}
+          fi
+          echo "corpus after merge: $(ls corpus/${{ matrix.target }} | wc -l)"
+
+      - name: Triage any crashes
+        if: always()
+        run: |
+          set +e
+          shopt -s nullglob
+          OUT=Brovan.Fuzz/bin/Release/net8.0
+          FOUND=0
+          for f in crashes/*; do
+            FOUND=1
+            echo "=============================================================="
+            echo "crash input: $f  ($(stat -c%s "$f") bytes)"
+            echo "sha256: $(sha256sum "$f" | cut -d' ' -f1)"
+            echo "--- first 256 bytes ---"
+            od -A x -t x1z -v "$f" | head -16
+            echo "--- replay ---"
+            timeout 60 dotnet "$OUT/Brovan.Fuzz.dll" replay ${{ matrix.target }} "$f" 2>&1 | head -40
+            RC=${PIPESTATUS[0]}
+            # Death by signal leaves no managed stack, so gdb says where the fault landed. Inside
+            # the host driver means the finding is what Brovan forwarded.
+            if [ "$RC" -ge 128 ]; then
+              echo "--- died with signal $(( RC - 128 )), native backtrace ---"
+              timeout 120 gdb -q -batch -ex run -ex "bt 15" \
+                --args "$OUT/Brovan.Fuzz" replay ${{ matrix.target }} "$f" 2>&1 | tail -25
+            fi
+          done | tee artifacts/triage-${{ matrix.target }}.txt
+          echo "CRASHES_FOUND=$FOUND" >> "$GITHUB_ENV"
+
+      - name: Upload logs, dictionary and any crashes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-run${{ github.run_number }}
+          path: |
+            artifacts/
+            crashes/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Open an issue on a new crash
+        if: always() && env.CRASHES_FOUND == '1'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const target = '${{ matrix.target }}';
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = `Fuzz: crash in the Brovvulk ${target} target`;
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'fuzz',
+            });
+            const dup = existing.data.find(i => i.title === title);
+
+            const body = [
+              `The nightly Brovvulk fuzzer crashed in the \`${target}\` target.`,
+              ``,
+              `Run: ${run}`,
+              ``,
+              `The reproducing input is attached to that run as \`fuzz-${target}-run${{ github.run_number }}\`,`,
+              `along with the triage output. To reproduce locally:`,
+              ``,
+              '```bash',
+              `dotnet build Brovan.Fuzz/Brovan.Fuzz.csproj -c Release -p:SkipUnicornNative=true`,
+              `dotnet Brovan.Fuzz/bin/Release/net8.0/Brovan.Fuzz.dll replay ${target} <crash-file>`,
+              '```',
+            ].join('\n');
+
+            if (dup) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: dup.number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['fuzz', 'security'],
+              });
+            }
+
+      - name: Fail the job if the fuzzer crashed
+        if: always() && env.CRASHES_FOUND == '1'
+        run: |
+          echo "::error::the ${{ matrix.target }} target crashed; see the uploaded artifact"
+          exit 1

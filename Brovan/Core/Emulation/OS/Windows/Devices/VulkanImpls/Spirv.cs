@@ -138,11 +138,41 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             foreach (uint[] d in decorations)
             {
-                if (d[0] == DecorationBuiltIn && d.Length > 1)
+                if (d.Length > 1 && d[0] == DecorationBuiltIn)
                     return (int)d[1];
             }
 
             return -1;
+        }
+
+        // The parsers index fixed operand slots bounded only by the instruction's own word count.
+        internal static int MinimumWords(int op)
+        {
+            switch (op)
+            {
+                case OpCapability:
+                case OpTypeStruct:
+                case OpTypeBool:
+                case OpDecorate:
+                    return 2;
+                case OpEntryPoint:
+                case OpExecutionMode:
+                case OpMemberDecorate:
+                case OpTypeFloat:
+                case OpSpecConstant:
+                case OpFunction:
+                    return 3;
+                case OpTypeInt:
+                case OpTypeVector:
+                case OpTypeMatrix:
+                case OpTypeArray:
+                case OpTypePointer:
+                case OpConstant:
+                case OpVariable:
+                    return 4;
+                default:
+                    return 1;
+            }
         }
 
         public static SpirvInterface? ParseInterface(uint* words, int count, uint executionModel, string? entryName)
@@ -166,7 +196,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 uint head = words[i];
                 int len = (int)(head >> 16);
                 int op = (int)(head & 0xFFFF);
-                if (len == 0 || i + len > count)
+                if (len == 0 || i + len > count || len < MinimumWords(op))
                     return null;
 
                 switch (op)
@@ -240,6 +270,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return null;
 
             Dictionary<uint, SpirvType> built = new Dictionary<uint, SpirvType>();
+            HashSet<uint> building = new HashSet<uint>();
             foreach (uint id in interfaces)
             {
                 if (!variables.TryGetValue(id, out (uint Storage, uint PointerType) v) || v.Storage != StorageOutput)
@@ -248,12 +279,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return null;
 
                 SpirvVariable variable = new SpirvVariable();
-                variable.Type = BuildType(words, typeAt, constants, specConstants, memberDecorations, built, words[at + 3], result);
+                variable.Type = BuildType(words, typeAt, constants, specConstants, memberDecorations, built, building, words[at + 3], result);
                 if (decorations.TryGetValue(id, out List<uint[]>? list))
                 {
                     foreach (uint[] d in list)
                     {
-                        if (d[0] == DecorationXfbBuffer || d[0] == DecorationXfbStride || d[0] == DecorationStream)
+                        if (d.Length > 0 && (d[0] == DecorationXfbBuffer || d[0] == DecorationXfbStride || d[0] == DecorationStream))
                             result.Unsupported = true;
                         variable.Decorations.Add(d);
                     }
@@ -266,15 +297,23 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         private static SpirvType BuildType(uint* words, Dictionary<uint, int> typeAt, Dictionary<uint, uint> constants, HashSet<uint> specConstants,
-            Dictionary<uint, Dictionary<uint, List<uint[]>>> memberDecorations, Dictionary<uint, SpirvType> built, uint id, SpirvInterface result)
+            Dictionary<uint, Dictionary<uint, List<uint[]>>> memberDecorations, Dictionary<uint, SpirvType> built,
+            HashSet<uint> building, uint id, SpirvInterface result)
         {
             if (built.TryGetValue(id, out SpirvType? done))
+            {
+                // Memoised before its members are filled, so a self-referencing type leaves a loop TypeId follows forever.
+                if (building.Contains(id))
+                    result.Unsupported = true;
                 return done;
+            }
 
             SpirvType t = new SpirvType();
             built[id] = t;
+            building.Add(id);
             if (!typeAt.TryGetValue(id, out int at))
             {
+                building.Remove(id);
                 result.Unsupported = true;
                 return t;
             }
@@ -292,17 +331,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                     break;
                 case OpTypeVector:
                     t.Kind = SpirvTypeKind.Vector;
-                    t.Element = BuildType(words, typeAt, constants, specConstants, memberDecorations, built, words[at + 2], result);
+                    t.Element = BuildType(words, typeAt, constants, specConstants, memberDecorations, built, building, words[at + 2], result);
                     t.Count = (int)words[at + 3];
                     break;
                 case OpTypeMatrix:
                     t.Kind = SpirvTypeKind.Matrix;
-                    t.Element = BuildType(words, typeAt, constants, specConstants, memberDecorations, built, words[at + 2], result);
+                    t.Element = BuildType(words, typeAt, constants, specConstants, memberDecorations, built, building, words[at + 2], result);
                     t.Count = (int)words[at + 3];
                     break;
                 case OpTypeArray:
                     t.Kind = SpirvTypeKind.Array;
-                    t.Element = BuildType(words, typeAt, constants, specConstants, memberDecorations, built, words[at + 2], result);
+                    t.Element = BuildType(words, typeAt, constants, specConstants, memberDecorations, built, building, words[at + 2], result);
                     if (specConstants.Contains(words[at + 3]) || !constants.TryGetValue(words[at + 3], out uint length))
                         result.Unsupported = true;
                     else
@@ -317,11 +356,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     memberDecorations.TryGetValue(id, out Dictionary<uint, List<uint[]>>? members);
                     for (int m = 0; m < n; m++)
                     {
-                        t.Members[m] = BuildType(words, typeAt, constants, specConstants, memberDecorations, built, words[at + 2 + m], result);
+                        t.Members[m] = BuildType(words, typeAt, constants, specConstants, memberDecorations, built, building, words[at + 2 + m], result);
                         t.MemberDecorations[m] = members != null && members.TryGetValue((uint)m, out List<uint[]>? list) ? list : new List<uint[]>();
                         foreach (uint[] d in t.MemberDecorations[m])
                         {
-                            if (d[0] == DecorationXfbBuffer || d[0] == DecorationXfbStride || d[0] == DecorationStream)
+                            if (d.Length > 0 && (d[0] == DecorationXfbBuffer || d[0] == DecorationXfbStride || d[0] == DecorationStream))
                                 result.Unsupported = true;
                         }
                     }
@@ -335,6 +374,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((t.Kind == SpirvTypeKind.Float || t.Kind == SpirvTypeKind.Int) && t.Width != 32)
                 result.Unsupported = true;
 
+            building.Remove(id);
             return t;
         }
 
@@ -371,8 +411,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             uint type = words[at + 3];
             int elements = 1;
+            // An array whose element type is itself gives a chain with no end.
+            int steps = typeAt.Count;
             while (typeAt.TryGetValue(type, out at) && (words[at] & 0xFFFF) == OpTypeArray)
             {
+                if (steps-- <= 0)
+                    return -1;
                 if (!constants.TryGetValue(words[at + 3], out uint length))
                     return -1;
                 elements = (int)length;
@@ -404,7 +448,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 uint head = words[i];
                 int len = (int)(head >> 16);
                 int op = (int)(head & 0xFFFF);
-                if (len == 0 || i + len > count)
+                if (len == 0 || i + len > count || len < MinimumWords(op))
                 {
                     info.Left = true;
                     return;
@@ -591,7 +635,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 uint head = words[i];
                 int len = (int)(head >> 16);
                 int op = (int)(head & 0xFFFF);
-                if (len == 0 || i + len > count)
+                if (len == 0 || i + len > count || len < Spirv.MinimumWords(op))
                     return null;
 
                 switch (op)
@@ -671,7 +715,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 uint head = words[i];
                 int len = (int)(head >> 16);
-                if (len == 0 || i + len > count)
+                if (len == 0 || i + len > count || len < Spirv.MinimumWords((int)(head & 0xFFFF)))
                     return null;
                 if ((head & 0xFFFF) == Spirv.OpFunction && words[i + 2] == entryFunction)
                 {
@@ -699,7 +743,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         uint h = words[k];
                         int l = (int)(h >> 16);
                         int o = (int)(h & 0xFFFF);
-                        if (l == 0 || (o != Spirv.OpVariable && o != Spirv.OpLine && o != Spirv.OpNoLine))
+                        if (l == 0 || k + l > count || (o != Spirv.OpVariable && o != Spirv.OpLine && o != Spirv.OpNoLine))
                             break;
                         prologueAt = k + l;
                         k += l;

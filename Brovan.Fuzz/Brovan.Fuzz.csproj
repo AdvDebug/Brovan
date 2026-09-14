@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Harness for the Brovvulk forwarding path. Linux only: the guard pages use mmap. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PlatformTarget>x64</PlatformTarget>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Brovan.Fuzz</AssemblyName>
+    <RootNamespace>Brovan.Fuzz</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SharpFuzz" Version="2.3.0" />
+  </ItemGroup>
+
+  <!-- The harness never runs a guest, so the Unicorn native build is dead weight. -->
+  <ItemGroup>
+    <ProjectReference Include="../Brovan/Brovan.csproj">
+      <AdditionalProperties>SkipUnicornNative=true</AdditionalProperties>
+    </ProjectReference>
+  </ItemGroup>
+
+</Project>

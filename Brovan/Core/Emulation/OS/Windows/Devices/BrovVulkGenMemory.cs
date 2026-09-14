@@ -124,7 +124,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return *(ulong*)(ext + 16);
         }
 
-        internal static int AllocateMemory(GenReader r, GenBuf w, GenState st, BinaryEmulator inst, int allocInfoSid)
+        internal static int AllocateMemory(GenReader r, GenBuf w, GenState st, IGuestMemory inst, int allocInfoSid)
         {
             IntPtr device = st.Lookup(r.ReadU32(), "VkDevice");
             uint hasInfo = r.ReadU32();
@@ -133,6 +133,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             IntPtr ai = BrovVulkGenStruct.Rebuild(allocInfoSid, r, st);
             ulong bounceVa = r.ReadU64();
             ulong bounceSize = r.ReadU64();
+            // The import path rewrites allocationSize, so the guest's own size is taken first.
+            ulong requested = *(ulong*)(ai + 16);
 
             uint imported = 0;
             IntPtr memory = IntPtr.Zero;
@@ -198,6 +200,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return rr;
 
             uint id = st.Register(memory, "VkDeviceMemory");
+            st.SetMemorySize(id, requested);
             if (imported != 0)
                 st.MarkImported(id);
             w.WriteU32(id);
@@ -218,7 +221,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return (bits & (1u << (int)memoryTypeIndex)) != 0;
         }
 
-        internal static int FreeMemory(GenReader r, GenState st, BinaryEmulator inst)
+        internal static int FreeMemory(GenReader r, GenState st, IGuestMemory inst)
         {
             IntPtr device = st.Lookup(r.ReadU32(), "VkDevice");
             uint memId = r.ReadU32();
@@ -239,7 +242,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return 0;
         }
 
-        internal static int MapMemory(GenReader r, GenState st, BinaryEmulator inst)
+        internal static int MapMemory(GenReader r, GenState st, IGuestMemory inst)
         {
             IntPtr device = st.Lookup(r.ReadU32(), "VkDevice");
             uint memId = r.ReadU32();
@@ -249,6 +252,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint flags = r.ReadU32();
             ulong guestVa = r.ReadU64();
             if (memory == IntPtr.Zero || guestVa == 0 || size == 0 || size > MaxMapBytes || st.HasMapping(memId))
+                return VkErrorMemoryMapFailed;
+            if (!st.IsMemoryRangeInsideAllocation(memId, offset, size))
                 return VkErrorMemoryMapFailed;
             if (!inst.IsRegionMapped(guestVa, size))
                 return VkErrorMemoryMapFailed;
@@ -275,7 +280,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return rr;
         }
 
-        internal static int UnmapMemory(GenReader r, GenState st, BinaryEmulator inst)
+        internal static int UnmapMemory(GenReader r, GenState st, IGuestMemory inst)
         {
             IntPtr device = st.Lookup(r.ReadU32(), "VkDevice");
             uint memId = r.ReadU32();
@@ -304,13 +309,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return 0;
         }
 
-        internal static int FlushMappedMemoryRanges(GenReader r, GenState st, BinaryEmulator inst) =>
+        internal static int FlushMappedMemoryRanges(GenReader r, GenState st, IGuestMemory inst) =>
             SyncRanges(r, st, inst, invalidate: false);
 
-        internal static int InvalidateMappedMemoryRanges(GenReader r, GenState st, BinaryEmulator inst) =>
+        internal static int InvalidateMappedMemoryRanges(GenReader r, GenState st, IGuestMemory inst) =>
             SyncRanges(r, st, inst, invalidate: true);
 
-        internal static void SyncAllMappingsToHost(GenState st, BinaryEmulator inst)
+        internal static void SyncAllMappingsToHost(GenState st, IGuestMemory inst)
         {
             int copied = 0;
             ulong bytes = 0;
@@ -325,7 +330,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ImportStats.RecordSync(copied, bytes);
         }
 
-        internal static void ReleaseMappings(GenState st, BinaryEmulator inst)
+        internal static void ReleaseMappings(GenState st, IGuestMemory inst)
         {
             foreach (GenState.MapEntry e in st.Mappings)
             {
@@ -336,7 +341,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             st.ClearMappings();
         }
 
-        private static int SyncRanges(GenReader r, GenState st, BinaryEmulator inst, bool invalidate)
+        private static int SyncRanges(GenReader r, GenState st, IGuestMemory inst, bool invalidate)
         {
             IntPtr device = st.Lookup(r.ReadU32(), "VkDevice");
             uint count = r.ReadU32();
@@ -388,13 +393,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return rr;
         }
 
-        private static void EnsureGuestRange(BinaryEmulator inst, ulong guestVa, ulong size)
+        private static void EnsureGuestRange(IGuestMemory inst, ulong guestVa, ulong size)
         {
             if (!inst.IsRegionMapped(guestVa, size))
                 throw new InvalidOperationException("BrovVulk generic: mapped range guest memory not mapped.");
         }
 
-        private static void CopyGuestToHost(BinaryEmulator inst, ulong guestVa, IntPtr hostPtr, ulong size)
+        private static void CopyGuestToHost(IGuestMemory inst, ulong guestVa, IntPtr hostPtr, ulong size)
         {
             ulong done = 0;
             while (done < size)
@@ -406,7 +411,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static void CopyHostToGuest(BinaryEmulator inst, IntPtr hostPtr, ulong guestVa, ulong size)
+        private static void CopyHostToGuest(IGuestMemory inst, IntPtr hostPtr, ulong guestVa, ulong size)
         {
             ulong done = 0;
             while (done < size)

@@ -90,6 +90,7 @@ namespace Brovan.Generators
             public string AltLength;
             public int ArrayLen = 1;
             public bool Optional;
+            public bool OptionalElement;
         }
 
         private sealed class Command
@@ -292,6 +293,10 @@ namespace Brovan.Generators
                     m.Commands[aliasName] = new Command { Name = aliasName, Alias = aliasTarget };
                     continue;
                 }
+                // vk.xml lists some commands twice, and the Vulkan SC copy drops optional.
+                string commandApi = (string)c.Attribute("api");
+                if (commandApi != null && Array.IndexOf(commandApi.Split(','), "vulkan") < 0)
+                    continue;
                 XElement proto = c.Element("proto");
                 if (proto == null)
                     continue;
@@ -302,7 +307,9 @@ namespace Brovan.Generators
                         continue;
                     ParseTyped(p, out string ty, out string nm, out int pd, out bool isc);
                     int palen = pd == 0 ? ResolveArrayLen(p, m.Constants) : 1;
-                    cmd.Params.Add(new Param { Name = nm, Type = ty, PtrDepth = pd, IsConst = isc, Length = (string)p.Attribute("len"), AltLength = (string)p.Attribute("altlen"), ArrayLen = palen, Optional = ((string)p.Attribute("optional") ?? "").StartsWith("true", StringComparison.Ordinal) });
+                    // One optional component covers the pointer, a second covers the elements.
+                    string[] optParts = ((string)p.Attribute("optional") ?? "").Split(',');
+                    cmd.Params.Add(new Param { Name = nm, Type = ty, PtrDepth = pd, IsConst = isc, Length = (string)p.Attribute("len"), AltLength = (string)p.Attribute("altlen"), ArrayLen = palen, Optional = optParts[0].StartsWith("true", StringComparison.Ordinal), OptionalElement = optParts[optParts.Length - 1].StartsWith("true", StringComparison.Ordinal) });
                 }
                 if (cmd.Name != null)
                     m.Commands[cmd.Name] = cmd;
@@ -464,10 +471,22 @@ namespace Brovan.Generators
             return lay;
         }
 
+        // vk.xml leaves these unmarked, but the spec lets each one be null.
+        private static readonly HashSet<string> NullableMembers = new HashSet<string>
+        {
+            "VkWriteDescriptorSet.dstSet",
+            "VkDescriptorImageInfo.sampler",
+            "VkDescriptorImageInfo.imageView",
+        };
+
         private static bool OptionalAt(XElement e, int index)
         {
             string[] parts = ((string)e.Attribute("optional") ?? "").Split(',');
-            return parts.Length > index && parts[index] == "true";
+            if (parts.Length > index && parts[index] == "true")
+                return true;
+
+            string owner = (string)e.Parent?.Attribute("name");
+            return owner != null && NullableMembers.Contains(owner + "." + e.Element("name")?.Value);
         }
 
         // One optional component in vk.xml covers the pointer and its elements, so such an array may hold
@@ -1312,7 +1331,7 @@ namespace Brovan.Generators
                     "                int rr;\n" +
                     "                if (Brovan.Android.AndroidHost.IsActive)\n" +
                     "                {\n" +
-                    "                    System.IntPtr awin = inst.WinHelper.EnsureHostWindowHandle();\n" +
+                    "                    System.IntPtr awin = inst.EnsureHostWindowHandle();\n" +
                     "                    byte* ci = stackalloc byte[32];\n" +
                     "                    for (int z = 0; z < 32; z++) ci[z] = 0;\n" +
                     "                    *(int*)(ci + 0) = " + "1000008000" + ";\n" +
@@ -1322,7 +1341,7 @@ namespace Brovan.Generators
                     "                else if (Brovan.GeneralHelper.IsLinux)\n" +
                     "                {\n" +
                     "                    System.IntPtr xdpy; System.IntPtr xwin;\n" +
-                    "                    inst.WinHelper.EnsureHostXlibSurfaceHandles(out xdpy, out xwin);\n" +
+                    "                    inst.EnsureHostXlibSurfaceHandles(out xdpy, out xwin);\n" +
                     "                    byte* ci = stackalloc byte[40];\n" +
                     "                    for (int z = 0; z < 40; z++) ci[z] = 0;\n" +
                     "                    *(int*)(ci + 0) = 1000005000;\n" +
@@ -1332,7 +1351,7 @@ namespace Brovan.Generators
                     "                }\n" +
                     "                else\n" +
                     "                {\n" +
-                    "                    System.IntPtr hwnd = inst.WinHelper.EnsureHostWindowHandle();\n" +
+                    "                    System.IntPtr hwnd = inst.EnsureHostWindowHandle();\n" +
                     "                    System.IntPtr hinst = BrovVulkGenNative.GetModuleHandleW(System.IntPtr.Zero);\n" +
                     "                    byte* ci = stackalloc byte[40];\n" +
                     "                    for (int z = 0; z < 40; z++) ci[z] = 0;\n" +
@@ -1466,7 +1485,7 @@ namespace Brovan.Generators
                     }
                     else
                     {
-                        b.Append("                System.IntPtr ").Append(local).Append(" = st.Lookup(r.ReadU32(), \"").Append(p.Type).Append("\");\n");
+                        b.Append("                System.IntPtr ").Append(local).Append(" = st.").Append(p.Optional ? "Lookup" : "LookupRequired").Append("(r.ReadU32(), \"").Append(p.Type).Append("\");\n");
                     }
                     callArgs.Add(local);
                 }
@@ -1495,7 +1514,10 @@ namespace Brovan.Generators
                 }
                 else if (kind == "StructIn" && StructId.ContainsKey(p.Type))
                 {
-                    b.Append("                System.IntPtr ").Append(local).Append(" = r.ReadU32() != 0 ? BrovVulkGenStruct.Rebuild(").Append(StructId[p.Type]).Append(", r, st) : System.IntPtr.Zero;\n");
+                    if (p.Optional)
+                        b.Append("                System.IntPtr ").Append(local).Append(" = r.ReadU32() != 0 ? BrovVulkGenStruct.Rebuild(").Append(StructId[p.Type]).Append(", r, st) : System.IntPtr.Zero;\n");
+                    else
+                        b.Append("                System.IntPtr ").Append(local).Append(" = BrovVulkGenStruct.RebuildRequired(").Append(StructId[p.Type]).Append(", r, st, \"").Append(p.Type).Append("\");\n");
                     if (p == WaitTimeoutStructParam(m, c))
                         b.Append("                if (").Append(local).Append(" != System.IntPtr.Zero) *(ulong*)(").Append(local).Append(" + BrovVulkLayout.MemberOffset[\"").Append(p.Type).Append(".timeout\"]) = 0;\n");
                     callArgs.Add(local);
@@ -1533,7 +1555,7 @@ namespace Brovan.Generators
                         }
                         else
                         {
-                            b.Append("                if (").Append(local).Append("n > 0) { ").Append(local).Append(" = st.Alloc(BrovVulkGenStruct.CheckedBytes(").Append(local).Append("n, 8)); for (uint k = 0; k < ").Append(local).Append("n; k++) *(System.IntPtr*)(").Append(local).Append(" + (int)(k * 8)) = st.Lookup(r.ReadU32(), \"").Append(p.Type).Append("\"); }\n");
+                            b.Append("                if (").Append(local).Append("n > 0) { ").Append(local).Append(" = st.Alloc(BrovVulkGenStruct.CheckedBytes(").Append(local).Append("n, 8)); for (uint k = 0; k < ").Append(local).Append("n; k++) *(System.IntPtr*)(").Append(local).Append(" + (int)(k * 8)) = st.").Append(p.OptionalElement ? "Lookup" : "LookupRequired").Append("(r.ReadU32(), \"").Append(p.Type).Append("\"); }\n");
                         }
                     }
                     else
@@ -2880,7 +2902,7 @@ namespace Brovan.Generators
             db.AppendLine("{");
             db.AppendLine("    internal static unsafe class BrovVulkGenDispatch");
             db.AppendLine("    {");
-            db.AppendLine("        internal static int Dispatch(uint id, GenReader r, GenBuf w, GenState st, BinaryEmulator inst)");
+            db.AppendLine("        internal static int Dispatch(uint id, GenReader r, GenBuf w, GenState st, Brovan.Core.Emulation.IGuestMemory inst)");
             db.AppendLine("        {");
             db.AppendLine("            switch (id)");
             db.AppendLine("            {");

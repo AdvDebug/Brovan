@@ -46,6 +46,18 @@ namespace Brovan.Core.Emulation
 
         internal WindowsGuest WindowsGuest => GetGuest<WindowsGuest>();
         internal WinSysHelper WinHelper => WindowsGuest?.WinHelper;
+
+        LogFlags IGuestMemory.GuestLogFlags => Settings.Flags;
+
+        OS.SharedHelpers.DpiAwareness IGuestMemory.GuestDpiAwareness => Win32kDpi.GetHostAwareness(this);
+
+        bool IGuestMemory.ReadMemory(ulong Address, Span<byte> Destination) => ReadMemory(Address, Destination);
+
+        IntPtr IGuestMemory.EnsureHostWindowHandle() => WinHelper.EnsureHostWindowHandle();
+
+        void IGuestMemory.EnsureHostXlibSurfaceHandles(out IntPtr Connection, out IntPtr Window) =>
+            WinHelper.EnsureHostXlibSurfaceHandles(out Connection, out Window);
+
         internal ulong TEB => WindowsGuest?.GetCurrentTeb(this) ?? 0;
 
         /// <summary>
