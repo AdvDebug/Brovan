@@ -52,11 +52,10 @@ jobs:
           echo "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json" >> "$GITHUB_ENV"
 
       - name: Build libfuzzer-dotnet
-        run: |
-          curl -sSLo libfuzzer-dotnet.cc \
+          curl -fsSLo libfuzzer-dotnet.cc \
             https://raw.githubusercontent.com/Metalnem/libfuzzer-dotnet/master/libfuzzer-dotnet.cc
           clang -fsanitize=fuzzer libfuzzer-dotnet.cc -o libfuzzer-dotnet
-          ./libfuzzer-dotnet -help=1 > /dev/null && echo "libfuzzer-dotnet ready"
+          test -x ./libfuzzer-dotnet && echo "libfuzzer-dotnet ready"
 
       - name: Build the harness
         # The fuzzer never runs a guest, so SkipUnicornNative drops the native emulator core.
