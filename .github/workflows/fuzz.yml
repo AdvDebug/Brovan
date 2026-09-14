@@ -52,6 +52,7 @@ jobs:
           echo "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json" >> "$GITHUB_ENV"
 
       - name: Build libfuzzer-dotnet
+        run: |
           curl -fsSLo libfuzzer-dotnet.cc \
             https://raw.githubusercontent.com/Metalnem/libfuzzer-dotnet/master/libfuzzer-dotnet.cc
           clang -fsanitize=fuzzer libfuzzer-dotnet.cc -o libfuzzer-dotnet
