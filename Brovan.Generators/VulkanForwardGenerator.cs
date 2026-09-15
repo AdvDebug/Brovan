@@ -293,6 +293,7 @@ namespace Brovan.Generators
                     m.Commands[aliasName] = new Command { Name = aliasName, Alias = aliasTarget };
                     continue;
                 }
+                
                 // vk.xml lists some commands twice, and the Vulkan SC copy drops optional.
                 string commandApi = (string)c.Attribute("api");
                 if (commandApi != null && Array.IndexOf(commandApi.Split(','), "vulkan") < 0)
@@ -309,7 +310,8 @@ namespace Brovan.Generators
                     int palen = pd == 0 ? ResolveArrayLen(p, m.Constants) : 1;
                     // One optional component covers the pointer, a second covers the elements.
                     string[] optParts = ((string)p.Attribute("optional") ?? "").Split(',');
-                    cmd.Params.Add(new Param { Name = nm, Type = ty, PtrDepth = pd, IsConst = isc, Length = (string)p.Attribute("len"), AltLength = (string)p.Attribute("altlen"), ArrayLen = palen, Optional = optParts[0].StartsWith("true", StringComparison.Ordinal), OptionalElement = optParts[optParts.Length - 1].StartsWith("true", StringComparison.Ordinal) });
+                    bool opt = optParts[0].StartsWith("true", StringComparison.Ordinal) && !RequiredHandles.Contains(cmd.Name + "." + nm);
+                    cmd.Params.Add(new Param { Name = nm, Type = ty, PtrDepth = pd, IsConst = isc, Length = (string)p.Attribute("len"), AltLength = (string)p.Attribute("altlen"), ArrayLen = palen, Optional = opt, OptionalElement = optParts[optParts.Length - 1].StartsWith("true", StringComparison.Ordinal) });
                 }
                 if (cmd.Name != null)
                     m.Commands[cmd.Name] = cmd;
@@ -479,14 +481,27 @@ namespace Brovan.Generators
             "VkDescriptorImageInfo.imageView",
         };
 
+        // VK_GOOGLE_surfaceless_query is what marks these optional, and it is denied. The loader
+        // dereferences the surface before any driver sees it.
+        private static readonly HashSet<string> RequiredHandles = new HashSet<string>
+        {
+            "VkPhysicalDeviceSurfaceInfo2KHR.surface",
+            "vkGetPhysicalDeviceSurfaceFormatsKHR.surface",
+            "vkGetPhysicalDeviceSurfacePresentModesKHR.surface",
+        };
+
         private static bool OptionalAt(XElement e, int index)
         {
+            string owner = (string)e.Parent?.Attribute("name");
+            string qualified = owner == null ? null : owner + "." + e.Element("name")?.Value;
+            if (qualified != null && RequiredHandles.Contains(qualified))
+                return false;
+
             string[] parts = ((string)e.Attribute("optional") ?? "").Split(',');
             if (parts.Length > index && parts[index] == "true")
                 return true;
 
-            string owner = (string)e.Parent?.Attribute("name");
-            return owner != null && NullableMembers.Contains(owner + "." + e.Element("name")?.Value);
+            return qualified != null && NullableMembers.Contains(qualified);
         }
 
         // One optional component in vk.xml covers the pointer and its elements, so such an array may hold
@@ -565,6 +580,7 @@ namespace Brovan.Generators
             ["VK_NVX_image_view_handle"] = "host CUDA interop",
             ["VK_EXT_multi_draw"] = "strided array parameters",
             ["VK_EXT_shader_object"] = "bypasses the shader module stand-ins",
+            ["VK_GOOGLE_surfaceless_query"] = "a null surface reaches the host loader",
         };
 
         // Advertised, but the listed chain structs are dropped and nothing is written back to them.

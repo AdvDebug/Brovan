@@ -249,7 +249,7 @@ internal static class IoctlTarget
 internal static unsafe class VulkanBootstrap
 {
     public static bool Available { get; private set; }
-    public static IntPtr Instance, PhysicalDevice, Device, Queue;
+    public static IntPtr Instance, PhysicalDevice, Device, Queue, Surface;
 
     private const string VK = "libvulkan.so.1";
     [DllImport(VK)] private static extern int vkCreateInstance(void* ci, IntPtr alloc, out IntPtr instance);
@@ -259,6 +259,7 @@ internal static unsafe class VulkanBootstrap
     [DllImport(VK)] private static extern int vkDeviceWaitIdle(IntPtr dev);
     [DllImport(VK)] private static extern void vkGetDeviceQueue(IntPtr dev, uint family, uint index, out IntPtr queue);
     [DllImport(VK)] private static extern int vkEnumerateInstanceVersion(out uint version);
+    [DllImport(VK)] private static extern IntPtr vkGetInstanceProcAddr(IntPtr instance, IntPtr name);
     [DllImport(VK)] private static extern int vkEnumerateInstanceExtensionProperties(IntPtr layer, ref uint count, IntPtr props);
     [DllImport(VK)] private static extern int vkEnumerateDeviceExtensionProperties(IntPtr pd, IntPtr layer, ref uint count, IntPtr props);
 
@@ -323,6 +324,35 @@ internal static unsafe class VulkanBootstrap
             Device = Queue = IntPtr.Zero;
         }
         Available = OpenDevice();
+        OpenSurface();
+    }
+
+    private const uint HeadlessSurfaceCreateInfo = 1000256000;
+
+    // Every surface-taking query dereferences the handle in the loader, so without a real one in the
+    // table each of them stops at its handle lookup. VK_EXT_headless_surface needs no window system.
+    private static void OpenSurface()
+    {
+        if (Instance == IntPtr.Zero)
+            return;
+
+        IntPtr name = Marshal.StringToHGlobalAnsi("vkCreateHeadlessSurfaceEXT");
+        IntPtr proc;
+        try { proc = vkGetInstanceProcAddr(Instance, name); }
+        finally { Marshal.FreeHGlobal(name); }
+
+        if (proc == IntPtr.Zero)
+            return;
+
+        byte* ci = stackalloc byte[24]; new Span<byte>(ci, 24).Clear();
+        *(uint*)ci = HeadlessSurfaceCreateInfo;
+
+        // The one this replaces is left alone. vkDestroySurfaceKHR is reachable from an input, so the
+        // harness cannot tell whether its own handle is still live, and the object is a few hundred
+        // bytes against -rss_limit_mb.
+        IntPtr surface = IntPtr.Zero;
+        if (((delegate* unmanaged[Cdecl]<IntPtr, void*, IntPtr, IntPtr*, int>)proc)(Instance, ci, IntPtr.Zero, &surface) == 0)
+            Surface = surface;
     }
 
     private static bool OpenDevice()
@@ -395,7 +425,7 @@ internal static unsafe class VulkanBootstrap
             ? vkEnumerateInstanceExtensionProperties(IntPtr.Zero, ref count, props)
             : vkEnumerateDeviceExtensionProperties(physicalDevice, IntPtr.Zero, ref count, props);
 
-    /// <summary>Fills the handle table with ids 1 to 4, the order the seed corpus assumes.</summary>
+    /// <summary>Fills the handle table with ids 1 to 5, the order the seed corpus assumes.</summary>
     public static void Register(GenState st)
     {
         if (!Available)
@@ -405,6 +435,7 @@ internal static unsafe class VulkanBootstrap
         st.Register(Device, "VkDevice");
         st.Register(Queue, "VkQueue");
         st.SetDevicePhysical(Device, PhysicalDevice);
+        st.Register(Surface, "VkSurfaceKHR");
     }
 
     public static void SetStandIns(GenState st, int bits)

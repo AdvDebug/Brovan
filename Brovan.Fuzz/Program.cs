@@ -24,7 +24,9 @@ internal static class Program
 
         IoctlTarget.Init();
         Console.Error.WriteLine(VulkanBootstrap.Available
-            ? "[ioctl] host Vulkan device ready, handle ids 1 to 4 registered"
+            ? VulkanBootstrap.Surface != IntPtr.Zero
+                ? "[ioctl] host Vulkan device ready, handle ids 1 to 5 registered"
+                : "[ioctl] host Vulkan device ready, handle ids 1 to 4 registered, no headless surface"
             : "[ioctl] no host Vulkan device, only the framing and the reader are reachable");
     }
 
@@ -59,8 +61,6 @@ internal static class Program
                 MemoryGuard.Check();
             });
 
-            // Run unmaps the shared memory that instrumented code traces through, so a managed
-            // shutdown hook which reaches that code faults.
             HardExit(0);
             return 0;
         }
@@ -176,6 +176,11 @@ internal static class Corpus
                 foreach ((uint handle, uint standIns) in Shapes)
                     for (uint id = 0; id < (uint)Grammar.CommandCount; id++)
                         Emit(Frame(id, standIns, new WireWriter().U32(handle).U32(0).U32(0).Done()));
+
+                // A surface query reads the physical device and then the surface, and a null surface
+                // is refused, so the one-handle shape never reaches the call.
+                for (uint id = 0; id < (uint)Grammar.CommandCount; id++)
+                    Emit(Frame(id, 0, new WireWriter().U32(2).U32(5).U32(0).U32(0).Done()));
 
                 Emit(Frame(0xFFFFFFFE, 0, new WireWriter().U32(2).U32(0).U32(3).U32(1).U32(3).Done()));
                 break;

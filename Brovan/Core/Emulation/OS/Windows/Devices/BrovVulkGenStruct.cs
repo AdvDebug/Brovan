@@ -82,8 +82,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                         RebuildAt(d.Sub, r, st, fp);
                         break;
                     case BvkMK.StructPtr:
-                        *(IntPtr*)fp = r.ReadU32() != 0 ? Rebuild(d.Sub, r, st) : IntPtr.Zero;
+                    {
+                        uint has = r.ReadU32();
+                        if (has == 0 && !d.Optional)
+                            throw new InvalidOperationException($"BrovVulk generic: null pointer where struct {d.Sub} is required.");
+                        *(IntPtr*)fp = has != 0 ? Rebuild(d.Sub, r, st) : IntPtr.Zero;
                         break;
+                    }
                     case BvkMK.StructArray:
                     {
                         uint n = r.ReadU32();
