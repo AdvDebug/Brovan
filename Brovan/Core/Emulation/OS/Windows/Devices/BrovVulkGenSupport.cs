@@ -276,9 +276,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Marshal.FreeHGlobal(p);
             _overflow.Clear();
         }
+
+        public void FreeAll()
+        {
+            FreeCallAllocs();
+            if (_arena == IntPtr.Zero)
+                return;
+            Marshal.FreeHGlobal(_arena);
+            _arena = IntPtr.Zero;
+        }
     }
 
-    internal sealed class GenState
+    internal sealed class GenState : IDisposable
     {
         internal readonly struct MapEntry
         {
@@ -484,6 +493,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public IntPtr Alloc(int size) => _arena.Alloc(size);
 
         public void FreeCallAllocs() => _arena.FreeCallAllocs();
+
+        public void Dispose() => _arena.FreeAll();
 
     }
 }
