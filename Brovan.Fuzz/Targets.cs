@@ -197,6 +197,8 @@ internal static class IoctlTarget
     {
         _guest?.Dispose();
         _guest = new FuzzGuest();
+        // The arena behind a dropped GenState is unmanaged, so the collector never returns it.
+        _device?.GenState.Dispose();
         _device = new BrovVulkDevice();
         VulkanBootstrap.ReopenDevice();
         VulkanBootstrap.Register(_device.GenState);
