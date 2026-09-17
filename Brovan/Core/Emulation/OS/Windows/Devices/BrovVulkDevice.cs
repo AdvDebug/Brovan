@@ -71,6 +71,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Reader.Reset(Input, 8, (int)PayloadLen);
                 Writer.Reset();
                 int Result;
+                uint Failing = Id;
                 IntPtr PreviousDpiContext = HostDisplayMetrics.EnterWindowDpiContext(Instance.GuestDpiAwareness);
                 try
                 {
@@ -84,6 +85,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         for (uint k = 0; k < Count; k++)
                         {
                             uint SubId = Reader.ReadU32();
+                            Failing = SubId;
                             try { Result = BrovVulkGenDispatch.Dispatch(SubId, Reader, Writer, GenState, Instance); }
                             catch (EntryPointNotFoundException Ex) { ReportMissingEntryPoint(SubId, Ex, Instance); }
                             finally { GenState.FreeCallAllocs(); }
@@ -97,9 +99,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 catch (Exception Ex)
                 {
-                    Utils.LogError($"[!] BrovVulk(gen): {Ex.Message}");
+                    string Where = Failing < (uint)BrovVulkApi.CommandNames.Length ? BrovVulkApi.CommandNames[Failing] : Failing.ToString();
+                    Utils.LogError($"[!] BrovVulk(gen): {Where}: {Ex.Message}");
                     if ((Instance.GuestLogFlags & LogFlags.Issues) != 0)
-                        Instance.TriggerEventMessage($"[!] BrovVulk(gen): {Ex.Message}", LogFlags.Issues);
+                        Instance.TriggerEventMessage($"[!] BrovVulk(gen): {Where}: {Ex.Message}", LogFlags.Issues);
                     Writer.Reset();
                     Result = VK_ERROR_INITIALIZATION_FAILED;
                 }

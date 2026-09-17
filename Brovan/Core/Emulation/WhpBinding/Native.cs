@@ -32,6 +32,28 @@ namespace Brovan.Core.Emulation
         public static extern int WHvUnmapGpaRange(IntPtr Partition, ulong GuestAddress, ulong SizeInBytes);
 
         [DllImport(Lib)]
+        public static extern int WHvAdviseGpaRange(IntPtr Partition, WhvMemoryRangeEntry* Ranges, uint RangeCount,
+            WhvAdviseGpaRangeCode Advice, void* AdviseArgument, uint AdviseArgumentSizeInBytes);
+
+        // Windows 10 2004 and later.
+        private static int _adviseGpaRangeState;
+
+        public static bool HasAdviseGpaRange
+        {
+            get
+            {
+                if (_adviseGpaRangeState == 0)
+                {
+                    bool present = NativeLibrary.TryLoad(Lib, out IntPtr Handle)
+                        && NativeLibrary.TryGetExport(Handle, nameof(WHvAdviseGpaRange), out IntPtr Export)
+                        && Export != IntPtr.Zero;
+                    _adviseGpaRangeState = present ? 1 : -1;
+                }
+                return _adviseGpaRangeState > 0;
+            }
+        }
+
+        [DllImport(Lib)]
         public static extern int WHvCreateVirtualProcessor(IntPtr Partition, uint VpIndex, uint Flags);
 
         [DllImport(Lib)]
@@ -94,6 +116,20 @@ namespace Brovan.Core.Emulation
                 Low = (ulong)limit << 48,
                 High = @base,
             };
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct WhvMemoryRangeEntry
+    {
+        public ulong GuestAddress;
+        public ulong SizeInBytes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct WhvAdviseGpaRangePopulate
+    {
+        public uint Flags;
+        public WhvMemoryAccessType AccessType;
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 144)]

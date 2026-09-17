@@ -40,6 +40,7 @@ namespace Brovan.Core.Emulation
         private ulong[] _sortedPageKeys = Array.Empty<ulong>();
         private bool _sortedPageKeysDirty = true;
         private bool _mappingsDirty;
+        private bool _populateUnavailable = !WhpNative.HasAdviseGpaRange;
         private ulong _lastLookupPageBase = ulong.MaxValue;
         private MappedPage _lastLookupPage;
 
@@ -53,6 +54,8 @@ namespace Brovan.Core.Emulation
         // Kept maps never merge, so past this count the next rebuild merges everything and starts over.
         private const int MaxGpaRanges = 8192;
         private const int MapHeadroom = 64;
+        private const ulong PopulateLimitBytes = 32UL * 1024 * 1024;
+        private const ulong PopulateMinBytes = 64UL * 1024;
         private bool _fullRebuildRequired = true;
         private readonly List<DirtyRange> _dirtyRanges = new();
         private const int MaxDirtyRanges = 16;
@@ -2363,6 +2366,31 @@ namespace Brovan.Core.Emulation
             return !isWrite || (map.Flags & WhvMapGpaRangeFlags.Write) != 0;
         }
 
+        // WHP builds second level entries one page at a time and resolves those faults inside
+        // WHvRunVirtualProcessor, so they never reach the exit switch.
+        private unsafe void PopulateRange(ulong gpa, ulong size, WhvMapGpaRangeFlags flags)
+        {
+            if (_populateUnavailable) return;
+
+            // An oversized range is skipped, not clipped; the tail past the clip still faults page by page.
+            if (size < PopulateMinBytes || size > PopulateLimitBytes) return;
+
+            WhvMemoryRangeEntry range;
+            range.GuestAddress = gpa;
+            range.SizeInBytes = size;
+
+            WhvAdviseGpaRangePopulate populate;
+            populate.Flags = 0;
+            populate.AccessType = (flags & WhvMapGpaRangeFlags.Write) != 0
+                ? WhvMemoryAccessType.Write
+                : WhvMemoryAccessType.Read;
+
+            int hr = WhpNative.WHvAdviseGpaRange(_partition, &range, 1, WhvAdviseGpaRangeCode.Populate,
+                &populate, (uint)sizeof(WhvAdviseGpaRangePopulate));
+            if (WhpNative.Failed(hr))
+                _populateUnavailable = true;
+        }
+
         private void RebuildMappingsIncremental(ulong spanStart, ulong spanEnd)
         {
             int firstIndex = FirstActiveMapIndexAtOrBefore(spanStart);
@@ -2484,6 +2512,8 @@ namespace Brovan.Core.Emulation
             int hr = WhpNative.WHvMapGpaRange(_partition, (void*)host, gpa, size, flags);
             if (WhpNative.Failed(hr))
                 throw new WhpException($"WHvMapGpaRange failed (gpa=0x{gpa:X}, size=0x{size:X})", hr);
+
+            PopulateRange(gpa, size, flags);
         }
 
         private void UnmapGpaRange(ulong gpa, ulong size)

@@ -51,6 +51,13 @@ namespace Brovan.Core.Emulation
         ProcessorCount = 0x00001fff,
     }
 
+    internal enum WhvAdviseGpaRangeCode : uint
+    {
+        Populate = 0x00000000,
+        Pin = 0x00000001,
+        Unpin = 0x00000002,
+    }
+
     [Flags]
     internal enum WhvMapGpaRangeFlags : uint
     {
