@@ -1511,6 +1511,49 @@ namespace Brovan.Core.Emulation
         private static SyscallDispatchTable<WinSyscallEntry> CachedSyscallTable = null;
         private static SyscallDispatchTable<WinSyscallEntry> CachedSyscallTablex86 = null;
 
+        private static readonly Dictionary<string, BinaryFile> PreParsedImages =
+            new Dictionary<string, BinaryFile>(GeneralHelper.IsWindows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+
+        /// <summary>
+        /// Hold an image the syscall table builder parsed so the loader can take the same parse.
+        /// </summary>
+        /// <param name="Image">Parsed image, owned by this call.</param>
+        private static void KeepParsedImage(BinaryFile Image)
+        {
+            if (Image != null && !string.IsNullOrEmpty(Image.Location))
+            {
+                lock (PreParsedImages)
+                {
+                    if (PreParsedImages.TryAdd(Image.Location, Image))
+                        return;
+                }
+            }
+
+            Image?.Dispose();
+        }
+
+        /// <summary>
+        /// Take an image the syscall table builder already parsed, transferring ownership to the caller.
+        /// </summary>
+        /// <param name="HostPath">Host path of the image.</param>
+        /// <returns>The parsed image, or null when it was not pre-parsed or was already taken.</returns>
+        public static BinaryFile TakeParsedImage(string HostPath)
+        {
+            if (string.IsNullOrEmpty(HostPath))
+                return null;
+
+            lock (PreParsedImages)
+            {
+                if (PreParsedImages.Count != 0 &&
+                    PreParsedImages.Remove(Path.GetFullPath(HostPath), out BinaryFile Image))
+                {
+                    return Image;
+                }
+            }
+
+            return null;
+        }
+
         public static uint TryExtractSyscallByte(ReadOnlySpan<byte> bytes)
         {
             for (int i = 0; i < bytes.Length; i++)
@@ -1539,6 +1582,14 @@ namespace Brovan.Core.Emulation
             if (CachedSyscallTablex86 != null)
             {
                 CachedSyscallTablex86 = null;
+            }
+
+            lock (PreParsedImages)
+            {
+                foreach (BinaryFile Image in PreParsedImages.Values)
+                    Image.Dispose();
+
+                PreParsedImages.Clear();
             }
         }
 
@@ -1663,21 +1714,38 @@ namespace Brovan.Core.Emulation
                     return false;
                 }
 
-                using BinaryFile Ntdll = new BinaryFile(NtdllPath, true);
-                using BinaryFile Win32u = !string.IsNullOrWhiteSpace(Win32uPath) && File.Exists(Win32uPath) ? new BinaryFile(Win32uPath, true) : null;
+                BinaryFile Ntdll = null;
+                BinaryFile Win32u = null;
 
-                if (Win32u == null)
-                    Utils.PrintHighlight("[-] win32u.dll not found, UI-related syscalls may not work.", true);
+                try
+                {
+                    Ntdll = new BinaryFile(NtdllPath, true);
+                    Win32u = !string.IsNullOrWhiteSpace(Win32uPath) && File.Exists(Win32uPath) ? new BinaryFile(Win32uPath, true) : null;
 
-                ReadOnlySpan<byte> NtdllData = Ntdll.GetBinaryData();
-                ReadOnlySpan<byte> Win32uData = Win32u != null ? Win32u.GetBinaryData() : ReadOnlySpan<byte>.Empty;
+                    if (Win32u == null)
+                        Utils.PrintHighlight("[-] win32u.dll not found, UI-related syscalls may not work.", true);
 
-                AddSyscallsFromExports(Ntdll.ExportFunctions, NtdllData, SupportedFunctions, false);
+                    ReadOnlySpan<byte> NtdllData = Ntdll.GetBinaryData();
+                    ReadOnlySpan<byte> Win32uData = Win32u != null ? Win32u.GetBinaryData() : ReadOnlySpan<byte>.Empty;
 
-                if (Win32u != null)
-                    AddSyscallsFromExports(Win32u.ExportFunctions, Win32uData, SupportedFunctionsWin32k, true);
+                    AddSyscallsFromExports(Ntdll.ExportFunctions, NtdllData, SupportedFunctions, false);
 
-                return true;
+                    if (Win32u != null)
+                        AddSyscallsFromExports(Win32u.ExportFunctions, Win32uData, SupportedFunctionsWin32k, true);
+
+                    KeepParsedImage(Ntdll);
+                    Ntdll = null;
+
+                    KeepParsedImage(Win32u);
+                    Win32u = null;
+
+                    return true;
+                }
+                finally
+                {
+                    Ntdll?.Dispose();
+                    Win32u?.Dispose();
+                }
             }
 
             if (BinaryArch == BinaryArchitecture.x86)

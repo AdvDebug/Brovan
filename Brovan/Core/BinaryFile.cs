@@ -80,8 +80,6 @@ namespace Brovan.Core
         private readonly SectionLookupCache<PortableBinarySection> PeSectionCache = new SectionLookupCache<PortableBinarySection>(GetPeSectionVa, GetPeSectionSize);
         private readonly SectionLookupCache<ElfBinarySection> ElfSectionCache = new SectionLookupCache<ElfBinarySection>(GetElfSectionVa, GetElfSectionSize);
 
-        private Dictionary<uint, uint> RvaToFileOffsetCache;
-
         /// <summary>
         /// Executable Formats Magic Number.
         /// </summary>
@@ -307,7 +305,6 @@ namespace Brovan.Core
 
                 bool IsDotNet = false;
                 uint ComDescriptorRva = 0;
-                dynamic Header;
                 if (Is64Bit)
                 {
                     IMAGE_OPTIONAL_HEADER64 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER64>(Data, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
@@ -328,7 +325,6 @@ namespace Brovan.Core
                     PE.FileAlignment = OptionalHeader.FileAlignment;
                     PE.SectionAlignment = OptionalHeader.SectionAlignment;
                     PE.OptionalHeader64 = OptionalHeader;
-                    Header = OptionalHeader;
                 }
                 else
                 {
@@ -350,7 +346,6 @@ namespace Brovan.Core
                     PE.FileAlignment = OptionalHeader.FileAlignment;
                     PE.SectionAlignment = OptionalHeader.SectionAlignment;
                     PE.OptionalHeader32 = OptionalHeader;
-                    Header = OptionalHeader;
                 }
 
                 // Get the offset of the PE sections.
@@ -380,7 +375,7 @@ namespace Brovan.Core
 
                 if (!IsDotNet)
                 {
-                    ParsePEExportFunctions(DosHeader, FileHeader, Is64Bit);
+                    ParsePEExportFunctions(Is64Bit);
                     if (!Quick)
                         ParsePEFunctions(DosHeader, FileHeader, Is64Bit);
                 }
@@ -400,7 +395,7 @@ namespace Brovan.Core
                     if (!Quick)
                         ParseDotNetFunctions();
                 }
-                ParsePEImports(DosHeader, FileHeader, Is64Bit);
+                ParsePEImports(Is64Bit);
             }
             else if (FileFormat == BinaryFormat.ELF)
             {
@@ -887,6 +882,8 @@ namespace Brovan.Core
             private uint[]? VaEnd;
             private bool HasLast;
             private TSection Last;
+            private uint LastStart;
+            private uint LastEnd;
 
             public SectionLookupCache(Func<TSection, uint> GetVa, Func<TSection, uint> GetSize)
             {
@@ -952,10 +949,7 @@ namespace Brovan.Core
 
                 if (HasLast)
                 {
-                    uint Start = GetVa(Last);
-                    uint End = Start + GetSize(Last);
-
-                    if (Va >= Start && Va < End)
+                    if (Va >= LastStart && Va < LastEnd)
                     {
                         Section = Last;
                         return true;
@@ -987,6 +981,8 @@ namespace Brovan.Core
                     Section = SortedByVa[Mid];
                     HasLast = true;
                     Last = Section;
+                    LastStart = Start;
+                    LastEnd = End;
                     return true;
                 }
 
@@ -1004,7 +1000,6 @@ namespace Brovan.Core
                 return;
 
             PeSectionCache.Build(PE.Sections);
-            RvaToFileOffsetCache = new Dictionary<uint, uint>(4096);
         }
 
         /// <summary>
@@ -1057,24 +1052,13 @@ namespace Brovan.Core
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool TryRvaToFileOffset(uint Rva, out uint FileOffset)
         {
-            if (RvaToFileOffsetCache != null &&
-                RvaToFileOffsetCache.TryGetValue(Rva, out FileOffset))
-            {
-                return true;
-            }
-
             if (!TryFindPESectionByRvaFast(Rva, out PortableBinarySection Sec))
             {
                 FileOffset = 0;
                 return false;
             }
 
-            uint Delta = Rva - Sec.VirtualAddress;
-            FileOffset = Sec.RawOffset + Delta;
-
-            if (RvaToFileOffsetCache != null)
-                RvaToFileOffsetCache[Rva] = FileOffset;
-
+            FileOffset = Sec.RawOffset + (Rva - Sec.VirtualAddress);
             return true;
         }
 
@@ -1509,71 +1493,18 @@ namespace Brovan.Core
         }
 
         /// <summary>
-        /// Find a conservative end offset for an exported function by scanning a small code window for common terminators.
-        /// </summary>
-        /// <param name="Data">Binary data.</param>
-        /// <param name="FunctionFileOffset">Function file offset.</param>
-        /// <returns>The discovered end offset, or the original function offset when no terminator is found.</returns>
-        private static uint FindExportFunctionEndOffset(ReadOnlySpan<byte> Data, uint FunctionFileOffset)
-        {
-            if (FunctionFileOffset >= (uint)Data.Length)
-                return FunctionFileOffset;
-
-            int Start = (int)FunctionFileOffset;
-            int Length = Data.Length - Start;
-            if (Length > 4096)
-                Length = 4096;
-
-            if (Length <= 0)
-                return FunctionFileOffset;
-
-            ReadOnlySpan<byte> Code = Data.Slice(Start, Length);
-
-            for (int i = 0; i < Code.Length; i++)
-            {
-                byte Current = Code[i];
-
-                if (Current == 0xCC)
-                    return (uint)(Start + i);
-
-                if (i + 1 < Code.Length && Current == 0xC9 && Code[i + 1] == 0xC3)
-                    return (uint)(Start + i + 2);
-
-                if (i + 1 < Code.Length && Current >= 0x58 && Current <= 0x5F && Code[i + 1] == 0xC3)
-                    return (uint)(Start + i + 2);
-
-                if (i + 2 < Code.Length && Current == 0xC2)
-                    return (uint)(Start + i + 3);
-            }
-
-            return FunctionFileOffset;
-        }
-
-        /// <summary>
         /// Parse and extract function names from the PE export directory.
         /// </summary>
-        /// <param name="DosHeader">DOS Header of the PE file.</param>
-        /// <param name="FileHeader">File Header of the PE file.</param>
         /// <param name="Is64Bit">Indicates if the PE is 64-bit.</param>
         /// <exception cref="IndexOutOfRangeException"></exception>
-        private void ParsePEExportFunctions(IMAGE_DOS_HEADER DosHeader, IMAGE_FILE_HEADER FileHeader, bool Is64Bit)
+        private void ParsePEExportFunctions(bool Is64Bit)
         {
             ReadOnlySpan<byte> BinaryData = DataSpan;
             int BinaryLength = BinaryData.Length;
-            uint ExportTableRva = 0;
 
-            if (Is64Bit)
-            {
-                IMAGE_OPTIONAL_HEADER64 OptionalHeader64 = ReadStruct<IMAGE_OPTIONAL_HEADER64>(BinaryData, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
-
-                ExportTableRva = OptionalHeader64.ExportTable.VirtualAddress;
-            }
-            else
-            {
-                IMAGE_OPTIONAL_HEADER32 OptionalHeader32 = ReadStruct<IMAGE_OPTIONAL_HEADER32>(BinaryData, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
-
-                ExportTableRva = OptionalHeader32.ExportTable.VirtualAddress;
-            }
+            uint ExportTableRva = Is64Bit
+                ? PE.OptionalHeader64.ExportTable.VirtualAddress
+                : PE.OptionalHeader32.ExportTable.VirtualAddress;
 
             if (ExportTableRva == 0)
                 return;
@@ -1615,10 +1546,10 @@ namespace Brovan.Core
                 OrdinalTableOffset = OrdinalSection.RawOffset + (OrdinalTableRva - OrdinalSection.VirtualAddress);
             }
 
-            ulong TotalExports = (ulong)ExportDirectory.NumberOfNames + ExportDirectory.NumberOfFunctions;
-            int EstimatedExportCount = (int)Math.Min(TotalExports, 8192UL);
-            List<BinaryFunction> FunctionList = new List<BinaryFunction>(EstimatedExportCount);
-            HashSet<uint> ExistingOffsets = new HashSet<uint>(Functions.Length + EstimatedExportCount);
+            int ExportCapacity = (int)Math.Min(ExportDirectory.NumberOfFunctions, 8192U);
+            BinaryFunction[] ExportBuffer = new BinaryFunction[ExportCapacity];
+            int ExportCount = 0;
+            HashSet<uint> ExistingOffsets = new HashSet<uint>(Functions.Length + ExportCapacity);
 
             for (int i = 0; i < Functions.Length; i++)
                 ExistingOffsets.Add(Functions[i].Offset);
@@ -1666,14 +1597,11 @@ namespace Brovan.Core
                     if (string.IsNullOrEmpty(FunctionName))
                         continue;
 
-                    uint EndOffset = FindExportFunctionEndOffset(BinaryData, FunctionFileOffset);
-
-                    FunctionList.Add(new BinaryFunction
+                    AddExport(ref ExportBuffer, ref ExportCount, new BinaryFunction
                     {
                         FunctionName = FunctionName,
                         Address = PE.ImageBase + FunctionRva,
-                        Offset = FunctionFileOffset,
-                        EndOffset = EndOffset
+                        Offset = FunctionFileOffset
                     });
 
                     ExistingOffsets.Add(FunctionFileOffset);
@@ -1698,19 +1626,26 @@ namespace Brovan.Core
                 if (!ExistingOffsets.Add(FunctionFileOffset))
                     continue;
 
-                uint EndOffset = FindExportFunctionEndOffset(BinaryData, FunctionFileOffset);
                 uint Ordinal = unchecked(i + ExportDirectory.Base);
 
-                FunctionList.Add(new BinaryFunction
+                AddExport(ref ExportBuffer, ref ExportCount, new BinaryFunction
                 {
                     FunctionName = $"Ordinal_{Ordinal:X}",
                     Address = PE.ImageBase + FunctionRva,
-                    Offset = FunctionFileOffset,
-                    EndOffset = EndOffset
+                    Offset = FunctionFileOffset
                 });
             }
 
-            ExportFunctions = FunctionList.ToArray();
+            Array.Resize(ref ExportBuffer, ExportCount);
+            ExportFunctions = ExportBuffer;
+
+            static void AddExport(ref BinaryFunction[] Buffer, ref int Count, BinaryFunction Function)
+            {
+                if (Count == Buffer.Length)
+                    Array.Resize(ref Buffer, Buffer.Length * 2);
+
+                Buffer[Count++] = Function;
+            }
         }
 
         /// <summary>
@@ -1925,25 +1860,12 @@ namespace Brovan.Core
         /// <summary>
         /// Parse the PE import directory to extract imported functions.
         /// </summary>
-        /// <param name="DosHeader">DOS Header of the PE file.</param>
-        /// <param name="FileHeader">File Header of the PE file.</param>
         /// <param name="Is64Bit">Indicates if the PE is 64-bit.</param>
-        private void ParsePEImports(IMAGE_DOS_HEADER DosHeader, IMAGE_FILE_HEADER FileHeader, bool Is64Bit)
+        private void ParsePEImports(bool Is64Bit)
         {
-            uint ImportTableRva = 0;
-
-            if (Is64Bit)
-            {
-                IMAGE_OPTIONAL_HEADER64 OptionalHeader64 = ReadStruct<IMAGE_OPTIONAL_HEADER64>(DataSpan, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
-
-                ImportTableRva = OptionalHeader64.DataDirectory[1].VirtualAddress;
-            }
-            else
-            {
-                IMAGE_OPTIONAL_HEADER32 OptionalHeader32 = ReadStruct<IMAGE_OPTIONAL_HEADER32>(DataSpan, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
-
-                ImportTableRva = OptionalHeader32.DataDirectory[1].VirtualAddress;
-            }
+            uint ImportTableRva = Is64Bit
+                ? PE.OptionalHeader64.DataDirectory[1].VirtualAddress
+                : PE.OptionalHeader32.DataDirectory[1].VirtualAddress;
 
             if (ImportTableRva == 0)
                 return;
@@ -1953,6 +1875,12 @@ namespace Brovan.Core
 
             uint DescriptorSize = (uint)Unsafe.SizeOf<IMAGE_IMPORT_DESCRIPTOR>();
             uint PointerSize = (uint)(Is64Bit ? 8 : 4);
+
+            uint IatSize = Is64Bit
+                ? PE.OptionalHeader64.DataDirectory[12].Size
+                : PE.OptionalHeader32.DataDirectory[12].Size;
+            if (IatSize != 0)
+                PE.ImportFunctions.EnsureCapacity((int)(Math.Min(IatSize, (uint)Data.Length) / PointerSize));
 
             while (true)
             {
@@ -2708,8 +2636,6 @@ namespace Brovan.Core
             this.Quick = Quick;
             ParseBinary(Data.AsSpan());
             this.Location = Path.GetFullPath(BinaryPath);
-            this.RvaToFileOffsetCache?.Clear();
-            this.RvaToFileOffsetCache = null;
         }
 
         /// <summary>

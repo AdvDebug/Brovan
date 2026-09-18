@@ -1131,7 +1131,7 @@ namespace Brovan.Core.Emulation
 
         public BinaryFile LoadBinary(string Path)
         {
-            return new BinaryFile(Path, true);
+            return HelperFunctions.TakeParsedImage(Path) ?? new BinaryFile(Path, true);
         }
 
         private static bool CanMergeProtectedWinRegions(MemoryRegion Left, MemoryRegion Right)

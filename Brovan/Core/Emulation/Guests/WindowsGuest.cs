@@ -2006,7 +2006,7 @@ namespace Brovan.Core.Emulation.Guests
                     return;
                 }
 
-                using (BinaryFile Library = new BinaryFile(NtdllPath, true))
+                using (BinaryFile Library = Instance.LoadBinary(NtdllPath))
                 {
                     _ntdllModule = Instance.LoadWinLibrary(Library, true, MapBySections: false);
                 }
