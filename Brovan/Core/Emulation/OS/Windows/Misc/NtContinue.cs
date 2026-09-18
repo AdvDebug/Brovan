@@ -87,6 +87,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (CurrentThread == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
+            if (Is64)
+                WindowsThreadContext64.ApplyVectorState(Instance, CurrentThread, ContextPtr, Flags);
+
             WindowsThreadState State = WinEmulatedThread.GetState(CurrentThread);
             State.DispatchException = false;
             State.IsHandlingException = false;

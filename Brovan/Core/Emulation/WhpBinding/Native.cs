@@ -54,6 +54,33 @@ namespace Brovan.Core.Emulation
         }
 
         [DllImport(Lib)]
+        public static extern int WHvGetVirtualProcessorXsaveState(IntPtr Partition, uint VpIndex, void* Buffer,
+            uint BufferSizeInBytes, uint* BytesWritten);
+
+        [DllImport(Lib)]
+        public static extern int WHvSetVirtualProcessorXsaveState(IntPtr Partition, uint VpIndex, void* Buffer,
+            uint BufferSizeInBytes);
+
+        private static int _xsaveStateState;
+
+        public static bool HasXsaveState
+        {
+            get
+            {
+                if (_xsaveStateState == 0)
+                {
+                    bool present = NativeLibrary.TryLoad(Lib, out IntPtr Handle)
+                        && NativeLibrary.TryGetExport(Handle, nameof(WHvGetVirtualProcessorXsaveState), out IntPtr Get)
+                        && Get != IntPtr.Zero
+                        && NativeLibrary.TryGetExport(Handle, nameof(WHvSetVirtualProcessorXsaveState), out IntPtr Set)
+                        && Set != IntPtr.Zero;
+                    _xsaveStateState = present ? 1 : -1;
+                }
+                return _xsaveStateState > 0;
+            }
+        }
+
+        [DllImport(Lib)]
         public static extern int WHvCreateVirtualProcessor(IntPtr Partition, uint VpIndex, uint Flags);
 
         [DllImport(Lib)]

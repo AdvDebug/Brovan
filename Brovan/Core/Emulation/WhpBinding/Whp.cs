@@ -41,6 +41,14 @@ namespace Brovan.Core.Emulation
         private bool _sortedPageKeysDirty = true;
         private bool _mappingsDirty;
         private bool _populateUnavailable = !WhpNative.HasAdviseGpaRange;
+        private bool _avxEnabled;
+        private byte[] _xsaveImage;
+        private const int XsaveImageSize = 4096;
+        private const int XsaveXmmOffset = 160;
+        private const int XsaveHeaderOffset = 512;
+        // Component 2 follows the header in both the standard and the compacted layout.
+        private const int XsaveYmmHighOffset = 576;
+        private const ulong XcrAvxFeatures = 0x7;
         private ulong _lastLookupPageBase = ulong.MaxValue;
         private MappedPage _lastLookupPage;
 
@@ -1672,6 +1680,17 @@ namespace Brovan.Core.Emulation
                 throw new WhpException("WHvGetCapability(HypervisorPresent) failed. The Windows Hypervisor Platform feature must be enabled.", hr);
             if (written < sizeof(int) || present == 0)
                 throw new WhpException("Windows Hypervisor Platform is not present. Enable the 'Windows Hypervisor Platform' optional feature and ensure virtualization is available.");
+
+            _avxEnabled = WhpNative.HasXsaveState && HostEnablesAvx();
+        }
+
+        private unsafe bool HostEnablesAvx()
+        {
+            ulong features = 0;
+            uint written = 0;
+            int hr = WhpNative.WHvGetCapability(WhvCapabilityCode.ProcessorXsaveFeatures, &features, sizeof(ulong), &written);
+            const ulong xsaveAndAvx = (1UL << 0) | (1UL << 2);
+            return !WhpNative.Failed(hr) && written >= sizeof(ulong) && (features & xsaveAndAvx) == xsaveAndAvx;
         }
 
         private unsafe void ConfigurePartition()
@@ -1689,7 +1708,6 @@ namespace Brovan.Core.Emulation
                 if (!TrySetupPartition(1, out hr))
                     throw new WhpException("WHvSetupPartition failed", hr);
             }
-
         }
 
         private unsafe bool TrySetupPartition(uint processorCount, out int hr)
@@ -1835,7 +1853,7 @@ namespace Brovan.Core.Emulation
 
         private unsafe void InitializeVirtualProcessorState(VirtualProcessor vp)
         {
-            const int maxCount = 16;
+            const int maxCount = 17;
             Span<uint> names = stackalloc uint[maxCount];
             Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[maxCount];
 
@@ -1855,7 +1873,8 @@ namespace Brovan.Core.Emulation
             values[8] = WhvRegisterValue.FromTable(_exceptionIdtPageGpa, (ushort)(WhpConstants.ExceptionVectorCount * 16 - 1));
             names[9] = (uint)WhvRegisterName.Cr0; values[9] = WhvRegisterValue.FromReg64(0x80000033UL);
             names[10] = (uint)WhvRegisterName.Cr3; values[10] = WhvRegisterValue.FromReg64(_pml4Gpa);
-            names[11] = (uint)WhvRegisterName.Cr4; values[11] = WhvRegisterValue.FromReg64(0x620UL);
+            names[11] = (uint)WhvRegisterName.Cr4;
+            values[11] = WhvRegisterValue.FromReg64(_avxEnabled ? 0x620UL | (1UL << 18) : 0x620UL);
             names[12] = (uint)WhvRegisterName.Efer;
             values[12] = WhvRegisterValue.FromReg64((1UL << 8) | (1UL << 10) | (1UL << 11) | (_guest64 ? 1UL << 0 : 0));
 
@@ -1865,7 +1884,14 @@ namespace Brovan.Core.Emulation
                 names[13] = (uint)WhvRegisterName.Star; values[13] = WhvRegisterValue.FromReg64((0x23UL << 48) | (0x08UL << 32));
                 names[14] = (uint)WhvRegisterName.Lstar; values[14] = WhvRegisterValue.FromReg64(_syscallTrapPageGpa);
                 names[15] = (uint)WhvRegisterName.Sfmask; values[15] = WhvRegisterValue.FromReg64(0);
-                count = maxCount;
+                count = 16;
+            }
+
+            if (_avxEnabled)
+            {
+                names[count] = (uint)WhvRegisterName.XCr0;
+                values[count] = WhvRegisterValue.FromReg64(XcrAvxFeatures);
+                count++;
             }
 
             lock (_vcpuLock)
@@ -2958,6 +2984,56 @@ namespace Brovan.Core.Emulation
             Array.Copy(head, Names, head.Length);
             Array.Copy(tail, 0, Names, head.Length, tail.Length);
             return Names;
+        }
+
+        public bool SupportsAvx => _avxEnabled;
+
+        // Only the YMM upper halves go through the XSAVE image. XMM0-15 stay on the register cache,
+        // and a write to a running processor faults inside the platform library instead of failing.
+        public unsafe bool TransferVectorState(ulong[] Xmm, ulong[] YmmHigh, bool Write)
+        {
+            if (!_avxEnabled)
+            {
+                if (!Write && YmmHigh != null) Array.Clear(YmmHigh);
+                return TransferXmmRegisters(Xmm, Write);
+            }
+            if (YmmHigh == null || YmmHigh.Length < XmmRegisterCount * 2)
+                return false;
+            if (!TransferXmmRegisters(Xmm, Write))
+                return false;
+
+            VirtualProcessor vp = CurrentVp;
+            if (vp.Running)
+                return !Write;
+
+            _xsaveImage ??= new byte[XsaveImageSize];
+            lock (_vcpuLock)
+            {
+                fixed (byte* image = _xsaveImage)
+                {
+                    uint size = 0;
+                    int hr = WhpNative.WHvGetVirtualProcessorXsaveState(_partition, vp.Index, image, XsaveImageSize, &size);
+                    if (WhpNative.Failed(hr) || size < XsaveYmmHighOffset + XmmRegisterCount * 16)
+                        return false;
+
+                    ulong* ymmHigh = (ulong*)(image + XsaveYmmHighOffset);
+                    ulong* stateMask = (ulong*)(image + XsaveHeaderOffset);
+
+                    if (!Write)
+                    {
+                        bool avxLive = (*stateMask & 0x4) != 0;
+                        for (int i = 0; i < XmmRegisterCount * 2; i++)
+                            YmmHigh[i] = avxLive ? ymmHigh[i] : 0;
+                        return true;
+                    }
+
+                    for (int i = 0; i < XmmRegisterCount * 2; i++)
+                        ymmHigh[i] = YmmHigh[i];
+                    *stateMask |= 0x4;
+                    hr = WhpNative.WHvSetVirtualProcessorXsaveState(_partition, vp.Index, image, size);
+                    return !WhpNative.Failed(hr);
+                }
+            }
         }
 
         /// <summary>

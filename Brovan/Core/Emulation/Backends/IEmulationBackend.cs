@@ -181,6 +181,16 @@ namespace Brovan.Core.Emulation
 
         bool WriteXmmRegisters(ulong[] values) => false;
 
+        bool SupportsAvx => false;
+
+        bool ReadVectorState(ulong[] xmm, ulong[] ymmHigh)
+        {
+            if (ymmHigh != null) System.Array.Clear(ymmHigh);
+            return ReadXmmRegisters(xmm);
+        }
+
+        bool WriteVectorState(ulong[] xmm, ulong[] ymmHigh) => WriteXmmRegisters(xmm);
+
         /// <summary>
         /// True when the backend can keep a guest thread's register file resident in its own processor,
         /// so switching to that thread transfers no state.

@@ -70,6 +70,10 @@ namespace Brovan.Core.Emulation
         public const uint KvmIoGetTscKhz = 0xAEA3;
         public const uint KvmIoSetDeviceAttr = 0x4018AEE1;
         public const uint KvmIoGetDeviceAttr = 0x4018AEE2;
+        public const uint KvmIoEnableCap = 0x4068AEA3;
+        public const uint KvmIoPreFaultMemory = 0xC040AED5;
+        public const uint KvmIoGetXsave2 = 0x9000AECF;
+        public const uint KvmIoSetXcrs = 0x4188AEA7;
         public const uint VcpuTscCtrl = 0;
         public const ulong VcpuTscOffset = 0;
 
@@ -78,8 +82,22 @@ namespace Brovan.Core.Emulation
         public const int CapMaxVcpus = 66;
         public const int CapVcpuAttributes = 127;
         public const int CapSyncRegs = 74;
-        public const int CapXsave = 84;
+        public const int CapXsave = 55;
         public const int CapImmediateExit = 136;
+        public const int CapDisableQuirks2 = 213;
+        public const int CapPreFaultMemory = 236;
+        public const int CapXcrs = 56;
+        public const int CapXsave2 = 208;
+
+        public const ulong QuirkSlotZapAll = 1UL << 7;
+
+        public const ulong Cr4Osxsave = 1UL << 18;
+        public const ulong XcrX87 = 1UL << 0;
+        public const ulong XcrSse = 1UL << 1;
+        public const ulong XcrAvx = 1UL << 2;
+        public const ulong XcrAvxFeatures = XcrX87 | XcrSse | XcrAvx;
+        public const int XsaveXmmOffset = 160;
+        public const int XsaveHeaderOffset = 512;
 
         public const ulong SyncGeneralRegisters = 1UL << 0;
         public const ulong SyncSpecialRegisters = 1UL << 1;
@@ -111,6 +129,7 @@ namespace Brovan.Core.Emulation
         public const ulong PageShift = 12;
         public const ulong PageSize = 1UL << (int)PageShift;
         public const ulong PageMask = PageSize - 1;
+        public const ulong HugePageSize = 2UL << 20;
 
         public const ulong InternalPageTableBase = 0x0000007000000000UL;
         public const ulong PageTableEntryPresent = 1UL << 0;

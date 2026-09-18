@@ -27,7 +27,6 @@ namespace Brovan.Core.Emulation
 
     public sealed class Kvm : IDisposable
     {
-
         private int _systemFd = -1;
         private int _partitionFd = -1;
         private int _runMmapSize;
@@ -40,6 +39,16 @@ namespace Brovan.Core.Emulation
         private int _maxMemslots;
         private bool _supportsXsave;
         private bool _supportsVcpuAttributes;
+        private bool _supportsPreFault;
+        private bool _supportsXcrs;
+        private bool _supportsXsave2;
+        private int _xsaveSize = 4096;
+        private bool _avxEnabled;
+        private int _ymmHighOffset = 576;
+        private byte[] _xsaveImage;
+        private bool _populateUnavailable;
+        private const ulong PopulateLimitBytes = 32UL * 1024 * 1024;
+        private const ulong PopulateMinBytes = 64UL * 1024;
         private bool _tscOffsetKnown;
         private ulong _tscOffset;
         private int _nextSlotId;
@@ -364,7 +373,7 @@ namespace Brovan.Core.Emulation
 
             if (canBatch && size > 0)
             {
-                if (!TryAllocateBackingMemory(size, out IntPtr backing))
+                if (!TryAllocateGuestBacking(address, size, out IntPtr backing))
                 {
                     _error = KvmErrors.NoMemory;
                     return false;
@@ -391,6 +400,8 @@ namespace Brovan.Core.Emulation
                 }
 
                 RebuildMappings();
+                if (perm != KvmMemoryPermission.None)
+                    PopulateRange(address, size, backing);
                 _error = KvmErrors.Ok;
                 return true;
             }
@@ -1307,7 +1318,6 @@ namespace Brovan.Core.Emulation
             InstructionHookEntry entry = new InstructionHookEntry { Type = instruction, Callback = callback };
             if (instruction == BackendInstructionHook.Syscall)
             {
-
                 if (_syscallHook != null) UnpinHookEntry(_syscallHook);
                 _syscallHook = entry;
             }
@@ -1559,6 +1569,57 @@ namespace Brovan.Core.Emulation
             return ptr;
         }
 
+        // A 2 MiB second level entry needs host and guest addresses to agree modulo 2 MiB.
+        private bool TryAllocateGuestBacking(ulong guestAddress, ulong size, out IntPtr pointer)
+        {
+            ulong huge = KvmConstants.HugePageSize;
+            ulong firstBlock = (guestAddress + huge - 1) & ~(huge - 1);
+            if (firstBlock + huge > guestAddress + size)
+                return TryAllocateBackingMemory(size, out pointer);
+
+            if (!TryAllocateBackingMemory(size + huge, out IntPtr mapped))
+            {
+                pointer = IntPtr.Zero;
+                return false;
+            }
+
+            ulong head = (guestAddress - (ulong)mapped) & (huge - 1);
+            pointer = (IntPtr)((ulong)mapped + head);
+            if (head != 0)
+                KvmNative.munmap(mapped, (UIntPtr)head);
+            KvmNative.munmap((IntPtr)((ulong)pointer + size), (UIntPtr)(huge - head));
+            _backingBytes -= huge;
+
+            KvmNative.madvise(pointer, (UIntPtr)size, KvmNative.MADV_HUGEPAGE);
+            return true;
+        }
+
+        // Second level entries are otherwise built one exit per page at first touch.
+        // An oversized range is skipped, not clipped, because a clipped tail still faults page by page.
+        private void PopulateRange(ulong address, ulong size, IntPtr backing)
+        {
+            if (_populateUnavailable || !_supportsPreFault) return;
+            if (size < PopulateMinBytes || size > PopulateLimitBytes) return;
+
+            // A read populate would map the zero page read only and fault again on the first write.
+            if (KvmNative.madvise(backing, (UIntPtr)size, KvmNative.MADV_POPULATE_WRITE) != 0)
+            {
+                _populateUnavailable = true;
+                return;
+            }
+
+            // The ioctl takes the vCPU mutex, which KVM_RUN holds.
+            VirtualProcessor vp = CurrentVp;
+            if (vp.Running) return;
+
+            LinuxKvmPreFaultMemory range = new LinuxKvmPreFaultMemory { Gpa = address, Size = size };
+            while (range.Size != 0)
+            {
+                if (KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoPreFaultMemory, ref range) < 0)
+                    break;
+            }
+        }
+
         private unsafe void FreeBackingMemory(IntPtr ptr, ulong size)
         {
             KvmNative.munmap(ptr, (UIntPtr)size);
@@ -1651,6 +1712,11 @@ namespace Brovan.Core.Emulation
 
             _supportsXsave = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapXsave) > 0;
             _supportsVcpuAttributes = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapVcpuAttributes) > 0;
+            _supportsPreFault = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapPreFaultMemory) > 0;
+            _supportsXcrs = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapXcrs) > 0;
+            int xsaveSize = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapXsave2);
+            _supportsXsave2 = xsaveSize > 0;
+            if (xsaveSize > _xsaveSize) _xsaveSize = xsaveSize;
 
             const ulong requiredSync = KvmConstants.SyncGeneralRegisters | KvmConstants.SyncSpecialRegisters;
             int syncRegs = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapSyncRegs);
@@ -1690,6 +1756,21 @@ namespace Brovan.Core.Emulation
             if (_partitionFd < 0)
                 throw new KvmException("KVM_CREATE_VM failed", Marshal.GetLastWin32Error());
             KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoSetTssAddress, (IntPtr)0xfffbd000);
+            KeepMappingsOnSlotDelete();
+        }
+
+        // With the quirk on, deleting one memslot drops every second level entry of the partition.
+        private void KeepMappingsOnSlotDelete()
+        {
+            int quirks = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCheckExtension, KvmConstants.CapDisableQuirks2);
+            if (quirks <= 0 || ((ulong)quirks & KvmConstants.QuirkSlotZapAll) == 0) return;
+
+            LinuxKvmEnableCap cap = new LinuxKvmEnableCap
+            {
+                Cap = (uint)KvmConstants.CapDisableQuirks2,
+                Arg0 = KvmConstants.QuirkSlotZapAll,
+            };
+            KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoEnableCap, ref cap);
         }
 
         private VirtualProcessor CreateProcessor(int index)
@@ -1785,6 +1866,7 @@ namespace Brovan.Core.Emulation
                         throw new KvmException("KVM_GET_SUPPORTED_CPUID failed", Marshal.GetLastWin32Error());
                 }
                 _cpuidTable = table;
+                ConfigureExtendedState();
             }
 
             fixed (byte* buffer = _cpuidTable)
@@ -1792,6 +1874,32 @@ namespace Brovan.Core.Emulation
                 if (KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoSetCpuid2, (IntPtr)buffer) < 0)
                     throw new KvmException("KVM_SET_CPUID2 failed", Marshal.GetLastWin32Error());
             }
+        }
+
+        // Guest XCR0 stops at x87, SSE and AVX, which is the state the thread contexts carry.
+        private unsafe void ConfigureExtendedState()
+        {
+            ulong supportedXcr0 = 0;
+            bool cpuidXsave = false;
+            fixed (byte* buffer = _cpuidTable)
+            {
+                ref LinuxKvmCpuid2 table = ref Unsafe.AsRef<LinuxKvmCpuid2>(buffer);
+                LinuxKvmCpuidEntry2* entries = (LinuxKvmCpuidEntry2*)Unsafe.AsPointer(ref table.FirstEntry);
+                for (uint i = 0; i < table.Nent; i++)
+                {
+                    ref LinuxKvmCpuidEntry2 entry = ref entries[i];
+                    if (entry.Function == 1 && entry.Index == 0)
+                        cpuidXsave = (entry.Ecx & (1u << 26)) != 0;
+                    if (entry.Function != 0xD) continue;
+                    if (entry.Index == 0)
+                        supportedXcr0 = entry.Eax | ((ulong)entry.Edx << 32);
+                    else if (entry.Index == 2 && entry.Eax >= XmmRegisterCount * 16 && entry.Ebx + entry.Eax <= (uint)_xsaveSize)
+                        _ymmHighOffset = (int)entry.Ebx;
+                }
+            }
+
+            _avxEnabled = _supportsXsave && _supportsXcrs && cpuidXsave
+                && (supportedXcr0 & KvmConstants.XcrAvxFeatures) == KvmConstants.XcrAvxFeatures;
         }
 
         private void InitializeVirtualProcessorState(VirtualProcessor vp)
@@ -1814,7 +1922,7 @@ namespace Brovan.Core.Emulation
             sregs.Fs = MakeSegment(0x53, false, true);
             sregs.Gs = MakeSegment(KvmConstants.UserDataSelector, false, true);
             sregs.Cr0 = 0x80000033UL;
-            sregs.Cr4 = 0x620UL;
+            sregs.Cr4 = _avxEnabled ? 0x620UL | KvmConstants.Cr4Osxsave : 0x620UL;
             sregs.Cr3 = _pml4Gpa;
             sregs.Efer = (1UL << 0) | (1UL << 8) | (1UL << 10) | (1UL << 11);
             sregs.Gdt.Base = vp.GdtPageGpa;
@@ -1854,6 +1962,9 @@ namespace Brovan.Core.Emulation
                 };
                 SetFpu(vp, ref fpu);
             }
+
+            if (_avxEnabled)
+                SetXcr0(vp);
 
             SetMsr(vp, KvmConstants.MsrStar, (0x23UL << 48) | (0x08UL << 32));
             SetMsr(vp, KvmConstants.MsrSyscallMask, 0);
@@ -2168,7 +2279,6 @@ namespace Brovan.Core.Emulation
             _fullRebuildRequired = false;
             _dirtyRanges.Clear();
         }
-
 
         private void MarkSpanDirty(ulong address, ulong size)
         {
@@ -2735,7 +2845,6 @@ namespace Brovan.Core.Emulation
                 }
 
                 bool handled = HandleExceptionTrap(rip);
-                ClearPendingExceptionState();
                 if (handled) return true;
                 _error = KvmErrors.Exception;
                 return false;
@@ -3201,6 +3310,67 @@ namespace Brovan.Core.Emulation
         private void MarkSpecialRegistersDirty() => GetRunRef().DirtyRegs |= KvmConstants.SyncSpecialRegisters;
 
         internal const int XmmRegisterCount = 16;
+
+        public bool SupportsAvx => _avxEnabled;
+
+        private void SetXcr0(VirtualProcessor vp)
+        {
+            LinuxKvmXcrs xcrs = new LinuxKvmXcrs { Count = 1, Value = KvmConstants.XcrAvxFeatures };
+            lock (_vcpuLock)
+            {
+                if (KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoSetXcrs, ref xcrs) < 0)
+                    throw new KvmException("KVM_SET_XCRS failed", Marshal.GetLastWin32Error());
+            }
+        }
+
+        // A write starts from the current image so the x87 and MXCSR state stay as they are.
+        public unsafe bool TransferVectorState(ulong[] Xmm, ulong[] YmmHigh, bool Write)
+        {
+            if (!_avxEnabled)
+            {
+                if (!Write && YmmHigh != null) Array.Clear(YmmHigh);
+                return TransferXmmRegisters(Xmm, Write);
+            }
+            if (Xmm == null || Xmm.Length < XmmRegisterCount * 2 || YmmHigh == null || YmmHigh.Length < XmmRegisterCount * 2)
+                return false;
+
+            _xsaveImage ??= new byte[_xsaveSize];
+            int fd = CurrentVp.Fd;
+            uint getRequest = _supportsXsave2 ? KvmConstants.KvmIoGetXsave2 : KvmConstants.KvmIoGetXsave;
+
+            lock (_vcpuLock)
+            {
+                fixed (byte* image = _xsaveImage)
+                {
+                    if (KvmNative.ioctl(fd, getRequest, (IntPtr)image) < 0)
+                        return false;
+
+                    ulong* xmm = (ulong*)(image + KvmConstants.XsaveXmmOffset);
+                    ulong* ymmHigh = (ulong*)(image + _ymmHighOffset);
+                    ulong* stateMask = (ulong*)(image + KvmConstants.XsaveHeaderOffset);
+
+                    if (!Write)
+                    {
+                        bool avxLive = (*stateMask & KvmConstants.XcrAvx) != 0;
+                        for (int i = 0; i < XmmRegisterCount * 2; i++)
+                        {
+                            Xmm[i] = xmm[i];
+                            YmmHigh[i] = avxLive ? ymmHigh[i] : 0;
+                        }
+                        return true;
+                    }
+
+                    for (int i = 0; i < XmmRegisterCount * 2; i++)
+                    {
+                        xmm[i] = Xmm[i];
+                        ymmHigh[i] = YmmHigh[i];
+                    }
+                    *stateMask |= KvmConstants.XcrSse | KvmConstants.XcrAvx;
+                    stateMask[1] = 0;
+                    return KvmNative.ioctl(fd, KvmConstants.KvmIoSetXsave, (IntPtr)image) >= 0;
+                }
+            }
+        }
 
         /// <summary>
         /// Transfers XMM0-15 as 32 qwords, low half of each register first.

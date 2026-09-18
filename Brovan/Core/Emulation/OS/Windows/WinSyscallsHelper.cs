@@ -1735,7 +1735,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 catch
                 {
-
                 }
             }
 
@@ -1829,7 +1828,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
                     catch
                     {
-
                     }
                 }
             }
@@ -2130,7 +2128,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             else
                 ExceptionInformation.Status = Exception;
 
-
             WinModule ntdll = WinModules.FirstOrDefault(m => m.Name != null && m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase));
             if (ntdll == null)
             {
@@ -2325,6 +2322,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong CombinedSize = BinaryEmulator.AlignUp((ulong)ContextSize + ExceptionRecordSize, 0x10);
             ulong AllocationSize = CombinedSize + MachineFrameSize;
 
+            // The XSTATE area sits above the machine frame, out of the fixed frame offsets ntdll unwinds by.
+            bool XState = WindowsThreadContext64.XStateEnabled(Emulator);
+            ulong XStateAreaOffset = 0;
+            if (XState)
+            {
+                XStateAreaOffset = BinaryEmulator.AlignUp(AllocationSize, 0x40);
+                AllocationSize = XStateAreaOffset + (ulong)WindowsThreadContext64.XStateAreaSize;
+            }
+
             ulong NewRsp = AlignDown(InitialRsp - AllocationSize, 0x100);
 
             // Validate that the exception frame stays within the mapped stack.
@@ -2396,11 +2402,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             const uint CONTEXT_SEGMENTS = 0x00000004;
             const uint CONTEXT_DEBUG_REGISTERS = 0x00000010;
 
-            // Only advertise what we actually populate.
-            uint Flags = CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_DEBUG_REGISTERS;
+            uint Flags = CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_DEBUG_REGISTERS
+                | WindowsThreadContext64.CONTEXT_FLOATING_POINT;
+            if (XState)
+                Flags |= WindowsThreadContext64.CONTEXT_XSTATE;
             WriteUInt32(Context, 0x30, Flags);
 
-            WriteUInt32(Context, 0x34, (uint)Emulator.ReadRegister(Registers.UC_X86_REG_MXCSR));
+            ulong MxCsr = Emulator.ReadRegister(Registers.UC_X86_REG_MXCSR);
+            WriteUInt32(Context, 0x34, (uint)MxCsr);
+
+            ulong[] Xmm = WindowsThreadContext64.XmmScratch;
+            ulong[] YmmHigh = WindowsThreadContext64.YmmScratch;
+            Emulator.ReadThreadVectorState(Thread, Xmm, YmmHigh);
+            WindowsThreadContext64.FillFltSave(Context.Slice((int)WindowsThreadContext64.FltSaveOffset), Xmm, MxCsr,
+                Emulator.ReadRegister(Registers.UC_X86_REG_FPCW));
+            if (XState)
+                WindowsThreadContext64.WriteContextEx(Context, XStateAreaOffset);
 
             WriteUInt16(Context, 0x38, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_CS));
             WriteUInt16(Context, 0x3A, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_DS));
@@ -2469,6 +2486,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteUInt64(Frame, 0x20, (ulong)(ushort)Emulator.ReadRegister(Registers.UC_X86_REG_SS));
 
             Emulator.WriteMemory(MachineFrameAddress, Frame);
+
+            if (XState)
+                WindowsThreadContext64.WriteXStateArea(Emulator, NewRsp + XStateAreaOffset, YmmHigh, WindowsThreadContext64.XcrAvxFeatures);
 
             // Enter KiUserExceptionDispatcher exactly like the kernel does: RSP points at CONTEXT, RIP = dispatcher.
             Emulator.WriteRegister(Registers.UC_X86_REG_RSP, ContextAddress);
@@ -2631,9 +2651,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong InitialRip = Emulator.ReadRegister(Registers.UC_X86_REG_RIP);
             ulong InitialEFlags = Emulator.ReadRegister(Registers.UC_X86_REG_EFLAGS);
 
-            ulong NewRsp = AlignDown(InitialRsp - (ulong)StackLayoutSize, 0x100);
-
             ulong AllocationSize = (ulong)StackLayoutSize;
+            bool XState = WindowsThreadContext64.XStateEnabled(Emulator);
+            ulong XStateAreaOffset = 0;
+            if (XState)
+            {
+                XStateAreaOffset = BinaryEmulator.AlignUp(AllocationSize, 0x40);
+                AllocationSize = XStateAreaOffset + (ulong)WindowsThreadContext64.XStateAreaSize;
+            }
+
+            ulong NewRsp = AlignDown(InitialRsp - AllocationSize, 0x100);
             if (Thread != null)
             {
                 ulong StackLow = Thread.StackAddress;
@@ -2681,8 +2708,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteUInt64(StackLayout, 0x08, Apc.ApcArgument2);
             WriteUInt64(StackLayout, 0x10, Apc.ApcArgument3);
             WriteUInt64(StackLayout, 0x18, Apc.ApcRoutine);
-            WriteUInt32(StackLayout, 0x30, ContextAmd64 | ContextControl | ContextInteger | ContextSegments | ContextDebugRegisters);
-            WriteUInt32(StackLayout, 0x34, (uint)Emulator.ReadRegister(Registers.UC_X86_REG_MXCSR));
+            uint ApcContextFlags = ContextAmd64 | ContextControl | ContextInteger | ContextSegments | ContextDebugRegisters
+                | WindowsThreadContext64.CONTEXT_FLOATING_POINT;
+            if (XState)
+                ApcContextFlags |= WindowsThreadContext64.CONTEXT_XSTATE;
+            WriteUInt32(StackLayout, 0x30, ApcContextFlags);
+            ulong ApcMxCsr = Emulator.ReadRegister(Registers.UC_X86_REG_MXCSR);
+            WriteUInt32(StackLayout, 0x34, (uint)ApcMxCsr);
+            ulong[] ApcXmm = WindowsThreadContext64.XmmScratch;
+            ulong[] ApcYmmHigh = WindowsThreadContext64.YmmScratch;
+            Emulator.ReadThreadVectorState(Thread, ApcXmm, ApcYmmHigh);
+            WindowsThreadContext64.FillFltSave(StackLayout.Slice((int)WindowsThreadContext64.FltSaveOffset), ApcXmm, ApcMxCsr,
+                Emulator.ReadRegister(Registers.UC_X86_REG_FPCW));
+            if (XState)
+                WindowsThreadContext64.WriteContextEx(StackLayout, XStateAreaOffset);
             WriteUInt16(StackLayout, 0x38, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_CS));
             WriteUInt16(StackLayout, 0x3A, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_DS));
             WriteUInt16(StackLayout, 0x3C, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_ES));
@@ -2717,6 +2756,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteInt32(StackLayout, ContinueOffset + 0x4, 1);
 
             Emulator.WriteMemory(NewRsp, StackLayout);
+            if (XState)
+                WindowsThreadContext64.WriteXStateArea(Emulator, NewRsp + XStateAreaOffset, ApcYmmHigh, WindowsThreadContext64.XcrAvxFeatures);
             State.PendingUserApcs.RemoveAt(ApcIndex);
             Thread.Context.RSP = NewRsp;
             Thread.Context.RIP = Dispatcher;
@@ -2989,7 +3030,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             string Value = Path.Trim().TrimEnd('\0').Replace('/', '\\');
             if (Value.StartsWith("Device\\", StringComparison.OrdinalIgnoreCase))
                 Value = "\\" + Value;
-
 
             if (Value.StartsWith("\\Device\\Mup\\", StringComparison.OrdinalIgnoreCase))
             {
@@ -3673,7 +3713,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             return (ulong)(uint)((Low & 0xFFFF) | (High << 16));
         }
-
 
         /// <summary>
         /// Convert windows memory protection to the internal enum.
@@ -5132,7 +5171,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return ThreadInfo;
         }
 
-
         /// <summary>
         /// Returns the client-side tagWND address for a tracked window.
         /// </summary>
@@ -6098,7 +6136,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             window = DesktopWindow.NativeHandle;
         }
 
-
         private WinWindow GetTopLevelWindow()
         {
             for (int i = TopLevelWindows.Count - 1; i >= 0; i--)
@@ -6878,7 +6915,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DeletedRegistryValues.TryGetValue(NtPath, out HashSet<string> DeletedValues))
                 DeletedValues.Remove(ValueName);
         }
-
 
         private void AddSyntheticDirectory(string Path)
         {

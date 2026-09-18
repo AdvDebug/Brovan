@@ -3,10 +3,8 @@ using System.Runtime.InteropServices;
 
 namespace Brovan.Core.Emulation
 {
-
     internal static class KvmNative
     {
-
         [DllImport("libc", SetLastError = true)]
         public static extern int open(string pathname, int flags, int mode);
 
@@ -49,6 +47,18 @@ namespace Brovan.Core.Emulation
         [DllImport("libc", SetLastError = true)]
         public static extern int ioctl(int fd, uint request, ref LinuxKvmDebugRegisters arg);
 
+        [DllImport("libc", SetLastError = true)]
+        public static extern int ioctl(int fd, uint request, ref LinuxKvmEnableCap arg);
+
+        [DllImport("libc", SetLastError = true)]
+        public static extern int ioctl(int fd, uint request, ref LinuxKvmPreFaultMemory arg);
+
+        [DllImport("libc", SetLastError = true)]
+        public static extern int ioctl(int fd, uint request, ref LinuxKvmXcrs arg);
+
+        [DllImport("libc", SetLastError = true)]
+        public static extern int madvise(IntPtr addr, UIntPtr length, int advice);
+
         [DllImport("libc")]
         public static extern int getpid();
 
@@ -80,6 +90,9 @@ namespace Brovan.Core.Emulation
         public const int MAP_PRIVATE = 0x02;
         public const int MAP_ANONYMOUS = 0x20;
         public static readonly IntPtr MAP_FAILED = new IntPtr(-1);
+
+        public const int MADV_HUGEPAGE = 14;
+        public const int MADV_POPULATE_WRITE = 23;
 
         public const int ErrnoEintr = 4;
         public const int ErrnoNoEntry = 2;
@@ -207,6 +220,38 @@ namespace Brovan.Core.Emulation
         public uint Count;
         public uint _pad0;
         public LinuxKvmMsrEntry FirstEntry;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal unsafe struct LinuxKvmEnableCap
+    {
+        public uint Cap;
+        public uint Flags;
+        public ulong Arg0;
+        public ulong Arg1;
+        public ulong Arg2;
+        public ulong Arg3;
+        public fixed byte Pad[64];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal unsafe struct LinuxKvmPreFaultMemory
+    {
+        public ulong Gpa;
+        public ulong Size;
+        public ulong Flags;
+        public fixed ulong Padding[5];
+    }
+
+    // kvm_xcrs sized for its 16 entries and padding. Only the first entry is used.
+    [StructLayout(LayoutKind.Sequential, Size = 392)]
+    internal struct LinuxKvmXcrs
+    {
+        public uint Count;
+        public uint Flags;
+        public uint Xcr;
+        public uint Reserved;
+        public ulong Value;
     }
 
     [StructLayout(LayoutKind.Sequential)]

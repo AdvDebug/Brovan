@@ -40,6 +40,7 @@ namespace Brovan.Core.Emulation
         HypervisorPresent = 0x00000000,
         Features = 0x00000001,
         ProcessorFeatures = 0x00001001,
+        ProcessorXsaveFeatures = 0x00001003,
         ProcessorClockFrequency = 0x00001004,
     }
 
@@ -130,6 +131,7 @@ namespace Brovan.Core.Emulation
         Cr3 = 0x0000001E,
         Cr4 = 0x0000001F,
         Cr8 = 0x00000020,
+        XCr0 = 0x00000027,
 
         Xmm0 = 0x00001000,
         FpControlStatus = 0x00001018,

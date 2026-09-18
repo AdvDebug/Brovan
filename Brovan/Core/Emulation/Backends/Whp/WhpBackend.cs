@@ -127,6 +127,11 @@ namespace Brovan.Core.Emulation
 
         public bool WriteXmmRegisters(ulong[] values)
             => Inner.TransferXmmRegisters(values, true);
+        public bool SupportsAvx => Inner.SupportsAvx;
+        public bool ReadVectorState(ulong[] xmm, ulong[] ymmHigh)
+            => Inner.TransferVectorState(xmm, ymmHigh, false);
+        public bool WriteVectorState(ulong[] xmm, ulong[] ymmHigh)
+            => Inner.TransferVectorState(xmm, ymmHigh, true);
 
         public bool SupportsThreadResidency => Inner.SupportsThreadResidency;
         public int ProcessorLimit => Inner.ProcessorLimit;

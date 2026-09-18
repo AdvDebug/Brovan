@@ -540,12 +540,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             // A present built before the guest read the queued host resize describes the previous frame.
             if (present.HostGeometryStale)
             {
-                if (hasApplied)
-                {
-                    present.State = applied.State;
-                    present.Width = applied.Width;
-                    present.Height = applied.Height;
-                }
+                present.State = hasApplied ? applied.State : window.State;
+                present.Width = hasApplied ? applied.Width : window.Width;
+                present.Height = hasApplied ? applied.Height : window.Height;
             }
             else
             {

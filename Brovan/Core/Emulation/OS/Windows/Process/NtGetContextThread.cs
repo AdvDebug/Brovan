@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -6,7 +7,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-
             ulong ThreadHandle = Instance.WinHelper.GetArg(0);
             ulong ContextPtr = Instance.WinHelper.GetArg(1);
 
@@ -40,12 +40,180 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const uint CONTEXT_SEGMENTS = 0x00000004;
         internal const uint CONTEXT_FLOATING_POINT = 0x00000008;
         internal const uint CONTEXT_DEBUG_REGISTERS = 0x00000010;
+        internal const uint CONTEXT_XSTATE = 0x00000040;
 
         internal const uint CONTEXT_I386 = 0x00010000;
 
         internal const ulong ContextFlagsOffset = 0x30;
         internal const ulong MinimumContextSize = 0x100;
         internal const ulong MinimumContextSize32 = 0x2CC;
+
+        internal const ulong FltSaveOffset = 0x100;
+        internal const int FltSaveSize = 0x200;
+        internal const ulong ContextExOffset = 0x4D0;
+        internal const int ContextExSize = 0x20;
+        internal const int XStateHeaderSize = 64;
+        // XSAVE header plus YMM_Hi128. x87 and SSE state stay in FltSave.
+        internal const int XStateAreaSize = XStateHeaderSize + 256;
+        internal const ulong XcrAvx = 0x4;
+        internal const ulong XcrAvxFeatures = 0x7;
+        private const int VectorQwords = 32;
+
+        [ThreadStatic] private static ulong[] _xmmScratch;
+        [ThreadStatic] private static ulong[] _ymmScratch;
+        internal static ulong[] XmmScratch => _xmmScratch ??= new ulong[VectorQwords];
+        internal static ulong[] YmmScratch => _ymmScratch ??= new ulong[VectorQwords];
+
+        internal static bool XStateEnabled(BinaryEmulator Instance)
+            => Instance.WinHelper.PointerSize == 8 && Instance._emulator.SupportsAvx;
+
+        // No x87 register stack is kept, so FltSave carries the control words, MXCSR and XMM0-15.
+        internal static void FillFltSave(Span<byte> Area, ulong[] Xmm, ulong MxCsr, ulong Fpcw)
+        {
+            Area.Slice(0, FltSaveSize).Clear();
+            BinaryPrimitives.WriteUInt16LittleEndian(Area.Slice(0x00, 2), (ushort)Fpcw);
+            BinaryPrimitives.WriteUInt32LittleEndian(Area.Slice(0x18, 4), (uint)MxCsr);
+            BinaryPrimitives.WriteUInt32LittleEndian(Area.Slice(0x1C, 4), 0xFFFF);
+            for (int i = 0; i < VectorQwords; i++)
+                BinaryPrimitives.WriteUInt64LittleEndian(Area.Slice(0xA0 + i * 8, 8), Xmm[i]);
+        }
+
+        internal static void WriteContextEx(Span<byte> Context, ulong XStateAreaOffset)
+        {
+            Span<byte> Ex = Context.Slice((int)ContextExOffset, ContextExSize);
+            Ex.Clear();
+            BinaryPrimitives.WriteInt32LittleEndian(Ex.Slice(0x00, 4), -(int)ContextExOffset);
+            BinaryPrimitives.WriteUInt32LittleEndian(Ex.Slice(0x04, 4), (uint)(XStateAreaOffset + (ulong)XStateAreaSize));
+            BinaryPrimitives.WriteInt32LittleEndian(Ex.Slice(0x08, 4), -(int)ContextExOffset);
+            BinaryPrimitives.WriteUInt32LittleEndian(Ex.Slice(0x0C, 4), (uint)ContextExOffset);
+            BinaryPrimitives.WriteInt32LittleEndian(Ex.Slice(0x10, 4), (int)(XStateAreaOffset - ContextExOffset));
+            BinaryPrimitives.WriteUInt32LittleEndian(Ex.Slice(0x14, 4), (uint)XStateAreaSize);
+        }
+
+        // CONTEXT_EX chunk offsets count from the CONTEXT_EX itself, the way ntdll reads them.
+        internal static bool TryLocateXStateArea(BinaryEmulator Instance, ulong ContextPtr, out ulong Area)
+        {
+            Area = 0;
+            ulong ContextEx = ContextPtr + ContextExOffset;
+            if (!Instance.IsRegionMapped(ContextEx, (ulong)ContextExSize))
+                return false;
+
+            int AllOffset = (int)Instance.ReadMemoryUInt(ContextEx + 0x00);
+            uint AllLength = Instance.ReadMemoryUInt(ContextEx + 0x04);
+            int XStateOffset = (int)Instance.ReadMemoryUInt(ContextEx + 0x10);
+            uint XStateLength = Instance.ReadMemoryUInt(ContextEx + 0x14);
+            if (XStateOffset < AllOffset || (long)AllOffset + AllLength < (long)XStateOffset + XStateLength)
+                return false;
+            if (XStateLength < (uint)XStateAreaSize)
+                return false;
+
+            Area = (ulong)((long)ContextEx + XStateOffset);
+            return Instance.IsRegionMapped(Area, (ulong)XStateAreaSize);
+        }
+
+        // A clear AVX bit in XSTATE_BV is the init state, so the upper halves read as zero.
+        internal static void ReadXStateArea(BinaryEmulator Instance, ulong Area, ulong[] YmmHigh)
+        {
+            if ((Instance.ReadMemoryULong(Area) & XcrAvx) == 0)
+            {
+                Array.Clear(YmmHigh);
+                return;
+            }
+
+            Span<byte> Bytes = stackalloc byte[VectorQwords * 8];
+            Instance._emulator.ReadMemory(Area + (ulong)XStateHeaderSize, Bytes, (uint)Bytes.Length);
+            for (int i = 0; i < VectorQwords; i++)
+                YmmHigh[i] = BinaryPrimitives.ReadUInt64LittleEndian(Bytes.Slice(i * 8, 8));
+        }
+
+        // XSTATE_BV reports the features present, and the upper halves count as present only when one
+        // of them is nonzero. XCOMP_BV stays zero for the standard layout.
+        internal static void WriteXStateArea(BinaryEmulator Instance, ulong Area, ulong[] YmmHigh, ulong Mask)
+        {
+            Span<byte> Bytes = stackalloc byte[XStateAreaSize];
+            Bytes.Clear();
+
+            bool AvxLive = false;
+            for (int i = 0; i < VectorQwords && !AvxLive; i++)
+                AvxLive = YmmHigh[i] != 0;
+
+            ulong StateMask = Mask & 0x3;
+            if ((Mask & XcrAvx) != 0 && AvxLive)
+                StateMask |= XcrAvx;
+            BinaryPrimitives.WriteUInt64LittleEndian(Bytes.Slice(0, 8), StateMask);
+
+            if ((Mask & XcrAvx) != 0)
+            {
+                for (int i = 0; i < VectorQwords; i++)
+                    BinaryPrimitives.WriteUInt64LittleEndian(Bytes.Slice(XStateHeaderSize + i * 8, 8), YmmHigh[i]);
+            }
+
+            Instance.WriteMemory(Area, Bytes);
+        }
+
+        internal static void WriteContextVectorState(BinaryEmulator Instance, EmulatedThread Thread, ulong ContextPtr, uint Flags)
+        {
+            bool WantXmm = (Flags & CONTEXT_FLOATING_POINT) != 0;
+            bool WantYmm = (Flags & CONTEXT_XSTATE) != 0 && XStateEnabled(Instance);
+            if (!WantXmm && !WantYmm)
+                return;
+
+            ulong[] Xmm = XmmScratch;
+            ulong[] YmmHigh = YmmScratch;
+            if (!Instance.ReadThreadVectorState(Thread, Xmm, YmmHigh))
+                return;
+
+            bool IsCurrentThread = Instance.CurrentThread != null && Thread.ThreadId == Instance.CurrentThread.ThreadId;
+            if (WantXmm && Instance.IsRegionMapped(ContextPtr + FltSaveOffset, (ulong)FltSaveSize))
+            {
+                Span<byte> Area = stackalloc byte[FltSaveSize];
+                FillFltSave(Area, Xmm,
+                    ReadSavedOrLive(Instance, Thread.Context, IsCurrentThread, Registers.UC_X86_REG_MXCSR, Ctx => Ctx.MXCSR),
+                    ReadSavedOrLive(Instance, Thread.Context, IsCurrentThread, Registers.UC_X86_REG_FPCW, Ctx => Ctx.FPCW));
+                Instance.WriteMemory(ContextPtr + FltSaveOffset, Area);
+            }
+
+            if (WantYmm && TryLocateXStateArea(Instance, ContextPtr, out ulong XStateArea))
+                WriteXStateArea(Instance, XStateArea, YmmHigh, Instance.ReadMemoryULong(XStateArea));
+        }
+
+        internal static void ApplyVectorState(BinaryEmulator Instance, EmulatedThread Thread, ulong ContextPtr, uint Flags)
+        {
+            if (Thread == null || Instance.WinHelper.PointerSize != 8)
+                return;
+
+            bool HaveXmm = (Flags & CONTEXT_FLOATING_POINT) != 0 && Instance.IsRegionMapped(ContextPtr + FltSaveOffset, (ulong)FltSaveSize);
+            ulong XStateArea = 0;
+            bool HaveYmm = (Flags & CONTEXT_XSTATE) != 0 && XStateEnabled(Instance) && TryLocateXStateArea(Instance, ContextPtr, out XStateArea);
+            if (!HaveXmm && !HaveYmm)
+                return;
+
+            ulong[] Xmm = XmmScratch;
+            ulong[] YmmHigh = YmmScratch;
+            if (!Instance.ReadThreadVectorState(Thread, Xmm, YmmHigh))
+                return;
+
+            if (HaveXmm)
+            {
+                Span<byte> Area = stackalloc byte[FltSaveSize];
+                Instance._emulator.ReadMemory(ContextPtr + FltSaveOffset, Area, (uint)FltSaveSize);
+                for (int i = 0; i < VectorQwords; i++)
+                    Xmm[i] = BinaryPrimitives.ReadUInt64LittleEndian(Area.Slice(0xA0 + i * 8, 8));
+
+                bool IsCurrentThread = Instance.CurrentThread != null && Thread.ThreadId == Instance.CurrentThread.ThreadId;
+                ulong Fpcw = BinaryPrimitives.ReadUInt16LittleEndian(Area.Slice(0x00, 2));
+                ulong MxCsr = Instance.ReadMemoryUInt(ContextPtr + 0x34);
+                Thread.Context.FPCW = Fpcw;
+                Thread.Context.MXCSR = MxCsr;
+                WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_FPCW, Fpcw);
+                WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_MXCSR, MxCsr);
+            }
+
+            if (HaveYmm)
+                ReadXStateArea(Instance, XStateArea, YmmHigh);
+
+            Instance.WriteThreadVectorState(Thread, Xmm, YmmHigh);
+        }
 
         /// <summary>
         /// Resolves a Windows thread handle, including the current-thread pseudo handle.
@@ -185,6 +353,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(ContextPtr + 0xE8, ReadSavedOrLive(Instance, Context, IsCurrentThread, Registers.UC_X86_REG_R14, Ctx => Ctx.R14), 8);
                 Instance._emulator.WriteMemory(ContextPtr + 0xF0, ReadSavedOrLive(Instance, Context, IsCurrentThread, Registers.UC_X86_REG_R15, Ctx => Ctx.R15), 8);
             }
+
+            WriteContextVectorState(Instance, Thread, ContextPtr, Flags);
         }
 
         /// <summary>
@@ -291,6 +461,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_R14, Context.R14);
                 WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_R15, Context.R15);
             }
+
+            ApplyVectorState(Instance, Thread, ContextPtr, Flags);
         }
 
         private static void WriteContext32(BinaryEmulator Instance, CpuContext Context, bool IsCurrentThread, ulong ContextPtr, uint Flags)

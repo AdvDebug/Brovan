@@ -760,10 +760,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (int i = 0; i < 64; i++)
                 Page[OffsetProcessorFeatures + i] = 0;
 
-            // Do not leak the host KUSER_SHARED_DATA XState configuration into the guest.
-            // Brovan's CPUID surface does not advertise XSAVE/OSXSAVE, and guest ntdll will
-            // enter XRSTOR-based context paths if the copied host XState bitmap remains set.
             Array.Clear(Page, OffsetXStateConfiguration, Page.Length - OffsetXStateConfiguration);
+            if (Emulator?._emulator?.SupportsAvx == true && Emulator.IsX64Guest)
+                WriteXStateConfiguration(Page);
 
             Page[OffsetProcessorFeatures + 6] = 1;  // SSE
             Page[OffsetProcessorFeatures + 10] = 1; // SSE2
@@ -772,8 +771,39 @@ namespace Brovan.Core.Emulation.OS.Windows
             Page[OffsetProcessorFeatures + 23] = 1; // FASTFAIL
             Page[OffsetProcessorFeatures + 28] = 1; // RDRAND
             Page[OffsetProcessorFeatures + 32] = 1; // RDTSCP
+            if (Emulator?._emulator?.SupportsAvx == true)
+            {
+                Page[OffsetProcessorFeatures + 17] = 1; // XSAVE
+                Page[OffsetProcessorFeatures + 39] = 1; // AVX
+                if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+                    Page[OffsetProcessorFeatures + 40] = 1; // AVX2
+            }
 
             return Page;
+        }
+
+        // Component offsets count from the start of a full XSAVE image, so ntdll places YMM_Hi128
+        // 64 bytes into the extended area that follows a CONTEXT.
+        private static void WriteXStateConfiguration(byte[] Page)
+        {
+            const ulong Features = 0x7;
+            const uint AreaSize = 832;
+            int Base = OffsetXStateConfiguration;
+            BinaryPrimitives.WriteUInt64LittleEndian(Page.AsSpan(Base + 0x000, 8), Features);
+            BinaryPrimitives.WriteUInt64LittleEndian(Page.AsSpan(Base + 0x008, 8), Features);
+            WriteUInt32(Page, Base + 0x010, AreaSize);
+            WriteUInt32(Page, Base + 0x014, 0);
+            WriteUInt32(Page, Base + 0x018, 0);
+            WriteUInt32(Page, Base + 0x01C, 160);
+            WriteUInt32(Page, Base + 0x020, 160);
+            WriteUInt32(Page, Base + 0x024, 256);
+            WriteUInt32(Page, Base + 0x028, 576);
+            WriteUInt32(Page, Base + 0x02C, 256);
+            WriteUInt32(Page, Base + 0x228, AreaSize);
+            WriteUInt32(Page, Base + 0x22C, 160);
+            WriteUInt32(Page, Base + 0x230, 256);
+            WriteUInt32(Page, Base + 0x234, 256);
+            WriteUInt32(Page, Base + 0x340, AreaSize);
         }
 
         private static void WriteUInt32(byte[] Buffer, int Offset, uint Value)
@@ -839,7 +869,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private MemoryHookCallback LdrDataWriteHook;
         private CodeHookCallback BlockHook;
 
-
         private bool PebHookInstalled;
         private bool BlockHookInstalled;
         private bool PollDriven;
@@ -856,7 +885,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong LastHeadBlink;
 
         private readonly Dictionary<ulong, ModuleInfo> LastSnapshot = new Dictionary<ulong, ModuleInfo>();
-
 
         private struct ModuleInfo
         {

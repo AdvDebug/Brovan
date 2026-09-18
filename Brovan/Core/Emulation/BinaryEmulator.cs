@@ -363,7 +363,7 @@ namespace Brovan.Core.Emulation
             OS.SharedHelpers.HostEventQueue.WakeSignal = Signal;
             return Signal;
         }
-        
+
         private long MlfqSchedulerTick;
         private long EarliestWaitDeadline = long.MaxValue;
         private long LastFullWakeupScanTick;
@@ -1905,7 +1905,6 @@ namespace Brovan.Core.Emulation
             return 0;
         }
 
-
         /// <summary>
         /// Privileged instruction handler.
         /// </summary>
@@ -1916,7 +1915,6 @@ namespace Brovan.Core.Emulation
             Guest.HandlePrivilegedInstruction(this);
         }
 
-
         /// <summary>
         /// Invalid instruction handler.
         /// </summary>
@@ -1926,7 +1924,6 @@ namespace Brovan.Core.Emulation
             TriggerDebugMessage(() => $"cpu: invalid instruction at 0x{ReadRegister(IPRegister):X}");
             Guest.HandleInvalidInstruction(this);
         }
-
 
         /// <summary>
         /// Windows interrupt handling method.
@@ -2301,9 +2298,48 @@ namespace Brovan.Core.Emulation
             ReadGprBatch(t.Context);
             if (_emulator.IsThreadResident(t.ThreadId))
                 return;
-            _emulator.ReadXmmRegisters(t.Context.Xmm);
+            _emulator.ReadVectorState(t.Context.Xmm, t.Context.YmmHigh);
             t.Context.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
             t.Context.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
+        }
+
+        public bool ReadThreadVectorState(EmulatedThread t, ulong[] xmm, ulong[] ymmHigh)
+        {
+            if (t == null || t.Context == null) return false;
+            EmulatedThread current = CurrentThread;
+            if (ReferenceEquals(t, current))
+                return _emulator.ReadVectorState(xmm, ymmHigh);
+
+            if (_emulator.IsThreadResident(t.ThreadId))
+            {
+                _emulator.SelectThread(t.ThreadId);
+                bool read = _emulator.ReadVectorState(xmm, ymmHigh);
+                if (current != null) _emulator.SelectThread(current.ThreadId);
+                return read;
+            }
+
+            Array.Copy(t.Context.Xmm, xmm, t.Context.Xmm.Length);
+            Array.Copy(t.Context.YmmHigh, ymmHigh, t.Context.YmmHigh.Length);
+            return true;
+        }
+
+        public bool WriteThreadVectorState(EmulatedThread t, ulong[] xmm, ulong[] ymmHigh)
+        {
+            if (t == null || t.Context == null) return false;
+            Array.Copy(xmm, t.Context.Xmm, t.Context.Xmm.Length);
+            Array.Copy(ymmHigh, t.Context.YmmHigh, t.Context.YmmHigh.Length);
+
+            EmulatedThread current = CurrentThread;
+            if (ReferenceEquals(t, current))
+                return _emulator.WriteVectorState(xmm, ymmHigh);
+
+            if (!_emulator.IsThreadResident(t.ThreadId))
+                return true;
+
+            _emulator.SelectThread(t.ThreadId);
+            bool written = _emulator.WriteVectorState(xmm, ymmHigh);
+            if (current != null) _emulator.SelectThread(current.ThreadId);
+            return written;
         }
 
         public bool ReadGprBatch(CpuContext c)
@@ -2368,7 +2404,7 @@ namespace Brovan.Core.Emulation
             WriteGprBatch(t.Context);
             if (LoadVectorState)
             {
-                _emulator.WriteXmmRegisters(t.Context.Xmm);
+                _emulator.WriteVectorState(t.Context.Xmm, t.Context.YmmHigh);
                 WriteRegister(Registers.UC_X86_REG_MXCSR, t.Context.MXCSR);
                 WriteRegister(Registers.UC_X86_REG_FPCW, t.Context.FPCW);
             }
@@ -2432,7 +2468,7 @@ namespace Brovan.Core.Emulation
                 return false;
 
             _emulator.SelectThread(Victim.ThreadId);
-            _emulator.ReadXmmRegisters(Victim.Context.Xmm);
+            _emulator.ReadVectorState(Victim.Context.Xmm, Victim.Context.YmmHigh);
             Victim.Context.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
             Victim.Context.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
             _emulator.UnbindThread(Victim.ThreadId);
@@ -3905,7 +3941,6 @@ namespace Brovan.Core.Emulation
             }
             catch
             {
-
             }
             return true;
         }
@@ -3955,7 +3990,6 @@ namespace Brovan.Core.Emulation
             if (Snapshot == null || _emulator.Disposed || Disposed || !Snapshot.IsLazy)
                 return;
 
-
             List<MemoryRegion> RegionsToDelete = new List<MemoryRegion>();
 
             foreach (MemoryRegion Region in _memory)
@@ -3988,7 +4022,6 @@ namespace Brovan.Core.Emulation
                     }
                     catch
                     {
-
                     }
                 }
             }
