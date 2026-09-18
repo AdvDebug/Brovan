@@ -114,12 +114,27 @@ namespace Brovan.Core.Emulation
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool VirtualFree(IntPtr lpAddress, UIntPtr dwSize, uint dwFreeType);
 
+        [DllImport("psapi.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool QueryWorkingSetEx(IntPtr hProcess, void* pv, uint cb);
+
         public const uint MEM_COMMIT = 0x00001000;
         public const uint MEM_RESERVE = 0x00002000;
         public const uint MEM_RELEASE = 0x00008000;
         public const uint PAGE_READWRITE = 0x04;
 
+        public static readonly IntPtr CurrentProcess = new IntPtr(-1);
+
         public static bool Failed(int hr) => hr < 0;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct WorkingSetExInformation
+    {
+        public IntPtr VirtualAddress;
+        public nuint VirtualAttributes;
+
+        public bool Valid => (VirtualAttributes & 1) != 0;
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 16)]

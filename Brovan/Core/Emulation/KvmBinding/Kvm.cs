@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -49,6 +49,7 @@ namespace Brovan.Core.Emulation
         private bool _populateUnavailable;
         private const ulong PopulateLimitBytes = 32UL * 1024 * 1024;
         private const ulong PopulateMinBytes = 64UL * 1024;
+        private const int ResidencyQueryPages = 4096;
         private bool _tscOffsetKnown;
         private ulong _tscOffset;
         private int _nextSlotId;
@@ -69,6 +70,7 @@ namespace Brovan.Core.Emulation
         private MappedPage _lastLookupPage;
         private readonly Dictionary<ulong, InstalledSlot> _desiredSlots = new();
         private readonly List<ulong> _staleSlotKeys = new();
+        private readonly List<DirtyRange> _deletedSlotRanges = new();
         private readonly List<ulong> _activeSlotStarts = new();
         private readonly HashSet<ulong> _keptSlotStarts = new();
         private const int SlotHeadroom = 64;
@@ -1612,6 +1614,76 @@ namespace Brovan.Core.Emulation
             VirtualProcessor vp = CurrentVp;
             if (vp.Running) return;
 
+            PreFaultSpan(vp, address, size);
+        }
+
+        // A slot deleted and made again loses its second level entries for the whole range. Pre-faulting
+        // a page the host never touched maps the zero page, and the first guest write pays for the copy,
+        // so only resident pages get an entry built ahead of time.
+        private unsafe void PopulateResidentRange(ulong address, ulong size, IntPtr backing)
+        {
+            if (_populateUnavailable || !_supportsPreFault) return;
+            if (backing == IntPtr.Zero || size < PopulateMinBytes || size > PopulateLimitBytes) return;
+
+            VirtualProcessor vp = CurrentVp;
+            if (vp.Running) return;
+
+            ulong pageCount = size / KvmConstants.PageSize;
+            int chunkPages = (int)Math.Min(pageCount, (ulong)ResidencyQueryPages);
+            long backingBase = backing.ToInt64();
+
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(chunkPages);
+            try
+            {
+                ulong spanStart = 0;
+                ulong spanPages = 0;
+
+                fixed (byte* vec = buffer)
+                {
+                    for (ulong page = 0; page < pageCount; page += (ulong)chunkPages)
+                    {
+                        ulong count = Math.Min((ulong)chunkPages, pageCount - page);
+                        IntPtr chunk = new IntPtr(backingBase + (long)(page * KvmConstants.PageSize));
+                        if (KvmNative.mincore(chunk, (UIntPtr)(count * KvmConstants.PageSize), vec) != 0)
+                            break;
+
+                        for (ulong i = 0; i < count; i++)
+                        {
+                            if ((vec[i] & 1) != 0)
+                            {
+                                if (spanPages == 0) spanStart = page + i;
+                                spanPages++;
+                                continue;
+                            }
+
+                            if (spanPages != 0)
+                            {
+                                PreFaultResidentSpan(vp, address, spanStart, spanPages);
+                                spanPages = 0;
+                            }
+                        }
+                    }
+                }
+
+                if (spanPages != 0)
+                    PreFaultResidentSpan(vp, address, spanStart, spanPages);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+
+        private void PreFaultResidentSpan(VirtualProcessor vp, ulong address, ulong firstPage, ulong pageCount)
+        {
+            ulong size = pageCount * KvmConstants.PageSize;
+            if (size < PopulateMinBytes) return;
+
+            PreFaultSpan(vp, address + firstPage * KvmConstants.PageSize, size);
+        }
+
+        private void PreFaultSpan(VirtualProcessor vp, ulong address, ulong size)
+        {
             LinuxKvmPreFaultMemory range = new LinuxKvmPreFaultMemory { Gpa = address, Size = size };
             while (range.Size != 0)
             {
@@ -2464,6 +2536,7 @@ namespace Brovan.Core.Emulation
             }
 
             _staleSlotKeys.Clear();
+            _deletedSlotRanges.Clear();
             foreach (KeyValuePair<ulong, InstalledSlot> kv in _activeSlots)
             {
                 if (!_desiredSlots.TryGetValue(kv.Key, out InstalledSlot want)
@@ -2473,6 +2546,7 @@ namespace Brovan.Core.Emulation
                 {
                     DeleteMemslot(kv.Value.Id);
                     _staleSlotKeys.Add(kv.Key);
+                    _deletedSlotRanges.Add(new DirtyRange { Start = kv.Key, End = kv.Key + kv.Value.Size });
                 }
                 else
                 {
@@ -2483,7 +2557,7 @@ namespace Brovan.Core.Emulation
                 _activeSlots.Remove(_staleSlotKeys[i]);
 
             foreach (KeyValuePair<ulong, InstalledSlot> kv in _desiredSlots)
-                _activeSlots[kv.Key] = InstallSlot(kv.Key, kv.Value);
+                _activeSlots[kv.Key] = InstallSlot(kv.Key, kv.Value, WasSlotLive(kv.Key));
 
             _activeSlotStarts.Clear();
             foreach (KeyValuePair<ulong, InstalledSlot> kv in _activeSlots)
@@ -2512,6 +2586,7 @@ namespace Brovan.Core.Emulation
             BuildDesiredSlotsForSpan(spanStart, spanEnd);
 
             _staleSlotKeys.Clear();
+            _deletedSlotRanges.Clear();
             firstIndex = FirstActiveSlotIndexAtOrBefore(spanStart);
             for (int i = firstIndex; i < _activeSlotStarts.Count; i++)
             {
@@ -2528,6 +2603,7 @@ namespace Brovan.Core.Emulation
                 {
                     DeleteMemslot(active.Id);
                     _staleSlotKeys.Add(start);
+                    _deletedSlotRanges.Add(new DirtyRange { Start = start, End = start + active.Size });
                 }
                 else
                 {
@@ -2539,7 +2615,7 @@ namespace Brovan.Core.Emulation
                 RemoveActiveSlot(_staleSlotKeys[i]);
 
             foreach (KeyValuePair<ulong, InstalledSlot> kv in _desiredSlots)
-                AddActiveSlot(kv.Key, InstallSlot(kv.Key, kv.Value));
+                AddActiveSlot(kv.Key, InstallSlot(kv.Key, kv.Value, WasSlotLive(kv.Key)));
         }
 
         private void BuildDesiredSlotsForSpan(ulong spanStart, ulong spanEnd)
@@ -2604,10 +2680,22 @@ namespace Brovan.Core.Emulation
             Flags = KvmConstants.MemSlotReadOnly,
         };
 
-        private InstalledSlot InstallSlot(ulong guestAddress, InstalledSlot want)
+        private bool WasSlotLive(ulong start)
+        {
+            for (int i = 0; i < _deletedSlotRanges.Count; i++)
+            {
+                if (start >= _deletedSlotRanges[i].Start && start < _deletedSlotRanges[i].End)
+                    return true;
+            }
+            return false;
+        }
+
+        private InstalledSlot InstallSlot(ulong guestAddress, InstalledSlot want, bool overLiveRange = false)
         {
             int slot = AllocateSlotId();
             SetMemslot(slot, guestAddress, want.Size, want.Host, want.Flags);
+            if (overLiveRange)
+                PopulateResidentRange(guestAddress, want.Size, want.Host);
             return new InstalledSlot
             {
                 Id = slot,

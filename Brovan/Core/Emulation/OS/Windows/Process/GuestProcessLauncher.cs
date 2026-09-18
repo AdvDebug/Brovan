@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -155,6 +155,34 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
+        // Under "dotnet Brovan.dll" the process path is the shared runtime host, so a child needs the
+        // managed assembly to lead its arguments. Only that host sits outside the base directory, which
+        // is the test; argv[0] names the assembly for an apphost build as well.
+        private static string GetManagedEntryForSharedHost(string HostExecutable)
+        {
+            string HostDirectory = Path.GetDirectoryName(HostExecutable);
+            if (string.IsNullOrEmpty(HostDirectory)) return null;
+
+            StringComparison Comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+
+            if (string.Equals(Path.TrimEndingDirectorySeparator(HostDirectory),
+                    Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory), Comparison))
+                return null;
+
+            string[] Arguments = Environment.GetCommandLineArgs();
+            if (Arguments.Length == 0) return null;
+
+            string Entry = Arguments[0];
+            if (string.IsNullOrEmpty(Entry) || !Entry.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            return Path.IsPathRooted(Entry)
+                ? Entry
+                : Path.Combine(AppContext.BaseDirectory, Path.GetFileName(Entry));
+        }
+
         private static bool TryStartEmulator(
             BinaryEmulator Instance,
             string HostImage,
@@ -179,6 +207,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WorkingDirectory = WorkingDirectory,
                 CreateNoWindow = Utils.SilentMode,
             };
+
+            string ManagedEntry = GetManagedEntryForSharedHost(HostExecutable);
+            if (ManagedEntry != null)
+                StartInfo.ArgumentList.Add(ManagedEntry);
 
             AppendEmulatorOptions(Instance, StartInfo.ArgumentList);
 

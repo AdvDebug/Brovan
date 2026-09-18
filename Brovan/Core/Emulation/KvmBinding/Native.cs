@@ -59,6 +59,9 @@ namespace Brovan.Core.Emulation
         [DllImport("libc", SetLastError = true)]
         public static extern int madvise(IntPtr addr, UIntPtr length, int advice);
 
+        [DllImport("libc", SetLastError = true)]
+        public static extern unsafe int mincore(IntPtr addr, UIntPtr length, byte* vec);
+
         [DllImport("libc")]
         public static extern int getpid();
 

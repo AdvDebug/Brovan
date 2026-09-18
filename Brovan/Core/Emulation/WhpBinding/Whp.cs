@@ -55,6 +55,7 @@ namespace Brovan.Core.Emulation
         private readonly Dictionary<ulong, InstalledMap> _activeMaps = new();
         private readonly Dictionary<ulong, InstalledMap> _desiredMaps = new();
         private readonly List<ulong> _staleMapKeys = new();
+        private readonly List<KeyValuePair<ulong, InstalledMap>> _inPlaceMaps = new();
 
         private readonly List<ulong> _activeMapStarts = new();
         private readonly HashSet<ulong> _keptMapStarts = new();
@@ -64,6 +65,7 @@ namespace Brovan.Core.Emulation
         private const int MapHeadroom = 64;
         private const ulong PopulateLimitBytes = 32UL * 1024 * 1024;
         private const ulong PopulateMinBytes = 64UL * 1024;
+        private const int ResidencyQueryPages = 4096;
         private bool _fullRebuildRequired = true;
         private readonly List<DirtyRange> _dirtyRanges = new();
         private const int MaxDirtyRanges = 16;
@@ -2277,23 +2279,36 @@ namespace Brovan.Core.Emulation
             }
 
             _staleMapKeys.Clear();
+            _inPlaceMaps.Clear();
             foreach (KeyValuePair<ulong, InstalledMap> kv in _activeMaps)
             {
-                if (!_desiredMaps.TryGetValue(kv.Key, out InstalledMap want)
-                    || want.Size != kv.Value.Size
-                    || want.Host != kv.Value.Host
-                    || want.Flags != kv.Value.Flags)
-                {
-                    UnmapGpaRange(kv.Key, kv.Value.Size);
-                    _staleMapKeys.Add(kv.Key);
-                }
-                else
+                if (_desiredMaps.TryGetValue(kv.Key, out InstalledMap want)
+                    && want.Size == kv.Value.Size
+                    && want.Host == kv.Value.Host
+                    && want.Flags == kv.Value.Flags)
                 {
                     _desiredMaps.Remove(kv.Key);
+                    continue;
                 }
+
+                if (CoversInPlace(kv.Key, kv.Value))
+                {
+                    TakeInPlaceTiles(kv.Key, kv.Value);
+                    continue;
+                }
+
+                UnmapGpaRange(kv.Key, kv.Value.Size);
+                _staleMapKeys.Add(kv.Key);
             }
             for (int i = 0; i < _staleMapKeys.Count; i++)
                 _activeMaps.Remove(_staleMapKeys[i]);
+
+            for (int i = 0; i < _inPlaceMaps.Count; i++)
+            {
+                KeyValuePair<ulong, InstalledMap> kv = _inPlaceMaps[i];
+                MapGpaRange(kv.Key, kv.Value.Size, kv.Value.Host, kv.Value.Flags, true);
+                _activeMaps[kv.Key] = kv.Value;
+            }
 
             foreach (KeyValuePair<ulong, InstalledMap> kv in _desiredMaps)
             {
@@ -2335,6 +2350,35 @@ namespace Brovan.Core.Emulation
 
                 _keptMapStarts.Add(start);
                 _desiredMaps[start] = active;
+            }
+        }
+
+        // WHP rewrites a map laid over a live range in place. Unmapping first leaves the range absent
+        // for a moment from processors that are inside the guest.
+        private bool CoversInPlace(ulong start, InstalledMap active)
+        {
+            ulong end = start + active.Size;
+            long hostBase = active.Host.ToInt64();
+
+            for (ulong cursor = start; cursor < end;)
+            {
+                if (!_desiredMaps.TryGetValue(cursor, out InstalledMap tile)) return false;
+                if (tile.Host.ToInt64() != hostBase + (long)(cursor - start)) return false;
+                if (tile.Size > end - cursor) return false;
+                cursor += tile.Size;
+            }
+            return true;
+        }
+
+        private void TakeInPlaceTiles(ulong start, InstalledMap active)
+        {
+            ulong end = start + active.Size;
+            for (ulong cursor = start; cursor < end;)
+            {
+                InstalledMap tile = _desiredMaps[cursor];
+                _inPlaceMaps.Add(new KeyValuePair<ulong, InstalledMap>(cursor, tile));
+                _desiredMaps.Remove(cursor);
+                cursor += tile.Size;
             }
         }
 
@@ -2394,13 +2438,86 @@ namespace Brovan.Core.Emulation
 
         // WHP builds second level entries one page at a time and resolves those faults inside
         // WHvRunVirtualProcessor, so they never reach the exit switch.
-        private unsafe void PopulateRange(ulong gpa, ulong size, WhvMapGpaRangeFlags flags)
+        private void PopulateRange(ulong gpa, ulong size, WhvMapGpaRangeFlags flags)
         {
             if (_populateUnavailable) return;
 
             // An oversized range is skipped, not clipped; the tail past the clip still faults page by page.
             if (size < PopulateMinBytes || size > PopulateLimitBytes) return;
 
+            PopulateSpan(gpa, size, flags);
+        }
+
+        // A map over a live range drops the second level entries for every page it covers. Populate
+        // commits host memory, so only pages already resident are rebuilt; the rest would grow the
+        // working set by their full size.
+        private unsafe void PopulateResidentRange(ulong gpa, ulong size, IntPtr host, WhvMapGpaRangeFlags flags)
+        {
+            if (_populateUnavailable || host == IntPtr.Zero || size < PopulateMinBytes) return;
+
+            ulong pageCount = size / WhpConstants.PageSize;
+            int chunkPages = (int)Math.Min(pageCount, ResidencyQueryPages);
+            long hostBase = host.ToInt64();
+
+            WorkingSetExInformation[] buffer = ArrayPool<WorkingSetExInformation>.Shared.Rent(chunkPages);
+            try
+            {
+                ulong spanStart = 0;
+                ulong spanPages = 0;
+
+                fixed (WorkingSetExInformation* entries = buffer)
+                {
+                    for (ulong page = 0; page < pageCount; page += (ulong)chunkPages)
+                    {
+                        int count = (int)Math.Min((ulong)chunkPages, pageCount - page);
+                        for (int i = 0; i < count; i++)
+                        {
+                            entries[i].VirtualAddress =
+                                new IntPtr(hostBase + (long)((page + (ulong)i) * WhpConstants.PageSize));
+                            entries[i].VirtualAttributes = 0;
+                        }
+
+                        if (!WhpNative.QueryWorkingSetEx(WhpNative.CurrentProcess, entries,
+                                (uint)(count * sizeof(WorkingSetExInformation))))
+                            break;
+
+                        for (int i = 0; i < count; i++)
+                        {
+                            if (entries[i].Valid)
+                            {
+                                if (spanPages == 0) spanStart = page + (ulong)i;
+                                spanPages++;
+                                continue;
+                            }
+
+                            if (spanPages != 0)
+                            {
+                                PopulateResidentSpan(gpa, spanStart, spanPages, flags);
+                                spanPages = 0;
+                            }
+                        }
+                    }
+                }
+
+                if (spanPages != 0)
+                    PopulateResidentSpan(gpa, spanStart, spanPages, flags);
+            }
+            finally
+            {
+                ArrayPool<WorkingSetExInformation>.Shared.Return(buffer);
+            }
+        }
+
+        private void PopulateResidentSpan(ulong gpa, ulong firstPage, ulong pageCount, WhvMapGpaRangeFlags flags)
+        {
+            ulong size = pageCount * WhpConstants.PageSize;
+            if (size < PopulateMinBytes) return;
+
+            PopulateSpan(gpa + firstPage * WhpConstants.PageSize, size, flags);
+        }
+
+        private unsafe void PopulateSpan(ulong gpa, ulong size, WhvMapGpaRangeFlags flags)
+        {
             WhvMemoryRangeEntry range;
             range.GuestAddress = gpa;
             range.SizeInBytes = size;
@@ -2438,6 +2555,7 @@ namespace Brovan.Core.Emulation
             BuildDesiredMapsForSpan(spanStart, spanEnd);
 
             _staleMapKeys.Clear();
+            _inPlaceMaps.Clear();
             firstIndex = FirstActiveMapIndexAtOrBefore(spanStart);
             for (int i = firstIndex; i < _activeMapStarts.Count; i++)
             {
@@ -2447,22 +2565,34 @@ namespace Brovan.Core.Emulation
                 InstalledMap active = _activeMaps[start];
                 if (start + active.Size <= spanStart) continue;
 
-                if (!_desiredMaps.TryGetValue(start, out InstalledMap want)
-                    || want.Size != active.Size
-                    || want.Host != active.Host
-                    || want.Flags != active.Flags)
-                {
-                    UnmapGpaRange(start, active.Size);
-                    _staleMapKeys.Add(start);
-                }
-                else
+                if (_desiredMaps.TryGetValue(start, out InstalledMap want)
+                    && want.Size == active.Size
+                    && want.Host == active.Host
+                    && want.Flags == active.Flags)
                 {
                     _desiredMaps.Remove(start);
+                    continue;
                 }
+
+                if (CoversInPlace(start, active))
+                {
+                    TakeInPlaceTiles(start, active);
+                    continue;
+                }
+
+                UnmapGpaRange(start, active.Size);
+                _staleMapKeys.Add(start);
             }
 
             for (int i = 0; i < _staleMapKeys.Count; i++)
                 RemoveActiveMap(_staleMapKeys[i]);
+
+            for (int i = 0; i < _inPlaceMaps.Count; i++)
+            {
+                KeyValuePair<ulong, InstalledMap> kv = _inPlaceMaps[i];
+                MapGpaRange(kv.Key, kv.Value.Size, kv.Value.Host, kv.Value.Flags, true);
+                AddActiveMap(kv.Key, kv.Value);
+            }
 
             foreach (KeyValuePair<ulong, InstalledMap> kv in _desiredMaps)
             {
@@ -2533,13 +2663,17 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private unsafe void MapGpaRange(ulong gpa, ulong size, IntPtr host, WhvMapGpaRangeFlags flags)
+        private unsafe void MapGpaRange(ulong gpa, ulong size, IntPtr host, WhvMapGpaRangeFlags flags,
+            bool overLiveRange = false)
         {
             int hr = WhpNative.WHvMapGpaRange(_partition, (void*)host, gpa, size, flags);
             if (WhpNative.Failed(hr))
                 throw new WhpException($"WHvMapGpaRange failed (gpa=0x{gpa:X}, size=0x{size:X})", hr);
 
-            PopulateRange(gpa, size, flags);
+            if (overLiveRange)
+                PopulateResidentRange(gpa, size, host, flags);
+            else
+                PopulateRange(gpa, size, flags);
         }
 
         private void UnmapGpaRange(ulong gpa, ulong size)
