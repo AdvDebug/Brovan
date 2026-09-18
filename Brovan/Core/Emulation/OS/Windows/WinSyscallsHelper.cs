@@ -92,10 +92,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Normalized = "\\Device\\WMIDataDevice";
             else if (Normalized.Equals("PhysicalDrive0", StringComparison.OrdinalIgnoreCase))
                 Normalized = WindowsStorageDeviceSupport.PhysicalDiskDeviceName;
-            else if (WindowsStorageDeviceSupport.IsVolumeDevicePath(Normalized, VolumeGuid))
+            else if (!IsDriveRootDirectory(Normalized) && WindowsStorageDeviceSupport.IsVolumeDevicePath(Normalized, VolumeGuid))
                 Normalized = WindowsStorageDeviceSupport.VolumeDeviceName;
 
             return Normalized;
+        }
+
+        // NT names the volume device "C:" and the root of its filesystem "C:\". Only the backslash separates them.
+        private static bool IsDriveRootDirectory(string Path)
+        {
+            return Path.Length == 3 && char.IsLetter(Path[0]) && Path[1] == ':' && Path[2] == '\\';
         }
 
         /// <summary>
@@ -1431,6 +1437,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinHandle> WinHandles = new List<WinHandle>();
         public List<WinProcess> WinProcesses = new List<WinProcess>();
         public List<WinFile> WinFiles = new List<WinFile>();
+
+        // WinFiles only ever grows, so share checks and byte range locks cannot be answered from it.
+        private readonly Dictionary<string, List<WinFile>> OpenFilesByPath = new Dictionary<string, List<WinFile>>(StringComparer.OrdinalIgnoreCase);
         public List<WinMutex> WinMutexes = new List<WinMutex>();
         public List<WinModule> WinModules = new List<WinModule>();
         public List<WinModule> MappedImageViews = new List<WinModule>();
@@ -6352,6 +6361,97 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        private const uint FILE_SHARE_READ = 0x00000001;
+        private const uint FILE_SHARE_WRITE = 0x00000002;
+        private const uint FILE_SHARE_DELETE = 0x00000004;
+
+        private static uint AccessToShareBits(AccessMask Access)
+        {
+            uint Bits = 0;
+
+            if ((Access & AccessMask.FileReadData) != 0 || (Access & AccessMask.FileExecute) != 0
+                || (Access & AccessMask.GenericRead) != 0 || (Access & AccessMask.GenericExecute) != 0
+                || (Access & AccessMask.GenericAll) != 0 || (Access & AccessMask.FileAllAccess) == AccessMask.FileAllAccess)
+                Bits |= FILE_SHARE_READ;
+
+            if ((Access & AccessMask.FileWriteData) != 0 || (Access & AccessMask.FileAppendData) != 0
+                || (Access & AccessMask.GenericWrite) != 0
+                || (Access & AccessMask.GenericAll) != 0 || (Access & AccessMask.FileAllAccess) == AccessMask.FileAllAccess)
+                Bits |= FILE_SHARE_WRITE;
+
+            if ((Access & AccessMask.Delete) != 0
+                || (Access & AccessMask.GenericAll) != 0 || (Access & AccessMask.FileAllAccess) == AccessMask.FileAllAccess)
+                Bits |= FILE_SHARE_DELETE;
+
+            return Bits;
+        }
+
+        // Both directions are checked, what this open wants and what the existing opens took.
+        public bool ShareAccessAllows(string Path, AccessMask DesiredAccess, uint ShareAccess)
+        {
+            if (string.IsNullOrEmpty(Path) || !OpenFilesByPath.TryGetValue(Path, out List<WinFile> Opens))
+                return true;
+
+            uint Wanted = AccessToShareBits(DesiredAccess);
+
+            for (int Index = 0; Index < Opens.Count; Index++)
+            {
+                WinFile Existing = Opens[Index];
+                if ((Wanted & ~Existing.ShareAccess) != 0)
+                    return false;
+
+                if ((AccessToShareBits(Existing.GrantedAccess) & ~ShareAccess) != 0)
+                    return false;
+            }
+
+            return true;
+        }
+
+        public void RegisterOpenFile(WinFile File)
+        {
+            if (File == null || File.Device || string.IsNullOrEmpty(File.Path))
+                return;
+
+            if (!OpenFilesByPath.TryGetValue(File.Path, out List<WinFile> Opens))
+            {
+                Opens = new List<WinFile>(1);
+                OpenFilesByPath[File.Path] = Opens;
+            }
+            else if (Opens.Count != 0)
+            {
+                File.Locks = Opens[0].Locks;
+            }
+
+            Opens.Add(File);
+        }
+
+        private void UnregisterOpenFile(WinFile File)
+        {
+            if (File == null || string.IsNullOrEmpty(File.Path))
+                return;
+
+            if (!OpenFilesByPath.TryGetValue(File.Path, out List<WinFile> Opens))
+                return;
+
+            Opens.Remove(File);
+            if (Opens.Count == 0)
+                OpenFilesByPath.Remove(File.Path);
+        }
+
+        public void RetargetOpenFile(WinFile File, string OldPath)
+        {
+            if (File == null || string.IsNullOrEmpty(OldPath))
+                return;
+
+            if (!OpenFilesByPath.TryGetValue(OldPath, out List<WinFile> Opens) || !Opens.Remove(File))
+                return;
+
+            if (Opens.Count == 0)
+                OpenFilesByPath.Remove(OldPath);
+
+            RegisterOpenFile(File);
+        }
+
         public WinFile? GetFileByHandle(ulong Handle, AccessMask Purpose)
         {
             if (!HandleManager.TryGetHandle(Handle, out HandleEntry Entry))
@@ -6691,10 +6791,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             AddSyntheticDirectory(UserProfile + "\\AppData");
             AddSyntheticDirectory(UserProfile + "\\AppData\\Local");
             AddSyntheticDirectory(UserProfile + "\\AppData\\LocalLow");
+            AddSyntheticDirectory(UserProfile + "\\AppData\\Local\\Temp");
             AddSyntheticDirectory(UserProfile + "\\AppData\\Roaming");
             AddSyntheticDirectory(UserProfile + "\\Desktop");
             AddSyntheticDirectory(UserProfile + "\\Documents");
             AddSyntheticDirectory(UserProfile + "\\Downloads");
+            AddSyntheticDirectory(UserProfile + "\\Saved Games");
             AddSyntheticDirectory("C:\\ProgramData");
             AddSyntheticDirectory("C:\\Users\\Public");
             AddSyntheticDirectory("C:\\Users\\Public\\Desktop");
@@ -7007,6 +7109,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             AddSyntheticKnownFolder(Root, "{33E28130-4E1E-4676-835A-98395C3BC3BB}", "Pictures", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Pictures", 4, KeyCache, DefaultHive);
             AddSyntheticKnownFolder(Root, "{4BD8D571-6D19-48D3-BE97-422220080E43}", "Music", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Music", 4, KeyCache, DefaultHive);
             AddSyntheticKnownFolder(Root, "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}", "Videos", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Videos", 4, KeyCache, DefaultHive);
+            AddSyntheticKnownFolder(Root, "{4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4}", "SavedGames", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Saved Games", 4, KeyCache, DefaultHive);
+            AddSyntheticKnownFolder(Root, "{A520A1A4-1780-4FF6-BD18-167343C5AF16}", "LocalAppDataLow", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "AppData\\LocalLow", 4, KeyCache, DefaultHive);
         }
 
         private void AddSyntheticKnownFolder(string Root, string Guid, string Name, string ParentFolder, string RelativePath, uint Category, Dictionary<string, bool> KeyCache, Hive DefaultHive)
@@ -7885,6 +7989,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         HandlesForObject.Remove(Handle);
                         if (HandlesForObject.Count == 0)
                         {
+                            UnregisterOpenFile(Closing);
                             if (Closing.DeletePending)
                                 ApplyDeleteOnClose(Closing);
                             else

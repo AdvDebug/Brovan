@@ -9,6 +9,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint FileFsSizeInformation = 3;
         private const uint FileFsDeviceInformation = 4;
         private const uint FileFsAttributeInformation = 5;
+        private const uint FileFsFullSizeInformation = 7;
+        private const uint FileFsObjectIdInformation = 8;
+        private const uint FileFsSectorSizeInformation = 11;
 
         private const uint FileFsVolumeInformationFixedSize = 0x18;
         private const uint FileFsVolumeInformationLabelOffset = 0x12;
@@ -76,6 +79,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 FileFsSizeInformation => QuerySizeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
                 FileFsDeviceInformation => QueryDeviceInformation(Instance, FileHandle, FileObj, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
                 FileFsAttributeInformation => QueryAttributeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
+                FileFsFullSizeInformation => QueryFullSizeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
+                FileFsObjectIdInformation => QueryObjectIdInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
+                FileFsSectorSizeInformation => QuerySectorSizeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length, Is64Bit),
                 _ => WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0, Is64Bit)
             };
         }
@@ -126,6 +132,59 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(FsInfoBuffer + 0x08, WindowsStorageDeviceSupport.FreeClusters, 8);
             Instance._emulator.WriteMemory(FsInfoBuffer + 0x10, (uint)WindowsStorageDeviceSupport.SectorsPerCluster, 4);
             Instance._emulator.WriteMemory(FsInfoBuffer + 0x14, (uint)WindowsStorageDeviceSupport.BytesPerSector, 4);
+
+            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize, Is64Bit);
+        }
+
+        // No quota, so the caller available count is the free count.
+        private static NTSTATUS QueryFullSizeInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length, bool Is64Bit)
+        {
+            const uint RequiredSize = 32;
+            if (Length < RequiredSize)
+                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_TOO_SMALL, 0, Is64Bit);
+
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x00, WindowsStorageDeviceSupport.TotalClusters, 8);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x08, WindowsStorageDeviceSupport.FreeClusters, 8);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x10, WindowsStorageDeviceSupport.FreeClusters, 8);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x18, (uint)WindowsStorageDeviceSupport.SectorsPerCluster, 4);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x1C, (uint)WindowsStorageDeviceSupport.BytesPerSector, 4);
+
+            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize, Is64Bit);
+        }
+
+        private static NTSTATUS QueryObjectIdInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length, bool Is64Bit)
+        {
+            const uint RequiredSize = 64;
+            if (Length < RequiredSize)
+                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_TOO_SMALL, 0, Is64Bit);
+
+            Span<byte> ObjectId = stackalloc byte[16];
+            if (!Guid.TryParse(Instance.WinHelper.SyntheticVolumeGuid, out Guid VolumeId))
+                VolumeId = Guid.Empty;
+            VolumeId.TryWriteBytes(ObjectId);
+
+            Instance._emulator.WriteMemory(FsInfoBuffer, ObjectId);
+            Instance.WinHelper.WriteZeroMemory(FsInfoBuffer + 0x10, 48);
+
+            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize, Is64Bit);
+        }
+
+        private static NTSTATUS QuerySectorSizeInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length, bool Is64Bit)
+        {
+            const uint RequiredSize = 28;
+            const uint AlignedDeviceAndPartition = 0x00000003;
+            if (Length < RequiredSize)
+                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_TOO_SMALL, 0, Is64Bit);
+
+            uint SectorSize = (uint)WindowsStorageDeviceSupport.BytesPerSector;
+
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x00, SectorSize, 4);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x04, SectorSize, 4);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x08, SectorSize, 4);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x0C, SectorSize, 4);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x10, AlignedDeviceAndPartition, 4);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x14, 0u, 4);
+            Instance._emulator.WriteMemory(FsInfoBuffer + 0x18, 0u, 4);
 
             return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize, Is64Bit);
         }

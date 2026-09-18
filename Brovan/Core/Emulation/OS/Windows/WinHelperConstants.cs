@@ -220,6 +220,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_FILE_IS_A_DIRECTORY = 0xC00000BA,
         STATUS_NOT_SAME_DEVICE = 0xC00000D4,
         STATUS_NOT_A_DIRECTORY = 0xC0000103,
+        STATUS_DIRECTORY_NOT_EMPTY = 0xC0000101,
+        STATUS_NO_SUCH_FILE = 0xC000000F,
+        STATUS_SHARING_VIOLATION = 0xC0000043,
         STATUS_CANNOT_DELETE = 0xC0000121,
         STATUS_INVALID_LOCK_RANGE = 0xC00001A1,
         STATUS_MUTANT_NOT_OWNED = 0xC0000046,
@@ -338,14 +341,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         FileAllInformation = 18,
         FileAllocationInformation = 19,
         FileEndOfFileInformation = 20,
+        FileAlternateNameInformation = 21,
+        FileStreamInformation = 22,
+        FileCompressionInformation = 28,
         FileCompletionInformation = 30,
         FileNetworkOpenInformation = 34,
         FileAttributeTagInformation = 35,
+        FileIdBothDirectoryInformation = 37,
+        FileIdFullDirectoryInformation = 38,
         FileNormalizedNameInformation = 48,
         FileIsRemoteDeviceInformation = 51,
         FileIdInformation = 59,
         FileDispositionInformationEx = 64,
-        FileRenameInformationEx = 65
+        FileRenameInformationEx = 65,
+        FileStatInformation = 68
     }
 
     public enum TOKEN_INFORMATION_CLASS : uint
@@ -1186,6 +1195,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public long LastAccessTime;
         public long LastWriteTime;
         public long ChangeTime;
+        public ulong FileId;
     }
 
     public class WinFile : IHandleObject
@@ -1209,13 +1219,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         public long Position;
         public uint Mode;
         public bool DeletePending;
-        public bool HasBasicInformation;
-        public uint BasicFileAttributes;
-        public long BasicCreationTime;
-        public long BasicLastAccessTime;
-        public long BasicLastWriteTime;
-        public long BasicChangeTime;
+        public AccessMask GrantedAccess;
+        public uint ShareAccess;
         public string OpenId = Guid.NewGuid().ToString("N");
+
+        // Byte range locks live on the file, so every open of a path shares one list.
         public List<WinLockFile> Locks = new List<WinLockFile>();
 
         /// <summary>
@@ -1230,6 +1238,22 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal GuestNamedPipe Pipe;
 
         public WinDeviceDelegate Handler;
+
+        // No inode in the VFS, so the file id comes from the path. Every site that reports one uses this.
+        public static ulong MakeFileId(string Path)
+        {
+            ulong Hash = 14695981039346656037UL;
+            if (Path == null)
+                return Hash;
+
+            for (int i = 0; i < Path.Length; i++)
+            {
+                Hash ^= char.ToLowerInvariant(Path[i]);
+                Hash *= 1099511628211UL;
+            }
+
+            return Hash;
+        }
 
         public WindowsFileStream GetFileStream(bool CreateWriteDirectories = false)
         {

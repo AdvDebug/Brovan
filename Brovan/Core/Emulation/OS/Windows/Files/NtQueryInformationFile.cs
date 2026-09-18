@@ -19,6 +19,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint FileNetworkOpenInformationSize = 0x38;
         private const uint FileAttributeTagInformationSize = 0x08;
         private const uint FileIdInformationSize = 0x18;
+        private const uint FileStreamInformationFixedSize = 0x18;
+        private const uint FileCompressionInformationSize = 0x10;
+        private const uint FileStatInformationSize = 0x48;
         private const uint FileAllInformationFixedSize = 0x68;
         private const uint FileAllInformationNameOffset = 0x64;
 
@@ -80,6 +83,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return HandleFilePipeInformation(Instance, File, IoStatusBlock, FileInformation, Length, InfoClass);
                 case FILE_INFORMATION_CLASS.FileIdInformation:
                     return HandleFileIdInformation(Instance, File, IoStatusBlock, FileInformation, Length);
+                case FILE_INFORMATION_CLASS.FileAlternateNameInformation:
+                    return HandleFileAlternateNameInformation(Instance, File, IoStatusBlock, FileInformation, Length);
+                case FILE_INFORMATION_CLASS.FileStreamInformation:
+                    return HandleFileStreamInformation(Instance, File, IoStatusBlock, FileInformation, Length);
+                case FILE_INFORMATION_CLASS.FileCompressionInformation:
+                    return HandleFileCompressionInformation(Instance, File, IoStatusBlock, FileInformation, Length);
+                case FILE_INFORMATION_CLASS.FileStatInformation:
+                    return HandleFileStatInformation(Instance, File, IoStatusBlock, FileInformation, Length);
                 default:
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                         Instance.TriggerEventMessage($"[!] NtQueryInformationFile: FileInformationClass {InfoClass} (0x{FileInformationClass:X}) not implemented.", LogFlags.Syscall);
@@ -289,6 +300,125 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        // No 8.3 table in the VFS, so the long name is also the alternate name.
+        private static NTSTATUS HandleFileAlternateNameInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation, uint Length)
+        {
+            string Leaf = System.IO.Path.GetFileName(File.Path ?? string.Empty);
+            int NameByteLength = System.Text.Encoding.Unicode.GetByteCount(Leaf);
+            ulong RequiredSize = 4UL + (ulong)NameByteLength;
+
+            if (Length < 4)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            Span<byte> NameBytes = Instance.WinHelper.Shared.GetSpan((uint)NameByteLength);
+            if (NameByteLength != 0)
+                System.Text.Encoding.Unicode.GetBytes(Leaf.AsSpan(), NameBytes);
+
+            Instance._emulator.WriteMemory(FileInformation + 0x00, (uint)NameByteLength, 4);
+            if (Length < RequiredSize)
+            {
+                uint ToWrite = (uint)(Length - 4);
+                if (ToWrite != 0)
+                    Instance._emulator.WriteMemory(FileInformation + 0x04, NameBytes, ToWrite);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_BUFFER_OVERFLOW, RequiredSize);
+                return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+            }
+
+            if (NameByteLength != 0)
+                Instance._emulator.WriteMemory(FileInformation + 0x04, NameBytes, (uint)NameByteLength);
+
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, RequiredSize);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // One unnamed data stream per file, which is all the VFS stores.
+        private static NTSTATUS HandleFileStreamInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation, uint Length)
+        {
+            GetFileMetadata(File, out _, out _, out _, out _, out _, out ulong EndOfFile, out ulong AllocationSize, out bool IsDirectory);
+
+            if (IsDirectory)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            const string StreamName = "::$DATA";
+            int NameByteLength = System.Text.Encoding.Unicode.GetByteCount(StreamName);
+            ulong RequiredSize = FileStreamInformationFixedSize + (ulong)NameByteLength;
+
+            if (Length < RequiredSize)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_BUFFER_OVERFLOW, RequiredSize);
+                return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+            }
+
+            Span<byte> NameBytes = Instance.WinHelper.Shared.GetSpan((uint)NameByteLength);
+            System.Text.Encoding.Unicode.GetBytes(StreamName.AsSpan(), NameBytes);
+
+            Instance._emulator.WriteMemory(FileInformation + 0x00, 0u, 4);
+            Instance._emulator.WriteMemory(FileInformation + 0x04, (uint)NameByteLength, 4);
+            Instance._emulator.WriteMemory(FileInformation + 0x08, EndOfFile, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x10, AllocationSize, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x18, NameBytes, (uint)NameByteLength);
+
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, RequiredSize);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS HandleFileCompressionInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation, uint Length)
+        {
+            if (Length < FileCompressionInformationSize)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            GetFileMetadata(File, out _, out _, out _, out _, out _, out ulong EndOfFile, out _, out _);
+
+            Instance._emulator.WriteMemory(FileInformation + 0x00, EndOfFile, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x08, (ushort)0, 2);
+            Instance.WinHelper.WriteByte(FileInformation + 0x0A, 0x00);
+            Instance.WinHelper.WriteByte(FileInformation + 0x0B, 0x00);
+            Instance.WinHelper.WriteZeroMemory(FileInformation + 0x0C, 4);
+
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileCompressionInformationSize);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS HandleFileStatInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation, uint Length)
+        {
+            if (Length < FileStatInformationSize)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+            }
+
+            GetFileMetadata(File, out FileAttributes Attributes, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long ChangeTime, out ulong EndOfFile, out ulong AllocationSize, out bool IsDirectory);
+
+            if (Attributes == 0)
+                Attributes = FileAttributes.Normal;
+            if (IsDirectory && (Attributes & FileAttributes.Directory) == 0)
+                Attributes |= FileAttributes.Directory;
+
+            Instance._emulator.WriteMemory(FileInformation + 0x00, WinFile.MakeFileId(File.Path), 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x08, (ulong)CreationTime, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x10, (ulong)LastAccessTime, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x18, (ulong)LastWriteTime, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x20, (ulong)ChangeTime, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x28, AllocationSize, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x30, EndOfFile, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x38, (uint)Attributes, 4);
+            Instance._emulator.WriteMemory(FileInformation + 0x3C, 0u, 4);
+            Instance._emulator.WriteMemory(FileInformation + 0x40, 1u, 4);
+            Instance._emulator.WriteMemory(FileInformation + 0x44, (uint)AccessMask.FileAllAccess, 4);
+
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileStatInformationSize);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
         private static NTSTATUS HandleFileIdInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation, uint Length)
         {
             if (Length < FileIdInformationSize)
@@ -297,13 +427,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
-            ulong Hash = 14695981039346656037UL;
-            string Path = File.Path ?? string.Empty;
-            for (int i = 0; i < Path.Length; i++)
-            {
-                Hash ^= Path[i];
-                Hash *= 1099511628211UL;
-            }
+            ulong Hash = WinFile.MakeFileId(File.Path);
 
             Instance._emulator.WriteMemory(FileInformation + 0x00, 0x1234ABCDu);
             Instance._emulator.WriteMemory(FileInformation + 0x08, Hash, 8);

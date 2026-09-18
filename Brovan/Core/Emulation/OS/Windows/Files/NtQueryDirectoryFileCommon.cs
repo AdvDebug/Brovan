@@ -17,10 +17,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(IoStatusBlock, 0x10) || !Instance.IsRegionMapped(FileInformation, Length))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (GetHeaderSize(FileInformationClass) == 0)
+            ulong ClassHeaderSize = GetHeaderSize(FileInformationClass);
+            if (ClassHeaderSize == 0)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
                 return NTSTATUS.STATUS_INVALID_INFO_CLASS;
+            }
+
+            // A buffer under the fixed part is a length error, not an overflow.
+            if (Length < ClassHeaderSize)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
             WinFile DirectoryHandle = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
@@ -48,20 +56,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool MaskProvided = !string.IsNullOrEmpty(Mask);
             bool MaskChanged = MaskProvided && !string.Equals(DirectoryHandle.DirectoryMask ?? string.Empty, Mask, StringComparison.OrdinalIgnoreCase);
 
+            bool FirstQueryOfScan = false;
             if (DirectoryHandle.DirectoryEntries == null || RestartScan || MaskChanged)
             {
                 string EffectiveMask = MaskProvided ? Mask : (DirectoryHandle.DirectoryMask ?? string.Empty);
-                DirectoryHandle.DirectoryEntries = ScanDirectory(HostPath, GeneralHelper.IO.ResolveNativeHostPath(DirectoryHandle.Path), EffectiveMask);
+                DirectoryHandle.DirectoryEntries = ScanDirectory(HostPath, GeneralHelper.IO.ResolveNativeHostPath(DirectoryHandle.Path), EffectiveMask, DirectoryHandle.Path);
                 DirectoryHandle.DirectoryIndex = 0;
                 DirectoryHandle.DirectoryMask = EffectiveMask;
+                FirstQueryOfScan = true;
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtQueryDirectoryFile: Enumerating directory \"{DirectoryHandle.Path}\".", LogFlags.Syscall);
             }
 
             if (DirectoryHandle.DirectoryIndex >= DirectoryHandle.DirectoryEntries.Count)
             {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_NO_MORE_FILES, 0);
-                return NTSTATUS.STATUS_NO_MORE_FILES;
+                // An empty first query is STATUS_NO_SUCH_FILE, which FindFirstFile maps to ERROR_FILE_NOT_FOUND.
+                NTSTATUS EmptyStatus = FirstQueryOfScan ? NTSTATUS.STATUS_NO_SUCH_FILE : NTSTATUS.STATUS_NO_MORE_FILES;
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, EmptyStatus, 0);
+                return EmptyStatus;
             }
 
             ulong CurrentOffset = 0;
@@ -130,6 +142,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return 0x5E;
                 case FILE_INFORMATION_CLASS.FileNamesInformation:
                     return 0x0C;
+                case FILE_INFORMATION_CLASS.FileIdFullDirectoryInformation:
+                    return 0x50;
+                case FILE_INFORMATION_CLASS.FileIdBothDirectoryInformation:
+                    return 0x68;
                 default:
                     return 0;
             }
@@ -150,6 +166,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return;
                 case FILE_INFORMATION_CLASS.FileNamesInformation:
                     WriteFileNamesInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
+                    return;
+                case FILE_INFORMATION_CLASS.FileIdFullDirectoryInformation:
+                    WriteFileIdFullDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
+                    return;
+                case FILE_INFORMATION_CLASS.FileIdBothDirectoryInformation:
+                    WriteFileIdBothDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
                     return;
                 default:
                     throw new NotSupportedException();
@@ -192,6 +214,38 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(Address + 0x5E, FileNameBytes, (uint)FileNameBytes.Length);
         }
 
+        private static void WriteFileIdFullDirectoryInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
+        {
+            WriteFileDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
+            Instance._emulator.WriteMemory(Address + 0x40, 0u, 4);
+            Instance._emulator.WriteMemory(Address + 0x44, 0u, 4);
+            Instance._emulator.WriteMemory(Address + 0x48, Entry.FileId, 8);
+            if (FileNameBytes.Length != 0)
+                Instance._emulator.WriteMemory(Address + 0x50, FileNameBytes, (uint)FileNameBytes.Length);
+        }
+
+        private static void WriteFileIdBothDirectoryInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
+        {
+            WriteFileDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
+            Instance._emulator.WriteMemory(Address + 0x40, 0u, 4);
+            Instance.WinHelper.WriteByte(Address + 0x44, 0x00);
+            Instance.WinHelper.WriteByte(Address + 0x45, 0x00);
+            Instance.WinHelper.WriteZeroMemory(Address + 0x46, 0x1A);
+            Instance._emulator.WriteMemory(Address + 0x60, Entry.FileId, 8);
+            if (FileNameBytes.Length != 0)
+                Instance._emulator.WriteMemory(Address + 0x68, FileNameBytes, (uint)FileNameBytes.Length);
+        }
+
+        private static string CombineGuestPath(string DirectoryPath, string Name)
+        {
+            if (string.IsNullOrEmpty(DirectoryPath))
+                return Name;
+
+            return DirectoryPath.EndsWith("\\", StringComparison.Ordinal)
+                ? DirectoryPath + Name
+                : DirectoryPath + "\\" + Name;
+        }
+
         private static void WriteFileNamesInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
         {
             Span<byte> Buf = stackalloc byte[0x0C];
@@ -203,7 +257,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(Address + 0x0C, FileNameBytes);
         }
 
-        private static List<WinDirectoryEntry> ScanDirectory(string HostPath, string NativePath, string Mask)
+        private static List<WinDirectoryEntry> ScanDirectory(string HostPath, string NativePath, string Mask, string GuestPath)
         {
             List<WinDirectoryEntry> Entries = new List<WinDirectoryEntry>();
             HashSet<string> Seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -226,25 +280,26 @@ namespace Brovan.Core.Emulation.OS.Windows
                         CreationTime = SelfCreation,
                         LastAccessTime = SelfAccess,
                         LastWriteTime = SelfWrite,
-                        ChangeTime = SelfWrite
+                        ChangeTime = SelfWrite,
+                        FileId = WinFile.MakeFileId(CombineGuestPath(GuestPath, Dot))
                     });
                 }
             }
             catch { }
 
-            AddDirectoryContents(Entries, Seen, HostPath, Mask);
+            AddDirectoryContents(Entries, Seen, HostPath, Mask, GuestPath);
 
             // The overlay shadows the host directory rather than replacing it, so both have to be listed.
             if (!string.IsNullOrEmpty(NativePath) &&
                 !string.Equals(NativePath, HostPath, StringComparison.OrdinalIgnoreCase) &&
                 Directory.Exists(NativePath))
-                AddDirectoryContents(Entries, Seen, NativePath, Mask);
+                AddDirectoryContents(Entries, Seen, NativePath, Mask, GuestPath);
 
             Entries.Sort((A, B) => string.Compare(A.Name, B.Name, StringComparison.OrdinalIgnoreCase));
             return Entries;
         }
 
-        private static void AddDirectoryContents(List<WinDirectoryEntry> Entries, HashSet<string> Seen, string DirectoryPath, string Mask)
+        private static void AddDirectoryContents(List<WinDirectoryEntry> Entries, HashSet<string> Seen, string DirectoryPath, string Mask, string GuestPath)
         {
             IEnumerable<string> FileSystemEntries;
 
@@ -307,7 +362,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     CreationTime = CreationUtc.ToFileTimeUtc(),
                     LastAccessTime = LastAccessUtc.ToFileTimeUtc(),
                     LastWriteTime = LastWriteUtc.ToFileTimeUtc(),
-                    ChangeTime = LastWriteUtc.ToFileTimeUtc()
+                    ChangeTime = LastWriteUtc.ToFileTimeUtc(),
+                    FileId = WinFile.MakeFileId(CombineGuestPath(GuestPath, Name))
                 });
             }
 

@@ -8,6 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const uint FILE_DIRECTORY_FILE = 0x00000001;
         private const uint FILE_NON_DIRECTORY_FILE = 0x00000040;
+        private const uint FILE_OPEN = 1;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -91,6 +92,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_CANNOT_DELETE;
             }
 
+            if (!IsDirectory)
+            {
+                using WindowsFileStream Probe = WindowsFileStream.FromGuestPath(Path);
+                if (NtCreateFile.RefusesWriteAccess(Probe, (AccessMask)DesiredAccess, FILE_OPEN))
+                    return NTSTATUS.STATUS_ACCESS_DENIED;
+            }
+
+            if (!Instance.WinHelper.ShareAccessAllows(Path, (AccessMask)DesiredAccess, ShareAccess))
+                return NTSTATUS.STATUS_SHARING_VIOLATION;
+
             WinFile FileObj = new WinFile
             {
                 Path = Path,
@@ -99,10 +110,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Directory = IsDirectory,
                 Position = 0,
                 Handler = null,
-                DeletePending = DeleteOnClose
+                DeletePending = DeleteOnClose,
+                GrantedAccess = (AccessMask)DesiredAccess,
+                ShareAccess = ShareAccess
             };
 
             Instance.WinHelper.WinFiles.Add(FileObj);
+            Instance.WinHelper.RegisterOpenFile(FileObj);
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, (AccessMask)DesiredAccess);
             Instance.WinHelper.AddWinHandle(Handle);

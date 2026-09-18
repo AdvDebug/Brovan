@@ -153,22 +153,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (FileObj.Directory)
                 Attributes |= (uint)FileAttributes.Directory;
 
-            ApplyBasicInformation(FileObj, Attributes, CreationTime, LastAccessTime, LastWriteTime, ChangeTime);
+            WindowsFileStream Stream = FileObj.GetFileStream(true);
 
-            // A zero attribute field means "leave the attributes alone".
+            // A zero field leaves that attribute or timestamp alone.
             if (Attributes != 0)
-                FileObj.GetFileStream(true)?.TryApplyAttributes((FileAttributes)Attributes);
+                Stream?.TryApplyAttributes((FileAttributes)Attributes);
 
-            foreach (WinFile OtherFile in Instance.WinHelper.WinFiles)
-            {
-                if (OtherFile == null)
-                    continue;
-
-                if (!string.Equals(OtherFile.Path, FileObj.Path, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                ApplyBasicInformation(OtherFile, Attributes, CreationTime, LastAccessTime, LastWriteTime, ChangeTime);
-            }
+            Stream?.TryApplyTimes(CreationTime, LastAccessTime, LastWriteTime);
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileBasicInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
@@ -220,6 +211,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_NOT_SAME_DEVICE, 0);
                 return NTSTATUS.STATUS_NOT_SAME_DEVICE;
+            }
+
+            // A rename onto the same name is a no-op, not a collision.
+            if (string.Equals(SourcePath, TargetPath, StringComparison.OrdinalIgnoreCase))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, Length);
+                return NTSTATUS.STATUS_SUCCESS;
             }
 
             WindowsFileStream TargetStream = WindowsFileStream.FromGuestPath(TargetPath);
@@ -290,9 +288,25 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_CANNOT_DELETE;
             }
 
+            if (Delete && !IsDeletableDirectory(FileObj))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_DIRECTORY_NOT_EMPTY, 0);
+                return NTSTATUS.STATUS_DIRECTORY_NOT_EMPTY;
+            }
+
             FileObj.DeletePending = Delete;
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileDispositionInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT rejects a non-empty directory at the disposition call, not at the close.
+        private static bool IsDeletableDirectory(WinFile FileObj)
+        {
+            if (!FileObj.Directory)
+                return true;
+
+            WindowsFileStream Stream = FileObj.GetFileStream();
+            return Stream == null || Stream.IsDirectoryEmpty;
         }
 
         private static NTSTATUS HandleFileDispositionInformationEx(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong IoStatusBlock, ulong FileInformation, uint Length)
@@ -318,6 +332,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_CANNOT_DELETE, 0);
                 return NTSTATUS.STATUS_CANNOT_DELETE;
+            }
+
+            if (Delete && !IsDeletableDirectory(FileObj))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_DIRECTORY_NOT_EMPTY, 0);
+                return NTSTATUS.STATUS_DIRECTORY_NOT_EMPTY;
             }
 
             FileObj.DeletePending = Delete;
@@ -387,12 +407,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
-            if (Size > int.MaxValue)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_NO_MEMORY, 0);
-                return NTSTATUS.STATUS_NO_MEMORY;
-            }
-
             WindowsFileStream Stream = FileObj.GetFileStream(true);
             if (Stream == null)
             {
@@ -402,6 +416,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             try
             {
+                // An allocation size only reserves. It trims below the end of file and never extends it.
+                if (!EndOfFile)
+                {
+                    if (Size >= Stream.Length)
+                    {
+                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, RequiredSize);
+                        return NTSTATUS.STATUS_SUCCESS;
+                    }
+                }
+
                 Stream.SetLength(Size);
             }
             catch
@@ -418,19 +442,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static void ApplyBasicInformation(WinFile FileObj, uint Attributes, long CreationTime, long LastAccessTime, long LastWriteTime, long ChangeTime)
-        {
-            if (FileObj == null)
-                return;
-
-            FileObj.HasBasicInformation = true;
-            FileObj.BasicFileAttributes = Attributes;
-            FileObj.BasicCreationTime = CreationTime;
-            FileObj.BasicLastAccessTime = LastAccessTime;
-            FileObj.BasicLastWriteTime = LastWriteTime;
-            FileObj.BasicChangeTime = ChangeTime;
-        }
-
         private static void UpdateOpenFilePaths(BinaryEmulator Instance, string SourcePath, string TargetPath, bool DirectoryRename)
         {
             if (string.IsNullOrEmpty(SourcePath) || string.IsNullOrEmpty(TargetPath))
@@ -441,11 +452,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (FileObj == null || string.IsNullOrEmpty(FileObj.Path))
                     continue;
 
+                string OldPath = FileObj.Path;
+
                 if (DirectoryRename)
                 {
                     if (string.Equals(FileObj.Path, SourcePath, StringComparison.OrdinalIgnoreCase))
                     {
                         FileObj.Path = TargetPath;
+                        Instance.WinHelper.RetargetOpenFile(FileObj, OldPath);
                         continue;
                     }
 
@@ -455,13 +469,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                         string Suffix = FileObj.Path.Substring(Prefix.Length);
                         string NewPrefix = TargetPath.EndsWith("\\", StringComparison.Ordinal) ? TargetPath : TargetPath + "\\";
                         FileObj.Path = NewPrefix + Suffix;
+                        Instance.WinHelper.RetargetOpenFile(FileObj, OldPath);
                     }
 
                     continue;
                 }
 
                 if (string.Equals(FileObj.Path, SourcePath, StringComparison.OrdinalIgnoreCase))
+                {
                     FileObj.Path = TargetPath;
+                    Instance.WinHelper.RetargetOpenFile(FileObj, OldPath);
+                }
             }
         }
 

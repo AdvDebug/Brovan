@@ -214,6 +214,60 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        // A zero field leaves that timestamp alone. -1 means "stop updating it", which the VFS cannot express.
+        public bool TryApplyTimes(long CreationTime, long LastAccessTime, long LastWriteTime)
+        {
+            if (CreationTime <= 0 && LastAccessTime <= 0 && LastWriteTime <= 0)
+                return true;
+
+            if (string.IsNullOrWhiteSpace(WriteHostPath))
+                return false;
+
+            try
+            {
+                bool Directory = ExistsAsDirectory;
+                if (Directory)
+                {
+                    System.IO.Directory.CreateDirectory(WriteHostPath);
+                }
+                else if (ExistsAsFile)
+                {
+                    lock (HandleLock)
+                    {
+                        CloseCachedHandle();
+                        EnsureWriteStore(true);
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+
+                if (CreationTime > 0)
+                    SetTime(Directory, WriteHostPath, CreationTime, System.IO.File.SetCreationTimeUtc, System.IO.Directory.SetCreationTimeUtc);
+                if (LastAccessTime > 0)
+                    SetTime(Directory, WriteHostPath, LastAccessTime, System.IO.File.SetLastAccessTimeUtc, System.IO.Directory.SetLastAccessTimeUtc);
+                if (LastWriteTime > 0)
+                    SetTime(Directory, WriteHostPath, LastWriteTime, System.IO.File.SetLastWriteTimeUtc, System.IO.Directory.SetLastWriteTimeUtc);
+
+                DropStoreProbes();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void SetTime(bool Directory, string HostPath, long FileTime, Action<string, DateTime> FileSetter, Action<string, DateTime> DirectorySetter)
+        {
+            DateTime Value = DateTime.FromFileTimeUtc(FileTime);
+            if (Directory)
+                DirectorySetter(HostPath, Value);
+            else
+                FileSetter(HostPath, Value);
+        }
+
         public bool ExistsAsDirectory
         {
             get
@@ -227,6 +281,33 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 ProbeReadStore();
                 return ReadProbeIsDirectory;
+            }
+        }
+
+        // The overlay shadows the read layer rather than replacing it, so both have to be checked.
+        public bool IsDirectoryEmpty
+        {
+            get
+            {
+                foreach (string Candidate in new[] { WriteHostPath, ReadHostPath })
+                {
+                    if (string.IsNullOrWhiteSpace(Candidate))
+                        continue;
+
+                    try
+                    {
+                        if (!Directory.Exists(Candidate))
+                            continue;
+
+                        foreach (string Unused in Directory.EnumerateFileSystemEntries(Candidate))
+                            return false;
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                return true;
             }
         }
 
