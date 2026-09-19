@@ -2,6 +2,7 @@ using System.ComponentModel;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Platform;
 using Avalonia.Platform.Storage;
@@ -22,7 +23,6 @@ namespace BrovanGUI.Views
             if (OperatingSystem.IsWindows())
             {
                 ExtendClientAreaToDecorationsHint = true;
-                ExtendClientAreaChromeHints = ExtendClientAreaChromeHints.PreferSystemChrome;
                 ExtendClientAreaTitleBarHeightHint = 40;
                 ContentHost.Margin = new Thickness(0, 40, 0, 0);
             }
@@ -75,12 +75,12 @@ namespace BrovanGUI.Views
 
         private static void DragOver(object? Sender, DragEventArgs Event)
         {
-            Event.DragEffects = Event.Data.Contains(DataFormats.Files) ? DragDropEffects.Copy : DragDropEffects.None;
+            Event.DragEffects = Event.DataTransfer.Contains(DataFormat.File) ? DragDropEffects.Copy : DragDropEffects.None;
         }
 
         private void Drop(object? Sender, DragEventArgs Event)
         {
-            IEnumerable<IStorageItem>? Items = Event.Data.GetFiles();
+            IStorageItem[]? Items = Event.DataTransfer.TryGetFiles();
             if (Items == null)
                 return;
 

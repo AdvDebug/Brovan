@@ -30,10 +30,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The projects target net8.0, but Avalonia's source generator needs Roslyn >= 4.14, which only
+      # ships with the .NET 9 SDK.
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            9.0.x
 
       - name: Restore
         run: |

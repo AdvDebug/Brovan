@@ -15,15 +15,14 @@
         <PublishAot>true</PublishAot>
         <StripSymbols>true</StripSymbols>
         <Version>0.1.0</Version>
+        <AvaloniaVersion>12.1.2</AvaloniaVersion>
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="Avalonia" Version="12.1.2" />
-        <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />
-        <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.2" />
-        <PackageReference Include="Avalonia.Desktop" Version="12.1.2" />
-        <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
-        <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.22" />
+        <PackageReference Include="Avalonia" Version="$(AvaloniaVersion)" />
+        <PackageReference Include="Avalonia.Desktop" Version="$(AvaloniaVersion)" />
+        <PackageReference Include="Avalonia.Themes.Fluent" Version="$(AvaloniaVersion)" />
+        <PackageReference Include="Avalonia.Fonts.Inter" Version="$(AvaloniaVersion)" />
     </ItemGroup>
 
 </Project>

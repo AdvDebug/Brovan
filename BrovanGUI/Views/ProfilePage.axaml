@@ -61,10 +61,10 @@
                         </TextBox>
                     </views:SettingCard>
                     <views:SettingCard Header="Arguments" Description="Command line passed to the program.">
-                        <TextBox Classes="form" Text="{Binding Arguments}" Watermark="None" />
+                        <TextBox Classes="form" Text="{Binding Arguments}" PlaceholderText="None" />
                     </views:SettingCard>
                     <views:SettingCard Header="Start in" Description="The folder the program starts in.">
-                        <TextBox Classes="form" Text="{Binding WorkingDirectory}" Watermark="The program's own folder">
+                        <TextBox Classes="form" Text="{Binding WorkingDirectory}" PlaceholderText="The program's own folder">
                             <TextBox.InnerRightContent>
                                 <Button Classes="iconbtn inner" Command="{Binding BrowseWorkingDirectoryCommand}" ToolTip.Tip="Browse">
                                     <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconFolder}" />

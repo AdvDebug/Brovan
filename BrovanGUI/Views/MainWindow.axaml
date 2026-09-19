@@ -87,7 +87,7 @@
                     <Button Classes="iconbtn" Command="{Binding ResetCommand}" IsVisible="{Binding IsOverridden}" ToolTip.Tip="Back to the default">
                         <Path Classes="icon muted" Width="13" Height="13" Data="{StaticResource IconReset}" />
                     </Button>
-                    <TextBox Classes="setting" Text="{Binding TextValue}" Watermark="Default" VerticalAlignment="Center" />
+                    <TextBox Classes="setting" Text="{Binding TextValue}" PlaceholderText="Default" VerticalAlignment="Center" />
                 </StackPanel>
             </views:SettingCard>
         </DataTemplate>
@@ -98,7 +98,7 @@
                     <Button Classes="iconbtn" Command="{Binding ResetCommand}" IsVisible="{Binding IsOverridden}" ToolTip.Tip="Back to the default">
                         <Path Classes="icon muted" Width="13" Height="13" Data="{StaticResource IconReset}" />
                     </Button>
-                    <TextBox Classes="list" Text="{Binding TextValue}" Watermark="None" VerticalAlignment="Center" />
+                    <TextBox Classes="list" Text="{Binding TextValue}" PlaceholderText="None" VerticalAlignment="Center" />
                 </StackPanel>
             </views:SettingCard>
         </DataTemplate>
@@ -231,7 +231,7 @@
                                    ViewportSize="{Binding #Log.Bounds.Width}" Value="{Binding #Log.HorizontalOffset, Mode=TwoWay}"
                                    SmallChange="20" LargeChange="200" />
                         <TextBox Grid.Row="2" Grid.ColumnSpan="2" Classes="output" Text="{Binding Output.Input}" KeyDown="InputKeyDown" Margin="12,4,12,8"
-                                 Watermark="Type a line for the program and press Enter" />
+                                 PlaceholderText="Type a line for the program and press Enter" />
                     </Grid>
                 </Grid>
             </Border>
