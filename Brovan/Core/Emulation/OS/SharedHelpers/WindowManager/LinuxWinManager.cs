@@ -175,6 +175,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial int XFreePixmap(IntPtr display, IntPtr pixmap);
 
         [LibraryImport("libX11.so.6")]
+        public static partial IntPtr XCreatePixmap(IntPtr display, IntPtr drawable, uint width, uint height, uint depth);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XDefaultDepth(IntPtr display, int screen);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial IntPtr XGetImage(IntPtr display, IntPtr drawable, int x, int y, uint width, uint height,
+            nuint planeMask, int format);
+
+        [LibraryImport("libX11.so.6")]
         public static partial int XWarpPointer(IntPtr display, IntPtr sourceWindow, IntPtr destinationWindow,
             int sourceX, int sourceY, uint sourceWidth, uint sourceHeight, int destinationX, int destinationY);
 
@@ -319,6 +329,21 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public const int XA_WM_CLASS = 67;
 
         public const int GXcopy = 3;
+        public const int ZPixmap = 2;
+
+        // XDestroyImage is a macro over this table, so the entry has to be called directly.
+        public const int XImageDestroyFunctionOffset = 96;
+
+        [StructLayout(LayoutKind.Explicit)]
+        public struct XImage
+        {
+            [FieldOffset(0)] public int Width;
+            [FieldOffset(4)] public int Height;
+            [FieldOffset(16)] public IntPtr Data;
+            [FieldOffset(40)] public int Depth;
+            [FieldOffset(44)] public int BytesPerLine;
+            [FieldOffset(48)] public int BitsPerPixel;
+        }
         public const int GXxor = 6;
         public const int GXinvert = 10;
 
@@ -569,6 +594,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private IntPtr _colormap;
         private IntPtr _gc;
         private IntPtr _fontStruct;
+        private IntPtr _rasterPixmap;
+        private IntPtr _rasterGc;
+        private int _rasterWidth;
+        private int _rasterHeight;
         private nuint _whitePixel;
         private nuint _blackPixel;
         private uint _modifierState;
@@ -1224,6 +1253,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     _gc = IntPtr.Zero;
                 }
 
+                ReleaseRasterSurface();
                 _pixelCache.Clear();
                 X11.XCloseDisplay(_xDisplay);
                 _xDisplay = IntPtr.Zero;
@@ -1722,6 +1752,135 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
 
             X11.XDrawString(_xDisplay, windowHandle, gc, textX, textY, text, text.Length);
+        }
+
+        public unsafe bool RasterizeText(IntPtr font, string text, Span<uint> pixels, int width, int height,
+            int x, int y, uint textColor, uint backColor, bool opaque)
+        {
+            int count = width * height;
+            if (_xDisplay == IntPtr.Zero || width <= 0 || height <= 0 || pixels.Length < count)
+                return false;
+
+            IntPtr fontStruct = ResolveFont(font);
+            if (fontStruct == IntPtr.Zero || !EnsureRasterSurface(width, height, out IntPtr pixmap, out IntPtr gc))
+                return false;
+
+            X11.XFontStruct metrics = ReadFont(fontStruct);
+
+            SetGraphicsFunction(gc, X11.GXcopy);
+            X11.XSetForeground(_xDisplay, gc, 0);
+            X11.XFillRectangle(_xDisplay, pixmap, gc, 0, 0, (uint)width, (uint)height);
+
+            if (!string.IsNullOrEmpty(text))
+            {
+                X11.XSetForeground(_xDisplay, gc, _whitePixel);
+                X11.XSetFont(_xDisplay, gc, metrics.Fid);
+                X11.XDrawString(_xDisplay, pixmap, gc, x, y + metrics.Ascent, text, text.Length);
+            }
+
+            IntPtr image = X11.XGetImage(_xDisplay, pixmap, 0, 0, (uint)width, (uint)height, unchecked((nuint)~0UL), X11.ZPixmap);
+            if (image == IntPtr.Zero)
+                return false;
+
+            X11.XImage view = *(X11.XImage*)image;
+            if (view.Data == IntPtr.Zero || view.BytesPerLine <= 0)
+            {
+                DestroyImage(image);
+                return false;
+            }
+
+            // The image is a coverage mask, not colour.
+            uint foreground = HostColor.FromColorRef(textColor);
+            uint background = HostColor.FromColorRef(backColor);
+            int bytesPerPixel = Math.Max(1, view.BitsPerPixel / 8);
+
+            for (int row = 0; row < height; row++)
+            {
+                byte* line = (byte*)view.Data + (long)row * view.BytesPerLine;
+                Span<uint> target = pixels.Slice(row * width, width);
+
+                for (int column = 0; column < width; column++)
+                {
+                    uint sample = 0;
+                    byte* sourcePixel = line + column * bytesPerPixel;
+                    for (int b = 0; b < bytesPerPixel; b++)
+                        sample |= (uint)sourcePixel[b] << (b * 8);
+
+                    if (sample != 0)
+                        target[column] = foreground;
+                    else if (opaque)
+                        target[column] = background;
+                }
+            }
+
+            DestroyImage(image);
+            return true;
+        }
+
+        private unsafe void DestroyImage(IntPtr image)
+        {
+            delegate* unmanaged<IntPtr, int> destroy =
+                *(delegate* unmanaged<IntPtr, int>*)((byte*)image + X11.XImageDestroyFunctionOffset);
+
+            if (destroy != null)
+                destroy(image);
+        }
+
+        private bool EnsureRasterSurface(int width, int height, out IntPtr pixmap, out IntPtr gc)
+        {
+            if (_rasterPixmap != IntPtr.Zero && _rasterWidth == width && _rasterHeight == height)
+            {
+                pixmap = _rasterPixmap;
+                gc = _rasterGc;
+                return true;
+            }
+
+            ReleaseRasterSurface();
+
+            pixmap = IntPtr.Zero;
+            gc = IntPtr.Zero;
+
+            uint depth = (uint)X11.XDefaultDepth(_xDisplay, _screen);
+            IntPtr created = X11.XCreatePixmap(_xDisplay, X11.XRootWindow(_xDisplay, _screen), (uint)width, (uint)height, depth);
+            if (created == IntPtr.Zero)
+                return false;
+
+            IntPtr createdGc = X11.XCreateGC(_xDisplay, created, 0, IntPtr.Zero);
+            if (createdGc == IntPtr.Zero)
+            {
+                X11.XFreePixmap(_xDisplay, created);
+                return false;
+            }
+
+            _rasterPixmap = created;
+            _rasterGc = createdGc;
+            _rasterWidth = width;
+            _rasterHeight = height;
+
+            pixmap = created;
+            gc = createdGc;
+            return true;
+        }
+
+        private void ReleaseRasterSurface()
+        {
+            if (_xDisplay == IntPtr.Zero)
+                return;
+
+            if (_rasterGc != IntPtr.Zero)
+            {
+                X11.XFreeGC(_xDisplay, _rasterGc);
+                _rasterGc = IntPtr.Zero;
+            }
+
+            if (_rasterPixmap != IntPtr.Zero)
+            {
+                X11.XFreePixmap(_xDisplay, _rasterPixmap);
+                _rasterPixmap = IntPtr.Zero;
+            }
+
+            _rasterWidth = 0;
+            _rasterHeight = 0;
         }
 
         public bool MeasureText(IntPtr font, string text, out int width, out int height)

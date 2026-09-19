@@ -16,6 +16,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private static readonly object MetricsLock = new();
         private static IntPtr _metricsDc = IntPtr.Zero;
+        private static IntPtr _rasterDc = IntPtr.Zero;
+        private static IntPtr _rasterBitmap = IntPtr.Zero;
+        private static IntPtr _rasterPreviousBitmap = IntPtr.Zero;
+        private static IntPtr _rasterBits = IntPtr.Zero;
+        private static int _rasterWidth;
+        private static int _rasterHeight;
         private static IntPtr _metricsFont = IntPtr.Zero;
         private static IntPtr _metricsPreviousFont = IntPtr.Zero;
 
@@ -787,6 +793,118 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return true;
         }
 
+        public unsafe bool RasterizeText(IntPtr font, string text, Span<uint> pixels, int width, int height,
+            int x, int y, uint textColor, uint backColor, bool opaque)
+        {
+            int Count = width * height;
+            if (width <= 0 || height <= 0 || pixels.Length < Count)
+                return false;
+
+            lock (MetricsLock)
+            {
+                if (!EnsureRasterSurface(width, height, out IntPtr hdc, out IntPtr bits))
+                    return false;
+
+                Span<uint> surface = new Span<uint>((void*)bits, Count);
+                pixels.Slice(0, Count).CopyTo(surface);
+
+                IntPtr previousFont = font != IntPtr.Zero ? SelectObject(hdc, font) : IntPtr.Zero;
+                SetTextColor(hdc, unchecked((int)(textColor & 0x00FFFFFF)));
+                SetBkColor(hdc, unchecked((int)(backColor & 0x00FFFFFF)));
+                SetBkMode(hdc, opaque ? OPAQUE : TRANSPARENT);
+
+                RECT rect = new RECT { Left = 0, Top = 0, Right = width, Bottom = height };
+                bool drawn = ExtTextOutW(hdc, x, y, opaque ? ETO_OPAQUE : 0u, ref rect,
+                    text ?? string.Empty, (uint)(text?.Length ?? 0), IntPtr.Zero);
+
+                // The DIB bits are only current once the batch is flushed.
+                GdiFlush();
+
+                if (previousFont != IntPtr.Zero)
+                    SelectObject(hdc, previousFont);
+
+                if (!drawn)
+                    return false;
+
+                surface.CopyTo(pixels.Slice(0, Count));
+            }
+
+            return true;
+        }
+
+        private static unsafe bool EnsureRasterSurface(int width, int height, out IntPtr hdc, out IntPtr bits)
+        {
+            if (_rasterDc != IntPtr.Zero && _rasterWidth == width && _rasterHeight == height)
+            {
+                hdc = _rasterDc;
+                bits = _rasterBits;
+                return true;
+            }
+
+            ReleaseRasterSurface();
+
+            hdc = IntPtr.Zero;
+            bits = IntPtr.Zero;
+
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            if (screenDc == IntPtr.Zero)
+                return false;
+
+            IntPtr memoryDc = CreateCompatibleDC(screenDc);
+            ReleaseDC(IntPtr.Zero, screenDc);
+            if (memoryDc == IntPtr.Zero)
+                return false;
+
+            BITMAPINFOHEADER header = default;
+            header.biSize = (uint)sizeof(BITMAPINFOHEADER);
+            header.biWidth = width;
+            header.biHeight = -height;
+            header.biPlanes = 1;
+            header.biBitCount = 32;
+            header.biCompression = BI_RGB;
+
+            IntPtr dib = CreateDIBSection(memoryDc, ref header, DIB_RGB_COLORS, out IntPtr surface, IntPtr.Zero, 0);
+            if (dib == IntPtr.Zero || surface == IntPtr.Zero)
+            {
+                if (dib != IntPtr.Zero)
+                    DeleteObject(dib);
+                DeleteDC(memoryDc);
+                return false;
+            }
+
+            _rasterPreviousBitmap = SelectObject(memoryDc, dib);
+            _rasterDc = memoryDc;
+            _rasterBitmap = dib;
+            _rasterBits = surface;
+            _rasterWidth = width;
+            _rasterHeight = height;
+
+            hdc = memoryDc;
+            bits = surface;
+            return true;
+        }
+
+        private static void ReleaseRasterSurface()
+        {
+            if (_rasterDc == IntPtr.Zero)
+                return;
+
+            if (_rasterPreviousBitmap != IntPtr.Zero)
+                SelectObject(_rasterDc, _rasterPreviousBitmap);
+
+            if (_rasterBitmap != IntPtr.Zero)
+                DeleteObject(_rasterBitmap);
+
+            DeleteDC(_rasterDc);
+
+            _rasterDc = IntPtr.Zero;
+            _rasterBitmap = IntPtr.Zero;
+            _rasterPreviousBitmap = IntPtr.Zero;
+            _rasterBits = IntPtr.Zero;
+            _rasterWidth = 0;
+            _rasterHeight = 0;
+        }
+
         private static IntPtr EnsureMetricsDc()
         {
             if (_metricsDc != IntPtr.Zero)
@@ -1408,6 +1526,36 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const int STOCK_OBJECT_DEFAULT_GUI_FONT = 17;
 
         private const int TRANSPARENT = 1;
+        private const int OPAQUE = 2;
+        private const uint ETO_OPAQUE = 0x0002;
+        private const uint BI_RGB = 0;
+        private const uint DIB_RGB_COLORS = 0;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BITMAPINFOHEADER
+        {
+            public uint biSize;
+            public int biWidth;
+            public int biHeight;
+            public ushort biPlanes;
+            public ushort biBitCount;
+            public uint biCompression;
+            public uint biSizeImage;
+            public int biXPelsPerMeter;
+            public int biYPelsPerMeter;
+            public uint biClrUsed;
+            public uint biClrImportant;
+        }
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER pbmi, uint usage,
+            out IntPtr ppvBits, IntPtr hSection, uint offset);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern bool DeleteDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool GdiFlush();
 
         [DllImport("gdi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

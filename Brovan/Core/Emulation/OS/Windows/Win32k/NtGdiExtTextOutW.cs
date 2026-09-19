@@ -16,9 +16,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             uint Count = (uint)Instance.WinHelper.GetArg(6);
             ulong DxPtr = Instance.WinHelper.GetArg(7);
 
+            string Text = string.Empty;
+            if (StringPtr != 0 && Count > 0)
+            {
+                Text = Instance._emulator.ReadMemoryString(StringPtr, (int)(Count * 2), System.Text.Encoding.Unicode)?.TrimEnd('\0') ?? string.Empty;
+            }
+
             ulong Hwnd = Instance.WinHelper.GetHwndFromDc(Hdc);
             if (Hwnd == 0)
             {
+                Win32kHelper.TryRenderTextToDcBitmap(Instance, Hdc, Text, X, Y, Options);
                 Instance.SetRawSyscallReturn(1);
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -28,12 +35,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 Instance.SetRawSyscallReturn(1);
                 return NTSTATUS.STATUS_SUCCESS;
-            }
-
-            string Text = string.Empty;
-            if (StringPtr != 0 && Count > 0)
-            {
-                Text = Instance._emulator.ReadMemoryString(StringPtr, (int)(Count * 2), System.Text.Encoding.Unicode)?.TrimEnd('\0') ?? string.Empty;
             }
 
             int RectLeft = 0, RectTop = 0, RectRight = 0, RectBottom = 0;

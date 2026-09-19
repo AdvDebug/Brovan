@@ -630,12 +630,23 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         byte PitchAndFamily,
         string FaceName);
 
+    public static class HostColor
+    {
+        // A COLORREF is 0x00BBGGRR, a 32 bit DIB pixel is 0x00RRGGBB.
+        public static uint FromColorRef(uint colorRef)
+            => ((colorRef & 0x000000FF) << 16) | (colorRef & 0x0000FF00) | ((colorRef & 0x00FF0000) >> 16);
+    }
+
     public interface ITextMetricsSupport
     {
         // A zero font is the host's own default.
         bool MeasureText(IntPtr font, string text, out int width, out int height);
 
         bool GetTextMetrics(IntPtr font, out TextMetricsData metrics);
+
+        // The buffer is top-down 32 bit, the colours are COLORREF.
+        bool RasterizeText(IntPtr font, string text, Span<uint> pixels, int width, int height,
+            int x, int y, uint textColor, uint backColor, bool opaque);
 
         IntPtr CreateFont(in FontDescription description);
 

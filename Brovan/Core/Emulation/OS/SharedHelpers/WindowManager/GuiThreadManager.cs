@@ -275,6 +275,17 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return support != null && support.GetTextMetrics(font, out metrics);
         }
 
+        public bool RasterizeText(IntPtr font, string text, Span<uint> pixels, int width, int height,
+            int x, int y, uint textColor, uint backColor, bool opaque)
+        {
+            if (_disposed || !WaitForInitialization())
+                return false;
+
+            ITextMetricsSupport support = _textMetrics;
+            return support != null && support.RasterizeText(font, text ?? string.Empty, pixels, width, height,
+                x, y, textColor, backColor, opaque);
+        }
+
         public IntPtr CreateFont(in FontDescription description)
         {
             if (_disposed || !WaitForInitialization())

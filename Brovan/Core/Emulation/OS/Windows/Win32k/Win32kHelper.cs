@@ -1,5 +1,7 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Brovan.Core.Emulation.OS.SharedHelpers;
@@ -87,6 +89,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
     internal static class Win32kHelper
     {
+        private const uint EtoOpaque = 0x0002;
+
         internal const uint ERROR_SUCCESS = 0;
         internal const uint ERROR_INVALID_HANDLE = 6;
         internal const uint ERROR_ACCESS_DENIED = 5;
@@ -900,6 +904,67 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 TopDown = TopDown,
             };
             return Handle;
+        }
+
+        internal static bool TryRenderTextToDcBitmap(BinaryEmulator Instance, ulong Hdc, string Text, int X, int Y, uint Options)
+        {
+            Win32kState State = GetState(Instance);
+            if (!State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc) || Dc.Hwnd != 0 || Dc.SelectedBitmap == 0)
+                return false;
+
+            if (!State.Bitmaps.TryGetValue(Dc.SelectedBitmap, out Win32kBitmap Bitmap)
+                || !Bitmap.DibSection || Bitmap.BitsPerPixel != 32 || Bitmap.BitsAddress == 0
+                || Bitmap.Width <= 0 || Bitmap.Height <= 0)
+                return false;
+
+            if (!Instance.IsRegionMapped(Bitmap.BitsAddress, Bitmap.BitsSize))
+                return false;
+
+            Instance.WinHelper.ReadDcTextColors(Hdc, out uint TextColor, out uint BackColor, out bool Opaque);
+            if ((Options & EtoOpaque) != 0)
+                Opaque = true;
+
+            int Count = Bitmap.Width * Bitmap.Height;
+            uint[] Rented = ArrayPool<uint>.Shared.Rent(Count);
+            try
+            {
+                Span<uint> Pixels = Rented.AsSpan(0, Count);
+                if (!TransferBitmapRows(Instance, Bitmap, Pixels, false))
+                    return false;
+
+                if (!Instance.WinHelper.RasterizeText(ResolveDcFont(Instance, Hdc), Text, Pixels,
+                        Bitmap.Width, Bitmap.Height, X, Y, TextColor, BackColor, Opaque))
+                    return false;
+
+                return TransferBitmapRows(Instance, Bitmap, Pixels, true);
+            }
+            finally
+            {
+                ArrayPool<uint>.Shared.Return(Rented);
+            }
+        }
+
+        // The buffer is always top-down; a bottom-up DIB stores its first row last.
+        private static bool TransferBitmapRows(BinaryEmulator Instance, in Win32kBitmap Bitmap, Span<uint> Pixels, bool ToGuest)
+        {
+            for (int Row = 0; Row < Bitmap.Height; Row++)
+            {
+                int GuestRow = Bitmap.TopDown ? Row : Bitmap.Height - 1 - Row;
+                ulong Address = Bitmap.BitsAddress + (ulong)((long)GuestRow * Bitmap.Stride);
+                Span<byte> Line = MemoryMarshal.AsBytes(Pixels.Slice(Row * Bitmap.Width, Bitmap.Width));
+
+                if (ToGuest)
+                {
+                    if (!Instance.WriteMemory(Address, Line))
+                        return false;
+                }
+                else if (!Instance.ReadMemory(Address, Line, (uint)Line.Length))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         internal static bool CopyBitmapBitsIn(BinaryEmulator Instance, in Win32kBitmap Bitmap, ulong SourceAddress)

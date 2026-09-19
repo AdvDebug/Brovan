@@ -4132,6 +4132,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             return RotatedBack ^ 1;
         }
 
+        private const int DcAttrBackgroundColorOffset = 0xB4;
+        private const int DcAttrTextColorOffset = 0xBC;
+        private const int DcAttrBackgroundModeOffset = 0xE0;
+        private const uint TransparentBackgroundMode = 1;
         private const int DcAttrSelectedBrushOffset = 0xA0;
         private const int DcAttrSelectedPenOffset = 0xA8;
         private const int DcAttrViewportOrgXOffset = 0x144;
@@ -4218,6 +4222,22 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Emulator._emulator.WriteMemory(DcAttr + DcAttrBrushOriginXOffset, unchecked((uint)X), 4);
             Emulator._emulator.WriteMemory(DcAttr + DcAttrBrushOriginYOffset, unchecked((uint)Y), 4);
+        }
+
+        // gdi32 keeps the text colours in DC_ATTR and never tells the kernel about them.
+        public void ReadDcTextColors(ulong Hdc, out uint TextColor, out uint BackColor, out bool Opaque)
+        {
+            TextColor = 0;
+            BackColor = 0x00FFFFFF;
+            Opaque = true;
+
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            if (DcAttr == 0)
+                return;
+
+            TextColor = Emulator.ReadMemoryUInt(DcAttr + DcAttrTextColorOffset) & 0x00FFFFFF;
+            BackColor = Emulator.ReadMemoryUInt(DcAttr + DcAttrBackgroundColorOffset) & 0x00FFFFFF;
+            Opaque = Emulator.ReadMemoryUInt(DcAttr + DcAttrBackgroundModeOffset) != TransparentBackgroundMode;
         }
 
         public ulong ReadDcSelectedBrush(ulong Hdc)
@@ -4547,6 +4567,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             EnsureDesktopDisplay();
             if (DesktopDisplay is GuiThreadManager guiManager)
                 return guiManager.MeasureText(Font, Text ?? string.Empty, out Width, out Height);
+
+            return false;
+        }
+
+        public bool RasterizeText(IntPtr Font, string Text, Span<uint> Pixels, int Width, int Height,
+            int X, int Y, uint TextColor, uint BackColor, bool Opaque)
+        {
+            EnsureDesktopDisplay();
+            if (DesktopDisplay is GuiThreadManager guiManager)
+                return guiManager.RasterizeText(Font, Text ?? string.Empty, Pixels, Width, Height, X, Y, TextColor, BackColor, Opaque);
 
             return false;
         }
@@ -7669,6 +7699,182 @@ namespace Brovan.Core.Emulation.OS.Windows
             RegistryGeneration++;
             CompleteRegistryNotifications(NtPath, 0x00000004);
             return true;
+        }
+
+        private static string RegistryOverlayFile(uint GuestProcessId)
+        {
+            string SessionDirectory = GuestSession.Directory;
+            return string.IsNullOrEmpty(SessionDirectory)
+                ? null
+                : Path.Combine(SessionDirectory, $"registry-{GuestProcessId}.bin");
+        }
+
+        private Hive FindHiveByMountPoint(string NtMountPoint)
+        {
+            if (string.IsNullOrEmpty(NtMountPoint) || RegHives == null)
+                return null;
+
+            foreach (Hive Candidate in RegHives)
+            {
+                if (Candidate != null && string.Equals(Candidate.NtMountPoint, NtMountPoint, StringComparison.OrdinalIgnoreCase))
+                    return Candidate;
+            }
+
+            return null;
+        }
+
+        // Keys are written between CreateProcess and ResumeThread, so the child takes them at the resume.
+        internal void ExportRegistryOverlay(uint GuestProcessId)
+        {
+            string OverlayFile = RegistryOverlayFile(GuestProcessId);
+            if (OverlayFile == null)
+                return;
+
+            try
+            {
+                string Staging = OverlayFile + ".tmp";
+                using (FileStream Stream = new FileStream(Staging, FileMode.Create, FileAccess.Write, FileShare.None))
+                using (BinaryWriter Writer = new BinaryWriter(Stream, Encoding.Unicode))
+                {
+                    Writer.Write(TempRegistryKeys.Count);
+                    foreach (string KeyPath in TempRegistryKeys)
+                    {
+                        Writer.Write(KeyPath);
+                        Writer.Write(TempRegistryKeyHives.TryGetValue(KeyPath, out Hive KeyHive) && KeyHive != null
+                            ? KeyHive.NtMountPoint ?? string.Empty
+                            : string.Empty);
+                    }
+
+                    Writer.Write(DeletedRegistryKeys.Count);
+                    foreach (string KeyPath in DeletedRegistryKeys)
+                        Writer.Write(KeyPath);
+
+                    Writer.Write(TempRegistryValues.Count);
+                    foreach (KeyValuePair<string, Dictionary<string, ValueNode>> Entry in TempRegistryValues)
+                    {
+                        Writer.Write(Entry.Key);
+                        Writer.Write(Entry.Value.Count);
+                        foreach (ValueNode Value in Entry.Value.Values)
+                        {
+                            Writer.Write(Value.Name ?? string.Empty);
+                            Writer.Write(Value.Type);
+                            byte[] Data = Value.Data ?? Array.Empty<byte>();
+                            Writer.Write(Data.Length);
+                            Writer.Write(Data);
+                        }
+                    }
+
+                    Writer.Write(DeletedRegistryValues.Count);
+                    foreach (KeyValuePair<string, HashSet<string>> Entry in DeletedRegistryValues)
+                    {
+                        Writer.Write(Entry.Key);
+                        Writer.Write(Entry.Value.Count);
+                        foreach (string ValueName in Entry.Value)
+                            Writer.Write(ValueName);
+                    }
+                }
+
+                File.Move(Staging, OverlayFile, true);
+            }
+            catch (Exception Ex)
+            {
+                Utils.LogError($"[Registry] Could not hand the registry to guest process {GuestProcessId}: {Ex.Message}");
+            }
+        }
+
+        internal void ImportRegistryOverlay()
+        {
+            string OverlayFile = RegistryOverlayFile(PID);
+            if (OverlayFile == null || !File.Exists(OverlayFile))
+                return;
+
+            try
+            {
+                using (FileStream Stream = new FileStream(OverlayFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (BinaryReader Reader = new BinaryReader(Stream, Encoding.Unicode))
+                {
+                    int KeyCount = Reader.ReadInt32();
+                    for (int i = 0; i < KeyCount; i++)
+                    {
+                        string KeyPath = Reader.ReadString();
+                        Hive KeyHive = FindHiveByMountPoint(Reader.ReadString());
+                        TempRegistryKeys.Add(KeyPath);
+                        DeletedRegistryKeys.Remove(KeyPath);
+                        if (KeyHive != null)
+                            TempRegistryKeyHives[KeyPath] = KeyHive;
+                    }
+
+                    int DeletedKeyCount = Reader.ReadInt32();
+                    for (int i = 0; i < DeletedKeyCount; i++)
+                    {
+                        string KeyPath = Reader.ReadString();
+                        DeletedRegistryKeys.Add(KeyPath);
+                        TempRegistryKeys.Remove(KeyPath);
+                        TempRegistryValues.Remove(KeyPath);
+                        TempRegistryKeyHives.Remove(KeyPath);
+                    }
+
+                    int PathCount = Reader.ReadInt32();
+                    for (int i = 0; i < PathCount; i++)
+                    {
+                        string KeyPath = Reader.ReadString();
+                        int ValueCount = Reader.ReadInt32();
+
+                        if (!TempRegistryValues.TryGetValue(KeyPath, out Dictionary<string, ValueNode> Values))
+                        {
+                            Values = new Dictionary<string, ValueNode>(StringComparer.OrdinalIgnoreCase);
+                            TempRegistryValues[KeyPath] = Values;
+                        }
+
+                        for (int v = 0; v < ValueCount; v++)
+                        {
+                            string ValueName = Reader.ReadString();
+                            int Type = Reader.ReadInt32();
+                            byte[] Data = Reader.ReadBytes(Reader.ReadInt32());
+                            Values[ValueName] = new ValueNode { Name = ValueName, Type = Type, Data = Data };
+
+                            if (DeletedRegistryValues.TryGetValue(KeyPath, out HashSet<string> Deleted))
+                                Deleted.Remove(ValueName);
+                        }
+                    }
+
+                    int DeletedPathCount = Reader.ReadInt32();
+                    for (int i = 0; i < DeletedPathCount; i++)
+                    {
+                        string KeyPath = Reader.ReadString();
+                        int ValueCount = Reader.ReadInt32();
+
+                        if (!DeletedRegistryValues.TryGetValue(KeyPath, out HashSet<string> Deleted))
+                        {
+                            Deleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            DeletedRegistryValues[KeyPath] = Deleted;
+                        }
+
+                        for (int v = 0; v < ValueCount; v++)
+                        {
+                            string ValueName = Reader.ReadString();
+                            Deleted.Add(ValueName);
+
+                            if (TempRegistryValues.TryGetValue(KeyPath, out Dictionary<string, ValueNode> Values))
+                                Values.Remove(ValueName);
+                        }
+                    }
+                }
+
+                RegistryGeneration++;
+            }
+            catch (Exception Ex)
+            {
+                Utils.LogError($"[Registry] Could not take the registry handed to guest process {PID}: {Ex.Message}");
+            }
+
+            try
+            {
+                File.Delete(OverlayFile);
+            }
+            catch (Exception)
+            {
+            }
         }
 
         public void RegisterRegistryNotification(WinRegistryNotification Notification)

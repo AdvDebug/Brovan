@@ -35,6 +35,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance._emulator.WriteMemory(PreviousSuspendCountPtr, 1u);
                 }
 
+                Instance.WinHelper.ExportRegistryOverlay(Remote.Process.ProcessId);
+
                 // A process that was never held cannot report a failure to release it, and the suspend count
                 // still has to come back or the caller treats the whole create as failed.
                 Remote.Process.Resume();

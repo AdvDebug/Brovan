@@ -118,6 +118,68 @@ namespace Brovan.Android
             return AndroidText.GetMetrics(out metrics);
         }
 
+        public bool RasterizeText(IntPtr font, string text, Span<uint> pixels, int width, int height,
+            int x, int y, uint textColor, uint backColor, bool opaque)
+        {
+            int count = width * height;
+            if (width <= 0 || height <= 0 || pixels.Length < count)
+                return false;
+
+            Span<uint> surface = pixels.Slice(0, count);
+            if (opaque)
+                surface.Fill(HostColor.FromColorRef(backColor));
+
+            if (string.IsNullOrEmpty(text))
+                return true;
+
+            if (!AndroidText.Rasterize(text, out AndroidTextBitmap bitmap))
+                return false;
+
+            // The coverage bitmap is inset by its padding on each side, and y is the top of the cell.
+            Blend(surface, bitmap, x - bitmap.Padding, y - bitmap.Padding, width, height, HostColor.FromColorRef(textColor));
+            return true;
+        }
+
+        private static void Blend(Span<uint> surface, in AndroidTextBitmap bitmap, int left, int top, int width, int height, uint color)
+        {
+            int firstRow = Math.Max(0, -top);
+            int lastRow = Math.Min(bitmap.Height, height - top);
+            int firstColumn = Math.Max(0, -left);
+            int lastColumn = Math.Min(bitmap.Width, width - left);
+
+            uint red = (color >> 16) & 0xFF;
+            uint green = (color >> 8) & 0xFF;
+            uint blue = color & 0xFF;
+
+            for (int row = firstRow; row < lastRow; row++)
+            {
+                int source = row * bitmap.Width;
+                Span<uint> target = surface.Slice((top + row) * width, width);
+
+                for (int column = firstColumn; column < lastColumn; column++)
+                {
+                    uint coverage = bitmap.Coverage[source + column];
+                    if (coverage == 0)
+                        continue;
+
+                    if (coverage == 0xFF)
+                    {
+                        target[left + column] = color;
+                        continue;
+                    }
+
+                    uint pixel = target[left + column];
+                    uint remaining = 255 - coverage;
+
+                    uint blended = ((((pixel >> 16) & 0xFF) * remaining + (red * coverage)) / 255) << 16;
+                    blended |= ((((pixel >> 8) & 0xFF) * remaining + (green * coverage)) / 255) << 8;
+                    blended |= ((pixel & 0xFF) * remaining + (blue * coverage)) / 255;
+
+                    target[left + column] = blended;
+                }
+            }
+        }
+
         public IntPtr CreateFont(in FontDescription description)
         {
             return IntPtr.Zero;

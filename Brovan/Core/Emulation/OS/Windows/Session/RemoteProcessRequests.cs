@@ -127,6 +127,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case SessionOperation.ResumeProcess:
                 {
+                    Instance.WinHelper?.ImportRegistryOverlay();
                     Instance.ResumeSuspendedStart();
                     return NTSTATUS.STATUS_SUCCESS;
                 }

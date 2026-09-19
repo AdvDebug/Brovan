@@ -125,6 +125,9 @@ namespace Brovan.Core.Emulation
         // The trap page holds hlt at 0 and sysretq at 8.
         private const ulong SyscallReturnOffset = 8;
 
+        private readonly bool _guest64;
+        private readonly ushort _userCodeSelector;
+
         // One vCPU per guest thread. A thread that cannot get one waits.
         private readonly List<VirtualProcessor> _processors = new();
         private VirtualProcessor[] _processorSnapshot = Array.Empty<VirtualProcessor>();
@@ -266,8 +269,11 @@ namespace Brovan.Core.Emulation
 
         public Kvm(Arch arch, Mode mode)
         {
-            if (arch != Arch.X86 || mode != Mode.MODE_64)
-                throw new KvmException("KVM backend only supports x86-64 long mode.");
+            if (arch != Arch.X86 || (mode != Mode.MODE_64 && mode != Mode.MODE_32))
+                throw new KvmException("KVM backend only supports x86 32-bit and x86-64 guests.");
+
+            _guest64 = mode == Mode.MODE_64;
+            _userCodeSelector = _guest64 ? KvmConstants.UserCodeSelector : KvmConstants.UserCodeSelector32;
 
             EnsurePlatformSupport();
             _pid = KvmNative.getpid();
@@ -1520,19 +1526,21 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private static LinuxKvmSegment MakeSegment(ushort selector, bool isCode, bool isUser)
+        private LinuxKvmSegment MakeSegment(ushort selector, bool isCode, bool isUser)
         {
+            bool code64 = _guest64 && isCode;
+            // KVM takes the limit in bytes and applies G itself.
             return new LinuxKvmSegment
             {
                 Base = 0,
-                Limit = 0xFFFFF,
+                Limit = 0xFFFFFFFF,
                 Selector = selector,
                 Type = isCode ? (byte)0xB : (byte)0x3,
                 Present = 1,
                 Dpl = isUser ? (byte)3 : (byte)0,
-                Db = isCode ? (byte)0 : (byte)1,
+                Db = code64 ? (byte)0 : (byte)1,
                 S = 1,
-                L = isCode ? (byte)1 : (byte)0,
+                L = code64 ? (byte)1 : (byte)0,
                 G = 1,
                 Avl = 0,
                 Unusable = 0,
@@ -1987,18 +1995,18 @@ namespace Brovan.Core.Emulation
             }
 
             ref LinuxKvmSpecialRegisters sregs = ref run.Sregs;
-            sregs.Cs = MakeSegment(KvmConstants.UserCodeSelector, true, true);
+            sregs.Cs = MakeSegment(_userCodeSelector, true, true);
             sregs.Ss = MakeSegment(KvmConstants.UserDataSelector, false, true);
             sregs.Ds = MakeSegment(KvmConstants.UserDataSelector, false, true);
             sregs.Es = MakeSegment(KvmConstants.UserDataSelector, false, true);
-            sregs.Fs = MakeSegment(0x53, false, true);
+            sregs.Fs = MakeSegment(KvmConstants.UserFsSelector32, false, true);
             sregs.Gs = MakeSegment(KvmConstants.UserDataSelector, false, true);
             sregs.Cr0 = 0x80000033UL;
             sregs.Cr4 = _avxEnabled ? 0x620UL | KvmConstants.Cr4Osxsave : 0x620UL;
             sregs.Cr3 = _pml4Gpa;
-            sregs.Efer = (1UL << 0) | (1UL << 8) | (1UL << 10) | (1UL << 11);
+            sregs.Efer = (1UL << 8) | (1UL << 10) | (1UL << 11) | (_guest64 ? 1UL << 0 : 0);
             sregs.Gdt.Base = vp.GdtPageGpa;
-            sregs.Gdt.Limit = 0x48;
+            sregs.Gdt.Limit = KvmConstants.GdtLimit;
             sregs.Idt.Base = _exceptionIdtPageGpa;
             sregs.Idt.Limit = (ushort)(KvmConstants.ExceptionVectorCount * 16 - 1);
             sregs.Tr.Selector = KvmConstants.TssSelector;
@@ -2038,9 +2046,12 @@ namespace Brovan.Core.Emulation
             if (_avxEnabled)
                 SetXcr0(vp);
 
-            SetMsr(vp, KvmConstants.MsrStar, (0x23UL << 48) | (0x08UL << 32));
-            SetMsr(vp, KvmConstants.MsrSyscallMask, 0);
-            SetMsr(vp, KvmConstants.MsrLstar, _syscallTrapPageGpa);
+            if (_guest64)
+            {
+                SetMsr(vp, KvmConstants.MsrStar, (0x23UL << 48) | (0x08UL << 32));
+                SetMsr(vp, KvmConstants.MsrSyscallMask, 0);
+                SetMsr(vp, KvmConstants.MsrLstar, _syscallTrapPageGpa);
+            }
         }
 
         public bool SupportsThreadResidency => _processorLimit > 1;
@@ -2108,6 +2119,8 @@ namespace Brovan.Core.Emulation
 
         private void InitializeSyscallTrapPage()
         {
+            if (!_guest64) return;
+
             _syscallTrapPageGpa = AllocateInternalPage(true);
             unsafe
             {
@@ -2139,11 +2152,18 @@ namespace Brovan.Core.Emulation
                 gdt[0x10] = 0xFF; gdt[0x11] = 0xFF; gdt[0x12] = 0x00; gdt[0x13] = 0x00;
                 gdt[0x14] = 0x00; gdt[0x15] = 0x93; gdt[0x16] = 0xCF; gdt[0x17] = 0x00;
 
+                gdt[0x20] = 0xFF; gdt[0x21] = 0xFF; gdt[0x22] = 0x00; gdt[0x23] = 0x00;
+                gdt[0x24] = 0x00; gdt[0x25] = 0xFB; gdt[0x26] = 0xCF; gdt[0x27] = 0x00;
+
                 gdt[0x28] = 0xFF; gdt[0x29] = 0xFF; gdt[0x2A] = 0x00; gdt[0x2B] = 0x00;
                 gdt[0x2C] = 0x00; gdt[0x2D] = 0xF3; gdt[0x2E] = 0xCF; gdt[0x2F] = 0x00;
 
                 gdt[0x30] = 0xFF; gdt[0x31] = 0xFF; gdt[0x32] = 0x00; gdt[0x33] = 0x00;
                 gdt[0x34] = 0x00; gdt[0x35] = 0xFB; gdt[0x36] = 0xAF; gdt[0x37] = 0x00;
+
+                // RtlGetCurrentProcessorNumber reads this descriptor limit with lsl and shifts it right by 14
+                gdt[0x50] = 0xFF; gdt[0x51] = 0x0F; gdt[0x52] = 0x00; gdt[0x53] = 0x00;
+                gdt[0x54] = 0x00; gdt[0x55] = 0xF3; gdt[0x56] = 0x40; gdt[0x57] = 0x00;
             }
         }
 
@@ -2911,7 +2931,7 @@ namespace Brovan.Core.Emulation
         {
             ulong rip = ReadRegister(Registers.UC_X86_REG_RIP);
 
-            if (_syscallHook != null && rip == (_syscallTrapPageGpa + 1))
+            if (_guest64 && _syscallHook != null && rip == (_syscallTrapPageGpa + 1))
             {
                 if (HandleSyscallTrap()) return true;
                 _error = KvmErrors.Ok;
@@ -3123,7 +3143,7 @@ namespace Brovan.Core.Emulation
             for (int i = 0; i < _interruptHooks.Count; i++)
                 _interruptHooks[i].Callback(exception);
 
-            return false;
+            return _interruptHooks.Count != 0 && exception >= KvmConstants.FirstSoftwareInterruptVector;
         }
 
         private void RestoreExceptionFrame(ulong stubRip)
@@ -3163,7 +3183,7 @@ namespace Brovan.Core.Emulation
             ulong frameSs = BitConverter.ToUInt64(frameBytes.Slice(32));
 
             // A fault on the trap page's sysretq belongs to the user address it was returning to.
-            if (frameRip == _syscallTrapPageGpa + SyscallReturnOffset)
+            if (_guest64 && frameRip == _syscallTrapPageGpa + SyscallReturnOffset)
             {
                 frameRip = regs.Rcx;
                 frameRflags = regs.R11;
@@ -3578,8 +3598,23 @@ namespace Brovan.Core.Emulation
             if (TryApplySregRead(ref sregs, register, out ulong current) && current == value) return true;
 
             if (!TryApplySregWrite(ref sregs, register, value)) return false;
+            if (!_guest64 && register == Registers.UC_X86_REG_FS_BASE)
+                SyncGdtDescriptorBase(value);
             MarkSpecialRegistersDirty();
             return true;
+        }
+
+        // A compatibility-mode segment load takes the base from the descriptor, not from the MSR.
+        private unsafe void SyncGdtDescriptorBase(ulong segmentBase)
+        {
+            if (!_mappedPages.TryGetValue(CurrentVp.GdtPageGpa, out MappedPage gdtPage) || gdtPage.HostPage == IntPtr.Zero)
+                return;
+
+            byte* descriptor = (byte*)gdtPage.HostPage + (KvmConstants.UserFsSelector32 >> 3) * 8;
+            descriptor[2] = (byte)segmentBase;
+            descriptor[3] = (byte)(segmentBase >> 8);
+            descriptor[4] = (byte)(segmentBase >> 16);
+            descriptor[7] = (byte)(segmentBase >> 24);
         }
 
         private bool TryReadSpecialRegister(Registers register, out ulong value)
