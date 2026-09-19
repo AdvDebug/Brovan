@@ -44,8 +44,9 @@ jobs:
           dotnet restore Brovan/Brovan.csproj
           dotnet restore BrovanGUI/BrovanGUI.csproj
 
+      # Native symbols come to several times the size of the binary.
       - name: Publish
-        run: dotnet publish Brovan/Brovan.csproj -c Release -r ${{ matrix.rid }} --self-contained false -o artifacts/publish/${{ matrix.rid }}
+        run: dotnet publish Brovan/Brovan.csproj -c Release -r ${{ matrix.rid }} --self-contained false -p:NativeDebugSymbols=false -o artifacts/publish/${{ matrix.rid }}
 
       - name: Publish the launcher beside the emulator
         shell: bash
@@ -108,6 +109,12 @@ jobs:
 
           mkdir -p "$vfs"
           cp -f "$shim" "$vfs/steamclient64.dll"
+
+      # SkiaSharp and HarfBuzzSharp carry prebuilt symbols beside their native libraries, and no publish
+      # switch leaves those behind.
+      - name: Drop the symbols the native packages bring along
+        shell: bash
+        run: find "artifacts/publish/${{ matrix.rid }}" -name '*.pdb' -delete
 
       - name: Upload CI Artifact
         uses: actions/upload-artifact@v6
