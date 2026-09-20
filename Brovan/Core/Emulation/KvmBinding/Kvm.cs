@@ -3232,12 +3232,11 @@ namespace Brovan.Core.Emulation
 
         private bool HandleDebugExit(ref LinuxKvmRun run)
         {
+            uint exception = run.Exit.Debug.Exception;
             for (int i = 0; i < _interruptHooks.Count; i++)
-            {
-                _interruptHooks[i].Callback(1);
-                return true;
-            }
-            return false;
+                _interruptHooks[i].Callback(exception);
+
+            return _interruptHooks.Count != 0;
         }
 
         private bool HandleSyscallTrap()
