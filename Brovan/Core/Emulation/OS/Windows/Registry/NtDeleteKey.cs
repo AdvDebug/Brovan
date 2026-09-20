@@ -16,8 +16,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtDeleteKey Running with the FullPath: {RegKey.FullPath}", LogFlags.Syscall);
 
-                if (!Instance.WinHelper.DeleteRegistryKeyPath(RegKey.FullPath))
-                    return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+                if (!Instance.WinHelper.DeleteRegistryKeyPath(RegKey.FullPath, out RegistryDeleteStatus DeleteStatus))
+                {
+                    switch (DeleteStatus)
+                    {
+                        case RegistryDeleteStatus.HasSubKeys:
+                            return NTSTATUS.STATUS_CANNOT_DELETE;
+                        case RegistryDeleteStatus.NotWritable:
+                            return NTSTATUS.STATUS_ACCESS_DENIED;
+                        default:
+                            return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+                    }
+                }
 
                 return NTSTATUS.STATUS_SUCCESS;
             }

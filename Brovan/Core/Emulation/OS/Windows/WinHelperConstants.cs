@@ -1430,8 +1430,33 @@ namespace Brovan.Core.Emulation.OS.Windows
         public RegistryHiveReader.HiveKey ParsedKey;
         public bool HasParsedKey;
 
+        public List<string> CachedSubKeyNames;
+        public List<ValueNode> CachedValues;
+        public uint CachedGeneration;
+        public uint CachedHiveGeneration;
+
         public override string ObjectId => FullPath;
         public override HandleType ObjectType => HandleType.RegistryKeyHandle;
+    }
+
+    public enum RegistryDeleteStatus
+    {
+        Deleted,
+        NotFound,
+        HasSubKeys,
+        NotWritable
+    }
+
+    public class WinVolatileRegKey
+    {
+        public Hive Hive;
+        public Dictionary<string, ValueNode> Values = new Dictionary<string, ValueNode>(StringComparer.OrdinalIgnoreCase);
+
+        // Deleted over a hive this process cannot write. They stay on disk but must read as absent.
+        public HashSet<string> DeletedValues;
+
+        // The key itself lives in a hive and only its values are held here, so it is not a volatile parent.
+        public bool Shadow;
     }
 
     public class WinRegistryNotification

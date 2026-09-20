@@ -44,8 +44,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (string.IsNullOrEmpty(KeyPath))
                     return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
+                const uint RegOptionVolatile = 0x00000001;
+
                 bool CreatedNew = false;
-                if (!Instance.WinHelper.RegistryKeyExists(KeyPath, out _, out _, out _) && !Instance.WinHelper.CreateRegistryKeyPath(KeyPath, out CreatedNew))
+                if (!Instance.WinHelper.RegistryKeyExists(KeyPath, out _, out _, out _)
+                    && !Instance.WinHelper.CreateRegistryKeyPath(KeyPath, (CreateOptions & RegOptionVolatile) != 0, out CreatedNew))
                 {
                     return NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
                 }
@@ -65,7 +68,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 _ = TitleIndex;
-                _ = CreateOptions;
                 return NTSTATUS.STATUS_SUCCESS;
             }
 

@@ -1455,11 +1455,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public uint RegistryGeneration;
 
-        public HashSet<string> TempRegistryKeys = new(StringComparer.OrdinalIgnoreCase);
-        public HashSet<string> DeletedRegistryKeys = new(StringComparer.OrdinalIgnoreCase);
-        public Dictionary<string, Dictionary<string, ValueNode>> TempRegistryValues = new(StringComparer.OrdinalIgnoreCase);
-        public Dictionary<string, HashSet<string>> DeletedRegistryValues = new(StringComparer.OrdinalIgnoreCase);
-        public Dictionary<string, Hive> TempRegistryKeyHives = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly Comparison<ValueNode> RegistryValueNameOrder =
+            static (Left, Right) => string.Compare(Left.Name ?? string.Empty, Right.Name ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+
+        // REG_OPTION_VOLATILE keys, plus the keys of a hive that could not be opened for writing.
+        public Dictionary<string, WinVolatileRegKey> VolatileRegistryKeys = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> SyntheticDirectories = new(StringComparer.OrdinalIgnoreCase);
         internal string SyntheticVolumeGuid { get; private set; }
         internal string SyntheticVolumeGuidSymbolicLink { get; private set; }
@@ -1825,6 +1825,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             List<Hive> Hives = new List<Hive>();
             if (Directory.Exists(WinRegPath))
             {
+                RegManager.EnsureUserHive("NTUSER.DAT");
+
                 foreach (string HiveFile in Directory.GetFiles(WinRegPath))
                 {
                     try
@@ -6777,45 +6779,44 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void InitializeSyntheticRegistryDefaults()
         {
-            Dictionary<string, bool> KeyCache = new Dictionary<string, bool>(128, StringComparer.OrdinalIgnoreCase);
-            Hive DefaultHive = RegHives != null && RegHives.Length != 0 ? RegHives[0] : null;
             string UserProfile = CurrentUserProfile;
             string UserRoot = "\\Registry\\User\\" + CurrentUserSid;
             string ExplorerRoot = UserRoot + "\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer";
+            string VolatileEnvironment = UserRoot + "\\Volatile Environment";
 
-            AddSyntheticRegistryKeyTrusted("\\Registry\\User", KeyCache, DefaultHive);
-            AddSyntheticRegistryKeyTrusted(UserRoot, KeyCache, DefaultHive);
-            AddSyntheticRegistryKeyTrusted("\\Registry\\User\\.DEFAULT", KeyCache, DefaultHive);
-            AddSyntheticRegistryKeyTrusted(UserRoot + "\\" + CurrentUserSid, KeyCache, DefaultHive);
-            AddSyntheticRegistryKeyTrusted(ExplorerRoot + "\\SessionInfo\\0", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "USERPROFILE", 2, UserProfile, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEDRIVE", 1, "C:", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "HOMEPATH", 1, "\\Users\\" + CurrentUserName, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "APPDATA", 2, "%USERPROFILE%\\AppData\\Roaming", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(UserRoot + "\\Volatile Environment", "LOCALAPPDATA", 2, "%USERPROFILE%\\AppData\\Local", KeyCache, DefaultHive);
+            AddSyntheticRegistryKey("\\Registry\\User");
+            AddSyntheticRegistryKey(UserRoot);
+            AddSyntheticRegistryKey("\\Registry\\User\\.DEFAULT");
+            AddVolatileRegistryKey(UserRoot + "\\" + CurrentUserSid);
+            AddVolatileRegistryKey(ExplorerRoot + "\\SessionInfo\\0");
+            SetVolatileRegistryString(VolatileEnvironment, "USERPROFILE", 2, UserProfile);
+            SetVolatileRegistryString(VolatileEnvironment, "HOMEDRIVE", 1, "C:");
+            SetVolatileRegistryString(VolatileEnvironment, "HOMEPATH", 1, "\\Users\\" + CurrentUserName);
+            SetVolatileRegistryString(VolatileEnvironment, "APPDATA", 2, "%USERPROFILE%\\AppData\\Roaming");
+            SetVolatileRegistryString(VolatileEnvironment, "LOCALAPPDATA", 2, "%USERPROFILE%\\AppData\\Local");
 
-            SetSyntheticRegistryStringTrusted(UserRoot + "\\Keyboard Layout\\Preload", "1", 1, "00000409", KeyCache, DefaultHive);
+            SetSyntheticRegistryString(UserRoot + "\\Keyboard Layout\\Preload", "1", 1, "00000409");
 
             string ProfileListKey = "\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\" + CurrentUserSid;
-            AddSyntheticRegistryKeyTrusted(ProfileListKey, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(ProfileListKey, "ProfileImagePath", 2, "%SystemDrive%\\Users\\" + CurrentUserName, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(ProfileListKey, "Flags", 0, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(ProfileListKey, "State", 0, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(ProfileListKey, "RefCount", 0, KeyCache, DefaultHive);
+            AddSyntheticRegistryKey(ProfileListKey);
+            SetSyntheticRegistryString(ProfileListKey, "ProfileImagePath", 2, "%SystemDrive%\\Users\\" + CurrentUserName);
+            SetSyntheticRegistryDword(ProfileListKey, "Flags", 0);
+            SetSyntheticRegistryDword(ProfileListKey, "State", 0);
+            SetSyntheticRegistryDword(ProfileListKey, "RefCount", 0);
 
-            InitializeSyntheticWindowsVersionRegistryDefaults(KeyCache, DefaultHive);
-            InitializeSyntheticKnownFolderDescriptions(KeyCache, DefaultHive);
-            InitializeSyntheticSteamRegistry(KeyCache, DefaultHive);
+            InitializeSyntheticWindowsVersionRegistryDefaults();
+            InitializeSyntheticKnownFolderDescriptions();
+            InitializeSyntheticSteamRegistry();
 
             // clbcatq uses its built-in catalog only at version one. Later versions route class activation
             // to the COM+ catalog server, which is not there.
-            SetSyntheticRegistryValueTrusted("\\Registry\\Machine\\Software\\Microsoft\\COM3", "REGDBVersion", 3,
-                new byte[] { 1, 0, 0, 0, 0, 0, 0, 0 }, KeyCache, DefaultHive);
+            SetSyntheticRegistryValue("\\Registry\\Machine\\Software\\Microsoft\\COM3", "REGDBVersion", 3,
+                new byte[] { 1, 0, 0, 0, 0, 0, 0, 0 });
 
             string KnownFolderSettings = "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\KnownFolderSettings";
-            AddSyntheticRegistryKeyTrusted(KnownFolderSettings, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(KnownFolderSettings, "CacheTimeout", 0, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(KnownFolderSettings, "BackgroundRetryInterval", 0, KeyCache, DefaultHive);
+            AddSyntheticRegistryKey(KnownFolderSettings);
+            SetSyntheticRegistryDword(KnownFolderSettings, "CacheTimeout", 0);
+            SetSyntheticRegistryDword(KnownFolderSettings, "BackgroundRetryInterval", 0);
 
             AddSyntheticDirectory(UserProfile);
             AddSyntheticDirectory(UserProfile + "\\AppData");
@@ -6835,8 +6836,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             string UserShellFolders = ExplorerRoot + "\\User Shell Folders";
             string ShellFolders = ExplorerRoot + "\\Shell Folders";
 
-            AddSyntheticRegistryKeyTrusted(UserShellFolders, KeyCache, DefaultHive);
-            AddSyntheticRegistryKeyTrusted(ShellFolders, KeyCache, DefaultHive);
+            AddSyntheticRegistryKey(UserShellFolders);
+            AddSyntheticRegistryKey(ShellFolders);
 
             (string Name, string ExpandValue, string ResolvedValue)[] Folders =
             {
@@ -6861,34 +6862,34 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach ((string Name, string ExpandValue, string ResolvedValue) in Folders)
             {
-                SetSyntheticRegistryStringTrusted(UserShellFolders, Name, 2, ExpandValue, KeyCache, DefaultHive);
-                SetSyntheticRegistryStringTrusted(ShellFolders, Name, 1, ResolvedValue, KeyCache, DefaultHive);
+                SetSyntheticRegistryString(UserShellFolders, Name, 2, ExpandValue);
+                SetSyntheticRegistryString(ShellFolders, Name, 1, ResolvedValue);
                 AddSyntheticDirectory(ResolvedValue);
             }
 
             string MachineExplorerRoot = "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer";
             string CommonUserShellFolders = MachineExplorerRoot + "\\User Shell Folders";
             string CommonShellFolders = MachineExplorerRoot + "\\Shell Folders";
-            AddSyntheticRegistryKeyTrusted(CommonUserShellFolders, KeyCache, DefaultHive);
-            AddSyntheticRegistryKeyTrusted(CommonShellFolders, KeyCache, DefaultHive);
+            AddSyntheticRegistryKey(CommonUserShellFolders);
+            AddSyntheticRegistryKey(CommonShellFolders);
 
-            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common AppData", 2, "%ProgramData%", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common AppData", 1, "C:\\ProgramData", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Desktop", 2, "%PUBLIC%\\Desktop", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Desktop", 1, "C:\\Users\\Public\\Desktop", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Documents", 2, "%PUBLIC%\\Documents", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Documents", 1, "C:\\Users\\Public\\Documents", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Programs", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Programs", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Start Menu", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Start Menu", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Startup", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Startup", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonUserShellFolders, "Common Templates", 2, "%ProgramData%\\Microsoft\\Windows\\Templates", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CommonShellFolders, "Common Templates", 1, "C:\\ProgramData\\Microsoft\\Windows\\Templates", KeyCache, DefaultHive);
+            SetSyntheticRegistryString(CommonUserShellFolders, "Common AppData", 2, "%ProgramData%");
+            SetSyntheticRegistryString(CommonShellFolders, "Common AppData", 1, "C:\\ProgramData");
+            SetSyntheticRegistryString(CommonUserShellFolders, "Common Desktop", 2, "%PUBLIC%\\Desktop");
+            SetSyntheticRegistryString(CommonShellFolders, "Common Desktop", 1, "C:\\Users\\Public\\Desktop");
+            SetSyntheticRegistryString(CommonUserShellFolders, "Common Documents", 2, "%PUBLIC%\\Documents");
+            SetSyntheticRegistryString(CommonShellFolders, "Common Documents", 1, "C:\\Users\\Public\\Documents");
+            SetSyntheticRegistryString(CommonUserShellFolders, "Common Programs", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs");
+            SetSyntheticRegistryString(CommonShellFolders, "Common Programs", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs");
+            SetSyntheticRegistryString(CommonUserShellFolders, "Common Start Menu", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu");
+            SetSyntheticRegistryString(CommonShellFolders, "Common Start Menu", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu");
+            SetSyntheticRegistryString(CommonUserShellFolders, "Common Startup", 2, "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup");
+            SetSyntheticRegistryString(CommonShellFolders, "Common Startup", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup");
+            SetSyntheticRegistryString(CommonUserShellFolders, "Common Templates", 2, "%ProgramData%\\Microsoft\\Windows\\Templates");
+            SetSyntheticRegistryString(CommonShellFolders, "Common Templates", 1, "C:\\ProgramData\\Microsoft\\Windows\\Templates");
         }
 
-        private void InitializeSyntheticSteamRegistry(Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        private void InitializeSyntheticSteamRegistry()
         {
             if (Steam == null || !Steam.Enabled)
                 return;
@@ -6897,155 +6898,105 @@ namespace Brovan.Core.Emulation.OS.Windows
             string ActiveProcess = SteamRoot + "\\ActiveProcess";
 
             // The client writes SteamPath and SteamExe lower case with forward slashes.
-            SetSyntheticRegistryStringTrusted(SteamRoot, "SteamPath", 1, "c:/program files (x86)/steam", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(SteamRoot, "SteamExe", 1, "c:/program files (x86)/steam/steam.exe", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(SteamRoot, "Language", 1, "english", KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(SteamRoot, "RunningAppID", Steam.AppId, KeyCache, DefaultHive);
-
-            SetSyntheticRegistryDwordTrusted(ActiveProcess, "pid", Steam.ClientPid, KeyCache, DefaultHive);
-            // Only the 64 bit client is built, and a 32 bit vtable needs the thiscall convention the
-            // trampolines do not carry, so SteamClientDll stays absent rather than dangling.
-            SetSyntheticRegistryStringTrusted(ActiveProcess, "SteamClientDll64", 1, SteamAppContext.GuestClientDll64, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(ActiveProcess, "Universe", 1, "Public", KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(ActiveProcess, "ActiveUser", (uint)(Steam.SteamId & 0xFFFFFFFF), KeyCache, DefaultHive);
+            SetSyntheticRegistryString(SteamRoot, "SteamPath", 1, "c:/program files (x86)/steam");
+            SetSyntheticRegistryString(SteamRoot, "SteamExe", 1, "c:/program files (x86)/steam/steam.exe");
+            SetSyntheticRegistryString(SteamRoot, "Language", 1, "english");
 
             string Apps = SteamRoot + "\\Apps\\" + Steam.AppId.ToString();
-            SetSyntheticRegistryDwordTrusted(Apps, "Installed", 1, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(Apps, "Running", 1, KeyCache, DefaultHive);
+            SetSyntheticRegistryDword(Apps, "Installed", 1);
 
-            SetSyntheticRegistryStringTrusted("\\Registry\\Machine\\Software\\Valve\\Steam", "InstallPath", 1, SteamAppContext.GuestDirectory, KeyCache, DefaultHive);
+            SetSyntheticRegistryString("\\Registry\\Machine\\Software\\Valve\\Steam", "InstallPath", 1, SteamAppContext.GuestDirectory);
+
+            SetVolatileRegistryDword(SteamRoot, "RunningAppID", Steam.AppId);
+            SetVolatileRegistryDword(Apps, "Running", 1);
+            SetVolatileRegistryDword(ActiveProcess, "pid", Steam.ClientPid);
+            // Only the 64 bit client is built, so SteamClientDll stays absent rather than dangling.
+            SetVolatileRegistryString(ActiveProcess, "SteamClientDll64", 1, SteamAppContext.GuestClientDll64);
+            SetVolatileRegistryString(ActiveProcess, "Universe", 1, "Public");
+            SetVolatileRegistryDword(ActiveProcess, "ActiveUser", (uint)(Steam.SteamId & 0xFFFFFFFF));
         }
 
-        private void InitializeSyntheticWindowsVersionRegistryDefaults(Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        private void InitializeSyntheticWindowsVersionRegistryDefaults()
         {
             const string CurrentVersionKey = "\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion";
-            AddSyntheticRegistryKeyTrusted(CurrentVersionKey, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "ProductName", 1, WindowsVersionInfo.ProductName, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "EditionID", 1, WindowsVersionInfo.EditionId, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "CompositionEditionID", 1, WindowsVersionInfo.EditionId, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "InstallationType", 1, WindowsVersionInfo.InstallationType, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "DisplayVersion", 1, WindowsVersionInfo.DisplayVersion, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "ReleaseId", 1, WindowsVersionInfo.DisplayVersion, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "CurrentVersion", 1, WindowsVersionInfo.CurrentVersion, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "CurrentBuild", 1, WindowsVersionInfo.BuildNumber.ToString(), KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "CurrentBuildNumber", 1, WindowsVersionInfo.BuildNumber.ToString(), KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(CurrentVersionKey, "CurrentMajorVersionNumber", WindowsVersionInfo.MajorVersion, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(CurrentVersionKey, "CurrentMinorVersionNumber", WindowsVersionInfo.MinorVersion, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(CurrentVersionKey, "UBR", WindowsVersionInfo.UpdateBuildRevision, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "BuildBranch", 1, WindowsVersionInfo.BuildBranch, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "BuildLab", 1, WindowsVersionInfo.BuildLab, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "BuildLabEx", 1, WindowsVersionInfo.BuildLabEx, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(CurrentVersionKey, "CurrentType", 1, "Multiprocessor Free", KeyCache, DefaultHive);
+            AddSyntheticRegistryKey(CurrentVersionKey);
+            SetSyntheticRegistryString(CurrentVersionKey, "ProductName", 1, WindowsVersionInfo.ProductName);
+            SetSyntheticRegistryString(CurrentVersionKey, "EditionID", 1, WindowsVersionInfo.EditionId);
+            SetSyntheticRegistryString(CurrentVersionKey, "CompositionEditionID", 1, WindowsVersionInfo.EditionId);
+            SetSyntheticRegistryString(CurrentVersionKey, "InstallationType", 1, WindowsVersionInfo.InstallationType);
+            SetSyntheticRegistryString(CurrentVersionKey, "DisplayVersion", 1, WindowsVersionInfo.DisplayVersion);
+            SetSyntheticRegistryString(CurrentVersionKey, "ReleaseId", 1, WindowsVersionInfo.DisplayVersion);
+            SetSyntheticRegistryString(CurrentVersionKey, "CurrentVersion", 1, WindowsVersionInfo.CurrentVersion);
+            SetSyntheticRegistryString(CurrentVersionKey, "CurrentBuild", 1, WindowsVersionInfo.BuildNumber.ToString());
+            SetSyntheticRegistryString(CurrentVersionKey, "CurrentBuildNumber", 1, WindowsVersionInfo.BuildNumber.ToString());
+            SetSyntheticRegistryDword(CurrentVersionKey, "CurrentMajorVersionNumber", WindowsVersionInfo.MajorVersion);
+            SetSyntheticRegistryDword(CurrentVersionKey, "CurrentMinorVersionNumber", WindowsVersionInfo.MinorVersion);
+            SetSyntheticRegistryDword(CurrentVersionKey, "UBR", WindowsVersionInfo.UpdateBuildRevision);
+            SetSyntheticRegistryString(CurrentVersionKey, "BuildBranch", 1, WindowsVersionInfo.BuildBranch);
+            SetSyntheticRegistryString(CurrentVersionKey, "BuildLab", 1, WindowsVersionInfo.BuildLab);
+            SetSyntheticRegistryString(CurrentVersionKey, "BuildLabEx", 1, WindowsVersionInfo.BuildLabEx);
+            SetSyntheticRegistryString(CurrentVersionKey, "CurrentType", 1, "Multiprocessor Free");
 
             const string ProductOptionsKey = "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\ProductOptions";
-            AddSyntheticRegistryKeyTrusted(ProductOptionsKey, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(ProductOptionsKey, "ProductType", 1, WindowsVersionInfo.RegistryProductType, KeyCache, DefaultHive);
+            AddSyntheticRegistryKey(ProductOptionsKey);
+            SetSyntheticRegistryString(ProductOptionsKey, "ProductType", 1, WindowsVersionInfo.RegistryProductType);
         }
 
-        private void AddSyntheticRegistryKey(string NtPath, Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        private void AddSyntheticRegistryKey(string NtPath)
         {
-            NtPath = NormalizeNtRegistryPath(NtPath);
-            if (string.IsNullOrEmpty(NtPath))
-                return;
-
-            string[] Parts = NtPath.Trim('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
-            string Current = string.Empty;
-
-            foreach (string Part in Parts)
-            {
-                Current += "\\" + Part;
-                if (Current.Equals("\\Registry", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                if (TempRegistryKeys.Contains(Current))
-                {
-                    KeyCache[Current] = true;
-                    continue;
-                }
-
-                if (!KeyCache.TryGetValue(Current, out bool Exists))
-                {
-                    Exists = RegistryKeyExists(Current, out _, out _, out _);
-                    KeyCache[Current] = Exists;
-                }
-
-                if (Exists)
-                    continue;
-
-                TempRegistryKeys.Add(Current);
-                DeletedRegistryKeys.Remove(Current);
-                Hive Hive = GetHiveByNtPath(Current) ?? DefaultHive;
-                if (Hive != null)
-                    TempRegistryKeyHives[Current] = Hive;
-                KeyCache[Current] = true;
-            }
-        }
-        private void AddSyntheticRegistryKeyTrusted(string NtPath, Dictionary<string, bool> KeyCache, Hive DefaultHive)
-        {
-            NtPath = NormalizeNtRegistryPath(NtPath);
-            if (string.IsNullOrEmpty(NtPath))
-                return;
-
-            string[] Parts = NtPath.Trim('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
-            string Current = string.Empty;
-
-            foreach (string Part in Parts)
-            {
-                Current += "\\" + Part;
-                if (Current.Equals("\\Registry", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                if (TempRegistryKeys.Contains(Current))
-                {
-                    KeyCache[Current] = true;
-                    continue;
-                }
-
-                if (KeyCache.TryGetValue(Current, out bool Exists) && Exists)
-                    continue;
-
-                TempRegistryKeys.Add(Current);
-                DeletedRegistryKeys.Remove(Current);
-                Hive Hive = GetHiveByNtPath(Current) ?? DefaultHive;
-                if (Hive != null)
-                    TempRegistryKeyHives[Current] = Hive;
-                KeyCache[Current] = true;
-            }
+            CreateRegistryKeyPath(NtPath, false, out _);
         }
 
-        private void SetSyntheticRegistryStringTrusted(string NtPath, string ValueName, int Type, string Value, Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        // Only the named key is volatile. A volatile parent would hold every stable key under it in memory.
+        private void AddVolatileRegistryKey(string NtPath)
         {
-            byte[] Data = Encoding.Unicode.GetBytes((Value ?? string.Empty) + "\0");
-            SetSyntheticRegistryValueTrusted(NtPath, ValueName, Type, Data, KeyCache, DefaultHive);
+            string Parent = GetRegistryParentPath(NormalizeNtRegistryPath(NtPath));
+            if (!string.IsNullOrEmpty(Parent))
+                CreateRegistryKeyPath(Parent, false, out _);
+
+            CreateRegistryKeyPath(NtPath, true, out _);
         }
 
-        private void SetSyntheticRegistryDwordTrusted(string NtPath, string ValueName, uint Value, Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        private void SetSyntheticRegistryString(string NtPath, string ValueName, int Type, string Value)
         {
-            byte[] Data = BitConverter.GetBytes(Value);
-            SetSyntheticRegistryValueTrusted(NtPath, ValueName, 4, Data, KeyCache, DefaultHive);
+            SetSyntheticRegistryValue(NtPath, ValueName, Type, Encoding.Unicode.GetBytes((Value ?? string.Empty) + "\0"));
         }
 
-        private void SetSyntheticRegistryValueTrusted(string NtPath, string ValueName, int Type, byte[] Data, Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        private void SetSyntheticRegistryDword(string NtPath, string ValueName, uint Value)
         {
-            AddSyntheticRegistryKeyTrusted(NtPath, KeyCache, DefaultHive);
+            SetSyntheticRegistryValue(NtPath, ValueName, 4, BitConverter.GetBytes(Value));
+        }
+
+        // Rewriting an unchanged value would churn the hive on every start.
+        private void SetSyntheticRegistryValue(string NtPath, string ValueName, int Type, byte[] Data)
+        {
+            AddSyntheticRegistryKey(NtPath);
 
             NtPath = NormalizeNtRegistryPath(NtPath);
             if (string.IsNullOrEmpty(NtPath))
                 return;
 
-            if (ValueName == null)
-                ValueName = string.Empty;
+            ValueName ??= string.Empty;
+            Data ??= Array.Empty<byte>();
 
-            if (!TempRegistryValues.TryGetValue(NtPath, out Dictionary<string, ValueNode> Values))
-            {
-                Values = new Dictionary<string, ValueNode>(StringComparer.OrdinalIgnoreCase);
-                TempRegistryValues[NtPath] = Values;
-            }
+            if (TryReadRegistryValue(NtPath, ValueName, out ValueNode Existing)
+                && Existing.Type == Type
+                && (Existing.Data ?? Array.Empty<byte>()).AsSpan().SequenceEqual(Data))
+                return;
 
-            Values[ValueName] = new ValueNode { Name = ValueName, Type = Type, Data = Data ?? Array.Empty<byte>() };
+            SetRegistryValue(NtPath, ValueName, Type, Data);
+        }
 
-            if (DeletedRegistryValues.TryGetValue(NtPath, out HashSet<string> DeletedValues))
-                DeletedValues.Remove(ValueName);
+        private void SetVolatileRegistryString(string NtPath, string ValueName, int Type, string Value)
+        {
+            AddVolatileRegistryKey(NtPath);
+            SetRegistryValue(NtPath, ValueName, Type, Encoding.Unicode.GetBytes((Value ?? string.Empty) + "\0"));
+        }
+
+        private void SetVolatileRegistryDword(string NtPath, string ValueName, uint Value)
+        {
+            AddVolatileRegistryKey(NtPath);
+            SetRegistryValue(NtPath, ValueName, 4, BitConverter.GetBytes(Value));
         }
 
         private void AddSyntheticDirectory(string Path)
@@ -7090,81 +7041,46 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
-        private void SetSyntheticRegistryString(string NtPath, string ValueName, int Type, string Value, Dictionary<string, bool> KeyCache, Hive DefaultHive)
-        {
-            byte[] Data = Encoding.Unicode.GetBytes((Value ?? string.Empty) + "\0");
-            SetSyntheticRegistryValue(NtPath, ValueName, Type, Data, KeyCache, DefaultHive);
-        }
-
-        private void SetSyntheticRegistryDword(string NtPath, string ValueName, uint Value, Dictionary<string, bool> KeyCache, Hive DefaultHive)
-        {
-            byte[] Data = BitConverter.GetBytes(Value);
-            SetSyntheticRegistryValue(NtPath, ValueName, 4, Data, KeyCache, DefaultHive);
-        }
-
-        private void SetSyntheticRegistryValue(string NtPath, string ValueName, int Type, byte[] Data, Dictionary<string, bool> KeyCache, Hive DefaultHive)
-        {
-            AddSyntheticRegistryKey(NtPath, KeyCache, DefaultHive);
-
-            NtPath = NormalizeNtRegistryPath(NtPath);
-            if (string.IsNullOrEmpty(NtPath))
-                return;
-
-            if (ValueName == null)
-                ValueName = string.Empty;
-
-            if (!TempRegistryValues.TryGetValue(NtPath, out Dictionary<string, ValueNode> Values))
-            {
-                Values = new Dictionary<string, ValueNode>(StringComparer.OrdinalIgnoreCase);
-                TempRegistryValues[NtPath] = Values;
-            }
-
-            Values[ValueName] = new ValueNode { Name = ValueName, Type = Type, Data = Data ?? Array.Empty<byte>() };
-
-            if (DeletedRegistryValues.TryGetValue(NtPath, out HashSet<string> DeletedValues))
-                DeletedValues.Remove(ValueName);
-        }
-
-        private void InitializeSyntheticKnownFolderDescriptions(Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        private void InitializeSyntheticKnownFolderDescriptions()
         {
             const string Root = "\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FolderDescriptions";
-            AddSyntheticRegistryKeyTrusted(Root, KeyCache, DefaultHive);
+            AddSyntheticRegistryKey(Root);
 
-            AddSyntheticKnownFolder(Root, "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Profile", string.Empty, string.Empty, 2, KeyCache, DefaultHive);
-            AddSyntheticKnownFolder(Root, "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}", "Local AppData", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "AppData\\Local", 4, KeyCache, DefaultHive);
-            AddSyntheticKnownFolder(Root, "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}", "Roaming AppData", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "AppData\\Roaming", 4, KeyCache, DefaultHive);
-            AddSyntheticKnownFolder(Root, "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}", "Documents", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Documents", 4, KeyCache, DefaultHive);
-            AddSyntheticKnownFolder(Root, "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}", "Desktop", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Desktop", 4, KeyCache, DefaultHive);
-            AddSyntheticKnownFolder(Root, "{374DE290-123F-4565-9164-39C4925E467B}", "Downloads", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Downloads", 4, KeyCache, DefaultHive);
-            AddSyntheticKnownFolder(Root, "{33E28130-4E1E-4676-835A-98395C3BC3BB}", "Pictures", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Pictures", 4, KeyCache, DefaultHive);
-            AddSyntheticKnownFolder(Root, "{4BD8D571-6D19-48D3-BE97-422220080E43}", "Music", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Music", 4, KeyCache, DefaultHive);
-            AddSyntheticKnownFolder(Root, "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}", "Videos", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Videos", 4, KeyCache, DefaultHive);
-            AddSyntheticKnownFolder(Root, "{4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4}", "SavedGames", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Saved Games", 4, KeyCache, DefaultHive);
-            AddSyntheticKnownFolder(Root, "{A520A1A4-1780-4FF6-BD18-167343C5AF16}", "LocalAppDataLow", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "AppData\\LocalLow", 4, KeyCache, DefaultHive);
+            AddSyntheticKnownFolder(Root, "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Profile", string.Empty, string.Empty, 2);
+            AddSyntheticKnownFolder(Root, "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}", "Local AppData", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "AppData\\Local", 4);
+            AddSyntheticKnownFolder(Root, "{3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}", "Roaming AppData", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "AppData\\Roaming", 4);
+            AddSyntheticKnownFolder(Root, "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}", "Documents", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Documents", 4);
+            AddSyntheticKnownFolder(Root, "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}", "Desktop", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Desktop", 4);
+            AddSyntheticKnownFolder(Root, "{374DE290-123F-4565-9164-39C4925E467B}", "Downloads", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Downloads", 4);
+            AddSyntheticKnownFolder(Root, "{33E28130-4E1E-4676-835A-98395C3BC3BB}", "Pictures", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Pictures", 4);
+            AddSyntheticKnownFolder(Root, "{4BD8D571-6D19-48D3-BE97-422220080E43}", "Music", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Music", 4);
+            AddSyntheticKnownFolder(Root, "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}", "Videos", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Videos", 4);
+            AddSyntheticKnownFolder(Root, "{4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4}", "SavedGames", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "Saved Games", 4);
+            AddSyntheticKnownFolder(Root, "{A520A1A4-1780-4FF6-BD18-167343C5AF16}", "LocalAppDataLow", "{5E6C858F-0E22-4760-9AFE-EA3317B67173}", "AppData\\LocalLow", 4);
         }
 
-        private void AddSyntheticKnownFolder(string Root, string Guid, string Name, string ParentFolder, string RelativePath, uint Category, Dictionary<string, bool> KeyCache, Hive DefaultHive)
+        private void AddSyntheticKnownFolder(string Root, string Guid, string Name, string ParentFolder, string RelativePath, uint Category)
         {
             string Key = Root + "\\" + Guid;
-            AddSyntheticRegistryKeyTrusted(Key, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(Key, "Name", 1, Name, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(Key, "Category", Category, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(Key, "Attributes", 0x10, KeyCache, DefaultHive);
-            SetSyntheticRegistryDwordTrusted(Key, "DefinitionFlags", 0, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(Key, "LocalizedName", 2, Name, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(Key, "Tooltip", 2, Name, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(Key, "Icon", 2, "%SystemRoot%\\system32\\imageres.dll,-3", KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(Key, "Security", 1, string.Empty, KeyCache, DefaultHive);
+            AddSyntheticRegistryKey(Key);
+            SetSyntheticRegistryString(Key, "Name", 1, Name);
+            SetSyntheticRegistryDword(Key, "Category", Category);
+            SetSyntheticRegistryDword(Key, "Attributes", 0x10);
+            SetSyntheticRegistryDword(Key, "DefinitionFlags", 0);
+            SetSyntheticRegistryString(Key, "LocalizedName", 2, Name);
+            SetSyntheticRegistryString(Key, "Tooltip", 2, Name);
+            SetSyntheticRegistryString(Key, "Icon", 2, "%SystemRoot%\\system32\\imageres.dll,-3");
+            SetSyntheticRegistryString(Key, "Security", 1, string.Empty);
 
             if (!string.IsNullOrEmpty(ParentFolder))
-                SetSyntheticRegistryStringTrusted(Key, "ParentFolder", 1, ParentFolder, KeyCache, DefaultHive);
+                SetSyntheticRegistryString(Key, "ParentFolder", 1, ParentFolder);
 
             if (!string.IsNullOrEmpty(RelativePath))
-                SetSyntheticRegistryStringTrusted(Key, "RelativePath", 1, RelativePath, KeyCache, DefaultHive);
+                SetSyntheticRegistryString(Key, "RelativePath", 1, RelativePath);
 
             string PropertyBag = Key + "\\PropertyBag";
-            AddSyntheticRegistryKeyTrusted(PropertyBag, KeyCache, DefaultHive);
-            SetSyntheticRegistryStringTrusted(PropertyBag, "ThisPCPolicy", 1, "Show", KeyCache, DefaultHive);
+            AddSyntheticRegistryKey(PropertyBag);
+            SetSyntheticRegistryString(PropertyBag, "ThisPCPolicy", 1, "Show");
         }
 
         /// <summary>
@@ -7177,29 +7093,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(NtPath))
                 return true;
 
-            if (NtPath.Contains(UnclaimedActivatableClassNamespace, StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            NtPath = NormalizeKeyPath(NtPath);
-
-            foreach (string DeletedKey in DeletedRegistryKeys)
-            {
-                if (NtPath.Equals(DeletedKey, StringComparison.OrdinalIgnoreCase) || NtPath.StartsWith(DeletedKey + "\\", StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-
-            return false;
+            return NtPath.Contains(UnclaimedActivatableClassNamespace, StringComparison.OrdinalIgnoreCase);
         }
 
         public bool RegistryKeyExists(string NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly)
+        {
+            return RegistryKeyExists(NtPath, out Hive, out Key, out TempOnly, out _);
+        }
+
+        // ResolvedPath is the spelling a write has to target, which the Wow64 redirect can change.
+        public bool RegistryKeyExists(string NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly, out string ResolvedPath)
         {
             string Normalized = NormalizeNtRegistryPath(NtPath);
 
             if (Emulator.IsX86Guest
                 && TryApplyWow64RegistryRedirect(Normalized, out string Redirected)
                 && RegistryKeyExistsExact(Redirected, out Hive, out Key, out TempOnly))
+            {
+                ResolvedPath = Redirected;
                 return true;
+            }
 
+            ResolvedPath = Normalized;
             return RegistryKeyExistsExact(Normalized, out Hive, out Key, out TempOnly);
         }
 
@@ -7269,25 +7184,26 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
             }
 
-            bool HasTempKey = TempRegistryKeys.Contains(NtPath);
+            bool IsVolatile = VolatileRegistryKeys.TryGetValue(NtPath, out WinVolatileRegKey Volatile);
             Hive = GetHiveByNtPath(NtPath);
+
             if (Hive == null)
             {
-                if (!HasTempKey)
+                if (!IsVolatile)
                     return false;
 
                 TempOnly = true;
-                TempRegistryKeyHives.TryGetValue(NtPath, out Hive TempHive);
-                Hive = TempHive ?? RegHives.FirstOrDefault();
+                Hive = Volatile.Hive ?? (RegHives != null && RegHives.Length != 0 ? RegHives[0] : null);
                 return true;
             }
 
-            if (HasTempKey)
+            Hive.SyncFromDisk();
+
+            if (IsVolatile)
             {
                 TempOnly = true;
-                TempRegistryKeyHives.TryGetValue(NtPath, out Hive TempHive);
-                if (TempHive != null)
-                    Hive = TempHive;
+                if (Volatile.Hive != null)
+                    Hive = Volatile.Hive;
             }
 
             if (Hive.Reader != null)
@@ -7297,7 +7213,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     KeyPath = "\\";
 
                 if (Hive.Reader.TryOpenPath(KeyPath, out Key))
+                {
+                    TempOnly = false;
                     return true;
+                }
             }
 
             return TempOnly;
@@ -7323,6 +7242,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RegKey == null)
                 return false;
 
+            DropStaleRegistryCache(RegKey);
+
+            if (RegKey.CachedValues != null)
+            {
+                Values = RegKey.CachedValues;
+                return true;
+            }
+
             string NtPath = NormalizeNtRegistryPath(RegKey.FullPath);
             if (string.IsNullOrEmpty(NtPath) || IsRegistryPathDeleted(NtPath))
                 return false;
@@ -7340,22 +7267,27 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            if (DeletedRegistryValues.TryGetValue(NtPath, out HashSet<string> DeletedValues))
+            if (VolatileRegistryKeys.TryGetValue(NtPath, out WinVolatileRegKey Volatile))
             {
-                foreach (string Name in DeletedValues)
-                    Merged.Remove(Name);
-            }
+                if (Volatile.DeletedValues != null)
+                {
+                    foreach (string Deleted in Volatile.DeletedValues)
+                        Merged.Remove(Deleted);
+                }
 
-            if (TempRegistryValues.TryGetValue(NtPath, out Dictionary<string, ValueNode> TempValues))
-            {
-                foreach (var Pair in TempValues)
+                foreach (var Pair in Volatile.Values)
                 {
                     ValueNode Value = Pair.Value;
                     Merged[Pair.Key] = new ValueNode { Name = Value.Name, Type = Value.Type, Data = Value.Data == null ? Array.Empty<byte>() : (byte[])Value.Data.Clone() };
                 }
             }
 
-            Values = Merged.Values.OrderBy(v => v.Name ?? string.Empty, StringComparer.OrdinalIgnoreCase).ToList();
+            Values = new List<ValueNode>(Merged.Count);
+            foreach (var Pair in Merged)
+                Values.Add(Pair.Value);
+
+            Values.Sort(RegistryValueNameOrder);
+            RegKey.CachedValues = Values;
             return true;
         }
 
@@ -7366,11 +7298,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RegKey == null)
                 return false;
 
+            DropStaleRegistryCache(RegKey);
+
+            if (RegKey.CachedSubKeyNames != null)
+            {
+                Names = RegKey.CachedSubKeyNames;
+                return true;
+            }
+
             string NtPath = NormalizeNtRegistryPath(RegKey.FullPath);
             if (string.IsNullOrEmpty(NtPath) || IsRegistryPathDeleted(NtPath))
                 return false;
 
-            Names = new List<string>();
+            Names = new List<string>(RegKey.HasParsedKey && RegKey.ParsedKey != null ? Math.Max(0, RegKey.ParsedKey.SubKeyCount) : 0);
             AddVirtualRegistrySubKeys(NtPath, Names);
 
             if (RegKey.Hive != null && RegKey.Hive.Reader != null && RegKey.HasParsedKey)
@@ -7382,25 +7322,43 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Enumerated)
                 {
                     foreach (string SubKeyName in SubKeyNames.Keys)
-                    {
-                        string ChildFullPath = NormalizeKeyPath(NtPath + "\\" + SubKeyName);
-                        if (!DeletedRegistryKeys.Contains(ChildFullPath))
-                            Names.Add(SubKeyName);
-                    }
+                        Names.Add(SubKeyName);
                 }
             }
 
-            foreach (string TempKey in TempRegistryKeys)
+            foreach (string VolatilePath in VolatileRegistryKeys.Keys)
             {
-                if (DeletedRegistryKeys.Contains(TempKey))
-                    continue;
-
-                if (IsDirectRegistryChild(NtPath, TempKey, out string ChildName))
+                if (IsDirectRegistryChild(NtPath, VolatilePath, out string ChildName))
                     Names.Add(ChildName);
             }
 
             Names.Sort(StringComparer.OrdinalIgnoreCase);
+
+            for (int i = Names.Count - 1; i > 0; i--)
+            {
+                if (string.Equals(Names[i], Names[i - 1], StringComparison.OrdinalIgnoreCase))
+                    Names.RemoveAt(i);
+            }
+
+            RegKey.CachedSubKeyNames = Names;
             return true;
+        }
+
+        // Another emulator process moves the hive reader's generation, not this counter, so both are watched.
+        private void DropStaleRegistryCache(WinRegKey RegKey)
+        {
+            Hive Hive = RegKey.Hive;
+            Hive?.SyncFromDisk();
+
+            uint HiveGeneration = Hive != null ? Hive.ReaderGeneration : 0;
+
+            if (RegKey.CachedGeneration == RegistryGeneration && RegKey.CachedHiveGeneration == HiveGeneration)
+                return;
+
+            RegKey.CachedGeneration = RegistryGeneration;
+            RegKey.CachedHiveGeneration = HiveGeneration;
+            RegKey.CachedSubKeyNames = null;
+            RegKey.CachedValues = null;
         }
 
         public bool TryEnumerateRegistrySubKey(WinRegKey RegKey, int Index, out string Name)
@@ -7412,6 +7370,25 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Name = Names[Index];
             return true;
+        }
+
+        private bool HasRegistrySubKeys(WinRegKey RegKey, string NtPath)
+        {
+            if (IsVirtualRegistryRoot(NtPath))
+                return true;
+
+            if (RegKey.Hive != null && RegKey.Hive.Reader != null && RegKey.HasParsedKey
+                && RegKey.Hive.Reader.TryQueryKeyHeader(RegKey.ParsedKey, out int SubKeyCount, out _, out _)
+                && SubKeyCount > 0)
+                return true;
+
+            foreach (string VolatilePath in VolatileRegistryKeys.Keys)
+            {
+                if (IsDirectRegistryChild(NtPath, VolatilePath, out _))
+                    return true;
+            }
+
+            return false;
         }
 
         private bool IsDirectRegistryChild(string ParentPath, string ChildPath, out string ChildName)
@@ -7504,19 +7481,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ValueName == null)
                 ValueName = string.Empty;
 
-            if (DeletedRegistryValues.TryGetValue(NtPath, out HashSet<string> DeletedValues) && DeletedValues.Contains(ValueName))
-                return false;
-
-            if (TempRegistryValues.TryGetValue(NtPath, out Dictionary<string, ValueNode> Values) && Values.TryGetValue(ValueName, out ValueNode TempValue))
+            if (VolatileRegistryKeys.TryGetValue(NtPath, out WinVolatileRegKey Volatile))
             {
-                Value = new ValueNode { Name = TempValue.Name, Type = TempValue.Type, Data = TempValue.Data == null ? Array.Empty<byte>() : (byte[])TempValue.Data.Clone() };
-                return true;
+                if (Volatile.Values.TryGetValue(ValueName, out ValueNode VolatileValue))
+                {
+                    Value = new ValueNode { Name = VolatileValue.Name, Type = VolatileValue.Type, Data = VolatileValue.Data == null ? Array.Empty<byte>() : (byte[])VolatileValue.Data.Clone() };
+                    return true;
+                }
+
+                if (Volatile.DeletedValues != null && Volatile.DeletedValues.Contains(ValueName))
+                    return false;
             }
 
             if (RegKey.Hive != null && RegKey.Hive.Reader != null && RegKey.HasParsedKey)
                 return RegKey.Hive.Reader.TryGetValue(RegKey.ParsedKey, ValueName, out Value);
 
             return false;
+        }
+
+        private bool TryReadRegistryValue(string NtPath, string ValueName, out ValueNode Value)
+        {
+            Value = null;
+
+            WinRegKey RegKey = ResolveRegistryKey(NtPath);
+            return RegKey != null && TryGetRegistryValue(RegKey, ValueName, out Value);
         }
 
         public bool TryQueryRegistryKeyHeader(WinRegKey RegKey, out int SubKeyCount, out int ValueCount, out string Name)
@@ -7577,7 +7565,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        public bool CreateRegistryKeyPath(string NtPath, out bool CreatedNew)
+        // NT has no stable key under a volatile one.
+        public bool CreateRegistryKeyPath(string NtPath, bool Volatile, out bool CreatedNew)
         {
             CreatedNew = false;
 
@@ -7585,54 +7574,96 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(NtPath))
                 return false;
 
+            if (RegistryKeyExists(NtPath, out Hive Existing, out _, out _, out string ResolvedPath))
+            {
+                // A key on disk still needs its memory side, or a volatile write would reach the hive.
+                if (Volatile)
+                    GetOrAddVolatileRegistryKey(ResolvedPath, Existing);
+
+                return true;
+            }
+
             string ParentPath = GetRegistryParentPath(NtPath);
             if (string.IsNullOrEmpty(ParentPath))
                 return false;
 
-            if (!RegistryKeyExists(ParentPath, out Hive ParentHive, out _, out _))
+            if (!CreateRegistryKeyPath(ParentPath, Volatile, out _))
                 return false;
 
-            if (RegistryKeyExists(NtPath, out _, out _, out _))
-                return true;
+            Hive Hive = GetHiveByNtPath(NtPath);
 
-            TempRegistryKeys.Add(NtPath);
-            DeletedRegistryKeys.Remove(NtPath);
-            TempRegistryKeyHives[NtPath] = ParentHive;
+            bool ParentVolatile = VolatileRegistryKeys.TryGetValue(ParentPath, out WinVolatileRegKey ParentEntry) && !ParentEntry.Shadow;
+
+            if (Volatile || Hive == null || !Hive.Writable || ParentVolatile)
+            {
+                VolatileRegistryKeys[NtPath] = new WinVolatileRegKey { Hive = Hive };
+            }
+            else
+            {
+                string Relative = RegManager.NormalizeNtRegistryPath(Hive, NtPath);
+                if (string.IsNullOrEmpty(Relative) || !Hive.CreateKey(Relative, out _))
+                    return false;
+            }
+
             CreatedNew = true;
+            RegistryGeneration++;
             CompleteRegistryNotifications(ParentPath, 0x00000001);
             return true;
         }
 
-        public bool DeleteRegistryKeyPath(string NtPath)
+        public bool DeleteRegistryKeyPath(string NtPath, out RegistryDeleteStatus Status)
         {
+            Status = RegistryDeleteStatus.NotFound;
+
             NtPath = NormalizeNtRegistryPath(NtPath);
             if (string.IsNullOrEmpty(NtPath))
                 return false;
 
-            if (!RegistryKeyExists(NtPath, out _, out _, out _))
+            WinRegKey RegKey = ResolveRegistryKey(NtPath);
+            if (RegKey == null)
                 return false;
 
-            DeletedRegistryKeys.Add(NtPath);
-            TempRegistryKeys.Remove(NtPath);
-            TempRegistryValues.Remove(NtPath);
-            DeletedRegistryValues.Remove(NtPath);
-            TempRegistryKeyHives.Remove(NtPath);
+            NtPath = RegKey.FullPath;
 
-            List<string> TempChildren = TempRegistryKeys.Where(x => x.StartsWith(NtPath + "\\", StringComparison.OrdinalIgnoreCase)).ToList();
-            foreach (string Child in TempChildren)
+            if (HasRegistrySubKeys(RegKey, NtPath))
             {
-                TempRegistryKeys.Remove(Child);
-                TempRegistryValues.Remove(Child);
-                DeletedRegistryValues.Remove(Child);
-                TempRegistryKeyHives.Remove(Child);
-                DeletedRegistryKeys.Add(Child);
+                Status = RegistryDeleteStatus.HasSubKeys;
+                return false;
             }
 
+            bool Removed = VolatileRegistryKeys.Remove(NtPath);
+
+            Hive Hive = RegKey.Hive;
+            if (Hive != null && Hive.Writable)
+            {
+                string Relative = RegManager.NormalizeNtRegistryPath(Hive, NtPath);
+                if (!string.IsNullOrEmpty(Relative) && Hive.DeleteKey(Relative))
+                    Removed = true;
+            }
+
+            if (!Removed)
+            {
+                Status = Hive != null && !Hive.Writable ? RegistryDeleteStatus.NotWritable : RegistryDeleteStatus.NotFound;
+                return false;
+            }
+
+            Status = RegistryDeleteStatus.Deleted;
             RegistryGeneration++;
 
             string ParentPath = GetRegistryParentPath(NtPath);
             CompleteRegistryNotifications(!string.IsNullOrEmpty(ParentPath) ? ParentPath : NtPath, 0x00000001);
             return true;
+        }
+
+        private WinVolatileRegKey GetOrAddVolatileRegistryKey(string NtPath, Hive Hive)
+        {
+            if (!VolatileRegistryKeys.TryGetValue(NtPath, out WinVolatileRegKey Volatile))
+            {
+                Volatile = new WinVolatileRegKey { Hive = Hive, Shadow = true };
+                VolatileRegistryKeys[NtPath] = Volatile;
+            }
+
+            return Volatile;
         }
 
         public bool SetRegistryValue(string NtPath, string ValueName, int Type, byte[] Data)
@@ -7641,22 +7672,29 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(NtPath))
                 return false;
 
-            if (!RegistryKeyExists(NtPath, out _, out _, out _))
+            if (!RegistryKeyExists(NtPath, out Hive Hive, out _, out _, out string ResolvedPath))
                 return false;
 
-            if (ValueName == null)
-                ValueName = string.Empty;
+            ValueName ??= string.Empty;
+            Data ??= Array.Empty<byte>();
 
-            if (!TempRegistryValues.TryGetValue(NtPath, out Dictionary<string, ValueNode> Values))
+            if (VolatileRegistryKeys.TryGetValue(ResolvedPath, out WinVolatileRegKey Volatile))
             {
-                Values = new Dictionary<string, ValueNode>(StringComparer.OrdinalIgnoreCase);
-                TempRegistryValues[NtPath] = Values;
+                Volatile.Values[ValueName] = new ValueNode { Name = ValueName, Type = Type, Data = Data };
+                Volatile.DeletedValues?.Remove(ValueName);
             }
-
-            Values[ValueName] = new ValueNode { Name = ValueName, Type = Type, Data = Data ?? Array.Empty<byte>() };
-
-            if (DeletedRegistryValues.TryGetValue(NtPath, out HashSet<string> DeletedValues))
-                DeletedValues.Remove(ValueName);
+            else if (Hive != null && Hive.Writable)
+            {
+                string Relative = RegManager.NormalizeNtRegistryPath(Hive, ResolvedPath);
+                if (string.IsNullOrEmpty(Relative) || !Hive.SetValue(Relative, ValueName, Type, Data))
+                    return false;
+            }
+            else
+            {
+                WinVolatileRegKey Shadow = GetOrAddVolatileRegistryKey(ResolvedPath, Hive);
+                Shadow.Values[ValueName] = new ValueNode { Name = ValueName, Type = Type, Data = Data };
+                Shadow.DeletedValues?.Remove(ValueName);
+            }
 
             RegistryGeneration++;
             CompleteRegistryNotifications(NtPath, 0x00000004);
@@ -7669,212 +7707,34 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(NtPath))
                 return false;
 
-            if (!RegistryKeyExists(NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly))
+            if (!RegistryKeyExists(NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out _, out string ResolvedPath))
                 return false;
 
-            if (ValueName == null)
-                ValueName = string.Empty;
+            ValueName ??= string.Empty;
 
-            bool Exists = false;
+            bool Removed = false;
 
-            if (TempRegistryValues.TryGetValue(NtPath, out Dictionary<string, ValueNode> Values) && Values.ContainsKey(ValueName))
-                Exists = true;
+            if (VolatileRegistryKeys.TryGetValue(ResolvedPath, out WinVolatileRegKey Volatile))
+                Removed = Volatile.Values.Remove(ValueName);
 
-            if (!Exists && Hive != null && Hive.Reader != null && !TempOnly)
-                Exists = Hive.Reader.TryGetValue(Key, ValueName, out _);
-
-            if (!Exists)
-                return false;
-
-            if (TempRegistryValues.TryGetValue(NtPath, out Values))
-                Values.Remove(ValueName);
-
-            if (!DeletedRegistryValues.TryGetValue(NtPath, out HashSet<string> DeletedValues))
+            if (Hive != null && Hive.Writable)
             {
-                DeletedValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                DeletedRegistryValues[NtPath] = DeletedValues;
+                string Relative = RegManager.NormalizeNtRegistryPath(Hive, ResolvedPath);
+                Removed |= !string.IsNullOrEmpty(Relative) && Hive.DeleteValue(Relative, ValueName);
+            }
+            else if (Hive != null && Key != null && Hive.Reader != null && Hive.Reader.TryGetValue(Key, ValueName, out _))
+            {
+                WinVolatileRegKey Shadow = GetOrAddVolatileRegistryKey(ResolvedPath, Hive);
+                Shadow.DeletedValues ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                Removed |= Shadow.DeletedValues.Add(ValueName);
             }
 
-            DeletedValues.Add(ValueName);
+            if (!Removed)
+                return false;
+
             RegistryGeneration++;
             CompleteRegistryNotifications(NtPath, 0x00000004);
             return true;
-        }
-
-        private static string RegistryOverlayFile(uint GuestProcessId)
-        {
-            string SessionDirectory = GuestSession.Directory;
-            return string.IsNullOrEmpty(SessionDirectory)
-                ? null
-                : Path.Combine(SessionDirectory, $"registry-{GuestProcessId}.bin");
-        }
-
-        private Hive FindHiveByMountPoint(string NtMountPoint)
-        {
-            if (string.IsNullOrEmpty(NtMountPoint) || RegHives == null)
-                return null;
-
-            foreach (Hive Candidate in RegHives)
-            {
-                if (Candidate != null && string.Equals(Candidate.NtMountPoint, NtMountPoint, StringComparison.OrdinalIgnoreCase))
-                    return Candidate;
-            }
-
-            return null;
-        }
-
-        // Keys are written between CreateProcess and ResumeThread, so the child takes them at the resume.
-        internal void ExportRegistryOverlay(uint GuestProcessId)
-        {
-            string OverlayFile = RegistryOverlayFile(GuestProcessId);
-            if (OverlayFile == null)
-                return;
-
-            try
-            {
-                string Staging = OverlayFile + ".tmp";
-                using (FileStream Stream = new FileStream(Staging, FileMode.Create, FileAccess.Write, FileShare.None))
-                using (BinaryWriter Writer = new BinaryWriter(Stream, Encoding.Unicode))
-                {
-                    Writer.Write(TempRegistryKeys.Count);
-                    foreach (string KeyPath in TempRegistryKeys)
-                    {
-                        Writer.Write(KeyPath);
-                        Writer.Write(TempRegistryKeyHives.TryGetValue(KeyPath, out Hive KeyHive) && KeyHive != null
-                            ? KeyHive.NtMountPoint ?? string.Empty
-                            : string.Empty);
-                    }
-
-                    Writer.Write(DeletedRegistryKeys.Count);
-                    foreach (string KeyPath in DeletedRegistryKeys)
-                        Writer.Write(KeyPath);
-
-                    Writer.Write(TempRegistryValues.Count);
-                    foreach (KeyValuePair<string, Dictionary<string, ValueNode>> Entry in TempRegistryValues)
-                    {
-                        Writer.Write(Entry.Key);
-                        Writer.Write(Entry.Value.Count);
-                        foreach (ValueNode Value in Entry.Value.Values)
-                        {
-                            Writer.Write(Value.Name ?? string.Empty);
-                            Writer.Write(Value.Type);
-                            byte[] Data = Value.Data ?? Array.Empty<byte>();
-                            Writer.Write(Data.Length);
-                            Writer.Write(Data);
-                        }
-                    }
-
-                    Writer.Write(DeletedRegistryValues.Count);
-                    foreach (KeyValuePair<string, HashSet<string>> Entry in DeletedRegistryValues)
-                    {
-                        Writer.Write(Entry.Key);
-                        Writer.Write(Entry.Value.Count);
-                        foreach (string ValueName in Entry.Value)
-                            Writer.Write(ValueName);
-                    }
-                }
-
-                File.Move(Staging, OverlayFile, true);
-            }
-            catch (Exception Ex)
-            {
-                Utils.LogError($"[Registry] Could not hand the registry to guest process {GuestProcessId}: {Ex.Message}");
-            }
-        }
-
-        internal void ImportRegistryOverlay()
-        {
-            string OverlayFile = RegistryOverlayFile(PID);
-            if (OverlayFile == null || !File.Exists(OverlayFile))
-                return;
-
-            try
-            {
-                using (FileStream Stream = new FileStream(OverlayFile, FileMode.Open, FileAccess.Read, FileShare.Read))
-                using (BinaryReader Reader = new BinaryReader(Stream, Encoding.Unicode))
-                {
-                    int KeyCount = Reader.ReadInt32();
-                    for (int i = 0; i < KeyCount; i++)
-                    {
-                        string KeyPath = Reader.ReadString();
-                        Hive KeyHive = FindHiveByMountPoint(Reader.ReadString());
-                        TempRegistryKeys.Add(KeyPath);
-                        DeletedRegistryKeys.Remove(KeyPath);
-                        if (KeyHive != null)
-                            TempRegistryKeyHives[KeyPath] = KeyHive;
-                    }
-
-                    int DeletedKeyCount = Reader.ReadInt32();
-                    for (int i = 0; i < DeletedKeyCount; i++)
-                    {
-                        string KeyPath = Reader.ReadString();
-                        DeletedRegistryKeys.Add(KeyPath);
-                        TempRegistryKeys.Remove(KeyPath);
-                        TempRegistryValues.Remove(KeyPath);
-                        TempRegistryKeyHives.Remove(KeyPath);
-                    }
-
-                    int PathCount = Reader.ReadInt32();
-                    for (int i = 0; i < PathCount; i++)
-                    {
-                        string KeyPath = Reader.ReadString();
-                        int ValueCount = Reader.ReadInt32();
-
-                        if (!TempRegistryValues.TryGetValue(KeyPath, out Dictionary<string, ValueNode> Values))
-                        {
-                            Values = new Dictionary<string, ValueNode>(StringComparer.OrdinalIgnoreCase);
-                            TempRegistryValues[KeyPath] = Values;
-                        }
-
-                        for (int v = 0; v < ValueCount; v++)
-                        {
-                            string ValueName = Reader.ReadString();
-                            int Type = Reader.ReadInt32();
-                            byte[] Data = Reader.ReadBytes(Reader.ReadInt32());
-                            Values[ValueName] = new ValueNode { Name = ValueName, Type = Type, Data = Data };
-
-                            if (DeletedRegistryValues.TryGetValue(KeyPath, out HashSet<string> Deleted))
-                                Deleted.Remove(ValueName);
-                        }
-                    }
-
-                    int DeletedPathCount = Reader.ReadInt32();
-                    for (int i = 0; i < DeletedPathCount; i++)
-                    {
-                        string KeyPath = Reader.ReadString();
-                        int ValueCount = Reader.ReadInt32();
-
-                        if (!DeletedRegistryValues.TryGetValue(KeyPath, out HashSet<string> Deleted))
-                        {
-                            Deleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                            DeletedRegistryValues[KeyPath] = Deleted;
-                        }
-
-                        for (int v = 0; v < ValueCount; v++)
-                        {
-                            string ValueName = Reader.ReadString();
-                            Deleted.Add(ValueName);
-
-                            if (TempRegistryValues.TryGetValue(KeyPath, out Dictionary<string, ValueNode> Values))
-                                Values.Remove(ValueName);
-                        }
-                    }
-                }
-
-                RegistryGeneration++;
-            }
-            catch (Exception Ex)
-            {
-                Utils.LogError($"[Registry] Could not take the registry handed to guest process {PID}: {Ex.Message}");
-            }
-
-            try
-            {
-                File.Delete(OverlayFile);
-            }
-            catch (Exception)
-            {
-            }
         }
 
         public void RegisterRegistryNotification(WinRegistryNotification Notification)
@@ -7937,7 +7797,24 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinRegKey ResolveRegistryKey(string NtPath)
         {
             NtPath = NormalizeNtRegistryPath(NtPath);
-            if (string.IsNullOrEmpty(NtPath) || !RegistryKeyExists(NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly))
+            if (string.IsNullOrEmpty(NtPath))
+                return null;
+
+            if (Emulator.IsX86Guest
+                && TryApplyWow64RegistryRedirect(NtPath, out string Redirected)
+                && RegistryKeyExistsExact(Redirected, out Hive RedirectedHive, out RegistryHiveReader.HiveKey RedirectedKey, out bool RedirectedTempOnly))
+            {
+                return new WinRegKey
+                {
+                    FullPath = Redirected,
+                    Hive = RedirectedHive,
+                    Key = null,
+                    ParsedKey = RedirectedKey,
+                    HasParsedKey = !RedirectedTempOnly && RedirectedHive != null && RedirectedHive.Reader != null
+                };
+            }
+
+            if (!RegistryKeyExistsExact(NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly))
                 return null;
 
             return new WinRegKey
