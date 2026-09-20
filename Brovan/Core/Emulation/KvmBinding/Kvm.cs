@@ -1835,7 +1835,7 @@ namespace Brovan.Core.Emulation
             _partitionFd = KvmNative.ioctl(_systemFd, KvmConstants.KvmIoCreateVm, IntPtr.Zero);
             if (_partitionFd < 0)
                 throw new KvmException("KVM_CREATE_VM failed", Marshal.GetLastWin32Error());
-            KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoSetTssAddress, (IntPtr)0xfffbd000);
+            KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoSetTssAddress, unchecked((IntPtr)0xfffbd000));
             KeepMappingsOnSlotDelete();
         }
 

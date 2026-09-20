@@ -6,27 +6,23 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            {
-                ulong KeyHandle = Instance.WinHelper.GetArg(0);
-                ulong ValueNamePtr = Instance.WinHelper.GetArg(1);
+            ulong KeyHandle = Instance.WinHelper.GetArg(0);
+            ulong ValueNamePtr = Instance.WinHelper.GetArg(1);
 
-                if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out NTSTATUS Status))
-                    return Status;
+            if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out NTSTATUS Status))
+                return Status;
 
-                WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
-                if (RegKey == null)
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
+            WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
+            if (RegKey == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
 
-                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                    Instance.TriggerEventMessage($"[+] NtDeleteValueKey Running with the FullPath: {RegKey.FullPath}, ValueName: {ValueName}", LogFlags.Syscall);
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtDeleteValueKey Running with the FullPath: {RegKey.FullPath}, ValueName: {ValueName}", LogFlags.Syscall);
 
-                if (!Instance.WinHelper.DeleteRegistryValue(RegKey.FullPath, ValueName))
-                    return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+            if (!Instance.WinHelper.DeleteRegistryValue(RegKey.FullPath, ValueName))
+                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
-            return Instance.WinUnimplemented;
+            return NTSTATUS.STATUS_SUCCESS;
         }
     }
 }

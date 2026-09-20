@@ -1271,6 +1271,15 @@ namespace Brovan.Generators
             return "(" + sp + " ? (uint32_t)" + sp + "->" + fld + " : 0)";
         }
 
+        private static string BlobLenExpr(Command c, string len)
+        {
+            Param Lp = c.Params.FirstOrDefault(x => x.Name == len);
+            if (Lp == null || Lp.PtrDepth == 0)
+                return "(uint32_t)" + len;
+
+            return "(" + len + " ? (uint32_t)*" + len + " : 0)";
+        }
+
         private static string EmitHostCase(Model m, Command c, int id)
         {
             if (c.Name == "vkMapMemory")
@@ -2373,12 +2382,13 @@ namespace Brovan.Generators
                 }
                 else if (kind == "VoidIn" && c.Params.Any(x => x.Name == p.Length))
                 {
-                    b.Append("    bvk_w_u32(").Append(p.Name).Append(" ? (uint32_t)").Append(p.Length).Append(" : 0);\n");
-                    b.Append("    if (").Append(p.Name).Append(") bvk_w_bytes(").Append(p.Name).Append(", (uint32_t)").Append(p.Length).Append(");\n");
+                    string len = BlobLenExpr(c, p.Length);
+                    b.Append("    bvk_w_u32(").Append(p.Name).Append(" ? ").Append(len).Append(" : 0);\n");
+                    b.Append("    if (").Append(p.Name).Append(") bvk_w_bytes(").Append(p.Name).Append(", ").Append(len).Append(");\n");
                 }
                 else if (kind == "VoidOut" && c.Params.Any(x => x.Name == p.Length))
                 {
-                    b.Append("    bvk_w_u32(").Append(p.Name).Append(" ? (uint32_t)").Append(p.Length).Append(" : 0);\n");
+                    b.Append("    bvk_w_u32(").Append(p.Name).Append(" ? ").Append(BlobLenExpr(c, p.Length)).Append(" : 0);\n");
                 }
                 else if (IsStructLenHandleArrayOut(m, p))
                 {
@@ -2476,7 +2486,8 @@ namespace Brovan.Generators
                 }
                 else if (kind == "VoidOut" && c.Params.Any(x => x.Name == p.Length))
                 {
-                    b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + (uint32_t)").Append(p.Length).Append(") { memcpy(").Append(p.Name).Append(", bvk_out + bvk_off, (uint32_t)").Append(p.Length).Append("); bvk_off += (uint32_t)").Append(p.Length).Append("; }\n");
+                    string len = BlobLenExpr(c, p.Length);
+                    b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + ").Append(len).Append(") { memcpy(").Append(p.Name).Append(", bvk_out + bvk_off, ").Append(len).Append("); bvk_off += ").Append(len).Append("; }\n");
                 }
             }
             if (c.Name == "vkGetPhysicalDeviceMemoryProperties")

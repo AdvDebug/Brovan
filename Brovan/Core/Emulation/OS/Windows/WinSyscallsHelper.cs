@@ -1148,7 +1148,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ReapAdoptedSessionProcesses();
 
             List<WinProcess> Processes = WinProcesses ?? new List<WinProcess>();
-            List<(uint Pid, uint Ppid, string Name)> Entries = new(Processes.Count + GuestSession.SlotCount);
+            List<(uint Pid, uint Ppid, string? Name)> Entries = new(Processes.Count + GuestSession.SlotCount);
 
             ListedProcessIds.Clear();
 
@@ -1179,7 +1179,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong Current = Buffer;
             for (int i = 0; i < Entries.Count; i++)
             {
-                (uint Pid, uint Ppid, string Name) Entry = Entries[i];
+                (uint Pid, uint Ppid, string? Name) Entry = Entries[i];
 
                 Emulator._emulator.WriteMemory(Current + 0x00, i == Entries.Count - 1 ? 0u : EntrySize);
                 Emulator._emulator.WriteMemory(Current + 0x04, 1u);

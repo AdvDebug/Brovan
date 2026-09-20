@@ -1724,7 +1724,7 @@ namespace Brovan.Core
                         if (!string.IsNullOrEmpty(MethodName))
                         {
                             int LocalsCount = 0;
-                            if (ILCode != null)
+                            if (!ILCode.IsEmpty)
                             {
                                 MethodBodyBlock MethodBody = PEReader.GetMethodBody(MethodDef.RelativeVirtualAddress);
                                 if (!MethodBody.LocalSignature.IsNil)
@@ -2671,7 +2671,7 @@ namespace Brovan.Core
         /// <exception cref="OverflowException"></exception>
         public BinaryFile(ReadOnlySpan<byte> BinaryData, bool Quick)
         {
-            if (BinaryData == null || BinaryData.Length == 0)
+            if (BinaryData.Length == 0)
                 throw new NullReferenceException("Binary data cannot be null or empty.");
             PE = new PortableExecutable();
             ELF = new ELF();

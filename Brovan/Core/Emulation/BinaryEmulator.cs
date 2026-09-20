@@ -929,7 +929,7 @@ namespace Brovan.Core.Emulation
         /// <exception cref="UnicornException"></exception>
         public BinaryEmulator(IGuestEnvironment Guest, BinaryEmulatorSettings Settings, Mode mode, Arch arch, ReadOnlySpan<byte> Data, BinaryFile Binary = null!)
         {
-            if (Data == null || Data.Length == 0)
+            if (Data.Length == 0)
                 throw new NullReferenceException(nameof(Data));
 
             BindMainWorker();
@@ -3378,7 +3378,7 @@ namespace Brovan.Core.Emulation
                 {
                     if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
                     {
-                        ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context?.RAX);
+                        ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context!.RAX);
 
                         if (WinHelper != null)
                         {

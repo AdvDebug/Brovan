@@ -7,6 +7,7 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Security.Principal;
 using System.Text;
 using System.Threading.Tasks;
@@ -170,6 +171,7 @@ namespace Brovan
 
     internal class GeneralHelper
     {
+        [SupportedOSPlatformGuard("windows")]
         public static bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
         // Windows sleeps in units of the system timer, 15.6 ms by default, so a wait of a few milliseconds
@@ -1583,13 +1585,16 @@ namespace Brovan
                 {
                 }
 
-                try
+                if (!IsWindows)
                 {
-                    FileSystemInfo Info = IsDirectory ? new DirectoryInfo(TargetPath) : new FileInfo(TargetPath);
-                    Info.UnixFileMode = Mode;
-                }
-                catch
-                {
+                    try
+                    {
+                        FileSystemInfo Info = IsDirectory ? new DirectoryInfo(TargetPath) : new FileInfo(TargetPath);
+                        Info.UnixFileMode = Mode;
+                    }
+                    catch
+                    {
+                    }
                 }
             }
             private static bool TryMaterializeRootfsHardLink(UbuntuRootfsPendingHardLink Link, IReadOnlyDictionary<string, string> SymlinkTargetsByArchivePath)

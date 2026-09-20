@@ -169,42 +169,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            {
-                ulong ValueNamePtr = Instance.WinHelper.GetArg(0);
-                ulong TypePtr = Instance.WinHelper.GetArg(1);
-                ulong DataPtr = Instance.WinHelper.GetArg(2);
-                uint DataSize = (uint)Instance.WinHelper.GetArg(3);
-                ulong ResultDataSizePtr = Instance.WinHelper.GetArg(4);
+            ulong ValueNamePtr = Instance.WinHelper.GetArg(0);
+            ulong TypePtr = Instance.WinHelper.GetArg(1);
+            ulong DataPtr = Instance.WinHelper.GetArg(2);
+            uint DataSize = (uint)Instance.WinHelper.GetArg(3);
+            ulong ResultDataSizePtr = Instance.WinHelper.GetArg(4);
 
-                if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out NTSTATUS Status))
-                    return Status;
+            if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out NTSTATUS Status))
+                return Status;
 
-                NTSTATUS QueryStatus = QueryLicenseValue(Instance, ValueName, TypePtr, DataPtr, DataSize, ResultDataSizePtr);
-                if (QueryStatus == NTSTATUS.STATUS_SUCCESS || QueryStatus == NTSTATUS.STATUS_BUFFER_TOO_SMALL)
-                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                        Instance.TriggerEventMessage($"[+] NtQueryLicenseValue: \"{ValueName}\"", LogFlags.Syscall);
-                return QueryStatus;
-            }
-
-            if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-                uint ValueNamePtr = Instance.WinHelper.GetArg32(0);
-                uint TypePtr = Instance.WinHelper.GetArg32(1);
-                uint DataPtr = Instance.WinHelper.GetArg32(2);
-                uint DataSize = Instance.WinHelper.GetArg32(3);
-                uint ResultDataSizePtr = Instance.WinHelper.GetArg32(4);
-
-                if (!Instance.WinHelper.TryReadUnicodeString32(ValueNamePtr, out string ValueName, out NTSTATUS Status))
-                    return Status;
-
-                NTSTATUS QueryStatus = QueryLicenseValue(Instance, ValueName, TypePtr, DataPtr, DataSize, ResultDataSizePtr);
-                if (QueryStatus == NTSTATUS.STATUS_SUCCESS || QueryStatus == NTSTATUS.STATUS_BUFFER_TOO_SMALL)
-                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                        Instance.TriggerEventMessage($"[+] NtQueryLicenseValue (x86): \"{ValueName}\"", LogFlags.Syscall);
-                return QueryStatus;
-            }
-
-            return Instance.WinUnimplemented;
+            NTSTATUS QueryStatus = QueryLicenseValue(Instance, ValueName, TypePtr, DataPtr, DataSize, ResultDataSizePtr);
+            if (QueryStatus == NTSTATUS.STATUS_SUCCESS || QueryStatus == NTSTATUS.STATUS_BUFFER_TOO_SMALL)
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtQueryLicenseValue: \"{ValueName}\"", LogFlags.Syscall);
+            return QueryStatus;
         }
     }
 }

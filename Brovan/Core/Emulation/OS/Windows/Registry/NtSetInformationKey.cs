@@ -6,63 +6,59 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
+            ulong KeyHandle = Instance.WinHelper.GetArg(0);
+            KEY_SET_INFORMATION_CLASS KeySetInformationClass = (KEY_SET_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(1);
+            ulong KeySetInformation = Instance.WinHelper.GetArg(2);
+            uint KeySetInformationLength = (uint)Instance.WinHelper.GetArg(3);
+
+            WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
+            if (RegKey == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtSetInformationKey Running with the FullPath: {RegKey.FullPath}, Class: {KeySetInformationClass}", LogFlags.Syscall);
+
+            uint RequiredLength = GetRequiredLength(KeySetInformationClass);
+            if (RequiredLength == 0)
+                return NTSTATUS.STATUS_INVALID_INFO_CLASS;
+
+            if (KeySetInformationLength != RequiredLength)
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+            if (KeySetInformation == 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (!Instance.IsRegionMapped(KeySetInformation, KeySetInformationLength))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            switch (KeySetInformationClass)
             {
-                ulong KeyHandle = Instance.WinHelper.GetArg(0);
-                KEY_SET_INFORMATION_CLASS KeySetInformationClass = (KEY_SET_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(1);
-                ulong KeySetInformation = Instance.WinHelper.GetArg(2);
-                uint KeySetInformationLength = (uint)Instance.WinHelper.GetArg(3);
+                case KEY_SET_INFORMATION_CLASS.KeyWriteTimeInformation:
+                    RegKey.LastWriteTime = (long)Instance._emulator.ReadMemoryULong(KeySetInformation);
+                    break;
 
-                WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
-                if (RegKey == null)
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
+                case KEY_SET_INFORMATION_CLASS.KeyWow64FlagsInformation:
+                    RegKey.Wow64Flags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
+                    break;
 
-                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                    Instance.TriggerEventMessage($"[+] NtSetInformationKey Running with the FullPath: {RegKey.FullPath}, Class: {KeySetInformationClass}", LogFlags.Syscall);
+                case KEY_SET_INFORMATION_CLASS.KeyControlFlagsInformation:
+                    RegKey.ControlFlags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
+                    break;
 
-                uint RequiredLength = GetRequiredLength(KeySetInformationClass);
-                if (RequiredLength == 0)
-                    return NTSTATUS.STATUS_INVALID_INFO_CLASS;
+                case KEY_SET_INFORMATION_CLASS.KeySetVirtualizationInformation:
+                    RegKey.VirtualizationFlags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
+                    break;
 
-                if (KeySetInformationLength != RequiredLength)
-                    return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                case KEY_SET_INFORMATION_CLASS.KeySetDebugInformation:
+                    RegKey.DebugInformation = Instance._emulator.ReadMemoryUInt(KeySetInformation);
+                    break;
 
-                if (KeySetInformation == 0)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                if (!Instance.IsRegionMapped(KeySetInformation, KeySetInformationLength))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                switch (KeySetInformationClass)
-                {
-                    case KEY_SET_INFORMATION_CLASS.KeyWriteTimeInformation:
-                        RegKey.LastWriteTime = (long)Instance._emulator.ReadMemoryULong(KeySetInformation);
-                        break;
-
-                    case KEY_SET_INFORMATION_CLASS.KeyWow64FlagsInformation:
-                        RegKey.Wow64Flags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
-                        break;
-
-                    case KEY_SET_INFORMATION_CLASS.KeyControlFlagsInformation:
-                        RegKey.ControlFlags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
-                        break;
-
-                    case KEY_SET_INFORMATION_CLASS.KeySetVirtualizationInformation:
-                        RegKey.VirtualizationFlags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
-                        break;
-
-                    case KEY_SET_INFORMATION_CLASS.KeySetDebugInformation:
-                        RegKey.DebugInformation = Instance._emulator.ReadMemoryUInt(KeySetInformation);
-                        break;
-
-                    case KEY_SET_INFORMATION_CLASS.KeySetHandleTagsInformation:
-                        RegKey.HandleTags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
-                        break;
-                }
-
-                return NTSTATUS.STATUS_SUCCESS;
+                case KEY_SET_INFORMATION_CLASS.KeySetHandleTagsInformation:
+                    RegKey.HandleTags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
+                    break;
             }
 
-            return Instance.WinUnimplemented;
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         private static uint GetRequiredLength(KEY_SET_INFORMATION_CLASS KeySetInformationClass)

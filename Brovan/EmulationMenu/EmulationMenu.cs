@@ -778,7 +778,7 @@ namespace Brovan.EmulationMenu
                 return;
             }
 
-            if (GBytes.Length > uint.MaxValue || !TryGetInclusiveEnd(GAddress, (ulong)GBytes.Length, out ulong GEnd))
+            if (!TryGetInclusiveEnd(GAddress, (ulong)GBytes.Length, out ulong GEnd))
             {
                 PrintHighlight("[-] Ghost patch range overflows the address space.", true);
                 return;
@@ -870,7 +870,7 @@ namespace Brovan.EmulationMenu
                 null
             };
 
-            bool Success = (bool)Generic.Invoke(null, InvokeArgs);
+            bool Success = Generic.Invoke(null, InvokeArgs) is true;
             if (!Success)
             {
                 PrintHighlight("[-] Failed to parse struct.", true);

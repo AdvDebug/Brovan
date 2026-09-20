@@ -6,25 +6,15 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            {
-                ulong TimerHandlePtr = Instance.WinHelper.GetArg(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
-                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
-                ulong TimerType = (uint)Instance.WinHelper.GetArg(3);
+            ulong TimerHandlePtr = Instance.WinHelper.GetArg(0);
+            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+            ulong TimerType = (uint)Instance.WinHelper.GetArg(3);
 
-                return HandleCreateTimer64(Instance, TimerHandlePtr, DesiredAccess, ObjectAttributesPtr, TimerType);
-            }
-
-
-            uint TimerHandlePtr32 = (uint)Instance.WinHelper.GetArg(0);
-            uint DesiredAccess32 = (uint)Instance.WinHelper.GetArg(1);
-            uint ObjectAttributesPtr32 = (uint)Instance.WinHelper.GetArg(2);
-            uint TimerType32 = (uint)Instance.WinHelper.GetArg(3);
-
-            return HandleCreateTimer32(Instance, TimerHandlePtr32, DesiredAccess32, ObjectAttributesPtr32, TimerType32);
+            return HandleCreateTimer(Instance, TimerHandlePtr, DesiredAccess, ObjectAttributesPtr, TimerType);
         }
 
-        private static NTSTATUS HandleCreateTimer64(BinaryEmulator Instance, ulong TimerHandlePtr, ulong DesiredAccess, ulong ObjectAttributesPtr, ulong TimerType)
+        private static NTSTATUS HandleCreateTimer(BinaryEmulator Instance, ulong TimerHandlePtr, ulong DesiredAccess, ulong ObjectAttributesPtr, ulong TimerType)
         {
             if (TimerHandlePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -35,32 +25,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (TimerType > (ulong)TIMER_TYPE.SynchronizationTimer)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!NtTimerHelpers.TryReadTimerObjectName64(Instance, ObjectAttributesPtr, out string Name, out NTSTATUS NameStatus))
+            if (!NtTimerHelpers.TryReadTimerObjectName(Instance, ObjectAttributesPtr, out string Name, out NTSTATUS NameStatus))
                 return NameStatus;
 
             WinHandle Handle = Instance.WinHelper.CreateTimerHandle(Name, (TIMER_TYPE)TimerType, (AccessMask)(uint)DesiredAccess);
             if (!Instance.WinHelper.WritePointer(TimerHandlePtr, Handle.Handle))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private static NTSTATUS HandleCreateTimer32(BinaryEmulator Instance, uint TimerHandlePtr, uint DesiredAccess, uint ObjectAttributesPtr, uint TimerType)
-        {
-            if (TimerHandlePtr == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!Instance.IsRegionMapped(TimerHandlePtr, 4))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            if (TimerType > (uint)TIMER_TYPE.SynchronizationTimer)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!NtTimerHelpers.TryReadTimerObjectName32(Instance, ObjectAttributesPtr, out string Name, out NTSTATUS NameStatus))
-                return NameStatus;
-
-            WinHandle Handle = Instance.WinHelper.CreateTimerHandle(Name, (TIMER_TYPE)TimerType, (AccessMask)DesiredAccess);
-            if (!Instance._emulator.WriteMemory(TimerHandlePtr, (uint)Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             return NTSTATUS.STATUS_SUCCESS;
@@ -109,6 +78,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Instance.WakeWorkerFactoryWaitersForObject(TimerHandle) || Instance.HasHandleWaiters(TimerHandle))
                     Instance._emulator.StopEmulation();
             }
+        }
+
+        public static bool TryReadTimerObjectName(BinaryEmulator Instance, ulong ObjectAttributesPtr, out string Name, out NTSTATUS Status)
+        {
+            return Instance.WinHelper.PointerSize == 8
+                ? TryReadTimerObjectName64(Instance, ObjectAttributesPtr, out Name, out Status)
+                : TryReadTimerObjectName32(Instance, (uint)ObjectAttributesPtr, out Name, out Status);
         }
 
         public static bool TryReadTimerObjectName64(BinaryEmulator Instance, ulong ObjectAttributesPtr, out string Name, out NTSTATUS Status)

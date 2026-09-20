@@ -333,7 +333,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 return NTSTATUS.STATUS_INVALID_HANDLE;
                             }
                         }
-                        break;
                     case PROCESSINFOCLASS.ProcessWow64Information:
                         if (OutBufferLength < (ulong)Instance.WinHelper.PointerSize)
                         {
