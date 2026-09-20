@@ -30,14 +30,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # The projects target net8.0, but Avalonia's source generator needs Roslyn >= 4.14, which only
-      # ships with the .NET 9 SDK.
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: |
-            8.0.x
-            9.0.x
+          dotnet-version: 10.0.x
 
       - name: Restore
         run: |
@@ -46,7 +42,7 @@ jobs:
 
       # Native symbols come to several times the size of the binary.
       - name: Publish
-        run: dotnet publish Brovan/Brovan.csproj -c Release -r ${{ matrix.rid }} --self-contained false -p:NativeDebugSymbols=false -o artifacts/publish/${{ matrix.rid }}
+        run: dotnet publish Brovan/Brovan.csproj -c Release -r ${{ matrix.rid }} -p:NativeDebugSymbols=false -o artifacts/publish/${{ matrix.rid }}
 
       - name: Publish the launcher beside the emulator
         shell: bash
@@ -54,7 +50,7 @@ jobs:
           out="artifacts/publish/${{ matrix.rid }}"
 
           # Native symbols come to several times the size of the binary.
-          dotnet publish BrovanGUI/BrovanGUI.csproj -c Release -r ${{ matrix.rid }} --self-contained false \
+          dotnet publish BrovanGUI/BrovanGUI.csproj -c Release -r ${{ matrix.rid }} \
             -p:NativeDebugSymbols=false -o "$out"
 
           if [ "${{ runner.os }}" = "Windows" ]; then
@@ -131,12 +127,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # A .NET 9 SDK is required even though the project targets net8.0: the source generator needs
-      # Roslyn >= 4.10.
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 9.0.x
+          dotnet-version: 10.0.x
 
       - name: Setup JDK
         uses: actions/setup-java@v5

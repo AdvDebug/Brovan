@@ -40,7 +40,7 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'
 
       - name: Install clang and a software Vulkan driver
         run: |
@@ -67,7 +67,7 @@ jobs:
           # The instrumentor version has to match the SharpFuzz package the harness references, or
           # the injected trace calls hit a different SharpFuzz.Common and fault.
           dotnet tool install --global SharpFuzz.CommandLine --version 2.3.0
-          OUT=Brovan.Fuzz/bin/Release/net8.0
+          OUT=Brovan.Fuzz/bin/Release/net10.0
           # Instrumented assemblies expect libFuzzer's shared memory, so seed, dict and replay keep
           # the plain build and only this copy is rewritten.
           cp -r "$OUT" fuzzbin
@@ -87,7 +87,7 @@ jobs:
 
       - name: Seed the corpus and build the dictionary
         run: |
-          OUT=Brovan.Fuzz/bin/Release/net8.0
+          OUT=Brovan.Fuzz/bin/Release/net10.0
           mkdir -p corpus/${{ matrix.target }} artifacts
           # Seeds come from the vk.xml-generated tables. Adding them is idempotent.
           dotnet "$OUT/Brovan.Fuzz.dll" seed ${{ matrix.target }} corpus/${{ matrix.target }}
@@ -98,7 +98,7 @@ jobs:
         id: fuzz
         run: |
           set +e
-          OUT=Brovan.Fuzz/bin/Release/net8.0
+          OUT=Brovan.Fuzz/bin/Release/net10.0
           MINUTES="${{ github.event.inputs.minutes || '120' }}"
           WANT="${{ github.event.inputs.target }}"
           if [ -n "$WANT" ] && [ "$WANT" != "${{ matrix.target }}" ]; then
@@ -143,7 +143,7 @@ jobs:
         if: always()
         run: |
           set +e
-          OUT=Brovan.Fuzz/bin/Release/net8.0
+          OUT=Brovan.Fuzz/bin/Release/net10.0
           mkdir -p corpus-min/${{ matrix.target }} artifacts
           timeout 600 ./libfuzzer-dotnet \
             --target_path=fuzzbin/Brovan.Fuzz \
@@ -162,7 +162,7 @@ jobs:
         run: |
           set +e
           shopt -s nullglob
-          OUT=Brovan.Fuzz/bin/Release/net8.0
+          OUT=Brovan.Fuzz/bin/Release/net10.0
           mkdir -p artifacts
           # The loop is piped into tee, and a pipeline runs its left side in a subshell, so a
           # flag set inside it never reaches this shell.
@@ -223,7 +223,7 @@ jobs:
               ``,
               '```bash',
               `dotnet build Brovan.Fuzz/Brovan.Fuzz.csproj -c Release -p:SkipUnicornNative=true`,
-              `dotnet Brovan.Fuzz/bin/Release/net8.0/Brovan.Fuzz.dll replay ${target} <crash-file>`,
+              `dotnet Brovan.Fuzz/bin/Release/net10.0/Brovan.Fuzz.dll replay ${target} <crash-file>`,
               '```',
             ].join('\n');
 

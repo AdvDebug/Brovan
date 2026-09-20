@@ -37,7 +37,7 @@ namespace BrovanGUI.Models
 
             foreach (string Configuration in new[] { "Release", "Debug" })
             {
-                string Sibling = Path.GetFullPath(Path.Combine(Base, "..", "..", "..", "..", "Brovan", "bin", Configuration, "net8.0", ExecutableName));
+                string Sibling = Path.GetFullPath(Path.Combine(Base, "..", "..", "..", "..", "Brovan", "bin", Configuration, "net10.0", ExecutableName));
                 if (File.Exists(Sibling))
                     return Sibling;
             }
