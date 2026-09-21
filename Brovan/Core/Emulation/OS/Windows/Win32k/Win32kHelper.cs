@@ -19,7 +19,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         public readonly int X;
         public readonly int Y;
 
-        public Win32kMessage(ulong Hwnd, uint Message, ulong WParam, ulong LParam, uint Time, int X, int Y)
+        // Set only for a thread message, which has no window to name its reader.
+        public readonly uint TargetThreadId;
+
+        public Win32kMessage(ulong Hwnd, uint Message, ulong WParam, ulong LParam, uint Time, int X, int Y, uint TargetThreadId = 0)
         {
             this.Hwnd = Hwnd;
             this.Message = Message;
@@ -28,6 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             this.Time = Time;
             this.X = X;
             this.Y = Y;
+            this.TargetThreadId = TargetThreadId;
         }
     }
 
@@ -102,6 +106,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint ERROR_INSUFFICIENT_BUFFER = 122;
         internal const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
         internal const uint ERROR_CANNOT_FIND_WND_CLASS = 1407;
+        internal const uint ERROR_INVALID_THREAD_ID = 1444;
 
         internal const int MaxClassExtraBytes = 0x10000;
 
@@ -1227,7 +1232,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             int Rows = Header.Rows;
             int BytesPerPixel = Header.BitsPerPixel / 8;
-            int Stride = ((Header.Width * Header.BitsPerPixel + 31) / 32) * 4;
+            int Stride = GetBitmapStride(Header.Width, 1, Header.BitsPerPixel, true);
             if (Header.Width <= 0 || Rows <= 0 || Stride <= 0)
                 return false;
 
@@ -1852,7 +1857,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return PostMessage(Instance, GetState(Instance), Hwnd, Message, WParam, LParam);
         }
 
-        private static bool PostMessage(BinaryEmulator Instance, Win32kState State, ulong Hwnd, uint Message, ulong WParam, ulong LParam)
+        internal static bool PostThreadMessage(BinaryEmulator Instance, uint TargetThreadId, uint Message, ulong WParam, ulong LParam)
+        {
+            return PostMessage(Instance, GetState(Instance), 0, Message, WParam, LParam, TargetThreadId);
+        }
+
+        private static bool PostMessage(BinaryEmulator Instance, Win32kState State, ulong Hwnd, uint Message, ulong WParam, ulong LParam, uint TargetThreadId = 0)
         {
             uint Time = unchecked((uint)Instance.EmulatedTickCount64);
 
@@ -1878,7 +1888,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Message == WM_PAINT && IsQueued(State, Hwnd, WM_PAINT))
                 return true;
 
-            State.MessageQueue.Enqueue(new Win32kMessage(Hwnd, Message, WParam, LParam, Time, 0, 0));
+            State.MessageQueue.Enqueue(new Win32kMessage(Hwnd, Message, WParam, LParam, Time, 0, 0, TargetThreadId));
             NoteQueuedMessage(State, Message);
             Instance.WakeSignal.Bump();
             return true;
@@ -2263,7 +2273,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Queued = 0;
                 foreach (Win32kMessage Candidate in State.MessageQueue)
                 {
-                    if (OwnedByThread(Instance, Candidate.Hwnd, ThreadId))
+                    if (OwnedByThread(Instance, Candidate, ThreadId))
                         Queued |= GetMessageWakeBits(Candidate.Message);
                 }
             }
@@ -3729,13 +3739,22 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (HwndFilter != 0 && Message.Hwnd != HwndFilter)
                 return false;
 
-            if (!OwnedByThread(Instance, Message.Hwnd, ThreadId))
+            if (!OwnedByThread(Instance, Message, ThreadId))
                 return false;
 
             if (MinMessage == 0 && MaxMessage == 0)
                 return true;
 
             return Message.Message >= MinMessage && Message.Message <= MaxMessage;
+        }
+
+        // A thread message names its reader outright, a window message is read by the thread that owns it.
+        private static bool OwnedByThread(BinaryEmulator Instance, in Win32kMessage Message, uint ThreadId)
+        {
+            if (Message.TargetThreadId != 0)
+                return ThreadId == 0 || Message.TargetThreadId == ThreadId;
+
+            return OwnedByThread(Instance, Message.Hwnd, ThreadId);
         }
 
         // Only the creating thread may run a window procedure, so another thread's message stays queued.

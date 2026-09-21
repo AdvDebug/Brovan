@@ -49,8 +49,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             int BytesPerPixel = Header.BitsPerPixel / 8;
-            int Stride = ((Header.Width * Header.BitsPerPixel + 31) / 32) * 4;
-            if (!Instance.IsRegionMapped(BitsAddress, (ulong)((long)Stride * Rows)))
+            int Stride = Win32kHelper.GetBitmapStride(Header.Width, 1, Header.BitsPerPixel, true);
+            if (Stride <= 0 || !Instance.IsRegionMapped(BitsAddress, (ulong)((long)Stride * Rows)))
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
                 Instance.SetRawSyscallReturn(0);

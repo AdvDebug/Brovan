@@ -6,7 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            Instance.WinHelper.GetArg(0);
+            uint TargetThreadId = (uint)Instance.WinHelper.GetArg(0);
             uint Message = (uint)Instance.WinHelper.GetArg(1);
             ulong WParam = Instance.WinHelper.GetArg(2);
             ulong LParam = Instance.WinHelper.GetArg(3);
@@ -18,9 +18,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            // One message queue per process here, so the target thread id cannot pick a queue and a thread
-            // message is queued with no window. Waking the pump is the part callers depend on.
-            Win32kHelper.PostMessage(Instance, 0, Message, WParam, LParam);
+            if (TargetThreadId == 0
+                || !Instance.Threads.TryGetValue(TargetThreadId, out EmulatedThread Target)
+                || Target == null
+                || Target.State == EmulatedThreadState.Terminated)
+            {
+                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_THREAD_ID);
+                Instance.SetBooleanSyscallReturn(false);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            Win32kHelper.PostThreadMessage(Instance, TargetThreadId, Message, WParam, LParam);
 
             Instance.SetLastWinError(0);
             Instance.SetBooleanSyscallReturn(true);
