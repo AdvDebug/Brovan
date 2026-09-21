@@ -6,8 +6,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     internal class NtGdiExtGetObjectW : IWinSyscall
     {
         private const int Bitmap64Size = 0x20;
-        private const int LogPen64Size = 0x10;
+        private const int Bitmap32Size = 0x18;
+        private const int DibSection64Size = 0x68;
+        private const int DibSection32Size = 0x54;
+        private const int BitmapInfoHeaderSize = 0x28;
+        private const int LogPenSize = 0x10;
         private const int LogBrush64Size = 0x10;
+
+        // lbHatch is a ULONG_PTR, so LOGBRUSH loses its tail padding on x86.
+        private const int LogBrush32Size = 0x0C;
+        private const uint BiRgb = 0;
 
         private const uint PsSolid = 0;
         private const uint BsSolid = 0;
@@ -28,12 +36,21 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!IsBitmap && !IsPenBrush)
                 return Fail(Instance);
 
-            int Size = IsBitmap ? Bitmap64Size : (PenBrush.IsPen ? LogPen64Size : LogBrush64Size);
+            bool Wide = Instance.WinHelper.PointerSize == 8;
+            int BitmapSize = Wide ? Bitmap64Size : Bitmap32Size;
+
+            // A DIB section answers with the longer form only when the caller asked for all of it.
+            bool AsDibSection = IsBitmap && Bitmap.DibSection && Count >= (Wide ? DibSection64Size : DibSection32Size);
+
+            int Size = IsBitmap
+                ? (AsDibSection ? (Wide ? DibSection64Size : DibSection32Size) : BitmapSize)
+                : (PenBrush.IsPen ? LogPenSize : (Wide ? LogBrush64Size : LogBrush32Size));
 
             if (OutBuffer == 0)
             {
+                int Natural = IsBitmap && Bitmap.DibSection ? (Wide ? DibSection64Size : DibSection32Size) : Size;
                 Instance.SetLastWinError(0);
-                Instance.SetRawSyscallReturn((ulong)Size);
+                Instance.SetRawSyscallReturn((ulong)Natural);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
@@ -44,7 +61,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Buffer.Clear();
 
             if (IsBitmap)
-                WriteBitmap(Buffer, Bitmap);
+                WriteBitmap(Buffer, Bitmap, Wide, AsDibSection, BitmapSize);
             else
                 WritePenBrush(Buffer, PenBrush);
 
@@ -60,7 +77,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static void WriteBitmap(Span<byte> Buffer, in Win32kBitmap Bitmap)
+        private static void WriteBitmap(Span<byte> Buffer, in Win32kBitmap Bitmap, bool Wide, bool AsDibSection, int BitmapSize)
         {
             BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x04, 4), Bitmap.Width);
             BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x08, 4), Bitmap.Height);
@@ -70,7 +87,24 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             // Only a DIB section hands its pixels to the caller; a device-dependent bitmap reports no bits.
             if (Bitmap.DibSection)
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x18, 8), Bitmap.BitsAddress);
+            {
+                if (Wide)
+                    BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x18, 8), Bitmap.BitsAddress);
+                else
+                    BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x14, 4), (uint)Bitmap.BitsAddress);
+            }
+
+            if (!AsDibSection)
+                return;
+
+            Span<byte> Header = Buffer.Slice(BitmapSize, BitmapInfoHeaderSize);
+            BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x00, 4), BitmapInfoHeaderSize);
+            BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x04, 4), Bitmap.Width);
+            BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x08, 4), Bitmap.TopDown ? -Bitmap.Height : Bitmap.Height);
+            BinaryPrimitives.WriteUInt16LittleEndian(Header.Slice(0x0C, 2), Bitmap.Planes);
+            BinaryPrimitives.WriteUInt16LittleEndian(Header.Slice(0x0E, 2), Bitmap.BitsPerPixel);
+            BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x10, 4), BiRgb);
+            BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x14, 4), Bitmap.BitsSize);
         }
 
         private static void WritePenBrush(Span<byte> Buffer, in Win32kPenBrush PenBrush)

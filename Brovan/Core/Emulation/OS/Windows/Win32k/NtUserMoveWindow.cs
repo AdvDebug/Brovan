@@ -27,7 +27,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Window.Y = Y;
             Window.Width = (uint)Math.Max(Width, 0);
             Window.Height = (uint)Math.Max(Height, 0);
-            Window.Dirty = true;
+            Win32kHelper.MarkWindowDirty(Instance, Window);
 
             Instance.WinHelper.MaterializeUserWindow(Window);
 

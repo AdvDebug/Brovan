@@ -7,7 +7,6 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
 using System.Security.Principal;
 using System.Text;
 using System.Threading.Tasks;
@@ -15,6 +14,7 @@ using Brovan.Core.Emulation;
 using Brovan.Core.Helpers;
 using Brovan.Core;
 using Microsoft.Win32.SafeHandles;
+using System.Runtime.Versioning;
 using static Brovan.Core.Helpers.BinaryHelpers;
 using static Brovan.Core.Helpers.Utils;
 
@@ -626,7 +626,11 @@ namespace Brovan
             if (string.IsNullOrEmpty(ExePath))
                 return false;
 
-            string[] Args = Environment.GetCommandLineArgs().Skip(1).ToArray();
+            // Under "dotnet Brovan.dll" argv[0] is the assembly, which the shared host needs again.
+            string[] Raw = Environment.GetCommandLineArgs();
+            bool SharedHost = Raw.Length != 0 && !string.Equals(Path.GetFileNameWithoutExtension(Raw[0]),
+                Path.GetFileNameWithoutExtension(ExePath), StringComparison.OrdinalIgnoreCase);
+            string[] Args = Raw.Skip(SharedHost ? 0 : 1).ToArray();
             string CommandLine = BuildCommandLine(ExePath, Args);
 
             const uint ExtendedStartupInfoPresent = 0x00080000;
@@ -1585,16 +1589,16 @@ namespace Brovan
                 {
                 }
 
-                if (!IsWindows)
+                if (IsWindows)
+                    return;
+
+                try
                 {
-                    try
-                    {
-                        FileSystemInfo Info = IsDirectory ? new DirectoryInfo(TargetPath) : new FileInfo(TargetPath);
-                        Info.UnixFileMode = Mode;
-                    }
-                    catch
-                    {
-                    }
+                    FileSystemInfo Info = IsDirectory ? new DirectoryInfo(TargetPath) : new FileInfo(TargetPath);
+                    Info.UnixFileMode = Mode;
+                }
+                catch
+                {
                 }
             }
             private static bool TryMaterializeRootfsHardLink(UbuntuRootfsPendingHardLink Link, IReadOnlyDictionary<string, string> SymlinkTargetsByArchivePath)
@@ -1821,6 +1825,56 @@ namespace Brovan
             {
                 EnsureDriveMapping(DriveLetter, HostRoot);
                 RefreshAllowedRoots();
+            }
+
+            /// <summary>
+            /// Reports the drive letters the emulated Windows filesystem can reach, bit 0 for A:.
+            /// </summary>
+            public static uint GetWindowsDriveMap()
+            {
+                uint Map = 1u << ('C' - 'A');
+
+                for (int Index = 0; Index < 26; Index++)
+                {
+                    char Letter = (char)('A' + Index);
+
+                    if (IsWindows && Directory.Exists($"{Letter}:\\"))
+                    {
+                        Map |= 1u << Index;
+                        continue;
+                    }
+
+                    string Root;
+                    bool Mapped;
+                    lock (DriveMapLock)
+                    {
+                        Mapped = DriveMappings.TryGetValue(Letter, out Root) && !string.IsNullOrWhiteSpace(Root);
+                        if (!Mapped)
+                            Root = Path.Combine(VirtualFileSystemRoot, Letter.ToString());
+                    }
+
+                    try
+                    {
+                        if (!Directory.Exists(Root))
+                            continue;
+
+                        if (Mapped)
+                        {
+                            Map |= 1u << Index;
+                            continue;
+                        }
+
+                        using IEnumerator<string> Entries = Directory.EnumerateFileSystemEntries(Root).GetEnumerator();
+                        if (Entries.MoveNext())
+                            Map |= 1u << Index;
+                    }
+                    catch
+                    {
+                        // A root the host refuses to list is not a drive the guest can use.
+                    }
+                }
+
+                return Map;
             }
 
             /// <summary>
@@ -3045,6 +3099,10 @@ namespace Brovan
                     string LinkTarget;
                     if (IsWindows)
                     {
+                        // A throw per missing component costs an unwind through the backend's own frames.
+                        if (!Path.Exists(Current))
+                            continue;
+
                         FileAttributes Attributes;
                         try
                         {

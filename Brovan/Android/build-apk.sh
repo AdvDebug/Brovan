@@ -2,7 +2,7 @@
 # Builds the Brovan APK. Must run on a Linux host (WSL is fine): NativeAOT does not cross-compile from
 # Windows to linux-bionic.
 #
-# Expects a .NET 9 SDK (the source generator needs Roslyn >= 4.10), a JDK 17, Gradle 8.7+, and an Android
+# Expects a .NET 10 SDK, a JDK 17, Gradle 8.7+, and an Android
 # SDK with NDK 26. Point the variables below at them if they are not already on PATH.
 set -euo pipefail
 
@@ -16,8 +16,8 @@ TOOLS="${BROVAN_TOOLCHAIN:-$HOME/brovan-toolchain}"
 
 DOTNET="${DOTNET:-}"
 if [ -z "$DOTNET" ]; then
-    if [ -x "$HOME/.dotnet9/dotnet" ]; then
-        DOTNET="$HOME/.dotnet9/dotnet"
+    if [ -x "$HOME/.dotnet10/dotnet" ]; then
+        DOTNET="$HOME/.dotnet10/dotnet"
     else
         DOTNET="$(command -v dotnet || true)"
     fi
@@ -64,12 +64,12 @@ UNICORN_PATCH_KEY=""
 # as a skip rather than a build failure. Anything else is a real failure.
 missing() { echo "$1" >&2; exit 3; }
 
-[ -n "$DOTNET" ] && [ -x "$DOTNET" ] || missing "dotnet SDK not found; set DOTNET or install one at $HOME/.dotnet9"
+[ -n "$DOTNET" ] && [ -x "$DOTNET" ] || missing "dotnet SDK not found; set DOTNET or install one at $HOME/.dotnet10"
 DOTNET_MAJOR="$("$DOTNET" --version 2>/dev/null | cut -d. -f1)"
 case "${DOTNET_MAJOR:-}" in
     ''|*[!0-9]*) missing "could not read the SDK version of $DOTNET" ;;
 esac
-[ "$DOTNET_MAJOR" -ge 9 ] || missing "the source generator needs Roslyn >= 4.10, so a .NET 9 SDK is required; $DOTNET is $DOTNET_MAJOR.x"
+[ "$DOTNET_MAJOR" -ge 10 ] || missing "the projects target net10.0, so a .NET 10 SDK is required; $DOTNET is $DOTNET_MAJOR.x"
 [ -n "$GRADLE" ] && [ -x "$GRADLE" ] || missing "gradle not found; set GRADLE (8.7 or newer, required by AGP 8.5)"
 [ -n "$NDK" ] && [ -d "$NDK" ] || missing "Android NDK not found under $ANDROID_SDK_ROOT/ndk"
 [ -n "${CMAKE:-}" ] && [ -x "$CMAKE" ] || missing "cmake not found"

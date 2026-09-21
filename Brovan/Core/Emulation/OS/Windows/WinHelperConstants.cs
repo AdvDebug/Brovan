@@ -1696,6 +1696,10 @@ namespace Brovan.Core.Emulation.OS.Windows
     public class WinWindow : IHandleObject
     {
         public ulong Hwnd;
+
+        // Dirty is a WM_PAINT owed to the message fetch.
+        // PaintPending is the update region user32 reads, cleared only on validation.
+        public bool PaintPending;
         public ushort ClassAtom;
         public string Title;
         public string ClassName;

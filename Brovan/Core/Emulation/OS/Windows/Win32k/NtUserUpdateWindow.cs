@@ -28,7 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Win32kHelper.InvokeWindowProc(Instance, Hwnd, Window.WndProc, Win32kHelper.WM_PAINT, 0, 0, null, SyscallRip))
                     return NTSTATUS.STATUS_SUCCESS;
 
-                Window.Dirty = true;
+                Win32kHelper.MarkWindowDirty(Instance, Window);
             }
 
             Instance.SetBooleanSyscallReturn(true);

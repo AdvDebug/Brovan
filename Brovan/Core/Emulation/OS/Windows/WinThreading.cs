@@ -73,6 +73,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint GetMessageMinMessage { get; set; }
         public uint GetMessageMaxMessage { get; set; }
         public Stack<WinUserCallbackFrame> UserCallbackFrames { get; set; } = new();
+
+        // Set by a returning WM_PAINT callback, so the re-run of its syscall knows itself apart from a
+        // fresh call made inside the procedure.
+        public ulong PendingPaintRetryHwnd { get; set; }
     }
 
     public sealed class WinUserCallbackFrame
@@ -80,6 +84,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong SavedRsp;
         public ulong SavedReturnAddress;
         public ulong SyscallRetryRip;
+        public ulong PaintRetryHwnd;
 
         public ulong SavedSyscallNumber;
         public ulong SavedArg0;

@@ -63,7 +63,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     break;
             }
 
-            Window.Dirty = true;
+            Win32kHelper.MarkWindowDirty(Instance, Window);
 
             if (Window.ParentHwnd == 0 && Window.Visible && !Instance.WinHelper.TopLevelWindows.Contains(Window.Hwnd))
                 Instance.WinHelper.TopLevelWindows.Add(Window.Hwnd);
@@ -82,6 +82,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Win32kHelper.InvalidateWindowTree(Instance, Window.Hwnd);
             }
 
+            // user32 answers IsWindowVisible and GetWindowLong out of the client window object.
+            Instance.WinHelper.MaterializeUserWindow(Window);
             Instance.WinHelper.PresentDesktop();
 
             Instance.SetLastWinError(0);

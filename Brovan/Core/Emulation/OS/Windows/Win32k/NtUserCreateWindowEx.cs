@@ -68,6 +68,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             string title = Win32kHelper.ReadLargeString(Instance, WindowNamePtr) ?? string.Empty;
             ulong hwnd = Instance.WinHelper.AllocateUserHandle();
 
+            // Without WS_CHILD the argument names the owner, not the parent.
+            const uint WS_CHILD = 0x40000000;
+            ulong OwnerHwnd = 0;
+            if (((uint)StyleArg & WS_CHILD) == 0 && ParentHwnd != Win32kMessageOnlyParent.HwndMessage)
+            {
+                OwnerHwnd = ParentHwnd;
+                ParentHwnd = 0;
+            }
+
             WinWindow window = new WinWindow
             {
                 Hwnd = hwnd,
@@ -82,6 +91,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Width = (uint)Math.Max(width, 0),
                 Height = (uint)Math.Max(height, 0),
                 ParentHwnd = ParentHwnd,
+                OwnerHwnd = OwnerHwnd,
                 MenuHandle = MenuHandle,
                 InstanceHandle = InstanceHandle,
                 CreateParam = CreateParam,

@@ -11,6 +11,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private const int TenthsOfMillimetrePerInch = 254;
 
+        // RASTERCAPS: RC_BITBLT | RC_BITMAP64 | RC_GDI20_OUTPUT | RC_DI_BITMAP | RC_DIBTODEV | RC_BIGFONT
+        // | RC_STRETCHBLT | RC_STRETCHDIB
+        private const int RasterCaps = 0x00002E99;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             int Index = unchecked((int)Instance.WinHelper.GetArg(1));
@@ -43,6 +47,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 12 => 32, // BITSPIXEL
                 14 => 1, // PLANES
                 24 => -1, // NUMCOLORS
+                38 => RasterCaps,
+                108 => 24, // COLORRES
                 116 => 60, // VREFRESH
                 121 => 0x00000003, // COLORMGMTCAPS: CM_DEVICE_ICM | CM_GAMMA_RAMP
                 _ => 0,

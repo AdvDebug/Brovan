@@ -18,12 +18,14 @@ namespace Brovan.Android
             public int Width;
             public int Height;
             public bool Dirty;
+            public long LastUsed;
         }
 
         private readonly object _sync = new();
         private readonly Dictionary<ulong, WindowBuffer> _windows = new();
 
         private ulong _lastDrawn;
+        private long _accessCounter;
 
         public void Execute(in GdiPrimitive primitive)
         {
@@ -106,14 +108,14 @@ namespace Brovan.Android
         {
             if (!_windows.TryGetValue(hwnd, out WindowBuffer buffer))
             {
-                // A guest that churns windows would otherwise grow this without bound; the emulator only
-                // presents one at a time, so dropping the oldest costs nothing visible.
                 if (_windows.Count >= MaximumWindows)
-                    _windows.Clear();
+                    Evict();
 
                 buffer = new WindowBuffer();
                 _windows[hwnd] = buffer;
             }
+
+            buffer.LastUsed = ++_accessCounter;
 
             int width = AndroidHost.Width;
             int height = AndroidHost.Height;
@@ -129,6 +131,28 @@ namespace Brovan.Android
             }
 
             return buffer;
+        }
+
+        private void Evict()
+        {
+            ulong selected = AndroidGuestWindows.Selected;
+            ulong victim = 0;
+            long oldest = long.MaxValue;
+
+            foreach (KeyValuePair<ulong, WindowBuffer> entry in _windows)
+            {
+                if (entry.Key == _lastDrawn || entry.Key == selected)
+                    continue;
+
+                if (entry.Value.LastUsed < oldest)
+                {
+                    oldest = entry.Value.LastUsed;
+                    victim = entry.Key;
+                }
+            }
+
+            if (oldest != long.MaxValue)
+                _windows.Remove(victim);
         }
 
         private static void Draw(WindowBuffer target, in GdiPrimitive primitive)
@@ -164,6 +188,52 @@ namespace Brovan.Android
                 case GdiPrimitiveKind.Polyline:
                     DrawPolyline(target, primitive.Points, primitive.Kind == GdiPrimitiveKind.Polygon, primitive.HasPen ? stroke : fill, thickness);
                     break;
+
+                case GdiPrimitiveKind.Blit:
+                    DrawBlit(target, primitive);
+                    break;
+            }
+        }
+
+        private static void DrawBlit(WindowBuffer target, in GdiPrimitive primitive)
+        {
+            uint[] pixels = primitive.Pixels;
+            int sourceWidth = primitive.SourceWidth;
+            int sourceHeight = primitive.SourceHeight;
+            if (pixels == null || sourceWidth <= 0 || sourceHeight <= 0 || pixels.Length < sourceWidth * sourceHeight)
+                return;
+
+            int left = primitive.X1;
+            int top = primitive.Y1;
+            int right = primitive.X2;
+            int bottom = primitive.Y2;
+            Normalize(ref left, ref right);
+            Normalize(ref top, ref bottom);
+
+            int width = right - left;
+            int height = bottom - top;
+            if (width <= 0 || height <= 0)
+                return;
+
+            int clippedLeft = Math.Max(left, 0);
+            int clippedTop = Math.Max(top, 0);
+            int clippedRight = Math.Min(right, target.Width);
+            int clippedBottom = Math.Min(bottom, target.Height);
+
+            for (int y = clippedTop; y < clippedBottom; y++)
+            {
+                int sourceRow = (int)((long)(y - top) * sourceHeight / height);
+                int row = y * target.Width;
+
+                for (int x = clippedLeft; x < clippedRight; x++)
+                {
+                    int sourceColumn = (int)((long)(x - left) * sourceWidth / width);
+                    uint pixel = pixels[(sourceRow * sourceWidth) + sourceColumn];
+                    target.Pixels[row + x] = unchecked((int)(0xFF000000u
+                        | ((pixel & 0x00FF0000u) >> 16)
+                        | (pixel & 0x0000FF00u)
+                        | ((pixel & 0x000000FFu) << 16)));
+                }
             }
         }
 

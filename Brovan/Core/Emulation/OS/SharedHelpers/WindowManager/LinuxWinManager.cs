@@ -279,10 +279,27 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial int XFillArc(IntPtr display, IntPtr drawable, IntPtr gc, int x, int y, uint width, uint height, int angle1, int angle2);
 
         [LibraryImport("libX11.so.6")]
+        public static partial IntPtr XDefaultVisual(IntPtr display, int screen);
+
+        [LibraryImport("libX11.so.6")]
+        public static unsafe partial IntPtr XCreateImage(IntPtr display, IntPtr visual, uint depth, int format, int offset,
+            void* data, uint width, uint height, int bitmapPad, int bytesPerLine);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XPutImage(IntPtr display, IntPtr drawable, IntPtr gc, IntPtr image,
+            int srcX, int srcY, int destX, int destY, uint width, uint height);
+
+        [LibraryImport("libX11.so.6")]
         public static unsafe partial int XFillPolygon(IntPtr display, IntPtr drawable, IntPtr gc, XPoint* points, int count, int shape, int mode);
 
         [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
         public static partial IntPtr XLoadQueryFont(IntPtr display, string name);
+
+        [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
+        public static unsafe partial IntPtr* XListFonts(IntPtr display, string pattern, int maxNames, out int count);
+
+        [LibraryImport("libX11.so.6")]
+        public static unsafe partial int XFreeFontNames(IntPtr* list);
 
         [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
         public static partial int XDrawString(IntPtr display, IntPtr drawable, IntPtr gc, int x, int y, string str, int length);
@@ -1574,7 +1591,59 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 case GdiPrimitiveKind.Polyline:
                     DrawPoly(windowHandle, gc, primitive);
                     break;
+
+                case GdiPrimitiveKind.Blit:
+                    DrawBlit(windowHandle, gc, primitive);
+                    break;
             }
+        }
+
+        private unsafe void DrawBlit(IntPtr windowHandle, IntPtr gc, in GdiPrimitive primitive)
+        {
+            uint[] pixels = primitive.Pixels;
+            int sourceWidth = primitive.SourceWidth;
+            int sourceHeight = primitive.SourceHeight;
+            if (pixels == null || sourceWidth <= 0 || sourceHeight <= 0 || pixels.Length < sourceWidth * sourceHeight)
+                return;
+
+            int width = primitive.X2 - primitive.X1;
+            int height = primitive.Y2 - primitive.Y1;
+            if (width <= 0 || height <= 0)
+                return;
+
+            IntPtr visual = X11.XDefaultVisual(_xDisplay, _screen);
+            uint depth = (uint)X11.XDefaultDepth(_xDisplay, _screen);
+            if (visual == IntPtr.Zero)
+                return;
+
+            // XPutImage does not scale.
+            nuint bytes = (nuint)((long)width * height * sizeof(uint));
+            uint* data = (uint*)NativeMemory.Alloc(bytes);
+
+            for (int row = 0; row < height; row++)
+            {
+                int sourceRow = height == sourceHeight ? row : (int)((long)row * sourceHeight / height);
+                uint* target = data + (long)row * width;
+
+                for (int column = 0; column < width; column++)
+                {
+                    int sourceColumn = width == sourceWidth ? column : (int)((long)column * sourceWidth / width);
+                    target[column] = pixels[sourceRow * sourceWidth + sourceColumn];
+                }
+            }
+
+            IntPtr image = X11.XCreateImage(_xDisplay, visual, depth, X11.ZPixmap, 0, data,
+                (uint)width, (uint)height, 32, 0);
+
+            if (image == IntPtr.Zero)
+            {
+                NativeMemory.Free(data);
+                return;
+            }
+
+            SetGraphicsFunction(gc, X11.GXcopy);
+            X11.XPutImage(_xDisplay, windowHandle, gc, image, 0, 0, primitive.X1, primitive.Y1, (uint)width, (uint)height);
+            DestroyImage(image);
         }
 
         private unsafe void DrawPoly(IntPtr windowHandle, IntPtr gc, in GdiPrimitive primitive)
@@ -1926,6 +1995,57 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         {
             if (_xDisplay != IntPtr.Zero && font != IntPtr.Zero && font != _fontStruct)
                 X11.XFreeFont(_xDisplay, font);
+        }
+
+        // An XLFD name carries the family in its second field, one name per size and style.
+        public unsafe IReadOnlyList<FontFamilyData> EnumerateFontFamilies(string faceName, byte charSet)
+        {
+            const int MaxNames = 4096;
+            List<FontFamilyData> faces = new List<FontFamilyData>();
+
+            if (_xDisplay == IntPtr.Zero)
+                return faces;
+
+            IntPtr* names = X11.XListFonts(_xDisplay, "-*-*-*-*-*-*-*-*-*-*-*-*-*-*", MaxNames, out int count);
+            if (names == null)
+                return faces;
+
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < count; i++)
+            {
+                string name = Marshal.PtrToStringUTF8(names[i]);
+                if (string.IsNullOrEmpty(name) || name[0] != '-')
+                    continue;
+
+                int familyStart = name.IndexOf('-', 1) + 1;
+                if (familyStart <= 0)
+                    continue;
+
+                int familyEnd = name.IndexOf('-', familyStart);
+                if (familyEnd <= familyStart)
+                    continue;
+
+                string family = name.Substring(familyStart, familyEnd - familyStart);
+                if (family.Length == 0 || family == "*" || !seen.Add(family))
+                    continue;
+
+                if (!string.IsNullOrEmpty(faceName) && !family.Equals(faceName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                faces.Add(new FontFamilyData
+                {
+                    FaceName = family,
+                    FullName = family,
+                    Style = "Regular",
+                    CharSet = charSet == 0 ? (byte)0 : charSet,
+                    PitchAndFamily = 0,
+                    Weight = 400,
+                    FontType = 0,
+                });
+            }
+
+            X11.XFreeFontNames(names);
+            return faces;
         }
 
         private IntPtr ResolveFont(IntPtr font)

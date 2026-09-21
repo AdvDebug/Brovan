@@ -8,7 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
 
-            if (Win32kHelper.TryGetMessage(Instance, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, true, out Win32kMessage Message))
+            if (Win32kHelper.TryGetMessage(Instance, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, true, Thread.ThreadId, out Win32kMessage Message))
             {
                 bool Written = Win32kHelper.WriteMessage(Instance, State.GetMessageMessagePtr, Message);
                 Instance.WinHelper.ClearWaitState(Thread);
@@ -24,6 +24,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            Thread.WaitDeadline = Win32kHelper.GetNextTimerDue(Instance, State.GetMessageHwndFilter, Thread.ThreadId, State.GetMessageMinMessage, State.GetMessageMaxMessage);
             Thread.State = EmulatedThreadState.Waiting;
             WinEmulatedThread.GetState(Thread).ApcAlertable = WinEmulatedThread.GetState(Thread).WaitAlertable;
             Instance._emulator.WriteRegister(Instance.IPRegister, WinEmulatedThread.GetState(Thread).WaitResumeRIP);
@@ -65,7 +66,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, true, out Win32kMessage Message))
+            if (Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, true, Thread.ThreadId, out Win32kMessage Message))
             {
                 if (!Win32kHelper.WriteMessage(Instance, MessagePtr, Message))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -81,7 +82,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Thread.WaitActive = true;
             Thread.WaitHandles = null;
             Thread.WaitAll = false;
-            Thread.WaitDeadline = -1;
+            Thread.WaitDeadline = Win32kHelper.GetNextTimerDue(Instance, HwndFilter, Thread.ThreadId, MinMessage, MaxMessage);
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_PENDING;
             State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);

@@ -20,7 +20,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (!Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, Win32kHelper.RemoveFlagSet(Flags), out Win32kMessage Message))
+            if (!Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, Win32kHelper.RemoveFlagSet(Flags), Instance.CurrentThread?.ThreadId ?? 0, out Win32kMessage Message))
             {
                 Instance.SetLastWinError(0);
                 if (Win32kHelper.TryDeliverWindowPosChanged(Instance, 0))

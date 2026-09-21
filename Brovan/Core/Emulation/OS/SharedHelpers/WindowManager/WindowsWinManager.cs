@@ -636,6 +636,37 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 case GdiPrimitiveKind.Polyline:
                     DrawPoly(hdc, primitive);
                     break;
+
+                case GdiPrimitiveKind.Blit:
+                    DrawBlit(hdc, primitive);
+                    break;
+            }
+        }
+
+        private static unsafe void DrawBlit(IntPtr hdc, in GdiPrimitive primitive)
+        {
+            uint[] pixels = primitive.Pixels;
+            if (pixels == null || primitive.SourceWidth <= 0 || primitive.SourceHeight <= 0)
+                return;
+
+            if (pixels.Length < primitive.SourceWidth * primitive.SourceHeight)
+                return;
+
+            BITMAPINFOHEADER header = new BITMAPINFOHEADER
+            {
+                biSize = (uint)sizeof(BITMAPINFOHEADER),
+                biWidth = primitive.SourceWidth,
+                // A negative height makes the rows read top-down.
+                biHeight = -primitive.SourceHeight,
+                biPlanes = 1,
+                biBitCount = 32,
+                biCompression = 0,
+            };
+
+            fixed (uint* bits = pixels)
+            {
+                StretchDIBits(hdc, primitive.X1, primitive.Y1, primitive.X2 - primitive.X1, primitive.Y2 - primitive.Y1,
+                    0, 0, primitive.SourceWidth, primitive.SourceHeight, bits, ref header, 0, primitive.Rop);
             }
         }
 
@@ -747,6 +778,78 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         {
             if (font != IntPtr.Zero)
                 DeleteObject(font);
+        }
+
+        public IReadOnlyList<FontFamilyData> EnumerateFontFamilies(string faceName, byte charSet)
+        {
+            List<FontFamilyData> faces = new List<FontFamilyData>();
+
+            lock (MetricsLock)
+            {
+                IntPtr hdc = EnsureMetricsDc();
+                if (hdc == IntPtr.Zero)
+                    return faces;
+
+                LOGFONTW query = new LOGFONTW
+                {
+                    lfCharSet = charSet,
+                    lfFaceName = faceName ?? string.Empty,
+                };
+
+                EnumFontFamiliesExW(hdc, ref query, (logFont, textMetric, fontType, _) =>
+                {
+                    ENUMLOGFONTEXW enumerated = Marshal.PtrToStructure<ENUMLOGFONTEXW>(logFont);
+                    NEWTEXTMETRICW metrics = Marshal.PtrToStructure<NEWTEXTMETRICW>(textMetric);
+
+                    faces.Add(new FontFamilyData
+                    {
+                        FaceName = enumerated.elfLogFont.lfFaceName,
+                        FullName = enumerated.elfFullName,
+                        Style = enumerated.elfStyle,
+                        CharSet = enumerated.elfLogFont.lfCharSet,
+                        PitchAndFamily = enumerated.elfLogFont.lfPitchAndFamily,
+                        Weight = enumerated.elfLogFont.lfWeight,
+                        Italic = enumerated.elfLogFont.lfItalic != 0,
+                        FontType = fontType,
+                        Metrics = ToMetricsData(metrics),
+                        NtmFlags = metrics.ntmFlags,
+                        SizeEm = metrics.ntmSizeEM,
+                        CellHeight = metrics.ntmCellHeight,
+                        AvgWidth = metrics.ntmAvgWidth,
+                    });
+
+                    return 1;
+                }, IntPtr.Zero, 0);
+            }
+
+            return faces;
+        }
+
+        private static TextMetricsData ToMetricsData(in NEWTEXTMETRICW native)
+        {
+            return new TextMetricsData
+            {
+                Height = native.tmHeight,
+                Ascent = native.tmAscent,
+                Descent = native.tmDescent,
+                InternalLeading = native.tmInternalLeading,
+                ExternalLeading = native.tmExternalLeading,
+                AveCharWidth = native.tmAveCharWidth,
+                MaxCharWidth = native.tmMaxCharWidth,
+                Weight = native.tmWeight,
+                Overhang = native.tmOverhang,
+                DigitizedAspectX = native.tmDigitizedAspectX,
+                DigitizedAspectY = native.tmDigitizedAspectY,
+                FirstChar = native.tmFirstChar,
+                LastChar = native.tmLastChar,
+                DefaultChar = native.tmDefaultChar,
+                BreakChar = native.tmBreakChar,
+                Italic = native.tmItalic,
+                Underlined = native.tmUnderlined,
+                StruckOut = native.tmStruckOut,
+                PitchAndFamily = native.tmPitchAndFamily,
+                CharSet = native.tmCharSet,
+            };
         }
 
         public bool GetTextMetrics(IntPtr font, out TextMetricsData metrics)
@@ -1552,6 +1655,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             out IntPtr ppvBits, IntPtr hSection, uint offset);
 
         [DllImport("gdi32.dll", SetLastError = true)]
+        private static extern unsafe int StretchDIBits(IntPtr hdc, int xDest, int yDest, int destWidth, int destHeight,
+            int xSrc, int ySrc, int srcWidth, int srcHeight, void* bits, ref BITMAPINFOHEADER bmi, uint usage, uint rop);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
         private static extern bool DeleteDC(IntPtr hdc);
 
         [DllImport("gdi32.dll")]
@@ -1612,6 +1719,52 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
             public string lfFaceName;
         }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ENUMLOGFONTEXW
+        {
+            public LOGFONTW elfLogFont;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+            public string elfFullName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string elfStyle;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string elfScript;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NEWTEXTMETRICW
+        {
+            public int tmHeight;
+            public int tmAscent;
+            public int tmDescent;
+            public int tmInternalLeading;
+            public int tmExternalLeading;
+            public int tmAveCharWidth;
+            public int tmMaxCharWidth;
+            public int tmWeight;
+            public int tmOverhang;
+            public int tmDigitizedAspectX;
+            public int tmDigitizedAspectY;
+            public ushort tmFirstChar;
+            public ushort tmLastChar;
+            public ushort tmDefaultChar;
+            public ushort tmBreakChar;
+            public byte tmItalic;
+            public byte tmUnderlined;
+            public byte tmStruckOut;
+            public byte tmPitchAndFamily;
+            public byte tmCharSet;
+            public uint ntmFlags;
+            public uint ntmSizeEM;
+            public uint ntmCellHeight;
+            public uint ntmAvgWidth;
+        }
+
+        private delegate int EnumFontFamExProc(IntPtr logFont, IntPtr textMetric, uint fontType, IntPtr parameter);
+
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+        private static extern int EnumFontFamiliesExW(IntPtr hdc, ref LOGFONTW logFont, EnumFontFamExProc callback, IntPtr parameter, uint flags);
 
         [DllImport("gdi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr CreateFontIndirectW(ref LOGFONTW lplf);

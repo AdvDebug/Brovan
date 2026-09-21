@@ -1467,6 +1467,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal byte[] SyntheticMountDevUniqueId { get; private set; }
         private BinaryEmulator Emulator;
 
+        private uint CachedDriveMap;
+
+        // Bit 0 is A:.
+        internal uint DriveMap
+        {
+            get
+            {
+                if (CachedDriveMap == 0)
+                    CachedDriveMap = GeneralHelper.IO.GetWindowsDriveMap();
+
+                return CachedDriveMap;
+            }
+        }
+
         private bool _argCacheValid;
         private ulong _argCacheR10;
         private ulong _argCacheRDX;
@@ -3275,7 +3289,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : Emulator.ReadMemoryUInt(Table + (ulong)Index * 4);
         }
 
-        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinWindowCreation Creation, ulong SyscallRetryRip = 0)
+        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinWindowCreation Creation, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0)
         {
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null || Callback == 0 || PointerSize != 8)
@@ -3290,6 +3304,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 SavedRsp = CurrentRsp,
                 SavedReturnAddress = Emulator.ReadMemoryULong(CurrentRsp),
                 SyscallRetryRip = SyscallRetryRip,
+                PaintRetryHwnd = PaintRetryHwnd,
                 WindowCreation = Creation,
             };
 
@@ -3645,6 +3660,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Frame.SyscallRetryRip != 0)
             {
+                WinEmulatedThread.GetState(Thread).PendingPaintRetryHwnd = Frame.PaintRetryHwnd;
                 Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
                 Emulator.WriteRegister(Registers.UC_X86_REG_RAX, Frame.SavedSyscallNumber);
                 Emulator.WriteRegister(Registers.UC_X86_REG_R10, Frame.SavedArg0);
@@ -4079,7 +4095,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Zeroed.Clear();
                     Emulator._emulator.WriteMemory(DcAttr, Zeroed);
 
-                    Emulator._emulator.WriteMemory(DcAttr, 1, 1);
                     Emulator._emulator.WriteMemory(DcAttr + 0x68, 1, 4);
                     Emulator._emulator.WriteMemory(DcAttr + 0x128, 0x00010001UL, 8);
                     Emulator._emulator.WriteMemory(DcAttr + 0x140, 1, 4);
@@ -4146,6 +4161,23 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int DcAttrCurrentPosYOffset = 0xDC;
         private const int DcAttrBrushOriginXOffset = 0x158;
         private const int DcAttrBrushOriginYOffset = 0x15C;
+
+        public ulong GetGdiKernelObject(ulong Handle, byte ExpectedType)
+        {
+            if (Handle == 0 || ((Handle >> 16) & GdiHandleTypeMask) != ExpectedType || !ValidateGdiHandle(Handle))
+                return 0;
+
+            EnsureGdiHandleTable();
+            if (GdiHandleTableAddress == 0)
+                return 0;
+
+            ushort Index = (ushort)(Handle & 0xFFFF);
+            if (Index == 0 || Index >= GdiHandleEntryCount)
+                return 0;
+
+            ulong Encrypted = Emulator.ReadMemoryULong(GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize + 0x10);
+            return Encrypted == 0 ? 0 : DecryptGdiPointer(Encrypted);
+        }
 
         public ulong GetDcAttributeAddress(ulong Hdc)
         {
@@ -4497,6 +4529,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             });
         }
 
+        public void EnqueueGdiBlit(ulong Hwnd, ulong Hdc, int Left, int Top, int Right, int Bottom, uint[] Pixels, int SourceWidth, int SourceHeight, uint Rop)
+        {
+            if (DesktopDisplay is not GuiThreadManager guiManager)
+                return;
+
+            GetDcSurfaceOrigin(Hwnd, Hdc, out int SurfaceX, out int SurfaceY);
+
+            guiManager.EnqueueGdiPrimitive(new GdiPrimitive
+            {
+                Hwnd = Hwnd,
+                Kind = GdiPrimitiveKind.Blit,
+                X1 = Left + SurfaceX,
+                Y1 = Top + SurfaceY,
+                X2 = Right + SurfaceX,
+                Y2 = Bottom + SurfaceY,
+                Rop = Rop,
+                Pixels = Pixels,
+                SourceWidth = SourceWidth,
+                SourceHeight = SourceHeight,
+            });
+        }
+
         public void EnqueueGdiShape(ulong Hwnd, ulong Hdc, GdiPrimitiveKind Kind, int Left, int Top, int Right, int Bottom, uint PenColor, int PenWidth, uint BrushColor, int RoundedWidth = 0, int RoundedHeight = 0)
         {
             if (DesktopDisplay is not GuiThreadManager guiManager)
@@ -4748,6 +4802,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Font != IntPtr.Zero && DesktopDisplay is GuiThreadManager guiManager)
                 guiManager.DeleteFont(Font);
+        }
+
+        public IReadOnlyList<FontFamilyData> EnumerateFontFamilies(string FaceName, byte CharSet)
+        {
+            EnsureDesktopDisplay();
+            return DesktopDisplay is GuiThreadManager guiManager
+                ? guiManager.EnumerateFontFamilies(FaceName, CharSet)
+                : Array.Empty<FontFamilyData>();
         }
 
         private void WriteUserMessageFont(ulong Address, uint Dpi)
@@ -5349,6 +5411,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             return UserDesktopWindowAddress;
         }
 
+        // user32 answers UpdateWindow and GetUpdateRect out of the window object, with no syscall.
+        // WNDS_INTERNALPAINT is a paint owed with no update region.
+        private const int UserWindowPaintStateOffset = 0x10;
+        private const uint UserWindowStateInternalPaint = 0x00001000;
+        private const uint UserWindowStateUpdateDirty = 0x00002000;
+
+        public void PublishWindowPaintState(WinWindow Window)
+        {
+            if (Window == null || Window.ClientWindowAddress == 0)
+                return;
+
+            const uint PaintBits = UserWindowStateInternalPaint | UserWindowStateUpdateDirty;
+            uint State = Emulator.ReadMemoryUInt(Window.ClientWindowAddress + UserWindowPaintStateOffset);
+            State = Window.PaintPending ? State | PaintBits : State & ~PaintBits;
+
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowPaintStateOffset, State, 4);
+        }
+
         private void RefreshUserWindowObject(WinWindow Window)
         {
             ulong ClassObject = EnsureUserClassObject(Window);
@@ -5417,6 +5497,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xB8, Window.ClientTextBytes, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xC0, TextObject, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xE0, 0UL, 8);
+
+            PublishWindowPaintState(Window);
 
             Win32kDpi.ApplyWindowContext(Emulator, Window.ClientWindowAddress);
         }
@@ -5859,7 +5941,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Window.ParentHwnd = NewParent?.Hwnd ?? 0;
-            Window.Dirty = true;
+            Win32kHelper.MarkWindowDirty(Emulator, Window);
 
             if (NewParent != null)
             {
@@ -6056,6 +6138,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.WriteMemory(ServerInfo + (ulong)Offset, Foreground, Width);
         }
 
+        // Host geometry and host input belong to this window, not always the foreground one.
+        public ulong PresentedWindow { get; private set; }
+
         public void PresentDesktop()
         {
             try
@@ -6067,7 +6152,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return;
 
                 WinWindow Window = GetWindow(GetForegroundWindow());
-                if (Window == null || IsToolWindow(Window))
+                if (Window == null || IsToolWindow(Window) || !Window.Visible || Window.Destroyed)
                     Window = GetTopLevelWindow();
 
                 string title;
@@ -6096,6 +6181,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     state = WindowState.Normal;
                 }
 
+                PresentedWindow = visible ? (Window?.Hwnd ?? 0) : 0;
                 guiManager.EnqueuePresent(title, width, height, visible, state);
             }
             catch
@@ -6179,14 +6265,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private WinWindow GetTopLevelWindow()
         {
+            WinWindow Hidden = null;
+
             for (int i = TopLevelWindows.Count - 1; i >= 0; i--)
             {
                 ulong Hwnd = TopLevelWindows[i];
-                if (WinWindows.TryGetValue(Hwnd, out WinWindow Window) && Window != null && !Window.Destroyed && !IsToolWindow(Window))
+                if (!WinWindows.TryGetValue(Hwnd, out WinWindow Window) || Window == null || Window.Destroyed || IsToolWindow(Window))
+                    continue;
+
+                if (Window.Visible)
                     return Window;
+
+                Hidden ??= Window;
             }
 
-            return null;
+            return Hidden;
         }
 
         private static bool IsToolWindow(WinWindow Window)
@@ -6236,7 +6329,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Window.Visible && Window.ParentHwnd == 0)
                 SetThreadWindowContext(Window);
 
-            Window.Dirty = true;
+            Win32kHelper.MarkWindowDirty(Emulator, Window);
             MaterializeUserWindow(Window);
             PresentDesktop();
         }

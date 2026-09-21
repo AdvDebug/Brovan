@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -546,7 +547,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         Ellipse,
         RoundRect,
         Polygon,
-        Polyline
+        Polyline,
+        Blit
     }
 
     public struct GdiPenDescriptor
@@ -583,6 +585,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public GdiBrushDescriptor Brush;
         public bool HasPen;
         public bool HasBrush;
+
+        // Blit only. Top-down 32 bit rows, stretched onto the destination rectangle.
+        public uint[] Pixels;
+        public int SourceWidth;
+        public int SourceHeight;
     }
 
     public interface IGdiRenderSupport
@@ -630,6 +637,26 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         byte PitchAndFamily,
         string FaceName);
 
+    public sealed class FontFamilyData
+    {
+        public string FaceName;
+        public string FullName;
+        public string Style;
+        public byte CharSet;
+        public byte PitchAndFamily;
+        public int Weight;
+        public bool Italic;
+
+        // RASTER_FONTTYPE, DEVICE_FONTTYPE, TRUETYPE_FONTTYPE.
+        public uint FontType;
+
+        public TextMetricsData Metrics;
+        public uint NtmFlags;
+        public uint SizeEm;
+        public uint CellHeight;
+        public uint AvgWidth;
+    }
+
     public static class HostColor
     {
         // A COLORREF is 0x00BBGGRR, a 32 bit DIB pixel is 0x00RRGGBB.
@@ -651,6 +678,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         IntPtr CreateFont(in FontDescription description);
 
         void DeleteFont(IntPtr font);
+
+        // No face name asks for every face, a face name for that family's styles.
+        IReadOnlyList<FontFamilyData> EnumerateFontFamilies(string faceName, byte charSet);
     }
 
     public interface IDisplayConnection : IDisposable
