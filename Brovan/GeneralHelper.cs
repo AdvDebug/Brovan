@@ -1845,9 +1845,11 @@ namespace Brovan
                     }
 
                     string Root;
+                    bool Mapped;
                     lock (DriveMapLock)
                     {
-                        if (!DriveMappings.TryGetValue(Letter, out Root) || string.IsNullOrWhiteSpace(Root))
+                        Mapped = DriveMappings.TryGetValue(Letter, out Root) && !string.IsNullOrWhiteSpace(Root);
+                        if (!Mapped)
                             Root = Path.Combine(VirtualFileSystemRoot, Letter.ToString());
                     }
 
@@ -1855,6 +1857,12 @@ namespace Brovan
                     {
                         if (!Directory.Exists(Root))
                             continue;
+
+                        if (Mapped)
+                        {
+                            Map |= 1u << Index;
+                            continue;
+                        }
 
                         using IEnumerator<string> Entries = Directory.EnumerateFileSystemEntries(Root).GetEnumerator();
                         if (Entries.MoveNext())

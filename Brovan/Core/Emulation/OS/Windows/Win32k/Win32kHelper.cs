@@ -1515,14 +1515,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return true;
         }
 
+        // A window DC draws through the host window, so only a screen context resolves to the display surface.
         internal static bool TryGetDcBitmap(BinaryEmulator Instance, ulong Hdc, out Win32kBitmap Bitmap)
         {
             Win32kState State = GetState(Instance);
             Bitmap = default;
 
-            return State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc)
-                && Dc.SelectedBitmap != 0
-                && State.Bitmaps.TryGetValue(Dc.SelectedBitmap, out Bitmap);
+            if (!State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return false;
+
+            ulong Handle = Dc.Display && Dc.Hwnd == 0 ? EnsureDisplaySurfaceBitmap(Instance, State) : Dc.SelectedBitmap;
+            return Handle != 0 && State.Bitmaps.TryGetValue(Handle, out Bitmap);
         }
 
         // Packed colour only. Lower depths need a colour table the blit does not carry.
@@ -1938,7 +1941,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Timer.Elapse = Elapse;
             Timer.Due = Instance.CreateEmulatedDeadlineMilliseconds(Elapse);
 
-            WakeMessageWaiters(Instance, Timer.Due);
+            WakeMessageWaiters(Instance);
             return Id;
         }
 
@@ -1999,8 +2002,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Earliest;
         }
 
-        // A parked thread carries the deadline it was given, so a later timer hands it the new one.
-        private static void WakeMessageWaiters(BinaryEmulator Instance, long Due)
+        // A parked thread carries the deadline it was given, so each one is re-armed on the timer it can take.
+        private static void WakeMessageWaiters(BinaryEmulator Instance)
         {
             foreach (EmulatedThread Thread in Instance.Threads.Values)
             {
@@ -2011,8 +2014,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (State == null || (!State.GetMessageWaitActive && !State.WaitMessageActive))
                     continue;
 
-                if (Thread.WaitDeadline == -1 || Due < Thread.WaitDeadline)
-                    Thread.WaitDeadline = Due;
+                Thread.WaitDeadline = State.GetMessageWaitActive
+                    ? GetNextTimerDue(Instance, State.GetMessageHwndFilter, Thread.ThreadId, State.GetMessageMinMessage, State.GetMessageMaxMessage)
+                    : GetNextTimerDue(Instance, 0, Thread.ThreadId, 0, 0);
             }
 
             Instance.WakeSignal.Bump();
