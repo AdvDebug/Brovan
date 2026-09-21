@@ -111,6 +111,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const byte PenHandleType = 0x30;
         internal const byte BrushHandleType = 0x10;
         internal const byte BitmapHandleType = 0x05;
+        internal const byte RegionHandleType = 0x04;
         internal const byte FontHandleType = 0x0A;
 
         internal const uint WM_NULL = 0x0000;
@@ -202,6 +203,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const int PAINTSTRUCT32_SIZE = 64;
         private const int MaxWindowTextBytes = 0x1000;
         private const long MaxBitmapBytes = 0x40000000;
+        private const long MaxBlitPixels = MaxBitmapBytes / 4;
         private const uint BitmapCopyChunkBytes = 0x10000;
 
         private static readonly ConditionalWeakTable<BinaryEmulator, Win32kState> States = new();
@@ -997,10 +999,21 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return DibSection ? (int)(((Bits + 31) / 32) * 4) : (int)(((Bits + 15) / 16) * 2);
         }
 
-        // A stock object outlives every caller, so DeleteObject on one succeeds.
+        // A blit block is built in host memory, so a guest extent gets the budget a bitmap gets.
+        internal static bool IsBlitExtentValid(int Width, int Height)
+        {
+            return Width > 0 && Height > 0 && (long)Width * Height <= MaxBlitPixels;
+        }
+
+        // A stock object outlives every caller, so DeleteObject on one succeeds. Every window DC reports the
+        // one display surface, which is shared the same way.
         internal static bool IsStockObject(BinaryEmulator Instance, ulong Handle)
         {
-            return Handle != 0 && Handle == GetState(Instance).StockBitmap;
+            if (Handle == 0)
+                return false;
+
+            Win32kState State = GetState(Instance);
+            return Handle == State.StockBitmap || Handle == State.DisplaySurfaceBitmap;
         }
 
         // Every DC starts on this, so a caller that selects its own bitmap has one to select back.
@@ -1278,7 +1291,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Right = 0;
             Bottom = 0;
 
-            ulong Object = Instance.WinHelper.GetGdiKernelObject(Handle);
+            ulong Object = Instance.WinHelper.GetGdiKernelObject(Handle, RegionHandleType);
             if (Object == 0 || !Instance.IsRegionMapped(Object, RegionObjectSize))
                 return false;
 
@@ -1295,7 +1308,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static bool TryWriteRegionRect(BinaryEmulator Instance, ulong Handle, int Left, int Top, int Right, int Bottom)
         {
-            ulong Object = Instance.WinHelper.GetGdiKernelObject(Handle);
+            ulong Object = Instance.WinHelper.GetGdiKernelObject(Handle, RegionHandleType);
             if (Object == 0 || !Instance.IsRegionMapped(Object, RegionObjectSize))
                 return false;
 
@@ -1932,17 +1945,29 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static bool KillTimer(BinaryEmulator Instance, ulong Hwnd, ulong Id)
         {
             Win32kState State = GetState(Instance);
+            uint ThreadId = Instance.CurrentThread?.ThreadId ?? 0;
 
             for (int i = 0; i < State.Timers.Count; i++)
             {
                 if (State.Timers[i].Hwnd != Hwnd || State.Timers[i].Id != Id)
                     continue;
 
+                if (!TimerOwnedByThread(Instance, State.Timers[i], ThreadId))
+                    return false;
+
                 State.Timers.RemoveAt(i);
                 return true;
             }
 
             return false;
+        }
+
+        // A windowless timer belongs to the thread that set it, one on a window to the thread that owns it.
+        private static bool TimerOwnedByThread(BinaryEmulator Instance, Win32kTimer Timer, uint ThreadId)
+        {
+            return Timer.Hwnd != 0
+                ? OwnedByThread(Instance, Timer.Hwnd, ThreadId)
+                : ThreadId == 0 || Timer.ThreadId == 0 || Timer.ThreadId == ThreadId;
         }
 
         // A deadline for a timer the caller cannot consume parks it on an expiry it never clears.
@@ -2018,11 +2043,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (HwndFilter != 0 && Timer.Hwnd != HwndFilter)
                     continue;
 
-                bool Owned = Timer.Hwnd != 0
-                    ? OwnedByThread(Instance, Timer.Hwnd, ThreadId)
-                    : ThreadId == 0 || Timer.ThreadId == 0 || Timer.ThreadId == ThreadId;
-
-                if (!Owned)
+                if (!TimerOwnedByThread(Instance, Timer, ThreadId))
                     continue;
 
                 if (Timer.Due > Now)

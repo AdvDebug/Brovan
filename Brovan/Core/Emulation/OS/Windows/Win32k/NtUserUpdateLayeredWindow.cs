@@ -53,7 +53,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 TryReadPair(Instance, SourcePointPtr, out SourceX, out SourceY);
 
             // The layered surface is the whole window.
-            if (SourceDc != 0 && Width > 0 && Height > 0)
+            if (SourceDc != 0 && Win32kHelper.IsBlitExtentValid(Width, Height))
             {
                 int Count = Width * Height;
                 uint[] Pixels = ArrayPool<uint>.Shared.Rent(Count);

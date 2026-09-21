@@ -125,12 +125,18 @@ namespace Brovan.Core.Emulation
 
         public bool Emulate(ulong start, ulong end, uint timeout = 0, uint count = 0)
         {
+            HookFailure = null;
             _armedBudget = count;
             _sliceLimit = count;
             _sliceStart = Stopwatch.GetTimestamp();
             bool Result = Inner.Emulate(start, end, timeout, count);
             UpdateInstructionRate();
-            return Result;
+
+            if (HookFailure == null)
+                return Result;
+
+            HookFailure = null;
+            return false;
         }
 
         private uint _armedBudget;
@@ -339,8 +345,13 @@ namespace Brovan.Core.Emulation
             IntPtr NativePtr { get; }
         }
 
+        // uc_emu_stop makes uc_emu_start return success, so a hook that threw has to fail the slice itself.
+        [ThreadStatic]
+        private static Exception HookFailure;
+
         private static void FailHook(IntPtr uc, Exception Error)
         {
+            HookFailure ??= Error;
             Helpers.Utils.LogError($"[Unicorn] Hook callback threw, stopping the run: {Error}");
 
             try

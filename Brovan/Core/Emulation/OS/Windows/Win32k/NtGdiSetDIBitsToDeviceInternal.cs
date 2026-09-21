@@ -20,7 +20,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong BitsAddress = Instance.WinHelper.GetArg(9);
             ulong HeaderAddress = Instance.WinHelper.GetArg(10);
 
-            if (Width <= 0 || Height <= 0
+            if (!Win32kHelper.IsBlitExtentValid(Width, Height)
                 || !Win32kHelper.TryReadDibHeader(Instance, HeaderAddress, out Win32kHelper.DibHeader Header))
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);

@@ -4,7 +4,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtGdiCreateRectRgn : IWinSyscall
     {
-        private const byte RegionHandleType = 0x04;
         private const int RegionObjectSize = 0x30;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -20,7 +19,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int Top = System.Math.Min(Y1, Y2);
             int Bottom = System.Math.Max(Y1, Y2);
 
-            ulong Handle = Instance.WinHelper.AllocateGdiHandle(RegionHandleType);
+            ulong Handle = Instance.WinHelper.AllocateGdiHandle(Win32kHelper.RegionHandleType);
             if (Handle == 0)
             {
                 Instance.SetRawSyscallReturn(0);

@@ -4162,9 +4162,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int DcAttrBrushOriginXOffset = 0x158;
         private const int DcAttrBrushOriginYOffset = 0x15C;
 
-        public ulong GetGdiKernelObject(ulong Handle)
+        public ulong GetGdiKernelObject(ulong Handle, byte ExpectedType)
         {
-            if (Handle == 0 || !ValidateGdiHandle(Handle))
+            if (Handle == 0 || ((Handle >> 16) & GdiHandleTypeMask) != ExpectedType || !ValidateGdiHandle(Handle))
                 return 0;
 
             EnsureGdiHandleTable();

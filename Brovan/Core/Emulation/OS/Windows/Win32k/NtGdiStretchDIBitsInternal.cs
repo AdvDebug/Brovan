@@ -21,7 +21,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong HeaderAddress = Instance.WinHelper.GetArg(10);
             uint Rop = (uint)Instance.WinHelper.GetArg(12);
 
-            if (DestWidth <= 0 || DestHeight <= 0 || SourceWidth <= 0 || SourceHeight <= 0
+            if (!Win32kHelper.IsBlitExtentValid(DestWidth, DestHeight) || !Win32kHelper.IsBlitExtentValid(SourceWidth, SourceHeight)
                 || !Win32kHelper.TryReadDibHeader(Instance, HeaderAddress, out Win32kHelper.DibHeader Header))
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);

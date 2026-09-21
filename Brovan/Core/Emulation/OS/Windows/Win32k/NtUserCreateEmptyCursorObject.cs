@@ -8,6 +8,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             ulong Handle = Instance.WinHelper.AllocateUserHandle();
 
+            // The object exists before SetCursorIconDataEx fills it in, so DestroyCursor has to find it.
+            if (Handle != 0)
+                Win32kHelper.SetCursorIconData(Instance, Handle, new Win32kHelper.Win32kCursorIcon());
+
             Instance.SetLastWinError(Handle == 0 ? Win32kHelper.ERROR_INVALID_PARAMETER : Win32kHelper.ERROR_SUCCESS);
             Instance.SetRawSyscallReturn(Handle);
             return NTSTATUS.STATUS_SUCCESS;

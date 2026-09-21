@@ -18,7 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int SourceY = unchecked((int)Instance.WinHelper.GetArg(7));
             uint Rop = (uint)Instance.WinHelper.GetArg(8);
 
-            if (Width <= 0 || Height <= 0)
+            if (!Win32kHelper.IsBlitExtentValid(Width, Height))
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
                 Instance.SetRawSyscallReturn(0);
