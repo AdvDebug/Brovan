@@ -10,6 +10,7 @@
         <PublishAot>true</PublishAot>
         <InvariantGlobalization>true</InvariantGlobalization>
         <StripSymbols>true</StripSymbols>
+		<CetCompat>false</CetCompat>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
