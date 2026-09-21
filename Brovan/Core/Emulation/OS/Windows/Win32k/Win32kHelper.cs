@@ -118,6 +118,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const byte BitmapHandleType = 0x05;
         internal const byte RegionHandleType = 0x04;
         internal const byte FontHandleType = 0x0A;
+        internal const byte PaletteHandleType = 0x08;
 
         internal const uint WM_NULL = 0x0000;
         internal const uint WM_CREATE = 0x0001;
@@ -399,8 +400,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Window.Style |= WS_VISIBLE;
             }
 
-            if (Window.ParentHwnd == 0)
-            if ((Position.Flags & SWP_NOZORDER) == 0)
+            if (Window.ParentHwnd == 0 && (Position.Flags & SWP_NOZORDER) == 0)
                 Instance.WinHelper.UpdateTopLevelWindowZOrder(Position.Hwnd, Position.InsertAfter);
 
             MarkWindowDirty(Instance, Window);
@@ -702,6 +702,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 IsPen = false,
                 ColorRef = ColorRef,
             };
+            return Handle;
+        }
+
+        internal static ulong CreatePaletteHandle(BinaryEmulator Instance)
+        {
+            ulong Handle = Instance.WinHelper.AllocateGdiHandle(PaletteHandleType);
+
+            Instance.SetLastWinError(Handle == 0 ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS);
             return Handle;
         }
 

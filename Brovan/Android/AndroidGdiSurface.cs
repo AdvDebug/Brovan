@@ -18,12 +18,14 @@ namespace Brovan.Android
             public int Width;
             public int Height;
             public bool Dirty;
+            public long LastUsed;
         }
 
         private readonly object _sync = new();
         private readonly Dictionary<ulong, WindowBuffer> _windows = new();
 
         private ulong _lastDrawn;
+        private long _accessCounter;
 
         public void Execute(in GdiPrimitive primitive)
         {
@@ -106,14 +108,14 @@ namespace Brovan.Android
         {
             if (!_windows.TryGetValue(hwnd, out WindowBuffer buffer))
             {
-                // A guest that churns windows would otherwise grow this without bound; the emulator only
-                // presents one at a time, so dropping the oldest costs nothing visible.
                 if (_windows.Count >= MaximumWindows)
-                    _windows.Clear();
+                    Evict();
 
                 buffer = new WindowBuffer();
                 _windows[hwnd] = buffer;
             }
+
+            buffer.LastUsed = ++_accessCounter;
 
             int width = AndroidHost.Width;
             int height = AndroidHost.Height;
@@ -129,6 +131,28 @@ namespace Brovan.Android
             }
 
             return buffer;
+        }
+
+        private void Evict()
+        {
+            ulong selected = AndroidGuestWindows.Selected;
+            ulong victim = 0;
+            long oldest = long.MaxValue;
+
+            foreach (KeyValuePair<ulong, WindowBuffer> entry in _windows)
+            {
+                if (entry.Key == _lastDrawn || entry.Key == selected)
+                    continue;
+
+                if (entry.Value.LastUsed < oldest)
+                {
+                    oldest = entry.Value.LastUsed;
+                    victim = entry.Key;
+                }
+            }
+
+            if (oldest != long.MaxValue)
+                _windows.Remove(victim);
         }
 
         private static void Draw(WindowBuffer target, in GdiPrimitive primitive)

@@ -57,6 +57,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Flags = Flags,
             });
 
+            Instance.WinHelper.PresentDesktop();
+
             Instance.SetLastWinError(0);
             Instance.SetBooleanSyscallReturn(true);
             return NTSTATUS.STATUS_SUCCESS;

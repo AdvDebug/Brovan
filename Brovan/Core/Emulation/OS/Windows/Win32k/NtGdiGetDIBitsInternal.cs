@@ -41,7 +41,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int Width = Math.Min(Header.Width, Bitmap.Width);
             int Available = Bitmap.Height > (int)StartScan ? Bitmap.Height - (int)StartScan : 0;
             int Rows = Math.Min((int)Scans, Available);
-            if (Width <= 0 || Rows <= 0)
+            if (!Win32kHelper.IsBlitExtentValid(Width, Rows))
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
                 Instance.SetRawSyscallReturn(0);
