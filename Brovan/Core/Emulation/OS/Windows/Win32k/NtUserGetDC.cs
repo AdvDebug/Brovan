@@ -8,7 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
 
             ulong Hwnd = Instance.WinHelper.GetArg(0);
-            ulong Hdc = Win32kHelper.CreateDeviceContext(Instance, Hwnd, false, false);
+            ulong Hdc = Win32kHelper.CreateDeviceContext(Instance, Hwnd, false, false, true);
 
             if (Hdc == 0)
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);

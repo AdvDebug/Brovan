@@ -12,7 +12,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private static bool TryGetSatisfiedIndex(BinaryEmulator Instance, EmulatedThread Thread, List<ulong> Handles, bool WaitAll, uint WakeMask, out NTSTATUS WaitStatus)
         {
             WaitStatus = NTSTATUS.STATUS_SUCCESS;
-            bool MessageReady = Win32kHelper.HasQueuedInputEvent(Instance, WakeMask);
+            bool MessageReady = Win32kHelper.HasQueuedInputEvent(Instance, WakeMask, Thread.ThreadId);
 
             if (WaitAll)
             {

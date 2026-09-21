@@ -26,9 +26,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             if (!Win32kHelper.WritePaintStruct(Instance, PaintStructPtr, Hdc, Window))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            {
+                Win32kHelper.ReleaseDeviceContext(Instance, Hdc);
+                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
+                Instance.SetRawSyscallReturn(0);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
 
             Window.Dirty = false;
+            Window.PaintPending = false;
+            Instance.WinHelper.PublishWindowPaintState(Window);
             Instance.SetLastWinError(0);
             Instance.SetRawSyscallReturn(Hdc);
             return NTSTATUS.STATUS_SUCCESS;

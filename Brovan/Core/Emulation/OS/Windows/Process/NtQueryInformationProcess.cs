@@ -530,6 +530,39 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
                     case PROCESSINFOCLASS.ProcessImageFileNameWin32:
                         return QueryProcessImageFileNameWin32(Instance, ProcessHandle, OutBufferPtr, OutBufferLength, SetReturnLength);
+                    case PROCESSINFOCLASS.ProcessDeviceMap:
+                        {
+                            // PROCESS_DEVICEMAP_INFORMATION: drive bitmask, then one DRIVE_* byte per letter. 0x24 bytes on both architectures.
+                            const uint StructSize = 0x24;
+                            const byte DriveFixed = 3;
+
+                            if (OutBufferLength < StructSize)
+                            {
+                                SetReturnLength(StructSize);
+                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            if (!Instance.IsRegionMapped(OutBufferPtr, StructSize))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            uint Map = Instance.WinHelper.DriveMap;
+
+                            Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
+                            Buffer.Clear();
+                            WriteUInt32(Buffer, 0, Map);
+
+                            for (int Index = 0; Index < 26; Index++)
+                            {
+                                if ((Map & (1u << Index)) != 0)
+                                    Buffer[4 + Index] = DriveFixed;
+                            }
+
+                            if (!Instance.WriteMemory(OutBufferPtr, Buffer))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            SetReturnLength(StructSize);
+                            return NTSTATUS.STATUS_SUCCESS;
+                        }
                     case (PROCESSINFOCLASS)52:
                         {
                             // PROCESS_MITIGATION_POLICY_INFORMATION: policy id in, policy value out. 8 bytes on both architectures.

@@ -189,6 +189,31 @@ namespace Brovan.Android
         {
         }
 
+        // Android draws with one system face, so that is the whole enumeration.
+        public IReadOnlyList<FontFamilyData> EnumerateFontFamilies(string faceName, byte charSet)
+        {
+            const string SystemFace = "Roboto";
+
+            if (!string.IsNullOrEmpty(faceName) && !faceName.Equals(SystemFace, StringComparison.OrdinalIgnoreCase))
+                return Array.Empty<FontFamilyData>();
+
+            AndroidText.GetMetrics(out TextMetricsData metrics);
+
+            return new FontFamilyData[]
+            {
+                new FontFamilyData
+                {
+                    FaceName = SystemFace,
+                    FullName = SystemFace,
+                    Style = "Regular",
+                    CharSet = metrics.CharSet,
+                    PitchAndFamily = metrics.PitchAndFamily,
+                    Weight = metrics.Weight != 0 ? metrics.Weight : 400,
+                    Metrics = metrics,
+                }
+            };
+        }
+
         public void InvalidateSurface()
         {
             if (!_disposed)

@@ -20,7 +20,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             // The cbWndExtra block is the application's, and its first slots are the DWLP_ indexes.
             Window.DialogPointer = Dialog;
             Window.IsDialog = Dialog != 0;
-            Window.Dirty = true;
+            Win32kHelper.MarkWindowDirty(Instance, Window);
             Instance.WinHelper.MaterializeUserWindow(Window);
 
             Instance.SetLastWinError(0);

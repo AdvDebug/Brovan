@@ -339,6 +339,20 @@ namespace Brovan.Core.Emulation
             IntPtr NativePtr { get; }
         }
 
+        private static void FailHook(IntPtr uc, Exception Error)
+        {
+            Helpers.Utils.LogError($"[Unicorn] Hook callback threw, stopping the run: {Error}");
+
+            try
+            {
+                Native.uc_emu_stop(uc);
+            }
+            catch
+            {
+                // The run is already being torn down.
+            }
+        }
+
         private delegate bool NativeMemoryDelegate(IntPtr uc, MemoryType type, ulong address, uint size, ulong value, IntPtr userData);
         private delegate void NativeCodeDelegate(IntPtr uc, ulong address, uint size, IntPtr userData);
         private delegate void NativeInterruptDelegate(IntPtr uc, uint interruptNumber);
@@ -355,7 +369,18 @@ namespace Brovan.Core.Emulation
             public MemoryThunk(MemoryHookCallback user)
             {
                 _user = user;
-                _thunk = (_, type, address, size, value, _) => _user(TranslateMemoryType(type), address, size, value);
+                _thunk = (handle, type, address, size, value, _) =>
+                {
+                    try
+                    {
+                        return _user(TranslateMemoryType(type), address, size, value);
+                    }
+                    catch (Exception Error)
+                    {
+                        FailHook(handle, Error);
+                        return false;
+                    }
+                };
                 _selfPin = GCHandle.Alloc(this);
                 NativePtr = Marshal.GetFunctionPointerForDelegate(_thunk);
             }
@@ -372,7 +397,17 @@ namespace Brovan.Core.Emulation
             public CodeThunk(CodeHookCallback user)
             {
                 _user = user;
-                _thunk = (_, address, size, _) => _user(address, size);
+                _thunk = (handle, address, size, _) =>
+                {
+                    try
+                    {
+                        _user(address, size);
+                    }
+                    catch (Exception Error)
+                    {
+                        FailHook(handle, Error);
+                    }
+                };
                 _selfPin = GCHandle.Alloc(this);
                 NativePtr = Marshal.GetFunctionPointerForDelegate(_thunk);
             }
@@ -389,7 +424,17 @@ namespace Brovan.Core.Emulation
             public InterruptThunk(InterruptHookCallback user)
             {
                 _user = user;
-                _thunk = (_, intno) => _user(intno);
+                _thunk = (handle, intno) =>
+                {
+                    try
+                    {
+                        _user(intno);
+                    }
+                    catch (Exception Error)
+                    {
+                        FailHook(handle, Error);
+                    }
+                };
                 _selfPin = GCHandle.Alloc(this);
                 NativePtr = Marshal.GetFunctionPointerForDelegate(_thunk);
             }
@@ -406,7 +451,17 @@ namespace Brovan.Core.Emulation
             public InstructionThunk(InstructionHookCallback user)
             {
                 _user = user;
-                _thunk = (_, _) => _user();
+                _thunk = (handle, _) =>
+                {
+                    try
+                    {
+                        _user();
+                    }
+                    catch (Exception Error)
+                    {
+                        FailHook(handle, Error);
+                    }
+                };
                 _selfPin = GCHandle.Alloc(this);
                 NativePtr = Marshal.GetFunctionPointerForDelegate(_thunk);
             }
@@ -423,7 +478,18 @@ namespace Brovan.Core.Emulation
             public InstructionBoolThunk(InstructionBoolHookCallback user)
             {
                 _user = user;
-                _thunk = (_, _) => _user();
+                _thunk = (handle, _) =>
+                {
+                    try
+                    {
+                        return _user();
+                    }
+                    catch (Exception Error)
+                    {
+                        FailHook(handle, Error);
+                        return false;
+                    }
+                };
                 _selfPin = GCHandle.Alloc(this);
                 NativePtr = Marshal.GetFunctionPointerForDelegate(_thunk);
             }

@@ -20,7 +20,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return Status;
             }
 
-            if (Win32kHelper.HasQueuedInputEvent(Instance, Win32kHelper.QS_ALLINPUT))
+            if (Win32kHelper.HasQueuedInputEvent(Instance, Win32kHelper.QS_ALLINPUT, Thread.ThreadId))
             {
                 Instance.SetRawSyscallReturn(1);
                 return NTSTATUS.STATUS_SUCCESS;
@@ -31,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Thread.WaitActive = true;
                 Thread.WaitHandles = null;
                 Thread.WaitAll = false;
-                Thread.WaitDeadline = -1;
+                Thread.WaitDeadline = Win32kHelper.GetNextTimerDue(Instance, 0, Thread.ThreadId, 0, 0);
                 State.WaitCompleted = false;
                 State.WaitStatus = NTSTATUS.STATUS_PENDING;
                 State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);

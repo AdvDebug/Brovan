@@ -6,7 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            ulong Hdc = Win32kHelper.CreateDeviceContext(Instance, 0, false, false);
+            ulong Hdc = Win32kHelper.CreateDeviceContext(Instance, 0, false, false, true);
             Instance.SetLastWinError(Hdc == 0 ? Win32kHelper.ERROR_INVALID_PARAMETER : 0u);
             Instance.SetRawSyscallReturn(Hdc);
             return NTSTATUS.STATUS_SUCCESS;

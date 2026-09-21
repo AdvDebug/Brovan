@@ -8,6 +8,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
 
             ulong Handle = Instance.WinHelper.GetArg(0);
+            if (Win32kHelper.IsStockObject(Instance, Handle))
+            {
+                Instance.SetRawSyscallReturn(1ul);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
             Win32kHelper.RemovePenBrush(Instance, Handle);
             Win32kHelper.RemoveBitmap(Instance, Handle);
             Win32kHelper.RemoveFont(Instance, Handle);

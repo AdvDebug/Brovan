@@ -812,7 +812,7 @@ namespace Brovan.Core.Emulation
 
             if (State != null && State.WaitMessageActive)
             {
-                if (!Win32kHelper.HasQueuedInputEvent(this, Win32kHelper.QS_ALLINPUT))
+                if (!Win32kHelper.HasQueuedInputEvent(this, Win32kHelper.QS_ALLINPUT, Thread.ThreadId))
                     return false;
 
                 State.WaitMessageActive = false;
@@ -823,7 +823,7 @@ namespace Brovan.Core.Emulation
 
             if (State != null && State.GetMessageWaitActive)
             {
-                if (Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, true, out Win32kMessage Message))
+                if (Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, true, Thread.ThreadId, out Win32kMessage Message))
                 {
                     Win32kHelper.WriteMessage(this, State.GetMessageMessagePtr, Message);
                     State.GetMessageWaitActive = false;
@@ -837,7 +837,7 @@ namespace Brovan.Core.Emulation
 
             if (State != null && State.MsgWaitActive)
             {
-                bool MessageReady = Win32kHelper.HasQueuedInputEvent(this, State.MsgWaitMask);
+                bool MessageReady = Win32kHelper.HasQueuedInputEvent(this, State.MsgWaitMask, Thread.ThreadId);
                 bool HasHandles = Thread.WaitHandles != null && Thread.WaitHandles.Count > 0;
 
                 if (Thread.WaitAll)

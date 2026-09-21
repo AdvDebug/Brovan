@@ -60,7 +60,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Instance.WinHelper.UpdateTopLevelWindowZOrder(Hwnd, InsertAfter);
             }
 
-            Window.Dirty = true;
+            Win32kHelper.MarkWindowDirty(Instance, Window);
+            Instance.WinHelper.MaterializeUserWindow(Window);
             Instance.WinHelper.PresentDesktop();
 
             Instance.SetLastWinError(0);

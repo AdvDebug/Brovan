@@ -295,6 +295,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return support == null ? IntPtr.Zero : support.CreateFont(description);
         }
 
+        public IReadOnlyList<FontFamilyData> EnumerateFontFamilies(string faceName, byte charSet)
+        {
+            if (_disposed || !WaitForInitialization())
+                return Array.Empty<FontFamilyData>();
+
+            ITextMetricsSupport support = _textMetrics;
+            return support == null ? Array.Empty<FontFamilyData>() : support.EnumerateFontFamilies(faceName, charSet);
+        }
+
         public void DeleteFont(IntPtr font)
         {
             if (_disposed || font == IntPtr.Zero)

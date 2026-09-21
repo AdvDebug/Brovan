@@ -91,6 +91,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         private const uint EtoOpaque = 0x0002;
 
+        private const uint USER_TIMER_MINIMUM = 0x0000000A;
+        private const uint USER_TIMER_MAXIMUM = 0x7FFFFFFF;
+
         internal const uint ERROR_SUCCESS = 0;
         internal const uint ERROR_INVALID_HANDLE = 6;
         internal const uint ERROR_ACCESS_DENIED = 5;
@@ -143,6 +146,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const int COLOR_BTNFACE = 15;
         internal const uint WM_NCDESTROY = 0x0082;
         internal const uint WM_PAINT = 0x000F;
+        internal const uint WM_TIMER = 0x0113;
         internal const uint WM_SETTEXT = 0x000C;
         internal const uint WM_KEYDOWN = 0x0100;
         internal const uint WM_KEYUP = 0x0101;
@@ -190,6 +194,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const int HTCLIENT = 1;
         private const ulong HWND_BROADCAST = 0xFFFF;
         private const ulong FirstDeviceContextHandle = 0x770001;
+        private const ulong FirstDeferWindowPosHandle = 0x780001;
         private const uint PM_REMOVE = 0x0001;
         private const int MSG64_SIZE = 48;
         private const int MSG32_SIZE = 28;
@@ -204,15 +209,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private sealed class Win32kState
         {
             public readonly Queue<Win32kMessage> MessageQueue = new();
+            public readonly List<Win32kTimer> Timers = new();
+            public readonly Dictionary<ulong, Win32kCursorIcon> CursorIcons = new();
+            public ulong NextWindowlessTimerId = 1;
             public readonly Dictionary<ulong, Win32kDeviceContext> DeviceContexts = new();
             public readonly Dictionary<ulong, Win32kPenBrush> PenBrushObjects = new();
             public readonly Dictionary<ulong, Win32kBitmap> Bitmaps = new();
             public readonly Dictionary<ulong, Win32kFont> Fonts = new();
+            public readonly Dictionary<string, IReadOnlyList<FontFamilyData>> FontFamilies = new();
 
             // Advance width per character, biased by one so that zero reads as unmeasured.
             public readonly Dictionary<IntPtr, int[]> CharAdvanceWidthsByFont = new();
 
             public ulong StockBitmap;
+            public ulong DisplaySurfaceBitmap;
             public ulong NextDeviceContext = FirstDeviceContextHandle;
             public ulong CaptureWindow;
             public ulong ActivatedWindow;
@@ -221,6 +231,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public int CursorX;
             public int CursorY;
             public ulong CursorHandle;
+            public ulong UpdateLockWindow;
             public ulong StockCursor;
             public bool CursorAssigned;
             public int CursorShowCount;
@@ -241,6 +252,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly byte[] KeyState = new byte[256];
             public readonly byte[] KeyPressedSinceQuery = new byte[256];
 
+            public readonly Dictionary<ulong, List<Win32kDeferredWindowPos>> DeferredWindowPositions = new();
+            public ulong NextDeferHandle = FirstDeferWindowPosHandle;
+
             public Win32kCaret Caret;
 
             public uint QueuedWakeBits;
@@ -256,6 +270,39 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public int PointerScreenX;
             public int PointerScreenY;
             public ulong PointerTargetHwnd;
+        }
+
+        internal struct Win32kDeferredWindowPos
+        {
+            public ulong Hwnd;
+            public ulong InsertAfter;
+            public int X;
+            public int Y;
+            public int Width;
+            public int Height;
+            public uint Flags;
+        }
+
+        internal sealed class Win32kCursorIcon
+        {
+            public ulong MaskBitmap;
+            public ulong ColorBitmap;
+            public int Width;
+            public int Height;
+            public int HotspotX;
+            public int HotspotY;
+            public uint Flags;
+            public uint BitsPerPixel;
+        }
+
+        private sealed class Win32kTimer
+        {
+            public ulong Hwnd;
+            public ulong Id;
+            public ulong Proc;
+            public uint Elapse;
+            public long Due;
+            public uint ThreadId;
         }
 
         internal sealed class Win32kCaret
@@ -275,14 +322,23 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public IntPtr HostFont;
         }
 
+        private struct Win32kDcState
+        {
+            public ulong Bitmap;
+            public ulong Font;
+        }
+
         private sealed class Win32kDeviceContext
         {
             public ulong Handle;
             public ulong Hwnd;
             public bool WindowDc;
             public bool PaintDc;
+            public bool Display;
             public ulong SelectedBitmap;
             public ulong SelectedFont;
+            public ulong SelectedPalette;
+            public List<Win32kDcState> SavedStates;
             public uint BoundsFlags;
             public int BoundsLeft;
             public int BoundsTop;
@@ -293,6 +349,86 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private static Win32kState GetState(BinaryEmulator Instance)
         {
             return States.GetValue(Instance, static _ => new Win32kState());
+        }
+
+        internal const uint SwpNoSize = 0x0001;
+        internal const uint SwpNoMove = 0x0002;
+        internal const uint SwpNoZOrder = 0x0004;
+        internal const uint SwpNoActivate = 0x0010;
+
+        internal static bool ApplyWindowPos(BinaryEmulator Instance, in Win32kDeferredWindowPos Position)
+        {
+            const uint SWP_NOSIZE = SwpNoSize;
+            const uint SWP_NOMOVE = SwpNoMove;
+            const uint SWP_NOZORDER = SwpNoZOrder;
+            const uint SWP_SHOWWINDOW = 0x0040;
+            const uint SWP_HIDEWINDOW = 0x0080;
+            const uint WS_VISIBLE = 0x10000000;
+
+            WinWindow Window = Instance.WinHelper.GetWindow(Position.Hwnd);
+            if (Window == null)
+                return false;
+
+            if ((Position.Flags & SWP_NOMOVE) == 0)
+            {
+                Window.X = Position.X;
+                Window.Y = Position.Y;
+            }
+
+            if ((Position.Flags & SWP_NOSIZE) == 0)
+            {
+                Window.Width = (uint)Math.Max(Position.Width, 0);
+                Window.Height = (uint)Math.Max(Position.Height, 0);
+            }
+
+            if ((Position.Flags & SWP_HIDEWINDOW) != 0)
+            {
+                Window.Visible = false;
+                Window.Style &= ~WS_VISIBLE;
+            }
+            else if ((Position.Flags & SWP_SHOWWINDOW) != 0)
+            {
+                Window.Visible = true;
+                Window.Style |= WS_VISIBLE;
+            }
+
+            if (Window.ParentHwnd == 0)
+            if ((Position.Flags & SWP_NOZORDER) == 0)
+                Instance.WinHelper.UpdateTopLevelWindowZOrder(Position.Hwnd, Position.InsertAfter);
+
+            MarkWindowDirty(Instance, Window);
+            Instance.WinHelper.MaterializeUserWindow(Window);
+            return true;
+        }
+
+        internal static ulong BeginDeferWindowPos(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            ulong Handle = State.NextDeferHandle++;
+            State.DeferredWindowPositions[Handle] = new List<Win32kDeferredWindowPos>();
+            return Handle;
+        }
+
+        internal static bool DeferWindowPos(BinaryEmulator Instance, ulong Handle, in Win32kDeferredWindowPos Position)
+        {
+            if (!GetState(Instance).DeferredWindowPositions.TryGetValue(Handle, out List<Win32kDeferredWindowPos> Positions))
+                return false;
+
+            Positions.Add(Position);
+            return true;
+        }
+
+        internal static bool EndDeferWindowPos(BinaryEmulator Instance, ulong Handle)
+        {
+            Win32kState State = GetState(Instance);
+            if (!State.DeferredWindowPositions.Remove(Handle, out List<Win32kDeferredWindowPos> Positions))
+                return false;
+
+            foreach (Win32kDeferredWindowPos Position in Positions)
+                ApplyWindowPos(Instance, Position);
+
+            Instance.WinHelper.PresentDesktop();
+            return true;
         }
 
         internal static bool CreateCaret(BinaryEmulator Instance, ulong Hwnd, ulong Bitmap, int Width, int Height)
@@ -349,7 +485,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Hwnd == 0 || Instance.WinHelper.GetWindow(Hwnd) != null;
         }
 
-        internal static ulong CreateDeviceContext(BinaryEmulator Instance, ulong Hwnd, bool WindowDc, bool PaintDc)
+        internal static ulong CreateDeviceContext(BinaryEmulator Instance, ulong Hwnd, bool WindowDc, bool PaintDc, bool Display = false)
         {
             if (Hwnd != 0 && Instance.WinHelper.GetWindow(Hwnd) == null)
                 return 0;
@@ -365,6 +501,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Hwnd = Hwnd,
                 WindowDc = WindowDc,
                 PaintDc = PaintDc,
+                Display = Display || Hwnd != 0,
                 SelectedBitmap = EnsureStockBitmap(Instance),
             };
             return GdiHandle;
@@ -860,6 +997,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return DibSection ? (int)(((Bits + 31) / 32) * 4) : (int)(((Bits + 15) / 16) * 2);
         }
 
+        // A stock object outlives every caller, so DeleteObject on one succeeds.
+        internal static bool IsStockObject(BinaryEmulator Instance, ulong Handle)
+        {
+            return Handle != 0 && Handle == GetState(Instance).StockBitmap;
+        }
+
         // Every DC starts on this, so a caller that selects its own bitmap has one to select back.
         internal static ulong EnsureStockBitmap(BinaryEmulator Instance)
         {
@@ -868,6 +1011,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 State.StockBitmap = CreateBitmap(Instance, 1, 1, 1, 1, false, false);
 
             return State.StockBitmap;
+        }
+
+        internal static ulong CreateCompatibleBitmap(BinaryEmulator Instance, ulong Hdc, int Width, int Height)
+        {
+            if (!TryGetBitmap(Instance, GetDcSelectedBitmap(Instance, Hdc), out Win32kBitmap Source))
+                return 0;
+
+            // The caller deletes what it gets back, so a zero extent still needs its own bitmap.
+            if (Width == 0 || Height == 0)
+                return CreateBitmap(Instance, 1, 1, 1, 1, false, false);
+
+            return CreateBitmap(Instance, Width, Height, Source.Planes, Source.BitsPerPixel, false, false);
         }
 
         internal static ulong CreateBitmap(BinaryEmulator Instance, int Width, int Height, ushort Planes, ushort BitsPerPixel, bool DibSection, bool TopDown)
@@ -944,7 +1099,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
         }
 
-        // The buffer is always top-down; a bottom-up DIB stores its first row last.
+        // The buffer is top-down. A bottom-up DIB stores its first row last.
         private static bool TransferBitmapRows(BinaryEmulator Instance, in Win32kBitmap Bitmap, Span<uint> Pixels, bool ToGuest)
         {
             for (int Row = 0; Row < Bitmap.Height; Row++)
@@ -987,6 +1142,630 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             return true;
+        }
+
+        internal const int BitmapCoreHeaderSize = 12;
+        internal const int BitmapInfoHeaderSize = 40;
+        internal const uint BI_RGB = 0;
+        internal const uint BI_BITFIELDS = 3;
+
+        internal struct DibHeader
+        {
+            public int Width;
+            public int Height;
+            public ushort Planes;
+            public ushort BitsPerPixel;
+            public uint Compression;
+            public uint HeaderSize;
+            public bool TopDown => Height < 0;
+            public int Rows => Height < 0 ? -Height : Height;
+        }
+
+        internal static bool TryReadDibHeader(BinaryEmulator Instance, ulong Address, out DibHeader Header)
+        {
+            Header = default;
+
+            if (Address == 0 || !Instance.IsRegionMapped(Address, BitmapCoreHeaderSize))
+                return false;
+
+            uint HeaderSize = Instance.ReadMemoryUInt(Address);
+            int ReadSize = HeaderSize == BitmapCoreHeaderSize ? BitmapCoreHeaderSize : BitmapInfoHeaderSize;
+            if (HeaderSize != BitmapCoreHeaderSize && HeaderSize < BitmapInfoHeaderSize)
+                return false;
+
+            if (!Instance.IsRegionMapped(Address, (ulong)ReadSize))
+                return false;
+
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan((ulong)ReadSize);
+            if (!Instance.ReadMemory(Address, Buffer, (uint)ReadSize))
+                return false;
+
+            Header.HeaderSize = HeaderSize;
+
+            if (ReadSize == BitmapCoreHeaderSize)
+            {
+                Header.Width = BinaryPrimitives.ReadUInt16LittleEndian(Buffer.Slice(0x04, 2));
+                Header.Height = BinaryPrimitives.ReadUInt16LittleEndian(Buffer.Slice(0x06, 2));
+                Header.Planes = BinaryPrimitives.ReadUInt16LittleEndian(Buffer.Slice(0x08, 2));
+                Header.BitsPerPixel = BinaryPrimitives.ReadUInt16LittleEndian(Buffer.Slice(0x0A, 2));
+                Header.Compression = BI_RGB;
+                return true;
+            }
+
+            Header.Width = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x04, 4));
+            Header.Height = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x08, 4));
+            Header.Planes = BinaryPrimitives.ReadUInt16LittleEndian(Buffer.Slice(0x0C, 2));
+            Header.BitsPerPixel = BinaryPrimitives.ReadUInt16LittleEndian(Buffer.Slice(0x0E, 2));
+            Header.Compression = BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x10, 4));
+            return true;
+        }
+
+        internal static bool TryReadDibBlock(BinaryEmulator Instance, ulong BitsAddress, in DibHeader Header,
+            int X, int Y, int Width, int Height, Span<uint> Destination)
+        {
+            if (BitsAddress == 0 || Header.Planes != 1 || Width <= 0 || Height <= 0)
+                return false;
+
+            if (Header.Compression != BI_RGB && Header.Compression != BI_BITFIELDS)
+                return false;
+
+            if (Header.BitsPerPixel != 32 && Header.BitsPerPixel != 24)
+                return false;
+
+            int Rows = Header.Rows;
+            int BytesPerPixel = Header.BitsPerPixel / 8;
+            int Stride = ((Header.Width * Header.BitsPerPixel + 31) / 32) * 4;
+            if (Header.Width <= 0 || Rows <= 0 || Stride <= 0)
+                return false;
+
+            if (!Instance.IsRegionMapped(BitsAddress, (ulong)((long)Stride * Rows)))
+                return false;
+
+            byte[] Rented = ArrayPool<byte>.Shared.Rent(Stride);
+            try
+            {
+                Span<byte> Line = Rented.AsSpan(0, Stride);
+
+                for (int Row = 0; Row < Height; Row++)
+                {
+                    Span<uint> Target = Destination.Slice(Row * Width, Width);
+                    int SourceRow = Y + Row;
+                    if ((uint)SourceRow >= (uint)Rows)
+                    {
+                        Target.Clear();
+                        continue;
+                    }
+
+                    int StoredRow = Header.TopDown ? SourceRow : Rows - 1 - SourceRow;
+                    if (!Instance.ReadMemory(BitsAddress + (ulong)((long)StoredRow * Stride), Line, (uint)Stride))
+                        return false;
+
+                    for (int Column = 0; Column < Width; Column++)
+                    {
+                        int SourceColumn = X + Column;
+                        if ((uint)SourceColumn >= (uint)Header.Width)
+                        {
+                            Target[Column] = 0;
+                            continue;
+                        }
+
+                        int Offset = SourceColumn * BytesPerPixel;
+                        Target[Column] = (uint)(Line[Offset] | (Line[Offset + 1] << 8) | (Line[Offset + 2] << 16));
+                    }
+                }
+
+                return true;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Rented);
+            }
+        }
+
+        // Layout of the region object NtGdiCreateRectRgn builds.
+        internal const int RegionObjectSize = 0x30;
+        internal const int RegionRectOffset = 0x08;
+
+        internal const int RegionNull = 1;
+        internal const int RegionSimple = 2;
+        internal const int RegionComplex = 3;
+        internal const int RegionError = 0;
+
+        internal static bool TryReadRegionRect(BinaryEmulator Instance, ulong Handle, out int Left, out int Top, out int Right, out int Bottom)
+        {
+            Left = 0;
+            Top = 0;
+            Right = 0;
+            Bottom = 0;
+
+            ulong Object = Instance.WinHelper.GetGdiKernelObject(Handle);
+            if (Object == 0 || !Instance.IsRegionMapped(Object, RegionObjectSize))
+                return false;
+
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(16);
+            if (!Instance.ReadMemory(Object + RegionRectOffset, Buffer, 16))
+                return false;
+
+            Left = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0, 4));
+            Top = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(4, 4));
+            Right = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(8, 4));
+            Bottom = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(12, 4));
+            return true;
+        }
+
+        internal static bool TryWriteRegionRect(BinaryEmulator Instance, ulong Handle, int Left, int Top, int Right, int Bottom)
+        {
+            ulong Object = Instance.WinHelper.GetGdiKernelObject(Handle);
+            if (Object == 0 || !Instance.IsRegionMapped(Object, RegionObjectSize))
+                return false;
+
+            bool Empty = Right <= Left || Bottom <= Top;
+
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(20);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0, 4), Empty ? RegionNull : RegionSimple);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(4, 4), Empty ? 0 : Left);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(8, 4), Empty ? 0 : Top);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(12, 4), Empty ? 0 : Right);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(16, 4), Empty ? 0 : Bottom);
+
+            return Instance.WriteMemory(Object + 0x04, Buffer.Slice(0, 20));
+        }
+
+        // CombineRgn. A non-rectangular result is widened to its bounding rectangle.
+        internal static int CombineRegionRects(int Mode,
+            int ALeft, int ATop, int ARight, int ABottom,
+            int BLeft, int BTop, int BRight, int BBottom,
+            out int Left, out int Top, out int Right, out int Bottom)
+        {
+            const int RgnAnd = 1;
+            const int RgnOr = 2;
+            const int RgnXor = 3;
+            const int RgnDiff = 4;
+            const int RgnCopy = 5;
+
+            bool AEmpty = ARight <= ALeft || ABottom <= ATop;
+            bool BEmpty = BRight <= BLeft || BBottom <= BTop;
+
+            switch (Mode)
+            {
+                case RgnCopy:
+                    Left = ALeft; Top = ATop; Right = ARight; Bottom = ABottom;
+                    break;
+
+                case RgnAnd:
+                    Left = Math.Max(ALeft, BLeft);
+                    Top = Math.Max(ATop, BTop);
+                    Right = Math.Min(ARight, BRight);
+                    Bottom = Math.Min(ABottom, BBottom);
+                    break;
+
+                case RgnDiff:
+                    if (AEmpty || BEmpty)
+                    {
+                        Left = ALeft; Top = ATop; Right = ARight; Bottom = ABottom;
+                        break;
+                    }
+
+                    Left = ALeft; Top = ATop; Right = ARight; Bottom = ABottom;
+                    if (BLeft <= ALeft && BRight >= ARight && BTop <= ATop && BBottom >= ABottom)
+                    {
+                        Right = Left;
+                        Bottom = Top;
+                    }
+                    break;
+
+                case RgnOr:
+                case RgnXor:
+                default:
+                    if (AEmpty)
+                    {
+                        Left = BLeft; Top = BTop; Right = BRight; Bottom = BBottom;
+                    }
+                    else if (BEmpty)
+                    {
+                        Left = ALeft; Top = ATop; Right = ARight; Bottom = ABottom;
+                    }
+                    else
+                    {
+                        Left = Math.Min(ALeft, BLeft);
+                        Top = Math.Min(ATop, BTop);
+                        Right = Math.Max(ARight, BRight);
+                        Bottom = Math.Max(ABottom, BBottom);
+                    }
+                    break;
+            }
+
+            if (Right <= Left || Bottom <= Top)
+            {
+                Left = 0; Top = 0; Right = 0; Bottom = 0;
+                return RegionNull;
+            }
+
+            return RegionSimple;
+        }
+
+        internal const uint SrcCopyRop = 0x00CC0020;
+
+        internal static ulong FindDcForBitmap(BinaryEmulator Instance, ulong BitmapHandle)
+        {
+            if (BitmapHandle == 0)
+                return 0;
+
+            foreach (KeyValuePair<ulong, Win32kDeviceContext> Entry in GetState(Instance).DeviceContexts)
+            {
+                if (Entry.Value.SelectedBitmap == BitmapHandle)
+                    return Entry.Key;
+            }
+
+            return 0;
+        }
+
+        internal static int SaveDeviceContext(BinaryEmulator Instance, ulong Hdc)
+        {
+            if (!GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return 0;
+
+            Dc.SavedStates ??= new List<Win32kDcState>();
+            Dc.SavedStates.Add(new Win32kDcState { Bitmap = Dc.SelectedBitmap, Font = Dc.SelectedFont });
+            return Dc.SavedStates.Count;
+        }
+
+        internal static bool RestoreDeviceContext(BinaryEmulator Instance, ulong Hdc, int Level)
+        {
+            if (!GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc)
+                || Dc.SavedStates == null || Dc.SavedStates.Count == 0)
+                return false;
+
+            // A negative level counts back from the top, so RestoreDC(-1) pops one state.
+            int Target = Level < 0 ? Dc.SavedStates.Count + Level : Level - 1;
+            if ((uint)Target >= (uint)Dc.SavedStates.Count)
+                return false;
+
+            Win32kDcState Saved = Dc.SavedStates[Target];
+            Dc.SelectedBitmap = Saved.Bitmap;
+            Dc.SelectedFont = Saved.Font;
+            Dc.SavedStates.RemoveRange(Target, Dc.SavedStates.Count - Target);
+            return true;
+        }
+
+        internal static ulong SelectDcPalette(BinaryEmulator Instance, ulong Hdc, ulong Palette)
+        {
+            if (!GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return 0;
+
+            ulong Previous = Dc.SelectedPalette;
+            Dc.SelectedPalette = Palette;
+            return Previous;
+        }
+
+        // A screen context reports the display surface, not the bitmap selected into it.
+        internal static ulong GetDcSelectedBitmap(BinaryEmulator Instance, ulong Hdc)
+        {
+            Win32kState State = GetState(Instance);
+            if (!State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return 0;
+
+            return Dc.Display ? EnsureDisplaySurfaceBitmap(Instance, State) : Dc.SelectedBitmap;
+        }
+
+        private static ulong EnsureDisplaySurfaceBitmap(BinaryEmulator Instance, Win32kState State)
+        {
+            if (State.DisplaySurfaceBitmap == 0)
+                State.DisplaySurfaceBitmap = CreateBitmap(Instance, HostDisplayMetrics.ScreenWidth, HostDisplayMetrics.ScreenHeight, 1, 32, false, false);
+
+            return State.DisplaySurfaceBitmap;
+        }
+
+        internal static ulong GetDcSelectedFont(BinaryEmulator Instance, ulong Hdc)
+        {
+            return GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc) ? Dc.SelectedFont : 0;
+        }
+
+        // gdi32 asks twice, once for the size and once for the data.
+        internal static IReadOnlyList<FontFamilyData> GetFontFamilies(BinaryEmulator Instance, string FaceName, byte CharSet)
+        {
+            Win32kState State = GetState(Instance);
+            string Key = CharSet.ToString(CultureInfo.InvariantCulture) + "|" + (FaceName ?? string.Empty);
+
+            if (State.FontFamilies.TryGetValue(Key, out IReadOnlyList<FontFamilyData> Cached))
+                return Cached;
+
+            IReadOnlyList<FontFamilyData> Faces = Instance.WinHelper.EnumerateFontFamilies(FaceName, CharSet) ?? Array.Empty<FontFamilyData>();
+            State.FontFamilies[Key] = Faces;
+            return Faces;
+        }
+
+        internal static ulong GetDcSelectedPalette(BinaryEmulator Instance, ulong Hdc)
+        {
+            return GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc) ? Dc.SelectedPalette : 0;
+        }
+
+        internal static bool TryGetDcExtent(BinaryEmulator Instance, ulong Hdc, out int Width, out int Height)
+        {
+            Width = 0;
+            Height = 0;
+
+            if (!GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return false;
+
+            if (Dc.Hwnd != 0)
+            {
+                GetClientSize(Instance, Instance.WinHelper.GetWindow(Dc.Hwnd), out Width, out Height);
+                return true;
+            }
+
+            if (!TryGetDcBitmap(Instance, Hdc, out Win32kBitmap Bitmap))
+                return false;
+
+            Width = Bitmap.Width;
+            Height = Bitmap.Height;
+            return true;
+        }
+
+        internal static bool TryGetDcBitmap(BinaryEmulator Instance, ulong Hdc, out Win32kBitmap Bitmap)
+        {
+            Win32kState State = GetState(Instance);
+            Bitmap = default;
+
+            return State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc)
+                && Dc.SelectedBitmap != 0
+                && State.Bitmaps.TryGetValue(Dc.SelectedBitmap, out Bitmap);
+        }
+
+        // Packed colour only. Lower depths need a colour table the blit does not carry.
+        internal static bool CanBlitBitmap(in Win32kBitmap Bitmap)
+        {
+            return Bitmap.Planes == 1
+                && (Bitmap.BitsPerPixel == 32 || Bitmap.BitsPerPixel == 24)
+                && Bitmap.BitsAddress != 0
+                && Bitmap.Width > 0
+                && Bitmap.Height > 0;
+        }
+
+        // Flipping the term changes the result for at least one of the other four combinations.
+        internal static bool RopUsesSource(uint Rop)
+        {
+            uint Index = (Rop >> 16) & 0xFF;
+            return ((Index >> 2) & 0x33) != (Index & 0x33);
+        }
+
+        internal static bool RopUsesDestination(uint Rop)
+        {
+            uint Index = (Rop >> 16) & 0xFF;
+            return ((Index >> 1) & 0x55) != (Index & 0x55);
+        }
+
+        // Index is bits 16 to 23 of the rop code.
+        internal static uint ApplyRop(uint Index, uint Pattern, uint Source, uint Destination)
+        {
+            uint Result = 0;
+
+            if ((Index & 0x01) != 0) Result |= ~Pattern & ~Source & ~Destination;
+            if ((Index & 0x02) != 0) Result |= ~Pattern & ~Source & Destination;
+            if ((Index & 0x04) != 0) Result |= ~Pattern & Source & ~Destination;
+            if ((Index & 0x08) != 0) Result |= ~Pattern & Source & Destination;
+            if ((Index & 0x10) != 0) Result |= Pattern & ~Source & ~Destination;
+            if ((Index & 0x20) != 0) Result |= Pattern & ~Source & Destination;
+            if ((Index & 0x40) != 0) Result |= Pattern & Source & ~Destination;
+            if ((Index & 0x80) != 0) Result |= Pattern & Source & Destination;
+
+            return Result & 0x00FFFFFF;
+        }
+
+        private static ulong BitmapRowAddress(in Win32kBitmap Bitmap, int Row)
+        {
+            int Line = Bitmap.TopDown ? Row : Bitmap.Height - 1 - Row;
+            return Bitmap.BitsAddress + (ulong)((long)Line * Bitmap.Stride);
+        }
+
+        private static bool TryReadBitmapRow(BinaryEmulator Instance, in Win32kBitmap Bitmap, int Row, int X, int Width, Span<uint> Destination)
+        {
+            int BytesPerPixel = Bitmap.BitsPerPixel / 8;
+            int Bytes = Width * BytesPerPixel;
+            ulong Address = BitmapRowAddress(Bitmap, Row) + (ulong)(X * BytesPerPixel);
+
+            if (BytesPerPixel == 4)
+            {
+                Span<byte> Line = MemoryMarshal.AsBytes(Destination.Slice(0, Width));
+                return Instance.ReadMemory(Address, Line, (uint)Bytes);
+            }
+
+            byte[] Rented = ArrayPool<byte>.Shared.Rent(Bytes);
+            try
+            {
+                Span<byte> Line = Rented.AsSpan(0, Bytes);
+                if (!Instance.ReadMemory(Address, Line, (uint)Bytes))
+                    return false;
+
+                for (int Column = 0; Column < Width; Column++)
+                {
+                    int Offset = Column * 3;
+                    Destination[Column] = (uint)(Line[Offset] | (Line[Offset + 1] << 8) | (Line[Offset + 2] << 16));
+                }
+
+                return true;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Rented);
+            }
+        }
+
+        private static bool TryWriteBitmapRow(BinaryEmulator Instance, in Win32kBitmap Bitmap, int Row, int X, int Width, ReadOnlySpan<uint> Source)
+        {
+            int BytesPerPixel = Bitmap.BitsPerPixel / 8;
+            int Bytes = Width * BytesPerPixel;
+            ulong Address = BitmapRowAddress(Bitmap, Row) + (ulong)(X * BytesPerPixel);
+
+            if (BytesPerPixel == 4)
+                return Instance.WriteMemory(Address, MemoryMarshal.AsBytes(Source.Slice(0, Width)));
+
+            byte[] Rented = ArrayPool<byte>.Shared.Rent(Bytes);
+            try
+            {
+                Span<byte> Line = Rented.AsSpan(0, Bytes);
+                for (int Column = 0; Column < Width; Column++)
+                {
+                    uint Pixel = Source[Column];
+                    int Offset = Column * 3;
+                    Line[Offset] = (byte)Pixel;
+                    Line[Offset + 1] = (byte)(Pixel >> 8);
+                    Line[Offset + 2] = (byte)(Pixel >> 16);
+                }
+
+                return Instance.WriteMemory(Address, Line);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Rented);
+            }
+        }
+
+        internal static bool TryReadBitmapBlock(BinaryEmulator Instance, in Win32kBitmap Bitmap, int X, int Y, int Width, int Height, Span<uint> Destination)
+        {
+            if (!CanBlitBitmap(Bitmap) || Width <= 0 || Height <= 0)
+                return false;
+
+            if (!Instance.IsRegionMapped(Bitmap.BitsAddress, Bitmap.BitsSize))
+                return false;
+
+            for (int Row = 0; Row < Height; Row++)
+            {
+                Span<uint> Line = Destination.Slice(Row * Width, Width);
+                int SourceRow = Y + Row;
+
+                if ((uint)SourceRow >= (uint)Bitmap.Height)
+                {
+                    Line.Clear();
+                    continue;
+                }
+
+                int Left = Math.Max(X, 0);
+                int Right = Math.Min(X + Width, Bitmap.Width);
+                if (Right <= Left)
+                {
+                    Line.Clear();
+                    continue;
+                }
+
+                if (Left != X || Right != X + Width)
+                    Line.Clear();
+
+                if (!TryReadBitmapRow(Instance, Bitmap, SourceRow, Left, Right - Left, Line.Slice(Left - X)))
+                    return false;
+            }
+
+            return true;
+        }
+
+        internal static bool TryBlitBlockIntoBitmap(BinaryEmulator Instance, in Win32kBitmap Bitmap, int X, int Y, int Width, int Height,
+            ReadOnlySpan<uint> Source, int SourceWidth, int SourceHeight, uint Rop, uint PatternPixel)
+        {
+            if (!CanBlitBitmap(Bitmap) || Width <= 0 || Height <= 0 || SourceWidth <= 0 || SourceHeight <= 0)
+                return false;
+
+            if (!Instance.IsRegionMapped(Bitmap.BitsAddress, Bitmap.BitsSize))
+                return false;
+
+            int Left = Math.Max(X, 0);
+            int Top = Math.Max(Y, 0);
+            int Right = Math.Min(X + Width, Bitmap.Width);
+            int Bottom = Math.Min(Y + Height, Bitmap.Height);
+            if (Right <= Left || Bottom <= Top)
+                return true;
+
+            int Span = Right - Left;
+            uint Index = (Rop >> 16) & 0xFF;
+            bool Copy = Rop == SrcCopyRop;
+
+            uint[] Rented = ArrayPool<uint>.Shared.Rent(Span);
+            try
+            {
+                System.Span<uint> Line = Rented.AsSpan(0, Span);
+
+                for (int Row = Top; Row < Bottom; Row++)
+                {
+                    int SourceRow = (int)((long)(Row - Y) * SourceHeight / Height);
+                    ReadOnlySpan<uint> SourceLine = Source.Slice(SourceRow * SourceWidth, SourceWidth);
+
+                    if (!Copy && !TryReadBitmapRow(Instance, Bitmap, Row, Left, Span, Line))
+                        return false;
+
+                    for (int Column = 0; Column < Span; Column++)
+                    {
+                        int SourceColumn = (int)((long)(Left + Column - X) * SourceWidth / Width);
+                        uint Pixel = SourceLine[SourceColumn];
+                        Line[Column] = Copy ? Pixel & 0x00FFFFFF : ApplyRop(Index, PatternPixel, Pixel, Line[Column]);
+                    }
+
+                    if (!TryWriteBitmapRow(Instance, Bitmap, Row, Left, Span, Line))
+                        return false;
+                }
+
+                return true;
+            }
+            finally
+            {
+                ArrayPool<uint>.Shared.Return(Rented);
+            }
+        }
+
+        internal static bool BlitBlockToDc(BinaryEmulator Instance, ulong Hdc, int X, int Y, int Width, int Height,
+            ReadOnlySpan<uint> Source, int SourceWidth, int SourceHeight, uint Rop)
+        {
+            if (Width <= 0 || Height <= 0 || SourceWidth <= 0 || SourceHeight <= 0)
+                return false;
+
+            if (Source.Length < SourceWidth * SourceHeight)
+                return false;
+
+            if (TryGetDcBitmap(Instance, Hdc, out Win32kBitmap Target) && CanBlitBitmap(Target))
+            {
+                uint PatternPixel = HostColor.FromColorRef(ResolvePenBrush(Instance, Instance.WinHelper.ReadDcSelectedBrush(Hdc), false).ColorRef);
+                return TryBlitBlockIntoBitmap(Instance, Target, X, Y, Width, Height, Source, SourceWidth, SourceHeight, Rop, PatternPixel);
+            }
+
+            ulong Hwnd = Instance.WinHelper.GetHwndFromDc(Hdc);
+            if (Hwnd == 0)
+                return false;
+
+            // The GUI thread drains the queue later, so it gets rows of its own.
+            uint[] Owned = Source.Slice(0, SourceWidth * SourceHeight).ToArray();
+
+            // A window has no readable surface, so only a rop that ignores the destination can be resolved.
+            if (Rop != SrcCopyRop && !RopUsesDestination(Rop))
+            {
+                uint Index = (Rop >> 16) & 0xFF;
+                uint PatternPixel = HostColor.FromColorRef(ResolvePenBrush(Instance, Instance.WinHelper.ReadDcSelectedBrush(Hdc), false).ColorRef);
+
+                for (int i = 0; i < Owned.Length; i++)
+                    Owned[i] = ApplyRop(Index, PatternPixel, Owned[i], 0);
+
+                Rop = SrcCopyRop;
+            }
+
+            Instance.WinHelper.EnqueueGdiBlit(Hwnd, Hdc, X, Y, X + Width, Y + Height, Owned, SourceWidth, SourceHeight, Rop);
+            return true;
+        }
+
+        internal static bool BlitBlockToWindow(BinaryEmulator Instance, ulong Hwnd, int X, int Y, int Width, int Height,
+            ReadOnlySpan<uint> Source, int SourceWidth, int SourceHeight, uint Rop)
+        {
+            if (Hwnd == 0 || Width <= 0 || Height <= 0 || SourceWidth <= 0 || SourceHeight <= 0)
+                return false;
+
+            if (Source.Length < SourceWidth * SourceHeight)
+                return false;
+
+            uint[] Owned = Source.Slice(0, SourceWidth * SourceHeight).ToArray();
+            Instance.WinHelper.EnqueueGdiBlit(Hwnd, 0, X, Y, X + Width, Y + Height, Owned, SourceWidth, SourceHeight, Rop);
+            return true;
+        }
+
+        internal static bool TryReadDcBlock(BinaryEmulator Instance, ulong Hdc, int X, int Y, int Width, int Height, Span<uint> Destination)
+        {
+            return TryGetDcBitmap(Instance, Hdc, out Win32kBitmap Source)
+                && TryReadBitmapBlock(Instance, Source, X, Y, Width, Height, Destination);
         }
 
         internal static bool TryGetBitmap(BinaryEmulator Instance, ulong Handle, out Win32kBitmap Bitmap)
@@ -1114,7 +1893,149 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance.WakeSignal.Bump();
         }
 
-        internal static bool TryGetMessage(BinaryEmulator Instance, ulong HwndFilter, uint MinMessage, uint MaxMessage, bool Remove, out Win32kMessage Message)
+        internal static ulong SetTimer(BinaryEmulator Instance, ulong Hwnd, ulong Id, uint Elapse, ulong Proc)
+        {
+            Win32kState State = GetState(Instance);
+
+            if (Elapse < USER_TIMER_MINIMUM)
+                Elapse = USER_TIMER_MINIMUM;
+            else if (Elapse > USER_TIMER_MAXIMUM)
+                Elapse = USER_TIMER_MAXIMUM;
+
+            if (Hwnd == 0)
+                Id = State.NextWindowlessTimerId++;
+
+            Win32kTimer Timer = null;
+            foreach (Win32kTimer Candidate in State.Timers)
+            {
+                if (Candidate.Hwnd == Hwnd && Candidate.Id == Id)
+                {
+                    Timer = Candidate;
+                    break;
+                }
+            }
+
+            if (Timer == null)
+            {
+                Timer = new Win32kTimer { Hwnd = Hwnd, Id = Id, ThreadId = Instance.CurrentThread?.ThreadId ?? 0 };
+                State.Timers.Add(Timer);
+            }
+
+            Timer.Proc = Proc;
+            Timer.Elapse = Elapse;
+            Timer.Due = Instance.CreateEmulatedDeadlineMilliseconds(Elapse);
+
+            WakeMessageWaiters(Instance, Timer.Due);
+            return Id;
+        }
+
+        internal static bool KillTimer(BinaryEmulator Instance, ulong Hwnd, ulong Id)
+        {
+            Win32kState State = GetState(Instance);
+
+            for (int i = 0; i < State.Timers.Count; i++)
+            {
+                if (State.Timers[i].Hwnd != Hwnd || State.Timers[i].Id != Id)
+                    continue;
+
+                State.Timers.RemoveAt(i);
+                return true;
+            }
+
+            return false;
+        }
+
+        // A deadline for a timer the caller cannot consume parks it on an expiry it never clears.
+        internal static long GetNextTimerDue(BinaryEmulator Instance, ulong HwndFilter, uint ThreadId, uint MinMessage, uint MaxMessage)
+        {
+            if (!MessageInFilter(WM_TIMER, MinMessage, MaxMessage))
+                return -1;
+
+            Win32kState State = GetState(Instance);
+            DropTimersOfGoneWindows(Instance, State);
+
+            long Earliest = -1;
+            foreach (Win32kTimer Timer in State.Timers)
+            {
+                if (HwndFilter != 0 && Timer.Hwnd != HwndFilter)
+                    continue;
+
+                bool Owned = Timer.Hwnd != 0
+                    ? OwnedByThread(Instance, Timer.Hwnd, ThreadId)
+                    : ThreadId == 0 || Timer.ThreadId == 0 || Timer.ThreadId == ThreadId;
+
+                if (!Owned)
+                    continue;
+
+                if (Earliest == -1 || Timer.Due < Earliest)
+                    Earliest = Timer.Due;
+            }
+
+            return Earliest;
+        }
+
+        // A parked thread carries the deadline it was given, so a later timer hands it the new one.
+        private static void WakeMessageWaiters(BinaryEmulator Instance, long Due)
+        {
+            foreach (EmulatedThread Thread in Instance.Threads.Values)
+            {
+                if (Thread == null || !Thread.WaitActive || Thread.State != EmulatedThreadState.Waiting)
+                    continue;
+
+                WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+                if (State == null || (!State.GetMessageWaitActive && !State.WaitMessageActive))
+                    continue;
+
+                if (Thread.WaitDeadline == -1 || Due < Thread.WaitDeadline)
+                    Thread.WaitDeadline = Due;
+            }
+
+            Instance.WakeSignal.Bump();
+        }
+
+        private static void DropTimersOfGoneWindows(BinaryEmulator Instance, Win32kState State)
+        {
+            for (int i = State.Timers.Count - 1; i >= 0; i--)
+            {
+                ulong Hwnd = State.Timers[i].Hwnd;
+                if (Hwnd != 0 && Instance.WinHelper.GetWindow(Hwnd) == null)
+                    State.Timers.RemoveAt(i);
+            }
+        }
+
+        private static Win32kTimer FindDueTimer(BinaryEmulator Instance, Win32kState State, ulong HwndFilter, uint ThreadId)
+        {
+            if (State.Timers.Count == 0)
+                return null;
+
+            DropTimersOfGoneWindows(Instance, State);
+
+            long Now = Instance.EmulatedTickCount64;
+            Win32kTimer Earliest = null;
+
+            foreach (Win32kTimer Timer in State.Timers)
+            {
+                if (HwndFilter != 0 && Timer.Hwnd != HwndFilter)
+                    continue;
+
+                bool Owned = Timer.Hwnd != 0
+                    ? OwnedByThread(Instance, Timer.Hwnd, ThreadId)
+                    : ThreadId == 0 || Timer.ThreadId == 0 || Timer.ThreadId == ThreadId;
+
+                if (!Owned)
+                    continue;
+
+                if (Timer.Due > Now)
+                    continue;
+
+                if (Earliest == null || Timer.Due < Earliest.Due)
+                    Earliest = Timer;
+            }
+
+            return Earliest;
+        }
+
+        internal static bool TryGetMessage(BinaryEmulator Instance, ulong HwndFilter, uint MinMessage, uint MaxMessage, bool Remove, uint ThreadId, out Win32kMessage Message)
         {
             DrainHostEvents(Instance);
 
@@ -1122,7 +2043,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int Index = 0;
             foreach (Win32kMessage Candidate in State.MessageQueue)
             {
-                if (MatchesFilter(Candidate, HwndFilter, MinMessage, MaxMessage))
+                if (MatchesFilter(Instance, Candidate, HwndFilter, MinMessage, MaxMessage, ThreadId))
                 {
                     Message = Candidate;
                     if (Remove)
@@ -1137,6 +2058,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Index++;
             }
 
+            // NT hands out WM_PAINT only when the queue is empty, and keeps doing so until validation.
+            if (MessageInFilter(WM_PAINT, MinMessage, MaxMessage))
+            {
+                WinWindow Dirty = FindDirtyWindow(Instance, HwndFilter, ThreadId);
+                if (Dirty != null)
+                {
+                    Message = new Win32kMessage(Dirty.Hwnd, WM_PAINT, 0, 0, unchecked((uint)Instance.EmulatedTickCount64), 0, 0);
+                    if (Remove)
+                        Dirty.Dirty = false;
+
+                    return true;
+                }
+            }
+
             if (State.QuitPosted)
             {
                 Message = new Win32kMessage(0, WM_QUIT, State.QuitExitCode, 0, unchecked((uint)Instance.EmulatedTickCount64), 0, 0);
@@ -1145,13 +2080,56 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return true;
             }
 
+            // WM_TIMER is the lowest priority message and is synthesized, not queued.
+            if (MessageInFilter(WM_TIMER, MinMessage, MaxMessage))
+            {
+                Win32kTimer Timer = FindDueTimer(Instance, State, HwndFilter, ThreadId);
+                if (Timer != null)
+                {
+                    Message = new Win32kMessage(Timer.Hwnd, WM_TIMER, Timer.Id, Timer.Proc, unchecked((uint)Instance.EmulatedTickCount64), 0, 0);
+                    if (Remove)
+                        Timer.Due = Instance.CreateEmulatedDeadlineMilliseconds(Timer.Elapse);
+
+                    return true;
+                }
+            }
+
             Message = default;
             return false;
         }
 
-        internal static bool HasQueuedInputEvent(BinaryEmulator Instance, uint WakeMask)
+        private static bool MessageInFilter(uint Message, uint MinMessage, uint MaxMessage)
         {
-            return GetQueuedWakeBits(Instance, WakeMask) != 0;
+            return (MinMessage == 0 && MaxMessage == 0) || (Message >= MinMessage && Message <= MaxMessage);
+        }
+
+        private static WinWindow FindDirtyWindow(BinaryEmulator Instance, ulong HwndFilter, uint ThreadId)
+        {
+            ulong Locked = GetState(Instance).UpdateLockWindow;
+
+            if (HwndFilter != 0)
+            {
+                if (HwndFilter == Locked)
+                    return null;
+
+                WinWindow Target = Instance.WinHelper.GetWindow(HwndFilter);
+                return Target != null && Target.Dirty && Target.Visible && !Target.Destroyed
+                    && OwnedByThread(Instance, HwndFilter, ThreadId) ? Target : null;
+            }
+
+            foreach (WinWindow Window in Instance.WinHelper.WinWindows.Values)
+            {
+                if (Window.Dirty && Window.Visible && !Window.Destroyed && Window.Hwnd != Locked
+                    && (ThreadId == 0 || Window.OwnerThreadId == 0 || Window.OwnerThreadId == ThreadId))
+                    return Window;
+            }
+
+            return null;
+        }
+
+        internal static bool HasQueuedInputEvent(BinaryEmulator Instance, uint WakeMask, uint ThreadId)
+        {
+            return GetQueuedWakeBits(Instance, WakeMask, ThreadId) != 0;
         }
 
         // For a layout that is not a substitute, both halves of the HKL are the language the KLID ends with.
@@ -1244,7 +2222,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Measured;
         }
 
-        internal static uint GetQueuedWakeBits(BinaryEmulator Instance, uint WakeMask)
+        // A thread told about work it may not dequeue wakes, finds nothing, and parks again at once.
+        internal static uint GetQueuedWakeBits(BinaryEmulator Instance, uint WakeMask, uint ThreadId)
         {
             DrainHostEvents(Instance);
 
@@ -1252,18 +2231,39 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return 0;
 
             Win32kState State = GetState(Instance);
+            uint Queued;
 
-            if (!State.QueuedWakeBitsValid)
+            if (ThreadId != 0)
             {
-                uint Queued = 0;
+                Queued = 0;
                 foreach (Win32kMessage Candidate in State.MessageQueue)
-                    Queued |= GetMessageWakeBits(Candidate.Message);
+                {
+                    if (OwnedByThread(Instance, Candidate.Hwnd, ThreadId))
+                        Queued |= GetMessageWakeBits(Candidate.Message);
+                }
+            }
+            else
+            {
+                if (!State.QueuedWakeBitsValid)
+                {
+                    uint All = 0;
+                    foreach (Win32kMessage Candidate in State.MessageQueue)
+                        All |= GetMessageWakeBits(Candidate.Message);
 
-                State.QueuedWakeBits = Queued;
-                State.QueuedWakeBitsValid = true;
+                    State.QueuedWakeBits = All;
+                    State.QueuedWakeBitsValid = true;
+                }
+
+                Queued = State.QueuedWakeBits;
             }
 
-            uint Bits = State.QuitPosted ? State.QueuedWakeBits | QS_POSTMESSAGE : State.QueuedWakeBits;
+            uint Bits = State.QuitPosted ? Queued | QS_POSTMESSAGE : Queued;
+            if ((WakeMask & QS_PAINT) != 0 && FindDirtyWindow(Instance, 0, ThreadId) != null)
+                Bits |= QS_PAINT;
+
+            if ((WakeMask & QS_TIMER) != 0 && FindDueTimer(Instance, State, 0, ThreadId) != null)
+                Bits |= QS_TIMER;
+
             return Bits & WakeMask;
         }
 
@@ -1273,6 +2273,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 case WM_PAINT:
                     return QS_PAINT;
+                case WM_TIMER:
+                    return QS_TIMER;
                 case WM_INPUT:
                     return QS_RAWINPUT;
                 case WM_MOUSEMOVE:
@@ -1491,15 +2493,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static void DrainHostEvents(BinaryEmulator Instance)
         {
-            ulong Foreground = Instance.WinHelper.GetForegroundWindow();
+            ulong Active = Instance.WinHelper.GetForegroundWindow();
 
             // Nothing can be delivered before the guest makes a window visible, and the host queue must survive
             // until then: consuming the repaint flag (or draining input) here would discard the only events a
             // thread parked in MsgWaitForMultipleObjectsEx can ever be woken by.
-            if (Foreground == 0)
+            if (Active == 0)
                 return;
 
-            SyncActivation(Instance, Foreground);
+            SyncActivation(Instance, Active);
+
+            // Everything the host reports is about the window it draws.
+            ulong Foreground = Instance.WinHelper.PresentedWindow != 0 ? Instance.WinHelper.PresentedWindow : Active;
 
             Win32kDpi.DrainHostDpiChange(Instance);
 
@@ -2015,7 +3020,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static bool TryDeliverWindowPosChanged(BinaryEmulator Instance, ulong SyscallResult)
         {
-            ulong Hwnd = Instance.WinHelper.GetForegroundWindow();
+            // The host frame follows the presented window.
+            ulong Hwnd = Instance.WinHelper.PresentedWindow != 0
+                ? Instance.WinHelper.PresentedWindow
+                : Instance.WinHelper.GetForegroundWindow();
+
             if (Hwnd == 0)
                 return false;
 
@@ -2101,6 +3110,60 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Height = Math.Max((int)Window.Height - InsetTop - InsetBottom, 0);
         }
 
+        internal static void GetAbsoluteWindowPosition(BinaryEmulator Instance, WinWindow Window, out int Left, out int Top)
+        {
+            Left = Window.X;
+            Top = Window.Y;
+
+            ulong ParentHwnd = Window.ParentHwnd;
+            while (ParentHwnd != 0)
+            {
+                WinWindow Parent = Instance.WinHelper.GetWindow(ParentHwnd);
+                if (Parent == null)
+                    break;
+
+                GetClientRect(Instance, Parent, out int ClientLeft, out int ClientTop, out _, out _);
+                Left += ClientLeft;
+                Top += ClientTop;
+                ParentHwnd = Parent.ParentHwnd;
+            }
+        }
+
+        internal static ulong WindowFromPoint(BinaryEmulator Instance, int X, int Y)
+        {
+            ulong Found = 0;
+            List<ulong> TopLevel = Instance.WinHelper.TopLevelWindows;
+
+            for (int i = TopLevel.Count - 1; i >= 0 && Found == 0; i--)
+                Found = HitTest(Instance, Instance.WinHelper.GetWindow(TopLevel[i]), X, Y);
+
+            return Found;
+        }
+
+        private static ulong HitTest(BinaryEmulator Instance, WinWindow Window, int X, int Y)
+        {
+            const uint WS_EX_TRANSPARENT = 0x00000020;
+
+            if (Window == null || Window.Destroyed || !Window.Visible || (Window.ExStyle & WS_EX_TRANSPARENT) != 0)
+                return 0;
+
+            GetAbsoluteWindowPosition(Instance, Window, out int Left, out int Top);
+            if (X < Left || Y < Top || X >= Left + (int)Window.Width || Y >= Top + (int)Window.Height)
+                return 0;
+
+            foreach (WinWindow Child in Instance.WinHelper.WinWindows.Values)
+            {
+                if (Child.ParentHwnd != Window.Hwnd)
+                    continue;
+
+                ulong Hit = HitTest(Instance, Child, X, Y);
+                if (Hit != 0)
+                    return Hit;
+            }
+
+            return Window.Hwnd;
+        }
+
         internal static void GetClientSize(BinaryEmulator Instance, WinWindow Window, out int Width, out int Height)
         {
             GetClientRect(Instance, Window, out _, out _, out Width, out Height);
@@ -2158,7 +3221,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Window.Height = Height + (uint)(InsetTop + InsetBottom);
             }
 
-            Window.Dirty = true;
+            MarkWindowDirty(Instance, Window);
             Instance.WinHelper.MaterializeUserWindow(Window);
         }
 
@@ -2271,6 +3334,66 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Previous;
         }
 
+        internal static void SetCursorIconData(BinaryEmulator Instance, ulong Handle, Win32kCursorIcon Data)
+        {
+            GetState(Instance).CursorIcons[Handle] = Data;
+        }
+
+        internal static bool TryGetCursorIcon(BinaryEmulator Instance, ulong Handle, out Win32kCursorIcon Data)
+        {
+            return GetState(Instance).CursorIcons.TryGetValue(Handle, out Data);
+        }
+
+        internal static bool DestroyCursorIcon(BinaryEmulator Instance, ulong Handle)
+        {
+            Win32kState State = GetState(Instance);
+            if (!State.CursorIcons.Remove(Handle))
+                return false;
+
+            if (Handle != State.StockCursor && Handle != State.CursorHandle)
+                Instance.WinHelper.ReleaseUserHandle(Handle);
+
+            return true;
+        }
+
+        internal static ulong GetCursorHandle(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            return State.CursorAssigned ? State.CursorHandle : EnsureStockCursor(Instance);
+        }
+
+        internal static bool IsCursorShowing(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            return State.CursorShowCount >= 0 && !State.CursorHiddenWhileTyping;
+        }
+
+        internal static bool LockWindowUpdate(BinaryEmulator Instance, ulong Hwnd)
+        {
+            Win32kState State = GetState(Instance);
+
+            if (Hwnd == 0)
+            {
+                ulong Locked = State.UpdateLockWindow;
+                State.UpdateLockWindow = 0;
+
+                WinWindow Window = Locked != 0 ? Instance.WinHelper.GetWindow(Locked) : null;
+                if (Window != null && Window.Visible)
+                    MarkWindowDirty(Instance, Window);
+
+                return true;
+            }
+
+            if (State.UpdateLockWindow != 0 && State.UpdateLockWindow != Hwnd)
+                return false;
+
+            if (Instance.WinHelper.GetWindow(Hwnd) == null)
+                return false;
+
+            State.UpdateLockWindow = Hwnd;
+            return true;
+        }
+
         internal static int ShowCursor(BinaryEmulator Instance, bool Show)
         {
             Win32kState State = GetState(Instance);
@@ -2298,6 +3421,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance.WinHelper.SetHostCursorVisible(!Hidden);
         }
 
+        // WM_PAINT is not queued. The message fetch reports one while the flag stands.
+        internal static void MarkWindowDirty(BinaryEmulator Instance, WinWindow Window)
+        {
+            if (Window == null || Window.Destroyed)
+                return;
+
+            Window.Dirty = true;
+            Window.PaintPending = true;
+            Instance.WinHelper.PublishWindowPaintState(Window);
+            Instance.WakeSignal.Bump();
+        }
+
         internal static bool InvalidateWindow(BinaryEmulator Instance, ulong Hwnd)
         {
             if (Hwnd == 0)
@@ -2305,11 +3440,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 foreach (ulong TopLevelHwnd in Instance.WinHelper.TopLevelWindows)
                 {
                     WinWindow TopLevel = Instance.WinHelper.GetWindow(TopLevelHwnd);
-                    if (TopLevel != null)
-                    {
-                        TopLevel.Dirty = true;
-                        PostMessage(Instance, TopLevel.Hwnd, WM_PAINT, 0, 0);
-                    }
+                    MarkWindowDirty(Instance, TopLevel);
                 }
 
                 Instance.WinHelper.PresentDesktop();
@@ -2320,8 +3451,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Window == null)
                 return false;
 
-            Window.Dirty = true;
-            PostMessage(Instance, Hwnd, WM_PAINT, 0, 0);
+            MarkWindowDirty(Instance, Window);
             Instance.WinHelper.PresentDesktop();
             return true;
         }
@@ -2341,8 +3471,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Window == null || !Window.Visible)
                 return;
 
-            Window.Dirty = true;
-            PostMessage(Instance, State, Hwnd, WM_PAINT, 0, 0);
+            MarkWindowDirty(Instance, Window);
 
             for (int i = 0; i < Window.Children.Count; i++)
                 InvalidateWindowTree(Instance, State, Window.Children[i], Depth + 1);
@@ -2360,13 +3489,27 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const int CreateStructNameChars = 96;
 
         // The syscall in progress does not answer. The procedure's result becomes its return value.
-        internal static bool InvokeWindowProc(BinaryEmulator Instance, ulong Hwnd, ulong WndProc, uint Message, ulong WParam, ulong LParam, WinWindowCreation Creation = null, ulong SyscallRetryRip = 0)
+        internal static bool InvokeWindowProc(BinaryEmulator Instance, ulong Hwnd, ulong WndProc, uint Message, ulong WParam, ulong LParam, WinWindowCreation Creation = null, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0)
         {
             if (!TryBeginWindowProcCallback(Instance, WndProc, out ulong Callback, out ulong ArgumentBuffer))
                 return false;
 
             WriteWindowProcCallbackArguments(Instance, ArgumentBuffer, Hwnd, WndProc, Message, WParam, LParam);
-            return Instance.WinHelper.EnterUserCallback(Callback, WindowProcCallbackIndex, ArgumentBuffer, Creation, SyscallRetryRip);
+            return Instance.WinHelper.EnterUserCallback(Callback, WindowProcCallbackIndex, ArgumentBuffer, Creation, SyscallRetryRip, PaintRetryHwnd);
+        }
+
+        // True once, for the syscall that the returning WM_PAINT callback is re-running.
+        internal static bool TakePaintRetry(BinaryEmulator Instance, ulong Hwnd)
+        {
+            if (Hwnd == 0)
+                return false;
+
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Instance.CurrentThread);
+            if (State == null || State.PendingPaintRetryHwnd != Hwnd)
+                return false;
+
+            State.PendingPaintRetryHwnd = 0;
+            return true;
         }
 
         internal static bool SendWindowCreateMessage(BinaryEmulator Instance, WinWindow Window, uint Message, WinWindowCreation Creation)
@@ -2482,7 +3625,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 case WM_SETTEXT:
                     Window.Title = ReadWindowTextPointer(Instance, LParam, Ansi) ?? string.Empty;
-                    Window.Dirty = true;
+                    MarkWindowDirty(Instance, Window);
                     Instance.WinHelper.MaterializeUserWindow(Window);
                     Instance.WinHelper.PresentDesktop();
                     return 1;
@@ -2556,15 +3699,28 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return (Flags & PM_REMOVE) != 0;
         }
 
-        private static bool MatchesFilter(Win32kMessage Message, ulong HwndFilter, uint MinMessage, uint MaxMessage)
+        private static bool MatchesFilter(BinaryEmulator Instance, Win32kMessage Message, ulong HwndFilter, uint MinMessage, uint MaxMessage, uint ThreadId)
         {
             if (HwndFilter != 0 && Message.Hwnd != HwndFilter)
+                return false;
+
+            if (!OwnedByThread(Instance, Message.Hwnd, ThreadId))
                 return false;
 
             if (MinMessage == 0 && MaxMessage == 0)
                 return true;
 
             return Message.Message >= MinMessage && Message.Message <= MaxMessage;
+        }
+
+        // Only the creating thread may run a window procedure, so another thread's message stays queued.
+        private static bool OwnedByThread(BinaryEmulator Instance, ulong Hwnd, uint ThreadId)
+        {
+            if (Hwnd == 0 || ThreadId == 0)
+                return true;
+
+            WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
+            return Window == null || Window.OwnerThreadId == 0 || Window.OwnerThreadId == ThreadId;
         }
 
         private static void RemoveMessageAt(Win32kState State, int Index)
@@ -2778,7 +3934,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return false;
 
             ulong Address = Extra + (ulong)Offset;
-            Previous = Size == 8 ? Instance.ReadMemoryULong(Address) : Instance.ReadMemoryUInt(Address);
+            Previous = Instance.WinHelper.ReadPointer(Address, Size);
             return Instance._emulator.WriteMemory(Address, Value, Size);
         }
 
