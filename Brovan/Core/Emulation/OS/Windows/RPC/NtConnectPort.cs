@@ -1,33 +1,96 @@
 using static Brovan.Core.Helpers.BinaryHelpers;
-using System.Runtime.InteropServices;
 using Brovan.Core.Emulation.OS.Windows.RPC.Ports;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtConnectPort : IWinSyscall
     {
-        [StructLayout(LayoutKind.Sequential)]
-        [GenerateStructSerializer]
-        internal struct PORT_VIEW64
+        internal struct PORT_VIEW
         {
             public uint Length;
-            public uint Padding0;
             public ulong SectionHandle;
             public uint SectionOffset;
-            public uint Padding1;
             public ulong ViewSize;
             public ulong ViewBase;
             public ulong ViewRemoteBase;
+
+            public static uint SizeOf(bool Is64) => Is64 ? 0x30u : 0x18u;
+
+            public static PORT_VIEW ReadFrom(BinaryEmulator Instance, ulong Address, bool Is64)
+            {
+                PORT_VIEW View = default;
+                View.Length = Instance.ReadMemoryUInt(Address + 0x00);
+
+                if (Is64)
+                {
+                    View.SectionHandle = Instance.ReadMemoryULong(Address + 0x08);
+                    View.SectionOffset = Instance.ReadMemoryUInt(Address + 0x10);
+                    View.ViewSize = Instance.ReadMemoryULong(Address + 0x18);
+                    View.ViewBase = Instance.ReadMemoryULong(Address + 0x20);
+                    View.ViewRemoteBase = Instance.ReadMemoryULong(Address + 0x28);
+                    return View;
+                }
+
+                View.SectionHandle = Instance.ReadMemoryUInt(Address + 0x04);
+                View.SectionOffset = Instance.ReadMemoryUInt(Address + 0x08);
+                View.ViewSize = Instance.ReadMemoryUInt(Address + 0x0C);
+                View.ViewBase = Instance.ReadMemoryUInt(Address + 0x10);
+                View.ViewRemoteBase = Instance.ReadMemoryUInt(Address + 0x14);
+                return View;
+            }
+
+            // The connect answers with the view fields. Length, SectionHandle and SectionOffset stay as the caller set them.
+            public readonly bool WriteResult(BinaryEmulator Instance, ulong Address, bool Is64)
+            {
+                WinSysHelper Helper = Instance.WinHelper;
+
+                if (Is64)
+                {
+                    return Helper.WriteUInt64(Address + 0x18, ViewSize)
+                        && Helper.WriteUInt64(Address + 0x20, ViewBase)
+                        && Helper.WriteUInt64(Address + 0x28, ViewRemoteBase);
+                }
+
+                return Helper.WriteUInt32(Address + 0x0C, (uint)ViewSize)
+                    && Helper.WriteUInt32(Address + 0x10, (uint)ViewBase)
+                    && Helper.WriteUInt32(Address + 0x14, (uint)ViewRemoteBase);
+            }
         }
 
-        [GenerateStructSerializer]
-        [StructLayout(LayoutKind.Sequential)]
-        internal struct REMOTE_PORT_VIEW64
+        internal struct REMOTE_PORT_VIEW
         {
             public uint Length;
-            public uint Padding0;
             public ulong ViewSize;
             public ulong ViewBase;
+
+            public static uint SizeOf(bool Is64) => Is64 ? 0x18u : 0x0Cu;
+
+            public static REMOTE_PORT_VIEW ReadFrom(BinaryEmulator Instance, ulong Address, bool Is64)
+            {
+                REMOTE_PORT_VIEW View = default;
+                View.Length = Instance.ReadMemoryUInt(Address + 0x00);
+
+                if (Is64)
+                {
+                    View.ViewSize = Instance.ReadMemoryULong(Address + 0x08);
+                    View.ViewBase = Instance.ReadMemoryULong(Address + 0x10);
+                    return View;
+                }
+
+                View.ViewSize = Instance.ReadMemoryUInt(Address + 0x04);
+                View.ViewBase = Instance.ReadMemoryUInt(Address + 0x08);
+                return View;
+            }
+
+            public readonly bool WriteResult(BinaryEmulator Instance, ulong Address, bool Is64)
+            {
+                WinSysHelper Helper = Instance.WinHelper;
+
+                if (Is64)
+                    return Helper.WriteUInt64(Address + 0x08, ViewSize) && Helper.WriteUInt64(Address + 0x10, ViewBase);
+
+                return Helper.WriteUInt32(Address + 0x04, (uint)ViewSize) && Helper.WriteUInt32(Address + 0x08, (uint)ViewBase);
+            }
         }
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -87,13 +150,15 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (ClientViewPtr != 0)
             {
-                if (!Instance.IsRegionMapped(ClientViewPtr, 0x30))
+                bool Is64 = Instance.WinHelper.PointerSize == 8;
+                uint ClientViewSize = PORT_VIEW.SizeOf(Is64);
+
+                if (!Instance.IsRegionMapped(ClientViewPtr, ClientViewSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                if (!StructSerializer.ParseStruct(Instance, ClientViewPtr, out PORT_VIEW64 ClientView))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                PORT_VIEW ClientView = PORT_VIEW.ReadFrom(Instance, ClientViewPtr, Is64);
 
-                if (ClientView.Length < 0x30)
+                if (ClientView.Length < ClientViewSize)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                 WinSection PortSection = Instance.WinHelper.GetSectionByHandle(ClientView.SectionHandle, AccessMask.GiveTemp);
@@ -108,7 +173,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ClientView.ViewBase = PortSection.BackingAddress;
                 ClientView.ViewRemoteBase = PortSection.BackingAddress;
 
-                if (StructSerializer.WriteStruct(Instance, ClientViewPtr, ClientView) != WriteStructResult.Ok)
+                if (!ClientView.WriteResult(Instance, ClientViewPtr, Is64))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 // CsrClientConnectToServer closes the section handle as soon as the connect returns and
@@ -117,18 +182,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (ServerViewPtr != 0)
                 {
-                    if (!Instance.IsRegionMapped(ServerViewPtr, 0x18))
+                    uint ServerViewSize = REMOTE_PORT_VIEW.SizeOf(Is64);
+
+                    if (!Instance.IsRegionMapped(ServerViewPtr, ServerViewSize))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!StructSerializer.ParseStruct(Instance, ServerViewPtr, out REMOTE_PORT_VIEW64 ServerView))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                    if (ServerView.Length < 0x18)
+                    REMOTE_PORT_VIEW ServerView = REMOTE_PORT_VIEW.ReadFrom(Instance, ServerViewPtr, Is64);
+
+                    if (ServerView.Length < ServerViewSize)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                     ServerView.ViewSize = ViewSize;
                     ServerView.ViewBase = ClientView.ViewRemoteBase;
 
-                    if (StructSerializer.WriteStruct(Instance, ServerViewPtr, ServerView) != WriteStructResult.Ok)
+                    if (!ServerView.WriteResult(Instance, ServerViewPtr, Is64))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }
             }
