@@ -7,6 +7,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtQueryInformationToken : IWinSyscall
     {
+        private const uint SeGroupIntegrityEnabled = 0x20;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
@@ -132,7 +134,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     IntegrityRid = 0x3000;
             }
 
-            uint PointerSize = (uint)(Is64 ? 8 : 4);
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
 
             uint AlignPointer(uint Value)
             {
@@ -206,6 +208,28 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                 Buffer.Clear();
                 WritePointer(Buffer, 0, TokenInformation + SidOffset);
+                Sid.AsSpan().CopyTo(Buffer.Slice((int)SidOffset, Sid.Length));
+
+                if (!Instance.WriteMemory(TokenInformation, Buffer))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            // SID_AND_ATTRIBUTES keeps the SID on an 8 byte boundary on both architectures.
+            NTSTATUS WriteSidAndAttributesInfo(byte[] Sid, uint Attributes)
+            {
+                uint SidOffset = (PointerSize + 4 + 7u) & ~7u;
+                uint RequiredSize = SidOffset + (uint)Sid.Length;
+                WriteReturnLength(RequiredSize);
+
+                if (TokenInformationLength < RequiredSize)
+                    return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+
+                Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
+                Buffer.Clear();
+                WritePointer(Buffer, 0, TokenInformation + SidOffset);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice((int)PointerSize, 4), Attributes);
                 Sid.AsSpan().CopyTo(Buffer.Slice((int)SidOffset, Sid.Length));
 
                 if (!Instance.WriteMemory(TokenInformation, Buffer))
@@ -400,8 +424,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case TOKEN_INFORMATION_CLASS.TokenBnoIsolation:
                     {
-                        int PtrSize = Is64 ? 8 : 4;
-                        uint RequiredSize = (uint)(Is64 ? 16 : 8);
+                        uint RequiredSize = (uint)(PointerSize * 2);
 
                         WriteReturnLength(RequiredSize);
 
@@ -446,66 +469,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                 case TOKEN_INFORMATION_CLASS.TokenUser:
-                    {
-                        int PtrSize = Is64 ? 8 : 4;
-                        uint HeaderSize = (uint)(PtrSize + 4);
-                        uint SidOffset = (uint)((HeaderSize + 7) & ~7u);
-                        uint RequiredSize = SidOffset + (uint)UserSid.Length;
-
-                        WriteReturnLength(RequiredSize);
-
-                        if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
-
-                        Span<byte> BufferData = Instance.WinHelper.Shared.GetSpan(RequiredSize);
-                        BufferData.Clear();
-
-                        ulong SidPtr = TokenInformation + SidOffset;
-                        if (Is64)
-                            BinaryPrimitives.WriteUInt64LittleEndian(BufferData.Slice(0x00, 8), SidPtr);
-                        else
-                            BinaryPrimitives.WriteUInt32LittleEndian(BufferData.Slice(0x00, 4), (uint)SidPtr);
-
-                        UserSid.AsSpan().CopyTo(BufferData.Slice((int)SidOffset, UserSid.Length));
-
-                        if (!Instance.WriteMemory(TokenInformation, BufferData))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
+                    return WriteSidAndAttributesInfo(UserSid, 0);
 
                 case TOKEN_INFORMATION_CLASS.TokenIntegrityLevel:
-                    {
-                        byte[] IntegritySid = SidIntegrity(IntegrityRid);
-
-                        int PtrSize = Is64 ? 8 : 4;
-                        uint HeaderSize = (uint)(PtrSize + 4);
-                        uint SidOffset = (uint)((HeaderSize + 7) & ~7u);
-                        uint RequiredSize = SidOffset + (uint)IntegritySid.Length;
-
-                        WriteReturnLength(RequiredSize);
-
-                        if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
-
-                        Span<byte> BufferData = Instance.WinHelper.Shared.GetSpan(RequiredSize);
-                        BufferData.Clear();
-
-                        ulong SidPtr = TokenInformation + SidOffset;
-                        if (Is64)
-                            BinaryPrimitives.WriteUInt64LittleEndian(BufferData.Slice(0x00, 8), SidPtr);
-                        else
-                            BinaryPrimitives.WriteUInt32LittleEndian(BufferData.Slice(0x00, 4), (uint)SidPtr);
-
-                        BinaryPrimitives.WriteUInt32LittleEndian(BufferData.Slice(PtrSize, 4), 0x20u);
-
-                        IntegritySid.AsSpan().CopyTo(BufferData.Slice((int)SidOffset, IntegritySid.Length));
-
-                        if (!Instance.WriteMemory(TokenInformation, BufferData))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
+                    return WriteSidAndAttributesInfo(SidIntegrity(IntegrityRid), SeGroupIntegrityEnabled);
 
                 case TOKEN_INFORMATION_CLASS.TokenPrivateNameSpace:
                     return WriteUInt32Info(0);

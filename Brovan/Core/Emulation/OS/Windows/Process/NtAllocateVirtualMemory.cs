@@ -197,7 +197,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
                 return RemoteStatus;
 
-            if (!Instance._emulator.WriteMemory(BaseAddressPtr, GrantedBase, PointerSize) || !Instance._emulator.WriteMemory(RegionSizePtr, GrantedSize, PointerSize))
+            if (!Instance.WinHelper.WritePointer(BaseAddressPtr, GrantedBase) || !Instance.WinHelper.WritePointer(RegionSizePtr, GrantedSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

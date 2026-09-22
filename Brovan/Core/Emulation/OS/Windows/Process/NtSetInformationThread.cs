@@ -1,6 +1,4 @@
 using System;
-using System.Runtime.InteropServices;
-using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -60,7 +58,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case THREADINFOCLASS.ThreadAffinityMask:
                     {
-                        uint PointerSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8u : 4u;
+                        uint PointerSize = (uint)Instance.WinHelper.PointerSize;
 
                         if (ThreadInformationPtr == 0 || ThreadInformationLength < PointerSize)
                             return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -68,9 +66,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (!Instance.IsRegionMapped(ThreadInformationPtr, PointerSize))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                        ulong AffinityMask = PointerSize == 8
-                            ? Instance.ReadMemoryULong(ThreadInformationPtr)
-                            : Instance.ReadMemoryUInt(ThreadInformationPtr);
+                        ulong AffinityMask = Instance.WinHelper.ReadPointer(ThreadInformationPtr);
 
                         if (AffinityMask == 0)
                             return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -127,23 +123,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case THREADINFOCLASS.ThreadNameInformation:
                     {
-                        uint UsSize = (uint)Marshal.SizeOf<UNICODE_STRING64>();
+                        uint UsSize = (uint)(Instance.WinHelper.PointerSize * 2);
                         if (ThreadInformationPtr == 0 || ThreadInformationLength < UsSize)
                             return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                        if (!Instance.IsRegionMapped(ThreadInformationPtr, UsSize))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        if (!Instance.WinHelper.TryReadUnicodeString(ThreadInformationPtr, out string Name, out NTSTATUS NameStatus))
+                            return NameStatus;
 
-                        if (!StructSerializer.ParseStruct(Instance, ThreadInformationPtr, out UNICODE_STRING64 Us))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                        string Name = ReadUnicodeString(Instance, Us);
-                        Thread.Name = Name ?? string.Empty;
+                        Thread.Name = Name;
                         return NTSTATUS.STATUS_SUCCESS;
                     }
                 case THREADINFOCLASS.ThreadImpersonationToken:
                     {
-                        int HandleSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
+                        int HandleSize = Instance.WinHelper.PointerSize;
 
                         if (ThreadInformationPtr == 0 || ThreadInformationLength < (uint)HandleSize)
                             return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -151,9 +143,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (!Instance.IsRegionMapped(ThreadInformationPtr, (uint)HandleSize))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                        ulong TokenHandleValue = HandleSize == 8
-                            ? Instance._emulator.ReadMemoryULong(ThreadInformationPtr)
-                            : Instance._emulator.ReadMemoryUInt(ThreadInformationPtr);
+                        ulong TokenHandleValue = Instance.WinHelper.ReadPointer(ThreadInformationPtr);
 
                         WindowsThreadState State = WinEmulatedThread.GetState(Thread);
                         if (TokenHandleValue == 0)
@@ -221,7 +211,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS HandleThreadSetTlsArrayAddress(BinaryEmulator Instance, EmulatedThread Thread, ulong ThreadInformationPtr, uint ThreadInformationLength)
         {
-            uint PointerSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8u : 4u;
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
 
             if (ThreadInformationPtr == 0 || ThreadInformationLength < PointerSize)
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
@@ -229,9 +219,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(ThreadInformationPtr, PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            ulong TlsArrayAddress = PointerSize == 8
-                ? Instance.ReadMemoryULong(ThreadInformationPtr)
-                : Instance.ReadMemoryUInt(ThreadInformationPtr);
+            ulong TlsArrayAddress = Instance.WinHelper.ReadPointer(ThreadInformationPtr);
 
             ulong Teb = WinEmulatedThread.GetState(Thread).Teb;
             ulong TlsPointerAddress = Teb + (PointerSize == 8 ? 0x58UL : 0x2CUL);
@@ -239,11 +227,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(TlsPointerAddress, PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            bool Written = PointerSize == 8
-                ? Instance._emulator.WriteMemory(TlsPointerAddress, TlsArrayAddress)
-                : Instance._emulator.WriteMemory(TlsPointerAddress, (uint)TlsArrayAddress);
-
-            return Written ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
+            return Instance.WinHelper.WritePointer(TlsPointerAddress, TlsArrayAddress)
+                ? NTSTATUS.STATUS_SUCCESS
+                : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }
 
         private static bool ZeroTlsCell(BinaryEmulator Instance, EmulatedThread Thread, uint TlsCell)
@@ -341,18 +327,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return null;
 
             return WinThreadObj;
-        }
-
-        private static string ReadUnicodeString(BinaryEmulator Instance, UNICODE_STRING64 UnicodeString)
-        {
-            if (UnicodeString.Length == 0 || UnicodeString.Buffer == 0)
-                return string.Empty;
-
-            if (!Instance.IsRegionMapped(UnicodeString.Buffer, UnicodeString.Length))
-                return string.Empty;
-
-            byte[] Data = Instance.ReadMemory(UnicodeString.Buffer, UnicodeString.Length);
-            return Encoding.Unicode.GetString(Data).TrimEnd('\0');
         }
     }
 }

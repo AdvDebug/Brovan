@@ -547,7 +547,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Data.InputBuffer == null)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            int PtrSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
+            int PtrSize = Instance.WinHelper.PointerSize;
             int HeaderSize = PtrSize + 4 + 4 + 4;
             if (GuestInputLength(in Data) < HeaderSize)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
@@ -608,7 +608,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Data.InputBuffer == null)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            int PtrSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
+            int PtrSize = Instance.WinHelper.PointerSize;
             int HeaderSize = PtrSize + 4 + 4 + 4;
             if (GuestInputLength(in Data) < HeaderSize)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;

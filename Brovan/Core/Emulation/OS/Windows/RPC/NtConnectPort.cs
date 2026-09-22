@@ -1,6 +1,5 @@
 using static Brovan.Core.Helpers.BinaryHelpers;
 using System.Runtime.InteropServices;
-using System.Text;
 using Brovan.Core.Emulation.OS.Windows.RPC.Ports;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -49,14 +48,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(PortHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!StructSerializer.ParseStruct(Instance, PortNamePtr, out UNICODE_STRING64 PortNameStruct))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (!Instance.WinHelper.TryReadUnicodeString(PortNamePtr, out string PortName, out NTSTATUS PortNameStatus))
+                return PortNameStatus;
 
-            string PortName = ReadUnicodeString(Instance, PortNameStruct);
             if (string.IsNullOrEmpty(PortName))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
-
-            PortName = PortName.TrimEnd('\0');
 
             WinPort ExistingPort = FindPortByName(Instance, PortName);
             WinHandle Handle;
@@ -86,7 +82,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.AddWinHandle(Handle);
 
-            if (!Instance._emulator.WriteMemory(PortHandlePtr, (ulong)Handle.Handle))
+            if (!Instance.WinHelper.WritePointer(PortHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (ClientViewPtr != 0)
@@ -193,20 +189,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return null;
-        }
-
-        private static string ReadUnicodeString(BinaryEmulator Instance, UNICODE_STRING64 UnicodeString)
-        {
-            if (UnicodeString.Length == 0 || UnicodeString.Buffer == 0)
-                return null;
-
-            if ((UnicodeString.Length & 1) != 0)
-                return null;
-
-            if (!Instance.IsRegionMapped(UnicodeString.Buffer, UnicodeString.Length))
-                return null;
-
-            return Instance._emulator.ReadMemoryString(UnicodeString.Buffer, UnicodeString.Length, Encoding.Unicode);
         }
     }
 }

@@ -12,24 +12,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong Handle = Instance.WinHelper.GetArg(0);
-                OBJECT_INFORMATION_CLASS ObjectInformationClass = (OBJECT_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(1);
-                ulong ObjectInformation = Instance.WinHelper.GetArg(2);
-                uint ObjectInformationLength = (uint)Instance.WinHelper.GetArg(3);
-                ulong ReturnLength = Instance.WinHelper.GetArg(4);
-                return HandleQueryObject(Instance, Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength, ReturnLength, true);
-            }
-            else
-            {
-                ulong Handle = Instance.WinHelper.GetArg32(0);
-                OBJECT_INFORMATION_CLASS ObjectInformationClass = (OBJECT_INFORMATION_CLASS)Instance.WinHelper.GetArg32(1);
-                ulong ObjectInformation = Instance.WinHelper.GetArg32(2);
-                uint ObjectInformationLength = Instance.WinHelper.GetArg32(3);
-                ulong ReturnLength = Instance.WinHelper.GetArg32(4);
-                return HandleQueryObject(Instance, Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength, ReturnLength, false);
-            }
+            ulong Handle = Instance.WinHelper.GetArg(0);
+            OBJECT_INFORMATION_CLASS ObjectInformationClass = (OBJECT_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(1);
+            ulong ObjectInformation = Instance.WinHelper.GetArg(2);
+            uint ObjectInformationLength = (uint)Instance.WinHelper.GetArg(3);
+            ulong ReturnLength = Instance.WinHelper.GetArg(4);
+
+            return HandleQueryObject(Instance, Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength, ReturnLength, Instance.WinHelper.PointerSize == 8);
         }
 
         private NTSTATUS HandleQueryObject(BinaryEmulator Instance, ulong Handle, OBJECT_INFORMATION_CLASS ObjectInformationClass, ulong ObjectInformation, uint ObjectInformationLength, ulong ReturnLength, bool Is64)

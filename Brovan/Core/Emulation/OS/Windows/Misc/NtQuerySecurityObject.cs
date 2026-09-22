@@ -14,26 +14,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong Handle = Instance.WinHelper.GetArg(0);
-                uint SecurityInformation = (uint)Instance.WinHelper.GetArg(1);
-                ulong SecurityDescriptorPtr = Instance.WinHelper.GetArg(2);
-                uint Length = (uint)Instance.WinHelper.GetArg(3);
-                ulong LengthNeededPtr = Instance.WinHelper.GetArg(4);
+            ulong Handle = Instance.WinHelper.GetArg(0);
+            uint SecurityInformation = (uint)Instance.WinHelper.GetArg(1);
+            ulong SecurityDescriptorPtr = Instance.WinHelper.GetArg(2);
+            uint Length = (uint)Instance.WinHelper.GetArg(3);
+            ulong LengthNeededPtr = Instance.WinHelper.GetArg(4);
 
-                return QuerySecurityObject(Instance, Handle, SecurityInformation, SecurityDescriptorPtr, Length, LengthNeededPtr);
-            }
-            else
-            {
-                ulong Handle = Instance.WinHelper.GetArg32(0);
-                uint SecurityInformation = Instance.WinHelper.GetArg32(1);
-                ulong SecurityDescriptorPtr = Instance.WinHelper.GetArg32(2);
-                uint Length = Instance.WinHelper.GetArg32(3);
-                ulong LengthNeededPtr = Instance.WinHelper.GetArg32(4);
-
-                return QuerySecurityObject(Instance, Handle, SecurityInformation, SecurityDescriptorPtr, Length, LengthNeededPtr);
-            }
+            return QuerySecurityObject(Instance, Handle, SecurityInformation, SecurityDescriptorPtr, Length, LengthNeededPtr);
         }
 
         private static NTSTATUS QuerySecurityObject(BinaryEmulator Instance, ulong Handle, uint SecurityInformation, ulong SecurityDescriptorPtr, uint Length, ulong LengthNeededPtr)

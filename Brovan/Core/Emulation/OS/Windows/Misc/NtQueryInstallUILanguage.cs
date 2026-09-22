@@ -13,34 +13,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong LanguageIdPtr = Instance.WinHelper.GetArg(0);
+            ulong LanguageIdPtr = Instance.WinHelper.GetArg(0);
 
-                if (LanguageIdPtr == 0 || !Instance.IsRegionMapped(LanguageIdPtr, 2))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (LanguageIdPtr == 0 || !Instance.IsRegionMapped(LanguageIdPtr, 2))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                ushort LanguageId = QueryInstallLanguage(Instance);
-                Instance._emulator.WriteMemory(LanguageIdPtr, LanguageId, 2);
-                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                    Instance.TriggerEventMessage($"[+] NtQueryInstallUILanguage: 0x{LanguageId:X4}", LogFlags.Syscall);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-                uint LanguageIdPtr = Instance.WinHelper.GetArg32(0);
+            ushort LanguageId = QueryInstallLanguage(Instance);
+            Instance._emulator.WriteMemory(LanguageIdPtr, LanguageId, 2);
 
-                if (LanguageIdPtr == 0 || !Instance.IsRegionMapped(LanguageIdPtr, 2))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtQueryInstallUILanguage: 0x{LanguageId:X4}", LogFlags.Syscall);
 
-                ushort LanguageId = QueryInstallLanguage(Instance);
-                Instance._emulator.WriteMemory(LanguageIdPtr, LanguageId, 2);
-                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                    Instance.TriggerEventMessage($"[+] NtQueryInstallUILanguage (x86): 0x{LanguageId:X4}", LogFlags.Syscall);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
-            return NTSTATUS.STATUS_NOT_IMPLEMENTED;
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         private static ushort QueryInstallLanguage(BinaryEmulator Instance)

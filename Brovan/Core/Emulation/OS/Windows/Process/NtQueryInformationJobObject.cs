@@ -156,7 +156,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static uint GetProcessIdListSize(BinaryEmulator Instance, WinJob Job)
         {
-            uint PtrSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8u : 4u;
+            uint PtrSize = (uint)Instance.WinHelper.PointerSize;
             uint Count = (uint)Job.ProcessIds.Distinct().Count();
             return 8u + (PtrSize * Count);
         }
@@ -264,7 +264,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS WriteBasicProcessIdList(BinaryEmulator Instance, WinJob Job, ulong Address, uint RequiredLength)
         {
-            uint PtrSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8u : 4u;
+            uint PtrSize = (uint)Instance.WinHelper.PointerSize;
             uint Count = (uint)Job.ProcessIds.Distinct().Count();
             if (RequiredLength < 8u + (PtrSize * Count))
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;

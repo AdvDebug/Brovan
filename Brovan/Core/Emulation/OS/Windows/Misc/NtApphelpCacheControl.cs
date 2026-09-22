@@ -22,20 +22,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                AhcServiceClass Service = (AhcServiceClass)(uint)Instance.WinHelper.GetArg(0);
-                ulong ServiceData = Instance.WinHelper.GetArg(1);
-                return HandleApphelpCacheControl(Instance, Service, ServiceData);
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-                AhcServiceClass Service = (AhcServiceClass)Instance.WinHelper.GetArg32(0);
-                uint ServiceData = Instance.WinHelper.GetArg32(1);
-                return HandleApphelpCacheControl(Instance, Service, ServiceData);
-            }
+            AhcServiceClass Service = (AhcServiceClass)(uint)Instance.WinHelper.GetArg(0);
+            ulong ServiceData = Instance.WinHelper.GetArg(1);
 
-            return Instance.WinUnimplemented;
+            return HandleApphelpCacheControl(Instance, Service, ServiceData);
         }
 
         private static NTSTATUS HandleApphelpCacheControl(BinaryEmulator Instance, AhcServiceClass Service, ulong ServiceData)

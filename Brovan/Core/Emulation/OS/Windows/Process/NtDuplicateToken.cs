@@ -14,33 +14,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
 
-            ulong ExistingTokenHandle;
-            ulong DesiredAccess;
-            ulong ObjectAttributesPtr;
-            bool EffectiveOnly;
-            uint RequestedTokenType;
-            ulong NewTokenHandlePtr;
+            ulong ExistingTokenHandle = Instance.WinHelper.GetArg(0);
+            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+            bool EffectiveOnly = (uint)Instance.WinHelper.GetArg(3) != 0;
+            uint RequestedTokenType = (uint)Instance.WinHelper.GetArg(4);
+            ulong NewTokenHandlePtr = Instance.WinHelper.GetArg(5);
 
-            if (Is64)
-            {
-                ExistingTokenHandle = Instance.WinHelper.GetArg(0);
-                DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
-                ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
-                EffectiveOnly = (uint)Instance.WinHelper.GetArg(3) != 0;
-                RequestedTokenType = (uint)Instance.WinHelper.GetArg(4);
-                NewTokenHandlePtr = Instance.WinHelper.GetArg(5);
-            }
-            else
-            {
-                ExistingTokenHandle = Instance.WinHelper.GetArg32(0);
-                DesiredAccess = Instance.WinHelper.GetArg32(1);
-                ObjectAttributesPtr = Instance.WinHelper.GetArg32(2);
-                EffectiveOnly = Instance.WinHelper.GetArg32(3) != 0;
-                RequestedTokenType = Instance.WinHelper.GetArg32(4);
-                NewTokenHandlePtr = Instance.WinHelper.GetArg32(5);
-            }
-
-            uint HandleSize = Is64 ? 8u : 4u;
+            uint HandleSize = (uint)Instance.WinHelper.PointerSize;
             if (NewTokenHandlePtr == 0 || !Instance.IsRegionMapped(NewTokenHandlePtr, HandleSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
@@ -74,11 +55,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ConvertObjectHandleAttributes(HandleAttributes));
             Instance.WinHelper.AddWinHandle(Handle);
 
-            bool Written = Is64
-                ? Instance._emulator.WriteMemory(NewTokenHandlePtr, Handle.Handle, 8)
-                : Instance._emulator.WriteMemory(NewTokenHandlePtr, (uint)Handle.Handle, 4);
-
-            if (!Written)
+            if (!Instance.WinHelper.WritePointer(NewTokenHandlePtr, Handle.Handle))
             {
                 Instance.WinHelper.CloseHandle(Handle.Handle);
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

@@ -6,22 +6,10 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong EventHandle = Instance.WinHelper.GetArg(0);
-                ulong PreviousStatePtr = Instance.WinHelper.GetArg(1);
+            ulong EventHandle = Instance.WinHelper.GetArg(0);
+            ulong PreviousStatePtr = Instance.WinHelper.GetArg(1);
 
-                return Handle(Instance, EventHandle, PreviousStatePtr, true);
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-                ulong EventHandle = Instance.WinHelper.GetArg32(0);
-                ulong PreviousStatePtr = Instance.WinHelper.GetArg32(1);
-
-                return Handle(Instance, EventHandle, PreviousStatePtr, true);
-            }
-
-            return Instance.WinUnimplemented;
+            return Handle(Instance, EventHandle, PreviousStatePtr, true);
         }
 
         internal static NTSTATUS Handle(BinaryEmulator Instance, ulong EventHandle, ulong PreviousStatePtr, bool Signaled)
@@ -55,22 +43,10 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong EventHandle = Instance.WinHelper.GetArg(0);
-                ulong PreviousStatePtr = Instance.WinHelper.GetArg(1);
+            ulong EventHandle = Instance.WinHelper.GetArg(0);
+            ulong PreviousStatePtr = Instance.WinHelper.GetArg(1);
 
-                return NtSetEvent.Handle(Instance, EventHandle, PreviousStatePtr, false);
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-                ulong EventHandle = Instance.WinHelper.GetArg32(0);
-                ulong PreviousStatePtr = Instance.WinHelper.GetArg32(1);
-
-                return NtSetEvent.Handle(Instance, EventHandle, PreviousStatePtr, false);
-            }
-
-            return Instance.WinUnimplemented;
+            return NtSetEvent.Handle(Instance, EventHandle, PreviousStatePtr, false);
         }
     }
 
@@ -78,20 +54,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong EventHandle = Instance.WinHelper.GetArg(0);
+            ulong EventHandle = Instance.WinHelper.GetArg(0);
 
-                return NtSetEvent.Handle(Instance, EventHandle, 0, false);
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-                ulong EventHandle = Instance.WinHelper.GetArg32(0);
-
-                return NtSetEvent.Handle(Instance, EventHandle, 0, false);
-            }
-
-            return Instance.WinUnimplemented;
+            return NtSetEvent.Handle(Instance, EventHandle, 0, false);
         }
     }
 }

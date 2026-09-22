@@ -10,30 +10,15 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong SourceProcessHandle = Instance.WinHelper.GetArg(0);
-                ulong SourceHandle = Instance.WinHelper.GetArg(1);
-                ulong TargetProcessHandle = Instance.WinHelper.GetArg(2);
-                ulong TargetHandlePtr = Instance.WinHelper.GetArg(3);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(4);
-                uint HandleAttributes = (uint)Instance.WinHelper.GetArg(5);
-                uint Options = (uint)Instance.WinHelper.GetArg(6);
+            ulong SourceProcessHandle = Instance.WinHelper.GetArg(0);
+            ulong SourceHandle = Instance.WinHelper.GetArg(1);
+            ulong TargetProcessHandle = Instance.WinHelper.GetArg(2);
+            ulong TargetHandlePtr = Instance.WinHelper.GetArg(3);
+            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(4);
+            uint HandleAttributes = (uint)Instance.WinHelper.GetArg(5);
+            uint Options = (uint)Instance.WinHelper.GetArg(6);
 
-                return DuplicateObject(Instance, SourceProcessHandle, SourceHandle, TargetProcessHandle, TargetHandlePtr, DesiredAccess, HandleAttributes, Options, 8);
-            }
-            else
-            {
-                ulong SourceProcessHandle = Instance.WinHelper.GetArg32(0);
-                ulong SourceHandle = Instance.WinHelper.GetArg32(1);
-                ulong TargetProcessHandle = Instance.WinHelper.GetArg32(2);
-                ulong TargetHandlePtr = Instance.WinHelper.GetArg32(3);
-                ulong DesiredAccess = Instance.WinHelper.GetArg32(4);
-                uint HandleAttributes = Instance.WinHelper.GetArg32(5);
-                uint Options = Instance.WinHelper.GetArg32(6);
-
-                return DuplicateObject(Instance, SourceProcessHandle, SourceHandle, TargetProcessHandle, TargetHandlePtr, DesiredAccess, HandleAttributes, Options, 4);
-            }
+            return DuplicateObject(Instance, SourceProcessHandle, SourceHandle, TargetProcessHandle, TargetHandlePtr, DesiredAccess, HandleAttributes, Options, (uint)Instance.WinHelper.PointerSize);
         }
 
         private static NTSTATUS DuplicateObject(BinaryEmulator Instance, ulong SourceProcessHandle, ulong SourceHandle, ulong TargetProcessHandle, ulong TargetHandlePtr, ulong DesiredAccess, uint HandleAttributes, uint Options, uint HandleSize)

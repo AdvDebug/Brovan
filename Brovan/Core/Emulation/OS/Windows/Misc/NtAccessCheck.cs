@@ -42,103 +42,46 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+            uint DesiredAccess = (uint)Instance.WinHelper.GetArg(2);
+            ulong GenericMappingPtr = Instance.WinHelper.GetArg(3);
+            ulong PrivilegeSetLengthPtr = Instance.WinHelper.GetArg(5);
+            ulong GrantedAccessPtr = Instance.WinHelper.GetArg(6);
+            ulong AccessStatusPtr = Instance.WinHelper.GetArg(7);
+
+            if (GrantedAccessPtr == 0 || AccessStatusPtr == 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (!Instance.IsRegionMapped(GrantedAccessPtr, 4) || !Instance.IsRegionMapped(AccessStatusPtr, 4))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (PrivilegeSetLengthPtr != 0 && !Instance.IsRegionMapped(PrivilegeSetLengthPtr, 4))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            uint MapRead = 0;
+            uint MapWrite = 0;
+            uint MapExecute = 0;
+            uint MapAll = 0;
+
+            if (GenericMappingPtr != 0)
             {
-                ulong SecurityDescriptor = Instance.WinHelper.GetArg(0);
-                ulong ClientToken = Instance.WinHelper.GetArg(1);
-                uint DesiredAccess = (uint)Instance.WinHelper.GetArg(2);
-                ulong GenericMappingPtr = Instance.WinHelper.GetArg(3);
-                ulong PrivilegeSet = Instance.WinHelper.GetArg(4);
-                ulong PrivilegeSetLengthPtr = Instance.WinHelper.GetArg(5);
-                ulong GrantedAccessPtr = Instance.WinHelper.GetArg(6);
-                ulong AccessStatusPtr = Instance.WinHelper.GetArg(7);
-
-                if (GrantedAccessPtr == 0 || AccessStatusPtr == 0)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                if (!Instance.IsRegionMapped(GrantedAccessPtr, 4) || !Instance.IsRegionMapped(AccessStatusPtr, 4))
+                if (!Instance.IsRegionMapped(GenericMappingPtr, 16))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                if (PrivilegeSetLengthPtr != 0 && !Instance.IsRegionMapped(PrivilegeSetLengthPtr, 4))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                uint MapRead = 0;
-                uint MapWrite = 0;
-                uint MapExecute = 0;
-                uint MapAll = 0;
-
-                if (GenericMappingPtr != 0)
-                {
-                    if (!Instance.IsRegionMapped(GenericMappingPtr, 16))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                    MapRead = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0x0);
-                    MapWrite = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0x4);
-                    MapExecute = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0x8);
-                    MapAll = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0xC);
-                }
-
-                uint GrantedAccess = ApplyGenericMapping(DesiredAccess, MapRead, MapWrite, MapExecute, MapAll);
-
-                Instance._emulator.WriteMemory(GrantedAccessPtr, GrantedAccess);
-                Instance._emulator.WriteMemory(AccessStatusPtr, (uint)NTSTATUS.STATUS_SUCCESS);
-
-                if (PrivilegeSetLengthPtr != 0)
-                    Instance._emulator.WriteMemory(PrivilegeSetLengthPtr, 0u);
-
-                return NTSTATUS.STATUS_SUCCESS;
+                MapRead = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0x0);
+                MapWrite = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0x4);
+                MapExecute = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0x8);
+                MapAll = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0xC);
             }
-            else
-            {
-                uint SecurityDescriptor32 = Instance.WinHelper.GetArg32(0);
-                uint ClientToken32 = Instance.WinHelper.GetArg32(1);
-                uint DesiredAccess = Instance.WinHelper.GetArg32(2);
-                uint GenericMappingPtr32 = Instance.WinHelper.GetArg32(3);
-                uint PrivilegeSet32 = Instance.WinHelper.GetArg32(4);
-                uint PrivilegeSetLengthPtr32 = Instance.WinHelper.GetArg32(5);
-                uint GrantedAccessPtr32 = Instance.WinHelper.GetArg32(6);
-                uint AccessStatusPtr32 = Instance.WinHelper.GetArg32(7);
 
-                ulong GenericMappingPtr = GenericMappingPtr32;
-                ulong PrivilegeSetLengthPtr = PrivilegeSetLengthPtr32;
-                ulong GrantedAccessPtr = GrantedAccessPtr32;
-                ulong AccessStatusPtr = AccessStatusPtr32;
+            uint GrantedAccess = ApplyGenericMapping(DesiredAccess, MapRead, MapWrite, MapExecute, MapAll);
 
-                if (GrantedAccessPtr == 0 || AccessStatusPtr == 0)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+            Instance._emulator.WriteMemory(GrantedAccessPtr, GrantedAccess);
+            Instance._emulator.WriteMemory(AccessStatusPtr, (uint)NTSTATUS.STATUS_SUCCESS);
 
-                if (!Instance.IsRegionMapped(GrantedAccessPtr, 4) || !Instance.IsRegionMapped(AccessStatusPtr, 4))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (PrivilegeSetLengthPtr != 0)
+                Instance._emulator.WriteMemory(PrivilegeSetLengthPtr, 0u);
 
-                if (PrivilegeSetLengthPtr != 0 && !Instance.IsRegionMapped(PrivilegeSetLengthPtr, 4))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                uint MapRead = 0;
-                uint MapWrite = 0;
-                uint MapExecute = 0;
-                uint MapAll = 0;
-
-                if (GenericMappingPtr != 0)
-                {
-                    if (!Instance.IsRegionMapped(GenericMappingPtr, 16))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                    MapRead = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0x0);
-                    MapWrite = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0x4);
-                    MapExecute = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0x8);
-                    MapAll = Instance._emulator.ReadMemoryUInt(GenericMappingPtr + 0xC);
-                }
-
-                uint GrantedAccess = ApplyGenericMapping(DesiredAccess, MapRead, MapWrite, MapExecute, MapAll);
-
-                Instance._emulator.WriteMemory(GrantedAccessPtr, GrantedAccess);
-                Instance._emulator.WriteMemory(AccessStatusPtr, (uint)NTSTATUS.STATUS_SUCCESS);
-
-                if (PrivilegeSetLengthPtr != 0)
-                    Instance._emulator.WriteMemory(PrivilegeSetLengthPtr, 0u);
-
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+            return NTSTATUS.STATUS_SUCCESS;
         }
     }
 }

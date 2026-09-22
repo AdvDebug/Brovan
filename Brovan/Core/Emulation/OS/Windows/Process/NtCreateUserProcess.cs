@@ -23,12 +23,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong AttributeList = Instance.WinHelper.GetArg(10);
 
             bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
-            int PointerSize = Is64 ? 8 : 4;
+            int PointerSize = Instance.WinHelper.PointerSize;
 
             if (ProcessParameters == 0 || !Instance.IsRegionMapped(ProcessParameters, 0x40))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            string ImageNameHint = ReadImageNameAttribute(Instance, AttributeList, Is64);
+            string ImageNameHint = ReadImageNameAttribute(Instance, AttributeList);
 
             // THREAD_CREATE_FLAGS_CREATE_SUSPENDED, the creator wants to act on the process before it runs.
             bool StartSuspended = (Instance.WinHelper.GetArg(7) & 1) != 0;
@@ -48,13 +48,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ThreadHandle = Instance.WinHelper.HandleManager.AddHandle(Thread, AccessMask.GenericAll).Handle;
 
             if (ProcessHandlePtr != 0 && Instance.IsRegionMapped(ProcessHandlePtr, (ulong)PointerSize))
-                Instance._emulator.WriteMemory(ProcessHandlePtr, ProcessHandle, (uint)PointerSize);
+                Instance.WinHelper.WritePointer(ProcessHandlePtr, ProcessHandle);
 
             if (ThreadHandlePtr != 0 && Instance.IsRegionMapped(ThreadHandlePtr, (ulong)PointerSize))
-                Instance._emulator.WriteMemory(ThreadHandlePtr, ThreadHandle, (uint)PointerSize);
+                Instance.WinHelper.WritePointer(ThreadHandlePtr, ThreadHandle);
 
             WriteCreateInfoSuccess(Instance, CreateInfo, Is64, Process.Remote.PebAddress, Process.Remote.ProcessParameters);
-            WriteClientIdAttribute(Instance, AttributeList, Is64, Process.PID, Thread.ThreadId);
+            WriteClientIdAttribute(Instance, AttributeList, Process.PID, Thread.ThreadId);
             WriteImageInformationAttribute(Instance, AttributeList, Is64, ImageInformation);
 
             return NTSTATUS.STATUS_SUCCESS;
@@ -90,7 +90,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static void WriteImageInformationAttribute(BinaryEmulator Instance, ulong AttributeList, bool Is64, SECTION_IMAGE_INFORMATION ImageInformation)
         {
-            if (!TryFindAttribute(Instance, AttributeList, Is64, PsAttributeImageInfo, out ulong ValuePointer, out ulong Size))
+            if (!TryFindAttribute(Instance, AttributeList, PsAttributeImageInfo, out ulong ValuePointer, out ulong Size))
                 return;
 
             uint StructSize = SECTION_IMAGE_INFORMATION.SizeOf(Is64);
@@ -103,22 +103,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WriteMemory(ValuePointer, Buffer);
         }
 
-        private static void WriteClientIdAttribute(BinaryEmulator Instance, ulong AttributeList, bool Is64, uint ProcessId, uint ThreadId)
+        private static void WriteClientIdAttribute(BinaryEmulator Instance, ulong AttributeList, uint ProcessId, uint ThreadId)
         {
-            if (!TryFindAttribute(Instance, AttributeList, Is64, PsAttributeClientId, out ulong ValuePointer, out ulong Size))
+            if (!TryFindAttribute(Instance, AttributeList, PsAttributeClientId, out ulong ValuePointer, out ulong Size))
                 return;
 
-            int PointerSize = Is64 ? 8 : 4;
+            int PointerSize = Instance.WinHelper.PointerSize;
             if (ValuePointer == 0 || Size < (ulong)(PointerSize * 2) || !Instance.IsRegionMapped(ValuePointer, Size))
                 return;
 
-            Instance._emulator.WriteMemory(ValuePointer, ProcessId, (uint)PointerSize);
-            Instance._emulator.WriteMemory(ValuePointer + (ulong)PointerSize, ThreadId, (uint)PointerSize);
+            Instance.WinHelper.WritePointer(ValuePointer, ProcessId);
+            Instance.WinHelper.WritePointer(ValuePointer + (ulong)PointerSize, ThreadId);
         }
 
-        private static string ReadImageNameAttribute(BinaryEmulator Instance, ulong AttributeList, bool Is64)
+        private static string ReadImageNameAttribute(BinaryEmulator Instance, ulong AttributeList)
         {
-            if (!TryFindAttribute(Instance, AttributeList, Is64, PsAttributeImageName, out ulong ValuePointer, out ulong Size))
+            if (!TryFindAttribute(Instance, AttributeList, PsAttributeImageName, out ulong ValuePointer, out ulong Size))
                 return null;
 
             if (ValuePointer == 0 || Size == 0 || Size > 0x8000 || !Instance.IsRegionMapped(ValuePointer, Size))
@@ -127,18 +127,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance._emulator.ReadMemoryString(ValuePointer, (int)Size, Encoding.Unicode)?.TrimEnd('\0');
         }
 
-        private static bool TryFindAttribute(BinaryEmulator Instance, ulong AttributeList, bool Is64, ulong Attribute, out ulong ValuePointer, out ulong Size)
+        private static bool TryFindAttribute(BinaryEmulator Instance, ulong AttributeList, ulong Attribute, out ulong ValuePointer, out ulong Size)
         {
             ValuePointer = 0;
             Size = 0;
 
-            int PointerSize = Is64 ? 8 : 4;
+            int PointerSize = Instance.WinHelper.PointerSize;
             int EntrySize = PointerSize * 4;
 
             if (AttributeList == 0 || !Instance.IsRegionMapped(AttributeList, (ulong)PointerSize))
                 return false;
 
-            ulong TotalLength = Is64 ? Instance.ReadMemoryULong(AttributeList) : Instance.ReadMemoryUInt(AttributeList);
+            ulong TotalLength = Instance.WinHelper.ReadPointer(AttributeList);
             if (TotalLength <= (uint)PointerSize)
                 return false;
 
@@ -149,12 +149,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (ulong i = 0; i < Count; i++)
             {
                 ulong Entry = AttributeList + (ulong)PointerSize + i * (ulong)EntrySize;
-                ulong EntryAttribute = Is64 ? Instance.ReadMemoryULong(Entry) : Instance.ReadMemoryUInt(Entry);
+                ulong EntryAttribute = Instance.WinHelper.ReadPointer(Entry);
                 if (EntryAttribute != Attribute)
                     continue;
 
-                Size = Is64 ? Instance.ReadMemoryULong(Entry + (ulong)PointerSize) : Instance.ReadMemoryUInt(Entry + (ulong)PointerSize);
-                ValuePointer = Is64 ? Instance.ReadMemoryULong(Entry + (ulong)(PointerSize * 2)) : Instance.ReadMemoryUInt(Entry + (ulong)(PointerSize * 2));
+                Size = Instance.WinHelper.ReadPointer(Entry + (ulong)PointerSize);
+                ValuePointer = Instance.WinHelper.ReadPointer(Entry + (ulong)(PointerSize * 2));
                 return true;
             }
 

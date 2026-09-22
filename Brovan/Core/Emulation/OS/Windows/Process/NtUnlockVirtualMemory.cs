@@ -43,8 +43,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(AlignedBase, AlignedSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            bool WroteBase = Instance._emulator.WriteMemory(BaseAddressPtr, AlignedBase, PointerSize);
-            bool WroteSize = Instance._emulator.WriteMemory(NumberOfBytesPtr, AlignedSize, PointerSize);
+            bool WroteBase = Instance.WinHelper.WritePointer(BaseAddressPtr, AlignedBase);
+            bool WroteSize = Instance.WinHelper.WritePointer(NumberOfBytesPtr, AlignedSize);
 
             return WroteBase && WroteSize ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }

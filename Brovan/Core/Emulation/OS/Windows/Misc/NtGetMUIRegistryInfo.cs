@@ -6,24 +6,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
-
-            uint Flags;
-            ulong DataSizePtr;
-            ulong DataPtr;
-
-            if (Is64)
-            {
-                Flags = (uint)Instance.WinHelper.GetArg(0);
-                DataSizePtr = Instance.WinHelper.GetArg(1);
-                DataPtr = Instance.WinHelper.GetArg(2);
-            }
-            else
-            {
-                Flags = Instance.WinHelper.GetArg32(0);
-                DataSizePtr = Instance.WinHelper.GetArg32(1);
-                DataPtr = Instance.WinHelper.GetArg32(2);
-            }
+            uint Flags = (uint)Instance.WinHelper.GetArg(0);
+            ulong DataSizePtr = Instance.WinHelper.GetArg(1);
+            ulong DataPtr = Instance.WinHelper.GetArg(2);
 
             if (DataSizePtr == 0 || !Instance.IsRegionMapped(DataSizePtr, 4))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

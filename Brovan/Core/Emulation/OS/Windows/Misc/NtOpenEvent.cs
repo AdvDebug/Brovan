@@ -6,24 +6,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong EventHandlePtr = Instance.WinHelper.GetArg(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
-                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+            ulong EventHandlePtr = Instance.WinHelper.GetArg(0);
+            ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
 
-                return Open(Instance, EventHandlePtr, DesiredAccess, ObjectAttributesPtr);
-            }
-            else if (Instance._binary.Architecture == BinaryArchitecture.x86)
-            {
-                ulong EventHandlePtr = Instance.WinHelper.GetArg32(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg32(1);
-                ulong ObjectAttributesPtr = Instance.WinHelper.GetArg32(2);
-
-                return Open(Instance, EventHandlePtr, DesiredAccess, ObjectAttributesPtr);
-            }
-
-            return Instance.WinUnimplemented;
+            return Open(Instance, EventHandlePtr, DesiredAccess, ObjectAttributesPtr);
         }
 
         private static NTSTATUS Open(BinaryEmulator Instance, ulong EventHandlePtr, ulong DesiredAccess, ulong ObjectAttributesPtr)

@@ -60,7 +60,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WinHandle ExistingHandle = Instance.WinHelper.HandleManager.AddHandle(Existing, DesiredAccess);
                 Instance.WinHelper.AddWinHandle(ExistingHandle);
 
-                if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)ExistingHandle.Handle))
+                if (!Instance.WinHelper.WritePointer(SectionHandlePtr, ExistingHandle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -80,7 +80,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 WinHandle SharedSectionHandle = Instance.WinHelper.CreateSectionHandle(FullName, SharedSectionSize, (uint)Instance.WinHelper.ConvertInternalToWinProtect(MemoryProtection.ReadWrite), 0, null, SharedSectionAddress, DesiredAccess);
 
-                if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)SharedSectionHandle.Handle))
+                if (!Instance.WinHelper.WritePointer(SectionHandlePtr, SharedSectionHandle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -118,7 +118,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinHandle Handle = Instance.WinHelper.CreateSectionHandle(FullName, Size, SectionPageProtection, AllocationAttributes, ResolvedBackingPath, BackingAddress, DesiredAccess);
 
-            if (!Instance._emulator.WriteMemory(SectionHandlePtr, (ulong)Handle.Handle))
+            if (!Instance.WinHelper.WritePointer(SectionHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

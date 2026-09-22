@@ -110,16 +110,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
 
-            ulong ProcessHandlePtr = Is64 ? Instance.WinHelper.GetArg(0) : Instance.WinHelper.GetArg32(0);
-            uint DesiredAccess = (uint)(Is64 ? Instance.WinHelper.GetArg(1) : Instance.WinHelper.GetArg32(1));
-            ulong ObjectAttributesPtr = Is64 ? Instance.WinHelper.GetArg(2) : Instance.WinHelper.GetArg32(2);
-            ulong ParentProcessHandle = Is64 ? Instance.WinHelper.GetArg(3) : Instance.WinHelper.GetArg32(3);
-            ulong SectionHandle = Is64 ? Instance.WinHelper.GetArg(5) : Instance.WinHelper.GetArg32(5);
-            ulong DebugPort = Is64 ? Instance.WinHelper.GetArg(6) : Instance.WinHelper.GetArg32(6);
-            ulong TokenHandle = Is64 ? Instance.WinHelper.GetArg(7) : Instance.WinHelper.GetArg32(7);
-            ulong Reserved = Is64 ? Instance.WinHelper.GetArg(8) : Instance.WinHelper.GetArg32(8);
+            ulong ProcessHandlePtr = Instance.WinHelper.GetArg(0);
+            uint DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
+            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+            ulong ParentProcessHandle = Instance.WinHelper.GetArg(3);
+            ulong SectionHandle = Instance.WinHelper.GetArg(5);
+            ulong DebugPort = Instance.WinHelper.GetArg(6);
+            ulong TokenHandle = Instance.WinHelper.GetArg(7);
+            ulong Reserved = Instance.WinHelper.GetArg(8);
 
-            uint HandleSize = Is64 ? 8u : 4u;
+            uint HandleSize = (uint)Instance.WinHelper.PointerSize;
             if (ProcessHandlePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
