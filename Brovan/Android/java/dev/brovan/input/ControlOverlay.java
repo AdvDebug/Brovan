@@ -45,6 +45,10 @@ public class ControlOverlay extends FrameLayout {
         void onMoved(ControlItem item);
     }
 
+    private static final VirtualKey[] SLOT_KEYS = {
+            VirtualKey.DIGIT_1, VirtualKey.DIGIT_2, VirtualKey.DIGIT_3, VirtualKey.DIGIT_4, VirtualKey.DIGIT_5,
+            VirtualKey.DIGIT_6, VirtualKey.DIGIT_7, VirtualKey.DIGIT_8, VirtualKey.DIGIT_9, VirtualKey.DIGIT_0};
+
     private final KeyEmitter keys = new KeyEmitter();
     private final Paint selectionPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -128,6 +132,8 @@ public class ControlOverlay extends FrameLayout {
                 ((JoystickView) child).setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
             } else if (child instanceof TouchpadView) {
                 ((TouchpadView) child).setStyle(item.strokeColor, item.opacity);
+            } else if (child instanceof SwitcherView) {
+                ((SwitcherView) child).setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
             }
         }
     }
@@ -184,6 +190,9 @@ public class ControlOverlay extends FrameLayout {
                 return view;
             }
 
+            case SWITCHER:
+                return switcher(item);
+
             default: {
                 ActionButtonView view = button(item);
                 view.setListener(down -> {
@@ -218,6 +227,21 @@ public class ControlOverlay extends FrameLayout {
         return view;
     }
 
+    private View switcher(ControlItem item) {
+        SwitcherView view = new SwitcherView(getContext());
+        view.setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
+        view.setSlots(item.slots);
+        view.setHorizontal(item.horizontal);
+        view.setListener((direction, slot) -> {
+            if (slot < 0) {
+                PointerState.scroll(direction);
+            } else {
+                keys.tap(item, SLOT_KEYS[slot % SLOT_KEYS.length]);
+            }
+        });
+        return view;
+    }
+
     @Override
     protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
         int width = right - left;
@@ -234,8 +258,18 @@ public class ControlOverlay extends FrameLayout {
             }
 
             ControlItem item = (ControlItem) child.getTag();
-            int itemWidth = dp(item.size);
-            int itemHeight = item.kind == ControlItem.Kind.TOUCHPAD ? Math.round(itemWidth * 0.66f) : itemWidth;
+            int span = dp(item.size);
+            int itemWidth = span;
+            int itemHeight = span;
+
+            if (item.kind == ControlItem.Kind.TOUCHPAD) {
+                itemHeight = Math.round(span * 0.66f);
+            } else if (item.kind == ControlItem.Kind.SWITCHER) {
+                int across = Math.round(span * 0.38f);
+                itemWidth = item.horizontal ? span : across;
+                itemHeight = item.horizontal ? across : span;
+            }
+
             int centreX = Math.round(item.x * width);
             int centreY = Math.round(item.y * height);
 

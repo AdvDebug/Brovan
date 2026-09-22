@@ -173,6 +173,11 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
                 addMouseButton();
                 break;
 
+            case SWITCHER:
+                addSlotsButton();
+                addOrientationButton();
+                break;
+
             default:
                 break;
         }
@@ -213,11 +218,11 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
         void onChosen(VirtualKey key);
     }
 
-    private void addKeyButton(int labelId, VirtualKey current, KeyChoice choice) {
+    private void addChoice(CharSequence text, View.OnClickListener click) {
         MaterialButton button = new MaterialButton(this, null,
                 com.google.android.material.R.attr.materialButtonOutlinedStyle);
-        button.setText(getString(labelId, current.label()));
-        button.setOnClickListener(view -> pickKey(choice));
+        button.setText(text);
+        button.setOnClickListener(click);
 
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -225,18 +230,51 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
         keyRow.addView(button, params);
     }
 
+    private void addKeyButton(int labelId, VirtualKey current, KeyChoice choice) {
+        addChoice(getString(labelId, current.label()), view -> pickKey(choice));
+    }
+
     private void addMouseButton() {
-        MaterialButton button = new MaterialButton(this, null,
-                com.google.android.material.R.attr.materialButtonOutlinedStyle);
         boolean right = selected.mouseButton == BrovanNative.BUTTON_RIGHT;
-        button.setText(getString(right ? R.string.controls_mouse_right : R.string.controls_mouse_left));
-        button.setOnClickListener(view -> {
+
+        addChoice(getString(right ? R.string.controls_mouse_right : R.string.controls_mouse_left), view -> {
             selected.mouseButton = right ? BrovanNative.BUTTON_LEFT : BrovanNative.BUTTON_RIGHT;
             selected.label = right ? "L" : "R";
             refresh();
         });
+    }
 
-        keyRow.addView(button);
+    private void addSlotsButton() {
+        String slots = selected.slots > 0
+                ? Integer.toString(selected.slots)
+                : getString(R.string.controls_slots_wheel);
+
+        addChoice(getString(R.string.controls_slots, slots), view -> pickSlots());
+    }
+
+    private void addOrientationButton() {
+        addChoice(getString(selected.horizontal ? R.string.controls_horizontal : R.string.controls_vertical),
+                view -> {
+                    selected.horizontal = !selected.horizontal;
+                    refresh();
+                });
+    }
+
+    /** The first entry keeps no slots, which leaves the control turning the wheel. */
+    private void pickSlots() {
+        CharSequence[] labels = new CharSequence[ControlItem.MAX_SLOTS];
+        labels[0] = getString(R.string.controls_slots_wheel);
+        for (int i = 1; i < labels.length; i++) {
+            labels[i] = Integer.toString(i + 1);
+        }
+
+        Theming.dialog(this)
+                .setTitle(R.string.controls_slots_title)
+                .setItems(labels, (dialog, index) -> {
+                    selected.slots = index == 0 ? 0 : index + 1;
+                    refresh();
+                })
+                .show();
     }
 
     private void pickKey(KeyChoice choice) {
@@ -258,7 +296,9 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
                 getString(R.string.controls_add_joystick),
                 getString(R.string.controls_add_dpad),
                 getString(R.string.controls_add_touchpad),
-                getString(R.string.controls_add_mouse)};
+                getString(R.string.controls_add_mouse),
+                getString(R.string.controls_add_switcher),
+                getString(R.string.controls_add_wheel)};
 
         Theming.dialog(this)
                 .setTitle(R.string.controls_add)
@@ -286,6 +326,14 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
 
             case 4:
                 item = ControlItem.mouse(BrovanNative.BUTTON_LEFT, "L", 0.5f, 0.5f, 66);
+                break;
+
+            case 5:
+                item = ControlItem.switcher(4, false, 0.5f, 0.5f, 190);
+                break;
+
+            case 6:
+                item = ControlItem.switcher(0, false, 0.5f, 0.5f, 150);
                 break;
 
             default:

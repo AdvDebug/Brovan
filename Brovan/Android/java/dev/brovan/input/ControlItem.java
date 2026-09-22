@@ -11,12 +11,16 @@ public final class ControlItem {
 
     public static final int DEFAULT_COLOR = 0xFFFFFF;
 
+    /** A switcher steps along the digit row, so ten is as many slots as one can bind. */
+    public static final int MAX_SLOTS = 10;
+
     public enum Kind {
         BUTTON,
         JOYSTICK,
         DPAD,
         TOUCHPAD,
-        MOUSE
+        MOUSE,
+        SWITCHER
     }
 
     public Kind kind;
@@ -29,6 +33,8 @@ public final class ControlItem {
     public VirtualKey left;
     public VirtualKey right;
     public int mouseButton;
+    public int slots;
+    public boolean horizontal;
     public String label;
     public int fillColor = DEFAULT_COLOR;
     public int strokeColor = DEFAULT_COLOR;
@@ -84,6 +90,18 @@ public final class ControlItem {
         return item;
     }
 
+    /** No slots leaves the control with nothing of its own to select, which is what turns the wheel instead. */
+    public static ControlItem switcher(int slots, boolean horizontal, float x, float y, int size) {
+        ControlItem item = new ControlItem();
+        item.kind = Kind.SWITCHER;
+        item.slots = slots;
+        item.horizontal = horizontal;
+        item.x = x;
+        item.y = y;
+        item.size = size;
+        return item;
+    }
+
     public ControlItem copy() {
         ControlItem item = new ControlItem();
         item.kind = kind;
@@ -96,6 +114,8 @@ public final class ControlItem {
         item.left = left;
         item.right = right;
         item.mouseButton = mouseButton;
+        item.slots = slots;
+        item.horizontal = horizontal;
         item.label = label;
         item.fillColor = fillColor;
         item.strokeColor = strokeColor;
@@ -120,6 +140,8 @@ public final class ControlItem {
                 return label != null ? label : "Click";
             case TOUCHPAD:
                 return "Touchpad";
+            case SWITCHER:
+                return slots > 0 ? "Switcher" : "Wheel";
             default:
                 return up.label() + left.label() + down.label() + right.label();
         }
@@ -132,6 +154,8 @@ public final class ControlItem {
         json.put("y", y);
         json.put("size", size);
         json.put("mouseButton", mouseButton);
+        json.put("slots", slots);
+        json.put("horizontal", horizontal);
         json.put("fill", fillColor);
         json.put("stroke", strokeColor);
         json.put("text", labelColor);
@@ -168,6 +192,8 @@ public final class ControlItem {
         item.y = (float) json.optDouble("y", 0.5);
         item.size = json.optInt("size", 70);
         item.mouseButton = json.optInt("mouseButton", 0);
+        item.slots = Math.max(0, Math.min(MAX_SLOTS, json.optInt("slots", 0)));
+        item.horizontal = json.optBoolean("horizontal", false);
         item.key = VirtualKey.byName(json.optString("key", null), VirtualKey.SPACE);
         item.up = VirtualKey.byName(json.optString("up", null), VirtualKey.W);
         item.down = VirtualKey.byName(json.optString("down", null), VirtualKey.S);

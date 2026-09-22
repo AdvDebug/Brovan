@@ -14,6 +14,8 @@ public final class PointerState {
     /** Games that poll the button state instead of reading messages miss a press with no duration. */
     private static final long CLICK_HOLD_MS = 70;
 
+    private static final int WHEEL_DELTA = 120;
+
     private static final Handler handler = new Handler(Looper.getMainLooper());
 
     private static volatile int x;
@@ -35,6 +37,11 @@ public final class PointerState {
     public static void moved(int px, int py) {
         x = px;
         y = py;
+    }
+
+    /** One notch forward is positive, the way a wheel turning away from the hand reports it. */
+    public static void scroll(int notches) {
+        BrovanNative.injectScroll(notches * WHEEL_DELTA, x, y, 0);
     }
 
     public static void click(int button) {

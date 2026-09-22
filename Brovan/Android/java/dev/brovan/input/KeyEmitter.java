@@ -1,5 +1,8 @@
 package dev.brovan.input;
 
+import android.os.Handler;
+import android.os.Looper;
+
 import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.IdentityHashMap;
@@ -17,6 +20,10 @@ import dev.brovan.BrovanNative;
  */
 public final class KeyEmitter {
 
+    /** Games that poll the key state instead of reading messages miss a press with no duration. */
+    private static final long TAP_HOLD_MS = 70;
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
     private final Map<Object, Set<VirtualKey>> owned = new IdentityHashMap<>();
     private final Map<VirtualKey, Integer> holders = new EnumMap<>(VirtualKey.class);
 
@@ -56,6 +63,11 @@ public final class KeyEmitter {
         } else {
             holders.put(key, count - 1);
         }
+    }
+
+    public void tap(Object owner, VirtualKey key) {
+        press(owner, key);
+        handler.postDelayed(() -> release(owner, key), TAP_HOLD_MS);
     }
 
     /** Presses everything in {@code wanted} and releases anything this owner holds that is not wanted. */

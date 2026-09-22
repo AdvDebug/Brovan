@@ -126,6 +126,8 @@
     <string name="controls_add_dpad">D-pad</string>
     <string name="controls_add_touchpad">Mouse touchpad</string>
     <string name="controls_add_mouse">Mouse click button</string>
+    <string name="controls_add_switcher">Slot switcher</string>
+    <string name="controls_add_wheel">Scroll wheel</string>
     <string name="controls_pick_key">Assign a key</string>
     <string name="controls_key">Key: %1$s</string>
     <string name="controls_up">Up: %1$s</string>
@@ -134,6 +136,11 @@
     <string name="controls_right">Right: %1$s</string>
     <string name="controls_mouse_left">Left click</string>
     <string name="controls_mouse_right">Right click</string>
+    <string name="controls_slots">Slots: %1$s</string>
+    <string name="controls_slots_title">What the control steps through</string>
+    <string name="controls_slots_wheel">Mouse wheel</string>
+    <string name="controls_horizontal">Horizontal</string>
+    <string name="controls_vertical">Vertical</string>
     <string name="nav_theme">Appearance</string>
     <string name="theme_presets">Presets</string>
     <string name="theme_colours">Colours</string>
