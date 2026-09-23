@@ -12,10 +12,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ApcContext = Instance.WinHelper.GetArg(3);
             ulong IoStatusBlock = Instance.WinHelper.GetArg(4);
             uint CompletionFilter = (uint)Instance.WinHelper.GetArg(5);
-            bool WatchTree = Instance.WinHelper.GetArg(6) != 0;
+            bool WatchTree = (byte)Instance.WinHelper.GetArg(6) != 0;
             ulong Buffer = Instance.WinHelper.GetArg(7);
             uint BufferSize = (uint)Instance.WinHelper.GetArg(8);
-            bool Asynchronous = Instance.WinHelper.GetArg(9) != 0;
+            bool Asynchronous = (byte)Instance.WinHelper.GetArg(9) != 0;
 
             WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
             if (RegKey == null)
@@ -52,6 +52,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_PENDING, 0);
+            Instance.WinHelper.ResetIoEvent(EventHandle);
             Instance.WinHelper.RegisterRegistryNotification(new WinRegistryNotification
             {
                 KeyPath = RegKey.FullPath,

@@ -3183,7 +3183,7 @@ namespace Brovan.Core.Emulation
                     }
 
                     // Comparing against the epoch the last scan observed, rather than a per-slice difference
-                    if (Self.WakeupScanRequired || SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch)
+                    if (Self.WakeupScanRequired || SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch || HasFinishedHostIo())
                     {
                         if (Debug)
                             TriggerDebugMessage($"scheduler: wakeup scan required={Self.WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
@@ -3241,7 +3241,7 @@ namespace Brovan.Core.Emulation
                             continue;
                         }
 
-                        if (HasActiveGetMessageWait())
+                        if (HasActiveGetMessageWait() || HasPendingHostIo())
                         {
                             IdleWait(IdleWaitSliceMs);
                             WinHelper?.KuserSharedData?.RefreshIfUnhooked();

@@ -294,6 +294,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.PipeWaitDeadline = -1;
         }
 
+        public bool IsPipeWaitActive(ulong FileHandle)
+        {
+            EmulatedThread Thread = Emulator.CurrentThread;
+            WindowsThreadState? State = Thread == null ? null : WinEmulatedThread.TryGetState(Thread);
+            return State != null && FileHandle != 0 && State.PipeWaitHandle == FileHandle;
+        }
+
         /// <summary>
         /// Clears the blocked wait state for an emulated thread.
         /// </summary>
@@ -456,6 +463,51 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Instance.WakeWorkerFactoryWaitersForObject(File.CompletionHandle))
                 Instance._emulator.StopEmulation();
+        }
+
+        public void CompletePendingIo(in WinPendingIo Io, NTSTATUS Status, ulong Information)
+        {
+            if (IsPendingIoLive(in Io))
+                WriteIoStatusBlock(Emulator, Io.IoStatusBlock, Status, Information);
+
+            if (Io.Event != null)
+                Io.Event.Signaled = true;
+
+            Emulator.Threads.TryGetValue((uint)Io.ThreadId, out EmulatedThread? Thread);
+            QueueIoCompletion(Io.File, Thread, Io.ApcRoutine, Io.ApcContext, Io.IoStatusBlock, Status, Information);
+        }
+
+        // NT cancels a thread's I/O when the thread exits, except I/O that completes to a port.
+        public bool IsPendingIoLive(in WinPendingIo Io)
+        {
+            if (Io.ApcRoutine == 0 && Io.ApcContext != 0 && Io.File != null && Io.File.CompletionHandle != 0)
+                return true;
+
+            return Io.ThreadId >= 0 && Emulator.Threads.TryGetValue((uint)Io.ThreadId, out EmulatedThread? Thread) &&
+                Thread.State != EmulatedThreadState.Terminated;
+        }
+
+        public void QueueIoCompletion(WinFile File, EmulatedThread? Thread, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock, NTSTATUS Status, ulong Information)
+        {
+            if (ApcRoutine == 0)
+            {
+                QueueFileCompletion(Emulator, File, ApcContext, Status, Information);
+                return;
+            }
+
+            if (Thread != null && Thread.State != EmulatedThreadState.Terminated)
+                NtQueueApcThread.Queue(Emulator, Thread, 0, ApcRoutine, ApcContext, IoStatusBlock, 0);
+        }
+
+        // The I/O manager clears the event before the driver sees the request.
+        public void ResetIoEvent(ulong EventHandle)
+        {
+            if (EventHandle == 0)
+                return;
+
+            WinEvent Ev = GetEventByHandle(EventHandle, AccessMask.GiveTemp);
+            if (Ev != null)
+                Ev.Signaled = false;
         }
 
         /// <summary>
@@ -1558,6 +1610,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public List<WinSemaphore> WinSemaphores = new List<WinSemaphore>();
         public List<WinRegistryNotification> RegistryNotifications = new List<WinRegistryNotification>();
+        internal readonly AfdDevice.HostConnects AfdConnects = new AfdDevice.HostConnects();
         public List<WinSection> WinSections = new List<WinSection>();
         private readonly Dictionary<ulong, int> WinHandleIndex = new Dictionary<ulong, int>();
         internal void AddWinHandle(WinHandle h)
@@ -1720,7 +1773,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong UserSharedDelta;
         public ulong ActiveWindow;
         public ulong FocusWindow;
-        private readonly Dictionary<string, string> _normalizedPathCache = new(StringComparer.OrdinalIgnoreCase);
+        // Ordinal: the result keeps the input's case.
+        private readonly Dictionary<string, LinkedListNode<(string Input, string Normalized)>> _normalizedPathCache = new(StringComparer.Ordinal);
+        private readonly LinkedList<(string Input, string Normalized)> _normalizedPathOrder = new();
 
         /// <summary>
         /// Initialize the environment for the helper (Processes, Console, etc).
@@ -2616,9 +2671,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinEmulatedThread.GetState(Thread).WaitAlertable = false;
             WinEmulatedThread.GetState(Thread).ApcAlertable = false;
 
-            ulong ResumeRip = WinEmulatedThread.GetState(Thread).WaitReturnRIP != 0 ? WinEmulatedThread.GetState(Thread).WaitReturnRIP : (WinEmulatedThread.GetState(Thread).WaitResumeRIP != 0 ? WinEmulatedThread.GetState(Thread).WaitResumeRIP + 2 : Thread.Context.RIP);
-            Thread.Context.RIP = ResumeRip;
-            Thread.Context.RAX = (ulong)NTSTATUS.STATUS_USER_APC;
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (State.RetrySyscallActive)
+            {
+                Thread.Context.RIP = State.WaitResumeRIP;
+                Thread.Context.RAX = State.RetrySyscallNumber;
+                State.RetrySyscallActive = false;
+                State.RetrySyscallNumber = 0;
+            }
+            else
+            {
+                ulong ResumeRip = WinEmulatedThread.GetState(Thread).WaitReturnRIP != 0 ? WinEmulatedThread.GetState(Thread).WaitReturnRIP : (WinEmulatedThread.GetState(Thread).WaitResumeRIP != 0 ? WinEmulatedThread.GetState(Thread).WaitResumeRIP + 2 : Thread.Context.RIP);
+                Thread.Context.RIP = ResumeRip;
+                Thread.Context.RAX = (ulong)NTSTATUS.STATUS_USER_APC;
+            }
+
             WinEmulatedThread.GetState(Thread).WaitResumeRIP = 0;
             WinEmulatedThread.GetState(Thread).WaitReturnRIP = 0;
             if (Emulator.CurrentThread == Thread)
@@ -2626,6 +2693,23 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Emulator.WriteRegister(Registers.UC_X86_REG_RIP, Thread.Context.RIP);
                 Emulator.WriteRegister(Registers.UC_X86_REG_RAX, Thread.Context.RAX);
             }
+        }
+
+        // NT checks for a queued user APC before the wait objects and the timeout.
+        public bool TryEndWaitWithUserApc(EmulatedThread Thread, bool Alertable)
+        {
+            if (!Alertable || Thread == null)
+                return false;
+
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (State.PendingUserApcs.Count == 0)
+                return false;
+
+            Emulator._emulator.WriteRegister(Emulator.IPRegister, GetSyscallRip(Thread, false) + 2);
+            State.ApcAlertable = true;
+            Thread.State = EmulatedThreadState.Ready;
+            Emulator._emulator.StopEmulation();
+            return true;
         }
 
         public bool DispatchNextUserApc(EmulatedThread Thread)
@@ -6826,13 +6910,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(NtPath))
                 return null;
 
-            if (_normalizedPathCache.TryGetValue(NtPath, out string Cached))
-                return Cached;
+            if (_normalizedPathCache.TryGetValue(NtPath, out LinkedListNode<(string Input, string Normalized)> Cached))
+            {
+                _normalizedPathOrder.Remove(Cached);
+                _normalizedPathOrder.AddFirst(Cached);
+                return Cached.Value.Normalized;
+            }
 
-            NtPath = FixupNtRegistryPath(NtPath);
-            NtPath = NormalizeKeyPath(NtPath);
-            _normalizedPathCache[NtPath] = NtPath;
-            return NtPath;
+            string Normalized = NormalizeKeyPath(FixupNtRegistryPath(NtPath));
+            LinkedListNode<(string Input, string Normalized)>? Node = _normalizedPathOrder.Last;
+
+            if (Node != null && _normalizedPathCache.Count >= Settings.MemoryBudget.RegistryPathCacheEntries)
+            {
+                _normalizedPathOrder.RemoveLast();
+                _normalizedPathCache.Remove(Node.Value.Input);
+                Node.Value = (NtPath, Normalized);
+            }
+            else
+            {
+                Node = new LinkedListNode<(string Input, string Normalized)>((NtPath, Normalized));
+            }
+
+            _normalizedPathOrder.AddFirst(Node);
+            _normalizedPathCache.Add(NtPath, Node);
+            return Normalized;
         }
 
         private bool IsVirtualRegistryRoot(string NtPath)

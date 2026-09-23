@@ -66,6 +66,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread.WaitActive)
                 return ContinueDelay(Instance, Thread);
 
+            if (Instance.WinHelper.TryEndWaitWithUserApc(Thread, Alertable))
+                return NTSTATUS.STATUS_USER_APC;
+
             ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Thread, false);
             ulong NextRip = SyscallRip + 2;
 

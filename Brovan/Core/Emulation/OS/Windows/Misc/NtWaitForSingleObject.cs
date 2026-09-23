@@ -51,6 +51,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Obj == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            if (Instance.WinHelper.TryEndWaitWithUserApc(Thread, Alertable))
+                return NTSTATUS.STATUS_USER_APC;
+
             if (Instance.TryAcquireWaitHandle(Handle, Thread, out NTSTATUS AcquiredStatus))
                 return AcquiredStatus;
 

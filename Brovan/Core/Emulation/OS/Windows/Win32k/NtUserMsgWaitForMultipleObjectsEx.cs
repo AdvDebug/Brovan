@@ -130,6 +130,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             bool WaitAll = (Flags & MWMO_WAITALL) != 0;
             bool Alertable = (Flags & MWMO_ALERTABLE) != 0;
 
+            // win32k returns a ready message before the APC check, except WAITALL with handles.
+            bool MessageFirst = (!WaitAll || Count == 0) && Alertable && State.PendingUserApcs.Count > 0
+                && Win32kHelper.HasQueuedInputEvent(Instance, WakeMask, Thread.ThreadId);
+            if (!MessageFirst && Instance.WinHelper.TryEndWaitWithUserApc(Thread, Alertable))
+                return NTSTATUS.STATUS_USER_APC;
+
             if (TryGetSatisfiedIndex(Instance, Thread, Handles, WaitAll, WakeMask, out NTSTATUS ImmediateStatus))
                 return ImmediateStatus;
 

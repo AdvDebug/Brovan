@@ -17,8 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong FileHandle = Instance.WinHelper.GetArg(0);
             ulong EventHandle = Instance.WinHelper.GetArg(1);
-
-            // ulong ApcRoutine = Instance.WinHelper.GetArg(2); // not used for now
+            ulong ApcRoutine = Instance.WinHelper.GetArg(2);
             ulong ApcContext = Instance.WinHelper.GetArg(3);
             ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(4);
             uint IoControlCode = (uint)Instance.WinHelper.GetArg(5);
@@ -36,6 +35,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinFile File = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             if (File == null)
             {
+                Instance.WinHelper.ClearPipeWait();
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
@@ -70,8 +70,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
+            Instance.WinHelper.ResetIoEvent(EventHandle);
+
             DeviceData Data = new DeviceData();
             Data.File = File;
+            Data.FileHandle = FileHandle;
+            Data.EventHandle = EventHandle;
+            Data.ApcRoutine = ApcRoutine;
+            Data.ApcContext = ApcContext;
+            Data.IoStatusBlock = IoStatusBlockPtr;
+            Data.UserBuffer = OutputBufferPtr;
 
             byte[] RentedInput = null;
             if (InputBufferPtr != 0 && InputBufferLength != 0)
@@ -112,9 +120,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Array.Clear(RentedOutput, 0, (int)OutputBufferLength);
                     Data.OutputBuffer = RentedOutput;
                 }
-
-                Data.OutputLength = OutputBufferLength;
             }
+
+            Data.OutputLength = OutputBufferLength;
 
             NTSTATUS Status;
             try
@@ -128,26 +136,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong Information = Data.Information;
 
-            if (Status >= 0 && OutputBufferPtr != 0 && OutputBufferLength != 0 && Data.OutputBuffer != null)
+            if (((uint)Status >> 30) != 3 && OutputBufferPtr != 0 && OutputBufferLength != 0 && Data.OutputBuffer != null)
             {
-                uint ToWrite = Math.Min(OutputBufferLength, (uint)Data.OutputBuffer.Length);
+                uint ToWrite = (uint)Math.Min(Information, Math.Min(OutputBufferLength, (uint)Data.OutputBuffer.Length));
                 if (ToWrite > 0)
-                {
                     Instance.WriteMemory(OutputBufferPtr, Data.OutputBuffer.AsSpan(0, (int)ToWrite));
-
-                    if (Information == 0)
-                        Information = ToWrite;
-                }
             }
 
-            if (Status != NTSTATUS.STATUS_PENDING)
-            {
-                if (RentedOutput != null)
-                    ArrayPool<byte>.Shared.Return(RentedOutput);
+            if (RentedOutput != null)
+                ArrayPool<byte>.Shared.Return(RentedOutput);
 
-                if (RentedInput != null)
-                    ArrayPool<byte>.Shared.Return(RentedInput);
-            }
+            if (RentedInput != null)
+                ArrayPool<byte>.Shared.Return(RentedInput);
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, Information);
 
@@ -158,8 +158,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Ev.Signaled = true;
             }
 
-            if (Status != NTSTATUS.STATUS_PENDING)
-                Instance.WinHelper.QueueFileCompletion(Instance, File, ApcContext, Status, Information);
+            // NT queues no APC or packet for a request that fails without pending.
+            if (Status != NTSTATUS.STATUS_PENDING && ((uint)Status >> 30) != 3)
+                Instance.WinHelper.QueueIoCompletion(File, Instance.CurrentThread, ApcRoutine, ApcContext, IoStatusBlockPtr, Status, Information);
 
             return Status;
         }

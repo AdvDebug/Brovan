@@ -62,6 +62,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!HasControlAccess(Instance, FileHandle, FsControlCode))
                 return WriteIoStatus(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0, Is64Bit);
 
+            Instance.WinHelper.ResetIoEvent(EventHandle);
+
             DeviceData Data = new DeviceData();
 
             if (InputBufferPtr != 0 && InputBufferLength != 0)
@@ -114,9 +116,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong Information = Data.Information;
 
-            if (OutputBufferPtr != 0 && OutputBufferLength != 0 && Data.OutputBuffer != null)
+            if (((uint)Status >> 30) != 3 && OutputBufferPtr != 0 && OutputBufferLength != 0 && Data.OutputBuffer != null)
             {
-                uint ToWrite = Math.Min(OutputBufferLength, (uint)Data.OutputBuffer.Length);
+                uint ToWrite = (uint)Math.Min(Information, Math.Min(OutputBufferLength, (uint)Data.OutputBuffer.Length));
                 if (ToWrite != 0)
                     Instance.WriteMemory(OutputBufferPtr, Data.OutputBuffer.AsSpan(0, (int)ToWrite));
             }

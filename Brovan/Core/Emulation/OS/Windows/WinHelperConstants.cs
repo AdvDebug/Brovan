@@ -17,6 +17,32 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint OutputLength;
         public ulong Information;
         public WinFile File;
+        public ulong FileHandle;
+        public ulong EventHandle;
+        public ulong ApcRoutine;
+        public ulong ApcContext;
+        public ulong IoStatusBlock;
+        public ulong UserBuffer;
+    }
+
+    public readonly struct WinPendingIo
+    {
+        public readonly WinFile File;
+        public readonly int ThreadId;
+        public readonly WinEvent? Event;
+        public readonly ulong ApcRoutine;
+        public readonly ulong ApcContext;
+        public readonly ulong IoStatusBlock;
+
+        public WinPendingIo(in DeviceData Data, int ThreadId, WinEvent? Event)
+        {
+            File = Data.File;
+            this.ThreadId = ThreadId;
+            this.Event = Event;
+            ApcRoutine = Data.ApcRoutine;
+            ApcContext = Data.ApcContext;
+            IoStatusBlock = Data.IoStatusBlock;
+        }
     }
 
     public enum ConsoleObjectKind : byte
@@ -208,6 +234,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_NO_MORE_FILES = 0x80000006,
         STATUS_INVALID_CID = 0xC000000B,
         STATUS_NETWORK_UNREACHABLE = 0xC000023C,
+        STATUS_HOST_UNREACHABLE = 0xC000023D,
+        STATUS_CONNECTION_REFUSED = 0xC0000236,
+        STATUS_CONNECTION_RESET = 0xC000020D,
+        STATUS_CONNECTION_ABORTED = 0xC0000241,
+        STATUS_ADDRESS_ALREADY_EXISTS = 0xC000020A,
+        STATUS_INVALID_ADDRESS_COMPONENT = 0xC0000207,
+        STATUS_HOST_DOWN = 0xC0000350,
+        STATUS_CANCELLED = 0xC0000120,
         STATUS_HANDLE_NOT_CLOSABLE = 0xC0000235,
         STATUS_GUARD_PAGE_VIOLATION = 0x80000001,
         STATUS_IMAGE_NOT_AT_BASE = 0x40000003,

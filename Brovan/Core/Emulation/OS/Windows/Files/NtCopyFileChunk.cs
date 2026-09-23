@@ -17,12 +17,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong SourceOffsetPtr = Instance.WinHelper.GetArg(5);
             ulong DestinationOffsetPtr = Instance.WinHelper.GetArg(6);
 
-            NTSTATUS Status = Copy(Instance, SourceHandle, DestinationHandle, IoStatusBlockPtr, Length, SourceOffsetPtr, DestinationOffsetPtr);
+            NTSTATUS Status = Copy(Instance, SourceHandle, DestinationHandle, EventHandle, IoStatusBlockPtr, Length, SourceOffsetPtr, DestinationOffsetPtr);
             Instance.WinHelper.SignalIoEvent(EventHandle, Status);
             return Status;
         }
 
-        private static NTSTATUS Copy(BinaryEmulator Instance, ulong SourceHandle, ulong DestinationHandle, ulong IoStatusBlockPtr, uint Length, ulong SourceOffsetPtr, ulong DestinationOffsetPtr)
+        private static NTSTATUS Copy(BinaryEmulator Instance, ulong SourceHandle, ulong DestinationHandle, ulong EventHandle, ulong IoStatusBlockPtr, uint Length, ulong SourceOffsetPtr, ulong DestinationOffsetPtr)
         {
             if (IoStatusBlockPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -38,6 +38,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
+
+            Instance.WinHelper.ResetIoEvent(EventHandle);
 
             if (Source.Device || Destination.Device || Source.Pipe != null || Destination.Pipe != null
                 || Source.Directory || Destination.Directory)

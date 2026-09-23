@@ -261,6 +261,7 @@ namespace Brovan.Core.Emulation
         public int Available => _socket.Available;
         public bool Blocking { get => _socket.Blocking; set => _socket.Blocking = value; }
         public bool Connected => _socket.Connected;
+        public bool IsBound => _socket.IsBound;
         public bool DontFragment { get => _socket.DontFragment; set => _socket.DontFragment = value; }
         public bool ExclusiveAddressUse { get => _socket.ExclusiveAddressUse; set => _socket.ExclusiveAddressUse = value; }
         public EndPoint RemoteEndPoint

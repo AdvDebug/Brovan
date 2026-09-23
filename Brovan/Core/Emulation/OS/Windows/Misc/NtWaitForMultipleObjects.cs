@@ -119,6 +119,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Handles.Add(H);
             }
 
+            if (Instance.WinHelper.TryEndWaitWithUserApc(Thread, Alertable))
+                return NTSTATUS.STATUS_USER_APC;
+
             bool WaitAll = WaitType == 0;
             if (TryGetSatisfiedIndex(Instance, Thread, Handles, WaitAll, out int Index, out NTSTATUS WaitStatus))
                 return WaitStatus;

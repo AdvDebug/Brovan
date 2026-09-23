@@ -399,6 +399,8 @@ namespace Brovan.Core.Emulation
             if (WinHelper == null)
                 return false;
 
+            WinHelper.AfdConnects.CompleteFinished(this);
+
             long Now = EmulatedTickCount64;
 
             if (WinHelper.HandleManager.Version == WindowsTimerSnapshotVersion && EarliestWindowsTimerDue >= 0 && Now < EarliestWindowsTimerDue)
@@ -974,6 +976,10 @@ namespace Brovan.Core.Emulation
 
             return false;
         }
+
+        internal bool HasPendingHostIo() => WinHelper != null && WinHelper.AfdConnects.InFlight != 0;
+
+        internal bool HasFinishedHostIo() => WinHelper != null && WinHelper.AfdConnects.HasFinished;
 
         internal bool HasActiveGetMessageWait()
         {

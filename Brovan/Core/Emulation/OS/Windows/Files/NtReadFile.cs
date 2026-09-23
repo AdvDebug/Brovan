@@ -20,6 +20,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
 
             ulong FileHandle = Instance.WinHelper.GetArg(0);
+            ulong EventHandle = Instance.WinHelper.GetArg(1);
             ulong ApcRoutine = Instance.WinHelper.GetArg(2);
             ulong ApcContext = Instance.WinHelper.GetArg(3);
             ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(4);
@@ -56,6 +57,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
+            Instance.WinHelper.ResetIoEvent(EventHandle);
+
             if (FileObj.Pipe != null)
             {
                 if (!HasReadAccess(Instance, FileHandle))
@@ -91,8 +94,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_ACCESS_DENIED;
                     }
 
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
-                    return NTSTATUS.STATUS_SUCCESS;
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
+                    return NTSTATUS.STATUS_END_OF_FILE;
                 }
 
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
@@ -125,11 +128,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             long FileLength = Stream.Length;
             if (Offset >= FileLength)
             {
-                if (ByteOffsetPtr == 0)
-                    FileObj.Position = Offset;
-
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
-                return NTSTATUS.STATUS_SUCCESS;
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
+                return NTSTATUS.STATUS_END_OF_FILE;
             }
 
             int Available = checked((int)Math.Min(int.MaxValue, FileLength - Offset));

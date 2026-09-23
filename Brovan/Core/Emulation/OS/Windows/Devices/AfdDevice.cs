@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
@@ -25,6 +26,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int AFD_GET_ADDRESS = 11;
         private const int AFD_EVENT_SELECT = 33;
         private const int AFD_ENUM_NETWORK_EVENTS = 34;
+        private const int AFD_ROUTING_INTERFACE_QUERY = 42;
+        private const int AFD_ADDRESS_LIST_QUERY = 44;
+        private const int AFD_TRANSPORT_IOCTL = 47;
+
+        private const uint MethodNeither = 3;
+        private const uint IoctlAfdConnect = ((uint)FsctlAfdBase << 12) | ((uint)AFD_CONNECT << 2) | MethodNeither;
 
         private const uint AFD_POLL_RECEIVE = 1u << 0;
         private const uint AFD_POLL_SEND = 1u << 2;
@@ -35,13 +42,18 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint AFD_POLL_ACCEPT = 1u << 7;
         private const uint AFD_POLL_CONNECT_FAIL = 1u << 8;
 
-        private const int DefaultConnectTimeoutMs = 5000;
+        private const uint PollReadEvents = AFD_POLL_RECEIVE | AFD_POLL_DISCONNECT | AFD_POLL_ACCEPT;
+        private const uint PollWriteEvents = AFD_POLL_SEND | AFD_POLL_CONNECT;
+        private const uint PollErrorEvents = AFD_POLL_CONNECT_FAIL | AFD_POLL_ABORT | AFD_POLL_LOCAL_CLOSE;
+
         private const int DefaultIoTimeoutMs = 5000;
-        private const int DefaultAcceptTimeoutMs = 10000;
+        private const int PollRetrySliceMs = 1;
 
         private BrovanSocket? _socket;
         private NetworkAccessPolicy _policy;
         private bool IsListening;
+        private bool _connectPending;
+        private NTSTATUS _connectFailure;
 
         private readonly Dictionary<int, BrovanSocket> _PendingAccepted = new();
         private int _NextSequence;
@@ -241,6 +253,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static uint GuestInputLength(in DeviceData Data) =>
             Data.InputBuffer == null ? 0u : Math.Min(Data.InputLength, (uint)Data.InputBuffer.Length);
 
+        private static uint GuestOutputLength(in DeviceData Data) =>
+            Data.OutputBuffer == null ? 0u : Math.Min(Data.OutputLength, (uint)Data.OutputBuffer.Length);
+
         private static (uint Length, ulong BufferPtr)? ReadWsabuf(BinaryEmulator Emulator, ulong WsaBufPtr)
         {
             if (WsaBufPtr == 0)
@@ -264,33 +279,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return (Length32, BufferPtr32);
         }
 
-        private bool ConnectWithTimeout(EndPoint Remote, int TimeoutMs)
-        {
-            EnsureSocket();
-            if (_socket == null)
-                return false;
-
-            try
-            {
-                IAsyncResult Ar = _socket.BeginConnect(Remote, null, null);
-
-                bool Ok = Ar.AsyncWaitHandle.WaitOne(TimeoutMs);
-                if (!Ok)
-                {
-                    try { _socket.Close(); } catch { }
-                    return false;
-                }
-
-                _socket.EndConnect(Ar);
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private BrovanSocket? AcceptWithTimeout(int TimeoutMs, out EndPoint? Remote)
+        private BrovanSocket? TryAccept(out EndPoint? Remote)
         {
             Remote = null;
             EnsureSocket();
@@ -299,7 +288,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             try
             {
-                if (!_socket.Poll(TimeoutMs * 1000, SelectMode.SelectRead))
+                if (!_socket.Poll(0, SelectMode.SelectRead))
                     return null;
 
                 BrovanSocket Accepted = _socket.Accept();
@@ -410,25 +399,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        // AFD ignores ConnectEndpoint on the endpoint itself.
         private NTSTATUS IoctlConnect(ref DeviceData Data, BinaryEmulator Instance)
         {
-            EnsureSocket();
-            if (_socket == null)
-                return NTSTATUS.STATUS_UNSUCCESSFUL;
-
-            uint InputLength = GuestInputLength(in Data);
-            if (Data.InputBuffer == null || InputLength < 24 + 16)
-                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
-
-            IPEndPoint? IpEndPoint = ParseSockaddr(Data.InputBuffer, InputLength, 24);
-            if (IpEndPoint == null)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!IsEndpointAllowed(Instance, IpEndPoint))
-                return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
-
-            bool Ok = ConnectWithTimeout(IpEndPoint, DefaultConnectTimeoutMs);
-            return Ok ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_UNSUCCESSFUL;
+            NTSTATUS Status = CheckConnectLengths(in Data, Instance);
+            return Status == NTSTATUS.STATUS_SUCCESS ? StartConnect(this, ref Data, Instance) : Status;
         }
 
         private NTSTATUS IoctlListen(ref DeviceData Data, BinaryEmulator Instance)
@@ -474,12 +449,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.Settings.GetNetworkPolicy().HasAnyAccess())
                 return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
 
-            if (Data.OutputBuffer == null || Data.OutputBuffer.Length < 20)
+            uint OutputLength = GuestOutputLength(in Data);
+            if (Data.OutputBuffer == null || OutputLength < 12)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (OutputLength < 20)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-            BrovanSocket? Accepted = AcceptWithTimeout(DefaultAcceptTimeoutMs, out EndPoint? Remote);
+            BrovanSocket? Accepted = TryAccept(out EndPoint? Remote);
             if (Accepted == null)
-                return NTSTATUS.STATUS_TIMEOUT;
+            {
+                if (Instance.WinHelper.TryContinuePipeWait(Data.FileHandle, int.MaxValue, PollRetrySliceMs))
+                    return NTSTATUS.STATUS_PENDING;
+
+                // STATUS_TIMEOUT is a success status.
+                return NTSTATUS.STATUS_IO_TIMEOUT;
+            }
+
+            Instance.WinHelper.ClearPipeWait();
 
             if (Remote != null && !IsEndpointAllowed(Instance, Remote))
             {
@@ -490,17 +477,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             int Sequence = _NextSequence++;
             _PendingAccepted[Sequence] = Accepted;
 
-            Array.Clear(Data.OutputBuffer, 0, Data.OutputBuffer.Length);
+            Array.Clear(Data.OutputBuffer, 0, (int)OutputLength);
             BinaryPrimitives.WriteInt32LittleEndian(Data.OutputBuffer.AsSpan(0, 4), Sequence);
 
+            uint AddressLength = 16;
             if (Remote is IPEndPoint RemoteIp)
             {
                 byte[] SockAddr = BuildSockaddr(RemoteIp);
-                if (SockAddr.Length >= 16)
-                    Buffer.BlockCopy(SockAddr, 0, Data.OutputBuffer, 4, 16);
+                AddressLength = Math.Min((uint)SockAddr.Length, OutputLength - 4);
+                Buffer.BlockCopy(SockAddr, 0, Data.OutputBuffer, 4, (int)AddressLength);
             }
 
-            Data.Information = 20;
+            Data.Information = 4 + AddressLength;
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -673,7 +661,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (_socket == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            if (Data.OutputBuffer == null)
+            uint OutputLength = GuestOutputLength(in Data);
+            if (Data.OutputBuffer == null || OutputLength < 2)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             try
@@ -686,10 +675,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (SockAddr.Length == 0)
                     return NTSTATUS.STATUS_NOT_SUPPORTED;
 
-                if (Data.OutputBuffer.Length < SockAddr.Length)
+                if (OutputLength < SockAddr.Length)
                     return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-                Array.Clear(Data.OutputBuffer, 0, Data.OutputBuffer.Length);
+                Array.Clear(Data.OutputBuffer, 0, (int)OutputLength);
                 Buffer.BlockCopy(SockAddr, 0, Data.OutputBuffer, 0, SockAddr.Length);
                 Data.Information = (ulong)SockAddr.Length;
                 return NTSTATUS.STATUS_SUCCESS;
@@ -700,14 +689,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        private static NTSTATUS ReplyZeroed(ref DeviceData Data)
+        {
+            uint OutputLength = GuestOutputLength(in Data);
+            if (OutputLength != 0)
+                Array.Clear(Data.OutputBuffer, 0, (int)OutputLength);
+
+            Data.Information = OutputLength;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
         private NTSTATUS IoctlPoll(ref DeviceData Data, BinaryEmulator Instance)
         {
             if (Data.InputBuffer == null || Data.OutputBuffer == null)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             int HeaderSize = 16;
-            if (Data.OutputBuffer.Length < HeaderSize || GuestInputLength(in Data) < HeaderSize)
-                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+            uint InputLength = GuestInputLength(in Data);
+            if (InputLength < HeaderSize)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             uint Count = ReadU32(Data.InputBuffer, 8);
             if (Count == 0)
@@ -716,11 +716,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             int EntrySize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 16 : 12;
             long Needed = HeaderSize + (long)Count * EntrySize;
 
-            if (GuestInputLength(in Data) < Needed || Data.OutputBuffer.Length < Needed)
-                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+            if (InputLength < Needed || GuestOutputLength(in Data) < InputLength)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             int OutIndex = 0;
             Buffer.BlockCopy(Data.InputBuffer, 0, Data.OutputBuffer, 0, HeaderSize);
+            bool Waiting = Instance.WinHelper.IsPipeWaitActive(Data.FileHandle);
 
             for (int i = 0; i < Count; i++)
             {
@@ -733,27 +734,47 @@ namespace Brovan.Core.Emulation.OS.Windows
                 uint Requested = ReadU32(Data.InputBuffer, EntryOffset + (Instance._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4));
 
                 WinFile? File = Instance.WinHelper.GetFileByHandle(Handle, AccessMask.GiveTemp);
-                if (File?.Handler?.Target is not AfdDevice EndpointDevice || EndpointDevice._socket == null)
+                NTSTATUS EntryStatus = NTSTATUS.STATUS_SUCCESS;
+                uint Triggered;
+
+                if (File?.Handler?.Target is not AfdDevice EndpointDevice)
+                {
+                    // NT ends a waiting poll when one of its endpoints closes.
+                    if (!Waiting)
+                        return NTSTATUS.STATUS_INVALID_HANDLE;
+
+                    Triggered = AFD_POLL_LOCAL_CLOSE;
+                }
+                else if (EndpointDevice._socket == null || EndpointDevice._connectPending)
+                {
                     continue;
-
-                BrovanSocket HostSocket = EndpointDevice._socket;
-
-                bool ReadReady = false;
-                bool WriteReady = false;
-                bool ErrorReady = false;
-
-                try
-                {
-                    ReadReady = HostSocket.Poll(0, SelectMode.SelectRead);
-                    WriteReady = HostSocket.Poll(0, SelectMode.SelectWrite);
-                    ErrorReady = HostSocket.Poll(0, SelectMode.SelectError);
                 }
-                catch
+                else if ((int)EndpointDevice._connectFailure < 0 && !EndpointDevice._socket.Connected)
                 {
-                    ErrorReady = true;
+                    Triggered = Requested & AFD_POLL_CONNECT_FAIL;
+                    EntryStatus = EndpointDevice._connectFailure;
+                }
+                else
+                {
+                    BrovanSocket HostSocket = EndpointDevice._socket;
+                    bool ReadReady = false;
+                    bool WriteReady = false;
+                    bool ErrorReady = false;
+
+                    try
+                    {
+                        ReadReady = (Requested & PollReadEvents) != 0 && HostSocket.Poll(0, SelectMode.SelectRead);
+                        WriteReady = (Requested & PollWriteEvents) != 0 && HostSocket.Poll(0, SelectMode.SelectWrite);
+                        ErrorReady = (Requested & PollErrorEvents) != 0 && HostSocket.Poll(0, SelectMode.SelectError);
+                    }
+                    catch
+                    {
+                        ErrorReady = true;
+                    }
+
+                    Triggered = MapPollEventsToTriggered(Requested, ReadReady, WriteReady, ErrorReady, EndpointDevice.IsListening);
                 }
 
-                uint Triggered = MapPollEventsToTriggered(Requested, ReadReady, WriteReady, ErrorReady, EndpointDevice.IsListening);
                 if (Triggered == 0)
                     continue;
 
@@ -763,13 +784,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     BinaryPrimitives.WriteUInt64LittleEndian(Data.OutputBuffer.AsSpan(OutEntryOffset, 8), Handle);
                     BinaryPrimitives.WriteUInt32LittleEndian(Data.OutputBuffer.AsSpan(OutEntryOffset + 8, 4), Triggered);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.OutputBuffer.AsSpan(OutEntryOffset + 12, 4), (uint)NTSTATUS.STATUS_SUCCESS);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.OutputBuffer.AsSpan(OutEntryOffset + 12, 4), (uint)EntryStatus);
                 }
                 else
                 {
                     BinaryPrimitives.WriteUInt32LittleEndian(Data.OutputBuffer.AsSpan(OutEntryOffset, 4), (uint)Handle);
                     BinaryPrimitives.WriteUInt32LittleEndian(Data.OutputBuffer.AsSpan(OutEntryOffset + 4, 4), Triggered);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.OutputBuffer.AsSpan(OutEntryOffset + 8, 4), (uint)NTSTATUS.STATUS_SUCCESS);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.OutputBuffer.AsSpan(OutEntryOffset + 8, 4), (uint)EntryStatus);
                 }
 
                 OutIndex++;
@@ -777,11 +798,31 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             BinaryPrimitives.WriteUInt32LittleEndian(Data.OutputBuffer.AsSpan(8, 4), (uint)OutIndex);
 
-            if (OutIndex == 0)
-                return NTSTATUS.STATUS_TIMEOUT;
+            long Timeout = BinaryPrimitives.ReadInt64LittleEndian(Data.InputBuffer.AsSpan(0, 8));
+            bool Overlapped = Data.ApcContext != 0 || Data.ApcRoutine != 0;
 
+            // Information stays 0 while pending, so the retry reads the input unchanged.
+            if (OutIndex == 0 && Timeout != 0 && !Overlapped &&
+                Instance.WinHelper.TryContinuePipeWait(Data.FileHandle, PollTimeoutMs(Instance, Timeout), PollRetrySliceMs))
+                return NTSTATUS.STATUS_PENDING;
+
+            Instance.WinHelper.ClearPipeWait();
             Data.Information = (ulong)(HeaderSize + OutIndex * EntrySize);
-            return NTSTATUS.STATUS_SUCCESS;
+
+            return OutIndex == 0 && Timeout != 0 ? NTSTATUS.STATUS_TIMEOUT : NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static int PollTimeoutMs(BinaryEmulator Instance, long Timeout)
+        {
+            long Delta = Timeout < 0
+                ? (Timeout == long.MinValue ? long.MaxValue : -Timeout)
+                : Timeout - Instance.GetEmulatedSystemTimeFileTimeUtc();
+
+            if (Delta <= 0)
+                return 0;
+
+            long Milliseconds = Delta / 10000 + (Delta % 10000 != 0 ? 1 : 0);
+            return Milliseconds > int.MaxValue ? int.MaxValue : (int)Milliseconds;
         }
 
         public NTSTATUS Handle(uint Ioctl, ref DeviceData Data, BinaryEmulator Instance)
@@ -814,12 +855,238 @@ namespace Brovan.Core.Emulation.OS.Windows
                     AFD_ENUM_NETWORK_EVENTS => NTSTATUS.STATUS_SUCCESS,
                     AFD_RECEIVE_DATAGRAM => Policy.Mode == NetworkAccessMode.Full ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_NETWORK_UNREACHABLE,
                     AFD_SEND_DATAGRAM => Policy.Mode == NetworkAccessMode.Full ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_NETWORK_UNREACHABLE,
+                    AFD_ROUTING_INTERFACE_QUERY or AFD_ADDRESS_LIST_QUERY or AFD_TRANSPORT_IOCTL => ReplyZeroed(ref Data),
                     _ => NTSTATUS.STATUS_SUCCESS
                 };
             }
             catch
             {
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
+            }
+        }
+
+        internal static NTSTATUS HandleConnectHelper(uint Ioctl, ref DeviceData Data, BinaryEmulator Instance)
+        {
+            if (!Instance.Settings.GetNetworkPolicy().HasAnyAccess())
+                return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
+
+            if (Ioctl != IoctlAfdConnect)
+                return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
+
+            NTSTATUS Status = CheckConnectLengths(in Data, Instance);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            Status = ResolveConnectEndpoint(Instance, ReadPtr(Instance, Data.InputBuffer, 2 * Instance.WinHelper.PointerSize), out AfdDevice? Endpoint);
+            return Endpoint == null ? Status : StartConnect(Endpoint, ref Data, Instance);
+        }
+
+        private static NTSTATUS CheckConnectLengths(in DeviceData Data, BinaryEmulator Instance)
+        {
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+
+            if (Data.OutputLength != 0 && Data.OutputLength < 2 * PointerSize)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (Data.InputBuffer == null || GuestInputLength(in Data) < 3 * PointerSize)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS StartConnect(AfdDevice Endpoint, ref DeviceData Data, BinaryEmulator Instance)
+        {
+            int PointerSize = Instance.WinHelper.PointerSize;
+            uint HeaderSize = 3 * (uint)PointerSize;
+            uint InputLength = GuestInputLength(in Data);
+
+            if (InputLength - HeaderSize < 2)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            IPEndPoint? Remote = ParseSockaddr(Data.InputBuffer, InputLength, (int)HeaderSize);
+            if (Remote == null)
+                return NTSTATUS.STATUS_INVALID_ADDRESS;
+
+            if (Data.UserBuffer != 0 && !Instance.IsRegionMapped(Data.UserBuffer, 4))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            // A root endpoint means a multipoint join, which uses another IOCTL.
+            if (ReadPtr(Instance, Data.InputBuffer, PointerSize) != 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            BrovanSocket? Socket = Endpoint._socket;
+            if (Endpoint._connectPending || Endpoint.IsListening || Socket == null || !Socket.IsBound ||
+                (Socket.SocketType == SocketType.Stream && Socket.Connected))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (!IsEndpointAllowed(Instance, Remote))
+                return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
+
+            if ((int)Endpoint._connectFailure < 0)
+            {
+                NTSTATUS Rebound = Endpoint.RebindAfterFailedConnect();
+                if (Rebound != NTSTATUS.STATUS_SUCCESS)
+                    return Rebound;
+
+                Socket = Endpoint._socket!;
+            }
+
+            return new HostConnect(Instance, Endpoint, in Data).Start(Socket, Remote);
+        }
+
+        // A host can replace a socket that failed to connect with an unbound one. AFD keeps the endpoint bound.
+        private NTSTATUS RebindAfterFailedConnect()
+        {
+            try
+            {
+                EndPoint? Local = _socket?.LocalEndPoint;
+                if (Local == null)
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                _socket!.Dispose();
+                _socket = null;
+                EnsureSocket();
+                _socket!.Bind(Local);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+            catch (Exception Ex)
+            {
+                return Ex is SocketException SocketEx ? MapConnectError(SocketEx.SocketErrorCode) : NTSTATUS.STATUS_UNSUCCESSFUL;
+            }
+        }
+
+        private static NTSTATUS ResolveConnectEndpoint(BinaryEmulator Instance, ulong Handle, out AfdDevice? Endpoint)
+        {
+            Endpoint = null;
+
+            if (HandleManager.IsCurrentProcessPseudoHandle(Handle) || HandleManager.IsCurrentThreadPseudoHandle(Handle))
+                return NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+
+            if (!Instance.WinHelper.HandleManager.TryGetHandle(Handle, out HandleEntry Entry) || Entry.Object == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            if (Entry.Object is not WinFile File)
+                return NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+
+            if (File.Handler?.Target is not AfdDevice Device)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            Endpoint = Device;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS MapConnectError(SocketError Error) => Error switch
+        {
+            SocketError.Success => NTSTATUS.STATUS_SUCCESS,
+            SocketError.ConnectionRefused => NTSTATUS.STATUS_CONNECTION_REFUSED,
+            SocketError.TimedOut => NTSTATUS.STATUS_IO_TIMEOUT,
+            SocketError.NetworkUnreachable => NTSTATUS.STATUS_NETWORK_UNREACHABLE,
+            SocketError.HostUnreachable => NTSTATUS.STATUS_HOST_UNREACHABLE,
+            SocketError.HostDown => NTSTATUS.STATUS_HOST_DOWN,
+            SocketError.ConnectionReset => NTSTATUS.STATUS_CONNECTION_RESET,
+            SocketError.ConnectionAborted => NTSTATUS.STATUS_CONNECTION_ABORTED,
+            SocketError.AddressAlreadyInUse => NTSTATUS.STATUS_ADDRESS_ALREADY_EXISTS,
+            SocketError.AddressNotAvailable => NTSTATUS.STATUS_INVALID_ADDRESS_COMPONENT,
+            SocketError.AccessDenied => NTSTATUS.STATUS_ACCESS_DENIED,
+            SocketError.OperationAborted => NTSTATUS.STATUS_CANCELLED,
+            _ => NTSTATUS.STATUS_UNSUCCESSFUL
+        };
+
+        internal sealed class HostConnects
+        {
+            private readonly ConcurrentQueue<HostConnect> Finished = new();
+
+            internal int InFlight;
+
+            internal bool HasFinished => !Finished.IsEmpty;
+
+            internal void Publish(HostConnect Connect) => Finished.Enqueue(Connect);
+
+            internal void CompleteFinished(BinaryEmulator Instance)
+            {
+                while (Finished.TryDequeue(out HostConnect? Connect))
+                {
+                    InFlight--;
+                    Connect.Complete(Instance);
+                }
+            }
+        }
+
+        internal sealed class HostConnect
+        {
+            private readonly HostConnects Owner;
+            private readonly WakeSignal Wake;
+            private readonly AfdDevice Endpoint;
+            private readonly WinPendingIo Io;
+            private readonly ulong UserBuffer;
+            private SocketAsyncEventArgs? Args;
+            private SocketError Result;
+
+            internal HostConnect(BinaryEmulator Instance, AfdDevice Endpoint, in DeviceData Data)
+            {
+                Owner = Instance.WinHelper.AfdConnects;
+                Wake = Instance.WakeSignal;
+                this.Endpoint = Endpoint;
+                Io = new WinPendingIo(in Data, Instance.CurrentThreadId, Instance.WinHelper.GetEventByHandle(Data.EventHandle, AccessMask.GiveTemp));
+                UserBuffer = Data.UserBuffer;
+            }
+
+            internal NTSTATUS Start(BrovanSocket Socket, IPEndPoint Remote)
+            {
+                Args = new SocketAsyncEventArgs { RemoteEndPoint = Remote, UserToken = this };
+                Args.Completed += OnHostCompleted;
+
+                bool Pending;
+                try
+                {
+                    Pending = Socket.ConnectAsync(Args);
+                }
+                catch (Exception Ex)
+                {
+                    Args.Dispose();
+                    return Ex is SocketException SocketEx ? MapConnectError(SocketEx.SocketErrorCode) : NTSTATUS.STATUS_UNSUCCESSFUL;
+                }
+
+                Begin();
+                if (!Pending)
+                    OnHostCompleted(null, Args);
+
+                return NTSTATUS.STATUS_PENDING;
+            }
+
+            private void Begin()
+            {
+                Endpoint._connectPending = true;
+                Endpoint._connectFailure = NTSTATUS.STATUS_SUCCESS;
+                Owner.InFlight++;
+            }
+
+            // Host thread. Touch only the queue and the wake counter.
+            private static void OnHostCompleted(object? Sender, SocketAsyncEventArgs Completed)
+            {
+                HostConnect Connect = (HostConnect)Completed.UserToken!;
+                Connect.Result = Completed.SocketError;
+                Connect.Finish();
+            }
+
+            private void Finish()
+            {
+                Owner.Publish(this);
+                Wake.Bump();
+            }
+
+            internal void Complete(BinaryEmulator Instance)
+            {
+                NTSTATUS Status = MapConnectError(Result);
+                Endpoint._connectPending = false;
+                Endpoint._connectFailure = (int)Status < 0 ? Status : NTSTATUS.STATUS_SUCCESS;
+
+                // AFD writes the status to the start of the output buffer.
+                if (UserBuffer != 0 && Instance.WinHelper.IsPendingIoLive(in Io))
+                    Instance.WinHelper.WriteUInt32(UserBuffer, (uint)Status);
+
+                Instance.WinHelper.CompletePendingIo(in Io, Status, 0);
+                Args?.Dispose();
             }
         }
     }
@@ -844,7 +1111,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
         {
             InternalPath = DevicePath;
-            Handler = static (uint Ioctl, ref DeviceData Data, BinaryEmulator Instance) => NTSTATUS.STATUS_SUCCESS;
+            Handler = AfdDevice.HandleConnectHelper;
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

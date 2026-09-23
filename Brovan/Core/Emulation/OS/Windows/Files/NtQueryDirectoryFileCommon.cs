@@ -9,7 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint SL_RETURN_SINGLE_ENTRY = 0x02;
         private const uint SL_NO_CURSOR_UPDATE = 0x10;
 
-        public static NTSTATUS Handle(BinaryEmulator Instance, ulong FileHandle, ulong IoStatusBlock, ulong FileInformation, uint Length, uint FileInformationClass, uint QueryFlags, ulong FileName)
+        public static NTSTATUS Handle(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong IoStatusBlock, ulong FileInformation, uint Length, uint FileInformationClass, uint QueryFlags, ulong FileName)
         {
             if (IoStatusBlock == 0 || FileInformation == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -37,6 +37,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
+
+            Instance.WinHelper.ResetIoEvent(EventHandle);
 
             string HostPath = GeneralHelper.IO.ResolveHostPath(DirectoryHandle.Path, Helpers.BinaryHelpers.BinaryFormat.PE);
             if (string.IsNullOrEmpty(HostPath) || !Directory.Exists(HostPath))

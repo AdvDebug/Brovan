@@ -48,6 +48,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
+            Instance.WinHelper.ResetIoEvent(EventHandle);
+
             if (FileObj.ConsoleKind == ConsoleObjectKind.Output || FileHandle == Instance.WinHelper.STD_OUT.Handle)
                 return HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
 

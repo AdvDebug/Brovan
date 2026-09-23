@@ -17,8 +17,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS Handle(uint IOCTL, ref DeviceData Data, BinaryEmulator Instance)
         {
-            if (Data.OutputBuffer != null && Data.OutputBuffer.Length != 0)
-                Array.Clear(Data.OutputBuffer, 0, Data.OutputBuffer.Length);
+            if (Data.OutputBuffer != null && Data.OutputLength != 0)
+                Array.Clear(Data.OutputBuffer, 0, (int)Data.OutputLength);
 
             Data.OutputBuffer = Array.Empty<byte>();
             Data.Information = 0;
