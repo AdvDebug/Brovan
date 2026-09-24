@@ -20,7 +20,7 @@ namespace Brovan.Core.Emulation.Guests
         Direct = 2
     }
 
-    internal class WindowsGuest : IGuestEnvironment
+    internal sealed class WindowsGuest : IGuestEnvironment
     {
         public GuestOsKind Os => GuestOsKind.Windows;
 

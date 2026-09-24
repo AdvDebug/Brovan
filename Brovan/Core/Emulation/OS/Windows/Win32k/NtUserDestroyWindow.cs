@@ -6,14 +6,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-
-            const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
-
             ulong Hwnd = Instance.WinHelper.GetArg(0);
-            bool Success = Instance.WinHelper.DestroyWindow(Hwnd);
 
-            Instance.SetLastWinError(Success ? 0u : ERROR_INVALID_WINDOW_HANDLE);
-            Instance.SetBooleanSyscallReturn(Success);
+            if (!Instance.WinHelper.DestroyWindow(Hwnd, 1, out bool Deferred))
+            {
+                Instance.SetBooleanSyscallReturn(false);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            if (!Deferred)
+                Instance.SetBooleanSyscallReturn(true);
+
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

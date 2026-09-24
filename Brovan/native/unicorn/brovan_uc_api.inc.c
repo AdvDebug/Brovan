@@ -335,7 +335,7 @@ void brov_free_uc(void *p)
         uc->brov_ram_starts = NULL;
         uc->brov_ram_starts_cap = 0;
 
-        free(uc->brov_jmp);
+        /* The table is arena memory, not heap. */
         uc->brov_jmp = NULL;
     }
 
@@ -728,26 +728,18 @@ void brov_jmp_clear_pc(struct uc_struct *uc, uint64_t pc)
     }
 }
 
-/* The slots of one page are not contiguous, so the page is retired by walking
- * its addresses. */
+/* An unmap clears its pages one after another, so the first call clears the table
+ * and the rest find it clean. */
 void brov_jmp_clear_page(struct uc_struct *uc, uint64_t page_addr)
 {
-    uint64_t off;
-
-    if (!uc || !uc->brov_jmp) {
-        return;
-    }
-    for (off = 0; off < 4096; off++) {
-        unsigned slot = brov_jmp_slot(page_addr + off);
-
-        uc->brov_jmp[slot].key = 0;
-        uc->brov_jmp[slot].tc_ptr = NULL;
-    }
+    (void)page_addr;
+    brov_jmp_clear_all(uc);
 }
 
 void brov_jmp_clear_all(struct uc_struct *uc)
 {
-    if (uc && uc->brov_jmp) {
+    if (uc && uc->brov_jmp && uc->brov_jmp_dirty) {
         memset(uc->brov_jmp, 0, BROV_JMP_SIZE * sizeof(brov_jmp_entry));
+        uc->brov_jmp_dirty = 0;
     }
 }

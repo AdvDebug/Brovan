@@ -93,12 +93,36 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong SavedArg3;
 
         public WinWindowCreation WindowCreation;
+        public WinWindowDestruction WindowDestruction;
     }
 
     public sealed class WinWindowCreation
     {
         public ulong Hwnd;
         public WinWindowCreationStep Step;
+    }
+
+    public sealed class WinWindowDestruction
+    {
+        public ulong Result;
+        public readonly List<WinWindowDestructionStep> Steps = new();
+        public readonly HashSet<ulong> Planned = new();
+        public int Next;
+        public ulong PendingRelease;
+    }
+
+    public readonly struct WinWindowDestructionStep
+    {
+        public readonly ulong Hwnd;
+        public readonly uint Message;
+        public readonly bool Root;
+
+        public WinWindowDestructionStep(ulong Hwnd, uint Message, bool Root)
+        {
+            this.Hwnd = Hwnd;
+            this.Message = Message;
+            this.Root = Root;
+        }
     }
 
     public enum WinWindowCreationStep

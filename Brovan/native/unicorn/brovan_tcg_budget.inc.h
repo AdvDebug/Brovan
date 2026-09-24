@@ -80,7 +80,7 @@ static inline bool brov_lookup_tb_ptr(CPUArchState *env, void **out)
     }
 
     if (unlikely(uc->brov_jmp_flush != uc->tcg_ctx->tb_ctx.tb_flush_count)) {
-        memset(uc->brov_jmp, 0, BROV_JMP_SIZE * sizeof(brov_jmp_entry));
+        brov_jmp_clear_all(uc);
         uc->brov_jmp_flush = uc->tcg_ctx->tb_ctx.tb_flush_count;
     }
 
@@ -109,6 +109,7 @@ static inline bool brov_lookup_tb_ptr(CPUArchState *env, void **out)
     if (cs_base == 0 && *cpu->trace_dstate == 0 && id != 0) {
         e->tc_ptr = tb->tc.ptr;
         e->key = brov_jmp_key((uint64_t)pc, id);
+        uc->brov_jmp_dirty = 1;
     }
 
     *out = tb->tc.ptr;

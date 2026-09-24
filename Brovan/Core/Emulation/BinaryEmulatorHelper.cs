@@ -1567,7 +1567,7 @@ namespace Brovan.Core.Emulation
                     return BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(i + 1, 4));
                 }
             }
-            return 0;
+            return uint.MaxValue;
         }
 
         /// <summary>

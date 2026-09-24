@@ -44,7 +44,7 @@ namespace Brovan.Core.Emulation
             return GeneralHelper.IO.MountWindowsProgramDirectory(Binary.Location, WinSysHelper.CurrentUserProfile);
         }
 
-        internal WindowsGuest WindowsGuest => GetGuest<WindowsGuest>();
+        internal WindowsGuest WindowsGuest => Guest as WindowsGuest;
         internal WinSysHelper WinHelper => WindowsGuest?.WinHelper;
 
         LogFlags IGuestMemory.GuestLogFlags => Settings.Flags;
@@ -2491,6 +2491,7 @@ namespace Brovan.Core.Emulation
                 SpecialProtections = SpecialProtections.None,
                 Flags = AllocationType.None
             });
+            _freedMemorySorted = false;
 
             return true;
         }

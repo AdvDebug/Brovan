@@ -1161,6 +1161,31 @@ namespace Brovan.Core.Emulation
             return Regs;
         }
 
+        private IntPtr[] _xmmSlots;
+        private IntPtr[] _x87Slots;
+
+        private IntPtr[] GetRegisterSlots(ref IntPtr[] Cache, int FirstRegister, int Count, ulong Bytes)
+        {
+            IntPtr[] Slots = Cache;
+            if (Slots != null)
+                return Slots;
+
+            Slots = new IntPtr[Count];
+            for (int i = 0; i < Count; i++)
+            {
+                if (brov_reg_ptr(_uc, FirstRegister + i, out IntPtr Pointer, out UIntPtr Size, out uint Flags) != UCErrors.UC_ERR_OK
+                    || Pointer == IntPtr.Zero || (ulong)Size != Bytes || (Flags & BROV_REG_WRITABLE) == 0)
+                {
+                    Slots = Array.Empty<IntPtr>();
+                    break;
+                }
+                Slots[i] = Pointer;
+            }
+
+            Cache = Slots;
+            return Slots;
+        }
+
         /// <summary>
         /// Transfers XMM0-15 as 32 qwords, low half of each register first.
         /// </summary>
@@ -1168,6 +1193,23 @@ namespace Brovan.Core.Emulation
         {
             if (DisposedCheck() || Values == null || Values.Length < XmmRegisterCount * 2)
                 return false;
+
+            IntPtr[] Slots = GetRegisterSlots(ref _xmmSlots, (int)Registers.UC_X86_REG_XMM0, XmmRegisterCount, 16);
+            if (Slots.Length == XmmRegisterCount)
+            {
+                fixed (ulong* ValsPtr = Values)
+                {
+                    for (int i = 0; i < XmmRegisterCount; i++)
+                    {
+                        if (Write)
+                            Unsafe.CopyBlockUnaligned((void*)Slots[i], &ValsPtr[i * 2], 16);
+                        else
+                            Unsafe.CopyBlockUnaligned(&ValsPtr[i * 2], (void*)Slots[i], 16);
+                    }
+                }
+                _error = UCErrors.UC_ERR_OK;
+                return true;
+            }
 
             lock (_registerLock)
             {
@@ -1189,6 +1231,43 @@ namespace Brovan.Core.Emulation
                     return _error == UCErrors.UC_ERR_OK;
                 }
             }
+        }
+
+        internal const int X87RegisterCount = 8;
+
+        /// <summary>
+        /// Transfers R0-R7 as 16 qwords, significand first. TOP in the status word selects ST0.
+        /// </summary>
+        public unsafe bool TransferX87State(ulong[] Values, ref ulong StatusWord, ref ulong TagWord, bool Write)
+        {
+            if (DisposedCheck() || Values == null || Values.Length < X87RegisterCount * 2)
+                return false;
+
+            IntPtr[] Slots = GetRegisterSlots(ref _x87Slots, (int)Registers.UC_X86_REG_FP0, X87RegisterCount, 10);
+            if (Slots.Length != X87RegisterCount)
+                return false;
+
+            for (int i = 0; i < X87RegisterCount; i++)
+            {
+                byte* Slot = (byte*)Slots[i];
+                if (Write)
+                {
+                    Unsafe.WriteUnaligned(Slot, Values[i * 2]);
+                    Unsafe.WriteUnaligned(Slot + 8, (ushort)Values[i * 2 + 1]);
+                }
+                else
+                {
+                    Values[i * 2] = Unsafe.ReadUnaligned<ulong>(Slot);
+                    Values[i * 2 + 1] = Unsafe.ReadUnaligned<ushort>(Slot + 8);
+                }
+            }
+
+            if (Write)
+                return WriteRegister((int)Registers.UC_X86_REG_FPSW, StatusWord) && WriteRegister((int)Registers.UC_X86_REG_FPTAG, TagWord);
+
+            StatusWord = ReadRegister((int)Registers.UC_X86_REG_FPSW);
+            TagWord = ReadRegister((int)Registers.UC_X86_REG_FPTAG);
+            return _error == UCErrors.UC_ERR_OK;
         }
 
         /// <summary>

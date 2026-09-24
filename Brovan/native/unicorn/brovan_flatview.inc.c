@@ -18,6 +18,73 @@
  * compacted radix tree cannot take an incremental insert. Every other dispatch,
  * including every other address space, is still compacted as usual. */
 
+/* render_memory_region is O(n^2) in the region count. A root of non-overlapping
+ * leaves is uc->mapped_blocks, already in address order. mapped_blocks can still
+ * hold a region that is being unmapped, so the counts must match. */
+static bool brov_render_flat(FlatView *view, MemoryRegion *root)
+{
+    struct uc_struct *uc = root->uc;
+    MemoryRegion *child;
+    Int128 end = int128_zero();
+    unsigned leaves = 0;
+    unsigned found = 0;
+    uint32_t i;
+    static int disabled = -1;
+
+    if (disabled < 0) {
+        disabled = getenv("BROVAN_NO_FLAT_RENDER") != NULL;
+    }
+    if (disabled || !uc || root != uc->system_memory || !root->enabled || root->terminates ||
+        root->readonly || root->addr != 0 || view->nr != 0) {
+        return false;
+    }
+
+    QTAILQ_FOREACH(child, &root->subregions, subregions_link) {
+        if (!child->enabled) {
+            continue;
+        }
+        if (!child->terminates || !QTAILQ_EMPTY(&child->subregions)) {
+            return false;
+        }
+        leaves++;
+    }
+
+    for (i = 0; i < uc->mapped_block_count; i++) {
+        MemoryRegion *mr = uc->mapped_blocks[i];
+
+        if (mr->container != root || !mr->enabled) {
+            continue;
+        }
+        if (!int128_nz(mr->size) || int128_lt(int128_make64(mr->addr), end)) {
+            return false;
+        }
+        end = int128_add(int128_make64(mr->addr), mr->size);
+        if (int128_gt(end, root->size)) {
+            return false;
+        }
+        found++;
+    }
+
+    if (found != leaves) {
+        return false;
+    }
+
+    for (i = 0; i < uc->mapped_block_count; i++) {
+        MemoryRegion *mr = uc->mapped_blocks[i];
+        FlatRange fr;
+
+        if (mr->container != root || !mr->enabled) {
+            continue;
+        }
+        fr.mr = mr;
+        fr.offset_in_region = 0;
+        fr.addr = addrrange_make(int128_make64(mr->addr), mr->size);
+        fr.readonly = mr->readonly;
+        flatview_insert(view, view->nr, &fr);
+    }
+    return true;
+}
+
 static void brov_dispatch_compact(FlatView *fv)
 {
     MemoryRegion *root = fv->root;

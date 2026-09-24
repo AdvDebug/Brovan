@@ -2517,8 +2517,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 && Instance.WinHelper.WritePointer(Address + 16 + PointerSize * 7, Class.SmallIconHandle);
         }
 
-        internal static ulong DispatchMessage(BinaryEmulator Instance, Win32kMessage Message)
+        internal static ulong DispatchMessage(BinaryEmulator Instance, Win32kMessage Message, out bool Deferred)
         {
+            Deferred = false;
+
             WinWindow Window = Message.Hwnd == 0 ? null : Instance.WinHelper.GetWindow(Message.Hwnd);
             if (Message.Hwnd != 0 && Window == null)
             {
@@ -2529,7 +2531,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Window == null)
                 return 0;
 
-            return DefaultWindowProc(Instance, Window, Message.Message, Message.WParam, Message.LParam, false);
+            return DefaultWindowProc(Instance, Window, Message.Message, Message.WParam, Message.LParam, false, out Deferred);
         }
 
         private const int MaxHostInputEventsPerDrain = 64;
@@ -3596,6 +3598,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Instance.WinHelper.EnterUserCallback(Callback, WindowProcCallbackIndex, ArgumentBuffer, Creation);
         }
 
+        internal static bool SendWindowDestroyMessage(BinaryEmulator Instance, WinWindow Window, uint Message, WinWindowDestruction Destruction)
+        {
+            if (Window == null || !TryBeginWindowProcCallback(Instance, Window.WndProc, out ulong Callback, out ulong ArgumentBuffer))
+                return false;
+
+            WriteWindowProcCallbackArguments(Instance, ArgumentBuffer, Window.Hwnd, Window.WndProc, Message, 0, 0);
+            return Instance.WinHelper.EnterUserCallback(Callback, WindowProcCallbackIndex, ArgumentBuffer, null, Destruction: Destruction);
+        }
+
         private static bool TryBeginWindowProcCallback(BinaryEmulator Instance, ulong WndProc, out ulong Callback, out ulong ArgumentBuffer)
         {
             Callback = 0;
@@ -3647,8 +3658,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Instance.WriteMemory(Address, Buffer);
         }
 
-        internal static ulong HandleMessageCall(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam, bool Ansi)
+        internal static ulong HandleMessageCall(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam, bool Ansi, out bool Deferred)
         {
+            Deferred = false;
+
             if (Hwnd != 0 && Instance.WinHelper.GetWindow(Hwnd) == null)
             {
                 Instance.SetLastWinError(ERROR_INVALID_WINDOW_HANDLE);
@@ -3659,11 +3672,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Window == null)
                 return 0;
 
-            return DefaultWindowProc(Instance, Window, Message, WParam, LParam, Ansi);
+            return DefaultWindowProc(Instance, Window, Message, WParam, LParam, Ansi, out Deferred);
         }
 
-        private static ulong DefaultWindowProc(BinaryEmulator Instance, WinWindow Window, uint Message, ulong WParam, ulong LParam, bool Ansi)
+        private static ulong DefaultWindowProc(BinaryEmulator Instance, WinWindow Window, uint Message, ulong WParam, ulong LParam, bool Ansi, out bool Deferred)
         {
+            Deferred = false;
+
             switch (Message)
             {
                 case WM_SETTEXT:
@@ -3690,7 +3705,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     return EraseWindowBackground(Instance, Window, WParam) ? 1ul : 0ul;
 
                 case WM_CLOSE:
-                    Instance.WinHelper.DestroyWindow(Window.Hwnd);
+                    Instance.WinHelper.DestroyWindow(Window.Hwnd, 0, out Deferred);
                     return 0;
 
                 default:

@@ -259,6 +259,7 @@ static inline uint64_t brov_jmp_key(uint64_t pc, unsigned id)
     brov_jmp_entry *brov_jmp;                                                  \
     unsigned brov_jmp_flush;                                                   \
     unsigned char brov_jmp_off;                                                \
+    unsigned char brov_jmp_dirty;                                              \
     struct brov_ops brov;
 
 #define BROVAN_TCG_FIELDS                                                      \

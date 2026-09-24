@@ -116,6 +116,10 @@ namespace Brovan.Core.Emulation
             => Inner.TransferXmmRegisters(values, false);
         public bool WriteXmmRegisters(ulong[] values)
             => Inner.TransferXmmRegisters(values, true);
+        public bool ReadX87State(ulong[] registers, ref ulong statusWord, ref ulong tagWord)
+            => Inner.TransferX87State(registers, ref statusWord, ref tagWord, false);
+        public bool WriteX87State(ulong[] registers, ulong statusWord, ulong tagWord)
+            => Inner.TransferX87State(registers, ref statusWord, ref tagWord, true);
 
         public CPUFlags GetCPUFlags() => Inner.GetCPUFlags();
         public bool SetCPUFlags(CPUFlags flags) => Inner.SetCPUFlags(flags);

@@ -108,6 +108,18 @@ static inline bool brov_tlb_reset_dirty_pages(CPUState *cpu, target_ulong start1
     return true;
 }
 
+/* A jump cache fill reads its code page through the TLB first, so a TLB with no
+ * dirty mmu index has empty jump caches too. */
+static inline bool brov_tlb_flush_is_noop(CPUState *cpu)
+{
+    static int disabled = -1;
+
+    if (disabled < 0) {
+        disabled = getenv("BROVAN_NO_FLUSH_ELIDE") != NULL;
+    }
+    return !disabled && env_tlb((CPUArchState *)cpu->env_ptr)->c.dirty == 0;
+}
+
 /* A memory hook that declines an access leaves the loop from inside the helper,
  * with the PC back on the faulting instruction. A hook-free run emits no
  * check_exit_request after an access, so exit_request alone would not stop it.

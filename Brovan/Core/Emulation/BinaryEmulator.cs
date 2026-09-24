@@ -693,7 +693,7 @@ namespace Brovan.Core.Emulation
             long HostFrequency = System.Diagnostics.Stopwatch.Frequency;
             long Elapsed = HostFrequency == QpcFrequency
                 ? HostTicks
-                : (long)((decimal)HostTicks * QpcFrequency / HostFrequency);
+                : HostTicks / HostFrequency * QpcFrequency + HostTicks % HostFrequency * QpcFrequency / HostFrequency;
 
             long Skew = Volatile.Read(ref _emulatedTimeSkewMilliseconds);
             long SkewCounts = Skew > long.MaxValue / (QpcFrequency / 1000) ? long.MaxValue : Skew * (QpcFrequency / 1000);
@@ -1930,8 +1930,8 @@ namespace Brovan.Core.Emulation
         /// </summary>
         private void InterruptHandler(uint interrupt_number)
         {
-            SchedulerRefreshRequested = true;
-            TriggerDebugMessage(() => $"cpu: interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}");
+            if (Debug)
+                TriggerDebugMessage($"cpu: interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}");
             long EpochBeforeCallback = WakeSignal.Current;
             try
             {
@@ -1941,6 +1941,7 @@ namespace Brovan.Core.Emulation
             }
             catch (Exception ex)
             {
+                SchedulerRefreshRequested = true;
                 Utils.LogError($"[GuestInterrupt] Error: {ex.Message}");
             }
 
@@ -2298,9 +2299,23 @@ namespace Brovan.Core.Emulation
             ReadGprBatch(t.Context);
             if (_emulator.IsThreadResident(t.ThreadId))
                 return;
-            _emulator.ReadVectorState(t.Context.Xmm, t.Context.YmmHigh);
-            t.Context.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
-            t.Context.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
+            SaveFloatingPointState(t.Context);
+        }
+
+        private void SaveFloatingPointState(CpuContext c)
+        {
+            _emulator.ReadVectorState(c.Xmm, c.YmmHigh);
+            _emulator.ReadX87State(c.X87, ref c.FPSW, ref c.FPTAG);
+            c.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
+            c.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
+        }
+
+        private void LoadFloatingPointState(CpuContext c)
+        {
+            _emulator.WriteVectorState(c.Xmm, c.YmmHigh);
+            _emulator.WriteX87State(c.X87, c.FPSW, c.FPTAG);
+            WriteRegister(Registers.UC_X86_REG_MXCSR, c.MXCSR);
+            WriteRegister(Registers.UC_X86_REG_FPCW, c.FPCW);
         }
 
         public bool ReadThreadVectorState(EmulatedThread t, ulong[] xmm, ulong[] ymmHigh)
@@ -2403,11 +2418,7 @@ namespace Brovan.Core.Emulation
 
             WriteGprBatch(t.Context);
             if (LoadVectorState)
-            {
-                _emulator.WriteVectorState(t.Context.Xmm, t.Context.YmmHigh);
-                WriteRegister(Registers.UC_X86_REG_MXCSR, t.Context.MXCSR);
-                WriteRegister(Registers.UC_X86_REG_FPCW, t.Context.FPCW);
-            }
+                LoadFloatingPointState(t.Context);
             Guest.OnThreadContextLoaded(this, t);
         }
 
@@ -2468,9 +2479,7 @@ namespace Brovan.Core.Emulation
                 return false;
 
             _emulator.SelectThread(Victim.ThreadId);
-            _emulator.ReadVectorState(Victim.Context.Xmm, Victim.Context.YmmHigh);
-            Victim.Context.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
-            Victim.Context.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
+            SaveFloatingPointState(Victim.Context);
             _emulator.UnbindThread(Victim.ThreadId);
             return true;
         }

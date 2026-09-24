@@ -186,6 +186,14 @@ insert-after|qemu/softmmu/memory.c|static bool brov_flatview_add(MemoryRegion *m
 replace-all|qemu/softmmu/memory.c|    memory_region_transaction_commit(subregion);|    if (!brov_flatview_add(subregion)) { memory_region_transaction_commit(subregion); }
 append|qemu/softmmu/memory.c|#include "brovan_flatview.inc.c"
 
+# --- a view of plain leaves is built in address order, not by insertion -----
+insert-after|qemu/softmmu/memory.c|static void brov_dispatch_compact(FlatView *fv);|static bool brov_render_flat(FlatView *view, MemoryRegion *root);
+replace-all|qemu/softmmu/memory.c|render_memory_region(view, mr, int128_zero(),|if (!brov_render_flat(view, mr)) render_memory_region(view, mr, int128_zero(),
+replace-all|qemu/softmmu/memory.c|memmove(&view->ranges[i], &view->ranges[j],|if (i != j) memmove(&view->ranges[i], &view->ranges[j],
+
+# --- a flush of a TLB with nothing in it is skipped -------------------------
+insert-in-body|qemu/accel/tcg/cputlb.c|static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)|    if (brov_tlb_flush_is_noop(cpu)) { return; }
+
 # --- the mru lookup cache cannot outlive a section-array realloc -------------
 insert-in-body|qemu/exec.c|static uint16_t phys_section_add(struct uc_struct *uc, PhysPageMap *map,|    container_of(map, AddressSpaceDispatch, map)->mru_section = NULL; /* brov: the array can move while the dispatch is live */
 

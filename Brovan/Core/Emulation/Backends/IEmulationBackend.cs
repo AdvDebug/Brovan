@@ -191,6 +191,10 @@ namespace Brovan.Core.Emulation
 
         bool WriteVectorState(ulong[] xmm, ulong[] ymmHigh) => WriteXmmRegisters(xmm);
 
+        bool ReadX87State(ulong[] registers, ref ulong statusWord, ref ulong tagWord) => false;
+
+        bool WriteX87State(ulong[] registers, ulong statusWord, ulong tagWord) => false;
+
         /// <summary>
         /// True when the backend can keep a guest thread's register file resident in its own processor,
         /// so switching to that thread transfers no state.

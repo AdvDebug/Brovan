@@ -1150,12 +1150,6 @@ static int brov_reg_ptr_impl(struct uc_struct *uc, int regid, void **ptr, size_t
     if (!uc->cpu || !uc->cpu->env_ptr) {
         return UC_ERR_HANDLE;
     }
-    /* 16- and 32-bit modes reach the same storage through different rules -
-     * reg_write() zero-extends EAX there but preserves the upper half in 64-bit
-     * mode - so only the unambiguous 64-bit ids are handed out. */
-    if (!(uc->mode & UC_MODE_64)) {
-        return UC_ERR_ARG;
-    }
     env = (CPUX86State *)uc->cpu->env_ptr;
     *flags = BROV_REG_READABLE | BROV_REG_WRITABLE;
 
@@ -1169,6 +1163,22 @@ static int brov_reg_ptr_impl(struct uc_struct *uc, int regid, void **ptr, size_t
             *size = 16;
         }
         return UC_ERR_OK;
+    }
+
+    /* Same 10-byte layout as reg_read(). */
+    if (regid >= UC_X86_REG_FP0 && regid <= UC_X86_REG_FP7) {
+        *ptr = &env->fpregs[regid - UC_X86_REG_FP0].d;
+        if (size) {
+            *size = 10;
+        }
+        return UC_ERR_OK;
+    }
+
+    /* 16- and 32-bit modes reach the same storage through different rules -
+     * reg_write() zero-extends EAX there but preserves the upper half in 64-bit
+     * mode - so only the unambiguous 64-bit ids are handed out. */
+    if (!(uc->mode & UC_MODE_64)) {
+        return UC_ERR_ARG;
     }
 
     switch (regid) {

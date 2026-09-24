@@ -268,12 +268,14 @@ Log.LogMessage(MessageImportance.High,
 
   <Target Name="EnsureUnicornArtifact" DependsOnTargets="PrepareUnicorn;BuildUnicorn" />
 
-  <Target Name="CopyUnicornToBuildOutput" AfterTargets="Build" DependsOnTargets="PrepareUnicorn;EnsureUnicornArtifact">
+  <Target Name="CopyUnicornToBuildOutput" AfterTargets="Build" DependsOnTargets="PrepareUnicorn;EnsureUnicornArtifact"
+          Condition="'$(SkipUnicornNative)' != 'true'">
     <Copy SourceFiles="$(UnicornArtifact)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Message Text="[Brovan.Unicorn] Copied $(UnicornLibName) -> $(TargetDir)" Importance="high" />
   </Target>
 
-  <Target Name="CopyUnicornToPublishOutput" AfterTargets="Publish" DependsOnTargets="PrepareUnicorn;EnsureUnicornArtifact">
+  <Target Name="CopyUnicornToPublishOutput" AfterTargets="Publish" DependsOnTargets="PrepareUnicorn;EnsureUnicornArtifact"
+          Condition="'$(SkipUnicornNative)' != 'true'">
     <Copy SourceFiles="$(UnicornArtifact)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
     <Message Text="[Brovan.Unicorn] Copied $(UnicornLibName) -> $(PublishDir)" Importance="high" />
   </Target>

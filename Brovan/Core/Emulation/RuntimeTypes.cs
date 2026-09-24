@@ -33,10 +33,13 @@ namespace Brovan.Core.Emulation
         public ulong RFLAGS;
         public ulong MXCSR = 0x1F80;
         public ulong FPCW = 0x027F;
+        public ulong FPSW;
+        public ulong FPTAG = 0xFFFF;
         public ulong CS, DS, ES, FS, GS, SS;
         public ulong DR0, DR1, DR2, DR3, DR6, DR7;
         public readonly ulong[] Xmm = new ulong[32];
         public readonly ulong[] YmmHigh = new ulong[32];
+        public readonly ulong[] X87 = new ulong[16];
     }
 
     public enum EmulatedThreadState

@@ -3373,7 +3373,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : Emulator.ReadMemoryUInt(Table + (ulong)Index * 4);
         }
 
-        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinWindowCreation Creation, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0)
+        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinWindowCreation Creation, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, WinWindowDestruction Destruction = null)
         {
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null || Callback == 0 || PointerSize != 8)
@@ -3390,6 +3390,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 SyscallRetryRip = SyscallRetryRip,
                 PaintRetryHwnd = PaintRetryHwnd,
                 WindowCreation = Creation,
+                WindowDestruction = Destruction,
             };
 
             if (SyscallRetryRip != 0)
@@ -3759,6 +3760,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Frame.WindowCreation != null && ContinueWindowCreation(Frame, ResultValue, out ResultValue))
                 return true;
 
+            if (Frame.WindowDestruction != null)
+            {
+                Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
+                if (RunWindowDestruction(Frame.WindowDestruction))
+                    return true;
+
+                ResultValue = Frame.WindowDestruction.Result;
+            }
+
             ReturnFromUserCallback(Frame, ResultValue);
             return true;
         }
@@ -3789,11 +3799,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Window == null || Refused)
             {
-                if (Window != null)
-                    DestroyWindow(Creation.Hwnd);
-
                 Result = 0;
-                return false;
+                if (Window == null)
+                    return false;
+
+                // NT destroys a refused window before CreateWindowEx returns.
+                Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
+                return BeginWindowDestruction(Window, 0);
             }
 
             Result = Creation.Hwnd;
@@ -5058,6 +5070,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             EnsureUserClientThreadInfo(Thread, 0);
             WriteWin32ClientInfoSlot(State, Win32ClientInfoActiveWindowSlot, ActiveHandle);
             WriteWin32ClientInfoSlot(State, Win32ClientInfoActiveWindowPointerSlot, ActiveWindowPointer);
+        }
+
+        // user32 IsWindow checks these slots before the handle table.
+        private void ForgetThreadWindowContext(ulong Hwnd)
+        {
+            foreach (EmulatedThread Thread in Emulator.Threads.Values)
+            {
+                WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+                if (State == null || State.Teb == 0)
+                    continue;
+
+                ulong NativeTeb = State.NativeTeb != 0 ? State.NativeTeb : State.Teb;
+                if (Emulator.ReadMemoryULong(NativeTeb + Win32ClientInfoX64Base + (ulong)Win32ClientInfoActiveWindowSlot * 8UL) != Hwnd)
+                    continue;
+
+                WriteWin32ClientInfoSlot(State, Win32ClientInfoActiveWindowSlot, 0);
+                WriteWin32ClientInfoSlot(State, Win32ClientInfoActiveWindowPointerSlot, 0);
+            }
         }
 
         private void WriteWin32ClientInfoSlot(WindowsThreadState State, int Slot, ulong Value)
@@ -6418,13 +6448,186 @@ namespace Brovan.Core.Emulation.OS.Windows
             PresentDesktop();
         }
 
-        public bool DestroyWindow(ulong Hwnd)
+        // When Deferred, the syscall returns Result after the last message is delivered.
+        public bool DestroyWindow(ulong Hwnd, ulong Result, out bool Deferred)
         {
-            if (Hwnd == Win32kMessageOnlyParent.HwndMessage)
-                return false;
+            Deferred = false;
 
-            if (!WinWindows.TryGetValue(Hwnd, out WinWindow Window))
+            if (Hwnd == Win32kMessageOnlyParent.HwndMessage || !WinWindows.TryGetValue(Hwnd, out WinWindow Window))
+            {
+                Emulator.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
                 return false;
+            }
+
+            if (!OwnedByCurrentThread(Window))
+            {
+                Emulator.SetLastWinError(Win32kHelper.ERROR_ACCESS_DENIED);
+                return false;
+            }
+
+            Deferred = BeginWindowDestruction(Window, Result);
+            return true;
+        }
+
+        private bool OwnedByCurrentThread(WinWindow Window)
+        {
+            uint ThreadId = Emulator.CurrentThread?.ThreadId ?? 0;
+            return Window.OwnerThreadId == 0 || ThreadId == 0 || Window.OwnerThreadId == ThreadId;
+        }
+
+        public bool BeginWindowDestruction(WinWindow Window, ulong Result)
+        {
+            WinWindowDestruction Destruction = new WinWindowDestruction { Result = Result };
+            PlanWindowDestruction(Destruction, Window, 0);
+            return RunWindowDestruction(Destruction);
+        }
+
+        // xxxDestroyWindow: owned windows first, then WM_DESTROY top down and WM_NCDESTROY bottom up.
+        private void PlanWindowDestruction(WinWindowDestruction Destruction, WinWindow Window, int Depth)
+        {
+            const uint WS_CHILD = 0x40000000;
+
+            if (Depth >= MaxWindowAncestorDepth || !Destruction.Planned.Add(Window.Hwnd))
+                return;
+
+            if ((Window.Style & WS_CHILD) == 0)
+            {
+                // NT starts at the top of the z-order, the end of the list.
+                for (int i = TopLevelWindows.Count - 1; i >= 0; i--)
+                {
+                    if (!WinWindows.TryGetValue(TopLevelWindows[i], out WinWindow Owned) || Owned.OwnerHwnd != Window.Hwnd)
+                        continue;
+
+                    // NT keeps another thread's window alive and clears its owner.
+                    if (OwnedByCurrentThread(Owned))
+                        PlanWindowDestruction(Destruction, Owned, Depth + 1);
+                    else
+                        Owned.OwnerHwnd = 0;
+                }
+            }
+
+            Destruction.Steps.Add(new WinWindowDestructionStep(Window.Hwnd, Win32kHelper.WM_DESTROY, true));
+            PlanTreeDestroyMessages(Destruction, Window, Depth);
+            PlanTreeNonClientDestroyMessages(Destruction, Window, Depth);
+        }
+
+        private void PlanTreeDestroyMessages(WinWindowDestruction Destruction, WinWindow Window, int Depth)
+        {
+            if (Depth >= MaxWindowAncestorDepth)
+                return;
+
+            foreach (ulong ChildHwnd in Window.Children)
+            {
+                if (!WinWindows.TryGetValue(ChildHwnd, out WinWindow Child) || !Destruction.Planned.Add(ChildHwnd))
+                    continue;
+
+                Destruction.Steps.Add(new WinWindowDestructionStep(ChildHwnd, Win32kHelper.WM_DESTROY, false));
+                PlanTreeDestroyMessages(Destruction, Child, Depth + 1);
+            }
+        }
+
+        private void PlanTreeNonClientDestroyMessages(WinWindowDestruction Destruction, WinWindow Window, int Depth)
+        {
+            if (Depth < MaxWindowAncestorDepth)
+            {
+                foreach (ulong ChildHwnd in Window.Children)
+                {
+                    if (WinWindows.TryGetValue(ChildHwnd, out WinWindow Child))
+                        PlanTreeNonClientDestroyMessages(Destruction, Child, Depth + 1);
+                }
+            }
+
+            Destruction.Steps.Add(new WinWindowDestructionStep(Window.Hwnd, Win32kHelper.WM_NCDESTROY, false));
+        }
+
+        private bool RunWindowDestruction(WinWindowDestruction Destruction)
+        {
+            if (Destruction.PendingRelease != 0)
+            {
+                if (WinWindows.TryGetValue(Destruction.PendingRelease, out WinWindow Returned))
+                    ReleaseDestroyedWindow(Returned);
+
+                Destruction.PendingRelease = 0;
+            }
+
+            while (Destruction.Next < Destruction.Steps.Count)
+            {
+                WinWindowDestructionStep Step = Destruction.Steps[Destruction.Next++];
+                if (!WinWindows.TryGetValue(Step.Hwnd, out WinWindow Window))
+                    continue;
+
+                if (Step.Message == Win32kHelper.WM_DESTROY)
+                {
+                    if (Step.Root)
+                        HideDestroyedWindow(Window);
+
+                    if (ActiveWindow == Window.Hwnd)
+                        ActiveWindow = 0;
+
+                    if (FocusWindow == Window.Hwnd)
+                        FocusWindow = 0;
+                }
+                else
+                {
+                    UnlinkDestroyedWindow(Window);
+                }
+
+                // Another thread's procedure cannot run in this frame.
+                bool Sent = OwnedByCurrentThread(Window) && Win32kHelper.SendWindowDestroyMessage(Emulator, Window, Step.Message, Destruction);
+                if (!Sent)
+                    Win32kHelper.PostMessage(Emulator, Window.Hwnd, Step.Message, 0, 0);
+
+                if (Step.Message == Win32kHelper.WM_NCDESTROY)
+                {
+                    if (Sent)
+                    {
+                        Destruction.PendingRelease = Window.Hwnd;
+                        return true;
+                    }
+
+                    ReleaseDestroyedWindow(Window);
+                    continue;
+                }
+
+                if (Sent)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private void HideDestroyedWindow(WinWindow Window)
+        {
+            const uint WS_VISIBLE = 0x10000000;
+
+            if (!Window.Visible && (Window.Style & WS_VISIBLE) == 0)
+                return;
+
+            Window.Visible = false;
+            Window.Style &= ~WS_VISIBLE;
+            MaterializeUserWindow(Window);
+            PresentDesktop();
+        }
+
+        // NT unlinks the window before WM_NCDESTROY but keeps ParentHwnd until it is freed.
+        private void UnlinkDestroyedWindow(WinWindow Window)
+        {
+            if (Window.ParentHwnd != 0 && WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow Parent))
+            {
+                if (Parent.Children.Remove(Window.Hwnd))
+                    RefreshWindowFamily(Parent);
+            }
+            else
+            {
+                TopLevelWindows.Remove(Window.Hwnd);
+            }
+        }
+
+        private void ReleaseDestroyedWindow(WinWindow Window)
+        {
+            ulong Hwnd = Window.Hwnd;
+
+            UnlinkDestroyedWindow(Window);
 
             if (ActiveWindow == Hwnd)
                 ActiveWindow = 0;
@@ -6432,37 +6635,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (FocusWindow == Hwnd)
                 FocusWindow = 0;
 
-            Win32kHelper.PostMessage(Emulator, Hwnd, Win32kHelper.WM_DESTROY, 0, 0);
-
-            foreach (ulong Child in Window.Children.ToArray())
-            {
-                DestroyWindow(Child);
-            }
-
-            Win32kHelper.PostMessage(Emulator, Hwnd, Win32kHelper.WM_NCDESTROY, 0, 0);
-
-            WinWindow DestroyedParent = null;
-            if (Window.ParentHwnd != 0 && WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow Parent))
-            {
-                Parent.Children.Remove(Hwnd);
-                DestroyedParent = Parent;
-            }
-            else
-            {
-                TopLevelWindows.Remove(Hwnd);
-            }
-
             Window.Destroyed = true;
             ClearUserWindowHandleEntry(Window);
+            ForgetThreadWindowContext(Hwnd);
             WinWindows.Remove(Hwnd);
-
-            if (DestroyedParent != null)
-                RefreshWindowFamily(DestroyedParent);
 
             RememberDestroyedWindow(Window);
             ReleaseUserHandle(Hwnd);
             PresentDesktop();
-            return true;
         }
 
         private void RememberDestroyedWindow(WinWindow Window)

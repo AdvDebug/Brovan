@@ -45,8 +45,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 }
             }
 
-            ulong Result = Win32kHelper.HandleMessageCall(Instance, Hwnd, Message, WParam, LParam, Ansi);
-            Instance.SetRawSyscallReturn(Result);
+            ulong Result = Win32kHelper.HandleMessageCall(Instance, Hwnd, Message, WParam, LParam, Ansi, out bool Deferred);
+            if (!Deferred)
+                Instance.SetRawSyscallReturn(Result);
+
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

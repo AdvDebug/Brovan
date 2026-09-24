@@ -29,18 +29,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Instance.WinHelper.ForgetDestroyedWindow(Message.Hwnd);
             }
 
-            if (Window == null || Window.WndProc == 0)
-            {
-                ulong FallbackResult = Win32kHelper.DispatchMessage(Instance, Message);
-                Instance.SetRawSyscallReturn(FallbackResult);
+            if (Window != null && Window.WndProc != 0
+                && Win32kHelper.InvokeWindowProc(Instance, Message.Hwnd, Window.WndProc, Message.Message, Message.WParam, Message.LParam))
                 return NTSTATUS.STATUS_SUCCESS;
-            }
 
-            if (!Win32kHelper.InvokeWindowProc(Instance, Message.Hwnd, Window.WndProc, Message.Message, Message.WParam, Message.LParam))
-            {
-                ulong FallbackResult = Win32kHelper.DispatchMessage(Instance, Message);
+            ulong FallbackResult = Win32kHelper.DispatchMessage(Instance, Message, out bool Deferred);
+            if (!Deferred)
                 Instance.SetRawSyscallReturn(FallbackResult);
-            }
 
             return NTSTATUS.STATUS_SUCCESS;
         }
