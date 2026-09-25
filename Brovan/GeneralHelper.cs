@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Formats.Tar;
 using System.IO.Compression;
+using System.IO.Enumeration;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -2369,6 +2370,10 @@ namespace Brovan
                 if (Component.IndexOfAny(WildcardCharacters) >= 0)
                     return null;
 
+                HashSet<string> Names = GetHostDirectoryNames(Directory);
+                if (Names != null)
+                    return Names.TryGetValue(Component, out string Name) ? Path.Combine(Directory, Name) : null;
+
                 try
                 {
                     foreach (string Entry in System.IO.Directory.EnumerateFileSystemEntries(Directory, Component, CaseInsensitiveComponentSearch))
@@ -2379,6 +2384,107 @@ namespace Brovan
                 }
 
                 return null;
+            }
+
+            private sealed class HostDirectoryNames
+            {
+                public string Directory;
+                public DateTime LastWriteTimeUtc;
+                public HashSet<string> Names;
+
+                public int Weight => (Names?.Count ?? 0) + 1;
+            }
+
+            private static readonly object HostDirectoryNamesLock = new();
+            private static readonly Dictionary<string, LinkedListNode<HostDirectoryNames>> HostDirectoryNamesCache = new(StringComparer.Ordinal);
+            private static readonly LinkedList<HostDirectoryNames> HostDirectoryNamesOrder = new();
+            private static int HostDirectoryNamesCount;
+
+            // Some host filesystems store modification times in 2 seconds steps.
+            private static readonly TimeSpan HostDirectorySettleTime = TimeSpan.FromSeconds(2);
+
+            private static HashSet<string> GetHostDirectoryNames(string Directory)
+            {
+                DateTime Stamp;
+                try
+                {
+                    Stamp = System.IO.Directory.GetLastWriteTimeUtc(Directory);
+                }
+                catch
+                {
+                    return null;
+                }
+
+                if (Stamp == DateTime.FromFileTimeUtc(0))
+                    return null;
+
+                lock (HostDirectoryNamesLock)
+                {
+                    if (HostDirectoryNamesCache.TryGetValue(Directory, out LinkedListNode<HostDirectoryNames> Cached))
+                    {
+                        if (Cached.Value.LastWriteTimeUtc == Stamp)
+                        {
+                            HostDirectoryNamesOrder.Remove(Cached);
+                            HostDirectoryNamesOrder.AddFirst(Cached);
+                            return Cached.Value.Names;
+                        }
+
+                        RemoveHostDirectoryNames(Cached);
+                    }
+                }
+
+                if (DateTime.UtcNow - Stamp < HostDirectorySettleTime)
+                    return null;
+
+                int Budget = Core.Settings.MemoryBudget.HostDirectoryIndexNames;
+                HashSet<string> Names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    FileSystemEnumerable<string> Entries = new FileSystemEnumerable<string>(Directory,
+                        (ref FileSystemEntry Entry) => Entry.FileName.ToString(), CaseInsensitiveComponentSearch);
+                    foreach (string Name in Entries)
+                    {
+                        if (Names.Count == Budget)
+                        {
+                            Names = null;
+                            break;
+                        }
+
+                        Names.Add(Name);
+                    }
+                }
+                catch
+                {
+                    return null;
+                }
+
+                lock (HostDirectoryNamesLock)
+                {
+                    if (HostDirectoryNamesCache.TryGetValue(Directory, out LinkedListNode<HostDirectoryNames> Raced))
+                        RemoveHostDirectoryNames(Raced);
+
+                    HostDirectoryNames Listing = new HostDirectoryNames
+                    {
+                        Directory = Directory,
+                        LastWriteTimeUtc = Stamp,
+                        Names = Names
+                    };
+
+                    while (HostDirectoryNamesOrder.Last != null && HostDirectoryNamesCount + Listing.Weight > Budget)
+                        RemoveHostDirectoryNames(HostDirectoryNamesOrder.Last);
+
+                    HostDirectoryNamesCache.Add(Directory, HostDirectoryNamesOrder.AddFirst(Listing));
+                    HostDirectoryNamesCount += Listing.Weight;
+                }
+
+                return Names;
+            }
+
+            private static void RemoveHostDirectoryNames(LinkedListNode<HostDirectoryNames> Node)
+            {
+                HostDirectoryNamesOrder.Remove(Node);
+                HostDirectoryNamesCache.Remove(Node.Value.Directory);
+                HostDirectoryNamesCount -= Node.Value.Weight;
             }
 
             private static readonly char[] WildcardCharacters = { '*', '?' };
