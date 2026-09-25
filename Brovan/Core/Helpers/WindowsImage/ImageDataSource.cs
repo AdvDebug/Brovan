@@ -38,7 +38,7 @@ namespace Brovan.Core.Helpers.WindowsImage
 
         public FileImageDataSource(string Path)
         {
-            Handle = File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.RandomAccess);
+            Handle = File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.None);
             FileLength = RandomAccess.GetLength(Handle);
             OwnsHandle = true;
         }
@@ -122,6 +122,7 @@ namespace Brovan.Core.Helpers.WindowsImage
 
     /// <summary>
     /// Presents a fragmented file (a UDF file with several allocation extents) as one flat source.
+    /// Ranges that no extent covers read as zeros.
     /// </summary>
     internal sealed class ExtentImageDataSource : ImageDataSource
     {
@@ -144,8 +145,22 @@ namespace Brovan.Core.Helpers.WindowsImage
                 return 0;
 
             int Index = FindExtent(Offset);
+
             if (Index < 0)
-                return 0;
+            {
+                int Next = ~Index;
+                long GapEnd = TotalLength;
+
+                if (Next < Extents.Length && Extents[Next].LogicalOffset < GapEnd)
+                    GapEnd = Extents[Next].LogicalOffset;
+
+                long Gap = GapEnd - Offset;
+                if (Buffer.Length > Gap)
+                    Buffer = Buffer.Slice(0, (int)Gap);
+
+                Buffer.Clear();
+                return Buffer.Length;
+            }
 
             ImageExtent Extent = Extents[Index];
             long Inside = Offset - Extent.LogicalOffset;
@@ -175,7 +190,7 @@ namespace Brovan.Core.Helpers.WindowsImage
                     return Middle;
             }
 
-            return -1;
+            return ~Low;
         }
     }
 

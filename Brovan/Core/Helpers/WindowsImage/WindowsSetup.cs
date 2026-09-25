@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using Microsoft.Win32.SafeHandles;
 
@@ -21,6 +22,9 @@ namespace Brovan.Core.Helpers.WindowsImage
             "built against. Brovan does not include or redistribute any Microsoft software. Using these files requires\n" +
             "a valid Windows license.";
 
+        private const string BrowserUserAgent =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
         public static bool InstallRuntimes(string BaseDirectory, bool LicenseAccepted, Action<string> Report, Func<bool>? Confirm, Action<long, long, long, long>? Progress = null)
         {
             if (!LicenseAccepted)
@@ -34,8 +38,25 @@ namespace Brovan.Core.Helpers.WindowsImage
                 }
             }
 
-            using HttpClient Client = HttpImageDataSource.CreateClient();
+            using HttpClient Client = CreateClient();
             return VisualCppRuntimeImporter.Import(BaseDirectory, Client, Report, Progress);
+        }
+
+        public static HttpClient CreateClient()
+        {
+            HttpClientHandler Handler = new HttpClientHandler
+            {
+                AllowAutoRedirect = true,
+                AutomaticDecompression = DecompressionMethods.None,
+            };
+
+            HttpClient Created = new HttpClient(Handler);
+            Created.Timeout = TimeSpan.FromMinutes(5);
+
+            Created.DefaultRequestHeaders.UserAgent.ParseAdd(BrowserUserAgent);
+            Created.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+            Created.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            return Created;
         }
 
         public static bool Install(string BaseDirectory, WindowsSetupOptions Options, Action<string> Report, Func<bool>? Confirm, Action<long, long, long, long>? Progress = null)
@@ -51,7 +72,6 @@ namespace Brovan.Core.Helpers.WindowsImage
                 }
             }
 
-            HttpClient? Client = null;
             ImageDataSource? Media = null;
 
             try
@@ -65,13 +85,8 @@ namespace Brovan.Core.Helpers.WindowsImage
                 }
                 else if (string.IsNullOrWhiteSpace(Location))
                 {
-                    Report("[-] No installation media. Give a path to an ISO, WIM or ESD file, or a direct link to one.");
+                    Report("[-] No installation media. Give a path to an ISO, WIM or ESD file.");
                     return false;
-                }
-                else if (Location.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || Location.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                {
-                    Client = HttpImageDataSource.CreateClient();
-                    Media = new HttpImageDataSource(new Uri(Location), Client);
                 }
                 else
                 {
@@ -91,10 +106,7 @@ namespace Brovan.Core.Helpers.WindowsImage
                 if (!WindowsImageImporter.TryWriteApiSetMap(BaseDirectory, Report))
                     Report("[!] The image had no apisetschema.dll; keeping the existing API set map.");
 
-                if (Media is HttpImageDataSource Remote)
-                    Report($"[*] Transferred {Remote.TransferredBytes / (1024 * 1024)} MB over the network.");
-
-                Client ??= HttpImageDataSource.CreateClient();
+                using HttpClient Client = CreateClient();
                 VisualCppRuntimeImporter.Import(BaseDirectory, Client, Report, Progress);
 
                 return true;
@@ -107,7 +119,6 @@ namespace Brovan.Core.Helpers.WindowsImage
             finally
             {
                 Media?.Dispose();
-                Client?.Dispose();
             }
         }
 

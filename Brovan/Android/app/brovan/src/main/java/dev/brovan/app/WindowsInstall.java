@@ -34,7 +34,7 @@ final class WindowsInstall {
         return new File(context.getFilesDir(), "WindowsLibs/msvcp140.dll").exists();
     }
 
-    static void windows(Activity activity, Executor worker, String url, Uri iso, Listener listener) {
+    static void windows(Activity activity, Executor worker, Uri iso, Listener listener) {
         run(activity, worker, listener, () -> {
             ParcelFileDescriptor descriptor = null;
 
@@ -46,7 +46,7 @@ final class WindowsInstall {
                     handle = descriptor == null ? -1 : descriptor.getFd();
                 }
 
-                return BrovanNative.installWindows(handle >= 0 ? null : url, handle, true, 1);
+                return BrovanNative.installWindows(handle, true, 1);
             } catch (Exception failure) {
                 return BrovanNative.STATUS_FAILED;
             } finally {

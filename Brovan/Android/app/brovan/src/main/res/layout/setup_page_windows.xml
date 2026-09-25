@@ -75,14 +75,6 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/setup_windows_iso" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/windows_link"
-                style="@style/Widget.Material3.Button.TextButton"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text="@string/setup_windows_link" />
         </LinearLayout>
 
         <com.google.android.material.progressindicator.LinearProgressIndicator

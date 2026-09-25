@@ -9,13 +9,11 @@ import android.graphics.drawable.Animatable;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Bundle;
-import android.text.InputType;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
-import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -27,7 +25,6 @@ import com.google.android.material.button.MaterialButton;
 import com.google.android.material.materialswitch.MaterialSwitch;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.android.material.snackbar.Snackbar;
-import com.google.android.material.textfield.TextInputEditText;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -201,11 +198,6 @@ public class SetupActivity extends AppCompatActivity {
                         .setType("*/*"), REQUEST_ISO);
             }
         });
-        target.findViewById(R.id.windows_link).setOnClickListener(button -> {
-            if (!busy && licensed(licensed)) {
-                askLink();
-            }
-        });
     }
 
     private boolean licensed(MaterialSwitch licensed) {
@@ -218,30 +210,7 @@ public class SetupActivity extends AppCompatActivity {
         return false;
     }
 
-    private void askLink() {
-        TextInputEditText input = new TextInputEditText(this);
-        input.setHint(R.string.setup_windows_link_hint);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-
-        FrameLayout holder = new FrameLayout(this);
-        holder.setPadding(dp(20), dp(8), dp(20), 0);
-        holder.addView(input);
-
-        Theming.dialog(this)
-                .setTitle(R.string.setup_windows_link)
-                .setView(holder)
-                .setPositiveButton(R.string.windows_install, (dialog, which) -> {
-                    CharSequence typed = input.getText();
-                    String url = typed == null ? "" : typed.toString().trim();
-                    if (!url.isEmpty()) {
-                        installWindows(url, null);
-                    }
-                })
-                .setNegativeButton(android.R.string.cancel, null)
-                .show();
-    }
-
-    private void installWindows(String url, Uri isoFile) {
+    private void installWindows(Uri isoFile) {
         View target = page;
         TextView state = target.findViewById(R.id.windows_state);
         MaterialButton pick = target.findViewById(R.id.windows_iso_pick);
@@ -249,7 +218,7 @@ public class SetupActivity extends AppCompatActivity {
         TextView detail = target.findViewById(R.id.windows_progress_text);
 
         startWork(pick, bar, detail, R.string.windows_working);
-        WindowsInstall.windows(this, worker, url, isoFile, new WindowsInstall.Listener() {
+        WindowsInstall.windows(this, worker, isoFile, new WindowsInstall.Listener() {
             @Override
             public void onProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal) {
                 if (filesTotal <= 0) {
@@ -397,7 +366,7 @@ public class SetupActivity extends AppCompatActivity {
         Uri uri = data.getData();
 
         if (requestCode == REQUEST_ISO) {
-            installWindows(null, uri);
+            installWindows(uri);
             return;
         }
 

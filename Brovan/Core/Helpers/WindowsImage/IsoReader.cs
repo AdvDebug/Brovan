@@ -80,7 +80,6 @@ namespace Brovan.Core.Helpers.WindowsImage
                         uint PartitionStart = uint.MaxValue;
                         uint BlockSize = SectorSize;
                         uint FileSetBlock = uint.MaxValue;
-                        uint FileSetPartition = 0;
 
                         uint Sectors = SequenceLength / SectorSize;
 
@@ -103,16 +102,16 @@ namespace Brovan.Core.Helpers.WindowsImage
                             if (Tag == 6)
                             {
                                 BlockSize = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(212));
-                                FileSetBlock = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(248 + 4));
-                                FileSetPartition = BinaryPrimitives.ReadUInt16LittleEndian(Descriptor.Slice(248 + 8));
+                                FileSetBlock = ReadBlockAddress(Descriptor.Slice(248 + 4));
                             }
                         }
 
-                        if (PartitionStart == uint.MaxValue || FileSetBlock == uint.MaxValue || BlockSize == 0)
+                        if (PartitionStart == uint.MaxValue || FileSetBlock == uint.MaxValue)
                             return null;
 
-                        if (FileSetPartition != 0)
-                            throw new NotSupportedException($"The UDF volume references partition {FileSetPartition}; only single partition media is supported.");
+                        // UDF 2.2.4.2.
+                        if (BlockSize != SectorSize)
+                            throw new NotSupportedException($"The UDF volume uses {BlockSize} byte logical blocks; only {SectorSize} byte blocks are supported.");
 
                         Span<byte> FileSet = Buffer.AsSpan(0, SectorSize);
                         Source.ReadExact((long)(PartitionStart + FileSetBlock) * BlockSize, FileSet);
@@ -120,7 +119,7 @@ namespace Brovan.Core.Helpers.WindowsImage
                         if (BinaryPrimitives.ReadUInt16LittleEndian(FileSet) != TagFileSetDescriptor)
                             return null;
 
-                        uint RootBlock = BinaryPrimitives.ReadUInt32LittleEndian(FileSet.Slice(400 + 4));
+                        uint RootBlock = ReadBlockAddress(FileSet.Slice(400 + 4));
                         return new UdfVolume(PartitionStart, BlockSize, RootBlock);
                     }
                     finally
@@ -200,16 +199,14 @@ namespace Brovan.Core.Helpers.WindowsImage
                     return new MemoryImageDataSource(Entry.InlineData);
 
                 ImageExtent[] Extents = new ImageExtent[Entry.Extents.Count];
-                long Logical = 0;
 
                 for (int i = 0; i < Extents.Length; i++)
                 {
                     UdfExtent Extent = Entry.Extents[i];
-                    Extents[i] = new ImageExtent((long)(PartitionStart + Extent.Block) * BlockSize, Logical, Extent.Length);
-                    Logical += Extent.Length;
+                    Extents[i] = new ImageExtent((long)(PartitionStart + Extent.Block) * BlockSize, Extent.LogicalOffset, Extent.Length);
                 }
 
-                return new ExtentImageDataSource(Source, Extents, Math.Min(Entry.InformationLength, Logical));
+                return new ExtentImageDataSource(Source, Extents, Math.Min(Entry.InformationLength, Entry.LogicalLength));
             }
 
             private bool TryFindChild(ImageDataSource Source, FileEntry Directory, string Name, out uint Block)
@@ -247,13 +244,14 @@ namespace Brovan.Core.Helpers.WindowsImage
                         if (Offset + Total > Content.Length)
                             return false;
 
-                        if ((Characteristics & 0x08) == 0 && NameLength > 0)
+                        // ECMA-167 4/14.4.3. Bit 2 deleted, bit 3 parent.
+                        if ((Characteristics & 0x0C) == 0 && NameLength > 0)
                         {
                             ReadOnlySpan<byte> Raw = Descriptor.Slice(38 + ImplementationLength, NameLength);
 
                             if (MatchesDString(Raw, Name))
                             {
-                                Block = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(20 + 4));
+                                Block = ReadBlockAddress(Descriptor.Slice(20 + 4));
                                 return true;
                             }
                         }
@@ -301,14 +299,25 @@ namespace Brovan.Core.Helpers.WindowsImage
                 return true;
             }
 
+            private static uint ReadBlockAddress(ReadOnlySpan<byte> Address)
+            {
+                ushort Partition = BinaryPrimitives.ReadUInt16LittleEndian(Address.Slice(4));
+                if (Partition != 0)
+                    throw new NotSupportedException($"The UDF volume references partition {Partition}; only single partition media is supported.");
+
+                return BinaryPrimitives.ReadUInt32LittleEndian(Address);
+            }
+
             private readonly struct UdfExtent
             {
                 public readonly uint Block;
+                public readonly long LogicalOffset;
                 public readonly long Length;
 
-                public UdfExtent(uint Block, long Length)
+                public UdfExtent(uint Block, long LogicalOffset, long Length)
                 {
                     this.Block = Block;
+                    this.LogicalOffset = LogicalOffset;
                     this.Length = Length;
                 }
             }
@@ -316,6 +325,7 @@ namespace Brovan.Core.Helpers.WindowsImage
             private sealed class FileEntry
             {
                 public long InformationLength;
+                public long LogicalLength;
                 public List<UdfExtent> Extents = new List<UdfExtent>();
                 public byte[]? InlineData;
             }
@@ -342,26 +352,35 @@ namespace Brovan.Core.Helpers.WindowsImage
                     ushort Flags = BinaryPrimitives.ReadUInt16LittleEndian(Descriptor.Slice(16 + 18));
                     int DescriptorType = Flags & 0x07;
 
+                    ulong InformationLength = BinaryPrimitives.ReadUInt64LittleEndian(Descriptor.Slice(56));
+                    if (InformationLength > long.MaxValue)
+                        throw new InvalidDataException($"The UDF file entry at block {Block} declares an information length of {InformationLength} bytes.");
+
                     FileEntry Entry = new FileEntry
                     {
-                        InformationLength = (long)BinaryPrimitives.ReadUInt64LittleEndian(Descriptor.Slice(56)),
+                        InformationLength = (long)InformationLength,
                     };
 
-                    int ExtendedAttributeLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(Base - 8));
-                    int AllocationLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(Base - 4));
-                    int AllocationOffset = Base + ExtendedAttributeLength;
+                    uint ExtendedAttributeLength = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(Base - 8));
+                    uint AllocationLength = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(Base - 4));
 
-                    if (AllocationOffset + AllocationLength > Descriptor.Length)
-                        throw new InvalidDataException($"The UDF file entry at block {Block} declares {AllocationLength} bytes of allocation descriptors that do not fit in one block.");
+                    if ((ulong)Base + ExtendedAttributeLength + AllocationLength > (ulong)Descriptor.Length)
+                        throw new InvalidDataException($"The UDF file entry at block {Block} declares {ExtendedAttributeLength} bytes of extended attributes and {AllocationLength} bytes of allocation descriptors that do not fit in one block.");
+
+                    int AllocationOffset = Base + (int)ExtendedAttributeLength;
+
+                    ReadOnlySpan<byte> Allocation = Descriptor.Slice(AllocationOffset, (int)AllocationLength);
 
                     if (DescriptorType == 3)
                     {
-                        Entry.InlineData = Descriptor.Slice(AllocationOffset, AllocationLength).ToArray();
-                        Entry.InformationLength = Math.Min(Entry.InformationLength, AllocationLength);
+                        Entry.InlineData = Allocation.ToArray();
+                        Entry.InformationLength = Math.Min(Entry.InformationLength, Allocation.Length);
                         return Entry;
                     }
 
-                    ReadAllocationDescriptors(Source, Descriptor.Slice(AllocationOffset, AllocationLength), DescriptorType, Entry);
+                    if (ReadAllocationDescriptors(Allocation, DescriptorType, Entry, out uint NextBlock, out int NextLength))
+                        ReadAllocationExtents(Source, NextBlock, NextLength, DescriptorType, Entry);
+
                     return Entry;
                 }
                 finally
@@ -370,55 +389,103 @@ namespace Brovan.Core.Helpers.WindowsImage
                 }
             }
 
-            private void ReadAllocationDescriptors(ImageDataSource Source, ReadOnlySpan<byte> Descriptors, int DescriptorType, FileEntry Entry)
+            private static bool ReadAllocationDescriptors(ReadOnlySpan<byte> Descriptors, int DescriptorType, FileEntry Entry, out uint NextBlock, out int NextLength)
             {
-                int Stride = DescriptorType == 0 ? 8 : 16;
+                NextBlock = 0;
+                NextLength = 0;
+
+                int Stride = DescriptorType switch
+                {
+                    0 => 8,
+                    1 => 16,
+                    2 => 20,
+                    _ => throw new InvalidDataException($"Unknown UDF allocation descriptor type {DescriptorType}."),
+                };
+                int LocationOffset = DescriptorType == 2 ? 12 : 4;
                 int Offset = 0;
 
                 while (Offset + Stride <= Descriptors.Length)
                 {
-                    uint Raw = BinaryPrimitives.ReadUInt32LittleEndian(Descriptors.Slice(Offset));
-                    uint Block = BinaryPrimitives.ReadUInt32LittleEndian(Descriptors.Slice(Offset + 4));
+                    ReadOnlySpan<byte> Descriptor = Descriptors.Slice(Offset, Stride);
+                    uint Raw = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor);
 
                     long Length = Raw & 0x3FFFFFFF;
                     int Type = (int)(Raw >> 30);
 
                     Offset += Stride;
 
-                    if (Type == 3)
+                    if (Length == 0)
+                        return false;
+
+                    uint Block = 0;
+
+                    if (Type == 0 || Type == 3)
                     {
-                        ReadAllocationExtent(Source, Block, (int)Length, DescriptorType, Entry);
-                        return;
+                        Block = DescriptorType == 0
+                            ? BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(4))
+                            : ReadBlockAddress(Descriptor.Slice(LocationOffset));
                     }
 
-                    if (Length == 0)
+                    if (Type == 3)
+                    {
+                        NextBlock = Block;
+                        NextLength = (int)Length;
+                        return true;
+                    }
+
+                    long InformationLength = Length;
+
+                    // ECMA-167 4/14.14.3. A recorded length below the information length means encoded data.
+                    if (DescriptorType == 2)
+                    {
+                        long RecordedLength = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(4)) & 0x3FFFFFFF;
+                        InformationLength = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(8));
+
+                        if (Type == 0 && RecordedLength < InformationLength)
+                            throw new NotSupportedException($"The UDF extent at block {Block} records {RecordedLength} of {InformationLength} bytes; encoded extents are not supported.");
+                    }
+
+                    if (InformationLength == 0)
                         continue;
 
                     if (Type == 0)
-                        Entry.Extents.Add(new UdfExtent(Block, Length));
+                        Entry.Extents.Add(new UdfExtent(Block, Entry.LogicalLength, InformationLength));
+
+                    Entry.LogicalLength += InformationLength;
                 }
+
+                return false;
             }
 
-            private void ReadAllocationExtent(ImageDataSource Source, uint Block, int Length, int DescriptorType, FileEntry Entry)
+            private void ReadAllocationExtents(ImageDataSource Source, uint Block, int Length, int DescriptorType, FileEntry Entry)
             {
+                HashSet<uint> Visited = new HashSet<uint>();
                 byte[] Buffer = ArrayPool<byte>.Shared.Rent((int)BlockSize);
 
                 try
                 {
                     Span<byte> Descriptor = Buffer.AsSpan(0, (int)BlockSize);
-                    Source.ReadExact((long)(PartitionStart + Block) * BlockSize, Descriptor);
 
-                    if (BinaryPrimitives.ReadUInt16LittleEndian(Descriptor) != TagAllocationExtentDescriptor)
-                        throw new InvalidDataException($"Expected a UDF allocation extent descriptor at block {Block}.");
+                    while (true)
+                    {
+                        if (!Visited.Add(Block))
+                            throw new InvalidDataException($"The UDF allocation extent chain returns to block {Block}.");
 
-                    int Available = (int)BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(20));
-                    if (Length > 0 && Length - 24 < Available)
-                        Available = Length - 24;
+                        Source.ReadExact((long)(PartitionStart + Block) * BlockSize, Descriptor);
 
-                    if (24 + Available > Descriptor.Length)
-                        throw new InvalidDataException($"The UDF allocation extent at block {Block} does not fit in one block.");
+                        if (BinaryPrimitives.ReadUInt16LittleEndian(Descriptor) != TagAllocationExtentDescriptor)
+                            throw new InvalidDataException($"Expected a UDF allocation extent descriptor at block {Block}.");
 
-                    ReadAllocationDescriptors(Source, Descriptor.Slice(24, Available), DescriptorType, Entry);
+                        int Available = (int)BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(20));
+                        if (Length - 24 < Available)
+                            Available = Length - 24;
+
+                        if ((uint)Available > (uint)(Descriptor.Length - 24))
+                            throw new InvalidDataException($"The UDF allocation extent at block {Block} does not fit in one block.");
+
+                        if (!ReadAllocationDescriptors(Descriptor.Slice(24, Available), DescriptorType, Entry, out Block, out Length))
+                            return;
+                    }
                 }
                 finally
                 {

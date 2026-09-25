@@ -19,8 +19,7 @@
 #define METHOD(name) Java_dev_brovan_BrovanNative_native##name
 
 extern int brovan_init(const char *baseDirectory);
-extern int brovan_install_windows(const char *media, int mediaDescriptor, int acceptLicense,
-                                  int imageIndex);
+extern int brovan_install_windows(int mediaDescriptor, int acceptLicense, int imageIndex);
 extern int brovan_install_runtimes(int acceptLicense);
 extern int brovan_install_dxvk(const char *version);
 extern void brovan_set_log_sink(void *sink);
@@ -479,18 +478,12 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
     return status;
 }
 
-JNIEXPORT jint JNICALL METHOD(InstallWindows)(JNIEnv *env, jclass clazz, jstring media, jint mediaDescriptor,
+JNIEXPORT jint JNICALL METHOD(InstallWindows)(JNIEnv *env, jclass clazz, jint mediaDescriptor,
                                               jint acceptLicense, jint imageIndex) {
+    (void)env;
     (void)clazz;
 
-    const char *path = media == NULL ? NULL : borrow(env, media);
-    int status = brovan_install_windows(path, mediaDescriptor, acceptLicense, imageIndex);
-
-    if (path != NULL) {
-        release(env, media, path);
-    }
-
-    return status;
+    return brovan_install_windows(mediaDescriptor, acceptLicense, imageIndex);
 }
 
 JNIEXPORT jint JNICALL METHOD(InstallRuntimes)(JNIEnv *env, jclass clazz, jint acceptLicense) {

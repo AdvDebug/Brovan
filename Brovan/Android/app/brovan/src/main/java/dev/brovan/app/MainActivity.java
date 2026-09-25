@@ -42,7 +42,6 @@ import com.google.android.material.materialswitch.MaterialSwitch;
 import com.google.android.material.navigation.NavigationView;
 import com.google.android.material.progressindicator.CircularProgressIndicator;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
-import com.google.android.material.textfield.TextInputEditText;
 import com.google.android.material.snackbar.Snackbar;
 import com.google.android.material.textfield.MaterialAutoCompleteTextView;
 
@@ -385,7 +384,6 @@ public class MainActivity extends AppCompatActivity {
 
         TextView status = view.findViewById(R.id.windows_status);
         MaterialSwitch licensed = view.findViewById(R.id.windows_licensed);
-        TextInputEditText source = view.findViewById(R.id.windows_source);
         MaterialButton install = view.findViewById(R.id.windows_install);
         LinearProgressIndicator bar = view.findViewById(R.id.windows_progress);
         TextView detail = view.findViewById(R.id.windows_progress_text);
@@ -448,17 +446,14 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
-            CharSequence typed = source.getText();
-            String media = typed == null || typed.toString().trim().isEmpty() ? null : typed.toString().trim();
-
-            if (media == null && selectedIso == null) {
+            if (selectedIso == null) {
                 snack(getString(R.string.windows_needs_media));
                 return;
             }
 
             licensed.setEnabled(false);
             startInstall(bar, detail, R.string.windows_working, install, runtimes);
-            WindowsInstall.windows(this, worker, media, selectedIso, new WindowsInstall.Listener() {
+            WindowsInstall.windows(this, worker, selectedIso, new WindowsInstall.Listener() {
                 @Override
                 public void onProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal) {
                     if (filesTotal <= 0) {

@@ -3,7 +3,6 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
-using System.Threading.Tasks;
 
 namespace Brovan.Core.Helpers.WindowsImage
 {
@@ -69,8 +68,8 @@ namespace Brovan.Core.Helpers.WindowsImage
     }
 
     /// <summary>
-    /// Reads the resource layout of a WIM or ESD. Every read goes through <see cref="ImageDataSource"/>, so the
-    /// backing image may equally be a local file or a remote ISO served over range requests.
+    /// Reads the resource layout of a WIM or ESD. Every read goes through <see cref="ImageDataSource"/>, so an image
+    /// inside an ISO is read in place.
     /// </summary>
     internal sealed class WimReader : IDisposable
     {
@@ -83,6 +82,7 @@ namespace Brovan.Core.Helpers.WindowsImage
         private readonly Dictionary<Sha1Hash, WimBlob> BlobsByHash = new Dictionary<Sha1Hash, WimBlob>();
         private readonly List<WimBlob> MetadataBlobs = new List<WimBlob>();
         private readonly Dictionary<WimResource, WimResourceSource> DecodedResources = new Dictionary<WimResource, WimResourceSource>();
+        private readonly List<WimDecompressor> IdleDecompressors = new List<WimDecompressor>();
 
         public WimCompression Compression { get; private set; }
         public int ChunkSize { get; private set; }
@@ -116,6 +116,8 @@ namespace Brovan.Core.Helpers.WindowsImage
 
             if (ChunkSize == 0)
                 ChunkSize = 32768;
+            else if (ChunkSize < 0)
+                throw new InvalidDataException($"The WIM declares a chunk size of {(uint)ChunkSize}.");
 
             ushort TotalParts = BinaryPrimitives.ReadUInt16LittleEndian(Header.Slice(42));
             if (TotalParts > 1)
@@ -290,24 +292,11 @@ namespace Brovan.Core.Helpers.WindowsImage
 
             if (!DecodedResources.TryGetValue(Resource, out WimResourceSource? Decoded))
             {
-                Decoded = new WimResourceSource(Source, Resource);
+                Decoded = new WimResourceSource(this, Source, Resource);
                 DecodedResources[Resource] = Decoded;
             }
 
             return new WindowImageDataSource(Decoded, Blob.OffsetInResource, Blob.Size);
-        }
-
-        /// <summary>
-        /// Drops the cached decoders. Only safe once every source handed out by <see cref="OpenBlob"/> has been
-        /// disposed, so the caller decides when: the importer calls it when it moves on to another resource, which
-        /// keeps at most one solid resource's chunk cache alive at a time.
-        /// </summary>
-        public void ReleaseDecoders()
-        {
-            foreach (WimResourceSource Decoded in DecodedResources.Values)
-                Decoded.Dispose();
-
-            DecodedResources.Clear();
         }
 
         public WimBlob? FindBlob(in WimDirectoryEntry Entry)
@@ -315,12 +304,44 @@ namespace Brovan.Core.Helpers.WindowsImage
             return FindBlob(Entry.Hash);
         }
 
+        /// <summary>
+        /// Opens one resource with a decoder of its own. Unlike <see cref="OpenBlob"/>, safe to call from several threads.
+        /// </summary>
         public ImageDataSource OpenResource(WimResource Resource)
         {
             if (!Resource.IsCompressed && !Resource.IsSolid)
                 return new WindowImageDataSource(Source, Resource.Offset, Resource.UncompressedSize);
 
-            return new WimResourceSource(Source, Resource);
+            return new WimResourceSource(this, Source, Resource);
+        }
+
+        /// <summary>
+        /// Decompressors carry large tables and an input buffer the size of a chunk, so they are pooled rather than
+        /// built per resource. Safe to call from several threads.
+        /// </summary>
+        public WimDecompressor RentDecompressor(WimResource Resource)
+        {
+            lock (IdleDecompressors)
+            {
+                for (int i = IdleDecompressors.Count - 1; i >= 0; i--)
+                {
+                    WimDecompressor Idle = IdleDecompressors[i];
+
+                    if (Idle.Compression == Resource.Compression && Idle.ChunkSize == Resource.ChunkSize)
+                    {
+                        IdleDecompressors.RemoveAt(i);
+                        return Idle;
+                    }
+                }
+            }
+
+            return new WimDecompressor(Resource.Compression, Resource.ChunkSize);
+        }
+
+        public void ReturnDecompressor(WimDecompressor Decompressor)
+        {
+            lock (IdleDecompressors)
+                IdleDecompressors.Add(Decompressor);
         }
 
         public WimImage OpenImage(int Index)
@@ -350,22 +371,21 @@ namespace Brovan.Core.Helpers.WindowsImage
     internal sealed class WimResourceSource : ImageDataSource
     {
         /// <summary>
-        /// Memory the chunk cache and the parallel decode may occupy together. Solid chunks are tens of megabytes,
-        /// so this is what decides how many of them can be decoded at once; it is derived from the machine so a
-        /// phone does not try to hold the same working set as a desktop.
+        /// Memory decoded chunks may hold at once, cached or decoded in parallel. Solid chunks are tens of megabytes,
+        /// so the budget comes from the machine and a phone does not hold a desktop working set.
         /// </summary>
-        private static readonly long CacheBudget = Math.Clamp(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 32, 32L << 20, 192L << 20);
+        public static readonly long DecodeBudget = Math.Clamp(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 32, 32L << 20, 192L << 20);
 
+        private readonly WimReader Owner;
         private readonly ImageDataSource Source;
-        private readonly WimResource Resource;
         private readonly long[] ChunkOffsets;
         private readonly long DataStart;
-        private readonly int ChunkSize;
         private readonly BlockCache Cache;
-        private readonly WimDecompressor[] Decompressors;
+        private WimDecompressor? Decompressor;
 
-        public WimResourceSource(ImageDataSource Source, WimResource Resource)
+        public WimResourceSource(WimReader Owner, ImageDataSource Source, WimResource Resource)
         {
+            this.Owner = Owner;
             this.Source = Source;
             this.Resource = Resource;
             ChunkSize = Resource.ChunkSize;
@@ -377,15 +397,15 @@ namespace Brovan.Core.Helpers.WindowsImage
             ChunkOffsets = new long[Count + 1];
             DataStart = ReadChunkTable(Count);
 
-            int Capacity = (int)Math.Clamp(CacheBudget / ChunkSize, 1, 32);
+            int Capacity = (int)Math.Clamp(DecodeBudget / ChunkSize, 1, 32);
             Cache = new BlockCache(ChunkSize, Capacity);
-
-            int Workers = (int)Math.Clamp(Math.Min(Environment.ProcessorCount, CacheBudget / ChunkSize), 1, 8);
-            Decompressors = new WimDecompressor[Workers];
-
-            for (int i = 0; i < Workers; i++)
-                Decompressors[i] = new WimDecompressor(Resource.Compression, ChunkSize);
         }
+
+        public WimResource Resource { get; }
+
+        public int ChunkSize { get; }
+
+        public long ChunkCount => ChunkOffsets.LongLength - 1;
 
         public override long Length => Resource.UncompressedSize;
 
@@ -458,101 +478,102 @@ namespace Brovan.Core.Helpers.WindowsImage
             int Inside = (int)(Offset - (Index * ChunkSize));
 
             if (!Cache.TryGet(Index, out ReadOnlySpan<byte> Chunk))
-            {
-                DecodeChunk(Index);
-
-                if (!Cache.TryGet(Index, out Chunk))
-                    return 0;
-            }
+                Chunk = DecodeIntoCache(Index);
 
             int Count = Math.Min(Buffer.Length, Chunk.Length - Inside);
             Chunk.Slice(Inside, Count).CopyTo(Buffer);
             return Count;
         }
 
-        private void DecodeChunk(long Index)
+        private ReadOnlySpan<byte> DecodeIntoCache(long Index)
         {
-            int Count = Decompressors.Length;
-            long Chunks = ChunkOffsets.LongLength - 1;
-
-            if (Index + Count > Chunks)
-                Count = (int)(Chunks - Index);
-
-            if (Count <= 1)
-            {
-                Span<byte> Single = Cache.Reserve(Index, ChunkLength(Index));
-                DecodeInto(Index, Single, Decompressors[0]);
-                return;
-            }
-
-            byte[][] Buffers = new byte[Count][];
+            Decompressor ??= Owner.RentDecompressor(Resource);
+            Span<byte> Slot = Cache.Reserve(Index, ChunkLength(Index));
 
             try
             {
-                for (int i = 0; i < Count; i++)
-                    Buffers[i] = ArrayPool<byte>.Shared.Rent(ChunkSize);
-
-                Parallel.For(0, Count, i => DecodeInto(Index + i, Buffers[i].AsSpan(0, ChunkLength(Index + i)), Decompressors[i]));
-
-                for (int i = 0; i < Count; i++)
-                {
-                    int Length = ChunkLength(Index + i);
-                    Buffers[i].AsSpan(0, Length).CopyTo(Cache.Reserve(Index + i, Length));
-                }
+                DecodeChunks(Index, 1, Slot, Decompressor);
             }
-            finally
+            catch
             {
-                for (int i = 0; i < Count; i++)
-                {
-                    if (Buffers[i] != null)
-                        ArrayPool<byte>.Shared.Return(Buffers[i]);
-                }
+                Cache.Invalidate();
+                throw;
             }
+
+            return Slot;
         }
 
-        private int ChunkLength(long Index)
+        public int ChunkLength(long Index)
         {
             return (int)Math.Min(ChunkSize, Resource.UncompressedSize - (Index * ChunkSize));
         }
 
-        private void DecodeInto(long Index, Span<byte> Target, WimDecompressor Decompressor)
+        /// <summary>
+        /// Decodes <paramref name="Count"/> consecutive chunks into <paramref name="Target"/>, which must be exactly as
+        /// long as those chunks. Safe to call from several threads, each with its own decompressor and target.
+        /// </summary>
+        public void DecodeChunks(long First, int Count, Span<byte> Target, WimDecompressor Decompressor)
         {
-            long CompressedStart = ChunkOffsets[Index];
-            int CompressedSize = (int)(ChunkOffsets[Index + 1] - CompressedStart);
+            long CompressedStart = ChunkOffsets[First];
+            long CompressedTotal = ChunkOffsets[First + Count] - CompressedStart;
 
-            if (CompressedSize <= 0 || CompressedSize > Target.Length + 4096)
-                throw new InvalidDataException($"Chunk {Index} declares a compressed size of {CompressedSize} against an uncompressed size of {Target.Length}.");
+            if (CompressedTotal <= 0 || CompressedTotal > Target.Length + (4096L * Count) || CompressedTotal > int.MaxValue)
+                throw new InvalidDataException($"Chunks {First} to {First + Count - 1} declare {CompressedTotal} compressed bytes against {Target.Length} uncompressed.");
 
-            if (CompressedSize == Target.Length)
-            {
-                Source.ReadExact(DataStart + CompressedStart, Target);
-                return;
-            }
-
-            Span<byte> Compressed = Decompressor.RentInput(CompressedSize);
+            Span<byte> Compressed = Decompressor.RentInput((int)CompressedTotal);
             Source.ReadExact(DataStart + CompressedStart, Compressed);
 
-            if (!Decompressor.Decompress(Compressed, Target))
-                throw new InvalidDataException($"Chunk {Index} of a {Resource.Compression} resource failed to decompress.");
+            int Input = 0;
+            int Output = 0;
+
+            for (long Index = First; Index < First + Count; Index++)
+            {
+                long CompressedSize = ChunkOffsets[Index + 1] - ChunkOffsets[Index];
+                int Length = ChunkLength(Index);
+
+                if (CompressedSize <= 0 || CompressedSize > Length + 4096L || CompressedSize > Compressed.Length - Input)
+                    throw new InvalidDataException($"Chunk {Index} declares a compressed size of {CompressedSize} against an uncompressed size of {Length}.");
+
+                ReadOnlySpan<byte> Chunk = Compressed.Slice(Input, (int)CompressedSize);
+                Span<byte> Into = Target.Slice(Output, Length);
+
+                if (CompressedSize == Length)
+                    Chunk.CopyTo(Into);
+                else if (!Decompressor.Decompress(Chunk, Into))
+                    throw new InvalidDataException($"Chunk {Index} of a {Resource.Compression} resource failed to decompress.");
+
+                Input += (int)CompressedSize;
+                Output += Length;
+            }
         }
 
         public override void Dispose()
         {
             Cache.Dispose();
+
+            if (Decompressor != null)
+            {
+                Owner.ReturnDecompressor(Decompressor);
+                Decompressor = null;
+            }
         }
     }
 
     internal sealed class WimDecompressor
     {
         private byte[] Input = Array.Empty<byte>();
-        private readonly WimCompression Compression;
         private readonly XpressDecompressor? Xpress;
         private readonly LzxDecompressor? Lzx;
         private readonly LzmsDecompressor? Lzms;
 
+        public WimCompression Compression { get; }
+
+        public int ChunkSize { get; }
+
         public WimDecompressor(WimCompression Compression, int ChunkSize)
         {
             this.Compression = Compression;
+            this.ChunkSize = ChunkSize;
 
             switch (Compression)
             {

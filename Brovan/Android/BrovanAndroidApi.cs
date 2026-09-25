@@ -441,7 +441,7 @@ namespace Brovan.Android
         }
 
         [UnmanagedCallersOnly(EntryPoint = "brovan_install_windows")]
-        public static int InstallWindows(byte* media, int mediaDescriptor, int acceptLicense, int imageIndex)
+        public static int InstallWindows(int mediaDescriptor, int acceptLicense, int imageIndex)
         {
             if (Volatile.Read(ref _initialized) == 0)
                 return StatusNotInitialized;
@@ -454,7 +454,6 @@ namespace Brovan.Android
 
             WindowsSetupOptions options = new WindowsSetupOptions
             {
-                Media = media == null ? null : Marshal.PtrToStringUTF8((IntPtr)media),
                 MediaDescriptor = mediaDescriptor,
                 LicenseAccepted = true,
                 ImageIndex = imageIndex < 1 ? 1 : imageIndex,

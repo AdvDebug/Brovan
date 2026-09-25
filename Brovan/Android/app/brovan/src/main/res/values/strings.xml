@@ -25,8 +25,6 @@
     <string name="setup_windows_state_missing">Brovan extracts the system files it needs from the Windows installation media. You need a valid Windows license.</string>
     <string name="setup_windows_state_installed">Windows is installed. Continue to the next step.</string>
     <string name="setup_windows_iso">Use an ISO file</string>
-    <string name="setup_windows_link">Use a direct link</string>
-    <string name="setup_windows_link_hint">Direct .iso link</string>
 
     <string name="setup_runtimes_title">Visual C++ runtimes</string>
 
@@ -187,7 +185,6 @@
     <string name="windows_missing">Not installed. Programs cannot run until you import these files.</string>
     <string name="windows_notice">Brovan extracts only the system libraries, NLS tables and registry hives from Windows installation media you supply. It does not include or redistribute software from Microsoft. You need a valid Windows license for these files.</string>
     <string name="windows_licensed">I have a valid Windows license</string>
-    <string name="windows_source">Direct ISO URL (leave empty to ask Microsoft)</string>
     <string name="windows_open_page">Download the ISO from Microsoft</string>
     <string name="windows_choose">Choose a downloaded ISO</string>
     <string name="windows_chosen">Selected: %1$s</string>
@@ -206,7 +203,7 @@
     <string name="windows_done">Import finished.</string>
     <string name="windows_failed">Import failed. See the log.</string>
     <string name="windows_needs_license">Confirm your Windows license first.</string>
-    <string name="windows_needs_media">Choose an ISO, WIM or ESD file, or paste a direct link to one.</string>
+    <string name="windows_needs_media">Choose an ISO, WIM or ESD file.</string>
 
     <string name="files_root">Brovan</string>
     <string name="files_summary">%1$d items · %2$s free</string>

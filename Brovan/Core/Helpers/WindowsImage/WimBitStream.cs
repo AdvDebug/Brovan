@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Brovan.Core.Helpers.WindowsImage
 {
@@ -71,12 +72,13 @@ namespace Brovan.Core.Helpers.WindowsImage
         }
 
         /// <summary>
-        /// Discards the remainder of the current 16 bit word, which is how LZX introduces an uncompressed block.
+        /// Skips the 1 to 16 bits of padding before an LZX uncompressed block header. A stream already on a word
+        /// boundary skips a whole word.
         /// </summary>
         public void AlignToWord()
         {
             int Bits = BitPosition;
-            Position = ((Bits + 15) / 16) * 2;
+            Position = ((Bits / 16) + 1) * 2;
             Buffer = 0;
             Count = 0;
         }
@@ -137,6 +139,18 @@ namespace Brovan.Core.Helpers.WindowsImage
         public static void CopyMatch(Span<byte> Output, int Position, int Offset, int Length)
         {
             int Source = Position - Offset;
+
+            // The 8 byte steps write up to 7 bytes past the match; the next output overwrites them.
+            if (Offset >= 8 && Output.Length - Position >= Length + 7)
+            {
+                for (int i = 0; i < Length; i += 8)
+                {
+                    ulong Value = MemoryMarshal.Read<ulong>(Output.Slice(Source + i));
+                    MemoryMarshal.Write(Output.Slice(Position + i), in Value);
+                }
+
+                return;
+            }
 
             if (Offset >= Length)
             {

@@ -341,11 +341,11 @@ namespace Brovan.Core.Helpers.WindowsImage
 
             while (i < Limit)
             {
-                if (Output[i] != 0xE8)
-                {
-                    i++;
-                    continue;
-                }
+                int Next = Output.Slice(i, Limit - i).IndexOf((byte)0xE8);
+                if (Next < 0)
+                    break;
+
+                i += Next;
 
                 int Absolute = BinaryPrimitives.ReadInt32LittleEndian(Output.Slice(i + 1));
 

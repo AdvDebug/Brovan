@@ -131,8 +131,8 @@ public final class BrovanNative {
         return nativeInit(baseDirectory);
     }
 
-    public static int installWindows(String media, int mediaDescriptor, boolean acceptLicense, int imageIndex) {
-        return nativeInstallWindows(media, mediaDescriptor, acceptLicense ? 1 : 0, imageIndex);
+    public static int installWindows(int mediaDescriptor, boolean acceptLicense, int imageIndex) {
+        return nativeInstallWindows(mediaDescriptor, acceptLicense ? 1 : 0, imageIndex);
     }
 
     /** Downloads only the Visual C++ runtimes, which {@link #installWindows} also does. */
@@ -385,8 +385,7 @@ public final class BrovanNative {
 
     private static native int nativeInit(String baseDirectory);
 
-    private static native int nativeInstallWindows(String media, int mediaDescriptor, int acceptLicense,
-                                                   int imageIndex);
+    private static native int nativeInstallWindows(int mediaDescriptor, int acceptLicense, int imageIndex);
 
     private static native int nativeInstallRuntimes(int acceptLicense);
 

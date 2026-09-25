@@ -18,7 +18,7 @@ namespace Brovan.Core.Helpers.WindowsImage
         {
             try
             {
-                using HttpClient Client = HttpImageDataSource.CreateClient();
+                using HttpClient Client = WindowsSetup.CreateClient();
 
                 string Wanted = Version == null ? string.Empty : Version.Trim();
                 string Address = Wanted.Length == 0 ? LatestRelease : TaggedRelease + Uri.EscapeDataString(Wanted);

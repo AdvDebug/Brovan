@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 
 namespace Brovan.Core.Helpers.WindowsImage
 {
@@ -148,6 +149,7 @@ namespace Brovan.Core.Helpers.WindowsImage
 
         private static readonly byte[] ExtraOffsetBits = DeriveExtraBits(OffsetSlotBase, MaxNumOffsetSyms);
         private static readonly byte[] ExtraLengthBits = DeriveExtraBits(LengthSlotBase, NumLengthSyms);
+        private static readonly SearchValues<byte> X86Opcodes = SearchValues.Create([0x48, 0x4C, 0xE8, 0xE9, 0xF0, 0xFF]);
 
         private readonly ProbabilityContext Main = new ProbabilityContext(NumMainProbs);
         private readonly ProbabilityContext Match = new ProbabilityContext(NumMatchProbs);
@@ -433,15 +435,11 @@ namespace Brovan.Core.Helpers.WindowsImage
 
             while (Position < Tail)
             {
-                byte Opcode = Data[Position];
+                int Next = Data.Slice(Position, Tail - Position).IndexOfAny(X86Opcodes);
+                if (Next < 0)
+                    break;
 
-                if (Opcode != 0x48 && Opcode != 0x4C && Opcode != 0xE8 && Opcode != 0xE9 && Opcode != 0xF0 && Opcode != 0xFF)
-                {
-                    Position++;
-                    continue;
-                }
-
-                Position = Translate(Data, Position, ref LastX86Position);
+                Position = Translate(Data, Position + Next, ref LastX86Position);
             }
         }
 
