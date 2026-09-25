@@ -20,6 +20,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (TargetThread == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            if (TargetThread.State == EmulatedThreadState.Terminated)
+                return NTSTATUS.STATUS_SUCCESS;
+
             if (TerminatingSelfByNullHandle && CountLiveThreads(Instance) <= 1)
                 return NTSTATUS.STATUS_CANT_TERMINATE_SELF;
 

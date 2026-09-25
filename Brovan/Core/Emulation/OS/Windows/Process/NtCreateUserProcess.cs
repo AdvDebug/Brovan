@@ -39,10 +39,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinRemoteThread Thread = new WinRemoteThread
             {
                 Process = Process.Remote,
-                ThreadId = Process.PID,
+                ThreadId = Process.MainThreadId != 0 ? Process.MainThreadId : Process.PID,
+                SuspendCount = StartSuspended ? 1 : 0,
             };
 
             Instance.WinHelper.WinProcesses.Add(Process);
+            InheritJob(Instance, Process, (uint)Instance.WinHelper.GetArg(6));
 
             ulong ProcessHandle = Instance.WinHelper.HandleManager.AddHandle(Process, AccessMask.GenericAll).Handle;
             ulong ThreadHandle = Instance.WinHelper.HandleManager.AddHandle(Thread, AccessMask.GenericAll).Handle;
@@ -58,6 +60,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteImageInformationAttribute(Instance, AttributeList, Is64, ImageInformation);
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static void InheritJob(BinaryEmulator Instance, WinProcess Child, uint ProcessFlags)
+        {
+            const uint ProcessCreateFlagsBreakaway = 0x1;
+            const uint JobLimitBreakawayOk = 0x800;
+            const uint JobLimitSilentBreakawayOk = 0x1000;
+
+            WinJob Job = Instance.WinHelper.WinProcesses.FirstOrDefault(p => p.PID == Instance.WinHelper.PID)?.Job;
+            if (Job == null)
+                return;
+
+            bool Breakaway = (Job.LimitFlags & JobLimitSilentBreakawayOk) != 0 ||
+                ((ProcessFlags & ProcessCreateFlagsBreakaway) != 0 && (Job.LimitFlags & JobLimitBreakawayOk) != 0);
+            if (Breakaway)
+                return;
+
+            Child.Job = Job;
+            if (!Job.ProcessIds.Contains(Child.PID))
+                Job.ProcessIds.Add(Child.PID);
         }
 
         private static void WriteCreateInfoSuccess(BinaryEmulator Instance, ulong CreateInfo, bool Is64, ulong PebAddress, ulong ProcessParameters)

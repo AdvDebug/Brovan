@@ -325,25 +325,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrWhiteSpace(Path))
                 return string.Empty;
 
-            Path = Path.Trim().TrimEnd('\0').Replace('/', '\\');
+            if (File.Device)
+                return Path.Trim().TrimEnd('\0').Replace('/', '\\');
 
-            if (File.Device || Path.StartsWith("\\Device\\", StringComparison.OrdinalIgnoreCase))
-                return Path;
-
-            while (Path.StartsWith("\\??\\", StringComparison.OrdinalIgnoreCase))
-                Path = Path.Substring(4);
-
-            if (Path.StartsWith("\\\\?\\", StringComparison.OrdinalIgnoreCase) ||
-                Path.StartsWith("\\\\.\\", StringComparison.OrdinalIgnoreCase))
-                Path = Path.Substring(4);
-
-            if (Path.Length >= 3 && char.IsLetter(Path[0]) && Path[1] == ':' && Path[2] == '\\')
-                return "\\Device\\HarddiskVolume1" + Path.Substring(2);
-
-            if (Path.StartsWith("\\\\", StringComparison.OrdinalIgnoreCase))
-                return "\\Device\\Mup" + Path.Substring(1);
-
-            return Path;
+            return WinSysHelper.ToNtDevicePath(Path);
         }
 
         private uint GetNameInformationSize(string Name, bool Is64)

@@ -501,11 +501,6 @@ namespace Brovan.Core.Emulation.Guests
             }
         }
 
-        private static uint GetWorkerFactoryPacketSize(BinaryArchitecture Architecture)
-        {
-            return Architecture == BinaryArchitecture.x64 ? 0x20u : 0x10u;
-        }
-
         private bool IsWorkerFactoryReady(BinaryEmulator Instance, WinWorkerFactory Factory)
         {
             if (Factory == null)
@@ -543,26 +538,9 @@ namespace Brovan.Core.Emulation.Guests
                 uint Removed = 0;
                 if (State.WorkerFactoryReservedEntries != null && State.WorkerFactoryReservedEntries.Count > 0)
                 {
-                    uint PacketSize = GetWorkerFactoryPacketSize(Instance._binary.Architecture);
                     foreach (WinIoCompletionEntry Entry in State.WorkerFactoryReservedEntries)
                     {
-                        ulong Address = State.WorkerFactoryMiniPackets + ((ulong)Removed * PacketSize);
-
-                        if (Instance._binary.Architecture == BinaryArchitecture.x64)
-                        {
-                            Instance._emulator.WriteMemory(Address + 0x0, Entry.KeyContext, 8);
-                            Instance._emulator.WriteMemory(Address + 0x8, Entry.ApcContext, 8);
-                            Instance._emulator.WriteMemory(Address + 0x10, unchecked((ulong)(long)(int)Entry.IoStatus), 8);
-                            Instance._emulator.WriteMemory(Address + 0x18, Entry.IoStatusInformation, 8);
-                        }
-                        else
-                        {
-                            Instance._emulator.WriteMemory(Address + 0x0, (uint)Entry.KeyContext);
-                            Instance._emulator.WriteMemory(Address + 0x4, (uint)Entry.ApcContext);
-                            Instance._emulator.WriteMemory(Address + 0x8, (uint)Entry.IoStatus);
-                            Instance._emulator.WriteMemory(Address + 0xC, (uint)Entry.IoStatusInformation);
-                        }
-
+                        OS.Windows.NtWaitForWorkViaWorkerFactory.WritePacket(Instance, State.WorkerFactoryMiniPackets, Removed, Entry);
                         Removed++;
                     }
                 }
@@ -1133,7 +1111,7 @@ namespace Brovan.Core.Emulation.Guests
             EmulatedThread Thread = new EmulatedThread
             {
                 Context = new CpuContext(),
-                ThreadId = WinHelper.GenerateRandomPID(),
+                ThreadId = NewThreadId(Instance, InitialThread),
                 Name = Name,
                 State = EmulatedThreadState.Ready,
                 BasePriority = BasePriority,
@@ -1146,7 +1124,7 @@ namespace Brovan.Core.Emulation.Guests
                 StackSize = ThreadStackSize,
                 StackAddress = AllocateGuardedThreadStack(Instance, ThreadStackSize, out ulong ThreadStackLimit),
                 StackLimit = ThreadStackLimit,
-                GuestState = new WindowsThreadState()
+                GuestState = new WindowsThreadState { CreateTime = Instance.GetEmulatedSystemTimeFileTimeUtc() }
             };
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
@@ -1189,6 +1167,15 @@ namespace Brovan.Core.Emulation.Guests
             return Thread;
         }
 
+        private uint NewThreadId(BinaryEmulator Instance, bool InitialThread)
+        {
+            uint Reserved = WinHelper.InitialThreadId;
+            if (InitialThread && Reserved != 0 && !Instance.Threads.ContainsKey(Reserved))
+                return Reserved;
+
+            return WinHelper.GenerateRandomPID();
+        }
+
         public EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8)
         {
             return CreateEmulatedThread(Instance, StartAddress, Name, Parameter, StackSizeOverride, BasePriority, 0, false);
@@ -1203,7 +1190,7 @@ namespace Brovan.Core.Emulation.Guests
             EmulatedThread Thread = new EmulatedThread
             {
                 Context = new CpuContext(),
-                ThreadId = WinHelper.GenerateRandomPID(),
+                ThreadId = NewThreadId(Instance, InitialThread),
                 Name = Name,
                 State = EmulatedThreadState.Ready,
                 BasePriority = BasePriority,
@@ -1216,7 +1203,7 @@ namespace Brovan.Core.Emulation.Guests
                 StackSize = ThreadStackSize,
                 StackAddress = AllocateGuardedThreadStack(Instance, ThreadStackSize, out ulong ThreadStackLimit),
                 StackLimit = ThreadStackLimit,
-                GuestState = new WindowsThreadState()
+                GuestState = new WindowsThreadState { CreateTime = Instance.GetEmulatedSystemTimeFileTimeUtc() }
             };
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
@@ -1458,7 +1445,7 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(PEB + 0x18, 0UL, 8);
                 Instance._emulator.WriteMemory(PEB + 0x30, 0UL, 8);
                 Instance._emulator.WriteMemory(PEB + 0x68, ApiSetMap, 8);
-                Instance._emulator.WriteMemory(PEB + 0xB8, 8, 4);
+                Instance._emulator.WriteMemory(PEB + 0xB8, WinHelper.ProcessorCount, 4);
                 Instance._emulator.WriteMemory(PEB + 0xBC, 0, 4);
                 Instance._emulator.WriteMemory(PEB + 0x118, WindowsVersionInfo.MajorVersion, 4);
                 Instance._emulator.WriteMemory(PEB + 0x11C, WindowsVersionInfo.MinorVersion, 4);
@@ -1562,7 +1549,7 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(PEB + 0xB0, WindowsVersionInfo.PlatformIdWin32Nt, 4);
                 Instance._emulator.WriteMemory(PEB + WinSxS.PebActivationContextData32, (uint)ProcessActivationContext);
 
-                Instance._emulator.WriteMemory(PEB + 0x64, (uint)Environment.ProcessorCount);
+                Instance._emulator.WriteMemory(PEB + 0x64, WinHelper.ProcessorCount);
                 Instance._emulator.WriteMemory(PEB + 0x68, 0u);
 
                 if (IsPeImage)
@@ -1596,7 +1583,7 @@ namespace Brovan.Core.Emulation.Guests
             WinHelper.LdrTracker = new PebLdrTracker(Instance, WinHelper);
             WinHelper.LdrTracker.Install();
 
-            GuestSession.PublishStartup(PEB, ProcessParams);
+            GuestSession.PublishStartup(PEB, ProcessParams, WinHelper.InitialThreadId);
         }
 
         private void InitializeNativePeb(BinaryEmulator Instance, WinModule MainModule)
@@ -1608,7 +1595,7 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemoryByte(NativePEB, 0, 0x2000);
             Instance._emulator.WriteMemory(NativePEB + 0x10, MainModule.MappedBase, 8);
             Instance._emulator.WriteMemory(NativePEB + 0x68, ApiSetMap, 8);
-            Instance._emulator.WriteMemory(NativePEB + 0xB8, (uint)Environment.ProcessorCount, 4);
+            Instance._emulator.WriteMemory(NativePEB + 0xB8, WinSysHelper.HostProcessorCount(64), 4);
             Instance._emulator.WriteMemory(NativePEB + 0x118, WindowsVersionInfo.MajorVersion, 4);
             Instance._emulator.WriteMemory(NativePEB + 0x11C, WindowsVersionInfo.MinorVersion, 4);
             Instance._emulator.WriteMemory(NativePEB + 0x120, WindowsVersionInfo.BuildNumberShort, 2);

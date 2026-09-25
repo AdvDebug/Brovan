@@ -13,6 +13,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         CreateThread = 4,
         ResumeProcess = 5,
         QueryMemory = 6,
+        FreeMemory = 7,
+        ProtectMemory = 8,
     }
 
     /// <summary>
@@ -115,7 +117,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return (NTSTATUS)_view.ReadUInt32(Base + StatusOffset);
             }
 
-            return NTSTATUS.STATUS_TIMEOUT;
+            // STATUS_TIMEOUT is a success code.
+            return NTSTATUS.STATUS_IO_TIMEOUT;
         }
 
         /// <summary>

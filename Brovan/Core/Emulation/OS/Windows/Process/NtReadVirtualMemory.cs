@@ -1,16 +1,16 @@
 using System;
 using System.Buffers;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Transactions;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtReadVirtualMemory : IWinSyscall
     {
+        // MmCopyVirtualMemory copies nothing from a source chunk of this size it cannot lock whole.
+        internal const uint CopyChunkBytes = 0xE000;
+
+        private const ulong PageSize = 0x1000;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             return Read(Instance, Instance.WinHelper.GetArg(0), Instance.WinHelper.GetArg(1), Instance.WinHelper.GetArg(2), Instance.WinHelper.GetArg(3), Instance.WinHelper.GetArg(4), (uint)Instance.WinHelper.PointerSize);
@@ -18,105 +18,130 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS Read(BinaryEmulator Instance, ulong ProcessHandle, ulong BaseAddress, ulong Buffer, ulong NumberOfBytesToRead, ulong BytesReadPtr, uint BytesReadSize)
         {
-            if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
-                return ReadLocal(Instance, BaseAddress, Buffer, NumberOfBytesToRead, BytesReadPtr, BytesReadSize);
-
-            if (!Instance.WinHelper.HandleExists(ProcessHandle))
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            // NT wants PROCESS_VM_READ for a read. PROCESS_VM_OPERATION belongs to write and protect.
-            WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessVMRead);
-            if (Process == null)
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-
-            if (Process.PID == Instance.WinHelper.PID)
-                return ReadLocal(Instance, BaseAddress, Buffer, NumberOfBytesToRead, BytesReadPtr, BytesReadSize);
-
-            if (Process.Remote == null)
-                return NTSTATUS.STATUS_INVALID_CID;
-
-            return ReadRemote(Instance, Process, BaseAddress, Buffer, NumberOfBytesToRead, BytesReadPtr, BytesReadSize);
-        }
-
-        private static NTSTATUS ReadLocal(BinaryEmulator Instance, ulong BaseAddress, ulong Buffer, ulong NumberOfBytesToRead, ulong BytesReadPtr, uint BytesReadSize)
-        {
-            if (BaseAddress == 0 || Buffer == 0 || NumberOfBytesToRead == 0 || NumberOfBytesToRead > int.MaxValue)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (Instance.IsRegionFreed(BaseAddress, true))
-                return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
-
-            if (!Instance.IsRegionMapped(BaseAddress, NumberOfBytesToRead))
-                return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
-
-            if (Instance.IsRegionFreed(Buffer, true))
+            // NT does not check the handle for an empty request.
+            if (NumberOfBytesToRead == 0)
             {
-                if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
-                    Instance.TriggerEventMessage($"[!!] Tried reading from a freed buffer at 0x{Buffer:X} while using NtReadVirtualMemory.", LogFlags.Issues);
-                return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+                WriteCount(Instance, BytesReadPtr, 0, BytesReadSize);
+                return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (!Instance.IsRegionMapped(Buffer, NumberOfBytesToRead))
-                return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+            if (BaseAddress + NumberOfBytesToRead < BaseAddress || Buffer + NumberOfBytesToRead < Buffer)
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            int Length = (int)NumberOfBytesToRead;
-            byte[] Rented = ArrayPool<byte>.Shared.Rent(Length);
+            // NT wants PROCESS_VM_READ for a read. PROCESS_VM_OPERATION belongs to write and protect.
+            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMRead, out WinProcess Process);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            ulong Copied;
+            if (Process.PID == Instance.WinHelper.PID)
+                Status = CopyLocal(Instance, BaseAddress, Buffer, NumberOfBytesToRead, out Copied);
+            else if (Process.Remote == null)
+                return NTSTATUS.STATUS_INVALID_CID;
+            else
+                Status = ReadRemote(Instance, Process, BaseAddress, Buffer, NumberOfBytesToRead, out Copied);
+
+            WriteCount(Instance, BytesReadPtr, Copied, BytesReadSize);
+            return Status;
+        }
+
+        internal static NTSTATUS CopyLocal(BinaryEmulator Instance, ulong Source, ulong Destination, ulong Length, out ulong Copied)
+        {
+            Copied = 0;
+            byte[] Rented = ArrayPool<byte>.Shared.Rent((int)Math.Min(Length, CopyChunkBytes));
 
             try
             {
-                Span<byte> Value = Rented.AsSpan(0, Length);
-                if (!Instance.ReadMemory(BaseAddress, Value, (uint)Length))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                while (Copied < Length)
+                {
+                    uint Chunk = (uint)Math.Min(Length - Copied, CopyChunkBytes);
+                    Span<byte> Data = Rented.AsSpan(0, (int)Chunk);
 
-                if (!Instance.WriteMemory(Buffer, Value))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    if (AccessibleLength(Instance, Source + Copied, Chunk, false) < Chunk || !Instance._emulator.ReadMemory(Source + Copied, Data))
+                        return NTSTATUS.STATUS_PARTIAL_COPY;
+
+                    ulong Writable = AccessibleLength(Instance, Destination + Copied, Chunk, true);
+                    if (Writable != 0 && !Instance._emulator.WriteMemory(Destination + Copied, Data.Slice(0, (int)Writable)))
+                        return NTSTATUS.STATUS_PARTIAL_COPY;
+
+                    Copied += Writable;
+                    if (Writable < Chunk)
+                        return NTSTATUS.STATUS_PARTIAL_COPY;
+                }
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(Rented);
             }
 
-            if (BytesReadPtr != 0 && Instance.IsRegionMapped(BytesReadPtr, BytesReadSize))
-                Instance._emulator.WriteMemory(BytesReadPtr, NumberOfBytesToRead, BytesReadSize);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal static ulong AccessibleLength(BinaryEmulator Instance, ulong Address, ulong Length, bool Write)
+        {
+            MemoryProtection Needed = Write ? MemoryProtection.Write : MemoryProtection.Read | MemoryProtection.Execute;
+            ulong Done = 0;
+
+            while (Done < Length)
+            {
+                ulong Current = Address + Done;
+                if (!Instance.TryFindMemoryRegion(Current, out MemoryRegion Region))
+                    break;
+
+                if ((Region.Protections & Needed) == 0 || (Region.SpecialProtections & SpecialProtections.Guard) != 0)
+                    break;
+
+                ulong RegionEnd = Region.BaseAddress + BinaryEmulator.AlignUp(Region.Size, PageSize);
+                if (RegionEnd <= Current)
+                    break;
+
+                Done = Math.Min(Length, RegionEnd - Address);
+            }
+
+            return Done;
+        }
+
+        private static NTSTATUS ReadRemote(BinaryEmulator Instance, WinProcess Process, ulong BaseAddress, ulong Buffer, ulong Length, out ulong Copied)
+        {
+            Copied = 0;
+            byte[] Rented = ArrayPool<byte>.Shared.Rent((int)Math.Min(Length, CopyChunkBytes));
+
+            try
+            {
+                while (Copied < Length)
+                {
+                    uint Chunk = (uint)Math.Min(Length - Copied, CopyChunkBytes);
+                    NTSTATUS RemoteStatus = Process.Remote.ReadMemory(BaseAddress + Copied, Rented.AsSpan(0, (int)Chunk), out int RemoteLength);
+                    if (RemoteStatus != NTSTATUS.STATUS_SUCCESS || RemoteLength < Chunk)
+                        return Copied == 0 && RemoteStatus != NTSTATUS.STATUS_SUCCESS ? RemoteStatus : NTSTATUS.STATUS_PARTIAL_COPY;
+
+                    ulong Writable = AccessibleLength(Instance, Buffer + Copied, Chunk, true);
+                    if (Writable != 0 && !Instance._emulator.WriteMemory(Buffer + Copied, Rented, 0, (int)Writable))
+                        return NTSTATUS.STATUS_PARTIAL_COPY;
+
+                    Copied += Writable;
+                    if (Writable < Chunk)
+                        return NTSTATUS.STATUS_PARTIAL_COPY;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Rented);
+            }
+
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] Read 0x{Copied:X} bytes from process \"{Process.Name}\" at 0x{BaseAddress:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS ReadRemote(BinaryEmulator Instance, WinProcess Process, ulong BaseAddress, ulong Buffer, ulong NumberOfBytesToRead, ulong BytesReadPtr, uint BytesReadSize)
+        internal static void WriteCount(BinaryEmulator Instance, ulong CountPtr, ulong Count, uint CountSize)
         {
-            if (BaseAddress == 0 || Buffer == 0 || NumberOfBytesToRead == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            if (CountPtr == 0)
+                return;
 
-            if (NumberOfBytesToRead > GuestSessionMailbox.MaxPayloadBytes)
-                NumberOfBytesToRead = GuestSessionMailbox.MaxPayloadBytes;
-
-            if (!Instance.IsRegionMapped(Buffer, NumberOfBytesToRead))
-                return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
-
-            byte[] Remote = ArrayPool<byte>.Shared.Rent((int)NumberOfBytesToRead);
-            int RemoteLength;
-
-            try
-            {
-                NTSTATUS RemoteStatus = Process.Remote.ReadMemory(BaseAddress, Remote.AsSpan(0, (int)NumberOfBytesToRead), out RemoteLength);
-                if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
-                    return RemoteStatus;
-
-                if (!Instance._emulator.WriteMemory(Buffer, Remote, 0, RemoteLength))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(Remote);
-            }
-
-            if (BytesReadPtr != 0 && Instance.IsRegionMapped(BytesReadPtr, BytesReadSize))
-                Instance._emulator.WriteMemory(BytesReadPtr, (ulong)RemoteLength, BytesReadSize);
-
-            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                Instance.TriggerEventMessage($"[+] Read 0x{RemoteLength:X} bytes from process \"{Process.Name}\" at 0x{BaseAddress:X}.", LogFlags.Syscall);
-
-            return NTSTATUS.STATUS_SUCCESS;
+            if (Instance.IsRegionMapped(CountPtr, CountSize))
+                Instance._emulator.WriteMemory(CountPtr, Count, CountSize);
         }
     }
 }

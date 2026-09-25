@@ -11,7 +11,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong PreviousSuspendCountPtr = Instance.WinHelper.GetArg(1);
 
             EmulatedThread TargetThread = null;
-            if (ThreadHandle == 0xFFFFFFFFFFFFFFFEUL)
+            if (HandleManager.IsCurrentThreadPseudoHandle(ThreadHandle))
                 TargetThread = Instance.CurrentThread;
             else
                 TargetThread = Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(ThreadHandle);
@@ -24,20 +24,25 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Remote == null)
                     return NTSTATUS.STATUS_INVALID_HANDLE;
 
-                if (Remote.Process == null || Remote.Process.HasExited)
-                    return NTSTATUS.STATUS_THREAD_IS_TERMINATING;
+                uint Previous = Remote.Process == null || Remote.Process.HasExited ? 0u : (uint)Remote.SuspendCount;
 
-                if (PreviousSuspendCountPtr != 0)
+                if (PreviousSuspendCountPtr != 0 && !Instance.IsRegionMapped(PreviousSuspendCountPtr, 4))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                // Only the create-suspended hold is known on this side.
+                if (Previous == 1)
                 {
-                    if (!Instance.IsRegionMapped(PreviousSuspendCountPtr, 4))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                    Instance._emulator.WriteMemory(PreviousSuspendCountPtr, 1u);
+                    NTSTATUS ResumeStatus = Remote.Process.Resume();
+                    if (ResumeStatus != NTSTATUS.STATUS_SUCCESS)
+                        return ResumeStatus;
                 }
 
-                // A process that was never held cannot report a failure to release it, and the suspend count
-                // still has to come back or the caller treats the whole create as failed.
-                Remote.Process.Resume();
+                if (Previous > 0)
+                    Remote.SuspendCount--;
+
+                if (PreviousSuspendCountPtr != 0)
+                    Instance.WinHelper.WriteUInt32(PreviousSuspendCountPtr, Previous);
+
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
@@ -56,11 +61,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 if (TargetThread.State == EmulatedThreadState.Suspended)
                 {
-                    if (TargetThread.WaitActive)
-                        TargetThread.State = EmulatedThreadState.Waiting;
-                    else
-                        TargetThread.State = EmulatedThreadState.Ready;
-                        Instance.WakeSignal.Bump();
+                    TargetThread.State = TargetThread.WaitActive ? EmulatedThreadState.Waiting : EmulatedThreadState.Ready;
+                    Instance.WakeSignal.Bump();
                 }
             }
 

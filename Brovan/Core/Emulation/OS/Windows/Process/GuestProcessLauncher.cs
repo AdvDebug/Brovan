@@ -130,7 +130,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            if (!WaitForStartup(HostProcess, SpawnToken, out uint ProcessId, out ulong PebAddress, out ulong StartupParameters))
+            if (!WaitForStartup(HostProcess, SpawnToken, out uint ProcessId, out ulong PebAddress, out ulong StartupParameters, out uint MainThreadId))
             {
                 Utils.LogError($"[GuestProcessLauncher] {Path.GetFileName(HostImage)} never reached guest startup.");
                 Terminate(HostProcess);
@@ -138,16 +138,25 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
+            const ushort MachineAmd64 = 0x8664;
+
             Process = new WinProcess
             {
                 PID = ProcessId,
                 PPID = Instance.WinHelper.PID,
                 Name = Path.GetFileName(HostImage),
                 Path = ImagePath,
-                Arch = Instance._binary.Architecture,
-                CreationTime = DateTime.UtcNow.ToFileTimeUtc(),
+                Arch = ImageInformation.Machine == MachineAmd64 ? BinaryArchitecture.x64 : BinaryArchitecture.x86,
+                CreationTime = Instance.GetEmulatedSystemTimeFileTimeUtc(),
+                RunningUser = Instance.WinHelper.CurrentUser,
+                MainThreadId = MainThreadId,
+                ImageInformation = ImageInformation,
                 Remote = RemoteGuestProcess.Adopt(ProcessId, HostProcess, Instance, PebAddress, StartupParameters),
             };
+
+            Instance.WinHelper.ClaimProcessId(ProcessId);
+            if (MainThreadId != 0)
+                Instance.WinHelper.ClaimProcessId(MainThreadId);
 
             Instance.TriggerEventMessage($"[GuestProcessLauncher] Launched {Process.Name} as guest process {Process.PID} (depth {Depth + 1}).", LogFlags.Syscall);
 
@@ -263,13 +272,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// The child only owns a PEB and answers cross-process requests once its emulator booted, and the creating
         /// kernel32 uses both as soon as this returns. Windows hands back an address space that already exists.
         /// </summary>
-        private static bool WaitForStartup(Process HostProcess, uint SpawnToken, out uint ProcessId, out ulong PebAddress, out ulong StartupParameters)
+        private static bool WaitForStartup(Process HostProcess, uint SpawnToken, out uint ProcessId, out ulong PebAddress, out ulong StartupParameters, out uint MainThreadId)
         {
             long Deadline = Environment.TickCount64 + StartupTimeoutMilliseconds;
 
             while (true)
             {
-                if (GuestSession.TryResolveSpawn(SpawnToken, out ProcessId, out _, out PebAddress, out StartupParameters))
+                if (GuestSession.TryResolveSpawn(SpawnToken, out ProcessId, out _, out PebAddress, out StartupParameters, out MainThreadId))
                     return true;
 
                 if ((HostProcess != null && HostProcess.HasExited) || Environment.TickCount64 >= Deadline)
@@ -277,6 +286,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     ProcessId = 0;
                     PebAddress = 0;
                     StartupParameters = 0;
+                    MainThreadId = 0;
                     return false;
                 }
 
@@ -430,7 +440,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return false;
 
                 IMAGE_DOS_HEADER DosHeader = MemoryMarshal.Read<IMAGE_DOS_HEADER>(Headers);
-                if (DosHeader.e_magic != DosSignature || DosHeader.e_lfanew < 0)
+                if (DosHeader.e_magic != DosSignature || DosHeader.e_lfanew < 0 ||
+                    DosHeader.e_lfanew > Available - 4 - Unsafe.SizeOf<IMAGE_FILE_HEADER>() - 2)
                     return false;
 
                 int FileHeaderOffset = DosHeader.e_lfanew + 4;

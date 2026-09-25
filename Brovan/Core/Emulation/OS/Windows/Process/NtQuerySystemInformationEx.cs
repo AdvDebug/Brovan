@@ -1,4 +1,4 @@
-﻿using System.Text;
+﻿using System;
 using System.Buffers.Binary;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -6,6 +6,25 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtQuerySystemInformationEx : IWinSyscall
     {
+        private const uint RelationProcessorCore = 0;
+        private const uint RelationNumaNode = 1;
+        private const uint RelationCache = 2;
+        private const uint RelationProcessorPackage = 3;
+        private const uint RelationGroup = 4;
+        private const uint RelationProcessorDie = 5;
+        private const uint RelationNumaNodeEx = 6;
+        private const uint RelationProcessorModule = 7;
+        private const uint RelationAll = 0xFFFF;
+
+        private const uint CacheUnified = 0;
+        private const uint CacheInstruction = 1;
+        private const uint CacheData = 2;
+
+        private const ushort CacheLineSize = 64;
+        private const uint L1CacheSize = 0x8000;
+        private const uint L2CacheSize = 0x80000;
+        private const uint L3CacheSize = 0x800000;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)(uint)Instance.WinHelper.GetArg(0);
@@ -70,8 +89,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (SystemInformationLength < OutputRequired)
                             return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
-                        uint ConfigurationType = Instance.ReadMemoryUInt((uint)InputBufferPtr + 0x00);
-                        uint FeatureId = Instance.ReadMemoryUInt((uint)InputBufferPtr + 0x04);
+                        uint ConfigurationType = Instance.ReadMemoryUInt(InputBufferPtr + 0x00);
+                        uint FeatureId = Instance.ReadMemoryUInt(InputBufferPtr + 0x04);
 
                         Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, OutputRequired);
 
@@ -153,369 +172,48 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_SUCCESS;
                     }
 
-                case SYSTEM_INFORMATION_CLASS.SystemTimeOfDayInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemProcessorPerformanceInformation:
                     {
-                        const uint FullSize = 0x30;
+                        NTSTATUS GroupStatus = CheckProcessorGroup(Instance, InputBufferPtr, InputBufferLength);
+                        if (GroupStatus != NTSTATUS.STATUS_SUCCESS)
+                            return GroupStatus;
 
-                        NTSTATUS rl = WriteReturnLength(FullSize);
-                        if (rl != NTSTATUS.STATUS_SUCCESS)
-                            return rl;
-
-                        if (SystemInformationLength < FullSize)
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-
-                        long CurrentTime = Instance.GetEmulatedSystemTimeFileTimeUtc();
-                        long MaxFileTime = DateTime.SpecifyKind(DateTime.MaxValue, DateTimeKind.Utc).ToFileTimeUtc();
-                        DateTime CurrentUtc = DateTime.FromFileTimeUtc(Math.Min(CurrentTime, MaxFileTime));
-                        DateTime LocalNow = TimeZoneInfo.ConvertTimeFromUtc(CurrentUtc, TimeZoneInfo.Local);
-
-                        TimeSpan Offset = TimeZoneInfo.Local.GetUtcOffset(CurrentUtc);
-                        long TimeZoneBias = -Offset.Ticks;
-
-                        long UPtime100ns = Instance.EmulatedTickCount64 * 10000;
-                        long BootTime = CurrentTime - UPtime100ns;
-
-                        uint TimeZoneId = TimeZoneInfo.Local.IsDaylightSavingTime(LocalNow) ? 2u : 1u;
-
-                        Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(FullSize);
-                        Buffer.Slice(0, (int)FullSize).Clear();
-
-                        BinaryPrimitives.WriteInt64LittleEndian(Buffer.Slice(0x00, 8), BootTime);
-                        BinaryPrimitives.WriteInt64LittleEndian(Buffer.Slice(0x08, 8), CurrentTime);
-                        BinaryPrimitives.WriteInt64LittleEndian(Buffer.Slice(0x10, 8), TimeZoneBias);
-                        BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x18, 4), TimeZoneId);
-
-                        if (!Instance.WriteMemory(SystemInformationPtr, Buffer.Slice(0, (int)FullSize)))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                        if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                            Instance.TriggerEventMessage($"[+] NtQuerySystemInformationEx: SystemTimeOfDayInformation (Boot=0x{BootTime:X}, Now=0x{CurrentTime:X}, TZId={TimeZoneId}).", LogFlags.Syscall);
-                        return NTSTATUS.STATUS_SUCCESS;
+                        return NtQuerySystemInformation.QueryProcessorPerformance(Instance, SystemInformationPtr, (uint)SystemInformationLength, ReturnLengthPtr);
                     }
 
-                case SYSTEM_INFORMATION_CLASS.SystemTimeZoneInformation:
-                case SYSTEM_INFORMATION_CLASS.SystemCurrentTimeZoneInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemLogicalProcessorInformation:
                     {
-                        uint RequiredLength = 172;
+                        NTSTATUS GroupStatus = CheckProcessorGroup(Instance, InputBufferPtr, InputBufferLength);
+                        if (GroupStatus != NTSTATUS.STATUS_SUCCESS)
+                            return GroupStatus;
 
-                        if (SystemInformationLength < RequiredLength)
-                        {
-                            NTSTATUS rl = WriteReturnLength(RequiredLength);
-                            if (rl != NTSTATUS.STATUS_SUCCESS)
-                                return rl;
-
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                        }
-
-                        Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, RequiredLength);
-
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0, -120);
-                        WriteUnicodeString(Instance, SystemInformationPtr + 4, "@tzres.dll,-342");
-
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 84, 0);
-                        WriteUnicodeString(Instance, SystemInformationPtr + 88, "@tzres.dll,-341");
-
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 68 + 2, (ushort)10);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 68 + 4, (ushort)5);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 68 + 6, (ushort)23);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 68 + 8, (ushort)59);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 68 + 10, (ushort)0);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 68 + 12, (ushort)0);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 68 + 14, (ushort)0);
-
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 152 + 2, (ushort)4);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 152 + 4, (ushort)4);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 152 + 6, (ushort)0);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 152 + 8, (ushort)0);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 152 + 10, (ushort)0);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 152 + 12, (ushort)0);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 152 + 14, (ushort)0);
-
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 168, -60);
-
-                        NTSTATUS rl2 = WriteReturnLength(RequiredLength);
-                        if (rl2 != NTSTATUS.STATUS_SUCCESS)
-                            return rl2;
-
-                        return NTSTATUS.STATUS_SUCCESS;
+                        return QueryLegacyProcessorInformation(Instance, SystemInformationPtr, (uint)SystemInformationLength, ReturnLengthPtr);
                     }
-
-                case SYSTEM_INFORMATION_CLASS.SystemRangeStartInformation:
-                    {
-                        uint Required = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8u : 4u;
-
-                        if (SystemInformationLength < Required)
-                        {
-                            if (ReturnLengthPtr != 0 && Instance.IsRegionMapped(ReturnLengthPtr, 4))
-                                Instance._emulator.WriteMemory(ReturnLengthPtr, Required);
-
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                        }
-
-                        if (SystemInformationPtr == 0)
-                            return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                        if (!Instance.IsRegionMapped(SystemInformationPtr, Required))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                        if (Instance._binary.Architecture == BinaryArchitecture.x64)
-                        {
-                            // Typical x64 kernel range start.
-                            ulong RangeStart = 0xFFFF800000000000UL;
-                            if (!Instance._emulator.WriteMemory(SystemInformationPtr, RangeStart, 8))
-                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                        }
-                        else
-                        {
-                            uint RangeStart = 0x80000000u;
-                            if (!Instance._emulator.WriteMemory(SystemInformationPtr, RangeStart, 4))
-                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                        }
-
-                        if (ReturnLengthPtr != 0 && Instance.IsRegionMapped(ReturnLengthPtr, 4))
-                            Instance._emulator.WriteMemory(ReturnLengthPtr, Required);
-
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
-
-                case SYSTEM_INFORMATION_CLASS.SystemCodeIntegrityInformation:
-                    {
-                        uint RequiredLength = 8;
-
-                        if (SystemInformationLength < RequiredLength)
-                        {
-                            NTSTATUS rl = WriteReturnLength(RequiredLength);
-                            if (rl != NTSTATUS.STATUS_SUCCESS)
-                                return rl;
-
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                        }
-
-                        uint CodeIntegrityOptions = 0x401;
-
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0, RequiredLength);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 4, CodeIntegrityOptions);
-
-                        NTSTATUS rl2 = WriteReturnLength(RequiredLength);
-                        if (rl2 != NTSTATUS.STATUS_SUCCESS)
-                            return rl2;
-
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
-
-                case SYSTEM_INFORMATION_CLASS.SystemNumaProcessorMap:
-                    const uint HeaderSize = 0x08;
-                    const uint GroupAffinitySize = 0x10;
-                    const uint MaxNodes = 0x40;
-
-                    if (SystemInformationLength < sizeof(uint))
-                    {
-                        if (ReturnLengthPtr != 0)
-                        {
-                            if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
-                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                            Instance._emulator.WriteMemory(ReturnLengthPtr, (uint)sizeof(uint));
-                        }
-                        return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                    }
-
-                    uint ClearSize = (uint)Math.Min(SystemInformationLength, HeaderSize + GroupAffinitySize);
-                    Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, ClearSize);
-
-                    Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, 0u); // HighestNodeNumber = 0
-
-                    uint ReqSize = sizeof(uint);
-
-                    if (SystemInformationLength >= HeaderSize + 8)
-                    {
-                        ulong ActiveMask = 0xFFFUL; // Single-node active processor mask
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, ActiveMask); // Node0 Mask
-
-                        if (SystemInformationLength >= HeaderSize + 0x0A)
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, (ushort)0);
-
-                        uint MaxEntries = (uint)((SystemInformationLength - HeaderSize) / GroupAffinitySize);
-                        if (MaxEntries > MaxNodes)
-                            MaxEntries = MaxNodes;
-
-                        ReqSize = HeaderSize + (MaxEntries != 0 ? (MaxEntries * GroupAffinitySize) : 0);
-                        if (ReqSize < sizeof(uint)) ReqSize = sizeof(uint);
-                    }
-
-                    if (ReturnLengthPtr != 0)
-                    {
-                        if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                        Instance._emulator.WriteMemory(ReturnLengthPtr, ReqSize);
-                    }
-                    return NTSTATUS.STATUS_SUCCESS;
 
                 case SYSTEM_INFORMATION_CLASS.SystemLogicalProcessorAndGroupInformation:
                     {
-                        if (InputBufferLength != 4)
+                        if (InputBufferPtr == 0 || InputBufferLength < sizeof(uint))
                             return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                        if (InputBufferPtr == 0)
-                            return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                        uint Request = Instance.ReadMemoryUInt((uint)InputBufferPtr);
-
-                        const uint RelationProcessorCore = 0;
-                        const uint RelationNumaNode = 1;
-                        const uint RelationGroup = 4;
-                        const uint RelationNumaNodeEx = 6;
-
-                        uint CpuCount = (uint)Environment.ProcessorCount;
-                        if (CpuCount == 0)
-                            CpuCount = 1;
-
-                        uint MaskBits = CpuCount > 64 ? 64u : CpuCount;
-                        ulong ActiveMask = MaskBits == 64 ? ulong.MaxValue : ((1UL << (int)MaskBits) - 1UL);
-
-                        const uint RootSize = 0x08;
-
-                        if (Request == RelationProcessorCore)
+                        uint Relationship = Instance.ReadMemoryUInt(InputBufferPtr);
+                        int RequiredLength = WriteProcessorRelations(Instance, Relationship, Span<byte>.Empty);
+                        if (RequiredLength < 0)
                         {
-                            const uint ProcessorRelationshipSize = 0x28;
-                            uint RequiredSize = RootSize + ProcessorRelationshipSize;
-
-                            NTSTATUS RL = WriteReturnLength(RequiredSize);
-                            if (RL != NTSTATUS.STATUS_SUCCESS)
-                                return RL;
-
-                            if (SystemInformationLength < RequiredSize)
-                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-
-                            Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, RequiredSize);
-
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, RelationProcessorCore);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x04, RequiredSize);
-
-                            ulong ProcessorBase = SystemInformationPtr + RootSize;
-                            Instance.WinHelper.WriteByte(ProcessorBase + 0x00, 0x01); // Flags: SMT-capable core.
-                            Instance.WinHelper.WriteByte(ProcessorBase + 0x01, 0x00); // EfficiencyClass.
-                            Instance._emulator.WriteMemory(ProcessorBase + 0x16, (ushort)1); // GroupCount.
-
-                            ulong GroupAffinity = ProcessorBase + 0x18;
-                            Instance._emulator.WriteMemory(GroupAffinity + 0x00, ActiveMask);
-                            Instance._emulator.WriteMemory(GroupAffinity + 0x08, (ushort)0);
-
-                            return NTSTATUS.STATUS_SUCCESS;
+                            if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
+                                Instance.TriggerEventMessage($"[!] Unsupported SystemLogicalProcessorAndGroupInformation request: 0x{Relationship:X}.", LogFlags.Suspicious);
+                            return NTSTATUS.STATUS_UNSUCCESSFUL;
                         }
 
-                        if (Request == RelationGroup)
-                        {
-                            const uint GroupRelationshipSize = 0x48;
-                            uint RequiredSize = RootSize + GroupRelationshipSize;
+                        NTSTATUS RL = WriteReturnLength((uint)RequiredLength);
+                        if (RL != NTSTATUS.STATUS_SUCCESS)
+                            return RL;
 
-                            NTSTATUS RL = WriteReturnLength(RequiredSize);
-                            if (RL != NTSTATUS.STATUS_SUCCESS)
-                                return RL;
-
-                            if (SystemInformationLength < RequiredSize)
-                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-
-                            Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, RequiredSize);
-
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, RelationGroup);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x04, RequiredSize);
-
-                            ulong GroupBase = SystemInformationPtr + RootSize;
-
-                            Instance._emulator.WriteMemory(GroupBase + 0x00, (ushort)1);
-                            Instance._emulator.WriteMemory(GroupBase + 0x02, (ushort)1);
-
-                            ulong GroupInfo = GroupBase + 0x18;
-
-                            byte ActiveCount8 = (byte)(CpuCount > 255 ? 255 : CpuCount);
-
-                            Instance._emulator.WriteMemory(GroupInfo + 0x00, ActiveCount8);
-                            Instance._emulator.WriteMemory(GroupInfo + 0x01, ActiveCount8);
-                            Instance._emulator.WriteMemory(GroupInfo + 0x28, ActiveMask);
-
-                            return NTSTATUS.STATUS_SUCCESS;
-                        }
-
-                        if (Request == RelationNumaNode || Request == RelationNumaNodeEx)
-                        {
-                            const uint NumaRelationshipSize = 0x28;
-                            uint RequiredSize = RootSize + NumaRelationshipSize;
-
-                            NTSTATUS RL = WriteReturnLength(RequiredSize);
-                            if (RL != NTSTATUS.STATUS_SUCCESS)
-                                return RL;
-
-                            if (SystemInformationLength < RequiredSize)
-                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-
-                            Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, RequiredSize);
-
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, RelationNumaNode);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x04, RequiredSize);
-
-                            ulong NumaBase = SystemInformationPtr + RootSize;
-
-                            Instance._emulator.WriteMemory(NumaBase + 0x00, 0u);
-
-                            ulong GroupAffinity = NumaBase + 0x18;
-
-                            Instance._emulator.WriteMemory(GroupAffinity + 0x00, ActiveMask);
-                            Instance._emulator.WriteMemory(GroupAffinity + 0x08, (ushort)0);
-
-                            return NTSTATUS.STATUS_SUCCESS;
-                        }
-
-                        if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
-                            Instance.TriggerEventMessage($"[!] Unsupported SystemLogicalProcessorAndGroupInformation request: 0x{Request:X}.", LogFlags.Suspicious);
-                        return NTSTATUS.STATUS_NOT_SUPPORTED;
-                    }
-
-                case SYSTEM_INFORMATION_CLASS.SystemKernelDebuggerInformation:
-                    {
-                        uint RequiredLength = 2;
-
-                        if (SystemInformationLength < RequiredLength)
-                        {
-                            NTSTATUS rl = WriteReturnLength(RequiredLength);
-                            if (rl != NTSTATUS.STATUS_SUCCESS)
-                                return rl;
-
+                        if (SystemInformationLength < (uint)RequiredLength)
                             return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                        }
 
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)0); // KernelDebuggerEnabled
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1); // KernelDebuggerNotPresent
-
-                        NTSTATUS rl2 = WriteReturnLength(RequiredLength);
-                        if (rl2 != NTSTATUS.STATUS_SUCCESS)
-                            return rl2;
-
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
-
-                case SYSTEM_INFORMATION_CLASS.SystemSecureBootInformation:
-                    {
-                        uint RequiredLength = 2;
-
-                        if (SystemInformationLength < RequiredLength)
-                        {
-                            NTSTATUS rl = WriteReturnLength(RequiredLength);
-                            if (rl != NTSTATUS.STATUS_SUCCESS)
-                                return rl;
-
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                        }
-
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0, (byte)1); // SecureBootEnabled
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 1, (byte)1); // SecureBootCapable
-
-                        NTSTATUS rl2 = WriteReturnLength(RequiredLength);
-                        if (rl2 != NTSTATUS.STATUS_SUCCESS)
-                            return rl2;
-
-                        return NTSTATUS.STATUS_SUCCESS;
+                        Span<byte> Relations = Instance.WinHelper.Shared.GetSpan((uint)RequiredLength);
+                        WriteProcessorRelations(Instance, Relationship, Relations);
+                        return Instance.WriteMemory(SystemInformationPtr, Relations) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
                 case SYSTEM_INFORMATION_CLASS.SystemControlFlowTransition:
@@ -523,111 +221,272 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Instance.TriggerEventMessage($"[!] Warbird transition query using NtQuerySystemInformationEx at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.Suspicious);
                     return NTSTATUS.STATUS_NOT_IMPLEMENTED;
 
-                case SYSTEM_INFORMATION_CLASS.SystemProcessInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemSupportedProcessorArchitectures:
+                case SYSTEM_INFORMATION_CLASS.SystemSupportedProcessorArchitectures2:
                     {
-                        bool Written = Instance.WinHelper.TryWriteProcessInformationList(SystemInformationPtr, (uint)SystemInformationLength, out uint RequiredLength);
+                        const uint RequiredLength = 12;
 
-                        NTSTATUS LengthStatus = WriteReturnLength(RequiredLength);
-                        if (LengthStatus != NTSTATUS.STATUS_SUCCESS)
-                            return LengthStatus;
+                        if (InputBufferPtr == 0 || InputBufferLength != (ulong)Instance.WinHelper.PointerSize)
+                            return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                        return Written ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                    }
-
-                case SYSTEM_INFORMATION_CLASS.SystemProcessorInformation:
-                    {
-                        const uint RequiredLength = 0x0C;
-
-                        if (SystemInformationLength < RequiredLength)
+                        BinaryArchitecture Architecture = BinaryArchitecture.Unknown;
+                        ulong ProcessHandle = Instance.WinHelper.ReadPointer(InputBufferPtr);
+                        if (ProcessHandle != 0)
                         {
-                            NTSTATUS rl = WriteReturnLength(RequiredLength);
-                            if (rl != NTSTATUS.STATUS_SUCCESS)
-                                return rl;
+                            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation, out WinProcess Process);
+                            if (Status != NTSTATUS.STATUS_SUCCESS)
+                                return Status;
 
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            Architecture = Process.PID == Instance.WinHelper.PID ? Instance._binary.Architecture : Process.Arch;
                         }
 
-                        ushort ProcessorArchitecture = Instance._binary.Architecture == BinaryArchitecture.x64 ? (ushort)9 : (ushort)0;
-                        ushort ProcessorLevel = 6;
-                        ushort ProcessorRevision = 0x0100;
+                        NTSTATUS RL = WriteReturnLength(RequiredLength);
+                        if (RL != NTSTATUS.STATUS_SUCCESS)
+                            return RL;
 
-                        int CpuCount = Environment.ProcessorCount;
-                        if (CpuCount < 1)
-                            CpuCount = 1;
-                        if (CpuCount > ushort.MaxValue)
-                            CpuCount = ushort.MaxValue;
+                        if (SystemInformationLength < RequiredLength)
+                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-                        ushort MaximumProcessors = (ushort)CpuCount;
-                        uint ProcessorFeatureBits = 0;
-
-                        Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, RequiredLength);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, ProcessorArchitecture);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x02, ProcessorLevel);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x04, ProcessorRevision);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x06, MaximumProcessors);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, ProcessorFeatureBits);
-
-                        NTSTATUS rl2 = WriteReturnLength(RequiredLength);
-                        if (rl2 != NTSTATUS.STATUS_SUCCESS)
-                            return rl2;
-
-                        return NTSTATUS.STATUS_SUCCESS;
+                        // AMD64 native in both modes, I386 user mode under WOW64, then a zero entry. Bit 19 marks the
+                        // queried process's architecture.
+                        Span<byte> Machines = stackalloc byte[(int)RequiredLength];
+                        Machines.Clear();
+                        BinaryPrimitives.WriteUInt32LittleEndian(Machines, 0x78664u | (Architecture == BinaryArchitecture.x64 ? 0x80000u : 0u));
+                        BinaryPrimitives.WriteUInt32LittleEndian(Machines.Slice(4), 0x12014Cu | (Architecture == BinaryArchitecture.x86 ? 0x80000u : 0u));
+                        return Instance.WriteMemory(SystemInformationPtr, Machines) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
-                case SYSTEM_INFORMATION_CLASS.SystemEmulationBasicInformation:
+                // NtQuerySystemInformation only. WOW64 refuses them before it reads the input.
                 case SYSTEM_INFORMATION_CLASS.SystemBasicInformation:
-                    {
-                        uint RequiredLength = 0x38;
+                case SYSTEM_INFORMATION_CLASS.SystemEmulationBasicInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemProcessorInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemTimeOfDayInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemProcessInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemKernelDebuggerInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemCurrentTimeZoneInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemTimeZoneInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemRangeStartInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemNumaProcessorMap:
+                case SYSTEM_INFORMATION_CLASS.SystemCodeIntegrityInformation:
+                case SYSTEM_INFORMATION_CLASS.SystemSecureBootInformation:
+                    return Instance.WinHelper.PointerSize == 8 && InputBufferLength == 0 ? NTSTATUS.STATUS_INVALID_PARAMETER : NTSTATUS.STATUS_INVALID_INFO_CLASS;
 
-                        if (SystemInformationLength < RequiredLength)
-                        {
-                            NTSTATUS rl = WriteReturnLength(RequiredLength);
-                            if (rl != NTSTATUS.STATUS_SUCCESS)
-                                return rl;
-
-                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                        }
-
-                        uint NumberOfPhysicalPages = Settings.MemoryBudget.GuestPhysicalPages;
-                        uint LowestPhysicalPageNumber = 0x00000001;
-                        uint HighestPhysicalPageNumber = LowestPhysicalPageNumber + NumberOfPhysicalPages - 1;
-                        uint AllocationGranularity = 0x10000;
-                        uint TimerResolution = 156250;
-
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, 0u);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x04, TimerResolution);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, 4096);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, NumberOfPhysicalPages);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, LowestPhysicalPageNumber);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x14, HighestPhysicalPageNumber);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x18, AllocationGranularity);
-
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x20, Instance.BaseAddress);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x28, Instance.MaxAddress);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x30, 0x1);
-                        Instance._emulator.WriteMemory(SystemInformationPtr + 0x38, (byte)Environment.ProcessorCount);
-
-                        NTSTATUS rl2 = WriteReturnLength(RequiredLength);
-                        if (rl2 != NTSTATUS.STATUS_SUCCESS)
-                            return rl2;
-
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
                 default:
                     if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                         Instance.TriggerEventMessage($"[-] Unsupported SYSTEM_INFO_CLASS: 0x{SystemInformationClass:X}", LogFlags.Issues);
                     return Instance.WinUnimplemented;
             }
         }
-        private static void WriteUnicodeString(BinaryEmulator Instance, ulong Address, string Value)
+
+        private static NTSTATUS CheckProcessorGroup(BinaryEmulator Instance, ulong InputBufferPtr, ulong InputBufferLength)
         {
-            int ByteCount = Encoding.Unicode.GetByteCount(Value) + 2;
-            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan((uint)ByteCount);
-            Encoding.Unicode.GetBytes(Value.AsSpan(), Buffer);
-            Buffer[ByteCount - 2] = 0;
-            Buffer[ByteCount - 1] = 0;
-            Instance._emulator.WriteMemory(Address, Buffer.Slice(0, ByteCount));
+            if (InputBufferPtr == 0 || InputBufferLength < sizeof(ushort))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            return Instance._emulator.ReadMemoryUShort(InputBufferPtr) == 0 ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_PARAMETER;
         }
 
+        internal static NTSTATUS QueryLegacyProcessorInformation(BinaryEmulator Instance, ulong Buffer, uint Length, ulong ReturnLengthPtr)
+        {
+            int RequiredLength = WriteLegacyProcessorInformation(Instance, Span<byte>.Empty);
+
+            if (ReturnLengthPtr != 0)
+            {
+                if (!Instance.IsRegionMapped(ReturnLengthPtr, 4))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                Instance._emulator.WriteMemory(ReturnLengthPtr, (uint)RequiredLength);
+            }
+
+            if (Length < (uint)RequiredLength)
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+            Span<byte> Processors = Instance.WinHelper.Shared.GetSpan((uint)RequiredLength);
+            WriteLegacyProcessorInformation(Instance, Processors);
+            return Instance.WriteMemory(Buffer, Processors) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
+        }
+
+        private static int WriteLegacyProcessorInformation(BinaryEmulator Instance, Span<byte> Target)
+        {
+            bool Wide = Instance.WinHelper.PointerSize == 8;
+            int EntrySize = Wide ? 0x20 : 0x18;
+            uint Count = Instance.WinHelper.ProcessorCount;
+            ulong All = Instance.WinHelper.ActiveProcessorMask;
+            int Required = (int)(Count * 4 + 3) * EntrySize;
+
+            if (Target.Length < Required)
+                return Required;
+
+            Target = Target.Slice(0, Required);
+            Target.Clear();
+
+            int Offset = 0;
+            for (int Index = 0; Index < Count; Index++)
+            {
+                ulong Mask = 1UL << Index;
+                NextLegacyEntry(Target, ref Offset, Wide, RelationProcessorCore, Mask);
+                WriteCacheDescriptor(NextLegacyEntry(Target, ref Offset, Wide, RelationCache, Mask), 1, 8, L1CacheSize, CacheData);
+                WriteCacheDescriptor(NextLegacyEntry(Target, ref Offset, Wide, RelationCache, Mask), 1, 8, L1CacheSize, CacheInstruction);
+                WriteCacheDescriptor(NextLegacyEntry(Target, ref Offset, Wide, RelationCache, Mask), 2, 8, L2CacheSize, CacheUnified);
+            }
+
+            NextLegacyEntry(Target, ref Offset, Wide, RelationProcessorPackage, All);
+            WriteCacheDescriptor(NextLegacyEntry(Target, ref Offset, Wide, RelationCache, All), 3, 16, L3CacheSize, CacheUnified);
+            NextLegacyEntry(Target, ref Offset, Wide, RelationNumaNode, All);
+            return Required;
+        }
+
+        private static Span<byte> NextLegacyEntry(Span<byte> Target, ref int Offset, bool Wide, uint Relationship, ulong Mask)
+        {
+            Span<byte> Entry = Target.Slice(Offset, Wide ? 0x20 : 0x18);
+            Offset += Entry.Length;
+            WriteMask(Entry, Mask, Wide);
+            BinaryPrimitives.WriteUInt32LittleEndian(Entry.Slice(Wide ? 8 : 4), Relationship);
+            return Entry.Slice(Wide ? 0x10 : 0x08);
+        }
+
+        internal static int WriteProcessorRelations(BinaryEmulator Instance, uint Relationship, Span<byte> Target)
+        {
+            if (Relationship > RelationProcessorModule && Relationship != RelationAll)
+                return -1;
+
+            bool Wide = Instance.WinHelper.PointerSize == 8;
+            uint Count = Instance.WinHelper.ProcessorCount;
+            ulong All = Instance.WinHelper.ActiveProcessorMask;
+
+            RelationWriter Measure = new RelationWriter(Relationship, Wide, Span<byte>.Empty);
+            WriteRelations(ref Measure, Count, All);
+            if (Target.Length < Measure.Length)
+                return Measure.Length;
+
+            RelationWriter Writer = new RelationWriter(Relationship, Wide, Target.Slice(0, Measure.Length));
+            WriteRelations(ref Writer, Count, All);
+            return Writer.Length;
+        }
+
+        // NT's entry order.
+        private static void WriteRelations(ref RelationWriter Writer, uint Count, ulong All)
+        {
+            Writer.Processor(RelationProcessorPackage, All);
+            for (int Index = 0; Index < Count; Index++)
+            {
+                ulong Mask = 1UL << Index;
+                Writer.Processor(RelationProcessorCore, Mask);
+                Writer.Processor(RelationProcessorModule, Mask);
+                Writer.Cache(1, 8, L1CacheSize, CacheData, Mask);
+                Writer.Cache(1, 8, L1CacheSize, CacheInstruction, Mask);
+                Writer.Cache(2, 8, L2CacheSize, CacheUnified, Mask);
+                if (Index == 0)
+                    Writer.Cache(3, 16, L3CacheSize, CacheUnified, All);
+            }
+            Writer.Numa(All);
+            Writer.Group(Count, All);
+            Writer.Processor(RelationProcessorDie, All);
+        }
+
+        private ref struct RelationWriter
+        {
+            private readonly uint Wanted;
+            private readonly bool Wide;
+            private readonly Span<byte> Target;
+            public int Length;
+
+            public RelationWriter(uint Wanted, bool Wide, Span<byte> Target)
+            {
+                this.Wanted = Wanted;
+                this.Wide = Wide;
+                this.Target = Target;
+                Length = 0;
+                Target.Clear();
+            }
+
+            private int GroupAffinitySize => Wide ? 0x10 : 0x0C;
+
+            // RelationAll leaves the die out. RelationNumaNodeEx reports RelationNumaNode entries.
+            private bool Includes(uint Relationship)
+            {
+                if (Wanted == RelationAll)
+                    return Relationship != RelationProcessorDie;
+
+                return Wanted == Relationship || (Wanted == RelationNumaNodeEx && Relationship == RelationNumaNode);
+            }
+
+            private Span<byte> Next(uint Relationship, int Size)
+            {
+                int Offset = Length;
+                Length += Size;
+                if (Target.IsEmpty)
+                    return Span<byte>.Empty;
+
+                Span<byte> Entry = Target.Slice(Offset, Size);
+                BinaryPrimitives.WriteUInt32LittleEndian(Entry, Relationship);
+                BinaryPrimitives.WriteUInt32LittleEndian(Entry.Slice(4), (uint)Size);
+                return Entry;
+            }
+
+            // NUMA_NODE_RELATIONSHIP shares this layout: GroupCount at 0x1E, then the GROUP_AFFINITY.
+            public void Processor(uint Relationship, ulong Mask)
+            {
+                if (!Includes(Relationship))
+                    return;
+
+                Span<byte> Entry = Next(Relationship, 0x20 + GroupAffinitySize);
+                if (Entry.IsEmpty)
+                    return;
+
+                BinaryPrimitives.WriteUInt16LittleEndian(Entry.Slice(0x1E), 1);
+                WriteMask(Entry.Slice(0x20), Mask, Wide);
+            }
+
+            public void Numa(ulong Mask) => Processor(RelationNumaNode, Mask);
+
+            public void Cache(byte Level, byte Associativity, uint Size, uint Type, ulong Mask)
+            {
+                if (!Includes(RelationCache))
+                    return;
+
+                Span<byte> Entry = Next(RelationCache, 0x28 + GroupAffinitySize);
+                if (Entry.IsEmpty)
+                    return;
+
+                WriteCacheDescriptor(Entry.Slice(0x08), Level, Associativity, Size, Type);
+                BinaryPrimitives.WriteUInt16LittleEndian(Entry.Slice(0x26), 1);
+                WriteMask(Entry.Slice(0x28), Mask, Wide);
+            }
+
+            public void Group(uint Count, ulong Mask)
+            {
+                if (!Includes(RelationGroup))
+                    return;
+
+                Span<byte> Entry = Next(RelationGroup, 0x48 + (Wide ? 8 : 4));
+                if (Entry.IsEmpty)
+                    return;
+
+                BinaryPrimitives.WriteUInt16LittleEndian(Entry.Slice(0x08), 1);
+                BinaryPrimitives.WriteUInt16LittleEndian(Entry.Slice(0x0A), 1);
+                Entry[0x20] = (byte)Count;
+                Entry[0x21] = (byte)Count;
+                WriteMask(Entry.Slice(0x48), Mask, Wide);
+            }
+        }
+
+        // CACHE_RELATIONSHIP starts with a CACHE_DESCRIPTOR.
+        private static void WriteCacheDescriptor(Span<byte> Target, byte Level, byte Associativity, uint Size, uint Type)
+        {
+            Target[0] = Level;
+            Target[1] = Associativity;
+            BinaryPrimitives.WriteUInt16LittleEndian(Target.Slice(2), CacheLineSize);
+            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(4), Size);
+            BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(8), Type);
+        }
+
+        private static void WriteMask(Span<byte> Target, ulong Mask, bool Wide)
+        {
+            if (Wide)
+                BinaryPrimitives.WriteUInt64LittleEndian(Target, Mask);
+            else
+                BinaryPrimitives.WriteUInt32LittleEndian(Target, (uint)Mask);
+        }
     }
 }

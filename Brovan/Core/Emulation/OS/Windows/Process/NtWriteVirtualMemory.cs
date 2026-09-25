@@ -13,69 +13,62 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS Write(BinaryEmulator Instance, ulong ProcessHandle, ulong BaseAddress, ulong Buffer, ulong NumberOfBytesToWrite, ulong BytesWrittenPtr, uint BytesWrittenSize)
         {
-            if (BaseAddress == 0 || Buffer == 0 || NumberOfBytesToWrite == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            // NT does not check the handle for an empty request.
+            if (NumberOfBytesToWrite == 0)
+            {
+                NtReadVirtualMemory.WriteCount(Instance, BytesWrittenPtr, 0, BytesWrittenSize);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
 
-            if (NumberOfBytesToWrite > GuestSessionMailbox.MaxPayloadBytes)
-                NumberOfBytesToWrite = GuestSessionMailbox.MaxPayloadBytes;
+            if (BaseAddress + NumberOfBytesToWrite < BaseAddress || Buffer + NumberOfBytesToWrite < Buffer)
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.IsRegionMapped(Buffer, NumberOfBytesToWrite))
-                return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMWrite, out WinProcess Process);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            int Length = (int)NumberOfBytesToWrite;
-            byte[] Rented = ArrayPool<byte>.Shared.Rent(Length);
+            ulong Copied;
+            if (Process.PID == Instance.WinHelper.PID)
+                Status = NtReadVirtualMemory.CopyLocal(Instance, Buffer, BaseAddress, NumberOfBytesToWrite, out Copied);
+            else if (Process.Remote == null)
+                return NTSTATUS.STATUS_INVALID_CID;
+            else
+                Status = WriteRemote(Instance, Process, BaseAddress, Buffer, NumberOfBytesToWrite, out Copied);
+
+            NtReadVirtualMemory.WriteCount(Instance, BytesWrittenPtr, Copied, BytesWrittenSize);
+            return Status;
+        }
+
+        private static NTSTATUS WriteRemote(BinaryEmulator Instance, WinProcess Process, ulong BaseAddress, ulong Buffer, ulong Length, out ulong Copied)
+        {
+            Copied = 0;
+            byte[] Rented = ArrayPool<byte>.Shared.Rent((int)Math.Min(Length, NtReadVirtualMemory.CopyChunkBytes));
 
             try
             {
-                Span<byte> Payload = Rented.AsSpan(0, Length);
-                if (!Instance.ReadMemory(Buffer, Payload, (uint)Length))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
+                while (Copied < Length)
                 {
-                    if (!Instance.WinHelper.HandleExists(ProcessHandle))
-                        return NTSTATUS.STATUS_INVALID_HANDLE;
+                    uint Chunk = (uint)Math.Min(Length - Copied, NtReadVirtualMemory.CopyChunkBytes);
+                    Span<byte> Data = Rented.AsSpan(0, (int)Chunk);
 
-                    WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessVMOperation | AccessMask.ProcessVMWrite);
-                    if (Process == null)
-                        return NTSTATUS.STATUS_ACCESS_DENIED;
+                    if (NtReadVirtualMemory.AccessibleLength(Instance, Buffer + Copied, Chunk, false) < Chunk || !Instance._emulator.ReadMemory(Buffer + Copied, Data))
+                        return NTSTATUS.STATUS_PARTIAL_COPY;
 
-                    if (Process.PID != Instance.WinHelper.PID)
-                    {
-                        if (Process.Remote == null)
-                            return NTSTATUS.STATUS_INVALID_CID;
+                    NTSTATUS RemoteStatus = Process.Remote.WriteMemory(BaseAddress + Copied, Data, out ulong Written);
+                    Copied += Math.Min(Written, Chunk);
 
-                        NTSTATUS RemoteStatus = Process.Remote.WriteMemory(BaseAddress, Payload, out ulong Written);
-                        if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
-                            return RemoteStatus;
-
-                        WriteCount(Instance, BytesWrittenPtr, Written, BytesWrittenSize);
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
+                    if (RemoteStatus != NTSTATUS.STATUS_SUCCESS || Written < Chunk)
+                        return Copied == 0 && RemoteStatus != NTSTATUS.STATUS_SUCCESS && RemoteStatus != NTSTATUS.STATUS_PARTIAL_COPY
+                            ? RemoteStatus
+                            : NTSTATUS.STATUS_PARTIAL_COPY;
                 }
-
-                if (!Instance.IsRegionMapped(BaseAddress, NumberOfBytesToWrite))
-                    return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
-
-                if (!Instance._emulator.WriteMemory(BaseAddress, Payload))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(Rented);
             }
 
-            WriteCount(Instance, BytesWrittenPtr, NumberOfBytesToWrite, BytesWrittenSize);
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private static void WriteCount(BinaryEmulator Instance, ulong BytesWrittenPtr, ulong Count, uint BytesWrittenSize)
-        {
-            if (BytesWrittenPtr == 0)
-                return;
-
-            if (Instance.IsRegionMapped(BytesWrittenPtr, BytesWrittenSize))
-                Instance._emulator.WriteMemory(BytesWrittenPtr, Count, BytesWrittenSize);
         }
     }
 }

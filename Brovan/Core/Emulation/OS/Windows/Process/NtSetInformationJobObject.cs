@@ -92,15 +92,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             switch (InfoClass)
             {
+                // The LARGE_INTEGER limits align the x86 records to 8 bytes.
                 case JOBOBJECTINFOCLASS.JobObjectBasicLimitInformation:
-                    return Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x40u : 0x2Cu;
+                    return Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x40u : 0x30u;
                 case JOBOBJECTINFOCLASS.JobObjectBasicUIRestrictions:
                 case JOBOBJECTINFOCLASS.JobObjectEndOfJobTimeInformation:
                     return 0x04;
                 case JOBOBJECTINFOCLASS.JobObjectAssociateCompletionPortInformation:
                     return Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x10u : 0x08u;
                 case JOBOBJECTINFOCLASS.JobObjectExtendedLimitInformation:
-                    return Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x90u : 0x6Cu;
+                    return Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x90u : 0x70u;
                 case JOBOBJECTINFOCLASS.JobObjectNotificationLimitInformation:
                     return 0x2C;
                 case JOBOBJECTINFOCLASS.JobObjectCpuRateControlInformation:
@@ -179,10 +180,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                Job.ProcessMemoryLimit = ReadUInt32(Data, 0x5C);
-                Job.JobMemoryLimit = ReadUInt32(Data, 0x60);
-                Job.PeakProcessMemoryUsed = ReadUInt32(Data, 0x64);
-                Job.PeakJobMemoryUsed = ReadUInt32(Data, 0x68);
+                Job.ProcessMemoryLimit = ReadUInt32(Data, 0x60);
+                Job.JobMemoryLimit = ReadUInt32(Data, 0x64);
+                Job.PeakProcessMemoryUsed = ReadUInt32(Data, 0x68);
+                Job.PeakJobMemoryUsed = ReadUInt32(Data, 0x6C);
             }
 
             return NTSTATUS.STATUS_SUCCESS;

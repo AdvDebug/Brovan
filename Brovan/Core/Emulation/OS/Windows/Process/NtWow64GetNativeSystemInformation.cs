@@ -1,4 +1,3 @@
-using System;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -40,17 +39,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Instance.IsRegionMapped(SystemInformationPtr, ProcessorInformationSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                int CpuCount = Environment.ProcessorCount;
-                if (CpuCount < 1)
-                    CpuCount = 1;
-                if (CpuCount > ushort.MaxValue)
-                    CpuCount = ushort.MaxValue;
-
                 Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, ProcessorInformationSize);
                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x00, NativeProcessorArchitectureAmd64);
                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x02, (ushort)6);
                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x04, (ushort)0x0100);
-                Instance._emulator.WriteMemory(SystemInformationPtr + 0x06, (ushort)CpuCount);
+                Instance._emulator.WriteMemory(SystemInformationPtr + 0x06, (ushort)Instance.WinHelper.ProcessorCount);
                 Instance._emulator.WriteMemory(SystemInformationPtr + 0x08, 0u);
 
                 return NTSTATUS.STATUS_SUCCESS;
@@ -81,7 +74,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint NumberOfPhysicalPages = Settings.MemoryBudget.GuestPhysicalPages;
             uint LowestPhysicalPageNumber = 0x00000001;
             uint HighestPhysicalPageNumber = LowestPhysicalPageNumber + NumberOfPhysicalPages - 1;
-            const ulong AffinityMask = 0x1;
+            ulong AffinityMask = Instance.WinHelper.ActiveProcessorMask;
 
             Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, BasicInformationSize);
             Instance.WinHelper.WriteUInt32(SystemInformationPtr + 0x00, 0u);
@@ -98,14 +91,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.WriteUInt64(SystemInformationPtr + 0x20, NativeMinimumUserModeAddress);
                 Instance.WinHelper.WriteUInt64(SystemInformationPtr + 0x28, NativeMaximumUserModeAddress);
                 Instance.WinHelper.WriteUInt64(SystemInformationPtr + 0x30, AffinityMask);
-                Instance.WinHelper.WriteByte(SystemInformationPtr + 0x38, (byte)Environment.ProcessorCount);
+                Instance.WinHelper.WriteByte(SystemInformationPtr + 0x38, (byte)Instance.WinHelper.ProcessorCount);
             }
             else
             {
                 Instance.WinHelper.WriteUInt32(SystemInformationPtr + 0x1C, (uint)NativeMinimumUserModeAddress);
                 Instance.WinHelper.WriteUInt32(SystemInformationPtr + 0x20, Wow64NativeMaximumUserModeAddress);
                 Instance.WinHelper.WriteUInt32(SystemInformationPtr + 0x24, (uint)AffinityMask);
-                Instance.WinHelper.WriteByte(SystemInformationPtr + 0x28, (byte)Environment.ProcessorCount);
+                Instance.WinHelper.WriteByte(SystemInformationPtr + 0x28, (byte)Instance.WinHelper.ProcessorCount);
             }
 
             return NTSTATUS.STATUS_SUCCESS;

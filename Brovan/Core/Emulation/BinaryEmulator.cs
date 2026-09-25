@@ -2338,6 +2338,31 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        // SaveContext does not copy MXCSR and FPCW out of a resident thread's processor.
+        public void RefreshThreadFpControl(EmulatedThread t)
+        {
+            EmulatedThread current = CurrentThread;
+            if (t == null || t.Context == null || ReferenceEquals(t, current) || !_emulator.IsThreadResident(t.ThreadId))
+                return;
+
+            _emulator.SelectThread(t.ThreadId);
+            t.Context.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
+            t.Context.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
+            if (current != null) _emulator.SelectThread(current.ThreadId);
+        }
+
+        public void StoreThreadFpControl(EmulatedThread t)
+        {
+            EmulatedThread current = CurrentThread;
+            if (t == null || t.Context == null || ReferenceEquals(t, current) || !_emulator.IsThreadResident(t.ThreadId))
+                return;
+
+            _emulator.SelectThread(t.ThreadId);
+            WriteRegister(Registers.UC_X86_REG_MXCSR, t.Context.MXCSR);
+            WriteRegister(Registers.UC_X86_REG_FPCW, t.Context.FPCW);
+            if (current != null) _emulator.SelectThread(current.ThreadId);
+        }
+
         public bool WriteThreadVectorState(EmulatedThread t, ulong[] xmm, ulong[] ymmHigh)
         {
             if (t == null || t.Context == null) return false;
@@ -3169,6 +3194,9 @@ namespace Brovan.Core.Emulation
 
                 if (Volatile.Read(ref TerminationRequested) != 0 && Interlocked.Exchange(ref TerminationRequested, 0) != 0)
                 {
+                    if (WinHelper != null)
+                        OS.Windows.NtTerminateJobObject.CloseJobsOfExitingProcess(this);
+
                     WinHelper?.HideDesktopWindow();
                     StopEmulation();
                 }
@@ -3307,6 +3335,7 @@ namespace Brovan.Core.Emulation
                 bool SliceRequestedRefresh = false;
 
                 SchedulerRefreshRequested = false;
+                long SliceStart = _wallClock.ElapsedTicks;
                 try
                 {
                     Guest.ExecuteThreadSlice(this, ImmaBeEmulatedOOO, QuantumInstructions, out State);
@@ -3330,6 +3359,7 @@ namespace Brovan.Core.Emulation
                     SchedulerRefreshRequested = false;
                 }
 
+                ImmaBeEmulatedOOO.RunTicks += _wallClock.ElapsedTicks - SliceStart;
                 SaveContext(ImmaBeEmulatedOOO);
                 CurrentContextSaved = true;
 

@@ -248,6 +248,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                 Buffer.Clear();
+                BinaryPrimitives.WriteUInt16LittleEndian(Buffer, 1);
 
                 if (!Instance.WriteMemory(TokenInformation, Buffer))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -285,14 +286,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                         Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                         Buffer.Clear();
-                        Buffer[0] = (byte)'B';
-                        Buffer[1] = (byte)'r';
-                        Buffer[2] = (byte)'o';
-                        Buffer[3] = (byte)'v';
-                        Buffer[4] = (byte)'a';
-                        Buffer[5] = (byte)'n';
-                        Buffer[6] = (byte)' ';
-                        Buffer[7] = (byte)' ';
+                        "User32 "u8.CopyTo(Buffer);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(8), WinToken.InteractiveSourceId);
 
                         if (!Instance.WriteMemory(TokenInformation, Buffer))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -362,6 +357,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case TOKEN_INFORMATION_CLASS.TokenImpersonationLevel:
                     {
+                        if (Token.Type == TokenType.Primary)
+                            return NTSTATUS.STATUS_INVALID_INFO_CLASS;
+
                         uint RequiredSize = 4;
                         WriteReturnLength(RequiredSize);
 
@@ -451,16 +449,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                         Buffer.Clear();
 
-                        ulong TokenIdLow = (ulong)((uint)Token.OwningProcessId);
-                        ulong TokenIdHigh = (ulong)((uint)Token.OwningThreadId);
-                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), TokenIdLow);
-                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), TokenIdHigh);
+                        User Owner = OwnerProcess?.RunningUser ?? Instance.WinHelper.CurrentUser;
+                        ulong AuthenticationId = Owner == User.System ? WinToken.SystemLogonId : Owner == User.LocalService ? WinToken.LocalServiceLogonId : WinToken.InteractiveLogonId;
+                        bool Primary = Token.Type == TokenType.Primary;
 
-                        uint TokenTypeValue = Token.Type == TokenType.Primary ? 1u : 2u;
-                        BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x18, 4), TokenTypeValue);
-
-                        uint ImpersonationLevel = (uint)Token.ImpersonationLevel;
-                        BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x1C, 4), ImpersonationLevel);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), Token.TokenId);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), AuthenticationId);
+                        BinaryPrimitives.WriteInt64LittleEndian(Buffer.Slice(0x10, 8), long.MaxValue);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x18, 4), Primary ? 1u : 2u);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x1C, 4), Primary ? 0u : (uint)Token.ImpersonationLevel);
+                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x30, 8), Token.ModifiedId);
 
                         if (!Instance.WriteMemory(TokenInformation, Buffer))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;

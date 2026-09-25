@@ -3357,9 +3357,12 @@ namespace Brovan.Core.Emulation
         private unsafe void SetSingleRegister(WhvRegisterName name, WhvRegisterValue value)
         {
             uint n = (uint)name;
+            byte* raw = stackalloc byte[32];
+            WhvRegisterValue* aligned = AlignRegisterValue(raw);
+            *aligned = value;
             lock (_vcpuLock)
             {
-                int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, CurrentVp.Index, &n, 1, &value);
+                int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, CurrentVp.Index, &n, 1, aligned);
                 if (WhpNative.Failed(hr))
                     throw new WhpException($"WHvSetVirtualProcessorRegisters({name}) failed", hr);
             }
@@ -3372,15 +3375,19 @@ namespace Brovan.Core.Emulation
                 FlushRegisterCache(vp);
 
             uint n = (uint)name;
-            WhvRegisterValue value;
+            byte* raw = stackalloc byte[32];
+            WhvRegisterValue* aligned = AlignRegisterValue(raw);
             lock (_vcpuLock)
             {
-                int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, vp.Index, &n, 1, &value);
+                int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, vp.Index, &n, 1, aligned);
                 if (WhpNative.Failed(hr))
                     throw new WhpException($"WHvGetVirtualProcessorRegisters({name}) failed", hr);
             }
-            return value;
+            return *aligned;
         }
+
+        // WHV_REGISTER_VALUE is DECLSPEC_ALIGN(16), and WinHvPlatform faults on a value that is not aligned.
+        private static unsafe WhvRegisterValue* AlignRegisterValue(byte* Raw) => (WhvRegisterValue*)(((nuint)Raw + 15) & ~(nuint)15);
 
         private static ref ulong GetGpRegisterPointer(ref WhpRegisters regs, GpRegisterName name)
         {

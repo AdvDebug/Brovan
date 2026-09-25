@@ -13,9 +13,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (LuidPtr == 0 || !Instance.IsRegionMapped(LuidPtr, 8))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            ulong Value = (ulong)Interlocked.Increment(ref _Next);
-            Instance._emulator.WriteMemory(LuidPtr, Value, 8);
+            Instance._emulator.WriteMemory(LuidPtr, Allocate(), 8);
             return NTSTATUS.STATUS_SUCCESS;
         }
+
+        internal static ulong Allocate() => (ulong)Interlocked.Increment(ref _Next);
     }
 }

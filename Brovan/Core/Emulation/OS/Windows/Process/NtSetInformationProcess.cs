@@ -15,17 +15,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ProcessInformation = Instance.WinHelper.GetArg(2);
             uint ProcessInformationLength = (uint)Instance.WinHelper.GetArg(3);
 
-            bool CurrentProcess = HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle);
+            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessSetInformation, out WinProcess Target);
+            if (Status == NTSTATUS.STATUS_ACCESS_DENIED)
+                Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessSetLimitedInformation, out Target);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            if (!CurrentProcess)
+            // kernelbase treats a failure here as fatal. Only the priority class of another process is modelled.
+            if (Target.PID != Instance.WinHelper.PID)
             {
-                WinProcess Target = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessSetInformation);
-                if (Target == null)
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
+                if (InfoClass == PROCESSINFOCLASS.ProcessPriorityClass || InfoClass == PROCESSINFOCLASS.ProcessPriorityClassEx)
+                    return SetPriorityClass(Instance, Target, ProcessInformation, ProcessInformationLength, InfoClass == PROCESSINFOCLASS.ProcessPriorityClassEx);
 
-                // kernelbase treats a failure here as fatal, and nothing below models another process.
-                if (Target.PID != Instance.WinHelper.PID)
-                    return NTSTATUS.STATUS_SUCCESS;
+                return NTSTATUS.STATUS_SUCCESS;
             }
 
             switch (InfoClass)
@@ -36,10 +38,33 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     return NTSTATUS.STATUS_SUCCESS;
 
-                case PROCESSINFOCLASS.ProcessDebugPort:
-                case PROCESSINFOCLASS.ProcessAffinityMask:
-                case PROCESSINFOCLASS.ProcessPriorityBoost:
+                case PROCESSINFOCLASS.ProcessPriorityClass:
+                    return SetPriorityClass(Instance, Target, ProcessInformation, ProcessInformationLength, false);
+
+                case PROCESSINFOCLASS.ProcessPriorityClassEx:
+                    return SetPriorityClass(Instance, Target, ProcessInformation, ProcessInformationLength, true);
+
+                // Needs SeDebugPrivilege.
+                case PROCESSINFOCLASS.ProcessBreakOnTermination:
+                    if (ProcessInformationLength != sizeof(uint))
+                        return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                    return NTSTATUS.STATUS_PRIVILEGE_NOT_HELD;
+
                 case PROCESSINFOCLASS.ProcessDebugFlags:
+                    if (ProcessInformationLength != sizeof(uint))
+                        return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                    if (!Instance.IsRegionMapped(ProcessInformation, sizeof(uint)))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    Instance.WinHelper.ProcessDebugFlags = Instance.ReadMemoryUInt(ProcessInformation) & 1;
+                    return NTSTATUS.STATUS_SUCCESS;
+
+                case PROCESSINFOCLASS.ProcessAffinityMask:
+                    return SetAffinityMask(Instance, ProcessInformation, ProcessInformationLength);
+
+                case PROCESSINFOCLASS.ProcessDebugPort:
+                case PROCESSINFOCLASS.ProcessPriorityBoost:
                 case PROCESSINFOCLASS.ProcessIoPriority:
                 case PROCESSINFOCLASS.ProcessExecuteFlags:
                 case PROCESSINFOCLASS.ProcessAffinityUpdateMode:
@@ -63,13 +88,90 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        // PROCESS_PRIORITY_CLASS is Foreground, PriorityClass. PROCESS_PRIORITY_CLASS_EX is a USHORT of valid bits,
+        // PriorityClass, Foreground.
+        private static NTSTATUS SetPriorityClass(BinaryEmulator Instance, WinProcess Process, ulong ProcessInformation, uint ProcessInformationLength, bool Extended)
+        {
+            const byte PriorityClassRealtime = 4;
+            const uint PriorityClassValid = 0x2;
+            uint Length = Extended ? 4u : 2u;
+
+            if (ProcessInformationLength != Length)
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+            if (!Instance.IsRegionMapped(ProcessInformation, Length))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            byte PriorityClass;
+            if (Extended)
+            {
+                uint Value = Instance.ReadMemoryUInt(ProcessInformation);
+                if ((Value & PriorityClassValid) == 0)
+                    return NTSTATUS.STATUS_SUCCESS;
+
+                PriorityClass = (byte)(Value >> 16);
+            }
+            else
+            {
+                PriorityClass = (byte)(Instance._emulator.ReadMemoryUShort(ProcessInformation) >> 8);
+            }
+
+            if (PriorityClass < 1 || PriorityClass > 6)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            // Needs SeIncreaseBasePriorityPrivilege. kernelbase then falls back to HIGH.
+            if (PriorityClass == PriorityClassRealtime)
+                return NTSTATUS.STATUS_PRIVILEGE_NOT_HELD;
+
+            Process.PriorityClass = PriorityClass;
+            if (Process.PID != Instance.WinHelper.PID)
+                return NTSTATUS.STATUS_SUCCESS;
+
+            Instance.WinHelper.CurrentPriority = WinSysHelper.PriorityClassBase(PriorityClass);
+
+            foreach (EmulatedThread Thread in Instance.Threads.Values)
+            {
+                if (Thread != null && Thread.State != EmulatedThreadState.Terminated)
+                    Instance.WinHelper.ApplyThreadBasePriority(Thread);
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS SetAffinityMask(BinaryEmulator Instance, ulong ProcessInformation, uint ProcessInformationLength)
+        {
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+            if (ProcessInformationLength != PointerSize)
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+            if (!Instance.IsRegionMapped(ProcessInformation, PointerSize))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            ulong Mask = Instance.WinHelper.ReadPointer(ProcessInformation);
+            if (Mask == 0 || (Mask & ~Instance.WinHelper.ActiveProcessorMask) != 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            Instance.WinHelper.ProcessAffinityMask = Mask;
+            foreach (EmulatedThread Thread in Instance.Threads.Values)
+            {
+                if (Thread != null)
+                    Thread.AffinityMask = Mask;
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
         private NTSTATUS HandleProcessInstrumentationCallback(BinaryEmulator Instance, ulong ProcessInformation, uint ProcessInformationLength)
         {
             ulong Callback;
 
+            // The legacy form passes a pointer to the callback address.
             if (ProcessInformationLength == 8)
             {
-                Callback = ProcessInformation;
+                if (!Instance.IsRegionMapped(ProcessInformation, 8))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                Callback = Instance.ReadMemoryULong(ProcessInformation);
             }
             else if (ProcessInformationLength == 16)
             {

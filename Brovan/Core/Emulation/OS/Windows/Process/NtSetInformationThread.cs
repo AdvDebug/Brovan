@@ -51,8 +51,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (!Instance.IsRegionMapped(ThreadInformationPtr, 4))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+                        // An absolute priority. Real-time values need SeIncreaseBasePriorityPrivilege.
                         int Priority = (int)Instance._emulator.ReadMemoryUInt(ThreadInformationPtr);
-                        Thread.BasePriority = ClampPriority(8 + Priority);
+                        if (Priority < 1 || Priority > 31)
+                            return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                        if (Priority > 15)
+                            return NTSTATUS.STATUS_PRIVILEGE_NOT_HELD;
+
+                        Thread.DynamicBoost = Math.Clamp(Priority - Thread.BasePriority, -16, 16);
                         return NTSTATUS.STATUS_SUCCESS;
                     }
 
@@ -68,11 +75,70 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                         ulong AffinityMask = Instance.WinHelper.ReadPointer(ThreadInformationPtr);
 
-                        if (AffinityMask == 0)
+                        if (AffinityMask == 0 || (AffinityMask & ~Instance.WinHelper.ProcessAffinityMask) != 0)
                             return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                         Thread.AffinityMask = AffinityMask;
                         return NTSTATUS.STATUS_SUCCESS;
+                    }
+
+                case THREADINFOCLASS.ThreadGroupInformation:
+                    {
+                        uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+                        uint GroupSize = PointerSize == 8 ? 0x10u : 0x0Cu;
+
+                        if (ThreadInformationPtr == 0 || ThreadInformationLength != GroupSize)
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                        if (!Instance.IsRegionMapped(ThreadInformationPtr, GroupSize))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                        ulong AffinityMask = Instance.WinHelper.ReadPointer(ThreadInformationPtr);
+                        ushort Group = (ushort)Instance._emulator.ReadMemoryUInt(ThreadInformationPtr + PointerSize);
+
+                        if (Group != 0 || AffinityMask == 0 || (AffinityMask & ~Instance.WinHelper.ProcessAffinityMask) != 0)
+                            return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                        Thread.AffinityMask = AffinityMask;
+                        return NTSTATUS.STATUS_SUCCESS;
+                    }
+
+                case THREADINFOCLASS.ThreadIdealProcessorEx:
+                    {
+                        if (ThreadInformationPtr == 0 || ThreadInformationLength != 4)
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                        if (!Instance.IsRegionMapped(ThreadInformationPtr, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                        // NT writes the previous ideal processor back into the same buffer.
+                        uint Requested = Instance._emulator.ReadMemoryUInt(ThreadInformationPtr);
+                        ushort Group = (ushort)Requested;
+                        byte Number = (byte)(Requested >> 16);
+                        if (Group != 0 || Number >= Instance.WinHelper.ProcessorCount)
+                            return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                        uint Previous = (uint)SetIdealProcessor(Instance, Thread, Number) << 16;
+                        return Instance.WinHelper.WriteUInt32(ThreadInformationPtr, Previous) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    }
+
+                case THREADINFOCLASS.ThreadIdealProcessor:
+                    {
+                        if (ThreadInformationPtr == 0 || ThreadInformationLength != 4)
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                        if (!Instance.IsRegionMapped(ThreadInformationPtr, 4))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                        // MAXIMUM_PROCESSORS only queries. NT returns the ideal processor in place of a status.
+                        uint Number = Instance._emulator.ReadMemoryUInt(ThreadInformationPtr);
+                        if (Number == (uint)(Instance.WinHelper.PointerSize * 8))
+                            return (NTSTATUS)WinEmulatedThread.GetState(Thread).IdealProcessor;
+
+                        if (Number >= Instance.WinHelper.ProcessorCount)
+                            return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                        return (NTSTATUS)SetIdealProcessor(Instance, Thread, (byte)Number);
                     }
 
                 case THREADINFOCLASS.ThreadBasePriority:
@@ -83,13 +149,24 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (!Instance.IsRegionMapped(ThreadInformationPtr, 4))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                        int PriorityDelta = (int)Instance._emulator.ReadMemoryUInt(ThreadInformationPtr);
-                        Thread.BasePriority = BasePriorityFromDelta(PriorityDelta);
+                        int Increment = (int)Instance._emulator.ReadMemoryUInt(ThreadInformationPtr);
+                        bool Saturated = Increment == 16 || Increment == -16;
+                        if (!Saturated && (Increment < -2 || Increment > 2))
+                            return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                        WindowsThreadState PriorityState = WinEmulatedThread.GetState(Thread);
+                        PriorityState.PrioritySaturation = Saturated ? Math.Sign(Increment) : 0;
+                        PriorityState.PriorityIncrement = Saturated ? 0 : Increment;
+                        Instance.WinHelper.ApplyThreadBasePriority(Thread);
                         return NTSTATUS.STATUS_SUCCESS;
                     }
 
                 case THREADINFOCLASS.ThreadHideFromDebugger:
                     {
+                        if (ThreadInformationLength != 0)
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                        WinEmulatedThread.GetState(Thread).HiddenFromDebugger = true;
                         if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
                             Instance.TriggerEventMessage($"[{Thread.ThreadId}] Thread Hide From Debugger.", LogFlags.Suspicious);
                         return NTSTATUS.STATUS_SUCCESS;
@@ -131,6 +208,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NameStatus;
 
                         Thread.Name = Name;
+                        WinEmulatedThread.GetState(Thread).Description = Name;
                         return NTSTATUS.STATUS_SUCCESS;
                     }
                 case THREADINFOCLASS.ThreadImpersonationToken:
@@ -297,29 +375,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        private static int ClampPriority(int Value)
+        // GetThreadIdealProcessorEx on the calling thread reads TEB.CurrentIdealProcessor.
+        private static byte SetIdealProcessor(BinaryEmulator Instance, EmulatedThread Thread, byte Number)
         {
-            if (Value < 1) return 1;
-            if (Value > 31) return 31;
-            return Value;
-        }
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            byte Previous = State.IdealProcessor;
+            State.IdealProcessor = Number;
 
-        private static int BasePriorityFromDelta(int Delta)
-        {
-            const int ProcessBasePriority = 8;
+            if (State.Teb != 0)
+                Instance.WinHelper.WriteUInt32(State.Teb + (Instance.WinHelper.PointerSize == 8 ? 0x1744UL : 0xF74UL), (uint)Number << 16);
 
-            if (Delta >= 16)
-                return 15;
-
-            if (Delta <= -16)
-                return 1;
-
-            return Math.Clamp(ProcessBasePriority + Delta, 1, 15);
+            return Previous;
         }
 
         private static EmulatedThread ResolveThreadFromHandle(BinaryEmulator Instance, ulong ThreadHandle)
         {
-            if (ThreadHandle == unchecked((ulong)0xFFFFFFFFFFFFFFFE) || ThreadHandle == 0xFFFFFFFEu)
+            if (HandleManager.IsCurrentThreadPseudoHandle(ThreadHandle))
                 return Instance.CurrentThread;
 
             EmulatedThread WinThreadObj = Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(ThreadHandle);

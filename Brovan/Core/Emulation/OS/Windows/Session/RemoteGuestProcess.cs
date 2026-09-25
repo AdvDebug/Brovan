@@ -148,7 +148,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Length == Destination.Length ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_UNSUCCESSFUL;
         }
 
-        internal NTSTATUS AllocateMemory(ulong Address, ulong RegionSize, uint AllocationType, uint Protect, out ulong AllocatedBase, out ulong AllocatedSize)
+        internal NTSTATUS AllocateMemory(ulong Address, ulong RegionSize, uint AllocationType, uint Protect, NtAllocateVirtualMemory.AddressRequirements Requirements, out ulong AllocatedBase, out ulong AllocatedSize)
         {
             AllocatedBase = 0;
             AllocatedSize = 0;
@@ -156,9 +156,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
                 return Status;
 
-            Span<byte> Request = stackalloc byte[8];
+            Span<byte> Request = stackalloc byte[32];
             BinaryPrimitives.WriteUInt32LittleEndian(Request, AllocationType);
             BinaryPrimitives.WriteUInt32LittleEndian(Request.Slice(4), Protect);
+            BinaryPrimitives.WriteUInt64LittleEndian(Request.Slice(8), Requirements.Lowest);
+            BinaryPrimitives.WriteUInt64LittleEndian(Request.Slice(16), Requirements.Highest);
+            BinaryPrimitives.WriteUInt64LittleEndian(Request.Slice(24), Requirements.Alignment);
 
             Span<byte> Granted = stackalloc byte[8];
             NTSTATUS Result = GuestSessionMailbox.Send(Slot, SessionOperation.AllocateMemory, Address, RegionSize, Request, Granted, out int GrantedLength, out AllocatedBase);
@@ -170,6 +173,54 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
             AllocatedSize = BinaryPrimitives.ReadUInt64LittleEndian(Granted);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal NTSTATUS FreeMemory(ulong Address, ulong RegionSize, uint FreeType, out ulong FreedBase, out ulong FreedSize)
+        {
+            FreedBase = 0;
+            FreedSize = 0;
+
+            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
+                return Status;
+
+            Span<byte> Request = stackalloc byte[4];
+            BinaryPrimitives.WriteUInt32LittleEndian(Request, FreeType);
+
+            Span<byte> Freed = stackalloc byte[8];
+            NTSTATUS Result = GuestSessionMailbox.Send(Slot, SessionOperation.FreeMemory, Address, RegionSize, Request, Freed, out int FreedLength, out FreedBase);
+            if (Result != NTSTATUS.STATUS_SUCCESS)
+                return Result;
+
+            if (FreedLength < Freed.Length)
+                return NTSTATUS.STATUS_UNSUCCESSFUL;
+
+            FreedSize = BinaryPrimitives.ReadUInt64LittleEndian(Freed);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal NTSTATUS ProtectMemory(ulong Address, ulong RegionSize, uint NewProtect, out ulong ProtectedBase, out ulong ProtectedSize, out uint OldProtect)
+        {
+            ProtectedBase = 0;
+            ProtectedSize = 0;
+            OldProtect = 0;
+
+            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
+                return Status;
+
+            Span<byte> Request = stackalloc byte[4];
+            BinaryPrimitives.WriteUInt32LittleEndian(Request, NewProtect);
+
+            Span<byte> Changed = stackalloc byte[12];
+            NTSTATUS Result = GuestSessionMailbox.Send(Slot, SessionOperation.ProtectMemory, Address, RegionSize, Request, Changed, out int ChangedLength, out ProtectedBase);
+            if (Result != NTSTATUS.STATUS_SUCCESS)
+                return Result;
+
+            if (ChangedLength < Changed.Length)
+                return NTSTATUS.STATUS_UNSUCCESSFUL;
+
+            ProtectedSize = BinaryPrimitives.ReadUInt64LittleEndian(Changed);
+            OldProtect = BinaryPrimitives.ReadUInt32LittleEndian(Changed.Slice(8));
             return NTSTATUS.STATUS_SUCCESS;
         }
 

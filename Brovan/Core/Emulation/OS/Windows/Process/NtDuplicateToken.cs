@@ -17,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ExistingTokenHandle = Instance.WinHelper.GetArg(0);
             ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
-            bool EffectiveOnly = (uint)Instance.WinHelper.GetArg(3) != 0;
+            bool EffectiveOnly = (byte)Instance.WinHelper.GetArg(3) != 0;
             uint RequestedTokenType = (uint)Instance.WinHelper.GetArg(4);
             ulong NewTokenHandlePtr = Instance.WinHelper.GetArg(5);
 
@@ -31,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryResolveToken(Instance, ExistingTokenHandle, out WinToken SourceToken, out AccessMask SourceAccess))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            if (!HasTokenDuplicateAccess(SourceToken, SourceAccess))
+            if (!HasTokenDuplicateAccess(SourceAccess))
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
             NTSTATUS Status = ReadObjectAttributes(Instance, ObjectAttributesPtr, Is64, out uint HandleAttributes, out SecurityImpersonationLevel ImpersonationLevel);
@@ -48,7 +48,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 EffectiveOnly = EffectiveOnly,
                 ImpersonationLevel = ImpersonationLevel,
                 OwningProcessId = SourceToken.OwningProcessId,
-                OwningThreadId = SourceToken.OwningThreadId
+                OwningThreadId = SourceToken.OwningThreadId,
+                ModifiedId = SourceToken.ModifiedId
             };
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(NewToken, NewAccess);
@@ -103,7 +104,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        private static bool HasTokenDuplicateAccess(WinToken Token, AccessMask Access)
+        private static bool HasTokenDuplicateAccess(AccessMask Access)
         {
             if (Access == AccessMask.GiveTemp)
                 return true;
@@ -114,14 +115,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((Access & AccessMask.MaximumAllowed) != 0)
                 return true;
 
-            if ((Access & AccessMask.TokenAllAccess) == AccessMask.TokenAllAccess)
-                return true;
-
-            if ((Access & AccessMask.TokenDuplicate) == AccessMask.TokenDuplicate)
-                return true;
-
-            AccessMask UsableAccess = AccessMask.TokenImpersonate | AccessMask.TokenQuery | AccessMask.TokenAssignPrimary;
-            return (Access & UsableAccess) != 0;
+            return (Access & AccessMask.TokenDuplicate) == AccessMask.TokenDuplicate;
         }
 
         private static AccessMask MapDesiredTokenAccess(AccessMask DesiredAccess, AccessMask SourceAccess)

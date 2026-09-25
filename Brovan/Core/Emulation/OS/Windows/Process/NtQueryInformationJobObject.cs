@@ -68,7 +68,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case JOBOBJECTINFOCLASS.JobObjectBasicLimitInformation:
                     return WriteBasicLimitInformation(Instance, Job, JobObjectInformation);
                 case JOBOBJECTINFOCLASS.JobObjectBasicProcessIdList:
-                    return WriteBasicProcessIdList(Instance, Job, JobObjectInformation, RequiredLength);
+                    return WriteBasicProcessIdList(Instance, Job, JobObjectInformation, (uint)JobObjectInformationLength);
                 case JOBOBJECTINFOCLASS.JobObjectBasicUIRestrictions:
                     return WriteUInt32Value(Instance, JobObjectInformation, Job.UiRestrictionsClass);
                 case JOBOBJECTINFOCLASS.JobObjectEndOfJobTimeInformation:
@@ -99,11 +99,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (JobHandle == 0)
             {
-                WinProcess CurrentProcess = Instance.WinHelper.WinProcesses.FirstOrDefault(p => p.PID == Instance.WinHelper.PID);
-                if (CurrentProcess == null || CurrentProcess.JobObjectHandle == 0)
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-
-                Job = Instance.WinHelper.GetJobByHandle(CurrentProcess.JobObjectHandle, AccessMask.GiveTemp);
+                Job = Instance.WinHelper.WinProcesses.FirstOrDefault(p => p.PID == Instance.WinHelper.PID)?.Job;
                 return Job != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
@@ -124,16 +120,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return 0x30;
                 case JOBOBJECTINFOCLASS.JobObjectBasicAndIoAccountingInformation:
                     return 0x60;
+                // The LARGE_INTEGER limits align the x86 records to 8 bytes.
                 case JOBOBJECTINFOCLASS.JobObjectBasicLimitInformation:
-                    return Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x40u : 0x2Cu;
+                    return Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x40u : 0x30u;
                 case JOBOBJECTINFOCLASS.JobObjectBasicProcessIdList:
-                    return GetProcessIdListSize(Instance, Job);
+                    return 8u + (uint)Instance.WinHelper.PointerSize;
                 case JOBOBJECTINFOCLASS.JobObjectBasicUIRestrictions:
                     return 0x04;
                 case JOBOBJECTINFOCLASS.JobObjectEndOfJobTimeInformation:
                     return 0x04;
                 case JOBOBJECTINFOCLASS.JobObjectExtendedLimitInformation:
-                    return Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x90u : 0x6Cu;
+                    return Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x90u : 0x70u;
                 case JOBOBJECTINFOCLASS.JobObjectNotificationLimitInformation:
                     return 0x2C;
                 case JOBOBJECTINFOCLASS.JobObjectCpuRateControlInformation:
@@ -152,13 +149,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Status = NTSTATUS.STATUS_INVALID_INFO_CLASS;
                     return 0;
             }
-        }
-
-        private static uint GetProcessIdListSize(BinaryEmulator Instance, WinJob Job)
-        {
-            uint PtrSize = (uint)Instance.WinHelper.PointerSize;
-            uint Count = (uint)Job.ProcessIds.Distinct().Count();
-            return 8u + (PtrSize * Count);
         }
 
         private static NTSTATUS WriteUInt32Value(BinaryEmulator Instance, ulong Address, uint Value)
@@ -195,7 +185,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint TotalProcesses = 0;
             uint ActiveProcesses = 0;
 
-            foreach (uint ProcessId in Job.ProcessIds.Distinct())
+            foreach (uint ProcessId in Job.ProcessIds)
             {
                 TotalProcesses++;
                 WinProcess Process = Instance.WinHelper.WinProcesses.FirstOrDefault(P => P.PID == ProcessId);
@@ -205,11 +195,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.UpdateProcessTimes(Process);
                 TotalUserTime += (ulong)Process.UserTime;
                 TotalKernelTime += (ulong)Process.KernelTime;
-                if (Process.ExitTime == 0)
+                if (WinSysHelper.IsProcessAlive(Process))
                     ActiveProcesses++;
             }
 
-            uint TotalTerminatedProcesses = TotalProcesses >= ActiveProcesses ? TotalProcesses - ActiveProcesses : 0;
+            // NT counts only processes a limit violation ended, and job limits are not enforced.
+            const uint TotalTerminatedProcesses = 0;
 
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), TotalUserTime);
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), TotalKernelTime);
@@ -231,14 +222,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Instance._emulator.WriteMemory(Address, Buffer) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            Span<byte> Buffer32 = stackalloc byte[0x2C];
+            Span<byte> Buffer32 = stackalloc byte[0x30];
+            Buffer32.Clear();
             WriteBasicLimitInformationToSpan(Job, Buffer32);
             return Instance._emulator.WriteMemory(Address, Buffer32) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }
 
         private static void WriteBasicLimitInformationToSpan(WinJob Job, Span<byte> Buffer)
         {
-            bool IsX64 = Buffer.Length >= 0x40;
+            bool IsX64 = Buffer.Length == 0x40;
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), Job.PerProcessUserTimeLimit);
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), Job.PerJobUserTimeLimit);
             BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x10, 4), Job.LimitFlags);
@@ -262,34 +254,57 @@ namespace Brovan.Core.Emulation.OS.Windows
             BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x28, 4), Job.SchedulingClass);
         }
 
-        private static NTSTATUS WriteBasicProcessIdList(BinaryEmulator Instance, WinJob Job, ulong Address, uint RequiredLength)
+        // The WOW64 thunk copies nothing back on STATUS_BUFFER_OVERFLOW.
+        private static NTSTATUS WriteBasicProcessIdList(BinaryEmulator Instance, WinJob Job, ulong Address, uint Length)
         {
             uint PtrSize = (uint)Instance.WinHelper.PointerSize;
-            uint Count = (uint)Job.ProcessIds.Distinct().Count();
-            if (RequiredLength < 8u + (PtrSize * Count))
-                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
-            Span<byte> Buffer = stackalloc byte[(int)RequiredLength];
-            Buffer.Clear();
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), Count);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), Count);
-
-            int Offset = 0x08;
-            foreach (uint ProcessId in Job.ProcessIds.Distinct())
+            uint Live = 0;
+            foreach (uint ProcessId in Job.ProcessIds)
             {
-                if (PtrSize == 8)
-                {
-                    BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(Offset, 8), ProcessId);
-                    Offset += 8;
-                }
-                else
-                {
-                    BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(Offset, 4), ProcessId);
-                    Offset += 4;
-                }
+                if (IsMemberAlive(Instance, ProcessId))
+                    Live++;
             }
 
-            return Instance._emulator.WriteMemory(Address, Buffer) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
+            uint Fit = Math.Min(Live, (Length - 8) / PtrSize);
+            bool Overflow = Fit < Live;
+            if (Overflow && PtrSize == 4)
+                return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+
+            uint Size = 8 + Fit * PtrSize;
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(Size);
+            Buffer.Clear();
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), Live);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), Fit);
+
+            int Offset = 0x08;
+            uint Written = 0;
+            foreach (uint ProcessId in Job.ProcessIds)
+            {
+                if (Written == Fit)
+                    break;
+
+                if (!IsMemberAlive(Instance, ProcessId))
+                    continue;
+
+                if (PtrSize == 8)
+                    BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(Offset, 8), ProcessId);
+                else
+                    BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(Offset, 4), ProcessId);
+
+                Offset += (int)PtrSize;
+                Written++;
+            }
+
+            if (!Instance._emulator.WriteMemory(Address, Buffer))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            return Overflow ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static bool IsMemberAlive(BinaryEmulator Instance, uint ProcessId)
+        {
+            return WinSysHelper.IsProcessAlive(Instance.WinHelper.WinProcesses.FirstOrDefault(p => p.PID == ProcessId));
         }
 
         private static NTSTATUS WriteExtendedLimitInformation(BinaryEmulator Instance, WinJob Job, ulong Address)
@@ -307,14 +322,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Instance._emulator.WriteMemory(Address, Buffer) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            Span<byte> Buffer32 = stackalloc byte[0x6C];
+            Span<byte> Buffer32 = stackalloc byte[0x70];
             Buffer32.Clear();
-            WriteBasicLimitInformationToSpan(Job, Buffer32.Slice(0x00, 0x2C));
+            WriteBasicLimitInformationToSpan(Job, Buffer32.Slice(0x00, 0x30));
             // IO_COUNTERS block is intentionally zeroed.
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x5C, 4), (uint)Job.ProcessMemoryLimit);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x60, 4), (uint)Job.JobMemoryLimit);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x64, 4), (uint)Job.PeakProcessMemoryUsed);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x68, 4), (uint)Job.PeakJobMemoryUsed);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x60, 4), (uint)Job.ProcessMemoryLimit);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x64, 4), (uint)Job.JobMemoryLimit);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x68, 4), (uint)Job.PeakProcessMemoryUsed);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x6C, 4), (uint)Job.PeakJobMemoryUsed);
             return Instance._emulator.WriteMemory(Address, Buffer32) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }
 

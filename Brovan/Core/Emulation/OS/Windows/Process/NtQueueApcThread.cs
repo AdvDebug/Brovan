@@ -17,6 +17,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            if (Thread.State == EmulatedThreadState.Terminated)
+                return NTSTATUS.STATUS_UNSUCCESSFUL;
+
             if (WinEmulatedThread.GetState(Thread).PendingUserApcs == null)
                 WinEmulatedThread.GetState(Thread).PendingUserApcs = new List<WinPendingUserApc>();
 

@@ -32,7 +32,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int ProcessParametersOffset = 0x30;
         private const int ExitCodeOffset = 0x38;
         private const int SpawnTokenOffset = 0x3C;
-        private const int ImageOffset = 0x40;
+        private const int MainThreadIdOffset = 0x40;
+        private const int ImageOffset = 0x44;
         private const int MaxImageBytes = SlotSize - ImageOffset - 2;
 
         private const uint SlotFree = 0;
@@ -187,7 +188,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Only published once this process can serve mailbox requests, since a creator acts on these immediately.
         /// </summary>
-        internal static void PublishStartup(ulong PebAddress, ulong ProcessParameters)
+        internal static void PublishStartup(ulong PebAddress, ulong ProcessParameters, uint MainThreadId)
         {
             lock (Sync)
             {
@@ -201,6 +202,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 int Offset = SlotOffset(_ownSlot);
                 _view.Write(Offset + PebAddressOffset, PebAddress);
                 _view.Write(Offset + ProcessParametersOffset, ProcessParameters);
+                _view.Write(Offset + MainThreadIdOffset, MainThreadId);
                 _view.Write(Offset + ReadyOffset, 1u);
                 _view.Flush();
             }
@@ -253,12 +255,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        internal static bool TryResolveSpawn(uint SpawnToken, out uint GuestProcessId, out uint HostProcessId, out ulong PebAddress, out ulong ProcessParameters)
+        internal static bool TryResolveSpawn(uint SpawnToken, out uint GuestProcessId, out uint HostProcessId, out ulong PebAddress, out ulong ProcessParameters, out uint MainThreadId)
         {
             GuestProcessId = 0;
             HostProcessId = 0;
             PebAddress = 0;
             ProcessParameters = 0;
+            MainThreadId = 0;
 
             if (SpawnToken == 0)
                 return false;
@@ -285,6 +288,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     HostProcessId = _view.ReadUInt32(Offset + HostProcessIdOffset);
                     PebAddress = _view.ReadUInt64(Offset + PebAddressOffset);
                     ProcessParameters = _view.ReadUInt64(Offset + ProcessParametersOffset);
+                    MainThreadId = _view.ReadUInt32(Offset + MainThreadIdOffset);
                     return PebAddress != 0;
                 }
 
@@ -324,12 +328,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <param name="ImageName">Receives the image name the member published.</param>
         /// <param name="PebAddress">Receives the guest PEB, zero until the member published startup.</param>
         /// <param name="ProcessParameters">Receives the guest process parameters.</param>
-        internal static bool TryResolveMember(uint GuestProcessId, out uint HostProcessId, out string ImageName, out ulong PebAddress, out ulong ProcessParameters)
+        internal static bool TryResolveMember(uint GuestProcessId, out uint HostProcessId, out string ImageName, out ulong PebAddress, out ulong ProcessParameters, out uint Architecture, out uint MainThreadId)
         {
             HostProcessId = 0;
             ImageName = string.Empty;
             PebAddress = 0;
             ProcessParameters = 0;
+            Architecture = 0;
+            MainThreadId = 0;
 
             lock (Sync)
             {
@@ -344,6 +350,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 HostProcessId = _view.ReadUInt32(Offset + HostProcessIdOffset);
                 if (HostProcessId == 0)
                     return false;
+
+                Architecture = _view.ReadUInt32(Offset + ArchitectureOffset);
+                MainThreadId = _view.ReadUInt32(Offset + MainThreadIdOffset);
 
                 int NameLength = (int)Math.Min(_view.ReadUInt32(Offset + ImageLengthOffset), (uint)MaxImageBytes);
                 if (NameLength > 0)
@@ -392,8 +401,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Live guest processes of the session, each of which runs in its own emulator instance.
         /// </summary>
-        /// <param name="Members">Receives the guest process id and image name of every live member.</param>
-        internal static void ListLive(List<(uint ProcessId, string ImageName)> Members)
+        /// <param name="Members">Receives the guest process id, initial thread id and image name of every live member.</param>
+        internal static void ListLive(List<(uint ProcessId, uint MainThreadId, string ImageName)> Members)
         {
             lock (Sync)
             {
@@ -426,7 +435,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         ImageName = Encoding.Unicode.GetString(Name);
                     }
 
-                    Members.Add((_view.ReadUInt32(Offset + GuestProcessIdOffset), ImageName));
+                    Members.Add((_view.ReadUInt32(Offset + GuestProcessIdOffset), _view.ReadUInt32(Offset + MainThreadIdOffset), ImageName));
                 }
             }
         }

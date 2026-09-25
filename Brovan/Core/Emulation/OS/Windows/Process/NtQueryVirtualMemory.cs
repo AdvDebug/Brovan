@@ -18,6 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong MemImage = 0x01000000UL;
 
         private const ulong PageGuard = 0x00000100UL;
+        private const uint PageNoAccess = 0x01;
 
         internal const int CanonicalBasicInformationBytes = 0x30;
 
@@ -93,19 +94,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance.IsRegionMapped(MemoryInformation, MemoryInformationLength))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    WinModule Module = Instance.WinHelper.FindMappedImageViewByAddress(Address);
-                    if (Module == null)
-                        return NTSTATUS.STATUS_INVALID_ADDRESS;
+                    NTSTATUS PathStatus = FindMappedFilePath(Instance, Address, out string Path);
+                    if (PathStatus != NTSTATUS.STATUS_SUCCESS)
+                        return PathStatus;
 
-                    string Path = !string.IsNullOrEmpty(Module.Path) ? Module.Path : Module.Name;
-                    if (string.IsNullOrEmpty(Path))
-                        Path = Module.CanonicalImagePath;
-
-                    if (string.IsNullOrEmpty(Path))
-                        return NTSTATUS.STATUS_INVALID_ADDRESS;
-
-                    if (!Path.StartsWith("\\", StringComparison.Ordinal))
-                        Path = "\\??\\" + Path;
+                    Path = WinSysHelper.ToNtDevicePath(Path);
 
                     int StringByteCount = Encoding.Unicode.GetByteCount(Path) + 2;
                     Span<byte> StringData = Instance.WinHelper.Shared.GetSpan((uint)StringByteCount);
@@ -117,7 +110,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     if (ReturnLength != 0)
                     {
-                        if (!Instance._emulator.WriteMemory(ReturnLength, RequiredLength))
+                        if (!Instance.WinHelper.WritePointer(ReturnLength, RequiredLength))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
@@ -229,7 +222,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     if (ReturnLength != 0)
                     {
-                        if (!Instance._emulator.WriteMemory(ReturnLength, RequiredLength))
+                        if (!Instance.WinHelper.WritePointer(ReturnLength, RequiredLength))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
@@ -270,17 +263,22 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryRegionInformation)
                 {
+                    // NT fills the largest record version that fits. The WOW64 thunk takes only the current one.
                     int RegionPointerSize = Instance.WinHelper.PointerSize;
                     ulong RequiredLength = RegionPointerSize == 8 ? 0x30UL : 0x1CUL;
+                    ulong OldestLength = RegionPointerSize == 8 ? 0x18UL : 0x1CUL;
+
+                    if (MemoryInformationLength < OldestLength)
+                        return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                    if (RegionPointerSize == 8 && MemoryInformationLength < RequiredLength)
+                        RequiredLength = MemoryInformationLength & ~7UL;
 
                     if (ReturnLength != 0)
                     {
-                        if (!Instance._emulator.WriteMemory(ReturnLength, RequiredLength))
+                        if (!Instance.WinHelper.WritePointer(ReturnLength, RequiredLength))
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
-
-                    if (MemoryInformationLength < RequiredLength)
-                        return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
                     if (!Instance.IsRegionMapped(MemoryInformation, RequiredLength))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -347,8 +345,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         NodePreference = ulong.MaxValue
                     };
 
-                    Span<byte> Data = Instance.WinHelper.Shared.GetSpan(RequiredLength);
-                    Data.Slice(0, (int)RequiredLength).Clear();
+                    Span<byte> Data = Instance.WinHelper.Shared.GetSpan(0x30);
+                    Data.Clear();
 
                     if (RegionPointerSize == 8)
                     {
@@ -446,7 +444,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             bool HasRegion = Instance.TryFindMemoryRegion(QueryAddress, out MemoryRegion Region) &&
                              QueryAddress >= Region.BaseAddress &&
-                             QueryAddress < Region.BaseAddress + BinaryEmulator.AlignUp(Region.Size, 0x1000);
+                             QueryAddress < BinaryEmulator.AlignUp(Region.BaseAddress + Region.Size, 0x1000);
 
             MemoryRegion Freed = default;
             bool HasFreed = false;
@@ -480,7 +478,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Info.AllocationProtect = (uint)AllocationProtect;
                 Info.PartitionId = 0;
-                Info.RegionSize = Region.BaseAddress + BinaryEmulator.AlignUp(Region.Size, 0x1000) - QueryAddress;
+                Info.RegionSize = BinaryEmulator.AlignUp(Region.BaseAddress + Region.Size, 0x1000) - QueryAddress;
 
                 if (IsCommitted)
                     Info.State = (uint)MemCommit;
@@ -489,18 +487,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 else
                     Info.State = 0;
 
-                if (IsCommitted)
-                {
-                    ulong Protect = Instance.WinHelper.ConvertInternalToWinProtect(Region.Protections);
-                    if (Region.SpecialProtections.HasFlag(SpecialProtections.Guard))
-                        Protect |= PageGuard;
-
-                    Info.Protect = (uint)Protect;
-                }
-                else
-                {
-                    Info.Protect = 0;
-                }
+                Info.Protect = IsCommitted ? RegionWinProtect(Instance, Region) : 0;
 
                 Info.Type = IsImage ? (uint)MemImage
                     : Instance.WinHelper.IsSectionViewAddress(Region.BaseAddress) ? (uint)MemMapped
@@ -511,13 +498,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong FreeSize;
 
+            // RegionSize must be whole pages, or a VirtualQuery walk loops on the same page.
             if (HasFreed)
             {
-                FreeSize = Freed.BaseAddress + Freed.Size - QueryAddress;
+                FreeSize = BinaryEmulator.AlignUp(Freed.BaseAddress + Freed.Size, 0x1000) - QueryAddress;
             }
             else
             {
-                // RegionSize is always whole pages.
                 ulong Next = AlignDownPage(MaxUserAddress) + 0x1000;
 
                 if (Instance.TryFindNextMemoryRegionBase(QueryAddress, out ulong NextMapped) && NextMapped < Next)
@@ -529,7 +516,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Next = R.BaseAddress;
                 }
 
-                FreeSize = Next > QueryAddress ? Next - QueryAddress : 0x1000UL;
+                FreeSize = Next > QueryAddress ? BinaryEmulator.AlignUp(Next, 0x1000) - QueryAddress : 0x1000UL;
             }
 
             Info.BaseAddress = QueryAddress;
@@ -538,10 +525,53 @@ namespace Brovan.Core.Emulation.OS.Windows
             Info.PartitionId = 0;
             Info.RegionSize = FreeSize;
             Info.State = (uint)MemFree;
-            Info.Protect = 0;
+            Info.Protect = PageNoAccess;
             Info.Type = 0;
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal static uint RegionWinProtect(BinaryEmulator Instance, in MemoryRegion Region)
+        {
+            // NT never reads back the PAGE_TARGETS_* and enclave bits.
+            uint Protect = Region.Protect & 0x6FF;
+
+            if (Protect == 0 || Instance.WinHelper.ConvertWinProtectToInternal(Protect) != Region.Protections)
+                Protect = (uint)Instance.WinHelper.ConvertInternalToWinProtect(Region.Protections);
+
+            if ((Region.SpecialProtections & SpecialProtections.Guard) != 0)
+                Protect |= (uint)PageGuard;
+
+            return Protect;
+        }
+
+        private static NTSTATUS FindMappedFilePath(BinaryEmulator Instance, ulong Address, out string Path)
+        {
+            Path = null;
+
+            WinModule Module = Instance.WinHelper.FindMappedImageViewByAddress(Address);
+            if (Module != null)
+            {
+                Path = !string.IsNullOrEmpty(Module.Path) ? Module.Path : Module.CanonicalImagePath;
+                if (string.IsNullOrEmpty(Path))
+                    Path = Module.Name;
+
+                return string.IsNullOrEmpty(Path) ? NTSTATUS.STATUS_INVALID_ADDRESS : NTSTATUS.STATUS_SUCCESS;
+            }
+
+            foreach (WinSection Section in Instance.WinHelper.WinSections)
+            {
+                if (Section == null || !Section.IsViewAddress(Address))
+                    continue;
+
+                Path = Section.Path;
+                if (string.IsNullOrEmpty(Path))
+                    Path = Section.GetFileStream()?.GuestPath;
+
+                return string.IsNullOrEmpty(Path) ? NTSTATUS.STATUS_FILE_INVALID : NTSTATUS.STATUS_SUCCESS;
+            }
+
+            return NTSTATUS.STATUS_INVALID_ADDRESS;
         }
 
         internal static void Serialize(in MEMORY_BASIC_INFORMATION Info, bool Is64, Span<byte> Data)

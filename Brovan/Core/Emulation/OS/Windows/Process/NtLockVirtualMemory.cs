@@ -4,58 +4,49 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtLockVirtualMemory : IWinSyscall
     {
+        private const uint MapProcess = 1;
+        private const uint MapSystem = 2;
+        private const ulong PageSize = 0x1000;
+        private const uint MemCommit = 0x1000;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-                return Handle64(Instance);
-
-            return Handle32(Instance);
+            return Change(Instance, Instance.WinHelper.GetArg(0), Instance.WinHelper.GetArg(1), Instance.WinHelper.GetArg(2), (uint)Instance.WinHelper.GetArg(3), true);
         }
 
-        private static NTSTATUS Handle64(BinaryEmulator Instance)
+        // Nothing pages out, so a lock is only a record NtUnlockVirtualMemory checks.
+        internal static NTSTATUS Change(BinaryEmulator Instance, ulong ProcessHandle, ulong BaseAddressPtr, ulong NumberOfBytesPtr, uint MapType, bool Lock)
         {
-            ulong ProcessHandle = Instance.WinHelper.GetArg64(0);
-            ulong BaseAddressPtr = Instance.WinHelper.GetArg64(1);
-            ulong NumberOfBytesToLockPtr = Instance.WinHelper.GetArg64(2);
-            uint MapType = (uint)Instance.WinHelper.GetArg64(3);
-
-            return HandleCommon(Instance, ProcessHandle, BaseAddressPtr, NumberOfBytesToLockPtr, MapType, 8);
-        }
-
-        private static NTSTATUS Handle32(BinaryEmulator Instance)
-        {
-            ulong ProcessHandle = Instance.WinHelper.GetArg(0);
-            ulong BaseAddressPtr = Instance.WinHelper.GetArg(1);
-            ulong NumberOfBytesToLockPtr = Instance.WinHelper.GetArg(2);
-            uint MapType = (uint)Instance.WinHelper.GetArg(3);
-
-            return HandleCommon(Instance, ProcessHandle, BaseAddressPtr, NumberOfBytesToLockPtr, MapType, 4);
-        }
-
-        private static NTSTATUS HandleCommon(BinaryEmulator Instance, ulong ProcessHandle, ulong BaseAddressPtr, ulong NumberOfBytesToLockPtr, uint MapType, uint PointerSize)
-        {
-            if (!Instance.WinHelper.IsCurrentProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation))
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            if (BaseAddressPtr == 0 || NumberOfBytesToLockPtr == 0)
+            if (MapType == 0 || (MapType & ~(MapProcess | MapSystem)) != 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(BaseAddressPtr, PointerSize) || !Instance.IsRegionMapped(NumberOfBytesToLockPtr, PointerSize))
+            // Needs SeLockMemoryPrivilege.
+            if ((MapType & MapSystem) != 0)
+                return NTSTATUS.STATUS_PRIVILEGE_NOT_HELD;
+
+            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            if (Process.PID != Instance.WinHelper.PID)
+                return Instance.WinUnimplemented;
+
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+
+            if (BaseAddressPtr == 0 || NumberOfBytesPtr == 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (!Instance.IsRegionMapped(BaseAddressPtr, PointerSize) || !Instance.IsRegionMapped(NumberOfBytesPtr, PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            ulong BaseAddress = PointerSize == 8
-                ? Instance.ReadMemoryULong(BaseAddressPtr)
-                : Instance.ReadMemoryUInt(BaseAddressPtr);
-            ulong NumberOfBytesToLock = PointerSize == 8
-                ? Instance.ReadMemoryULong(NumberOfBytesToLockPtr)
-                : Instance.ReadMemoryUInt(NumberOfBytesToLockPtr);
+            ulong BaseAddress = Instance.WinHelper.ReadPointer(BaseAddressPtr);
+            ulong NumberOfBytes = Instance.WinHelper.ReadPointer(NumberOfBytesPtr);
 
-            if (NumberOfBytesToLock == 0)
+            if (NumberOfBytes == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            const ulong PageSize = 0x1000;
             ulong AlignedBase = BaseAddress & ~(PageSize - 1UL);
-            ulong EndAddress = BaseAddress + NumberOfBytesToLock;
+            ulong EndAddress = BaseAddress + NumberOfBytes;
             if (EndAddress < BaseAddress)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -67,12 +58,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(AlignedBase, AlignedSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            bool WroteBase = PointerSize == 8
-                ? Instance._emulator.WriteMemory(BaseAddressPtr, AlignedBase)
-                : Instance._emulator.WriteMemory(BaseAddressPtr, (uint)AlignedBase);
-            bool WroteSize = PointerSize == 8
-                ? Instance._emulator.WriteMemory(NumberOfBytesToLockPtr, AlignedSize)
-                : Instance._emulator.WriteMemory(NumberOfBytesToLockPtr, (uint)AlignedSize);
+            for (ulong Page = AlignedBase; Lock && Page < AlignedEnd;)
+            {
+                if (NtQueryVirtualMemory.BuildBasicInformation(Instance, Page, out MEMORY_BASIC_INFORMATION Info) != NTSTATUS.STATUS_SUCCESS || Info.State != MemCommit)
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                Page += Info.RegionSize;
+            }
+
+            Status = Lock
+                ? Instance.WinHelper.LockPages(AlignedBase, AlignedEnd)
+                : Instance.WinHelper.UnlockPages(AlignedBase, AlignedEnd);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            bool WroteBase = Instance.WinHelper.WritePointer(BaseAddressPtr, AlignedBase);
+            bool WroteSize = Instance.WinHelper.WritePointer(NumberOfBytesPtr, AlignedSize);
 
             return WroteBase && WroteSize ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }

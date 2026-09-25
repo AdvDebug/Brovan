@@ -360,6 +360,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Thread.StackAddress != 0)
             {
+                ForgetLockedPages(Thread.StackAddress, Thread.StackAddress + Thread.StackSize);
                 if (!Emulator.ReleaseMemory(Thread.StackAddress))
                     Emulator.UnmapMemoryRegion(Thread.StackAddress);
                 Thread.StackAddress = 0;
@@ -370,7 +371,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 ulong TebBase = State.NativeTeb != 0 ? State.NativeTeb : State.Teb;
                 if (TebBase != 0)
+                {
+                    ForgetLockedRegion(TebBase);
                     Emulator.UnmapMemoryRegion(TebBase);
+                }
                 State.Teb = 0;
                 State.NativeTeb = 0;
 
@@ -410,6 +414,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
             if (State == null)
                 return;
+
+            if (State.ExitTime == 0)
+                State.ExitTime = Emulator.GetEmulatedSystemTimeFileTimeUtc();
 
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
@@ -1111,30 +1118,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        public ulong SetUnicodeString(ulong Address, string Buffer)
+        internal static string ToNtDevicePath(string Path)
         {
-            if (Buffer == null)
-                return 0;
+            if (string.IsNullOrWhiteSpace(Path))
+                return string.Empty;
 
-            ulong StructSize = (ulong)Unsafe.SizeOf<UNICODE_STRING64>();
-            if (!Emulator.IsRegionMapped(Address, StructSize))
-                return 0;
+            Path = Path.Trim().TrimEnd('\0').Replace('/', '\\');
 
-            int ByteLength = Buffer.Length * 2;
-            int MaxByteLength = ByteLength + 2;
+            if (Path.StartsWith("\\Device\\", StringComparison.OrdinalIgnoreCase))
+                return Path;
 
-            ulong StringAddress = Emulator.MapUniqueAddress((ulong)MaxByteLength, MemoryProtection.ReadWrite);
-            if (StringAddress == 0)
-                return 0;
+            while (Path.StartsWith("\\??\\", StringComparison.OrdinalIgnoreCase))
+                Path = Path.Substring(4);
 
-            Emulator._emulator.WriteMemory(StringAddress, Buffer, Encoding.Unicode);
-            Emulator._emulator.WriteMemory(StringAddress + (ulong)ByteLength, (ushort)0, 2);
+            if (Path.StartsWith("\\\\?\\", StringComparison.OrdinalIgnoreCase) ||
+                Path.StartsWith("\\\\.\\", StringComparison.OrdinalIgnoreCase))
+                Path = Path.Substring(4);
 
-            Emulator._emulator.WriteMemory(Address + 0, (ushort)ByteLength, 2);
-            Emulator._emulator.WriteMemory(Address + 2, (ushort)MaxByteLength, 2);
-            Emulator._emulator.WriteMemory(Address + 8, StringAddress, 8);
+            if (Path.Length >= 3 && char.IsLetter(Path[0]) && Path[1] == ':' && Path[2] == '\\')
+                return WindowsStorageDeviceSupport.VolumeDeviceName + Path.Substring(2);
 
-            return StringAddress;
+            if (Path.StartsWith("\\\\", StringComparison.OrdinalIgnoreCase))
+                return "\\Device\\Mup" + Path.Substring(1);
+
+            return Path;
         }
 
         public void WriteUnicodeStringRelative(BinaryEmulator Instance, ulong UnicodeStringAddress, ulong BaseAddress, string Value)
@@ -1153,32 +1160,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(UnicodeStringAddress + 8, Relative, 8);
         }
 
-        public uint SetUnicodeString32(uint Address, string Buffer)
-        {
-            if (Buffer == null)
-                return 0;
-
-            ulong StructSize = (ulong)Unsafe.SizeOf<UNICODE_STRING>();
-            if (!Emulator.IsRegionMapped(Address, StructSize))
-                return 0;
-
-            int ByteLength = Buffer.Length * 2;
-            int MaxByteLength = ByteLength + 2;
-
-            uint StringAddress = (uint)Emulator.MapUniqueAddress((ulong)MaxByteLength, MemoryProtection.ReadWrite);
-            if (StringAddress == 0)
-                return 0;
-
-            Emulator._emulator.WriteMemory(StringAddress, Buffer, Encoding.Unicode);
-            Emulator._emulator.WriteMemory((ulong)StringAddress + (ulong)ByteLength, (ushort)0, 2);
-
-            Emulator._emulator.WriteMemory(Address + 0, (ushort)ByteLength, 2);
-            Emulator._emulator.WriteMemory(Address + 2, (ushort)MaxByteLength, 2);
-            Emulator._emulator.WriteMemory(Address + 4, StringAddress);
-
-            return StringAddress;
-        }
-
         /// <summary>
         /// Writes the process list in the SYSTEM_PROCESS_INFORMATION layout of the guest architecture.
         /// </summary>
@@ -1188,80 +1169,219 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns>False when the buffer is too small, and nothing was written.</returns>
         public bool TryWriteProcessInformationList(ulong Buffer, uint BufferLength, out uint RequiredLength)
         {
-            bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;
+            bool Is64 = PointerSize == 8;
             uint HeaderSize = Is64 ? 0x100u : 0xB8u;
             uint ThreadSize = Is64 ? 0x50u : 0x40u;
-            uint EntrySize = HeaderSize + ThreadSize;
-            ulong BasePriorityOffset = Is64 ? 0x48UL : 0x40UL;
-            ulong ProcessIdOffset = Is64 ? 0x50UL : 0x44UL;
-            ulong ParentProcessIdOffset = Is64 ? 0x58UL : 0x48UL;
-            const ulong ImageNameOffset = 0x38;
 
             ReapAdoptedSessionProcesses();
 
-            List<WinProcess> Processes = WinProcesses ?? new List<WinProcess>();
-            List<(uint Pid, uint Ppid, string? Name)> Entries = new(Processes.Count + GuestSession.SlotCount);
-
+            ListedProcesses.Clear();
             ListedProcessIds.Clear();
 
-            for (int i = 0; i < Processes.Count; i++)
+            for (int i = 0; i < WinProcesses.Count; i++)
             {
-                WinProcess Process = Processes[i];
-                Entries.Add((Process.PID, Process.PPID, Process.Status != ProtectionStatus.Unaccessible ? Process.Name : null));
+                WinProcess Process = WinProcesses[i];
+                if (Process.PID != PID && !IsProcessAlive(Process))
+                    continue;
+
+                if (Process.MainThreadId == 0 && Process.PID != 0)
+                    Process.MainThreadId = GenerateRandomPID();
+
+                ListedProcesses.Add((Process, Process.PID, Process.MainThreadId, Process.Status != ProtectionStatus.Unaccessible ? Process.Name : null));
                 ListedProcessIds.Add(Process.PID);
             }
 
             // The other guest processes of the session run in their own emulator instances, and a guest that
             // enumerates processes has to see them the same way it sees its own.
-            List<(uint ProcessId, string ImageName)> Members = GetSessionMembers();
+            List<(uint ProcessId, uint MainThreadId, string ImageName)> Members = GetSessionMembers();
 
             for (int i = 0; i < Members.Count; i++)
             {
                 if (ListedProcessIds.Add(Members[i].ProcessId))
-                    Entries.Add((Members[i].ProcessId, 0u, Members[i].ImageName));
+                    ListedProcesses.Add((null, Members[i].ProcessId, Members[i].MainThreadId, Members[i].ImageName));
             }
 
-            RequiredLength = (uint)Entries.Count * EntrySize;
+            ulong Total = 0;
+            for (int i = 0; i < ListedProcesses.Count; i++)
+                Total += GetProcessEntrySize(ListedProcesses[i].Pid, ListedProcesses[i].Name, HeaderSize, ThreadSize);
 
+            RequiredLength = Total > uint.MaxValue ? uint.MaxValue : (uint)Total;
             if (BufferLength < RequiredLength)
                 return false;
 
-            WriteZeroMemory(Buffer, RequiredLength);
-
             ulong Current = Buffer;
-            for (int i = 0; i < Entries.Count; i++)
+            for (int i = 0; i < ListedProcesses.Count; i++)
             {
-                (uint Pid, uint Ppid, string? Name) Entry = Entries[i];
+                (WinProcess Process, uint Pid, uint MainThreadId, string Name) Entry = ListedProcesses[i];
+                uint EntrySize = GetProcessEntrySize(Entry.Pid, Entry.Name, HeaderSize, ThreadSize);
 
-                Emulator._emulator.WriteMemory(Current + 0x00, i == Entries.Count - 1 ? 0u : EntrySize);
-                Emulator._emulator.WriteMemory(Current + 0x04, 1u);
+                Span<byte> Data = Shared.GetSpan(EntrySize);
+                Data.Clear();
 
-                ulong ImageName = Current + ImageNameOffset;
-                if (!string.IsNullOrEmpty(Entry.Name))
-                {
-                    if (Is64)
-                        SetUnicodeString(ImageName, Entry.Name);
-                    else
-                        SetUnicodeString32((uint)ImageName, Entry.Name);
-                }
+                WriteProcessEntry(Data, Current, Entry.Process, Entry.Pid, Entry.MainThreadId, Entry.Name, i == ListedProcesses.Count - 1 ? 0u : EntrySize, HeaderSize, ThreadSize, Is64);
 
-                Emulator._emulator.WriteMemory(Current + BasePriorityOffset, 8u);
-
-                if (Is64)
-                {
-                    Emulator._emulator.WriteMemory(Current + ProcessIdOffset, (ulong)Entry.Pid, 8);
-                    Emulator._emulator.WriteMemory(Current + ParentProcessIdOffset, (ulong)Entry.Ppid, 8);
-                }
-                else
-                {
-                    Emulator._emulator.WriteMemory(Current + ProcessIdOffset, Entry.Pid);
-                    Emulator._emulator.WriteMemory(Current + ParentProcessIdOffset, Entry.Ppid);
-                }
+                if (!Emulator._emulator.WriteMemory(Current, Data))
+                    return false;
 
                 Current += EntrySize;
             }
 
             return true;
+        }
+
+        private uint GetProcessEntrySize(uint Pid, string Name, uint HeaderSize, uint ThreadSize)
+        {
+            uint Threads = Pid == PID ? CountLiveThreads() : 1u;
+            uint NameBytes = string.IsNullOrEmpty(Name) ? 0u : (uint)Name.Length * 2 + 2;
+            return HeaderSize + Threads * ThreadSize + ((NameBytes + 7) & ~7u);
+        }
+
+        private uint CountLiveThreads()
+        {
+            uint Count = 0;
+            foreach (EmulatedThread Thread in Emulator.Threads.Values)
+            {
+                if (Thread != null && Thread.State != EmulatedThreadState.Terminated)
+                    Count++;
+            }
+
+            return Math.Max(Count, 1u);
+        }
+
+        private void WriteProcessEntry(Span<byte> Data, ulong Address, WinProcess Process, uint Pid, uint MainThreadId, string Name, uint NextEntryOffset, uint HeaderSize, uint ThreadSize, bool Is64)
+        {
+            bool Own = Pid == PID;
+            uint PointerBytes = Is64 ? 8u : 4u;
+
+            void WritePointerField(Span<byte> Target, int Offset, ulong Value)
+            {
+                if (Is64)
+                    BinaryPrimitives.WriteUInt64LittleEndian(Target.Slice(Offset, 8), Value);
+                else
+                    BinaryPrimitives.WriteUInt32LittleEndian(Target.Slice(Offset, 4), (uint)Value);
+            }
+
+            if (Process != null)
+                UpdateProcessTimes(Process);
+
+            uint ThreadCount = Own ? CountLiveThreads() : 1u;
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x00, 4), NextEntryOffset);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x04, 4), ThreadCount);
+            BinaryPrimitives.WriteInt64LittleEndian(Data.Slice(0x20, 8), Process?.CreationTime ?? 0);
+            BinaryPrimitives.WriteInt64LittleEndian(Data.Slice(0x28, 8), Process?.UserTime ?? 0);
+            BinaryPrimitives.WriteInt64LittleEndian(Data.Slice(0x30, 8), Process?.KernelTime ?? 0);
+
+            uint NameOffset = HeaderSize + ThreadCount * ThreadSize;
+            if (!string.IsNullOrEmpty(Name))
+            {
+                int NameBytes = Name.Length * 2;
+                BinaryPrimitives.WriteUInt16LittleEndian(Data.Slice(0x38, 2), (ushort)NameBytes);
+                BinaryPrimitives.WriteUInt16LittleEndian(Data.Slice(0x3A, 2), (ushort)(NameBytes + 2));
+                WritePointerField(Data, 0x38 + (int)PointerBytes, Address + NameOffset);
+                Encoding.Unicode.GetBytes(Name.AsSpan(), Data.Slice((int)NameOffset, NameBytes));
+            }
+
+            int Cursor = Is64 ? 0x48 : 0x40;
+            uint BasePriority = Own ? CurrentPriority : PriorityClassBase(Process?.PriorityClass ?? 2);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(Cursor, 4), BasePriority);
+            WritePointerField(Data, Is64 ? 0x50 : 0x44, Pid);
+            WritePointerField(Data, Is64 ? 0x58 : 0x48, Process?.PPID ?? 0);
+
+            User Owner = Process?.RunningUser ?? CurrentUser;
+            bool ServiceSession = Owner == User.System || Owner == User.LocalService;
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(Is64 ? 0x60 : 0x4C, 4), Own ? (uint)HandleManager.Count : 0u);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(Is64 ? 0x64 : 0x50, 4), ServiceSession || Pid <= 4 ? 0u : 1u);
+
+            if (Own)
+            {
+                Emulator.SumGuestMemoryUsage(out ulong VirtualSize, out ulong CommittedSize);
+                int Counters = Is64 ? 0x70 : 0x58;
+                WritePointerField(Data, Counters, VirtualSize);
+                WritePointerField(Data, Counters + (int)PointerBytes, VirtualSize);
+                WritePointerField(Data, Counters + (int)PointerBytes * 3, CommittedSize);
+                WritePointerField(Data, Counters + (int)PointerBytes * 4, CommittedSize);
+                WritePointerField(Data, Counters + (int)PointerBytes * 9, CommittedSize);
+                WritePointerField(Data, Counters + (int)PointerBytes * 10, CommittedSize);
+                WritePointerField(Data, Counters + (int)PointerBytes * 11, CommittedSize);
+            }
+
+            int ThreadIndex = 0;
+            if (Own)
+            {
+                foreach (EmulatedThread Thread in Emulator.Threads.Values)
+                {
+                    if (Thread == null || Thread.State == EmulatedThreadState.Terminated || ThreadIndex >= ThreadCount)
+                        continue;
+
+                    WriteThreadEntry(Data.Slice((int)(HeaderSize + ThreadIndex * ThreadSize), (int)ThreadSize), Thread, Pid, Thread.ThreadId, Is64);
+                    ThreadIndex++;
+                }
+            }
+
+            if (ThreadIndex == 0)
+                WriteThreadEntry(Data.Slice((int)HeaderSize, (int)ThreadSize), null, Pid, MainThreadId, Is64);
+        }
+
+        private void WriteThreadEntry(Span<byte> Data, EmulatedThread Thread, uint Pid, uint Tid, bool Is64)
+        {
+            const uint KernelStateReady = 1;
+            const uint KernelStateRunning = 2;
+            const uint KernelStateWaiting = 5;
+            const uint WaitReasonSuspended = 5;
+            const uint WaitReasonUserRequest = 6;
+
+            uint State = KernelStateWaiting;
+            uint WaitReason = WaitReasonUserRequest;
+            int Priority = 8;
+            int BasePriority = 8;
+
+            if (Thread != null)
+            {
+                GetThreadTimes(Thread, out long CreateTime, out _, out long KernelTime, out long UserTime);
+                BinaryPrimitives.WriteInt64LittleEndian(Data.Slice(0x00, 8), KernelTime);
+                BinaryPrimitives.WriteInt64LittleEndian(Data.Slice(0x08, 8), UserTime);
+                BinaryPrimitives.WriteInt64LittleEndian(Data.Slice(0x10, 8), CreateTime);
+
+                if (Thread.State == EmulatedThreadState.Running)
+                    State = KernelStateRunning;
+                else if (Thread.State == EmulatedThreadState.Ready)
+                    State = KernelStateReady;
+                else if (Thread.State == EmulatedThreadState.Suspended || Thread.SuspendCount > 0)
+                    WaitReason = WaitReasonSuspended;
+
+                Priority = Thread.EffectivePriority;
+                BasePriority = Thread.BasePriority;
+            }
+
+            if (Is64)
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x20, 8), Thread?.StartAddress ?? 0);
+                BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x28, 8), Pid);
+                BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x30, 8), Tid);
+                BinaryPrimitives.WriteInt32LittleEndian(Data.Slice(0x38, 4), Priority);
+                BinaryPrimitives.WriteInt32LittleEndian(Data.Slice(0x3C, 4), BasePriority);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x44, 4), State);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x48, 4), State == KernelStateWaiting ? WaitReason : 0);
+                return;
+            }
+
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x1C, 4), (uint)(Thread?.StartAddress ?? 0));
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x20, 4), Pid);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x24, 4), Tid);
+            BinaryPrimitives.WriteInt32LittleEndian(Data.Slice(0x28, 4), Priority);
+            BinaryPrimitives.WriteInt32LittleEndian(Data.Slice(0x2C, 4), BasePriority);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x34, 4), State);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x38, 4), State == KernelStateWaiting ? WaitReason : 0);
+        }
+
+        // All CPU time counts as user time.
+        internal void GetThreadTimes(EmulatedThread Thread, out long CreateTime, out long ExitTime, out long KernelTime, out long UserTime)
+        {
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            CreateTime = State.CreateTime;
+            ExitTime = Thread.State == EmulatedThreadState.Terminated ? State.ExitTime : 0;
+            KernelTime = 0;
+            UserTime = (long)(Thread.RunTicks * (10_000_000.0 / System.Diagnostics.Stopwatch.Frequency));
         }
 
         /// <summary>
@@ -1315,7 +1435,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const long SessionMemberCacheMilliseconds = 250;
 
-        private readonly List<(uint ProcessId, string ImageName)> SessionMembers = new();
+        private readonly List<(uint ProcessId, uint MainThreadId, string ImageName)> SessionMembers = new();
+        private readonly List<(WinProcess Process, uint Pid, uint MainThreadId, string Name)> ListedProcesses = new();
         private readonly HashSet<uint> ListedProcessIds = new();
         private long SessionMemberCacheDeadline;
 
@@ -1323,7 +1444,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// The live session members, refreshed at most a few times a second. Reading them takes the session
         /// lock every member of the session shares, so a polling guest must not reach it on every call.
         /// </summary>
-        private List<(uint ProcessId, string ImageName)> GetSessionMembers()
+        private List<(uint ProcessId, uint MainThreadId, string ImageName)> GetSessionMembers()
         {
             long Now = Environment.TickCount64;
             if (Now < SessionMemberCacheDeadline)
@@ -1365,6 +1486,80 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Candidate != 0 && PIDs.Add(Candidate))
                     return Candidate;
             }
+        }
+
+        // Process and thread ids share one namespace across the session.
+        internal void ClaimProcessId(uint Id) => PIDs.Add(Id);
+
+        // NT bounds locked memory by the working set quota.
+        private readonly HashSet<ulong> LockedPages = new HashSet<ulong>();
+        private const int MaxLockedPages = 0x10000;
+
+        internal NTSTATUS LockPages(ulong Start, ulong End)
+        {
+            ulong First = Start >> 12;
+            ulong Last = End >> 12;
+            if (Last - First > MaxLockedPages)
+                return NTSTATUS.STATUS_WORKING_SET_QUOTA;
+
+            ulong Added = 0;
+            for (ulong Page = First; Page < Last; Page++)
+            {
+                if (!LockedPages.Contains(Page))
+                    Added++;
+            }
+
+            if (Added > (ulong)(MaxLockedPages - LockedPages.Count))
+                return NTSTATUS.STATUS_WORKING_SET_QUOTA;
+
+            for (ulong Page = First; Page < Last; Page++)
+                LockedPages.Add(Page);
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal NTSTATUS UnlockPages(ulong Start, ulong End)
+        {
+            ulong First = Start >> 12;
+            ulong Last = End >> 12;
+            if (Last - First > (ulong)LockedPages.Count)
+                return NTSTATUS.STATUS_NOT_LOCKED;
+
+            for (ulong Page = First; Page < Last; Page++)
+            {
+                if (!LockedPages.Contains(Page))
+                    return NTSTATUS.STATUS_NOT_LOCKED;
+            }
+
+            for (ulong Page = First; Page < Last; Page++)
+                LockedPages.Remove(Page);
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal void ForgetLockedPages(ulong Start, ulong End)
+        {
+            if (LockedPages.Count == 0)
+                return;
+
+            ulong First = Start >> 12;
+            ulong Last = BinaryEmulator.AlignUp(End, 0x1000) >> 12;
+            if (Last - First > (ulong)LockedPages.Count)
+            {
+                RemoveLockedPagesBetween(First, Last);
+                return;
+            }
+
+            for (ulong Page = First; Page < Last; Page++)
+                LockedPages.Remove(Page);
+        }
+
+        private void RemoveLockedPagesBetween(ulong First, ulong Last) => LockedPages.RemoveWhere(Page => Page >= First && Page < Last);
+
+        private void ForgetLockedRegion(ulong Address)
+        {
+            if (LockedPages.Count != 0 && Emulator.TryFindMemoryRegion(Address, out MemoryRegion Region))
+                ForgetLockedPages(Region.BaseAddress, Region.BaseAddress + Region.Size);
         }
 
         public uint GenerateAnonymousObjectId() => ++AnonymousObjectCursor;
@@ -1439,7 +1634,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public void GetProcessorTimes(out long IdleTime, out long KernelTime, out long UserTime)
         {
-            int CpuCount = Math.Max(1, Environment.ProcessorCount);
+            int CpuCount = (int)ProcessorCount;
             long Uptime = SaturatingMillisecondsToFileTimeDuration(Emulator.EmulatedTickCount64);
             long HostUser = Math.Max(0, (HostProcess.UserProcessorTime - HostUserTimeAtBoot).Ticks);
             long HostKernel = Math.Max(0, (HostProcess.PrivilegedProcessorTime - HostKernelTimeAtBoot).Ticks);
@@ -1458,6 +1653,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Current Process
         public uint PID = 0;
         public uint PPID = 0;
+        public uint InitialThreadId;
         public WinHandle STD_OUT;
         public WinHandle STD_IN;
         public WinHandle ConsoleHandle;
@@ -1480,6 +1676,62 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
         public uint CurrentPriority = 0x8; // Default priority (Normal), changes only if the program changed it explicitly.
         public uint DefaultHardErrorMode = 1; // Hard error reporting is on until the program turns it off.
+        public uint ProcessDebugFlags = 1;
+
+        // One processor group, so no more processors than the guest pointer has bits.
+        internal uint ProcessorCount => HostProcessorCount(PointerSize * 8);
+
+        internal ulong ActiveProcessorMask => ProcessorMask(ProcessorCount);
+
+        private ulong ChosenProcessAffinity;
+
+        internal ulong ProcessAffinityMask
+        {
+            get => ChosenProcessAffinity != 0 ? ChosenProcessAffinity : ActiveProcessorMask;
+            set => ChosenProcessAffinity = value;
+        }
+
+        internal static uint HostProcessorCount(int MaskBits) => (uint)Math.Clamp(Environment.ProcessorCount, 1, MaskBits);
+
+        internal static ulong ProcessorMask(uint Count) => Count >= 64 ? ulong.MaxValue : (1UL << (int)Count) - 1;
+
+        internal static uint PriorityClassBase(byte PriorityClass) => PriorityClass switch
+        {
+            1 => 4,
+            5 => 6,
+            6 => 10,
+            3 => 13,
+            4 => 24,
+            _ => 8,
+        };
+
+        internal void ApplyThreadBasePriority(EmulatedThread Thread)
+        {
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            bool Realtime = CurrentPriority >= 16;
+            int Low = Realtime ? 16 : 1;
+            int High = Realtime ? 31 : 15;
+
+            if (State.PrioritySaturation != 0)
+                Thread.BasePriority = State.PrioritySaturation > 0 ? High : Low;
+            else
+                Thread.BasePriority = Math.Clamp((int)CurrentPriority + State.PriorityIncrement, Low, High);
+        }
+
+        // A QPC tick is 100 ns, the unit of a thread or process time.
+        internal static ulong TimeToCycles(long Time)
+        {
+            if (Time <= 0)
+                return 0;
+
+            return (ulong)Time > ulong.MaxValue / BinaryEmulator.TscTicksPerQpcTick ? ulong.MaxValue : (ulong)Time * BinaryEmulator.TscTicksPerQpcTick;
+        }
+
+        internal int QueryThreadBasePriorityIncrement(EmulatedThread Thread)
+        {
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            return State.PrioritySaturation != 0 ? 16 * State.PrioritySaturation : Thread.BasePriority - (int)CurrentPriority;
+        }
         public User CurrentUser = User.Standard;
         public string CurrentUserSid = "S-1-5-21-1000-1000-1000-1001";
         public const string CurrentUserName = "User";
@@ -1488,6 +1740,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Other
         public List<WinHandle> WinHandles = new List<WinHandle>();
         public List<WinProcess> WinProcesses = new List<WinProcess>();
+        private WinProcess OwnProcess;
         public List<WinFile> WinFiles = new List<WinFile>();
 
         // WinFiles only ever grows, so share checks and byte range locks cannot be answered from it.
@@ -1795,6 +2048,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             KuserSharedData = new KuserSharedDataManager(Emulator);
             PID = AdoptHostProcessId();
 
+            // Must be set before startup is published. The creator reports it as the new process's thread.
+            InitialThreadId = GenerateRandomPID();
+
             // A guest spawned by another guest has a real parent in the session, and a check for
             // "who started me" has to see the creator rather than an invented shell.
             uint GuestParent = ReadGuestParentProcessId();
@@ -1843,7 +2099,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "Registry", Path = "Registry", Status = ProtectionStatus.Full, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "smss.exe", Path = "C:\\Windows\\System32\\smss.exe", Status = ProtectionStatus.LightTCB, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "Memory Compression", Path = "MemCompression", Status = ProtectionStatus.Full, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
-                new WinProcess{ PID = PID, PPID = PPID, Name = FileName, Path = Emulator.GuestImagePath, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = Binary.Architecture, PrimaryToken = new WinToken{SessionId = 1, IsElevated = false, IsRestricted = false, OwningProcessId = PID, OwningThreadId = 0, Type = TokenType.Primary } },
+                new WinProcess{ PID = PID, PPID = PPID, Name = FileName, Path = Emulator.GuestImagePath, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = Binary.Architecture, MainThreadId = InitialThreadId, PrimaryToken = new WinToken{SessionId = 1, IsElevated = false, IsRestricted = false, OwningProcessId = PID, OwningThreadId = 0, Type = TokenType.Primary } },
                 new WinProcess{ PID = ShellPID, PPID = GenerateRandomPID(), Name = "explorer.exe", Path = "C:\\Windows\\explorer.exe", Status = ProtectionStatus.None, RunningUser = User.Standard, Critical = false, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = FirefoxParent, PPID = ShellPID, Name = "firefox.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\firefox.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},
                 new WinProcess{ PID = GenerateRandomPID(), PPID = FirefoxParent, Name = "crashhelper.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\crashhelper.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},
@@ -1879,7 +2135,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             foreach (WinProcess Process in WinProcesses)
             {
                 if (Process.PID == PID)
+                {
+                    OwnProcess = Process;
                     InitializeProcessTimes(Process, Emulator.EmulatedTickCount64, false);
+                }
                 else
                     InitializeProcessTimes(Process, RandomGen.Next(60 * 1000, 2 * 60 * 60 * 1000), true);
             }
@@ -2111,6 +2370,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (UnmappedAny)
                 {
+                    ForgetLockedPages(ViewBase, End);
                     UnregisterMappedImageView(Module);
 
                     if (!Module.IsSectionView)
@@ -2139,6 +2399,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Section.BackingAddress = 0;
 
                 bool UnmappedView = Emulator.UnmapMemoryRuns(Removed.Base, Removed.Size);
+                ForgetLockedPages(Removed.Base, Removed.Base + Removed.Size);
 
                 ReleaseSectionIfUnreferenced(Section);
                 return UnmappedView;
@@ -2150,6 +2411,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (ViewSection.MappedViewCount > 0)
                     ViewSection.MappedViewCount--;
 
+                ForgetLockedPages(ViewSection.BackingAddress, ViewSection.BackingAddress + ViewSection.Size);
                 ReleaseSectionIfUnreferenced(ViewSection);
                 return true;
             }
@@ -2157,6 +2419,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Emulator.TryFindMemoryRegion(BaseAddress, out MemoryRegion ViewRegion))
                 return false;
 
+            ForgetLockedRegion(ViewRegion.BaseAddress);
             return Emulator.UnmapMemoryRegion(ViewRegion.BaseAddress);
         }
 
@@ -2182,6 +2445,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Section.BackingAddress != 0)
             {
+                ForgetLockedPages(Section.BackingAddress, Section.BackingAddress + Section.Size);
                 Emulator.UnmapMemoryRegion(Section.BackingAddress);
                 Section.BackingAddress = 0;
             }
@@ -3999,7 +4263,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ProcessId == 0 || ProcessId == PID)
                 return null;
 
-            if (!GuestSession.TryResolveMember(ProcessId, out uint HostProcessId, out string ImageName, out ulong Peb, out ulong Parameters))
+            if (!GuestSession.TryResolveMember(ProcessId, out uint HostProcessId, out string ImageName, out ulong Peb, out ulong Parameters, out uint Architecture, out uint MainThreadId))
                 return null;
 
             // Zero until the member publishes startup.
@@ -4026,7 +4290,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 PPID = 0,
                 Name = string.IsNullOrEmpty(ImageName) ? "Brovan.exe" : ImageName,
                 Path = string.Empty,
-                Arch = BinaryArchitecture.Unknown,
+                Arch = (BinaryArchitecture)Architecture,
+                MainThreadId = MainThreadId,
                 Status = ProtectionStatus.None,
                 RunningUser = CurrentUser,
                 CreationTime = Emulator.GetEmulatedSystemTimeFileTimeUtc(),
@@ -4035,6 +4300,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
 
             PIDs.Add(ProcessId);
+            if (MainThreadId != 0)
+                PIDs.Add(MainThreadId);
+
             WinProcesses.Add(Sibling);
             return Sibling;
         }
@@ -4057,6 +4325,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 WinProcesses.RemoveAt(Index);
                 PIDs.Remove(Candidate.PID);
+                PIDs.Remove(Candidate.MainThreadId);
             }
         }
 
@@ -8289,26 +8558,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HandleManager.GetObjectByHandle<WinJob>(Handle);
         }
 
-        public bool IsProcessInJob(ulong ProcessHandle, ulong JobHandle)
+        public NTSTATUS QueryProcessInJob(ulong ProcessHandle, ulong JobHandle)
         {
-            WinProcess Process = null;
+            NTSTATUS Status = ResolveProcessHandle(ProcessHandle, AccessMask.ProcessQueryLimitedInformation, out WinProcess Process);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) || ProcessHandle == uint.MaxValue)
-                Process = WinProcesses.FirstOrDefault(p => p.PID == PID);
-            else
-                Process = GetProcessByHandle(ProcessHandle, AccessMask.GiveTemp);
+            WinJob Job = null;
+            if (JobHandle != 0)
+            {
+                IHandleObject Object = HandleManager.GetObjectByHandle(JobHandle);
+                if (Object == null)
+                    return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            if (Process == null)
-                return false;
+                Job = Object as WinJob;
+                if (Job == null)
+                    return NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+            }
 
-            if (JobHandle == 0)
-                return Process.JobObjectHandle != 0;
+            if (Process.Job == null || (Job != null && !ReferenceEquals(Process.Job, Job)))
+                return NTSTATUS.STATUS_PROCESS_NOT_IN_JOB;
 
-            WinJob Job = GetJobByHandle(JobHandle, AccessMask.GiveTemp);
-            if (Job == null)
-                return false;
-
-            return Process.JobObjectHandle == JobHandle || Job.ProcessIds.Contains(Process.PID);
+            return NTSTATUS.STATUS_PROCESS_IN_JOB;
         }
 
         public NTSTATUS AssignProcessToJobHandle(ulong JobHandle, ulong ProcessHandle)
@@ -8317,25 +8588,57 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Job == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            WinProcess Process;
+            NTSTATUS Status = ResolveProcessHandle(ProcessHandle, AccessMask.GiveTemp, out WinProcess Process);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) || ProcessHandle == uint.MaxValue)
-                Process = WinProcesses.FirstOrDefault(p => p.PID == PID);
-            else
-                Process = GetProcessByHandle(ProcessHandle, AccessMask.GiveTemp);
-
-            if (Process == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            if (Process.JobObjectHandle != 0 && Process.JobObjectHandle != JobHandle)
+            if (Process.Job != null && !ReferenceEquals(Process.Job, Job))
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
-            Process.JobObjectHandle = JobHandle;
+            Process.Job = Job;
 
             if (!Job.ProcessIds.Contains(Process.PID))
                 Job.ProcessIds.Add(Process.PID);
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // Statuses follow ObReferenceObjectByHandle.
+        internal NTSTATUS ResolveProcessHandle(ulong ProcessHandle, AccessMask RequiredAccess, out WinProcess Process)
+        {
+            Process = null;
+
+            if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
+            {
+                Process = OwnProcess;
+                return Process != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_HANDLE;
+            }
+
+            IHandleObject Object = HandleManager.GetObjectByHandle(ProcessHandle);
+            if (Object == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            if (Object is not WinProcess Target)
+                return NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+
+            // NT grants the limited query right with the full one.
+            bool Granted = HandleManager.GetPermissionsByHandle(ProcessHandle) == AccessMask.GiveTemp ||
+                HandleManager.CheckAccess(ProcessHandle, RequiredAccess) ||
+                (RequiredAccess == AccessMask.ProcessQueryLimitedInformation && HandleManager.CheckAccess(ProcessHandle, AccessMask.ProcessQueryInformation));
+
+            if (!Granted)
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            Process = Target;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal static bool IsProcessAlive(WinProcess Process)
+        {
+            if (Process == null)
+                return false;
+
+            return Process.Remote != null ? !Process.Remote.HasExited : Process.ExitTime == 0;
         }
 
         public WinHandle CreateSemaphoreHandle(string Name, int InitialCount, int MaximumCount, AccessMask Permissions)
@@ -8468,6 +8771,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 RemoveWinHandle(Handle);
             }
+
+            if (ClosingSyncObject is WinJob ClosingJob && (ClosingJob.LimitFlags & NtTerminateJobObject.JobLimitKillOnJobClose) != 0 && !HandleManager.HasHandleToObject(ClosingJob))
+                NtTerminateJobObject.TerminateMembers(Emulator, ClosingJob, 0, true);
 
             ForgetNamedSyncObjectIfUnreferenced(ClosingSyncObject);
 

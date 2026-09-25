@@ -10,8 +10,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ThreadHandle = Instance.WinHelper.GetArg(0);
             ulong PreviousSuspendCountPtr = Instance.WinHelper.GetArg(1);
 
+            const int MaximumSuspendCount = 0x7F;
+
             EmulatedThread TargetThread = null;
-            if (ThreadHandle == 0xFFFFFFFFFFFFFFFEUL)
+            if (HandleManager.IsCurrentThreadPseudoHandle(ThreadHandle))
                 TargetThread = Instance.CurrentThread;
             else
                 TargetThread = Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(ThreadHandle);
@@ -19,13 +21,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (TargetThread == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            if (PreviousSuspendCountPtr != 0)
-            {
-                if (!Instance.IsRegionMapped(PreviousSuspendCountPtr, 4))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (PreviousSuspendCountPtr != 0 && !Instance.IsRegionMapped(PreviousSuspendCountPtr, 4))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                Instance._emulator.WriteMemory(PreviousSuspendCountPtr, (uint)TargetThread.SuspendCount);
+            if (TargetThread.State == EmulatedThreadState.Terminated || TargetThread.SuspendCount >= MaximumSuspendCount)
+            {
+                if (PreviousSuspendCountPtr != 0)
+                    Instance.WinHelper.WriteUInt32(PreviousSuspendCountPtr, 0);
+
+                return TargetThread.State == EmulatedThreadState.Terminated
+                    ? NTSTATUS.STATUS_THREAD_IS_TERMINATING
+                    : NTSTATUS.STATUS_SUSPEND_COUNT_EXCEEDED;
             }
+
+            if (PreviousSuspendCountPtr != 0)
+                Instance.WinHelper.WriteUInt32(PreviousSuspendCountPtr, (uint)TargetThread.SuspendCount);
 
             TargetThread.SuspendCount++;
             TargetThread.State = EmulatedThreadState.Suspended;

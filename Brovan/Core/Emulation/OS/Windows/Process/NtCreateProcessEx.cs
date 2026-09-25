@@ -93,7 +93,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!string.IsNullOrEmpty(SectionPath))
             {
                 Process.Path = SectionPath;
-                string FileName = Path.GetFileNameWithoutExtension(SectionPath);
+                string FileName = Path.GetFileName(SectionPath);
                 if (!string.IsNullOrEmpty(FileName))
                     Process.Name = FileName;
             }
@@ -108,6 +108,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance == null || Instance.WinHelper == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
+            return Create(Instance, (uint)Instance.WinHelper.GetArg(8));
+        }
+
+        internal static NTSTATUS Create(BinaryEmulator Instance, uint Reserved)
+        {
             bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
 
             ulong ProcessHandlePtr = Instance.WinHelper.GetArg(0);
@@ -117,7 +122,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong SectionHandle = Instance.WinHelper.GetArg(5);
             ulong DebugPort = Instance.WinHelper.GetArg(6);
             ulong TokenHandle = Instance.WinHelper.GetArg(7);
-            ulong Reserved = Instance.WinHelper.GetArg(8);
 
             uint HandleSize = (uint)Instance.WinHelper.PointerSize;
             if (ProcessHandlePtr == 0)
@@ -171,7 +175,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Name = ParentProcess.Name,
                 Path = ParentProcess.Path,
                 RunningUser = ParentProcess.RunningUser,
-                InstrumentationCallback = ParentProcess.InstrumentationCallback
+                InstrumentationCallback = ParentProcess.InstrumentationCallback,
+                Threadless = true
             };
 
             uint NewPID = Instance.WinHelper.GenerateRandomPID();

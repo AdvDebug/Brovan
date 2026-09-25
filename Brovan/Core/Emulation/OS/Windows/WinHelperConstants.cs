@@ -201,7 +201,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_SECTION_TOO_BIG = 0xC0000040,
         STATUS_PORT_CONNECTION_REFUSED = 0xC0000041,
         STATUS_INVALID_PAGE_PROTECTION = 0xC0000045,
+        STATUS_SUSPEND_COUNT_EXCEEDED = 0xC000004A,
         STATUS_THREAD_IS_TERMINATING = 0xC000004B,
+        STATUS_PRIVILEGE_NOT_HELD = 0xC0000061,
+        STATUS_FREE_VM_NOT_AT_BASE = 0xC000009F,
+        STATUS_INVALID_PARAMETER_3 = 0xC00000F1,
+        STATUS_INVALID_PARAMETER_4 = 0xC00000F2,
         STATUS_BAD_WORKING_SET_LIMIT = 0xC000004C,
         STATUS_INSUFFICIENT_RESOURCES = 0xC000009A,
         STATUS_INVALID_IMAGE_FORMAT = 0xC000007B,
@@ -220,12 +225,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_FLOAT_INVALID_OPERATION = 0xC0000090,
         STATUS_FLOAT_MULTIPLE_TRAPS = 0xC00002B5,
         STATUS_MEMORY_NOT_ALLOCATED = 0xC00000A0,
+        STATUS_WORKING_SET_QUOTA = 0xC00000A1,
         STATUS_CANT_TERMINATE_SELF = 0xC00000DB,
         STATUS_DEBUGGER_INACTIVE = 0xC0000354,
         STATUS_DATATYPE_MISALIGNMENT = 0x80000002,
         STATUS_BREAKPOINT = 0x80000003,
         STATUS_SINGLE_STEP = 0x80000004,
         STATUS_BUFFER_OVERFLOW = 0x80000005,
+        STATUS_PARTIAL_COPY = 0x8000000D,
         STATUS_NO_MORE_ENTRIES = 0x8000001A,
         STATUS_NOT_SUPPORTED = 0xC00000BB,
         STATUS_APP_INIT_FAILURE = 0xC0000145,
@@ -262,6 +269,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_MUTANT_NOT_OWNED = 0xC0000046,
         STATUS_SEMAPHORE_LIMIT_EXCEEDED = 0xC0000047,
         STATUS_NOT_A_REPARSE_POINT = 0xC0000275,
+        STATUS_PROCESS_NOT_IN_JOB = 0x00000123,
         STATUS_PROCESS_IN_JOB = 0x00000124,
         STATUS_INSTANCE_NOT_AVAILABLE = 0xC00000AB,
         STATUS_PIPE_NOT_AVAILABLE = 0xC00000AC,
@@ -1063,6 +1071,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
     public sealed class WinToken : IHandleObject
     {
+        public const ulong SystemLogonId = 0x3E7;
+        public const ulong LocalServiceLogonId = 0x3E5;
+        public const ulong InteractiveLogonId = 0x2F1B4;
+        public const ulong InteractiveSourceId = 0x2F0C9;
+
         public TokenType Type;
         public uint SessionId;
         public bool IsElevated;
@@ -1071,8 +1084,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         public SecurityImpersonationLevel ImpersonationLevel = SecurityImpersonationLevel.SecurityImpersonation;
         public ulong OwningProcessId;
         public ulong OwningThreadId;
+        public ulong TokenId;
+        public ulong ModifiedId;
         public string ObjectId => "Token";
         public HandleType ObjectType => HandleType.TokenHandle;
+
+        public WinToken()
+        {
+            TokenId = NtAllocateLocallyUniqueId.Allocate();
+            ModifiedId = TokenId;
+        }
     }
 
     public class WinHandle
@@ -1183,6 +1204,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool Critical;
         public long CreationTime;
         public long ExitTime;
+        public uint ExitStatus = (uint)NTSTATUS.STATUS_PENDING;
+
+        // NT takes the exit status from the last thread, so a threadless process keeps STATUS_PENDING.
+        public bool Threadless;
         public long KernelTime;
         public long UserTime;
         public uint ShutdownLevel = 0x280;
@@ -1190,7 +1215,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         public BinaryArchitecture Arch;
         public WinToken PrimaryToken;
         public ulong InstrumentationCallback;
-        public ulong JobObjectHandle;
+        public WinJob Job;
+
+        // PROCESS_PRIORITY_CLASS_* numbering, not the Win32 *_PRIORITY_CLASS flags.
+        public byte PriorityClass = 2;
+
+        public uint MainThreadId;
+        public SECTION_IMAGE_INFORMATION? ImageInformation;
 
         /// <summary>
         /// Null for this emulator's own process and for the ones only made up to answer process enumeration.
@@ -1214,6 +1245,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public RemoteGuestProcess Process;
         public uint ThreadId;
+        public int SuspendCount;
 
         public string ObjectId => $"REMOTETHREAD_{ThreadId}";
         public HandleType ObjectType => HandleType.ThreadHandle;
@@ -1851,7 +1883,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint BindingCount;
         public uint Paused;
         public uint Flags;
-        public uint ThreadBasePriority = 8;
+        // 0 means workers take the base priority of the process class.
+        public uint ThreadBasePriority;
         public uint TimeoutWaiters;
         public long Timeout;
         public long RetryTimeout;
@@ -2028,7 +2061,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 string ThreadName = (CreateFlags & Brovan.Core.Emulation.Guests.WindowsGuest.THREAD_CREATE_FLAGS_LOADER_WORKER) != 0
                     ? "loader worker"
                     : null;
-                EmulatedThread Thread = Guest.CreateEmulatedThread(Instance, Factory.StartRoutine, ThreadName, Factory.StartParameter, StackOverride, (int)Factory.ThreadBasePriority, CreateFlags, false);
+                int BasePriority = (int)(Factory.ThreadBasePriority != 0 ? Factory.ThreadBasePriority : Instance.WinHelper.CurrentPriority);
+                EmulatedThread Thread = Guest.CreateEmulatedThread(Instance, Factory.StartRoutine, ThreadName, Factory.StartParameter, StackOverride, BasePriority, CreateFlags, false);
                 if (Thread == null)
                     break;
 

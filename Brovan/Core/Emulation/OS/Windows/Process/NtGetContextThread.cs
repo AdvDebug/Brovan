@@ -41,6 +41,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const uint CONTEXT_FLOATING_POINT = 0x00000008;
         internal const uint CONTEXT_DEBUG_REGISTERS = 0x00000010;
         internal const uint CONTEXT_XSTATE = 0x00000040;
+        internal const uint CONTEXT_EXTENDED_REGISTERS = 0x00000020;
 
         internal const uint CONTEXT_I386 = 0x00010000;
 
@@ -50,6 +51,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal const ulong FltSaveOffset = 0x100;
         internal const int FltSaveSize = 0x200;
+        internal const ulong FloatSaveOffset32 = 0x1C;
+        internal const int FloatSaveSize32 = 0x70;
+        internal const ulong ExtendedRegistersOffset32 = 0xCC;
+        // The 32-bit FXSAVE image ends after XMM7.
+        internal const int ExtendedRegistersSize32 = 0x120;
         internal const ulong ContextExOffset = 0x4D0;
         internal const int ContextExSize = 0x20;
         internal const int XStateHeaderSize = 64;
@@ -202,7 +208,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 bool IsCurrentThread = Instance.CurrentThread != null && Thread.ThreadId == Instance.CurrentThread.ThreadId;
                 ulong Fpcw = BinaryPrimitives.ReadUInt16LittleEndian(Area.Slice(0x00, 2));
-                ulong MxCsr = Instance.ReadMemoryUInt(ContextPtr + 0x34);
+                ulong MxCsr = SanitizeMxCsr(Instance.ReadMemoryUInt(ContextPtr + 0x34));
                 Thread.Context.FPCW = Fpcw;
                 Thread.Context.MXCSR = MxCsr;
                 WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_FPCW, Fpcw);
@@ -214,6 +220,66 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WriteThreadVectorState(Thread, Xmm, YmmHigh);
         }
+
+        // FLOATING_SAVE_AREA carries only the control word, over an empty x87 stack.
+        private static void WriteContextVectorState32(BinaryEmulator Instance, EmulatedThread Thread, ulong ContextPtr, uint Flags)
+        {
+            bool WantFloat = (Flags & CONTEXT_FLOATING_POINT) != 0;
+            bool WantExtended = (Flags & CONTEXT_EXTENDED_REGISTERS) != 0;
+            if (Thread == null || (!WantFloat && !WantExtended))
+                return;
+
+            bool IsCurrentThread = Instance.CurrentThread != null && Thread.ThreadId == Instance.CurrentThread.ThreadId;
+            ulong Fpcw = ReadSavedOrLive(Instance, Thread.Context, IsCurrentThread, Registers.UC_X86_REG_FPCW, Ctx => Ctx.FPCW);
+
+            if (WantFloat)
+            {
+                Span<byte> Area = stackalloc byte[FloatSaveSize32];
+                Area.Clear();
+                BinaryPrimitives.WriteUInt32LittleEndian(Area.Slice(0x00, 4), (ushort)Fpcw);
+                BinaryPrimitives.WriteUInt32LittleEndian(Area.Slice(0x08, 4), 0xFFFF);
+                Instance.WriteMemory(ContextPtr + FloatSaveOffset32, Area);
+            }
+
+            if (WantExtended && Instance.ReadThreadVectorState(Thread, XmmScratch, YmmScratch))
+            {
+                Span<byte> Area = stackalloc byte[FltSaveSize];
+                FillFltSave(Area, XmmScratch, ReadSavedOrLive(Instance, Thread.Context, IsCurrentThread, Registers.UC_X86_REG_MXCSR, Ctx => Ctx.MXCSR), Fpcw);
+                Instance.WriteMemory(ContextPtr + ExtendedRegistersOffset32, Area.Slice(0, ExtendedRegistersSize32));
+            }
+        }
+
+        // ExtendedRegisters wins over FLOATING_SAVE_AREA when both are set.
+        private static void ApplyVectorState32(BinaryEmulator Instance, EmulatedThread Thread, bool IsCurrentThread, ulong ContextPtr, uint Flags)
+        {
+            CpuContext Context = Thread.Context;
+
+            if ((Flags & CONTEXT_FLOATING_POINT) != 0)
+            {
+                Context.FPCW = Instance._emulator.ReadMemoryUShort(ContextPtr + FloatSaveOffset32);
+                WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_FPCW, Context.FPCW);
+            }
+
+            if ((Flags & CONTEXT_EXTENDED_REGISTERS) == 0 || !Instance.ReadThreadVectorState(Thread, XmmScratch, YmmScratch))
+                return;
+
+            Span<byte> Area = stackalloc byte[ExtendedRegistersSize32];
+            Instance._emulator.ReadMemory(ContextPtr + ExtendedRegistersOffset32, Area, (uint)Area.Length);
+            for (int i = 0; i < 16; i++)
+                XmmScratch[i] = BinaryPrimitives.ReadUInt64LittleEndian(Area.Slice(0xA0 + i * 8, 8));
+
+            Context.FPCW = BinaryPrimitives.ReadUInt16LittleEndian(Area.Slice(0x00, 2));
+            Context.MXCSR = SanitizeMxCsr(BinaryPrimitives.ReadUInt32LittleEndian(Area.Slice(0x18, 4)));
+            WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_FPCW, Context.FPCW);
+            WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_MXCSR, Context.MXCSR);
+            Instance.WriteThreadVectorState(Thread, XmmScratch, YmmScratch);
+        }
+
+        // NT keeps the arithmetic flags, TF, DF, RF and ID, and forces IF.
+        private static ulong SanitizeEFlags(ulong EFlags) => (EFlags & 0x210DD5) | 0x200;
+
+        // Bits above MXCSR_MASK fault when loaded.
+        private static ulong SanitizeMxCsr(ulong MxCsr) => MxCsr & 0xFFFF;
 
         /// <summary>
         /// Resolves a Windows thread handle, including the current-thread pseudo handle.
@@ -296,10 +362,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             bool IsCurrentThread = Thread != null && Instance.CurrentThread != null && Thread.ThreadId == Instance.CurrentThread.ThreadId;
             CpuContext Context = Thread?.Context;
+            Instance.RefreshThreadFpControl(Thread);
 
             if (Instance.WinHelper.PointerSize == 4)
             {
                 WriteContext32(Instance, Context, IsCurrentThread, ContextPtr, Flags);
+                WriteContextVectorState32(Instance, Thread, ContextPtr, Flags);
                 return;
             }
 
@@ -371,23 +439,27 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             bool IsCurrentThread = Instance.CurrentThread != null && Thread.ThreadId == Instance.CurrentThread.ThreadId;
             CpuContext Context = Thread.Context;
+            Instance.RefreshThreadFpControl(Thread);
 
             if (Instance.WinHelper.PointerSize == 4)
             {
                 ApplyContext32(Instance, Context, IsCurrentThread, ContextPtr, Flags);
+                ApplyVectorState32(Instance, Thread, IsCurrentThread, ContextPtr, Flags);
+                if ((Flags & (CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS)) != 0)
+                    Instance.StoreThreadFpControl(Thread);
                 return;
             }
 
             if ((Flags & CONTEXT_FLOATING_POINT) != 0)
             {
-                ulong MxCsr = Instance.ReadMemoryUInt(ContextPtr + 0x34);
+                ulong MxCsr = SanitizeMxCsr(Instance.ReadMemoryUInt(ContextPtr + 0x34));
                 Context.MXCSR = MxCsr;
                 WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_MXCSR, MxCsr);
             }
 
             if ((Flags & CONTEXT_CONTROL) != 0)
             {
-                ulong EFlags = Instance.ReadMemoryUInt(ContextPtr + 0x44);
+                ulong EFlags = SanitizeEFlags(Instance.ReadMemoryUInt(ContextPtr + 0x44));
                 ulong Rsp = Instance.ReadMemoryULong(ContextPtr + 0x98);
                 ulong Rip = Instance.ReadMemoryULong(ContextPtr + 0xF8);
 
@@ -463,6 +535,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             ApplyVectorState(Instance, Thread, ContextPtr, Flags);
+            if ((Flags & CONTEXT_FLOATING_POINT) != 0)
+                Instance.StoreThreadFpControl(Thread);
         }
 
         private static void WriteContext32(BinaryEmulator Instance, CpuContext Context, bool IsCurrentThread, ulong ContextPtr, uint Flags)
@@ -531,7 +605,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Context.RBP = Instance.ReadMemoryUInt(ContextPtr + 0xB4);
                 Context.RIP = Instance.ReadMemoryUInt(ContextPtr + 0xB8);
-                Context.RFLAGS = Instance.ReadMemoryUInt(ContextPtr + 0xC0);
+                Context.RFLAGS = SanitizeEFlags(Instance.ReadMemoryUInt(ContextPtr + 0xC0));
                 Context.RSP = Instance.ReadMemoryUInt(ContextPtr + 0xC4);
 
                 WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_EBP, Context.RBP);
@@ -548,6 +622,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Context.DR3 = Instance.ReadMemoryUInt(ContextPtr + 0x10);
                 Context.DR6 = Instance.ReadMemoryUInt(ContextPtr + 0x14);
                 Context.DR7 = Instance.ReadMemoryUInt(ContextPtr + 0x18);
+
+                WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_DR0, Context.DR0);
+                WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_DR1, Context.DR1);
+                WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_DR2, Context.DR2);
+                WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_DR3, Context.DR3);
+                WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_DR6, Context.DR6);
+                WriteLiveRegister(Instance, IsCurrentThread, Registers.UC_X86_REG_DR7, Context.DR7);
             }
         }
 

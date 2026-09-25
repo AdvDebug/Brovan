@@ -8,9 +8,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong PS_ATTRIBUTE_CLIENT_ID = 0x10003;
         private const ulong PS_ATTRIBUTE_TEB_ADDRESS = 0x10004;
 
-        private static void WriteThreadCreationAttributes(BinaryEmulator Instance, EmulatedThread Thread, ulong AttributeList)
+        private static void WriteThreadCreationAttributes(BinaryEmulator Instance, uint ProcessId, uint ThreadId, ulong Teb, ulong AttributeList)
         {
-            if (Instance == null || Thread == null || AttributeList == 0)
+            if (Instance == null || AttributeList == 0)
                 return;
 
             WinSysHelper Helper = Instance.WinHelper;
@@ -40,15 +40,31 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Attribute == PS_ATTRIBUTE_CLIENT_ID && Size >= PointerSize * 2 && ValuePtr != 0 && Instance.IsRegionMapped(ValuePtr, PointerSize * 2))
                 {
-                    Helper.WritePointer(ValuePtr, Helper.PID);
-                    Helper.WritePointer(ValuePtr + PointerSize, Thread.ThreadId);
+                    Helper.WritePointer(ValuePtr, ProcessId);
+                    Helper.WritePointer(ValuePtr + PointerSize, ThreadId);
                 }
-                else if (Attribute == PS_ATTRIBUTE_TEB_ADDRESS && Size >= PointerSize && ValuePtr != 0 && Instance.IsRegionMapped(ValuePtr, PointerSize))
+                else if (Attribute == PS_ATTRIBUTE_TEB_ADDRESS && Teb != 0 && Size >= PointerSize && ValuePtr != 0 && Instance.IsRegionMapped(ValuePtr, PointerSize))
                 {
-                    WindowsThreadState State = WinEmulatedThread.GetState(Thread);
-                    Helper.WritePointer(ValuePtr, State.Teb);
+                    Helper.WritePointer(ValuePtr, Teb);
                 }
             }
+        }
+
+        // Matches RtlCreateUserStack.
+        private static bool TryGetStackReserve(BinaryEmulator Instance, ulong ImageReserve, ulong CommitSize, ulong ReserveSize, out ulong Reserve)
+        {
+            const ulong Megabyte = 0x100000;
+            const ulong Granularity = 0x10000;
+
+            Reserve = ReserveSize != 0 ? ReserveSize : ImageReserve;
+            if (CommitSize > Instance.MaxAddress || Reserve > Instance.MaxAddress)
+                return false;
+
+            if (CommitSize >= Reserve)
+                Reserve = BinaryEmulator.AlignUp(CommitSize, Megabyte);
+
+            Reserve = BinaryEmulator.AlignUp(Reserve, Granularity);
+            return Reserve != 0 && Reserve <= Instance.MaxAddress;
         }
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -60,7 +76,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong StartRoutine = Instance.WinHelper.GetArg(4);
             ulong Argument = Instance.WinHelper.GetArg(5);
             ulong CreateFlags = (uint)Instance.WinHelper.GetArg(6);
-            ulong StackSize = Instance.WinHelper.GetArg(8);
+            ulong CommitSize = Instance.WinHelper.GetArg(8);
+            ulong ReserveSize = Instance.WinHelper.GetArg(9);
             ulong AttributeList = Instance.WinHelper.GetArg(10);
 
             if (ThreadHandlePtr == 0)
@@ -86,6 +103,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Target.Remote == null)
                         return NTSTATUS.STATUS_INVALID_CID;
 
+                    // A remote thread cannot start suspended.
+                    if ((CreateFlags & 0x1UL) != 0)
+                        return NTSTATUS.STATUS_NOT_SUPPORTED;
+
                     NTSTATUS RemoteStatus = Target.Remote.CreateThread(StartRoutine, Argument, out uint RemoteThreadId);
                     if (RemoteStatus != NTSTATUS.STATUS_SUCCESS)
                         return RemoteStatus;
@@ -102,20 +123,30 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance.WinHelper.WritePointer(ThreadHandlePtr, RemoteHandle.Handle))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+                    WriteThreadCreationAttributes(Instance, Target.PID, RemoteThreadId, 0, AttributeList);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
             }
 
-            ulong? StackOverride = null;
-            if (StackSize != 0)
-                StackOverride = StackSize;
-
             WindowsGuest Guest = Instance.Guest as WindowsGuest;
+            ulong? StackOverride = CommitSize != 0 ? CommitSize : null;
+            if (Guest != null)
+            {
+                if (!TryGetStackReserve(Instance, Guest.StackSize, CommitSize, ReserveSize, out ulong Reserve) ||
+                    !Instance.TryFindFreeBaseAddress(Instance.AlignToPageSize(Reserve), 0x10000, Instance.BaseAddress, Instance.MaxAddress, out _))
+                    return NTSTATUS.STATUS_NO_MEMORY;
+
+                StackOverride = Reserve;
+            }
+
             EmulatedThread NewThread = Guest != null
                 ? Guest.CreateEmulatedThread(Instance, StartRoutine, null, Argument, StackOverride, 8, (uint)CreateFlags, false)
                 : Instance.CreateEmulatedThread(StartRoutine, null, Argument, StackOverride);
             if (NewThread == null)
                 return NTSTATUS.STATUS_NO_MEMORY;
+
+            if (Guest != null)
+                Instance.WinHelper.ApplyThreadBasePriority(NewThread);
 
             AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(NewThread, Permissions);
@@ -124,7 +155,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.WritePointer(ThreadHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            WriteThreadCreationAttributes(Instance, NewThread, AttributeList);
+            ulong Teb = Guest != null ? WinEmulatedThread.GetState(NewThread).Teb : 0;
+            WriteThreadCreationAttributes(Instance, Instance.WinHelper.PID, NewThread.ThreadId, Teb, AttributeList);
 
             // THREAD_CREATE_FLAGS_CREATE_SUSPENDED
             if ((CreateFlags & 0x1UL) != 0)

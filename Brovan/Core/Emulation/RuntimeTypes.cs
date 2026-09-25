@@ -91,6 +91,7 @@ namespace Brovan.Core.Emulation
         public CpuContext Context;
         public ulong LastRIP;
         public ulong InstructionsExecuted;
+        public long RunTicks;
         public int ExitCode;
         public int SuspendCount;
         public bool WaitActive;

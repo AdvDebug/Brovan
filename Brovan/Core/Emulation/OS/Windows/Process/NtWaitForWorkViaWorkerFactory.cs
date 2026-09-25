@@ -1,9 +1,31 @@
+using System.Buffers.Binary;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtWaitForWorkViaWorkerFactory : IWinSyscall
     {
+        // FILE_IO_COMPLETION_INFORMATION.
+        internal static bool WritePacket(BinaryEmulator Instance, ulong MiniPackets, uint Index, WinIoCompletionEntry Entry)
+        {
+            if (Instance.WinHelper.PointerSize == 8)
+            {
+                Span<byte> Packet = stackalloc byte[0x20];
+                BinaryPrimitives.WriteUInt64LittleEndian(Packet.Slice(0x00, 8), Entry.KeyContext);
+                BinaryPrimitives.WriteUInt64LittleEndian(Packet.Slice(0x08, 8), Entry.ApcContext);
+                BinaryPrimitives.WriteUInt64LittleEndian(Packet.Slice(0x10, 8), unchecked((ulong)(long)(int)Entry.IoStatus));
+                BinaryPrimitives.WriteUInt64LittleEndian(Packet.Slice(0x18, 8), Entry.IoStatusInformation);
+                return Instance._emulator.WriteMemory(MiniPackets + (ulong)Index * 0x20, Packet);
+            }
+
+            Span<byte> Packet32 = stackalloc byte[0x10];
+            BinaryPrimitives.WriteUInt32LittleEndian(Packet32.Slice(0x00, 4), (uint)Entry.KeyContext);
+            BinaryPrimitives.WriteUInt32LittleEndian(Packet32.Slice(0x04, 4), (uint)Entry.ApcContext);
+            BinaryPrimitives.WriteUInt32LittleEndian(Packet32.Slice(0x08, 4), (uint)Entry.IoStatus);
+            BinaryPrimitives.WriteUInt32LittleEndian(Packet32.Slice(0x0C, 4), (uint)Entry.IoStatusInformation);
+            return Instance._emulator.WriteMemory(MiniPackets + (ulong)Index * 0x10, Packet32);
+        }
+
         private static long ParseTimeoutDeadline(BinaryEmulator Instance, long Timeout)
         {
             if (Timeout == 0)
@@ -64,7 +86,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.MaterializeSignaledWaitPackets(Factory.IoCompletionHandle);
 
             uint Removed = 0;
-            uint PacketSize = Instance._binary.Architecture == BinaryArchitecture.x64 ? 0x20u : 0x10u;
             while (Removed < Count && Completion.PendingCount > 0)
             {
                 WinIoCompletionEntry Entry = Completion.Take();
@@ -80,11 +101,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
                 }
 
-                ulong Address = MiniPackets + ((ulong)Removed * PacketSize);
-                Instance._emulator.WriteMemory(Address + 0x0, Entry.KeyContext, 8);
-                Instance._emulator.WriteMemory(Address + 0x8, Entry.ApcContext, 8);
-                Instance._emulator.WriteMemory(Address + 0x10, unchecked((ulong)(long)(int)Entry.IoStatus), 8);
-                Instance._emulator.WriteMemory(Address + 0x18, Entry.IoStatusInformation, 8);
+                WritePacket(Instance, MiniPackets, Removed, Entry);
                 Removed++;
             }
 

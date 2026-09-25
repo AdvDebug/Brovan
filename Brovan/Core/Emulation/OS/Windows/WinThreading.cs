@@ -77,6 +77,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Set by a returning WM_PAINT callback, so the re-run of its syscall knows itself apart from a
         // fresh call made inside the procedure.
         public ulong PendingPaintRetryHwnd { get; set; }
+
+        // Increment over the process class. 16 or -16 pins it to the class edge.
+        public int PriorityIncrement { get; set; }
+        public int PrioritySaturation { get; set; }
+
+        public bool HiddenFromDebugger { get; set; }
+        public string Description { get; set; }
+        public long CreateTime { get; set; }
+        public long ExitTime { get; set; }
+        public byte IdealProcessor { get; set; }
     }
 
     public sealed class WinUserCallbackFrame

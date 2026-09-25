@@ -7,81 +7,79 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
+            ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+            uint ExitCode = (uint)Instance.WinHelper.GetArg(1);
+
+            // NT: NULL ends every thread but the caller.
+            if (ProcessHandle == 0)
             {
-                ulong ProcessHandle = Instance.WinHelper.GetArg(0);
-                ulong ExitCode = (uint)Instance.WinHelper.GetArg(1);
-
-                if (ProcessHandle == 0)
-                {
-                    uint CallingThreadId = (uint)Instance.CurrentThreadId;
-                    foreach (EmulatedThread ProcessThreads in Instance.Threads.Values)
-                    {
-                        if (ProcessThreads == null || ProcessThreads.ThreadId == CallingThreadId)
-                            continue;
-
-                        Instance.WinHelper.AbandonMutexesOwnedByThread(ProcessThreads.ThreadId);
-                        ProcessThreads.State = EmulatedThreadState.Terminated;
-                        Instance.WakeSignal.Bump();
-                        ProcessThreads.ExitCode = (int)ExitCode;
-                        Instance.WinHelper.ClearTerminationState(ProcessThreads);
-                    }
-                    return NTSTATUS.STATUS_SUCCESS;
-                }
-
-                if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
-                {
-                    if ((Instance.Settings.Flags & LogFlags.Important) != 0)
-                        Instance.TriggerEventMessage($"[{(ExitCode == 0 ? '+' : '!')}] Process asked to be terminated with exit code 0x{ExitCode:X}", LogFlags.Important);
-                    GuestSession.PublishExit((uint)ExitCode);
-                    Environment.ExitCode = (int)ExitCode;
-                    foreach (EmulatedThread ProcessThreads in Instance.Threads.Values)
-                    {
-                        if (ProcessThreads == null)
-                            continue;
-
-                        Instance.WinHelper.AbandonMutexesOwnedByThread(ProcessThreads.ThreadId);
-                        ProcessThreads.State = EmulatedThreadState.Terminated;
-                        Instance.WakeSignal.Bump();
-                        ProcessThreads.ExitCode = (int)ExitCode;
-                        Instance.WinHelper.ClearTerminationState(ProcessThreads);
-                    }
-                    Instance.WinHelper.HideDesktopWindow();
-                    Instance.StopEmulation();
-                    return NTSTATUS.STATUS_SUCCESS;
-                }
-                else
-                {
-                    WinProcess Process = Instance.WinHelper.GetProcessByHandle(ProcessHandle, AccessMask.ProcessTerminate);
-                    if (Process == null)
-                        return NTSTATUS.STATUS_ACCESS_DENIED;
-
-                    if (Process.PID == Instance.WinHelper.PID)
-                    {
-                        if ((Instance.Settings.Flags & LogFlags.Important) != 0)
-                            Instance.TriggerEventMessage($"[{(ExitCode == 0 ? '+' : '!')}] Process asked to be terminated with exit code 0x{ExitCode:X}", LogFlags.Important);
-                        GuestSession.PublishExit((uint)ExitCode);
-                        Environment.ExitCode = (int)ExitCode;
-                        foreach (EmulatedThread ProcessThreads in Instance.Threads.Values)
-                        {
-                            if (ProcessThreads == null)
-                                continue;
-
-                            Instance.WinHelper.AbandonMutexesOwnedByThread(ProcessThreads.ThreadId);
-                            ProcessThreads.State = EmulatedThreadState.Terminated;
-                            Instance.WakeSignal.Bump();
-                            ProcessThreads.ExitCode = (int)ExitCode;
-                            Instance.WinHelper.ClearTerminationState(ProcessThreads);
-                        }
-                        Instance.WinHelper.HideDesktopWindow();
-                        Instance.StopEmulation();
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
-
-                    if (Process.Remote != null)
-                        return Process.Remote.Terminate((uint)ExitCode);
-                }
+                TerminateThreads(Instance, ExitCode, true);
+                return NTSTATUS.STATUS_SUCCESS;
             }
-            return Instance.WinUnimplemented;
+
+            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessTerminate, out WinProcess Process);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            if (Process.PID == Instance.WinHelper.PID)
+            {
+                TerminateCurrentProcess(Instance, ExitCode);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            if (Process.Remote != null)
+                return Process.Remote.Terminate(ExitCode);
+
+            // A listed process runs nothing, so ending it only marks it exited.
+            if (Process.ExitTime == 0)
+            {
+                Instance.WinHelper.UpdateProcessTimes(Process);
+                if (!Process.Threadless)
+                    Process.ExitStatus = ExitCode;
+                Process.ExitTime = Instance.GetEmulatedSystemTimeFileTimeUtc();
+                Instance.WakeSignal.Bump();
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal static void TerminateCurrentProcess(BinaryEmulator Instance, uint ExitCode)
+        {
+            if ((Instance.Settings.Flags & LogFlags.Important) != 0)
+                Instance.TriggerEventMessage($"[{(ExitCode == 0 ? '+' : '!')}] Process asked to be terminated with exit code 0x{ExitCode:X}", LogFlags.Important);
+
+            NtTerminateJobObject.CloseJobsOfExitingProcess(Instance);
+            GuestSession.PublishExit(ExitCode);
+            Environment.ExitCode = (int)ExitCode;
+            TerminateThreads(Instance, ExitCode, false);
+            Instance.WinHelper.HideDesktopWindow();
+            Instance.StopEmulation();
+        }
+
+        private static void TerminateThreads(BinaryEmulator Instance, uint ExitCode, bool SpareCaller)
+        {
+            uint Caller = (uint)Instance.CurrentThreadId;
+            List<EmulatedThread> Threads = new List<EmulatedThread>(Instance.Threads.Values);
+
+            foreach (EmulatedThread Thread in Threads)
+            {
+                if (Thread == null || Thread.State == EmulatedThreadState.Terminated)
+                    continue;
+
+                bool Self = Instance.CurrentThread != null && Thread.ThreadId == Caller;
+                if (Self && SpareCaller)
+                    continue;
+
+                if (!Self)
+                    Instance.WaitUntilParked(Thread);
+
+                Instance.WinHelper.AbandonMutexesOwnedByThread(Thread.ThreadId);
+                Thread.ExitCode = (int)ExitCode;
+                Instance.WinHelper.ClearTerminationState(Thread);
+                Thread.State = EmulatedThreadState.Terminated;
+            }
+
+            Instance.WakeSignal.Bump();
         }
     }
 }

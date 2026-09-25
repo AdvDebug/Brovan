@@ -329,6 +329,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public long Version { get; private set; }
 
+        public int Count => HandleTable.Count;
+
         public void SnapshotHandles(List<KeyValuePair<ulong, IHandleObject>> Destination)
         {
             if (Destination == null)

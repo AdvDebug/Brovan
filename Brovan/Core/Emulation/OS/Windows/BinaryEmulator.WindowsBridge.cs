@@ -185,7 +185,7 @@ namespace Brovan.Core.Emulation
                 return Thread.State == EmulatedThreadState.Terminated;
 
             if (Obj is WinProcess Process)
-                return Process.Remote != null && Process.Remote.HasExited;
+                return !WinSysHelper.IsProcessAlive(Process);
 
             if (Obj is WinRemoteThread RemoteThread)
                 return RemoteThread.Process == null || RemoteThread.Process.HasExited;
@@ -288,7 +288,7 @@ namespace Brovan.Core.Emulation
 
             // NT: an exited process or thread stays signalled.
             if (Obj is WinProcess Process)
-                return Process.Remote != null && Process.Remote.HasExited;
+                return !WinSysHelper.IsProcessAlive(Process);
 
             if (Obj is WinRemoteThread RemoteThread)
                 return RemoteThread.Process == null || RemoteThread.Process.HasExited;

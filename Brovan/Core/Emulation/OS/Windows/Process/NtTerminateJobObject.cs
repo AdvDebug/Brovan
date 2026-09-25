@@ -5,6 +5,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtTerminateJobObject : IWinSyscall
     {
+        internal const uint JobLimitKillOnJobClose = 0x2000;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
@@ -28,47 +30,57 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Job == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            TerminateMembers(Instance, Job, unchecked((uint)ExitCode), true);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal static void TerminateMembers(BinaryEmulator Instance, WinJob Job, uint ExitStatus, bool EndSelf)
+        {
             Job.IsTerminated = true;
 
             long ExitTime = Instance.GetEmulatedSystemTimeFileTimeUtc();
-            uint ExitStatus = unchecked((uint)ExitCode);
             bool CurrentProcessInJob = false;
 
-            foreach (uint ProcessId in Job.ProcessIds.Distinct())
+            foreach (uint ProcessId in Job.ProcessIds)
             {
                 WinProcess Process = Instance.WinHelper.WinProcesses.FirstOrDefault(P => P.PID == ProcessId);
                 if (Process == null)
                     continue;
 
-                Instance.WinHelper.UpdateProcessTimes(Process);
-                if (Process.ExitTime == 0)
-                    Process.ExitTime = ExitTime;
-
                 if (Process.PID == Instance.WinHelper.PID)
-                    CurrentProcessInJob = true;
-            }
-
-            if (CurrentProcessInJob)
-            {
-                if ((Instance.Settings.Flags & LogFlags.Important) != 0)
-                    Instance.TriggerEventMessage($"[{(ExitStatus == 0 ? '+' : '!')}] Job asked to be terminated with exit code 0x{ExitStatus:X}", LogFlags.Important);
-
-                foreach (EmulatedThread ProcessThread in Instance.Threads.Values)
                 {
-                    if (ProcessThread == null)
-                        continue;
-
-                    Instance.WinHelper.AbandonMutexesOwnedByThread(ProcessThread.ThreadId);
-                    Instance.WinHelper.ClearTerminationState(ProcessThread);
-                    ProcessThread.ExitCode = unchecked((int)ExitStatus);
-                    ProcessThread.State = EmulatedThreadState.Terminated;
-                    Instance.WakeSignal.Bump();
+                    CurrentProcessInJob = true;
+                    continue;
                 }
 
-                Instance.StopEmulation();
+                if (!WinSysHelper.IsProcessAlive(Process))
+                    continue;
+
+                if (Process.Remote != null)
+                {
+                    Process.Remote.Terminate(ExitStatus);
+                    continue;
+                }
+
+                Instance.WinHelper.UpdateProcessTimes(Process);
+                if (!Process.Threadless)
+                    Process.ExitStatus = ExitStatus;
+                Process.ExitTime = ExitTime;
             }
 
-            return NTSTATUS.STATUS_SUCCESS;
+            Instance.WakeSignal.Bump();
+
+            if (CurrentProcessInJob && EndSelf)
+                NtTerminateProcess.TerminateCurrentProcess(Instance, ExitStatus);
+        }
+
+        internal static void CloseJobsOfExitingProcess(BinaryEmulator Instance)
+        {
+            foreach (KeyValuePair<ulong, IHandleObject> Handle in Instance.WinHelper.HandleManager.SnapshotHandles())
+            {
+                if (Handle.Value is WinJob Job && (Job.LimitFlags & JobLimitKillOnJobClose) != 0)
+                    TerminateMembers(Instance, Job, 0, false);
+            }
         }
     }
 }

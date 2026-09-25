@@ -159,7 +159,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint AllocationType = (uint)Instance.WinHelper.GetArg(8);
             uint Win32Protect = (uint)Instance.WinHelper.GetArg(9);
 
-            if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
+            NTSTATUS ProcessStatus = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess TargetProcess);
+            if (ProcessStatus != NTSTATUS.STATUS_SUCCESS)
+                return ProcessStatus;
+
+            if (TargetProcess.PID != Instance.WinHelper.PID)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if (BaseAddressPtr == 0 || ViewSizePtr == 0)
