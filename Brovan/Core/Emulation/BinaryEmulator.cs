@@ -3823,65 +3823,7 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            if (Arguments != null && Arguments.Length > 0)
-            {
-                if (_binary.Architecture == BinaryArchitecture.x64)
-                {
-                    if (_binary.FileFormat == BinaryFormat.PE)
-                    {
-                        // Windows x64 calling convention
-                        if (Arguments.Length > 0) _emulator.WriteRegister(Registers.UC_X86_REG_RCX, Arguments[0]);
-                        if (Arguments.Length > 1) _emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arguments[1]);
-                        if (Arguments.Length > 2) _emulator.WriteRegister(Registers.UC_X86_REG_R8, Arguments[2]);
-                        if (Arguments.Length > 3) _emulator.WriteRegister(Registers.UC_X86_REG_R9, Arguments[3]);
-
-                        // Reserve 32 bytes shadow space on stack before pushing additional args
-                        ulong RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-                        RSP -= 32;
-
-                        // Push remaining args left to right
-                        for (int i = 4; i < Arguments.Length; i++)
-                        {
-                            RSP -= 8;
-                            _emulator.WriteMemory(RSP, Arguments[i], 8);
-                        }
-                        RSP -= 8;
-                        _emulator.WriteRegister(Registers.UC_X86_REG_RSP, RSP);
-                    }
-                    else if (_binary.FileFormat == BinaryFormat.ELF)
-                    {
-                        // System V AMD64 calling convention (Unix/Linux)
-                        if (Arguments.Length > 0) _emulator.WriteRegister(Registers.UC_X86_REG_RDI, Arguments[0]);
-                        if (Arguments.Length > 1) _emulator.WriteRegister(Registers.UC_X86_REG_RSI, Arguments[1]);
-                        if (Arguments.Length > 2) _emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arguments[2]);
-                        if (Arguments.Length > 3) _emulator.WriteRegister(Registers.UC_X86_REG_RCX, Arguments[3]);
-                        if (Arguments.Length > 4) _emulator.WriteRegister(Registers.UC_X86_REG_R8, Arguments[4]);
-                        if (Arguments.Length > 5) _emulator.WriteRegister(Registers.UC_X86_REG_R9, Arguments[5]);
-
-                        ulong RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-
-                        // Push remaining args left to right
-                        for (int i = 4; i < Arguments.Length; i++)
-                        {
-                            RSP -= 8;
-                            _emulator.WriteMemory(RSP, Arguments[i], 8);
-                        }
-                        _emulator.WriteRegister(Registers.UC_X86_REG_RSP, RSP);
-                    }
-                }
-                else
-                {
-                    // Cdecl calling convention (args pushed on stack in reverse order)
-                    ulong ESP = _emulator.ReadRegister(Registers.UC_X86_REG_ESP);
-                    for (int i = Arguments.Length - 1; i >= 0; i--)
-                    {
-                        ESP -= 4;
-                        _emulator.WriteMemory(ESP, (uint)Arguments[i], 4);
-                    }
-                    ESP -= 4;
-                    _emulator.WriteRegister(Registers.UC_X86_REG_ESP, ESP);
-                }
-            }
+            SetupCallArguments(Arguments);
 
             bool Result = StartEmulation(Function.Address, Function.EndAddress, Timeout, Count, LogErrors);
             if (Snapshot != null)
@@ -3908,65 +3850,7 @@ namespace Brovan.Core.Emulation
             if (Disposed)
                 return false;
 
-            if (Arguments != null && Arguments.Length > 0)
-            {
-                if (_binary.Architecture == BinaryArchitecture.x64)
-                {
-                    if (_binary.FileFormat == BinaryFormat.PE)
-                    {
-                        // Windows x64 calling convention
-                        if (Arguments.Length > 0) _emulator.WriteRegister(Registers.UC_X86_REG_RCX, Arguments[0]);
-                        if (Arguments.Length > 1) _emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arguments[1]);
-                        if (Arguments.Length > 2) _emulator.WriteRegister(Registers.UC_X86_REG_R8, Arguments[2]);
-                        if (Arguments.Length > 3) _emulator.WriteRegister(Registers.UC_X86_REG_R9, Arguments[3]);
-
-                        // Reserve 32 bytes shadow space on stack before pushing additional args
-                        ulong RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-                        RSP -= 32;
-
-                        // Push remaining args left to right
-                        for (int i = 4; i < Arguments.Length; i++)
-                        {
-                            RSP -= 8;
-                            _emulator.WriteMemory(RSP, Arguments[i], 8);
-                        }
-                        RSP -= 8;
-                        _emulator.WriteRegister(Registers.UC_X86_REG_RSP, RSP);
-                    }
-                    else if (_binary.FileFormat == BinaryFormat.ELF)
-                    {
-                        // System V AMD64 calling convention (Unix/Linux)
-                        if (Arguments.Length > 0) _emulator.WriteRegister(Registers.UC_X86_REG_RDI, Arguments[0]);
-                        if (Arguments.Length > 1) _emulator.WriteRegister(Registers.UC_X86_REG_RSI, Arguments[1]);
-                        if (Arguments.Length > 2) _emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arguments[2]);
-                        if (Arguments.Length > 3) _emulator.WriteRegister(Registers.UC_X86_REG_RCX, Arguments[3]);
-                        if (Arguments.Length > 4) _emulator.WriteRegister(Registers.UC_X86_REG_R8, Arguments[4]);
-                        if (Arguments.Length > 5) _emulator.WriteRegister(Registers.UC_X86_REG_R9, Arguments[5]);
-
-                        ulong RSP = _emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-
-                        // Push remaining args left to right
-                        for (int i = 4; i < Arguments.Length; i++)
-                        {
-                            RSP -= 8;
-                            _emulator.WriteMemory(RSP, Arguments[i], 8);
-                        }
-                        _emulator.WriteRegister(Registers.UC_X86_REG_RSP, RSP);
-                    }
-                }
-                else
-                {
-                    // Cdecl calling convention (args pushed on stack in reverse order)
-                    ulong ESP = _emulator.ReadRegister(Registers.UC_X86_REG_ESP);
-                    for (int i = Arguments.Length - 1; i >= 0; i--)
-                    {
-                        ESP -= 4;
-                        _emulator.WriteMemory(ESP, (uint)Arguments[i], 4);
-                    }
-                    ESP -= 4;
-                    _emulator.WriteRegister(Registers.UC_X86_REG_ESP, ESP);
-                }
-            }
+            SetupCallArguments(Arguments);
 
             bool Result = StartEmulation(Function.Address, Function.EndAddress, Timeout, Count, LogErrors);
             if (Snapshot != null)
@@ -3974,6 +3858,65 @@ namespace Brovan.Core.Emulation
                 RestoreSnapshot(Snapshot);
             }
             return Result;
+        }
+
+        private static readonly Registers[] Win64ArgumentRegisters =
+        {
+            Registers.UC_X86_REG_RCX, Registers.UC_X86_REG_RDX, Registers.UC_X86_REG_R8, Registers.UC_X86_REG_R9
+        };
+
+        private static readonly Registers[] SysVArgumentRegisters =
+        {
+            Registers.UC_X86_REG_RDI, Registers.UC_X86_REG_RSI, Registers.UC_X86_REG_RDX,
+            Registers.UC_X86_REG_RCX, Registers.UC_X86_REG_R8, Registers.UC_X86_REG_R9
+        };
+
+        private void SetupCallArguments(ulong[] Arguments)
+        {
+            if (Arguments == null || Arguments.Length == 0)
+                return;
+
+            if (_binary.Architecture == BinaryArchitecture.x64)
+            {
+                Registers[] ArgumentRegisters;
+                ulong ShadowSpace;
+                if (_binary.FileFormat == BinaryFormat.PE)
+                {
+                    ArgumentRegisters = Win64ArgumentRegisters;
+                    ShadowSpace = 32;
+                }
+                else if (_binary.FileFormat == BinaryFormat.ELF)
+                {
+                    ArgumentRegisters = SysVArgumentRegisters;
+                    ShadowSpace = 0;
+                }
+                else
+                    return;
+
+                int RegisterCount = Math.Min(Arguments.Length, ArgumentRegisters.Length);
+                for (int i = 0; i < RegisterCount; i++)
+                    _emulator.WriteRegister(ArgumentRegisters[i], Arguments[i]);
+
+                ulong StackArgumentsSize = (ulong)(Arguments.Length - RegisterCount) * 8;
+                ulong CallSiteRsp = (_emulator.ReadRegister(Registers.UC_X86_REG_RSP) - ShadowSpace - StackArgumentsSize) & ~0xFUL;
+                ulong StackArguments = CallSiteRsp + ShadowSpace;
+                for (int i = RegisterCount; i < Arguments.Length; i++)
+                    _emulator.WriteMemory(StackArguments + (ulong)(i - RegisterCount) * 8, Arguments[i], 8);
+
+                _emulator.WriteRegister(Registers.UC_X86_REG_RSP, CallSiteRsp - 8);
+            }
+            else
+            {
+                // Cdecl calling convention (args pushed on stack in reverse order)
+                ulong ESP = _emulator.ReadRegister(Registers.UC_X86_REG_ESP);
+                for (int i = Arguments.Length - 1; i >= 0; i--)
+                {
+                    ESP -= 4;
+                    _emulator.WriteMemory(ESP, (uint)Arguments[i], 4);
+                }
+                ESP -= 4;
+                _emulator.WriteRegister(Registers.UC_X86_REG_ESP, ESP);
+            }
         }
 
         /// <summary>
