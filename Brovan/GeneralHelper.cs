@@ -539,10 +539,6 @@ namespace Brovan
             }
         }
 
-        /// <summary>
-        /// returns whether the current proccess is running as an admin.
-        /// </summary>
-        /// <returns>returns true if running as an admin, otherwise false.</returns>
         public static bool IsAdmin()
         {
             if (!IsWindows)
@@ -744,9 +740,6 @@ namespace Brovan
             return true;
         }
 
-        /// <summary>
-        /// Appends a single byte using the escaped guest-console representation.
-        /// </summary>
         private static void AppendEscapedConsoleByte(StringBuilder Builder, byte Value)
         {
             switch (Value)
@@ -784,9 +777,6 @@ namespace Brovan
             }
         }
 
-        /// <summary>
-        /// Appends a byte range using the escaped guest-console representation.
-        /// </summary>
         private static void AppendEscapedConsoleBytes(StringBuilder Builder, ReadOnlySpan<byte> Data, int Start, int Length)
         {
             int End = Start + Length;
@@ -794,9 +784,6 @@ namespace Brovan
                 AppendEscapedConsoleByte(Builder, Data[i]);
         }
 
-        /// <summary>
-        /// Checks whether a CSI sequence is safe to forward in light escaped console mode.
-        /// </summary>
         private static bool IsSafeLightConsoleCsiSequence(ReadOnlySpan<byte> Data, int Start, int Length)
         {
             if (Length < 3 || Data[Start] != 0x1B || Data[Start + 1] != (byte)'[')
@@ -826,9 +813,6 @@ namespace Brovan
             return true;
         }
 
-        /// <summary>
-        /// Attempts to find the end of a guest-provided virtual terminal sequence.
-        /// </summary>
         private static bool TryGetConsoleEscapeSequenceLength(ReadOnlySpan<byte> Data, int Start, out int Length)
         {
             Length = 1;
@@ -916,9 +900,6 @@ namespace Brovan
             Output.Write(Escaped, 0, Escaped.Length);
         }
 
-        /// <summary>
-        /// Writes guest-controlled console bytes with terminal control characters escaped.
-        /// </summary>
         private static void WriteEscapedConsoleBytes(ReadOnlySpan<byte> Data, Stream Output)
         {
             StringBuilder Builder = new StringBuilder(Data.Length);
@@ -956,9 +937,6 @@ namespace Brovan
             }
         }
 
-        /// <summary>
-        /// Writes guest-controlled console output to the host console using the selected safety policy.
-        /// </summary>
         public static void ConsoleWrite(ReadOnlySpan<byte> Data, Stream Output, GuestConsoleOutputMode Mode)
         {
             if (Data.Length == 0 || Output == null)
@@ -987,9 +965,6 @@ namespace Brovan
             }
         }
 
-        /// <summary>
-        /// Writes guest-controlled console output to the host console using the selected safety policy.
-        /// </summary>
         public static void ConsoleWrite(byte[] Data, Stream Output, GuestConsoleOutputMode Mode)
         {
             if (Data == null)
@@ -2109,7 +2084,7 @@ namespace Brovan
                         return VirtualPath;
                 }
 
-                // this resolve function be called for writes, so i think this is secure when reading or checking files/directories.
+                // This resolve function is not called for writes, so this is secure when reading or checking files/directories.
                 if (IsWindows)
                 {
                     string Native = GetNativeFullPath(WinPath, CreateDirectories);
@@ -2616,12 +2591,6 @@ namespace Brovan
                 return File.ReadAllBytes(HostPath);
             }
 
-            /// <summary>
-            /// returns whether a file exists in the emulated filesystem.
-            /// </summary>
-            /// <param name="Path">path to check.</param>
-            /// <param name="Format">binary format of the emulated process.</param>
-            /// <returns>returns true if the file exists, otherwise false.</returns>
             public static bool FileExists(string Path, BinaryFormat Format)
             {
                 string HostPath = ResolveHostPath(Path, Format);
@@ -2631,12 +2600,6 @@ namespace Brovan
                 return File.Exists(HostPath);
             }
 
-            /// <summary>
-            /// returns whether a directory exists in the emulated filesystem.
-            /// </summary>
-            /// <param name="Path">path to check.</param>
-            /// <param name="Format">binary format of the emulated process.</param>
-            /// <returns>returns true if the directory exists, otherwise false.</returns>
             public static bool DirectoryExists(string Path, BinaryFormat Format)
             {
                 string HostPath = ResolveHostPath(Path, Format);
@@ -2691,13 +2654,6 @@ namespace Brovan
                 }
             }
 
-            /// <summary>
-            /// Writes a file into the emulated filesystem.
-            /// </summary>
-            /// <param name="Path">path to write.</param>
-            /// <param name="Data">file bytes to write.</param>
-            /// <param name="Format">binary format of the emulated process.</param>
-            /// <returns>returns true if the file was written successfully, otherwise false.</returns>
             public static bool WriteFile(string Path, byte[] Data, BinaryFormat Format)
             {
                 if (Data == null)
@@ -3409,11 +3365,6 @@ namespace Brovan
                 return Full;
             }
 
-            /// <summary>
-            /// returns whether a full path is inside any allowed sandbox root directory.
-            /// </summary>
-            /// <param name="FullPath">full path to validate.</param>
-            /// <returns>returns true if the path is allowed, otherwise false.</returns>
             private static bool IsUnderAllowedRoots(string FullPath)
             {
                 if (string.IsNullOrWhiteSpace(FullPath))
@@ -3623,11 +3574,6 @@ namespace Brovan
     /// </summary>
     public class CrossGenerator
     {
-        /// <summary>
-        /// Generate an ApiSetMap that the emulated binary can use.
-        /// </summary>
-        /// <returns>returns a byte array containing the generated ApiSetMap.</returns>
-        /// <exception cref="ArgumentNullException"></exception>
         public static byte[] GenerateMap()
         {
             Dictionary<string, string> ApiSetMap = HelperFunctions.ApiSetMap;

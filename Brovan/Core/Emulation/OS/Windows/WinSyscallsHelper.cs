@@ -166,14 +166,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                    (Granted & RequiredAccess) == RequiredAccess;
         }
 
+        internal const ulong Int2EInstructionLength = 2;
+
         /// <summary>
         /// Returns the address of the syscall instruction that is currently being handled.
         /// </summary>
         /// <param name="Thread">The current emulated thread.</param>
         /// <param name="PreferThreadLastRip">Use the last executed RIP when it is available.</param>
         /// <returns>The syscall instruction address.</returns>
-        internal const ulong Int2EInstructionLength = 2;
-
         public ulong GetSyscallRip(EmulatedThread Thread, bool PreferThreadLastRip)
         {
             if (PreferThreadLastRip && Thread != null && Thread.LastRIP != 0)
@@ -1384,11 +1384,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             UserTime = (long)(Thread.RunTicks * (10_000_000.0 / System.Diagnostics.Stopwatch.Frequency));
         }
 
-        /// <summary>
-        /// Gets a x64 argument based on the index.
-        /// </summary>
-        /// <param name="Index">Index to read from. starting from 0.</param>
-        /// <returns></returns>
         public ulong GetArg64(int Index, bool UInt = false)
         {
             if (_argCacheValid)
@@ -1737,7 +1732,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const string CurrentUserName = "User";
         public const string CurrentUserProfile = @"C:\Users\" + CurrentUserName;
 
-        // Other
         public List<WinHandle> WinHandles = new List<WinHandle>();
         public List<WinProcess> WinProcesses = new List<WinProcess>();
         private WinProcess OwnProcess;
@@ -1809,7 +1803,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly ulong[] _winX64SyscallArgValues = new ulong[5];
 
         /// <summary>
-        /// the 5 registers (R10, RDX, R8, R9, RSP) in a single batch read.
+        /// Caches the 5 registers (R10, RDX, R8, R9, RSP) in a single batch read.
         /// Called once before the syscall handler
         /// runs; GetArg64 then reads from the cache.
         /// </summary>
@@ -1854,7 +1848,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// the syscall handler returns (in a finally block).
+        /// Called after the syscall handler returns (in a finally block).
         /// </summary>
         public void EndSyscall()
         {
@@ -2118,14 +2112,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WinProcesses.Add(new WinProcess { PID = Steam.ClientPid, PPID = ShellPID, Name = "steam.exe", Path = SteamAppContext.GuestExe, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = BinaryArchitecture.x86 });
             }
 
-            // Generate several random svchost.exe processes
             int RandomSvchostNumber = RandomGen.Next(10, 17);
             for (int i = 0; i < RandomSvchostNumber; i++)
             {
                 WinProcesses.Add(new WinProcess { PID = GenerateRandomPID(), PPID = ServicesPID, Name = "svchost.exe", Path = "C:\\Windows\\System32\\svchost.exe", Status = ProtectionStatus.None, RunningUser = GenerateRandomSvchostUser(), Critical = true, Arch = BinaryArchitecture.x64 });
             }
 
-            // Generate several firefox child processes
             int RandomFirefoxNumber = RandomGen.Next(5, 10);
             for (int i = 0; i < RandomFirefoxNumber; i++)
             {
@@ -2143,7 +2135,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     InitializeProcessTimes(Process, RandomGen.Next(60 * 1000, 2 * 60 * 60 * 1000), true);
             }
 
-            // Prepare Devices
             WinFile hConsoleHandle = new WinFile();
             hConsoleHandle.Device = true;
             hConsoleHandle.Path = "\\Device\\ConDrv\\Connect";
@@ -2287,9 +2278,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             private static readonly ulong[] SingleZeroParameter = new ulong[1];
         }
 
-        /// <summary>
-        /// Whether the address lies in a mapped view of a section.
-        /// </summary>
         public bool IsSectionViewAddress(ulong Address)
         {
             for (int Index = 0; Index < WinSections.Count; Index++)
@@ -2677,7 +2665,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong NewRsp = AlignDown(InitialRsp - AllocationSize, 0x100);
 
-            // Validate that the exception frame stays within the mapped stack.
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread != null)
             {
@@ -2798,7 +2785,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Emulator.WriteMemory(ContextAddress, Context);
 
-            // Build EXCEPTION_RECORD.
             Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
             Record.Clear();
             WriteUInt32(Record, 0x00, (uint)Exception);
@@ -2847,11 +2833,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator.Threads[(uint)Emulator.CurrentThreadId] = EmuThread;
         }
 
-        /// <summary>
-        /// Determines whether or not the thread is in a state where it can dispatch a user APC.
-        /// </summary>
-        /// <param name="Thread">Thread to check.</param>
-        /// <returns>returns true if the thread can dispatch an APC, otherwise false.</returns>
         public bool CanDispatchUserApc(EmulatedThread Thread)
         {
             return CanDispatchUserApc(Thread, false);
@@ -3530,10 +3511,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return null;
         }
 
-        /// <summary>
-        /// Adds a module to the emulated process.
-        /// </summary>
-        /// <param name="Module">Module to add.</param>
         public void AddModule(WinModule Module, bool TriggerMessage)
         {
             bool Finished = false;
@@ -3881,16 +3858,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return GuestCallTrampoline;
         }
 
-        /// <summary>
-        /// Calls a guest function from inside a syscall and resumes the syscall's caller afterwards with
-        /// ResultValue in RAX. Used for Win32 APIs whose kernel side calls back into user code.
-        /// </summary>
         public ulong EnsureGuestCallScratch()
         {
             ulong Page = EnsureGuestCallTrampoline();
             return Page == 0 ? 0 : Page + GuestCallScratchOffset;
         }
 
+        /// <summary>
+        /// Calls a guest function from inside a syscall and resumes the syscall's caller afterwards with
+        /// ResultValue in RAX. Used for Win32 APIs whose kernel side calls back into user code.
+        /// </summary>
         public bool BeginGuestCall(ulong Function, ulong Arg0, ulong Arg1, ulong Arg2, ulong Arg3, ulong ResultValue, ulong SyscallRetryRip = 0)
         {
             if (PointerSize != 8 || Function == 0 || !Emulator.IsRegionMapped(Function, 1))
@@ -4101,11 +4078,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return (ulong)(uint)((Low & 0xFFFF) | (High << 16));
         }
 
-        /// <summary>
-        /// Convert windows memory protection to the internal enum.
-        /// </summary>
-        /// <param name="Protect">Protection to convert.</param>
-        /// <returns>Internal memory protection enum with the Protect options.</returns>
         public MemoryProtection ConvertWinProtectToInternal(ulong Protect)
         {
             Protect &= 0xFF; // exclude PAGE_GUARD
@@ -4162,11 +4134,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return PAGE_NOACCESS;
         }
 
-        /// <summary>
-        /// Convert allocation type to <see cref="AllocationType"/>.
-        /// </summary>
-        /// <param name="AllocTypes">Allocation types.</param>
-        /// <returns>returns the <see cref="AllocationType"/> enum.</returns>
         public AllocationType ConvertWinAllocType(ulong AllocTypes)
         {
             AllocationType Flags = AllocationType.None;
@@ -6614,7 +6581,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Ensures the single host desktop window exists and returns its native handle (an HWND on
         /// Windows), or IntPtr.Zero if no host window backend is available. BrovVulk binds a Vulkan
-        /// surface to THIS real on-screen window rather than any guest-side HWND, so DXVK's swapchain
+        /// surface to THIS real on-screen window rather than any guest-side HWND, so a guest swapchain
         /// presents to the actual Brovan window.
         /// </summary>
         public IntPtr EnsureHostWindowHandle()
@@ -8781,9 +8748,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ReleaseSectionIfUnreferenced(ClosingSection);
         }
 
-        /// <summary>
-        /// Removes an object if it is not referenced anymore.
-        /// </summary>
         private void ForgetNamedSyncObjectIfUnreferenced(IHandleObject? Object)
         {
             if (Object == null || HandleManager.CountHandlesByObjectId(Object.ObjectId) != 0)

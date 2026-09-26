@@ -152,6 +152,9 @@ namespace Brovan.Core.Helpers.WindowsImage
             }
         }
 
+        /// <summary>
+        /// Counts finished files for the extraction workers and calls Report and Progress one caller at a time.
+        /// </summary>
         private sealed class ExtractionProgress
         {
             private readonly object Gate = new object();
@@ -351,7 +354,8 @@ namespace Brovan.Core.Helpers.WindowsImage
         }
 
         /// <summary>
-        /// Each body pulls its own work items and must stop once the loop state reports another worker's failure.
+        /// Runs <paramref name="Body"/> on up to <paramref name="Workers"/> threads, the calling thread included.
+        /// Each body pulls its own work items and must stop once the loop state reports a failure in another worker.
         /// </summary>
         private static void RunWorkers(int Workers, Action<ParallelLoopState> Body)
         {
@@ -466,8 +470,8 @@ namespace Brovan.Core.Helpers.WindowsImage
         }
 
         /// <summary>
-        /// Extracts blobs packed into solid resources. Each needed chunk is decoded once, by one worker that writes
-        /// every slice it holds. Chunks holding no wanted file are never read.
+        /// Extracts blobs packed into solid resources. Each needed chunk is decoded once, by one worker, which writes
+        /// every slice of every file the chunk holds. Chunks that hold no wanted file are never read.
         /// </summary>
         private static void ExtractPacked(WimReader Reader, List<PendingBlob> Blobs, string[] Targets, ExtractionProgress Tracker)
         {

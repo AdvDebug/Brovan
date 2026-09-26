@@ -316,8 +316,8 @@ namespace Brovan.Core.Helpers.WindowsImage
         }
 
         /// <summary>
-        /// Decompressors carry large tables and an input buffer the size of a chunk, so they are pooled rather than
-        /// built per resource. Safe to call from several threads.
+        /// Decompressors carry large tables and a compressed input buffer that grows to the chunk size, so they are
+        /// reused across resources. Safe to call from several threads.
         /// </summary>
         public WimDecompressor RentDecompressor(WimResource Resource)
         {
@@ -371,8 +371,9 @@ namespace Brovan.Core.Helpers.WindowsImage
     internal sealed class WimResourceSource : ImageDataSource
     {
         /// <summary>
-        /// Memory decoded chunks may hold at once, cached or decoded in parallel. Solid chunks are tens of megabytes,
-        /// so the budget comes from the machine and a phone does not hold a desktop working set.
+        /// Memory that decoded chunks may occupy at once, in a chunk cache or across chunks decoded in parallel.
+        /// Solid chunks are tens of megabytes, so this is what decides how many of them can be held at once; it is
+        /// derived from the machine so a phone does not try to hold the same working set as a desktop.
         /// </summary>
         public static readonly long DecodeBudget = Math.Clamp(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 32, 32L << 20, 192L << 20);
 
@@ -510,7 +511,8 @@ namespace Brovan.Core.Helpers.WindowsImage
 
         /// <summary>
         /// Decodes <paramref name="Count"/> consecutive chunks into <paramref name="Target"/>, which must be exactly as
-        /// long as those chunks. Safe to call from several threads, each with its own decompressor and target.
+        /// long as those chunks. Their compressed data is fetched in one read. Callers on different threads may decode
+        /// at once, each with its own decompressor and target.
         /// </summary>
         public void DecodeChunks(long First, int Count, Span<byte> Target, WimDecompressor Decompressor)
         {

@@ -109,7 +109,7 @@ namespace Brovan.Core.Helpers.WindowsImage
                         if (PartitionStart == uint.MaxValue || FileSetBlock == uint.MaxValue)
                             return null;
 
-                        // UDF 2.2.4.2.
+                        // UDF 2.2.4.2. The logical block size is the logical sector size.
                         if (BlockSize != SectorSize)
                             throw new NotSupportedException($"The UDF volume uses {BlockSize} byte logical blocks; only {SectorSize} byte blocks are supported.");
 
@@ -244,7 +244,7 @@ namespace Brovan.Core.Helpers.WindowsImage
                         if (Offset + Total > Content.Length)
                             return false;
 
-                        // ECMA-167 4/14.4.3. Bit 2 deleted, bit 3 parent.
+                        // ECMA-167 4/14.4.3. Skip deleted (bit 2) and parent (bit 3) entries.
                         if ((Characteristics & 0x0C) == 0 && NameLength > 0)
                         {
                             ReadOnlySpan<byte> Raw = Descriptor.Slice(38 + ImplementationLength, NameLength);
@@ -389,6 +389,9 @@ namespace Brovan.Core.Helpers.WindowsImage
                 }
             }
 
+            /// <summary>
+            /// Returns true when the sequence continues in the allocation extent at <paramref name="NextBlock"/>.
+            /// </summary>
             private static bool ReadAllocationDescriptors(ReadOnlySpan<byte> Descriptors, int DescriptorType, FileEntry Entry, out uint NextBlock, out int NextLength)
             {
                 NextBlock = 0;
@@ -435,7 +438,7 @@ namespace Brovan.Core.Helpers.WindowsImage
 
                     long InformationLength = Length;
 
-                    // ECMA-167 4/14.14.3. A recorded length below the information length means encoded data.
+                    // ECMA-167 4/14.14.3. Recorded Length below Information Length means encoded data.
                     if (DescriptorType == 2)
                     {
                         long RecordedLength = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(4)) & 0x3FFFFFFF;

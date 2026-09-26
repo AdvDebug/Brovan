@@ -457,14 +457,8 @@ namespace Brovan.Core.Helpers
             ExecInstr = 0x4,
         }
 
-        /// <summary>
-        /// Binary Function.
-        /// </summary>
         public struct BinaryFunction
         {
-            /// <summary>
-            /// The function name.
-            /// </summary>
             public string FunctionName;
 
             /// <summary>
@@ -551,19 +545,10 @@ namespace Brovan.Core.Helpers
             /// </summary>
             public bool StrictPushRetValidation;
 
-            /// <summary>
-            /// Analyze stack variables.
-            /// </summary>
             public bool AnalyzeStack;
 
-            /// <summary>
-            /// Enable parallel disassembly to disassemble functions faster.
-            /// </summary>
             public bool EnableParallelDisassembly;
 
-            /// <summary>
-            /// The minimum functions to have to use parallel disassembly.
-            /// </summary>
             public int ParallelMinFunctionCount;
         }
 
@@ -590,24 +575,12 @@ namespace Brovan.Core.Helpers
 
         public struct DotNetFunction
         {
-            /// <summary>
-            /// The function name.
-            /// </summary>
             public string FunctionName;
 
-            /// <summary>
-            /// The type name of the function.
-            /// </summary>
             public string TypeName;
             
-            /// <summary>
-            /// The RVA (Relative Virtual Address) of the method.
-            /// </summary>
             public uint RVA;
             
-            /// <summary>
-            /// The file offset of the method.
-            /// </summary>
             public uint FileOffset;
             
             /// <summary>
@@ -615,137 +588,65 @@ namespace Brovan.Core.Helpers
             /// </summary>
             public uint CodeSize;
             
-            /// <summary>
-            /// The method flags.
-            /// </summary>
             public ushort Flags;
 
-            /// <summary>
-            /// The method token.
-            /// </summary>
             public int Token;
 
-            /// <summary>
-            /// Parameter count of the method.
-            /// </summary>
             public int ParameterCount;
             
-            /// <summary>
-            /// The method implementation flags.
-            /// </summary>
             public MethodImplementations ImplFlags;
             
-            /// <summary>
-            /// The raw IL code bytes of the method.
-            /// </summary>
             public byte[] ILCode;
 
-            /// <summary>
-            /// The raw IL code string of the method.
-            /// </summary>
             public string ILString;
 
-            /// <summary>
-            /// An indicator to whether the method is an instance or not.
-            /// </summary>
             public bool IsInstance;
 
-            /// <summary>
-            /// The number of locals for the method.
-            /// </summary>
             public int LocalsCount;
 
-            /// <summary>
-            /// Instance of the method.
-            /// </summary>
             public Type Instance;
 
-            /// <summary>
-            /// Declaring type.
-            /// </summary>
             public string DeclaringType;
 
-            /// <summary>
-            /// Assembly name.
-            /// </summary>
             public string AssemblyName;
         }
 
         public struct DotNetProperty
         {
-            /// <summary>
-            /// Name of the property.
-            /// </summary>
             public string PropertyName;
 
-            /// <summary>
-            /// Token of the property.
-            /// </summary>
             public int Token;
         }
 
         public struct DotNetField
         {
-            /// <summary>
-            /// Name of the field.
-            /// </summary>
             public string FieldName;
             
-            /// <summary>
-            /// Token of the field.
-            /// </summary>
             public int Token;
         }
 
         public struct DotNetType
         {
-            /// <summary>
-            /// Name of the type.
-            /// </summary>
             public string TypeName;
 
-            /// <summary>
-            /// Token of the type.
-            /// </summary>
             public int Token;
         }
 
         public struct DotNetMember
         {
-            /// <summary>
-            /// Name of the member.
-            /// </summary>
             public string MemberName;
 
-            /// <summary>
-            /// Token of the member.
-            /// </summary>
             public int Token;
 
-            /// <summary>
-            /// Declaring type.
-            /// </summary>
             public string DeclaringType;
 
-            /// <summary>
-            /// Type name.
-            /// </summary>
             public string TypeName;
 
-            /// <summary>
-            /// Assembly name.
-            /// </summary>
             public string AssemblyName;
 
-            /// <summary>
-            /// Determines if the member is an instance or not.
-            /// </summary>
             public bool IsInstance;
         }
 
-        /// <summary>
-        /// Import Jump Function structure.
-        /// </summary>
         public struct ELFImportFunction
         {
             /// <summary>
@@ -768,25 +669,13 @@ namespace Brovan.Core.Helpers
             /// </summary>
             public string ImportedFunction;
 
-            /// <summary>
-            /// The GOT entry address.
-            /// </summary>
             public uint GotEntry;
         }
 
-        /// <summary>
-        /// PE Import Function structure.
-        /// </summary>
         public struct PEImportFunction
         {
-            /// <summary>
-            /// The name of the imported DLL.
-            /// </summary>
             public string LibraryName;
 
-            /// <summary>
-            /// The name of the imported function.
-            /// </summary>
             public string FunctionName;
 
             /// <summary>
@@ -804,9 +693,6 @@ namespace Brovan.Core.Helpers
             /// </summary>
             public uint Offset;
 
-            /// <summary>
-            /// True if imported by ordinal.
-            /// </summary>
             public bool IsOrdinal;
 
             /// <summary>
@@ -817,14 +703,8 @@ namespace Brovan.Core.Helpers
 
         public enum DotNetStatus
         {
-            /// <summary>
-            /// The PE file is not a .NET file.
-            /// </summary>
             None = 0,
             
-            /// <summary>
-            /// The PE file is a valid .NET file.
-            /// </summary>
             DotNet = 1,
 
             /// <summary>
@@ -833,64 +713,28 @@ namespace Brovan.Core.Helpers
             ModifiedDotNet = 2
         }
 
-        /// <summary>
-        /// PE Specific class.
-        /// </summary>
         public class PortableExecutable
         {
-            /// <summary>
-            /// Subsystem of the PE Binary.
-            /// </summary>
             public Subsystem Subsystem;
 
-            /// <summary>
-            /// The checksum of the PE Binary.
-            /// </summary>
             public uint CheckSum;
 
-            /// <summary>
-            /// ImageBase of the PE.
-            /// </summary>
             public ulong ImageBase;
 
-            /// <summary>
-            /// Size of the PE image.
-            /// </summary>
             public ulong SizeOfImage;
 
-            /// <summary>
-            /// Size of the PE headers.
-            /// </summary>
             public ulong SizeOfHeaders;
 
-            /// <summary>
-            /// Base of code.
-            /// </summary>
             public ulong BaseOfCode;
 
-            /// <summary>
-            /// File Alignment.
-            /// </summary>
             public ulong FileAlignment;
 
-            /// <summary>
-            /// Alignment of sections.
-            /// </summary>
             public ulong SectionAlignment;
 
-            /// <summary>
-            /// PE Characteristics.
-            /// </summary>
             public Characteristics Characteristics;
 
-            /// <summary>
-            /// Dll Characteristics of the PE File.
-            /// </summary>
             public DllCharacteristics DllCharacteristics;
 
-            /// <summary>
-            /// PE Sections with all their information.
-            /// </summary>
             public PortableBinarySection[] Sections = Array.Empty<PortableBinarySection>();
 
             public IMAGE_OPTIONAL_HEADER32 OptionalHeader32;
@@ -904,48 +748,24 @@ namespace Brovan.Core.Helpers
             /// </summary>
             public Dictionary<ulong, PEImportFunction> ImportFunctions = new();
 
-            /// <summary>
-            /// Indicates if the PE File is a .NET File.
-            /// </summary>
             public DotNetStatus DotNetStatus;
         }
 
         public class DotNet
         {
-            /// <summary>
-            /// .NET Functions that exist inside the binary.
-            /// </summary>
             public DotNetFunction[] DotNetFunctions = Array.Empty<DotNetFunction>();
 
-            /// <summary>
-            /// .NET Properties that exist inside the binary.
-            /// </summary>
             public DotNetProperty[] DotNetProperties = Array.Empty<DotNetProperty>();
 
-            /// <summary>
-            /// .NET Fields that exist inside the binary.
-            /// </summary>
             public DotNetField[] DotNetFields = Array.Empty<DotNetField>();
 
-            /// <summary>
-            /// .NET Types that exist inside the binary.
-            /// </summary>
             public DotNetType[] DotNetTypes = Array.Empty<DotNetType>();
 
-            /// <summary>
-            /// .NET Members.
-            /// </summary>
             public DotNetMember[] DotNetMembers = Array.Empty<DotNetMember>();
 
-            /// <summary>
-            /// Metadata reader for the .NET assembly.
-            /// </summary>
             public MetadataReader MetaReader;
         }
 
-        /// <summary>
-        /// ELF Specific class.
-        /// </summary>
         public class ELF
         {
             public uint Type;
@@ -966,9 +786,6 @@ namespace Brovan.Core.Helpers
         /// </summary>
         public struct BinarySearch
         {
-            /// <summary>
-            /// Matching bytes.
-            /// </summary>
             public byte[] Match;
 
             /// <summary>
@@ -1028,12 +845,6 @@ namespace Brovan.Core.Helpers
             return Encoding.ASCII.GetString(Slice.Slice(0, End));
         }
 
-        /// <summary>
-        /// Converts a Relative Virtual Address (RVA) to a file offset using section information.
-        /// </summary>
-        /// <param name="Rva">The RVA to convert.</param>
-        /// <param name="Section">The section containing the RVA.</param>
-        /// <returns>The file offset corresponding to the RVA.</returns>
         public static uint RvaToFileOffset(uint Rva, PortableBinarySection[] Sections)
         {
             foreach (PortableBinarySection Section in Sections)
@@ -1044,12 +855,6 @@ namespace Brovan.Core.Helpers
             return 0;
         }
 
-        /// <summary>
-        /// Convert a virtual address to an offset.
-        /// </summary>
-        /// <param name="VirtualAddress">Virtual Address to convert.</param>
-        /// <param name="Section">Section containing the virtual address.</param>
-        /// <returns>returns the offset.</returns>
         public static ulong VirtualAddressToFileOffset(ulong VirtualAddress, ElfBinarySection Section)
         {
             if (VirtualAddress >= Section.VirtualAddress &&
@@ -1060,12 +865,6 @@ namespace Brovan.Core.Helpers
             return 0;
         }
 
-        /// <summary>
-        /// Convert a virtual address to an offset.
-        /// </summary>
-        /// <param name="VirtualAddress">Virtual Address to convert.</param>
-        /// <param name="Sections">Sections to search for the virtual address.</param>
-        /// <returns>returns the offset.</returns>
         public static ulong VirtualAddressToFileOffset(ulong VirtualAddress, ElfBinarySection[] Sections)
         {
             foreach (ElfBinarySection Section in Sections)
@@ -1079,12 +878,6 @@ namespace Brovan.Core.Helpers
             return 0;
         }
 
-        /// <summary>
-        /// Convert the file offset in an ELF section to an RVA.
-        /// </summary>
-        /// <param name="FileOffset">File offset.</param>
-        /// <param name="Sections">Sections to search in.</param>
-        /// <returns>The RVA.</returns>
         public static ulong FileOffsetToRva(uint FileOffset, ElfBinarySection[] Sections)
         {
             foreach (ElfBinarySection Section in Sections)
