@@ -15,7 +15,7 @@
         <PublishAot>true</PublishAot>
         <StripSymbols>true</StripSymbols>
         <Version>0.1.0</Version>
-        <AvaloniaVersion>12.1.2</AvaloniaVersion>
+        <AvaloniaVersion>12.1.3</AvaloniaVersion>
     </PropertyGroup>
 
     <ItemGroup>
