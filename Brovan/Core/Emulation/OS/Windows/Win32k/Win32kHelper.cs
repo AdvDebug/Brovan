@@ -254,6 +254,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public ulong LastActiveWindow;
 
             public readonly Queue<ulong> PendingWindowPosChanged = new();
+            public readonly List<Win32kSentNotification> SentNotifications = new();
             public int QueuedNotifications;
             public ulong CursorHandle;
             public ulong UpdateLockWindow;
@@ -2743,17 +2744,154 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return PostMessage(Instance, GetState(Instance), Hwnd, Message, WParam, LParam);
         }
 
-        // NT sends these. A queued one that the activation or focus state has since overtaken is dropped.
-        private static void PostNotification(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam)
+        private readonly struct Win32kSentNotification
+        {
+            public readonly Win32kMessage Message;
+            public readonly uint Sender;
+            public readonly int Depth;
+
+            public Win32kSentNotification(in Win32kMessage Message, uint Sender, int Depth)
+            {
+                this.Message = Message;
+                this.Sender = Sender;
+                this.Depth = Depth;
+            }
+        }
+
+        // NT sends these. One overtaken by the activation or focus state is dropped.
+        private static void PostNotification(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam, bool FromHost)
         {
             if (Instance.WinHelper.GetWindow(Hwnd) == null)
                 return;
 
             Win32kState State = GetState(Instance);
-            State.MessageQueue.Enqueue(new Win32kMessage(Hwnd, Message, WParam, LParam, unchecked((uint)Instance.EmulatedTickCount64), State.CursorScreenX, State.CursorScreenY, 0, true));
-            State.QueuedNotifications++;
-            NoteQueuedMessage(State, Message);
+            Win32kMessage Notification = new Win32kMessage(Hwnd, Message, WParam, LParam, unchecked((uint)Instance.EmulatedTickCount64), State.CursorScreenX, State.CursorScreenY, 0, true);
+
+            // The callback path is x64 only.
+            if (Instance.WinHelper.PointerSize == 8)
+            {
+                EmulatedThread Thread = Instance.CurrentThread;
+                uint Sender = FromHost ? 0 : Thread?.ThreadId ?? 0;
+                State.SentNotifications.Add(new Win32kSentNotification(Notification, Sender, GetCallbackDepth(Thread)));
+            }
+            else
+            {
+                QueueNotificationMessage(State, Notification);
+            }
+
             Instance.WakeSignal.Bump();
+        }
+
+        private static void QueueNotificationMessage(Win32kState State, in Win32kMessage Notification)
+        {
+            State.MessageQueue.Enqueue(Notification);
+            State.QueuedNotifications++;
+            NoteQueuedMessage(State, Notification.Message);
+        }
+
+        private static int GetCallbackDepth(EmulatedThread Thread)
+        {
+            return WinEmulatedThread.TryGetState(Thread)?.UserCallbackFrames.Count ?? 0;
+        }
+
+        // True while a procedure runs. The syscall returns Result after the last one.
+        internal static bool SendNotifications(BinaryEmulator Instance, ulong Result)
+        {
+            Win32kState State = GetState(Instance);
+            while (TryTakeNotification(Instance, State, false, out Win32kMessage Notification))
+            {
+                if (InvokeNotification(Instance, State, Notification, 0, Result))
+                    return true;
+            }
+
+            return false;
+        }
+
+        internal static void ReturnAfterNotifications(BinaryEmulator Instance, ulong Result)
+        {
+            if (!SendNotifications(Instance, Result))
+                Instance.SetRawSyscallReturn(Result);
+        }
+
+        // NT: xxxReceiveMessages.
+        internal static bool ReceiveNotification(BinaryEmulator Instance, ulong SyscallRip)
+        {
+            DrainHostEvents(Instance);
+
+            Win32kState State = GetState(Instance);
+            while (TryTakeNotification(Instance, State, true, out Win32kMessage Notification))
+            {
+                if (InvokeNotification(Instance, State, Notification, SyscallRip, null))
+                    return true;
+            }
+
+            return false;
+        }
+
+        // A nested procedure never runs an outer send. Other sends wait for the owner to read its queue.
+        private static bool TryTakeNotification(BinaryEmulator Instance, Win32kState State, bool Reading, out Win32kMessage Notification)
+        {
+            List<Win32kSentNotification> Pending = State.SentNotifications;
+            EmulatedThread Thread = Instance.CurrentThread;
+            uint ThreadId = Thread?.ThreadId ?? 0;
+            int Depth = GetCallbackDepth(Thread);
+
+            for (int i = 0; i < Pending.Count;)
+            {
+                Win32kSentNotification Candidate = Pending[i];
+                if (Instance.WinHelper.GetWindow(Candidate.Message.Hwnd) == null || IsOvertaken(Instance, Candidate.Message))
+                {
+                    Pending.RemoveAt(i);
+                    continue;
+                }
+
+                bool Eligible = IsOwnSend(Candidate, ThreadId) ? Candidate.Depth >= Depth : Reading;
+                if (Eligible && OwnedByThread(Instance, Candidate.Message.Hwnd, ThreadId))
+                {
+                    Pending.RemoveAt(i);
+                    Notification = Candidate.Message;
+                    return true;
+                }
+
+                i++;
+            }
+
+            Notification = default;
+            return false;
+        }
+
+        private static bool IsOwnSend(in Win32kSentNotification Notification, uint ThreadId)
+        {
+            return Notification.Sender != 0 && Notification.Sender == ThreadId;
+        }
+
+        private static bool HasIncomingNotification(BinaryEmulator Instance, Win32kState State, uint ThreadId)
+        {
+            foreach (Win32kSentNotification Candidate in State.SentNotifications)
+            {
+                if (!IsOwnSend(Candidate, ThreadId)
+                    && OwnedByThread(Instance, Candidate.Message.Hwnd, ThreadId)
+                    && Instance.WinHelper.GetWindow(Candidate.Message.Hwnd) != null
+                    && !IsOvertaken(Instance, Candidate.Message))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool InvokeNotification(BinaryEmulator Instance, Win32kState State, in Win32kMessage Notification, ulong SyscallRetryRip, ulong? Result)
+        {
+            WinWindow Window = Instance.WinHelper.GetWindow(Notification.Hwnd);
+            if (InvokeWindowProc(Instance, Notification.Hwnd, Window.WndProc, Notification.Message, Notification.WParam, Notification.LParam,
+                SyscallRetryRip: SyscallRetryRip, DeferredSyscallResult: Result))
+            {
+                return true;
+            }
+
+            QueueNotificationMessage(State, Notification);
+            return false;
         }
 
         private static void DropOvertakenNotifications(BinaryEmulator Instance, Win32kState State)
@@ -3286,6 +3424,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             uint Bits = State.QuitPosted ? Queued | QS_POSTMESSAGE : Queued;
+            if ((WakeMask & QS_SENDMESSAGE) != 0 && HasIncomingNotification(Instance, State, ThreadId))
+                Bits |= QS_SENDMESSAGE;
+
             if ((WakeMask & QS_PAINT) != 0 && FindDirtyWindow(Instance, 0, ThreadId) != null)
                 Bits |= QS_PAINT;
 
@@ -3985,7 +4126,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             State.HostFocused = false;
             ulong Active = Instance.WinHelper.ActiveWindow;
             ReleaseHeldKeys(Instance, State, Active != 0 ? Active : Window);
-            DeactivateApplication(Instance);
+            DeactivateApplication(Instance, true);
         }
 
         internal static bool CanActivateImplicitly(WinWindow Window)
@@ -4004,7 +4145,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private static ulong MinimizedFlag(WinWindow Window) => Window.Minimized ? 0x10000UL : 0;
 
         /// <summary>
-        /// NT: xxxActivateWindow. The messages are posted in the order NT sends them.
+        /// NT: xxxActivateWindow. The messages are queued in the order NT sends them.
         /// </summary>
         internal static void ActivateWindow(BinaryEmulator Instance, WinWindow Window, bool FromHost)
         {
@@ -4022,22 +4163,22 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             WinWindow Old = Previous != Hwnd ? Helper.GetWindow(Previous) : null;
             if (Old != null)
             {
-                PostNotification(Instance, Previous, WM_NCACTIVATE, 0, 0);
-                PostNotification(Instance, Previous, WM_ACTIVATE, WA_INACTIVE | MinimizedFlag(Old), Hwnd);
+                PostNotification(Instance, Previous, WM_NCACTIVATE, 0, 0, FromHost);
+                PostNotification(Instance, Previous, WM_ACTIVATE, WA_INACTIVE | MinimizedFlag(Old), Hwnd, FromHost);
             }
 
             Helper.RaiseActivatedWindow(Window);
 
             if (!ApplicationActive)
-                PostActivateApp(Instance, true);
+                PostActivateApp(Instance, true, FromHost);
 
             Helper.ActiveWindow = Hwnd;
             Helper.ForegroundWindow = Hwnd;
             GetState(Instance).LastActiveWindow = Hwnd;
 
-            PostNotification(Instance, Hwnd, WM_NCACTIVATE, 1, 0);
-            PostNotification(Instance, Hwnd, WM_ACTIVATE, WA_ACTIVE | MinimizedFlag(Window), Old != null ? Previous : 0);
-            MoveFocus(Instance, Window.Minimized ? 0 : Hwnd);
+            PostNotification(Instance, Hwnd, WM_NCACTIVATE, 1, 0, FromHost);
+            PostNotification(Instance, Hwnd, WM_ACTIVATE, WA_ACTIVE | MinimizedFlag(Window), Old != null ? Previous : 0, FromHost);
+            MoveFocus(Instance, Window.Minimized ? 0 : Hwnd, FromHost);
 
             Helper.SetThreadWindowContext(Window);
             Helper.PublishForegroundWindow();
@@ -4048,7 +4189,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Helper.PresentDesktop();
         }
 
-        internal static void DeactivateApplication(BinaryEmulator Instance)
+        internal static void DeactivateApplication(BinaryEmulator Instance, bool FromHost)
         {
             WinSysHelper Helper = Instance.WinHelper;
             ulong Previous = Helper.ActiveWindow;
@@ -4058,12 +4199,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             WinWindow Old = Helper.GetWindow(Previous);
             if (Old != null)
             {
-                PostNotification(Instance, Previous, WM_NCACTIVATE, 0, 0);
-                PostNotification(Instance, Previous, WM_ACTIVATE, WA_INACTIVE | MinimizedFlag(Old), 0);
+                PostNotification(Instance, Previous, WM_NCACTIVATE, 0, 0, FromHost);
+                PostNotification(Instance, Previous, WM_ACTIVATE, WA_INACTIVE | MinimizedFlag(Old), 0, FromHost);
             }
 
-            PostActivateApp(Instance, false);
-            MoveFocus(Instance, 0);
+            PostActivateApp(Instance, false, FromHost);
+            MoveFocus(Instance, 0, FromHost);
 
             Helper.ActiveWindow = 0;
             Helper.ForegroundWindow = 0;
@@ -4099,7 +4240,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Next != null)
                 ActivateWindow(Instance, Next, false);
             else
-                DeactivateApplication(Instance);
+                DeactivateApplication(Instance, false);
         }
 
         private static bool IsActivationCandidate(WinWindow Window, WinWindow Leaving)
@@ -4113,14 +4254,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
 
         // NT: hidden windows get it too.
-        private static void PostActivateApp(BinaryEmulator Instance, bool Active)
+        private static void PostActivateApp(BinaryEmulator Instance, bool Active, bool FromHost)
         {
             List<ulong> TopLevel = Instance.WinHelper.TopLevelWindows;
             for (int i = TopLevel.Count - 1; i >= 0; i--)
-                PostNotification(Instance, TopLevel[i], WM_ACTIVATEAPP, Active ? 1UL : 0UL, 0);
+                PostNotification(Instance, TopLevel[i], WM_ACTIVATEAPP, Active ? 1UL : 0UL, 0, FromHost);
         }
 
-        internal static void MoveFocus(BinaryEmulator Instance, ulong Focus)
+        internal static void MoveFocus(BinaryEmulator Instance, ulong Focus, bool FromHost)
         {
             WinSysHelper Helper = Instance.WinHelper;
             ulong Previous = Helper.FocusWindow;
@@ -4130,10 +4271,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Helper.FocusWindow = Focus;
 
             if (Previous != 0 && Helper.GetWindow(Previous) != null)
-                PostNotification(Instance, Previous, WM_KILLFOCUS, Focus, 0);
+                PostNotification(Instance, Previous, WM_KILLFOCUS, Focus, 0, FromHost);
 
             if (Focus != 0)
-                PostNotification(Instance, Focus, WM_SETFOCUS, Previous, 0);
+                PostNotification(Instance, Focus, WM_SETFOCUS, Previous, 0, FromHost);
 
             Helper.PublishFocusState(Focus, Helper.ActiveWindow);
         }
@@ -4281,11 +4422,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
         }
 
-        internal static bool HasWindowPosChangedFor(BinaryEmulator Instance, uint ThreadId)
+        internal static bool HasSentMessageFor(BinaryEmulator Instance, uint ThreadId)
         {
             DrainHostEvents(Instance);
 
-            foreach (ulong Hwnd in GetState(Instance).PendingWindowPosChanged)
+            Win32kState State = GetState(Instance);
+            foreach (ulong Hwnd in State.PendingWindowPosChanged)
             {
                 WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
                 if (Window != null && Window.PendingWindowPosChanged && Window.WndProc != 0
@@ -4295,7 +4437,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 }
             }
 
-            return false;
+            return HasIncomingNotification(Instance, State, ThreadId);
         }
 
         // Owner thread only. The window procedure runs in its frame.
@@ -5742,14 +5884,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         // The syscall in progress does not answer. The procedure's result becomes its return value.
         internal static bool InvokeWindowProc(BinaryEmulator Instance, ulong Hwnd, ulong WndProc, uint Message, ulong WParam, ulong LParam, WinWindowCreation Creation = null, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0,
-            WinPaintBegin PaintBegin = null, WinScrollChildMoves ScrollChildMoves = null)
+            WinPaintBegin PaintBegin = null, WinScrollChildMoves ScrollChildMoves = null, ulong? DeferredSyscallResult = null)
         {
             if (!TryBeginWindowProcCallback(Instance, WndProc, out ulong Callback, out ulong ArgumentBuffer))
                 return false;
 
             WriteWindowProcCallbackArguments(Instance, ArgumentBuffer, Hwnd, WndProc, Message, WParam, LParam);
             return Instance.WinHelper.EnterUserCallback(Callback, WindowProcCallbackIndex, ArgumentBuffer, Creation, SyscallRetryRip, PaintRetryHwnd,
-                PaintBegin: PaintBegin, ScrollChildMoves: ScrollChildMoves);
+                PaintBegin: PaintBegin, ScrollChildMoves: ScrollChildMoves, DeferredSyscallResult: DeferredSyscallResult);
         }
 
         // True once, for the syscall that the returning WM_PAINT callback is re-running.

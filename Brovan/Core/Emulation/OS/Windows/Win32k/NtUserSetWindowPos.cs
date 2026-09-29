@@ -28,7 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Instance.SetBooleanSyscallReturn(true);
+            Win32kHelper.ReturnAfterNotifications(Instance, 1);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

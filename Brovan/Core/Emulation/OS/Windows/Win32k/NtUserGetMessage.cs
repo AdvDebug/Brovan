@@ -66,6 +66,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            // NT: a sent message runs inside GetMessage, which then goes on waiting.
+            ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Thread, false);
+            if (Win32kHelper.ReceiveNotification(Instance, SyscallRip))
+                return NTSTATUS.STATUS_SUCCESS;
+
             if (Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
             {
                 if (!Win32kHelper.WriteMessage(Instance, MessagePtr, Message, State))
@@ -79,8 +84,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            // NT: a sent message runs inside GetMessage, which then goes on waiting.
-            ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Thread, false);
             if (Win32kHelper.TryDeliverWindowPosChanged(Instance, 0, SyscallRip))
                 return NTSTATUS.STATUS_SUCCESS;
 

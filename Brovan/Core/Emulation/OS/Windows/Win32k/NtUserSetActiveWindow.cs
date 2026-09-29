@@ -30,7 +30,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if ((Window.Style & (WS_CHILD | WS_POPUP)) != WS_CHILD)
                 Win32kHelper.ActivateWindow(Instance, Window, false);
 
-            Instance.SetRawSyscallReturn(Previous);
+            Win32kHelper.ReturnAfterNotifications(Instance, Previous);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

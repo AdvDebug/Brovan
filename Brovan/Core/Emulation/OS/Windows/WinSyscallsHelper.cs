@@ -3656,7 +3656,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : Emulator.ReadMemoryUInt(Table + (ulong)Index * 4);
         }
 
-        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinWindowCreation Creation, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, WinWindowDestruction Destruction = null, WinWindowPosChange PositionChange = null, WinPaintBegin PaintBegin = null, WinScrollChildMoves ScrollChildMoves = null)
+        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinWindowCreation Creation, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, WinWindowDestruction Destruction = null, WinWindowPosChange PositionChange = null, WinPaintBegin PaintBegin = null, WinScrollChildMoves ScrollChildMoves = null, ulong? DeferredSyscallResult = null)
         {
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null || Callback == 0 || PointerSize != 8)
@@ -3677,6 +3677,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WindowPosChange = PositionChange,
                 PaintBegin = PaintBegin,
                 ScrollChildMoves = ScrollChildMoves,
+                DeferredSyscallResult = DeferredSyscallResult,
             };
 
             if (SyscallRetryRip != 0)
@@ -4085,6 +4086,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 ResultValue = Win32kHelper.FinishScrollWindow(Emulator, Moves.UpdateAddress, Moves.UpdateRect, Moves.Result);
             }
+
+            ResultValue = Frame.DeferredSyscallResult ?? ResultValue;
+
+            Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
+            if (Win32kHelper.SendNotifications(Emulator, ResultValue))
+                return true;
 
             ReturnFromUserCallback(Frame, ResultValue);
             return true;

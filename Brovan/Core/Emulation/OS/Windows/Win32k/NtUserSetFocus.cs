@@ -28,10 +28,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Instance.WinHelper.SetThreadWindowContext(Window);
             }
 
-            Win32kHelper.MoveFocus(Instance, Hwnd);
+            Win32kHelper.MoveFocus(Instance, Hwnd, false);
 
             Instance.SetLastWinError(0);
-            Instance.SetRawSyscallReturn(Previous);
+            Win32kHelper.ReturnAfterNotifications(Instance, Previous);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

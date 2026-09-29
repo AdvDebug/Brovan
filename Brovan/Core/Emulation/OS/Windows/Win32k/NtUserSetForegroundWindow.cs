@@ -19,7 +19,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Win32kHelper.ActivateWindow(Instance, Window, false);
 
             Instance.SetLastWinError(0);
-            Instance.SetBooleanSyscallReturn(true);
+            Win32kHelper.ReturnAfterNotifications(Instance, 1);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

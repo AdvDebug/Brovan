@@ -114,6 +114,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinWindowPosChange WindowPosChange;
         public WinPaintBegin PaintBegin;
         public WinScrollChildMoves ScrollChildMoves;
+        public ulong? DeferredSyscallResult;
     }
 
     public sealed class WinScrollChildMoves

@@ -136,7 +136,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance.WinHelper.PresentDesktop();
 
             Instance.SetLastWinError(0);
-            Instance.SetRawSyscallReturn(WasVisible ? 1ul : 0ul);
+            Win32kHelper.ReturnAfterNotifications(Instance, WasVisible ? 1ul : 0ul);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

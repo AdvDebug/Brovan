@@ -20,7 +20,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (!Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, Win32kHelper.WakeMaskFromPeekFlags(Flags), Win32kHelper.RemoveFlagSet(Flags), Instance.CurrentThread?.ThreadId ?? 0, out Win32kMessage Message))
+            uint WakeMask = Win32kHelper.WakeMaskFromPeekFlags(Flags);
+            if ((WakeMask & Win32kHelper.QS_SENDMESSAGE) != 0
+                && Win32kHelper.ReceiveNotification(Instance, Instance.WinHelper.GetSyscallRip(Instance.CurrentThread, false)))
+            {
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            if (!Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, WakeMask, Win32kHelper.RemoveFlagSet(Flags), Instance.CurrentThread?.ThreadId ?? 0, out Win32kMessage Message))
             {
                 Instance.SetLastWinError(0);
                 if (Win32kHelper.TryDeliverWindowPosChanged(Instance, 0))

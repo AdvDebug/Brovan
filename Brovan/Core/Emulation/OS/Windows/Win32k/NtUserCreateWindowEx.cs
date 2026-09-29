@@ -131,7 +131,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             // The callback path is x64 only, so a 32-bit guest gets the window with none of its creation
             // messages and the class has to cope on its own.
-            Instance.SetRawSyscallReturn(hwnd);
+            Win32kHelper.ReturnAfterNotifications(Instance, hwnd);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

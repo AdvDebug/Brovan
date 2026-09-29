@@ -10,7 +10,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             bool Applied = Win32kHelper.EndDeferWindowPos(Instance, DeferHandle);
 
             Instance.SetLastWinError(Applied ? 0u : Win32kHelper.ERROR_INVALID_HANDLE);
-            Instance.SetBooleanSyscallReturn(Applied);
+            Win32kHelper.ReturnAfterNotifications(Instance, Applied ? 1ul : 0ul);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

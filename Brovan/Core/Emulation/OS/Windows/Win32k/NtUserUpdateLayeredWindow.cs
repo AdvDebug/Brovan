@@ -108,7 +108,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 int DirtyWidth = Math.Clamp(Dirty.Right, DirtyLeft, Update.Width) - DirtyLeft;
                 int DirtyHeight = Math.Clamp(Dirty.Bottom, DirtyTop, Update.Height) - DirtyTop;
 
-                if (SourceDc != 0 && DirtyWidth > 0 && DirtyHeight > 0 && Win32kHelper.IsBlitExtentValid(DirtyWidth, DirtyHeight))
+                // The host surface is the whole window. Past the budget it moves and resizes with no pixels.
+                if (SourceDc != 0 && DirtyWidth > 0 && DirtyHeight > 0 && Win32kHelper.IsBlitExtentValid(Update.Width, Update.Height))
                     ReadDirtyBlock(Instance, Update, SourceDc, SourceX + DirtyLeft, SourceY + DirtyTop, DirtyLeft, DirtyTop, DirtyWidth, DirtyHeight);
 
                 Instance.WinHelper.EnqueueLayeredUpdate(Hwnd, Update);
