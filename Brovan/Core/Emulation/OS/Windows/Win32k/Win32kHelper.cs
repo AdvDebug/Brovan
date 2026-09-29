@@ -4737,6 +4737,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 | (Maximized && !Minimized ? WS_MAXIMIZE : 0);
         }
 
+        internal static void SetExStyle(WinWindow Window, uint ExStyle)
+        {
+            if ((ExStyle & WindowExStyleLayered) == 0)
+            {
+                Window.LayeredByAttributes = false;
+                Window.LayeredByUpdate = false;
+            }
+
+            Window.ExStyle = ExStyle;
+        }
+
         /// <summary>
         /// Screen position of the pointer, tracked from the client-relative coordinates the host window manager
         /// reports for the foreground window.
@@ -6420,7 +6431,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Composed = ReplaceByte(Composed, Offset - WindowStateExStyleFirstByte, Updated);
 
                 Window.Visible = (Composed & WinSysHelper.UserWindowStateVisible) != 0;
-                Window.ExStyle = Composed & ~WinSysHelper.UserWindowStateVisible;
+                SetExStyle(Window, Composed & ~WinSysHelper.UserWindowStateVisible);
             }
             else if (Offset == WindowStateDialogByte && (Mask & WindowStateDialogMask) != 0)
             {

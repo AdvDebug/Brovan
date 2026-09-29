@@ -20,7 +20,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (Window.LayeredByUpdate || (Window.ExStyle & Win32kHelper.WindowExStyleLayered) == 0)
+            if ((Window.ExStyle & Win32kHelper.WindowExStyleLayered) == 0)
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
                 Instance.SetBooleanSyscallReturn(false);

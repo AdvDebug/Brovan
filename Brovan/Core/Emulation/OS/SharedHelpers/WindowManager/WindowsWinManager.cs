@@ -1189,6 +1189,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             private bool _activated;
             private bool _layeredByUpdate;
+            private bool _layeredByAttributes;
             private int _boundsX;
             private int _boundsY;
             private int _boundsWidth;
@@ -1429,6 +1430,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _style = hostStyle & ~HostWindowState;
                 _exStyle = hostExStyle;
                 _decorated = (_style & WS_CAPTION) == WS_CAPTION;
+
+                if ((hostExStyle & WS_EX_LAYERED) == 0)
+                    ForgetLayeredMode();
+            }
+
+            private void ForgetLayeredMode()
+            {
+                _layeredByUpdate = false;
+                _layeredByAttributes = false;
+                _layered.Release();
             }
 
             public void SetOwner(ITopLevelWindow owner)
@@ -1530,8 +1541,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 EnsureAlive();
 
-                if ((_exStyle & WS_EX_LAYERED) != 0)
-                    SetLayeredWindowAttributes(_hwnd, colorKey, alpha, flags);
+                if ((_exStyle & WS_EX_LAYERED) == 0)
+                    return;
+
+                if (_layeredByUpdate)
+                    ForgetLayeredMode();
+
+                SetLayeredWindowAttributes(_hwnd, colorKey, alpha, flags);
+                _layeredByAttributes = true;
             }
 
             public unsafe void UpdateLayered(LayeredUpdate update)
@@ -1540,6 +1557,23 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 if ((_exStyle & WS_EX_LAYERED) == 0 || update.Width <= 0 || update.Height <= 0)
                     return;
+
+                // NT: UpdateLayeredWindow fails after SetLayeredWindowAttributes until the style is cleared and set again.
+                if (_layeredByAttributes)
+                {
+                    BeginGuestApply();
+                    try
+                    {
+                        SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, (IntPtr)(_exStyle & ~WS_EX_LAYERED));
+                        SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, (IntPtr)_exStyle);
+                    }
+                    finally
+                    {
+                        EndGuestApply();
+                    }
+
+                    ForgetLayeredMode();
+                }
 
                 _layeredByUpdate = true;
 

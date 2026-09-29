@@ -21,13 +21,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if ((Flags & ~ValidFlags) != 0 || Window.LayeredByUpdate || (Window.ExStyle & Win32kHelper.WindowExStyleLayered) == 0)
+            if ((Flags & ~ValidFlags) != 0 || (Window.ExStyle & Win32kHelper.WindowExStyleLayered) == 0)
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
                 Instance.SetBooleanSyscallReturn(false);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            // NT: works on a window layered by UpdateLayeredWindow.
+            Window.LayeredByUpdate = false;
             Window.LayeredByAttributes = true;
             Window.LayeredColorKey = ColorKey;
             Window.LayeredAlpha = Alpha;
