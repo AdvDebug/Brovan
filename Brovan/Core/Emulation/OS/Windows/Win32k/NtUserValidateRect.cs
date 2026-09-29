@@ -22,7 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             List<GdiClipRect> Area = Win32kHelper.GetRedrawArea(Instance);
             if (Window == null || (RectPtr != 0 && !Win32kHelper.TryReadGuestRect(Instance, RectPtr, Area)))
             {
-                Instance.SetLastWinError(Window == null ? Win32kHelper.ERROR_INVALID_WINDOW_HANDLE : Win32kHelper.ERROR_INVALID_PARAMETER);
+                Instance.SetLastWinError(Window == null ? Win32kHelper.ERROR_INVALID_WINDOW_HANDLE : Win32kHelper.ERROR_NOACCESS);
                 Instance.SetBooleanSyscallReturn(false);
                 return NTSTATUS.STATUS_SUCCESS;
             }

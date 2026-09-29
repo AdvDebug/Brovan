@@ -26,8 +26,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            List<GdiClipRect> PaintArea = new List<GdiClipRect>();
-            Win32kHelper.GetPaintArea(Instance, Window, PaintArea, out GdiClipRect Bounds);
+            List<GdiClipRect> PaintArea = Win32kHelper.GetPaintArea(Instance, Window, out GdiClipRect Bounds);
 
             bool Owed = Window.PaintPending;
             bool Erase = Window.SendEraseBackground;

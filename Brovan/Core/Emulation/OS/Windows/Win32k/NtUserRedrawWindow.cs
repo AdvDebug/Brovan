@@ -22,16 +22,35 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if ((Flags & Win32kHelper.RDW_RESERVED) != 0 || (Hwnd != 0 && Window == null))
+            if (Hwnd != 0 && Window == null)
             {
-                Instance.SetLastWinError(Window == null && Hwnd != 0 ? Win32kHelper.ERROR_INVALID_WINDOW_HANDLE : Win32kHelper.ERROR_INVALID_FLAGS);
+                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
+                Instance.SetBooleanSyscallReturn(false);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            GdiClipRect Rect = default;
+            if (RectPtr != 0 && !Win32kHelper.TryReadGuestRect(Instance, RectPtr, out Rect))
+            {
+                Instance.SetLastWinError(Win32kHelper.ERROR_NOACCESS);
+                Instance.SetBooleanSyscallReturn(false);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            if ((Flags & Win32kHelper.RDW_RESERVED) != 0)
+            {
+                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_FLAGS);
                 Instance.SetBooleanSyscallReturn(false);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
             List<GdiClipRect> Area = Win32kHelper.GetRedrawArea(Instance);
-            bool HasArea = (Region != 0 && Win32kHelper.TryReadRegion(Instance, Region, Area))
-                || (RectPtr != 0 && Win32kHelper.TryReadGuestRect(Instance, RectPtr, Area));
+            bool HasArea = Region != 0 && Win32kHelper.TryReadRegion(Instance, Region, Area);
+            if (!HasArea && RectPtr != 0)
+            {
+                Area.Add(Rect);
+                HasArea = true;
+            }
 
             Win32kHelper.RedrawWindow(Instance, Window, HasArea ? Area : null, Flags);
 

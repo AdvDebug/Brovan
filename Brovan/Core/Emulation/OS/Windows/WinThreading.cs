@@ -139,12 +139,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinWindowCreationStep Step;
     }
 
-    // One SetWindowPos in progress. WM_WINDOWPOSCHANGING can change the request.
+    // One SetWindowPos or EndDeferWindowPos entry in progress. WM_WINDOWPOSCHANGING can change the request.
     public sealed class WinWindowPosChange
     {
         internal Win32k.Win32kHelper.Win32kDeferredWindowPos Position;
         public ulong WindowPos;
         public bool Changed;
+        internal List<Win32k.Win32kHelper.Win32kDeferredWindowPos> Batch;
+        public int Next;
     }
 
     public sealed class WinWindowDestruction

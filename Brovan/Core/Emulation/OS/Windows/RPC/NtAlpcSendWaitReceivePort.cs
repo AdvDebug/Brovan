@@ -107,7 +107,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 PortReply Reply = null;
                 if (SendBytes != null && Port.Handler != null)
                 {
-                    Reply = new PortReply();
+                    Reply = new PortReply { Connection = PortHandle };
                     Port.ReceivedHandles = ReadHandleAttribute(Instance, SendMessageAttributesPtr);
                     Port.Handler(Port, SendBytes, Reply, Instance);
                     ReplyBytes = Reply.Data ?? SendBytes;

@@ -2193,6 +2193,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public byte[] Data;
         public List<ulong> Handles;
         public long NotBeforeTick;
+        public ulong Connection;
 
         public void AttachHandle(ulong Handle)
         {

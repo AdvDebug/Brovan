@@ -18,6 +18,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            Window.UpdateDirty = false;
+
             List<GdiClipRect> Rects = Win32kHelper.GetRedrawArea(Instance);
             if (Window.PaintPending)
                 Win32kHelper.GetUpdateRegion(Instance, Window, Rects);

@@ -46,7 +46,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             uint Flags = SwpNoZOrder | (ShowCommand == SwHide ? SwpHideWindow : SwpShowWindow);
 
-            Win32kHelper.ApplyWindowPos(Instance, new Win32kHelper.Win32kDeferredWindowPos
+            Instance.SetLastWinError(0);
+            if (Win32kHelper.SendWindowPos(Instance, new Win32kHelper.Win32kDeferredWindowPos
             {
                 Hwnd = Hwnd,
                 X = Left,
@@ -54,11 +55,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Width = Right - Left,
                 Height = Bottom - Top,
                 Flags = Flags,
-            });
+            }, out _))
+            {
+                return NTSTATUS.STATUS_SUCCESS;
+            }
 
-            Instance.WinHelper.PresentDesktop();
-
-            Instance.SetLastWinError(0);
             Win32kHelper.ReturnAfterNotifications(Instance, 1);
             return NTSTATUS.STATUS_SUCCESS;
         }

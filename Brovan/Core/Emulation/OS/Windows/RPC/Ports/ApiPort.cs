@@ -104,7 +104,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (DwmApiPortHandler.TryHandle(Port?.Name, SendData, Reply, Instance))
                 return NTSTATUS.STATUS_SUCCESS;
 
-            Reply.Data = HandleGenericRpcPort(Port, SendData, Instance);
+            Reply.Data = HandleGenericRpcPort(Port, SendData, Reply.Connection, Instance);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -196,7 +196,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return Reply;
         }
 
-        private static byte[] HandleGenericRpcPort(WinPort Port, byte[] SendData, BinaryEmulator Instance)
+        private static byte[] HandleGenericRpcPort(WinPort Port, byte[] SendData, ulong Connection, BinaryEmulator Instance)
         {
             if (TryBuildDceRpcReply(Port, SendData, out byte[] RpcReply, Instance))
             {
@@ -207,7 +207,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             if (LrpcPacket.TryParse(SendData, out LrpcMessage Message))
             {
-                if (RpcssPortHandler.TryHandle(Port?.Name, Message, out byte[] RpcssReply))
+                if (RpcssPortHandler.TryHandle(Port?.Name, Connection, Message, Instance.WinHelper.PID, out byte[] RpcssReply))
                     return RpcssReply;
 
                 if (Message.Type == LrpcMessageType.Bind)

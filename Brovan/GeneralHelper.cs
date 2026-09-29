@@ -3197,7 +3197,8 @@ namespace Brovan
 
                         if (!TryGetHostAttributes(new FileInfo(Current), out FileAttributes Attributes))
                         {
-                            Missing = true;
+                            // An unreadable entry can still hold a link below it.
+                            Missing = (int)Attributes == -1;
                             continue;
                         }
 

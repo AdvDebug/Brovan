@@ -222,9 +222,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public uint ReadSyscallNumber()
         {
-            return Emulator.ReadRegister32(Emulator._binary.Architecture == BinaryArchitecture.x64
-                ? Registers.UC_X86_REG_RAX
-                : Registers.UC_X86_REG_EAX);
+            return Emulator._binary.Architecture == BinaryArchitecture.x64
+                ? (uint)Emulator.ReadRegister(Registers.UC_X86_REG_RAX)
+                : Emulator.ReadRegister32(Registers.UC_X86_REG_EAX);
         }
 
         /// <summary>
@@ -7365,6 +7365,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Host geometry and host input belong to this window, not always the foreground one.
         public ulong PresentedWindow { get; private set; }
 
+        // A top-level host draws GDI straight into its windows.
+        public void PresentInvalidation()
+        {
+            if (!UsesTopLevelHost)
+                PresentDesktop();
+        }
+
         public void PresentDesktop()
         {
             try
@@ -9774,6 +9781,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case WinMutex Mutex:
                     WinMutexes.Remove(Mutex);
+                    break;
+
+                case WinPort Port when Port.IsServer:
+                    WinPorts.Remove(Port);
                     break;
 
                 case EmulatedThread Thread:

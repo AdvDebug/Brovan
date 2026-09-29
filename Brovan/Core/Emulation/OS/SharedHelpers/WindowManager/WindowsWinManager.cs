@@ -1578,8 +1578,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 BeginGuestApply();
                 try
                 {
-                    UpdateLayeredWindow(_hwnd, screenDc, ref destination, ref size, haveSurface ? _layered.Dc : IntPtr.Zero,
-                        ref source0, update.ColorKey, ref blend, update.Flags & (ULW_COLORKEY | ULW_ALPHA | ULW_OPAQUE));
+                    // NT: with no source DC, UpdateLayeredWindow fails a size or source point.
+                    if (!haveSurface)
+                    {
+                        SetWindowPos(_hwnd, IntPtr.Zero, update.X, update.Y, update.Width, update.Height,
+                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                    }
+
+                    UpdateLayeredWindow(_hwnd, screenDc, haveSurface ? &destination : null, haveSurface ? &size : null,
+                        haveSurface ? _layered.Dc : IntPtr.Zero, haveSurface ? &source0 : null, update.ColorKey, &blend,
+                        update.Flags & (ULW_COLORKEY | ULW_ALPHA | ULW_OPAQUE));
                 }
                 finally
                 {
@@ -2072,8 +2080,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool UpdateLayeredWindow(IntPtr hWnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc,
-            ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint dwFlags);
+        private static extern unsafe bool UpdateLayeredWindow(IntPtr hWnd, IntPtr hdcDst, POINT* pptDst, SIZE* psize, IntPtr hdcSrc,
+            POINT* pptSrc, uint crKey, BLENDFUNCTION* pblend, uint dwFlags);
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

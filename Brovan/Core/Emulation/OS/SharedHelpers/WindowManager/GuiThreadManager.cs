@@ -773,15 +773,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _pendingActivation = null;
             }
 
-            for (int i = 0; i < _applyingDestroyed.Count; i++)
-                DestroyHostWindow(_applyingDestroyed[i]);
-
-            _applyingDestroyed.Clear();
-
+            // Owner changes first. DestroyWindow also destroys owned windows.
             for (int i = 0; i < _applyingTopLevels.Count; i++)
                 ApplyTopLevel(_applyingTopLevels[i]);
 
             _applyingTopLevels.Clear();
+
+            for (int i = 0; i < _applyingDestroyed.Count; i++)
+                DestroyHostWindow(_applyingDestroyed[i]);
+
+            _applyingDestroyed.Clear();
 
             if (stacking != null)
                 Restack(stacking);

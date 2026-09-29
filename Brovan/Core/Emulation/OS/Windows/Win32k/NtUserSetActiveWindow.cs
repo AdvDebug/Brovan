@@ -26,6 +26,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            // NT: another thread's window is refused with no error.
+            uint ThreadId = Instance.CurrentThread?.ThreadId ?? 0;
+            if (Window.OwnerThreadId != 0 && Window.OwnerThreadId != ThreadId)
+            {
+                Instance.SetRawSyscallReturn(0);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
             // NT: a child window is refused, and the old active window is still returned.
             if ((Window.Style & (WS_CHILD | WS_POPUP)) != WS_CHILD)
                 Win32kHelper.ActivateWindow(Instance, Window, false);

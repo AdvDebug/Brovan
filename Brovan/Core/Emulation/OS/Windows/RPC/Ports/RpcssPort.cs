@@ -40,7 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private const uint OrOk = 0;
 
-        private static readonly Dictionary<uint, Guid> Contexts = new Dictionary<uint, Guid>();
+        private static readonly Dictionary<(ulong Connection, uint Context), Guid> Contexts = new Dictionary<(ulong Connection, uint Context), Guid>();
         private static readonly Dictionary<uint, byte[]> WindowProps = new Dictionary<uint, byte[]>();
         private static readonly Guid ResolverHandle = Guid.NewGuid();
         private static readonly Guid ProcessIdentifier = Guid.NewGuid();
@@ -49,7 +49,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private static ulong NextId = 0x1000;
         private static uint NextCookie = 1;
 
-        public static bool TryHandle(string Port, in LrpcMessage Message, out byte[] Reply)
+        public static bool TryHandle(string Port, ulong Connection, in LrpcMessage Message, uint ProcessId, out byte[] Reply)
         {
             Reply = null;
 
@@ -68,7 +68,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 if (Interface != LocalObjectExporter && Interface != Scm)
                     return false;
 
-                Contexts[Context] = Interface;
+                Contexts[(Connection, Context)] = Interface;
                 Reply = LrpcPacket.BuildBindAccept(Message, out _);
                 return Reply != null;
             }
@@ -77,12 +77,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return false;
 
             uint RequestContext = BinaryPrimitives.ReadUInt32LittleEndian(Payload.Slice(RequestContextOffset, 4));
-            if (!Contexts.TryGetValue(RequestContext, out Guid Target))
+            if (!Contexts.TryGetValue((Connection, RequestContext), out Guid Target))
                 return false;
 
             byte[] Stub = null;
             if (Target == LocalObjectExporter)
-                Stub = HandleLocalObjectExporter(Message.ProcNumber, Message.StubData);
+                Stub = HandleLocalObjectExporter(Message.ProcNumber, Message.StubData, ProcessId);
             else if (Target == Scm)
                 Stub = HandleScm(Message.ProcNumber, Message.StubData);
 
@@ -93,12 +93,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return true;
         }
 
-        private static byte[] HandleLocalObjectExporter(uint ProcNumber, ReadOnlySpan<byte> Stub)
+        private static byte[] HandleLocalObjectExporter(uint ProcNumber, ReadOnlySpan<byte> Stub, uint ProcessId)
         {
             switch (ProcNumber)
             {
                 case ProcConnect:
-                    return Connect(Stub);
+                    return Connect(Stub, ProcessId);
 
                 case ProcAllocateReservedIds:
                     return AllocateReservedIds(Stub);
@@ -130,7 +130,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return null;
         }
 
-        private static byte[] Connect(ReadOnlySpan<byte> Stub)
+        private static byte[] Connect(ReadOnlySpan<byte> Stub, uint ProcessId)
         {
             if (!TryReadConnectIdCount(Stub, out uint IdCount))
                 return null;
@@ -167,7 +167,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.WriteUInt32(0);
             Writer.WriteUInt32(0);
 
-            Writer.WriteUInt32((uint)Environment.ProcessId);
+            Writer.WriteUInt32(ProcessId);
             Writer.WriteUInt32(ScmProcessId);
             Writer.WriteUInt64(ProcessSignature);
 
