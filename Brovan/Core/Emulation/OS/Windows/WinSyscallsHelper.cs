@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
 using System.Text;
+using System.Buffers;
 using System.Buffers.Binary;
 using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Emulation.OS.Windows.Win32k;
@@ -219,6 +220,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Emulator.CreateEmulatedDeadlineMilliseconds(Ms);
         }
 
+        public uint ReadSyscallNumber()
+        {
+            return Emulator.ReadRegister32(Emulator._binary.Architecture == BinaryArchitecture.x64
+                ? Registers.UC_X86_REG_RAX
+                : Registers.UC_X86_REG_EAX);
+        }
+
         /// <summary>
         /// Parks the thread for one slice and resumes it on the syscall instruction, so the syscall runs
         /// again. Sleeping here instead would stop every other thread of the process.
@@ -232,9 +240,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             ulong SyscallRip = GetSyscallRip(Thread, false);
 
-            State.RetrySyscallNumber = Emulator.ReadRegister32(Emulator._binary.Architecture == BinaryArchitecture.x64
-                ? Registers.UC_X86_REG_RAX
-                : Registers.UC_X86_REG_EAX);
+            State.RetrySyscallNumber = ReadSyscallNumber();
             State.RetrySyscallActive = true;
 
             Thread.WaitActive = true;
@@ -1886,17 +1892,26 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ushort NextWindowClassAtom = 0xC000;
         private readonly Dictionary<ushort, ushort> ReservedSystemClassAtoms = new();
         private readonly Dictionary<ushort, string> ReservedSystemClassNames = new();
+        // Bottom of the z-order first.
         public readonly List<ulong> TopLevelWindows = new();
         private const uint UserHandleEntryCount = 0x200;
         private const uint UserHandleEntrySize = 0x20;
         private const ulong UserWindowObjectSize = 0x200;
         private const ulong UserClassObjectSize = 0x100;
         private const ulong UserDesktopInfoSize = 0x48;
+        private const ulong UserDisplayInfoScreenRightOffset = 0x20;
+        private const ulong UserDisplayInfoScreenBottomOffset = 0x24;
         private const ulong UserPrimaryMonitorSize = 0x1000;
         private const ulong Win32ClientInfoX64Base = 0x800;
         private const ulong Win32ClientInfoX86Base = 0x6CC;
-        private const int Win32ClientInfoPDeskInfoSlot = 2;
+        private const ulong Win32ClientInfoX64ExpWinVerOffset = 0x10;
+        private const ulong Win32ClientInfoX86ExpWinVerOffset = 0x08;
+        private const ulong Win32ClientInfoX64CompatFlags2Offset = 0x18;
+        private const ulong Win32ClientInfoX86CompatFlags2Offset = 0x10;
+        private const uint CompatFlags2OldFrameMetrics = 0x20000000;
         private const int Win32ClientInfoDesktopSlot = 4;
+        private const ulong UserDeskInfoFlagsOffset = 0x40;
+        private const uint DeskInfoComposited = 0x1;
         private const int Win32ClientInfoActiveWindowSlot = 8;
         private const int Win32ClientInfoThreadInfoSlot = 35;
         private const int Win32ClientInfoFocusInfoSlot = 12;
@@ -1951,6 +1966,31 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int MessageBoxStringStride = 40;
         private const int MessageBoxStringCaptionBytes = 32;
         private const ulong UserServerInfoLogPixelsOffset = 0x1B56;
+        private const ulong UserServerInfoProcessDpiGenerationOffset = 0x1B66;
+
+        // aiSysMet, then one block of DPI dependent metrics per DPI plateau.
+        private const ulong UserServerInfoSystemMetricsOffset = 0x768;
+        private const int UserSystemMetricCount = 97;
+        private const ulong UserServerInfoDpiMetricsOffset = 0x8EC;
+        private const int UserDpiMetricSlotCount = 30;
+        private const int SmCxMinSpacing = 47;
+        private const int SmCyMinSpacing = 48;
+        private const int SmCxMinimized = 57;
+        private const int SmCyMinimized = 58;
+        private const int MinimizedWidth96 = 154;
+        private const int MinimizedExtra = 6;
+
+        private static readonly (int Index, int Value)[] UserFixedSystemMetrics =
+        {
+            (5, 1), (6, 1), (7, 3), (8, 3), (19, 1), (36, 4), (37, 4), (43, 5), (45, 2), (46, 2), (56, 8), (63, 3),
+            (68, 4), (69, 4), (75, 1), (80, 1), (81, 1), (83, 1), (84, 1), (85, 4),
+        };
+
+        // Windows defaults at 96 DPI, in user32's slot order.
+        private static readonly int[] UserDpiMetrics96 =
+        {
+            17, 17, 23, 17, 17, 32, 32, 32, 32, 20, 17, 17, 22, 22, 4, 4, 136, 39, 75, 75, 16, 16, 23, 22, 22, 19, 19, 15, 15, 4,
+        };
         private const ulong UserServerInfoKeyStateGenerationOffset = 0x1B48;
         private const ulong UserServerInfoAsyncKeyStateGenerationOffset = 0x1B4C;
         private const int LogFontSize = 92;
@@ -1980,6 +2020,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int UserSharedInfoMessageTablesOffset = 0x28;
         private const int UserSharedInfoMessageTableSize = 0x10;
         internal const int UserSharedInfoMessageTableCount = Win32kHelper.FnidCount + 2;
+        internal const int UserDefWindowMessageTableIndex = Win32kHelper.FnidCount;
         internal const uint UserMessageBitmaskLastMessage = 0x3FF;
 
         internal static int UserSharedInfoMessageTableOffset(int Index)
@@ -2196,6 +2237,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 "\\RPC Control\\plugplay",
                 "\\RPC Control\\tapsrv",
                 "\\RPC Control\\keysvc",
+                "\\RPC Control\\lsapolicylookup",
             })
             {
                 WinPorts.Add(new WinPort
@@ -3614,7 +3656,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : Emulator.ReadMemoryUInt(Table + (ulong)Index * 4);
         }
 
-        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinWindowCreation Creation, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, WinWindowDestruction Destruction = null)
+        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinWindowCreation Creation, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, WinWindowDestruction Destruction = null, WinWindowPosChange PositionChange = null, WinPaintBegin PaintBegin = null, WinScrollChildMoves ScrollChildMoves = null)
         {
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null || Callback == 0 || PointerSize != 8)
@@ -3632,6 +3674,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 PaintRetryHwnd = PaintRetryHwnd,
                 WindowCreation = Creation,
                 WindowDestruction = Destruction,
+                WindowPosChange = PositionChange,
+                PaintBegin = PaintBegin,
+                ScrollChildMoves = ScrollChildMoves,
             };
 
             if (SyscallRetryRip != 0)
@@ -3954,17 +3999,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
+        public bool TryGetPrimaryMonitorWorkRect(out int Left, out int Top, out int Right, out int Bottom)
+        {
+            return TryReadPrimaryMonitorRect(0x2C, out Left, out Top, out Right, out Bottom);
+        }
+
         public bool TryGetPrimaryMonitorRect(out int Left, out int Top, out int Right, out int Bottom)
+        {
+            return TryReadPrimaryMonitorRect(0x1C, out Left, out Top, out Right, out Bottom);
+        }
+
+        // tagMONITOR holds rcMonitor at +0x1C and rcWork at +0x2C.
+        private bool TryReadPrimaryMonitorRect(ulong Offset, out int Left, out int Top, out int Right, out int Bottom)
         {
             Left = Top = Right = Bottom = 0;
             ulong Monitor = EnsureUserPrimaryMonitor();
             if (Monitor == 0)
                 return false;
 
-            Left = (int)Emulator.ReadMemoryUInt(Monitor + 0x1C);
-            Top = (int)Emulator.ReadMemoryUInt(Monitor + 0x20);
-            Right = (int)Emulator.ReadMemoryUInt(Monitor + 0x24);
-            Bottom = (int)Emulator.ReadMemoryUInt(Monitor + 0x28);
+            Left = (int)Emulator.ReadMemoryUInt(Monitor + Offset);
+            Top = (int)Emulator.ReadMemoryUInt(Monitor + Offset + 4);
+            Right = (int)Emulator.ReadMemoryUInt(Monitor + Offset + 8);
+            Bottom = (int)Emulator.ReadMemoryUInt(Monitor + Offset + 12);
             return Right > Left && Bottom > Top;
         }
 
@@ -4001,6 +4057,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Frame.WindowCreation != null && ContinueWindowCreation(Frame, ResultValue, out ResultValue))
                 return true;
 
+            if (Frame.WindowPosChange != null)
+            {
+                Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
+                if (Win32kHelper.ContinueWindowPos(Emulator, Frame.WindowPosChange, out ResultValue))
+                    return true;
+            }
+
             if (Frame.WindowDestruction != null)
             {
                 Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
@@ -4008,6 +4071,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return true;
 
                 ResultValue = Frame.WindowDestruction.Result;
+            }
+
+            if (Frame.PaintBegin != null)
+                ResultValue = Win32kHelper.FinishBeginPaint(Emulator, Frame.PaintBegin, ResultValue);
+
+            if (Frame.ScrollChildMoves != null)
+            {
+                WinScrollChildMoves Moves = Frame.ScrollChildMoves;
+                Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
+                if (Win32kHelper.SendScrollChildMoves(Emulator, Moves))
+                    return true;
+
+                ResultValue = Win32kHelper.FinishScrollWindow(Emulator, Moves.UpdateAddress, Moves.UpdateRect, Moves.Result);
             }
 
             ReturnFromUserCallback(Frame, ResultValue);
@@ -4073,7 +4149,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 0, PackCoordinates(ClientLeft, ClientTop), Creation);
         }
 
-        private static ulong PackCoordinates(int Low, int High)
+        internal static ulong PackCoordinates(int Low, int High)
         {
             return (ulong)(uint)((Low & 0xFFFF) | (High << 16));
         }
@@ -4349,11 +4425,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool EnsureUserMessageBitmask(out ulong Bitmask)
         {
-            Bitmask = EnsureUserMessageBitmaskPage(ref UserMessageBitmaskAddress);
+            Bitmask = EnsureUserMessageBitmaskPage(ref UserMessageBitmaskAddress, ReadOnlySpan<uint>.Empty);
             return Bitmask != 0;
         }
 
-        private ulong EnsureUserMessageBitmaskPage(ref ulong Cached)
+        // DefWindowMsgs. user32 answers a message itself when its bit is clear.
+        public bool EnsureUserDefWindowMessageBitmask(out ulong Bitmask)
+        {
+            Bitmask = EnsureUserMessageBitmaskPage(ref UserDefWindowMessageBitmaskAddress, UserClientDefWindowMessages);
+            return Bitmask != 0;
+        }
+
+        private ulong UserDefWindowMessageBitmaskAddress;
+        private static readonly uint[] UserClientDefWindowMessages = { Win32kHelper.WM_WINDOWPOSCHANGING, Win32kHelper.WM_WINDOWPOSCHANGED };
+
+        private ulong EnsureUserMessageBitmaskPage(ref ulong Cached, ReadOnlySpan<uint> ClientMessages)
         {
             if (Cached != 0 && Emulator.IsRegionMapped(Cached, UserMessageBitmaskSize))
                 return Cached;
@@ -4362,8 +4448,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Address == 0)
                 return 0;
 
-            Span<byte> Buffer = Shared.GetSpan((int)UserMessageBitmaskSize);
+            Span<byte> Buffer = Shared.GetSpan((int)UserMessageBitmaskSize).Slice(0, (int)UserMessageBitmaskSize);
             Buffer.Fill(0xFF);
+            foreach (uint Message in ClientMessages)
+                Buffer[(int)(Message >> 3)] &= (byte)~(1 << (int)(Message & 7));
+
             if (!Emulator._emulator.WriteMemory(Address, Buffer))
                 return 0;
 
@@ -4487,6 +4576,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint TransparentBackgroundMode = 1;
         private const int DcAttrSelectedBrushOffset = 0xA0;
         private const int DcAttrSelectedPenOffset = 0xA8;
+        private const int DcAttrWindowOrgXOffset = 0x134;
+        private const int DcAttrWindowOrgYOffset = 0x138;
         private const int DcAttrViewportOrgXOffset = 0x144;
         private const int DcAttrViewportOrgYOffset = 0x148;
         private const int DcAttrCurrentPosXOffset = 0xD8;
@@ -4552,7 +4643,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             return DcAttr == 0 ? 0 : Emulator.ReadMemoryULong(DcAttr + DcAttrSelectedPenOffset);
         }
 
-        public void ReadDcViewportOrigin(ulong Hdc, out int X, out int Y)
+        private const int DcAttrVisibleTypeOffset = 0x74;
+
+        public void WriteDcVisibleArea(ulong Hdc, int Type, int Left, int Top, int Right, int Bottom)
+        {
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            if (DcAttr == 0)
+                return;
+
+            Span<byte> Buffer = stackalloc byte[20];
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer, Type);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(4), Left);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(8), Top);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(12), Right);
+            BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(16), Bottom);
+            Emulator._emulator.WriteMemory(DcAttr + DcAttrVisibleTypeOffset, Buffer);
+        }
+
+        // Device position of logical 0,0.
+        public void ReadDcOrigin(ulong Hdc, out int X, out int Y)
         {
             X = 0;
             Y = 0;
@@ -4561,8 +4670,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DcAttr == 0)
                 return;
 
-            X = unchecked((int)Emulator.ReadMemoryUInt(DcAttr + DcAttrViewportOrgXOffset));
-            Y = unchecked((int)Emulator.ReadMemoryUInt(DcAttr + DcAttrViewportOrgYOffset));
+            X = unchecked((int)Emulator.ReadMemoryUInt(DcAttr + DcAttrViewportOrgXOffset) - (int)Emulator.ReadMemoryUInt(DcAttr + DcAttrWindowOrgXOffset));
+            Y = unchecked((int)Emulator.ReadMemoryUInt(DcAttr + DcAttrViewportOrgYOffset) - (int)Emulator.ReadMemoryUInt(DcAttr + DcAttrWindowOrgYOffset));
         }
 
         // gdi32 reads this back out of DC_ATTR and only calls the kernel when it cannot batch the change.
@@ -4634,106 +4743,188 @@ namespace Brovan.Core.Emulation.OS.Windows
             return GdiHandleTableAddress;
         }
 
-        private const ulong TebGdiBatchOffsetOffset = 0x0FE8;
-        private const ulong TebGdiBatchHdcOffset = 0x0FF0;
-        private const ulong TebGdiBatchBufferOffset = 0x0FF8;
-        private const uint GdiBatchBufferSize = 310;
-        private const ushort GdiBatchCmdTextOut = 2;
+        // A 32 bit gdi32 batches into the native TEB with the same layout.
+        private const ulong TebGdiBatchOffsetOffset = 0x2F0;
+        private const ulong TebGdiBatchHdcOffset = 0x2F8;
+        private const ulong TebGdiBatchBufferOffset = 0x300;
+        private const ulong TebGdiBatchCountOffset = 0x1740;
+        private const int GdiBatchBufferBytes = 310 * 4;
+        private const uint GdiBatchMaxCount = 0x134;
+        private const uint GdiBatchOffsetKeepMask = 0x40000000;
+
+        private const int GdiBatchPatBlt = 0;
+        private const int GdiBatchPolyPatBlt = 1;
+        private const int GdiBatchTextOut = 2;
+        private const int GdiBatchExtSelectClipRgn = 5;
+        private const int GdiBatchSelectFont = 6;
+        private const int GdiBatchDeleteRegion = 7;
+        private const int GdiBatchDeleteObject = 8;
+
         private const uint GdiBatchNoRectFlag = 0x80000000u;
         private const int GdiBatchTextOutStringOffset = 0x54;
 
+        // NT: the system service entry flushes the GDI batch before any win32k service.
         public void FlushGdiBatch()
         {
             ulong Teb = Emulator.NativeTEB;
             if (Teb == 0)
                 return;
 
-            uint BatchOffset = Emulator.ReadMemoryUInt(Teb + TebGdiBatchOffsetOffset);
-            uint RealBatchOffset = BatchOffset & ~GdiBatchNoRectFlag;
-            if (RealBatchOffset == 0 || RealBatchOffset > GdiBatchBufferSize * 4)
-            {
-                Emulator._emulator.WriteMemory(Teb + TebGdiBatchOffsetOffset, 0u, 4);
+            uint Count = Emulator.ReadMemoryUInt(Teb + TebGdiBatchCountOffset);
+            if (Count == 0)
                 return;
-            }
 
-            ulong BatchHdc = Emulator.ReadMemoryULong(Teb + TebGdiBatchHdcOffset);
-            ulong BufferAddr = Teb + TebGdiBatchBufferOffset;
+            uint Offset = Emulator.ReadMemoryUInt(Teb + TebGdiBatchOffsetOffset);
+            ulong Hdc = Emulator.ReadMemoryULong(Teb + TebGdiBatchHdcOffset);
+            Emulator._emulator.WriteMemory(Teb + TebGdiBatchCountOffset, 0u, 4);
+            Emulator._emulator.WriteMemory(Teb + TebGdiBatchOffsetOffset, Offset & GdiBatchOffsetKeepMask, 4);
+            Emulator._emulator.WriteMemory(Teb + TebGdiBatchHdcOffset, 0UL, 8);
 
-            Span<byte> BatchBuffer = Shared.GetSpan((ulong)(GdiBatchBufferSize * 4));
-            if (!Emulator.ReadMemory(BufferAddr, BatchBuffer.Slice(0, (int)(GdiBatchBufferSize * 4)), GdiBatchBufferSize * 4))
-            {
-                Emulator._emulator.WriteMemory(Teb + TebGdiBatchOffsetOffset, 0u, 4);
+            if (Count - 1 > GdiBatchMaxCount)
                 return;
-            }
 
-            int Offset = 0;
-            while (Offset + 4 <= (int)RealBatchOffset)
+            Span<byte> Buffer = stackalloc byte[GdiBatchBufferBytes];
+            if (!Emulator.ReadMemory(Teb + TebGdiBatchBufferOffset, Buffer))
+                return;
+
+            bool DcValid = Win32kHelper.IsKnownDc(Emulator, Hdc);
+            int Position = 0;
+            for (; Count > 0 && Position + 4 <= Buffer.Length; Count--)
             {
-                short Size = (short)(BatchBuffer[Offset] | (BatchBuffer[Offset + 1] << 8));
-                short Cmd = (short)(BatchBuffer[Offset + 2] | (BatchBuffer[Offset + 3] << 8));
-
-                if (Size <= 0 || Offset + Size > (int)RealBatchOffset)
+                int Size = BinaryPrimitives.ReadUInt16LittleEndian(Buffer.Slice(Position));
+                int Command = BinaryPrimitives.ReadUInt16LittleEndian(Buffer.Slice(Position + 2));
+                if (Position + Size > Buffer.Length)
                     break;
 
-                if (Cmd == GdiBatchCmdTextOut && Size >= GdiBatchTextOutStringOffset)
-                {
-                    int X = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x18, 4));
-                    int Y = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x1C, 4));
-                    uint Options = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(BatchBuffer.Slice(Offset + 0x20, 4));
-                    int RectLeft = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x24, 4));
-                    int RectTop = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x28, 4));
-                    int RectRight = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x2C, 4));
-                    int RectBottom = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x30, 4));
-                    uint Count = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(BatchBuffer.Slice(Offset + 0x38, 4));
-                    uint DxSize = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(BatchBuffer.Slice(Offset + 0x3C, 4));
-                    int VpOrgX = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x4C, 4));
-                    int VpOrgY = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(BatchBuffer.Slice(Offset + 0x50, 4));
+                RunGdiBatchCommand(Hdc, DcValid, Command, Buffer.Slice(Position, Size));
+                Position += (Size + 7) & ~7;
+            }
+        }
 
-                    bool HasRect = (Options & GdiBatchNoRectFlag) == 0;
-                    if (!HasRect)
-                    {
-                        RectLeft = 0;
-                        RectTop = 0;
-                        RectRight = 0;
-                        RectBottom = 0;
-                    }
-
-                    if (Count > 0 && BatchHdc != 0)
-                    {
-                        int PayloadSize = Size - GdiBatchTextOutStringOffset;
-                        int DxBytes = (int)DxSize;
-                        int TextBytes = (int)(Count * 2);
-
-                        if (DxBytes <= PayloadSize && TextBytes <= PayloadSize - DxBytes)
-                        {
-                            int StringStart = Offset + GdiBatchTextOutStringOffset + DxBytes;
-                            string Text = string.Empty;
-                            if (TextBytes > 0)
-                            {
-                                Span<byte> Raw = BatchBuffer.Slice(StringStart, TextBytes);
-                                char[] Chars = new char[Count];
-                                for (int i = 0; i < Count; i++)
-                                    Chars[i] = (char)(Raw[i * 2] | (Raw[i * 2 + 1] << 8));
-                                Text = new string(Chars);
-                            }
-
-                            ulong Hwnd = Win32kHelper.GetHwndFromDc(Emulator, BatchHdc);
-                            if (Hwnd != 0)
-                            {
-                                // The record carries the origin the batched call drew through, not the one
-                                // the DC holds now.
-                                EnqueueTextRender(Hwnd, 0, Win32kHelper.ResolveDcFont(Emulator, BatchHdc), Text, X + VpOrgX, Y + VpOrgY,
-                                    RectLeft + VpOrgX, RectTop + VpOrgY, RectRight + VpOrgX, RectBottom + VpOrgY, Options);
-                            }
-                        }
-                    }
-                }
-
-                Offset += Size;
+        // NT: NtGdiFlushUserBatchInternal. Only the deletions run when the batch's DC is gone.
+        private void RunGdiBatchCommand(ulong Hdc, bool DcValid, int Command, ReadOnlySpan<byte> Entry)
+        {
+            switch (Command)
+            {
+                case GdiBatchDeleteRegion:
+                case GdiBatchDeleteObject:
+                    if (Entry.Length >= 0x10)
+                        Win32kHelper.DeleteGdiObject(Emulator, BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(8)));
+                    return;
             }
 
-            Emulator._emulator.WriteMemory(Teb + TebGdiBatchOffsetOffset, 0u, 4);
-            Emulator._emulator.WriteMemory(Teb + TebGdiBatchHdcOffset, 0UL, 8);
+            if (!DcValid)
+                return;
+
+            switch (Command)
+            {
+                case GdiBatchPatBlt:
+                    if (Entry.Length >= 0x48)
+                    {
+                        uint Rop = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(32));
+                        if (!Win32kHelper.RopUsesSource(Rop))
+                        {
+                            Win32kHelper.PatBltDc(Emulator, Hdc, BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(4)),
+                                BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(8)), BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(12)),
+                                BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(16)), Rop, BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(24)));
+                        }
+                    }
+                    return;
+
+                case GdiBatchPolyPatBlt:
+                    if (Entry.Length >= 0x38)
+                    {
+                        const int FirstRect = 48;
+                        const int RectSize = 24;
+                        uint Rop = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(4));
+                        uint Rects = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(12));
+                        if (Win32kHelper.RopUsesSource(Rop) || Rects > (uint)((Entry.Length - FirstRect) / RectSize))
+                            return;
+
+                        for (int i = 0; i < (int)Rects; i++)
+                        {
+                            ReadOnlySpan<byte> Rect = Entry.Slice(FirstRect + i * RectSize, RectSize);
+                            Win32kHelper.PatBltDc(Emulator, Hdc, BinaryPrimitives.ReadInt32LittleEndian(Rect),
+                                BinaryPrimitives.ReadInt32LittleEndian(Rect.Slice(4)), BinaryPrimitives.ReadInt32LittleEndian(Rect.Slice(8)),
+                                BinaryPrimitives.ReadInt32LittleEndian(Rect.Slice(12)), Rop, BinaryPrimitives.ReadUInt64LittleEndian(Rect.Slice(16)));
+                        }
+                    }
+                    return;
+
+                case GdiBatchTextOut:
+                    RunGdiBatchTextOut(Hdc, Entry);
+                    return;
+
+                case GdiBatchExtSelectClipRgn:
+                    if (Entry.Length >= 0x18)
+                    {
+                        Win32kHelper.SelectDcClipRect(Emulator, Hdc, BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(4)),
+                            new GdiClipRect
+                            {
+                                Left = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(8)),
+                                Top = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(12)),
+                                Right = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(16)),
+                                Bottom = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(20)),
+                            });
+                    }
+                    return;
+
+                case GdiBatchSelectFont:
+                    if (Entry.Length >= 0x10)
+                        Win32kHelper.SelectFont(Emulator, Hdc, BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(8)));
+                    return;
+            }
+        }
+
+        private void RunGdiBatchTextOut(ulong Hdc, ReadOnlySpan<byte> Entry)
+        {
+            if (Entry.Length < GdiBatchTextOutStringOffset)
+                return;
+
+            int X = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x18));
+            int Y = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x1C));
+            uint Options = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(0x20));
+            int RectLeft = 0, RectTop = 0, RectRight = 0, RectBottom = 0;
+            if ((Options & GdiBatchNoRectFlag) == 0)
+            {
+                RectLeft = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x24));
+                RectTop = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x28));
+                RectRight = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x2C));
+                RectBottom = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x30));
+            }
+
+            // NT: the string follows the header, and a Dx array follows the string.
+            uint Count = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(0x38));
+            ulong RecordViewport = BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(0x4C));
+
+            int Payload = Entry.Length - GdiBatchTextOutStringOffset;
+            if (Count == 0 || Count > (uint)Payload / 2)
+                return;
+
+            string Text = System.Text.Encoding.Unicode.GetString(Entry.Slice(GdiBatchTextOutStringOffset, (int)Count * 2));
+
+            // NT: the flush draws through the record's viewport origin, not the DC's current one.
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            ulong CurrentViewport = 0;
+            if (DcAttr != 0)
+            {
+                CurrentViewport = Emulator.ReadMemoryULong(DcAttr + DcAttrViewportOrgXOffset);
+                Emulator._emulator.WriteMemory(DcAttr + DcAttrViewportOrgXOffset, RecordViewport, 8);
+            }
+
+            try
+            {
+                ulong Hwnd = Win32kHelper.GetHwndFromDc(Emulator, Hdc);
+                if (Hwnd == 0)
+                    Win32kHelper.TryRenderTextToDcBitmap(Emulator, Hdc, Text, X, Y, Options);
+                else
+                    EnqueueTextRender(Hwnd, Hdc, Win32kHelper.ResolveDcFont(Emulator, Hdc), Text, X, Y, RectLeft, RectTop, RectRight, RectBottom, Options);
+            }
+            finally
+            {
+                if (DcAttr != 0)
+                    Emulator._emulator.WriteMemory(DcAttr + DcAttrViewportOrgXOffset, CurrentViewport, 8);
+            }
         }
 
         public bool FreeGdiHandle(ulong Handle)
@@ -4754,6 +4945,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             GdiHandleUniq[Index]++;
             FreeGdiHandleIndices.Push(Index);
             return true;
+        }
+
+        private ulong GdiRegionObjectPool;
+
+        public ulong GetGdiRegionObject(ulong Handle)
+        {
+            ushort Index = (ushort)(Handle & 0xFFFF);
+            if (Index == 0 || Index >= GdiHandleEntryCount)
+                return 0;
+
+            ulong PoolSize = (ulong)GdiHandleEntryCount * Win32kHelper.RegionObjectSize;
+            if (GdiRegionObjectPool == 0 || !Emulator.IsRegionMapped(GdiRegionObjectPool, PoolSize))
+            {
+                GdiRegionObjectPool = Emulator.MapUniqueAddress(PoolSize, MemoryProtection.ReadWrite);
+                if (GdiRegionObjectPool == 0)
+                    return 0;
+            }
+
+            return GdiRegionObjectPool + (ulong)Index * Win32kHelper.RegionObjectSize;
         }
 
         public bool AttachGdiKernelObject(ulong Handle, ulong KernelObject)
@@ -4780,11 +4990,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Win32kHelper.GetHwndFromDc(Emulator, Hdc);
         }
 
-        // Every primitive lands on the one host surface, and a control draws in its own client coordinates.
+        // Surface of the top level ancestor, in its client coordinates.
         public void GetSurfaceOrigin(ulong Hwnd, out int OffsetX, out int OffsetY)
+        {
+            GetSurfaceOrigin(Hwnd, out OffsetX, out OffsetY, out _);
+        }
+
+        public void GetSurfaceOrigin(ulong Hwnd, out int OffsetX, out int OffsetY, out ulong Root)
         {
             OffsetX = 0;
             OffsetY = 0;
+            Root = Hwnd;
 
             for (int Depth = 0; Depth < MaxWindowAncestorDepth; Depth++)
             {
@@ -4794,19 +5010,198 @@ namespace Brovan.Core.Emulation.OS.Windows
                 OffsetX += Window.X;
                 OffsetY += Window.Y;
                 Hwnd = Window.ParentHwnd;
+                Root = Hwnd;
             }
         }
 
-        public void GetDcSurfaceOrigin(ulong Hwnd, ulong Hdc, out int OffsetX, out int OffsetY)
+        private int WindowLayoutGeneration;
+        private readonly Dictionary<ulong, WindowClipEntry> WindowClips = new();
+        private const int MaxClipRects = 256;
+
+        private sealed class WindowClipEntry
         {
-            GetSurfaceOrigin(Hwnd, out OffsetX, out OffsetY);
+            public int Generation;
+            public GdiClipRect[] Rects;
+        }
+
+        // NT: CalcVisRgn. Surface coordinates.
+        public GdiClipRect[] GetWindowClip(ulong Hwnd)
+        {
+            if (!WinWindows.TryGetValue(Hwnd, out WinWindow Window))
+                return null;
+
+            if (!WindowClips.TryGetValue(Hwnd, out WindowClipEntry Entry))
+            {
+                Entry = new WindowClipEntry { Generation = WindowLayoutGeneration - 1 };
+                WindowClips[Hwnd] = Entry;
+            }
+
+            if (Entry.Generation != WindowLayoutGeneration)
+            {
+                Entry.Rects = ComputeWindowClip(Window, true);
+                Entry.Generation = WindowLayoutGeneration;
+            }
+
+            return Entry.Rects;
+        }
+
+        // As a DCX_NOCLIPCHILDREN DC sees it.
+        public GdiClipRect[] GetWindowClipWithChildren(ulong Hwnd)
+        {
+            const uint WS_CLIPCHILDREN = 0x02000000;
+
+            if (!WinWindows.TryGetValue(Hwnd, out WinWindow Window))
+                return null;
+
+            return (Window.Style & WS_CLIPCHILDREN) == 0 ? GetWindowClip(Hwnd) : ComputeWindowClip(Window, false);
+        }
+
+        private GdiClipRect[] ComputeWindowClip(WinWindow Window, bool ClipChildren)
+        {
+            const uint WS_CLIPCHILDREN = 0x02000000;
+            const uint WS_CLIPSIBLINGS = 0x04000000;
+
+            if (!Window.Visible)
+                return Array.Empty<GdiClipRect>();
+
+            ClipChildren &= (Window.Style & WS_CLIPCHILDREN) != 0;
+            List<GdiClipRect> Rects = new();
+            int OriginX = 0;
+            int OriginY = 0;
+
+            if (Window.ParentHwnd == 0)
+            {
+                if (!ClipChildren)
+                    return null;
+
+                Win32kHelper.GetClientRect(Emulator, Window, out _, out _, out int ClientWidth, out int ClientHeight);
+                Rects.Add(new GdiClipRect { Right = ClientWidth, Bottom = ClientHeight });
+            }
+            else
+            {
+                GetSurfaceOrigin(Window.Hwnd, out OriginX, out OriginY);
+                Rects.Add(new GdiClipRect { Left = OriginX, Top = OriginY, Right = OriginX + (int)Window.Width, Bottom = OriginY + (int)Window.Height });
+
+                WinWindow Current = Window;
+                int CurrentX = OriginX;
+                int CurrentY = OriginY;
+                for (int Depth = 0; Depth < MaxWindowAncestorDepth && Rects.Count != 0; Depth++)
+                {
+                    if (!WinWindows.TryGetValue(Current.ParentHwnd, out WinWindow Parent))
+                        break;
+
+                    if (!Parent.Visible)
+                        return Array.Empty<GdiClipRect>();
+
+                    int ParentX = CurrentX - Current.X;
+                    int ParentY = CurrentY - Current.Y;
+                    Win32kHelper.GetClientRect(Emulator, Parent, out _, out _, out int ParentWidth, out int ParentHeight);
+                    if (Parent.ParentHwnd == 0)
+                    {
+                        ParentX = 0;
+                        ParentY = 0;
+                    }
+
+                    IntersectClip(Rects, new GdiClipRect { Left = ParentX, Top = ParentY, Right = ParentX + ParentWidth, Bottom = ParentY + ParentHeight });
+
+                    if ((Current.Style & WS_CLIPSIBLINGS) != 0)
+                    {
+                        foreach (ulong SiblingHwnd in Parent.Children)
+                        {
+                            if (SiblingHwnd == Current.Hwnd)
+                                break;
+
+                            if (WinWindows.TryGetValue(SiblingHwnd, out WinWindow Sibling) && CoversVisibleRegion(Sibling))
+                                SubtractClip(Rects, ParentX + Sibling.X, ParentY + Sibling.Y, (int)Sibling.Width, (int)Sibling.Height);
+                        }
+                    }
+
+                    if (Parent.ParentHwnd == 0)
+                        break;
+
+                    Current = Parent;
+                    CurrentX = ParentX;
+                    CurrentY = ParentY;
+                }
+            }
+
+            if (ClipChildren)
+            {
+                foreach (ulong ChildHwnd in Window.Children)
+                {
+                    if (WinWindows.TryGetValue(ChildHwnd, out WinWindow Child) && CoversVisibleRegion(Child))
+                        SubtractClip(Rects, OriginX + Child.X, OriginY + Child.Y, (int)Child.Width, (int)Child.Height);
+                }
+            }
+
+            return Rects.ToArray();
+        }
+
+        // NT: CalcVisRgnWorker does not cut out a transparent or layered window.
+        private static bool CoversVisibleRegion(WinWindow Window)
+        {
+            return Window.Visible
+                && (Window.ExStyle & (Win32kHelper.WindowExStyleTransparent | Win32kHelper.WindowExStyleLayered)) == 0;
+        }
+
+        internal static void IntersectClip(List<GdiClipRect> Rects, GdiClipRect Bounds)
+        {
+            for (int i = Rects.Count - 1; i >= 0; i--)
+            {
+                GdiClipRect Rect = Win32kHelper.Intersect(Rects[i], Bounds);
+                if (Win32kHelper.IsEmpty(Rect))
+                    Rects.RemoveAt(i);
+                else
+                    Rects[i] = Rect;
+            }
+        }
+
+        internal static void SubtractClip(List<GdiClipRect> Rects, int X, int Y, int Width, int Height)
+        {
+            if (Width <= 0 || Height <= 0)
+                return;
+
+            int Right = X + Width;
+            int Bottom = Y + Height;
+            for (int i = Rects.Count - 1; i >= 0; i--)
+            {
+                GdiClipRect Rect = Rects[i];
+                if (X >= Rect.Right || Right <= Rect.Left || Y >= Rect.Bottom || Bottom <= Rect.Top)
+                    continue;
+
+                if (Rects.Count + 3 > MaxClipRects)
+                    return;
+
+                Rects.RemoveAt(i);
+                if (Rect.Top < Y)
+                    Rects.Add(new GdiClipRect { Left = Rect.Left, Top = Rect.Top, Right = Rect.Right, Bottom = Y });
+                if (Bottom < Rect.Bottom)
+                    Rects.Add(new GdiClipRect { Left = Rect.Left, Top = Bottom, Right = Rect.Right, Bottom = Rect.Bottom });
+
+                int MiddleTop = Math.Max(Rect.Top, Y);
+                int MiddleBottom = Math.Min(Rect.Bottom, Bottom);
+                if (Rect.Left < X)
+                    Rects.Add(new GdiClipRect { Left = Rect.Left, Top = MiddleTop, Right = X, Bottom = MiddleBottom });
+                if (Right < Rect.Right)
+                    Rects.Add(new GdiClipRect { Left = Right, Top = MiddleTop, Right = Rect.Right, Bottom = MiddleBottom });
+            }
+        }
+
+        // Surface coordinates.
+        private void GetDcDrawTarget(ulong Hwnd, ulong Hdc, out int OffsetX, out int OffsetY, out ulong Root, out GdiClipRect[] Clip)
+        {
+            GetSurfaceOrigin(Hwnd, out int SurfaceX, out int SurfaceY, out Root);
+            OffsetX = SurfaceX;
+            OffsetY = SurfaceY;
+            Clip = GetWindowClip(Hwnd);
 
             if (Hdc == 0)
                 return;
 
-            ReadDcViewportOrigin(Hdc, out int ViewportX, out int ViewportY);
-            OffsetX += ViewportX;
-            OffsetY += ViewportY;
+            Clip = Win32kHelper.GetDcDrawClip(Emulator, Hdc, Clip, SurfaceX, SurfaceY);
+            ReadDcOrigin(Hdc, out int DeviceX, out int DeviceY);
+            OffsetX += DeviceX;
+            OffsetY += DeviceY;
         }
 
         public void EnqueueTextRender(ulong Hwnd, ulong Hdc, IntPtr Font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
@@ -4814,10 +5209,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopDisplay is not GuiThreadManager guiManager)
                 return;
 
-            GetDcSurfaceOrigin(Hwnd, Hdc, out int SurfaceX, out int SurfaceY);
+            GetDcDrawTarget(Hwnd, Hdc, out int SurfaceX, out int SurfaceY, out ulong Root, out GdiClipRect[] Clip);
 
-            guiManager.EnqueueTextRender(Hwnd, Font, text, x + SurfaceX, y + SurfaceY,
-                rectLeft + SurfaceX, rectTop + SurfaceY, rectRight + SurfaceX, rectBottom + SurfaceY, options);
+            guiManager.EnqueueTextRender(Root, Font, text, x + SurfaceX, y + SurfaceY,
+                rectLeft + SurfaceX, rectTop + SurfaceY, rectRight + SurfaceX, rectBottom + SurfaceY, options, Clip);
         }
 
         public void EnqueueGdiLine(ulong Hwnd, ulong Hdc, int X1, int Y1, int X2, int Y2, uint PenColor, int PenWidth)
@@ -4825,11 +5220,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopDisplay is not GuiThreadManager guiManager)
                 return;
 
-            GetDcSurfaceOrigin(Hwnd, Hdc, out int SurfaceX, out int SurfaceY);
+            GetDcDrawTarget(Hwnd, Hdc, out int SurfaceX, out int SurfaceY, out ulong Root, out GdiClipRect[] Clip);
 
             guiManager.EnqueueGdiPrimitive(new GdiPrimitive
             {
-                Hwnd = Hwnd,
+                Hwnd = Root,
+                Clip = Clip,
                 Kind = GdiPrimitiveKind.Line,
                 X1 = X1 + SurfaceX,
                 Y1 = Y1 + SurfaceY,
@@ -4845,11 +5241,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopDisplay is not GuiThreadManager guiManager)
                 return;
 
-            GetDcSurfaceOrigin(Hwnd, Hdc, out int SurfaceX, out int SurfaceY);
+            GetDcDrawTarget(Hwnd, Hdc, out int SurfaceX, out int SurfaceY, out ulong Root, out GdiClipRect[] Clip);
 
             guiManager.EnqueueGdiPrimitive(new GdiPrimitive
             {
-                Hwnd = Hwnd,
+                Hwnd = Root,
+                Clip = Clip,
                 Kind = GdiPrimitiveKind.FillRect,
                 X1 = Left + SurfaceX,
                 Y1 = Top + SurfaceY,
@@ -4861,16 +5258,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             });
         }
 
+        // Pixels comes from ArrayPool. The queue owns it from here.
         public void EnqueueGdiBlit(ulong Hwnd, ulong Hdc, int Left, int Top, int Right, int Bottom, uint[] Pixels, int SourceWidth, int SourceHeight, uint Rop)
         {
             if (DesktopDisplay is not GuiThreadManager guiManager)
+            {
+                ArrayPool<uint>.Shared.Return(Pixels);
                 return;
+            }
 
-            GetDcSurfaceOrigin(Hwnd, Hdc, out int SurfaceX, out int SurfaceY);
+            GetDcDrawTarget(Hwnd, Hdc, out int SurfaceX, out int SurfaceY, out ulong Root, out GdiClipRect[] Clip);
 
             guiManager.EnqueueGdiPrimitive(new GdiPrimitive
             {
-                Hwnd = Hwnd,
+                Hwnd = Root,
+                Clip = Clip,
                 Kind = GdiPrimitiveKind.Blit,
                 X1 = Left + SurfaceX,
                 Y1 = Top + SurfaceY,
@@ -4878,8 +5280,36 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Y2 = Bottom + SurfaceY,
                 Rop = Rop,
                 Pixels = Pixels,
+                PixelsPooled = true,
                 SourceWidth = SourceWidth,
                 SourceHeight = SourceHeight,
+            });
+        }
+
+        // Client coordinates. The pixel at x, y comes from x - Dx, y - Dy.
+        public void EnqueueGdiCopy(ulong Hwnd, List<GdiClipRect> Area, int Dx, int Dy)
+        {
+            if (DesktopDisplay is not GuiThreadManager guiManager || Area.Count == 0)
+                return;
+
+            GetSurfaceOrigin(Hwnd, out int SurfaceX, out int SurfaceY, out ulong Root);
+            Win32kHelper.GetRegionBounds(Area, out GdiClipRect Bounds);
+
+            GdiClipRect[] Clip = new GdiClipRect[Area.Count];
+            for (int i = 0; i < Clip.Length; i++)
+                Clip[i] = Win32kHelper.ShiftRect(Area[i], SurfaceX, SurfaceY);
+
+            guiManager.EnqueueGdiPrimitive(new GdiPrimitive
+            {
+                Hwnd = Root,
+                Clip = Clip,
+                Kind = GdiPrimitiveKind.Copy,
+                X1 = Bounds.Left + SurfaceX,
+                Y1 = Bounds.Top + SurfaceY,
+                X2 = Bounds.Right + SurfaceX,
+                Y2 = Bounds.Bottom + SurfaceY,
+                SourceX = Bounds.Left + SurfaceX - Dx,
+                SourceY = Bounds.Top + SurfaceY - Dy,
             });
         }
 
@@ -4888,11 +5318,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopDisplay is not GuiThreadManager guiManager)
                 return;
 
-            GetDcSurfaceOrigin(Hwnd, Hdc, out int SurfaceX, out int SurfaceY);
+            GetDcDrawTarget(Hwnd, Hdc, out int SurfaceX, out int SurfaceY, out ulong Root, out GdiClipRect[] Clip);
 
             guiManager.EnqueueGdiPrimitive(new GdiPrimitive
             {
-                Hwnd = Hwnd,
+                Hwnd = Root,
+                Clip = Clip,
                 Kind = Kind,
                 X1 = Left + SurfaceX,
                 Y1 = Top + SurfaceY,
@@ -4912,7 +5343,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopDisplay is not GuiThreadManager guiManager)
                 return;
 
-            GetDcSurfaceOrigin(Hwnd, Hdc, out int SurfaceX, out int SurfaceY);
+            GetDcDrawTarget(Hwnd, Hdc, out int SurfaceX, out int SurfaceY, out ulong Root, out GdiClipRect[] Clip);
 
             // The shifted figure is the primitive's own, so a caller reusing its array is not moved with it.
             if (Points != null && (SurfaceX != 0 || SurfaceY != 0))
@@ -4926,7 +5357,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             guiManager.EnqueueGdiPrimitive(new GdiPrimitive
             {
-                Hwnd = Hwnd,
+                Hwnd = Root,
+                Clip = Clip,
                 Kind = Kind,
                 Points = Points,
                 Pen = new GdiPenDescriptor { ColorRef = PenColor, Width = PenWidth },
@@ -5064,10 +5496,86 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint Dpi = Win32kDpi.GetEffectiveDpi(Emulator);
             Emulator._emulator.WriteMemory(UserServerInfoAddress + UserServerInfoLogPixelsOffset, Dpi, 2);
             WriteUserMessageFont(UserServerInfoAddress + UserServerInfoMessageFontOffset, Dpi);
+            WriteUserSystemMetrics(UserServerInfoAddress, Dpi);
+
+            // user32 keeps the process DPI until this changes.
+            ulong Generation = UserServerInfoAddress + UserServerInfoProcessDpiGenerationOffset;
+            Emulator._emulator.WriteMemory(Generation, (ushort)(Emulator._emulator.ReadMemoryUShort(Generation) + 1), 2);
 
             DeleteHostFont(DefaultTextFont);
             DefaultTextFont = IntPtr.Zero;
             DefaultTextFontResolved = false;
+        }
+
+        // The first DPI plateau is the system DPI. Plateau N after it is 72 + 24 * N.
+        private void WriteUserSystemMetrics(ulong ServerInfo, uint SystemDpi)
+        {
+            Span<byte> Metrics = Shared.GetSpan(UserSystemMetricCount * 4).Slice(0, UserSystemMetricCount * 4);
+            Metrics.Clear();
+
+            foreach ((int Index, int Value) in UserFixedSystemMetrics)
+                BinaryPrimitives.WriteInt32LittleEndian(Metrics.Slice(Index * 4), Value);
+
+            int CxMinimized = ScaleMetric(MinimizedWidth96, SystemDpi) + MinimizedExtra;
+            int CyMinimized = ScaleDpiMetric(13, SystemDpi) + MinimizedExtra;
+            BinaryPrimitives.WriteInt32LittleEndian(Metrics.Slice(SmCxMinimized * 4), CxMinimized);
+            BinaryPrimitives.WriteInt32LittleEndian(Metrics.Slice(SmCyMinimized * 4), CyMinimized);
+            BinaryPrimitives.WriteInt32LittleEndian(Metrics.Slice(SmCxMinSpacing * 4), CxMinimized);
+            BinaryPrimitives.WriteInt32LittleEndian(Metrics.Slice(SmCyMinSpacing * 4), CyMinimized);
+            Emulator._emulator.WriteMemory(ServerInfo + UserServerInfoSystemMetricsOffset, Metrics);
+
+            int CacheSize = UserServerInfoDpiBlockCount * UserDpiMetricSlotCount * 4;
+            Span<byte> Cache = Shared.GetSpan((ulong)CacheSize).Slice(0, CacheSize);
+            for (int Plateau = 0; Plateau < UserServerInfoDpiBlockCount; Plateau++)
+            {
+                uint Dpi = Plateau == 0 ? SystemDpi : (uint)(DpiPlateauBase + DpiPlateauStep * Plateau);
+                for (int Slot = 0; Slot < UserDpiMetricSlotCount; Slot++)
+                    BinaryPrimitives.WriteInt32LittleEndian(Cache.Slice((Plateau * UserDpiMetricSlotCount + Slot) * 4), ScaleDpiMetric(Slot, Dpi));
+            }
+
+            Emulator._emulator.WriteMemory(ServerInfo + UserServerInfoDpiMetricsOffset, Cache);
+        }
+
+        // NT: win32k ScaleSystemMetricForDPIWithoutCache.
+        private static int ScaleDpiMetric(int Slot, uint Dpi)
+        {
+            switch (Slot)
+            {
+                case 2:
+                    return ScaleDpiMetric(13, Dpi) + 1;
+                case 7:
+                case 8:
+                    return Dpi < 144 ? 32 : Dpi < 192 ? 48 : Dpi < 288 ? 64 : Dpi < 384 ? 96 : 128;
+                case 9:
+                    return ScaleDpiMetric(26, Dpi) + 1;
+                case 14:
+                case 15:
+                    return ScaleMetric(1, Dpi) + 3;
+                case 17:
+                    return 2 * (ScaleDpiMetric(15, Dpi) + ScaleDpiMetric(29, Dpi)) + ScaleDpiMetric(2, Dpi);
+                case 20:
+                    return Math.Min(ScaleDpiMetric(12, Dpi) - 2, ScaleDpiMetric(5, Dpi) / 2);
+                case 21:
+                    return Math.Min(ScaleDpiMetric(13, Dpi) - 2, ScaleDpiMetric(6, Dpi) / 2);
+                case 22:
+                    return ScaleDpiMetric(24, Dpi) + 1;
+            }
+
+            int Value = ScaleMetric(UserDpiMetrics96[Slot], Dpi);
+            return Slot switch
+            {
+                0 or 1 or 3 or 4 or 10 or 11 or 12 or 23 or 25 => Math.Max(Value, 8),
+                18 => Math.Max(Value, ScaleDpiMetric(5, Dpi)),
+                19 => Math.Max(Value, ScaleDpiMetric(6, Dpi)),
+                29 => Math.Clamp(Value, 0, 100),
+                _ => Value,
+            };
+        }
+
+        // NT: MulDiv(Value, Dpi, 96), which rounds.
+        internal static int ScaleMetric(int Value, uint Dpi)
+        {
+            return Dpi == 96 || Dpi == 0 ? Value : (int)(((long)Value * Dpi + 48) / 96);
         }
 
         private void ReserveSystemClassAtoms()
@@ -5256,7 +5764,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesktopInfo == 0)
                 return;
 
-            WriteWin32ClientInfoSlot(State, Win32ClientInfoPDeskInfoSlot, DesktopInfo);
+            uint ExpWinVer = GetImageExpWinVer();
+            WriteWin32ClientInfoDword(State, Win32ClientInfoX64ExpWinVerOffset, Win32ClientInfoX86ExpWinVerOffset, ExpWinVer);
+            WriteWin32ClientInfoDword(State, Win32ClientInfoX64CompatFlags2Offset, Win32ClientInfoX86CompatFlags2Offset,
+                ExpWinVer < 0x600 ? CompatFlags2OldFrameMetrics : 0);
             WriteWin32ClientInfoSlot(State, Win32ClientInfoDesktopSlot, EnsureUserClientDesktop());
 
             // The wake bits a message pump reads without a syscall. Windows fills this from a client callback
@@ -5328,20 +5839,43 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void WriteWin32ClientInfoSlot(WindowsThreadState State, int Slot, ulong Value)
         {
+            WriteWin32ClientInfo(State, (ulong)Slot * 8UL, 8, (ulong)Slot * 4UL, 4, Value);
+        }
+
+        private void WriteWin32ClientInfoDword(WindowsThreadState State, ulong X64Offset, ulong X86Offset, uint Value)
+        {
+            WriteWin32ClientInfo(State, X64Offset, 4, X86Offset, 4, Value);
+        }
+
+        private void WriteWin32ClientInfo(WindowsThreadState State, ulong X64Offset, uint X64Size, ulong X86Offset, uint X86Size, ulong Value)
+        {
             if (State == null || State.Teb == 0)
                 return;
 
             if (Emulator._binary.Architecture == BinaryArchitecture.x64)
             {
-                Emulator._emulator.WriteMemory(State.Teb + Win32ClientInfoX64Base + ((ulong)Slot * 8UL), Value, 8);
+                Emulator._emulator.WriteMemory(State.Teb + Win32ClientInfoX64Base + X64Offset, Value, X64Size);
                 return;
             }
 
-            Emulator._emulator.WriteMemory(State.Teb + Win32ClientInfoX86Base + ((ulong)Slot * 4UL), (uint)Value, 4);
+            Emulator._emulator.WriteMemory(State.Teb + Win32ClientInfoX86Base + X86Offset, Value, X86Size);
 
             // The SysWOW64 user32 reads CLIENTINFO out of the native TEB, where the 32-bit one keeps its OpenGL dispatch table.
             ulong NativeTeb = State.NativeTeb != 0 ? State.NativeTeb : State.Teb;
-            Emulator._emulator.WriteMemory(NativeTeb + Win32ClientInfoX64Base + ((ulong)Slot * 8UL), Value, 8);
+            Emulator._emulator.WriteMemory(NativeTeb + Win32ClientInfoX64Base + X64Offset, Value, X64Size);
+        }
+
+        // NT: RtlGetExpWinVer on the process image. A subsystem version of 1.x reads as 3.10.
+        private uint GetImageExpWinVer()
+        {
+            bool Wide = Emulator._binary.Architecture == BinaryArchitecture.x64;
+            uint Major = Wide ? Emulator._binary.PE.OptionalHeader64.MajorSubsystemVersion : Emulator._binary.PE.OptionalHeader32.MajorSubsystemVersion;
+            uint Minor = Wide ? Emulator._binary.PE.OptionalHeader64.MinorSubsystemVersion : Emulator._binary.PE.OptionalHeader32.MinorSubsystemVersion;
+
+            if (Major == 1)
+                return 0x30A;
+
+            return ((Major & 0xFF) << 8) | (Minor & 0xFF);
         }
 
         private ulong ComputeUserSharedDelta(ulong ServerInfo, ulong HandleTable, ulong DisplayInfo)
@@ -5390,6 +5924,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             int Width = Win32kDpi.GetScreenWidth(Emulator);
             int Height = Win32kDpi.GetScreenHeight(Emulator);
             ushort Dpi = (ushort)Win32kDpi.GetEffectiveDpi(Emulator);
+            Win32kDpi.GetWorkArea(Emulator, out int WorkLeft, out int WorkTop, out int WorkRight, out int WorkBottom);
 
             UserPrimaryMonitorInfo MonitorInfo = new UserPrimaryMonitorInfo
             {
@@ -5398,10 +5933,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 MonitorTop = 0,
                 MonitorRight = Width,
                 MonitorBottom = Height,
-                WorkLeft = 0,
-                WorkTop = 0,
-                WorkRight = Width,
-                WorkBottom = Height,
+                WorkLeft = WorkLeft,
+                WorkTop = WorkTop,
+                WorkRight = WorkRight,
+                WorkBottom = WorkBottom,
                 DpiX = Dpi,
                 DpiY = Dpi
             };
@@ -5414,6 +5949,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (UserPrimaryMonitorAddress != 0 && Emulator.IsRegionMapped(UserPrimaryMonitorAddress, UserPrimaryMonitorSize))
                 WriteUserPrimaryMonitorInfo(UserPrimaryMonitorAddress);
+
+            if (UserDesktopInfoAddress != 0 && Emulator.IsRegionMapped(UserDesktopInfoAddress, UserDesktopInfoSize))
+            {
+                Emulator._emulator.WriteMemory(UserDesktopInfoAddress + UserDisplayInfoScreenRightOffset, (uint)Win32kDpi.GetScreenWidth(Emulator), 4);
+                Emulator._emulator.WriteMemory(UserDesktopInfoAddress + UserDisplayInfoScreenBottomOffset, (uint)Win32kDpi.GetScreenHeight(Emulator), 4);
+            }
 
             foreach (WinWindow Window in WinWindows.Values)
             {
@@ -5434,6 +5975,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             DpiChangeRectAddress = Address;
             return DpiChangeRectAddress;
         }
+
+        public long GetDisplayRefreshPeriod() => KuserSharedDataManager.QpcFrequency / Math.Max(GetPrimaryDisplayFrequency(), 1u);
+
+        /// <summary>
+        /// Returns the first emulated tick at or after the next vertical blank.
+        /// </summary>
+        public long GetNextVerticalBlankTick()
+        {
+            const long CountsPerTick = KuserSharedDataManager.QpcFrequency / 1000;
+            long Period = GetDisplayRefreshPeriod();
+            long Now = (long)Emulator.GetEmulatedPerformanceCounter();
+            long Next = GetLastVerticalBlank(Now, Period) + Period;
+            return (Next + CountsPerTick - 1) / CountsPerTick;
+        }
+
+        internal static long GetLastVerticalBlank(long Now, long Period) => Now - Now % Period;
 
         public unsafe uint GetPrimaryDisplayFrequency()
         {
@@ -5483,6 +6040,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return 0;
 
             Emulator._emulator.WriteMemory(Address, UserDesktopOwnerAddress, 8);
+            Emulator._emulator.WriteMemory(Address + UserDeskInfoFlagsOffset, DeskInfoComposited, 4);
             UserClientDesktopAddress = Address;
             return UserClientDesktopAddress;
         }
@@ -5516,6 +6074,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Type = 1u,
                 PrimaryMonitor = PrimaryMonitor,
+                ScreenRight = Win32kDpi.GetScreenWidth(Emulator),
+                ScreenBottom = Win32kDpi.GetScreenHeight(Emulator),
                 CompositionFlags = 1u
             };
 
@@ -5534,6 +6094,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Window == null || Window.Hwnd == 0)
                 return false;
+
+            WindowLayoutGeneration++;
 
             if (!EnsureUserSharedInfo(out _, out ulong HandleTable, out uint EntrySize))
                 return false;
@@ -5670,18 +6232,40 @@ namespace Brovan.Core.Emulation.OS.Windows
             return 0;
         }
 
-        private ulong NextSiblingObject(WinWindow Window)
+        private void GetSiblingObjects(WinWindow Window, out ulong Previous, out ulong Next)
         {
-            if (Window.ParentHwnd == 0 || !WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow Parent))
-                return 0;
+            Previous = 0;
+            Next = 0;
 
-            int At = Parent.Children.IndexOf(Window.Hwnd);
-            if (At < 0)
-                return 0;
-
-            for (int i = At + 1; i < Parent.Children.Count; i++)
+            List<ulong> Siblings;
+            int Down = 1;
+            if (Window.ParentHwnd == 0)
             {
-                if (WinWindows.TryGetValue(Parent.Children[i], out WinWindow Sibling) && Sibling.ClientWindowAddress != 0)
+                Siblings = TopLevelWindows;
+                Down = -1;
+            }
+            else if (WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow Parent))
+            {
+                Siblings = Parent.Children;
+            }
+            else
+            {
+                return;
+            }
+
+            int At = Siblings.IndexOf(Window.Hwnd);
+            if (At < 0)
+                return;
+
+            Previous = FindSiblingObject(Siblings, At, -Down);
+            Next = FindSiblingObject(Siblings, At, Down);
+        }
+
+        private ulong FindSiblingObject(List<ulong> Siblings, int At, int Step)
+        {
+            for (int i = At + Step; i >= 0 && i < Siblings.Count; i += Step)
+            {
+                if (WinWindows.TryGetValue(Siblings[i], out WinWindow Sibling) && Sibling.ClientWindowAddress != 0)
                     return Sibling.ClientWindowAddress;
             }
 
@@ -5715,8 +6299,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         // DefDlgProcWorker reaches the DLG block user32 allocated through this slot.
         private const int UserWindowExtraDialogPointerOffset = 0x08;
         private const int UserWindowChildOffset = 0x38;
+        private const int UserWindowOwnerOffset = 0x40;
         private const int UserWindowNextOffset = 0x48;
+        private const int UserWindowPreviousOffset = 0x50;
+        // GetWindow skips a window outside the desktop band in a desktop process.
+        private const int UserWindowBandOffset = 0xEC;
+        private const uint UserWindowBandDesktop = 1;
         private const int UserWindowIdOffset = 0x140;
+        // GetWindowThreadProcessId answers another thread's window out of these.
+        private const int UserWindowThreadIdOffset = 0x148;
+        private const int UserWindowProcessIdOffset = 0x14C;
         private const int UserWindowUserDataOffset = 0xD8;
         private const int UserWindowStateOffset = 0x12;
         private const byte UserWindowStateDialog = 0x01;
@@ -5804,29 +6396,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             // GetDlgItem, EnumChildWindows and the dialog tab order walk this list client-side.
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowChildOffset, FirstChildObject(Window), 8);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowNextOffset, NextSiblingObject(Window), 8);
+            GetSiblingObjects(Window, out ulong PreviousObject, out ulong NextObject);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowNextOffset, NextObject, 8);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowPreviousOffset, PreviousObject, 8);
+
+            ulong OwnerObject = 0;
+            if (Window.OwnerHwnd != 0 && WinWindows.TryGetValue(Window.OwnerHwnd, out WinWindow OwnerWindow))
+                OwnerObject = OwnerWindow.ClientWindowAddress;
+
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowOwnerOffset, OwnerObject, 8);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowBandOffset, UserWindowBandDesktop, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowIdOffset, (uint)Window.MenuHandle, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowThreadIdOffset, Window.OwnerThreadId, 4);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowProcessIdOffset, PID, 4);
 
-            int OuterLeft = Window.X;
-            int OuterTop = Window.Y;
-            int OuterRight = OuterLeft + (int)Window.Width;
-            int OuterBottom = OuterTop + (int)Window.Height;
-
-            Win32kHelper.GetClientRect(Emulator, Window, out int ClientLeft, out int ClientTop, out int ClientWidth, out int ClientHeight);
-
-            // user32 answers GetClientRect from rcClient without a syscall, and win32k leaves that rectangle empty
-            // while a window is iconic. Renderers test it to stop drawing at a size their surface no longer has.
-            int ClientRight = Window.Minimized ? ClientLeft : ClientLeft + ClientWidth;
-            int ClientBottom = Window.Minimized ? ClientTop : ClientTop + ClientHeight;
-
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x58, (uint)OuterLeft, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x5C, (uint)OuterTop, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x60, (uint)OuterRight, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x64, (uint)OuterBottom, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x68, (uint)ClientLeft, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x6C, (uint)ClientTop, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x70, (uint)ClientRight, 4);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x74, (uint)ClientBottom, 4);
+            PublishWindowRects(Window, 0);
 
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x78, Window.WndProc, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0x80, ClassObject, 8);
@@ -5853,11 +6437,51 @@ namespace Brovan.Core.Emulation.OS.Windows
             Win32kDpi.ApplyWindowContext(Emulator, Window.ClientWindowAddress);
         }
 
+        private const int UserWindowRectOffset = 0x58;
+        private const int UserClientRectOffset = 0x68;
+
+        // user32 answers GetWindowRect, GetClientRect, ClientToScreen and MapWindowPoints from these with no syscall.
+        // Both are in screen coordinates, so a move updates the descendants too.
+        private void PublishWindowRects(WinWindow Window, int Depth)
+        {
+            ulong Address = Window.ClientWindowAddress;
+            if (Address == 0)
+                return;
+
+            Win32kHelper.GetScreenRects(Emulator, Window, out GdiClipRect Outer, out GdiClipRect Client);
+
+            // win32k leaves rcClient empty while a window is iconic. Renderers test it to stop drawing at a size
+            // their surface no longer has.
+            if (Window.Minimized)
+            {
+                Client.Right = Client.Left;
+                Client.Bottom = Client.Top;
+            }
+
+            ulong ClientRect = Address + UserClientRectOffset;
+            bool OriginMoved = unchecked((int)Emulator.ReadMemoryUInt(ClientRect)) != Client.Left
+                || unchecked((int)Emulator.ReadMemoryUInt(ClientRect + 4)) != Client.Top;
+
+            Span<byte> Rects = stackalloc byte[2 * Win32kHelper.GuestRectSize];
+            Win32kHelper.WriteGuestRect(Rects, Outer);
+            Win32kHelper.WriteGuestRect(Rects.Slice(Win32kHelper.GuestRectSize), Client);
+            Emulator._emulator.WriteMemory(Address + UserWindowRectOffset, Rects);
+
+            if (!OriginMoved || Depth >= MaxWindowAncestorDepth)
+                return;
+
+            foreach (ulong ChildHwnd in Window.Children)
+            {
+                if (WinWindows.TryGetValue(ChildHwnd, out WinWindow Child))
+                    PublishWindowRects(Child, Depth + 1);
+            }
+        }
+
         /// <summary>
         /// Publishes the window's current frame geometry as a WINDOWPOS and returns its guest address, for use as
         /// the lParam of a posted WM_WINDOWPOSCHANGED.
         /// </summary>
-        public ulong EnsureWindowPosStruct(WinWindow Window)
+        public ulong EnsureWindowPosStruct(WinWindow Window, uint Flags)
         {
             const uint SWP_NOZORDER = 0x0004;
             const uint SWP_NOACTIVATE = 0x0010;
@@ -5877,32 +6501,46 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Window.WindowPosAddress = Address;
             }
 
-            Span<byte> Data = Shared.GetSpan(StructSize);
-            Data.Slice(0, (int)StructSize).Clear();
-
-            if (Is64)
+            Span<byte> Data = Shared.GetSpan(StructSize).Slice(0, (int)StructSize);
+            Data.Clear();
+            WriteWindowPos(Data, Is64, new Win32kHelper.Win32kDeferredWindowPos
             {
-                WriteU64(Data, 0x00, Window.Hwnd);
-                WriteU32(Data, 0x10, (uint)Window.X);
-                WriteU32(Data, 0x14, (uint)Window.Y);
-                WriteU32(Data, 0x18, Window.Width);
-                WriteU32(Data, 0x1C, Window.Height);
-                WriteU32(Data, 0x20, SWP_NOZORDER | SWP_NOACTIVATE);
-            }
-            else
-            {
-                WriteU32(Data, 0x00, (uint)Window.Hwnd);
-                WriteU32(Data, 0x08, (uint)Window.X);
-                WriteU32(Data, 0x0C, (uint)Window.Y);
-                WriteU32(Data, 0x10, Window.Width);
-                WriteU32(Data, 0x14, Window.Height);
-                WriteU32(Data, 0x18, SWP_NOZORDER | SWP_NOACTIVATE);
-            }
+                Hwnd = Window.Hwnd,
+                X = Window.X,
+                Y = Window.Y,
+                Width = (int)Window.Width,
+                Height = (int)Window.Height,
+                Flags = SWP_NOZORDER | SWP_NOACTIVATE | Flags,
+            });
 
-            if (!Emulator._emulator.WriteMemory(Window.WindowPosAddress, Data.Slice(0, (int)StructSize)))
+            if (!Emulator._emulator.WriteMemory(Window.WindowPosAddress, Data))
                 return 0;
 
             return Window.WindowPosAddress;
+        }
+
+        internal static void WriteWindowPos(Span<byte> Data, bool Is64, in Win32kHelper.Win32kDeferredWindowPos Position)
+        {
+            if (Is64)
+            {
+                WriteU64(Data, 0x00, Position.Hwnd);
+                WriteU64(Data, 0x08, Position.InsertAfter);
+                WriteU32(Data, 0x10, (uint)Position.X);
+                WriteU32(Data, 0x14, (uint)Position.Y);
+                WriteU32(Data, 0x18, (uint)Position.Width);
+                WriteU32(Data, 0x1C, (uint)Position.Height);
+                WriteU32(Data, 0x20, Position.Flags);
+            }
+            else
+            {
+                WriteU32(Data, 0x00, (uint)Position.Hwnd);
+                WriteU32(Data, 0x04, (uint)Position.InsertAfter);
+                WriteU32(Data, 0x08, (uint)Position.X);
+                WriteU32(Data, 0x0C, (uint)Position.Y);
+                WriteU32(Data, 0x10, (uint)Position.Width);
+                WriteU32(Data, 0x14, (uint)Position.Height);
+                WriteU32(Data, 0x18, Position.Flags);
+            }
         }
 
         private ulong EnsureUserClassObject(WinWindow Window)
@@ -6280,33 +6918,55 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Window == null || IsWindowUnder(Window, NewParent))
                 return false;
 
+            WindowLayoutGeneration++;
+
+            // NT: SetParent hides the window while the old parent is invalidated, then shows it in the new one.
+            if (Window.Visible)
+            {
+                Win32kHelper.ClearUpdateTree(Emulator, Window);
+                Window.Visible = false;
+                Win32kHelper.InvalidateParentArea(Emulator, Window);
+                Window.Visible = true;
+            }
+
+            bool WasTopLevel = false;
             if (Window.ParentHwnd != 0 && WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow OldParent))
             {
                 OldParent.Children.Remove(Window.Hwnd);
                 RefreshWindowFamily(OldParent);
             }
-            else
+            else if (TopLevelWindows.Remove(Window.Hwnd))
             {
-                TopLevelWindows.Remove(Window.Hwnd);
+                RelinkTopLevelWindows();
+                WasTopLevel = true;
             }
 
             Window.ParentHwnd = NewParent?.Hwnd ?? 0;
-            Win32kHelper.MarkWindowDirty(Emulator, Window);
 
             if (NewParent != null)
             {
+                // NT: on top of its new siblings.
                 if (!NewParent.Children.Contains(Window.Hwnd))
-                    NewParent.Children.Add(Window.Hwnd);
+                    NewParent.Children.Insert(0, Window.Hwnd);
 
                 RefreshWindowFamily(NewParent);
-            }
-            else
-            {
-                if (!TopLevelWindows.Contains(Window.Hwnd))
-                    TopLevelWindows.Add(Window.Hwnd);
 
                 MaterializeUserWindow(Window);
             }
+            else
+            {
+                MaterializeUserWindow(Window);
+                LinkTopLevelWindow(Window);
+            }
+
+            if (Window.Visible)
+            {
+                Win32kHelper.InvalidateWholeWindow(Emulator, Window);
+                Win32kHelper.InvalidateParentArea(Emulator, Window);
+            }
+
+            if (WasTopLevel || NewParent == null)
+                PresentDesktop();
 
             return true;
         }
@@ -6331,57 +6991,244 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             MaterializeUserWindow(Parent);
 
-            // Walking backwards hands each child the sibling that follows it, so one pass settles the list.
-            ulong NextObject = 0;
-            for (int i = Parent.Children.Count - 1; i >= 0; i--)
+            ulong PreviousObject = 0;
+            for (int i = 0; i < Parent.Children.Count; i++)
             {
                 if (!WinWindows.TryGetValue(Parent.Children[i], out WinWindow Child) || Child.ClientWindowAddress == 0)
                     continue;
 
-                Emulator._emulator.WriteMemory(Child.ClientWindowAddress + (ulong)UserWindowNextOffset, NextObject, 8);
+                Emulator._emulator.WriteMemory(Child.ClientWindowAddress + (ulong)UserWindowPreviousOffset, PreviousObject, 8);
                 Emulator._emulator.WriteMemory(Child.ClientWindowAddress + (ulong)UserWindowChildOffset, FirstChildObject(Child), 8);
-                NextObject = Child.ClientWindowAddress;
+                Emulator._emulator.WriteMemory(Child.ClientWindowAddress + (ulong)UserWindowNextOffset, 0UL, 8);
+
+                if (PreviousObject != 0)
+                    Emulator._emulator.WriteMemory(PreviousObject + (ulong)UserWindowNextOffset, Child.ClientWindowAddress, 8);
+
+                PreviousObject = Child.ClientWindowAddress;
             }
         }
 
-        public void UpdateTopLevelWindowZOrder(ulong Hwnd, ulong InsertAfter)
+        private const uint HWND_TOP = 0;
+        private const uint HWND_BOTTOM = 1;
+        private const uint HWND_TOPMOST = 0xFFFFFFFF;
+        private const uint HWND_NOTOPMOST = 0xFFFFFFFE;
+        private const uint WS_EX_TOPMOST = 0x00000008;
+
+        public int GetZOrderIndex(WinWindow Window)
         {
-            const ulong HWND_TOP = 0;
-            const ulong HWND_BOTTOM = 1;
-            const ulong HWND_TOPMOST = 0xFFFFFFFFFFFFFFFF;
-            const ulong HWND_NOTOPMOST = 0xFFFFFFFFFFFFFFFE;
+            if (Window.ParentHwnd == 0)
+                return TopLevelWindows.IndexOf(Window.Hwnd);
 
-            if (!WinWindows.TryGetValue(Hwnd, out WinWindow Window))
+            return WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow Parent) ? Parent.Children.IndexOf(Window.Hwnd) : -1;
+        }
+
+        public void UpdateWindowZOrder(ulong Hwnd, ulong InsertAfter)
+        {
+            if (!WinWindows.TryGetValue(Hwnd, out WinWindow Window) || InsertAfter == Hwnd)
                 return;
 
-            if (Window.ParentHwnd != 0)
+            WindowLayoutGeneration++;
+
+            // HWND_TOPMOST and HWND_NOTOPMOST from an x86 guest arrive zero extended.
+            uint Special = (uint)InsertAfter;
+
+            if (Window.ParentHwnd == 0)
+            {
+                UpdateTopLevelWindowZOrder(Window, InsertAfter);
+                return;
+            }
+
+            if (Special >= HWND_NOTOPMOST)
+                InsertAfter = HWND_TOP;
+
+            if (!WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow Parent))
                 return;
 
-            TopLevelWindows.Remove(Hwnd);
+            List<ulong> Siblings = Parent.Children;
+            int Previous = Siblings.IndexOf(Hwnd);
+            if (Previous < 0)
+                return;
 
+            Siblings.RemoveAt(Previous);
+
+            int Index;
             if (InsertAfter == HWND_BOTTOM)
             {
-                TopLevelWindows.Insert(0, Hwnd);
-                return;
+                Index = Siblings.Count;
             }
-
-            if (InsertAfter == HWND_TOP || InsertAfter == HWND_TOPMOST || InsertAfter == HWND_NOTOPMOST)
+            else if (InsertAfter == HWND_TOP)
             {
-                TopLevelWindows.Add(Hwnd);
-                return;
+                Index = 0;
             }
-
-            int Index = TopLevelWindows.IndexOf(InsertAfter);
-            if (Index == -1)
+            else
             {
-                TopLevelWindows.Add(Hwnd);
-                return;
+                int Anchor = Siblings.IndexOf(InsertAfter);
+                Index = Anchor < 0 ? Previous : Anchor + 1;
             }
 
-            TopLevelWindows.Insert(Index + 1, Hwnd);
+            Siblings.Insert(Index, Hwnd);
+            RefreshWindowFamily(Parent);
         }
 
+        private void UpdateTopLevelWindowZOrder(WinWindow Window, ulong InsertAfter)
+        {
+            uint Special = (uint)InsertAfter;
+            int Previous = TopLevelWindows.IndexOf(Window.Hwnd);
+            if (Previous < 0)
+                return;
+
+            uint ExStyle = Window.ExStyle;
+
+            if (Special == HWND_TOPMOST)
+            {
+                Window.ExStyle |= WS_EX_TOPMOST;
+                MoveToTopOfBand(Window);
+            }
+            else if (Special == HWND_NOTOPMOST)
+            {
+                if (IsTopmost(Window))
+                {
+                    Window.ExStyle &= ~WS_EX_TOPMOST;
+                    MoveToTopOfBand(Window);
+                }
+            }
+            else if (InsertAfter == HWND_TOP)
+            {
+                MoveToTopOfBand(Window);
+            }
+            else if (InsertAfter == HWND_BOTTOM)
+            {
+                Window.ExStyle &= ~WS_EX_TOPMOST;
+                TopLevelWindows.RemoveAt(Previous);
+                TopLevelWindows.Insert(0, Window.Hwnd);
+            }
+            else
+            {
+                TopLevelWindows.RemoveAt(Previous);
+                int Anchor = TopLevelWindows.IndexOf(InsertAfter);
+                int Index = Anchor < 0 ? Previous : Anchor;
+                int BandStart = LowestTopmostIndex();
+                Index = IsTopmost(Window) ? Math.Max(Index, BandStart) : Math.Min(Index, BandStart);
+                TopLevelWindows.Insert(Index, Window.Hwnd);
+            }
+
+            LiftOwnedWindows(Window, 0);
+            RelinkTopLevelWindows();
+
+            if (Window.ExStyle != ExStyle)
+                MaterializeUserWindow(Window);
+        }
+
+        private static bool IsTopmost(WinWindow Window) => (Window.ExStyle & WS_EX_TOPMOST) != 0;
+
+        private int LowestTopmostIndex()
+        {
+            for (int i = 0; i < TopLevelWindows.Count; i++)
+            {
+                if (WinWindows.TryGetValue(TopLevelWindows[i], out WinWindow Window) && IsTopmost(Window))
+                    return i;
+            }
+
+            return TopLevelWindows.Count;
+        }
+
+        private void MoveToTopOfBand(WinWindow Window)
+        {
+            TopLevelWindows.Remove(Window.Hwnd);
+            TopLevelWindows.Insert(IsTopmost(Window) ? TopLevelWindows.Count : LowestTopmostIndex(), Window.Hwnd);
+        }
+
+        private void LiftOwnedWindows(WinWindow Owner, int Depth)
+        {
+            if (Depth >= MaxWindowAncestorDepth || !TopLevelWindows.Contains(Owner.Hwnd))
+                return;
+
+            List<WinWindow> Owned = null;
+            for (int i = 0; i < TopLevelWindows.Count; i++)
+            {
+                if (WinWindows.TryGetValue(TopLevelWindows[i], out WinWindow Candidate) && Candidate != Owner
+                    && Candidate.OwnerHwnd == Owner.Hwnd && IsTopmost(Candidate) == IsTopmost(Owner))
+                {
+                    (Owned ??= new List<WinWindow>()).Add(Candidate);
+                }
+            }
+
+            if (Owned == null)
+                return;
+
+            foreach (WinWindow Window in Owned)
+                TopLevelWindows.Remove(Window.Hwnd);
+
+            int Above = TopLevelWindows.IndexOf(Owner.Hwnd) + 1;
+            foreach (WinWindow Window in Owned)
+                TopLevelWindows.Insert(Above++, Window.Hwnd);
+
+            foreach (WinWindow Window in Owned)
+                LiftOwnedWindows(Window, Depth + 1);
+        }
+
+        public void LinkTopLevelWindow(WinWindow Window)
+        {
+            if (!TopLevelWindows.Contains(Window.Hwnd))
+            {
+                TopLevelWindows.Insert(IsTopmost(Window) ? TopLevelWindows.Count : LowestTopmostIndex(), Window.Hwnd);
+                RelinkTopLevelWindows();
+            }
+        }
+
+        public void RaiseActivatedWindow(WinWindow Window)
+        {
+            WinWindow Root = Window;
+            for (int Depth = 0; Root.OwnerHwnd != 0 && Depth < MaxWindowAncestorDepth; Depth++)
+            {
+                if (!WinWindows.TryGetValue(Root.OwnerHwnd, out WinWindow Owner) || Owner.Destroyed)
+                    break;
+
+                Root = Owner;
+            }
+
+            MoveToTopOfBand(Root);
+            LiftOwnedWindows(Root, 0);
+
+            if (Root != Window)
+            {
+                MoveToTopOfBand(Window);
+                LiftOwnedWindows(Window, 0);
+            }
+
+            RelinkTopLevelWindows();
+        }
+
+        // GetWindow walks these links in the client window objects without a syscall.
+        private void RelinkTopLevelWindows()
+        {
+            ulong Above = 0;
+            for (int i = TopLevelWindows.Count - 1; i >= 0; i--)
+            {
+                if (!WinWindows.TryGetValue(TopLevelWindows[i], out WinWindow Window) || Window.ClientWindowAddress == 0)
+                    continue;
+
+                Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowPreviousOffset, Above, 8);
+                Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowNextOffset, 0UL, 8);
+
+                if (Above != 0)
+                    Emulator._emulator.WriteMemory(Above + (ulong)UserWindowNextOffset, Window.ClientWindowAddress, 8);
+                else if (UserDesktopWindowAddress != 0)
+                    Emulator._emulator.WriteMemory(UserDesktopWindowAddress + (ulong)UserWindowChildOffset, Window.ClientWindowAddress, 8);
+
+                Above = Window.ClientWindowAddress;
+            }
+        }
+
+        public ulong ForegroundWindow;
+
         public ulong GetForegroundWindow()
+        {
+            ulong Hwnd = ForegroundWindow;
+            return Hwnd != 0 && WinWindows.TryGetValue(Hwnd, out WinWindow Window) && !Window.Destroyed ? Hwnd : 0;
+        }
+
+        public ulong GetTopVisibleWindow()
         {
             for (int i = TopLevelWindows.Count - 1; i >= 0; i--)
             {
@@ -6411,26 +7258,46 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void HideDesktopWindow()
         {
-            if (DesktopWindow == null || DesktopDisplay is not GuiThreadManager guiManager)
+            if (DesktopDisplay is not GuiThreadManager guiManager)
                 return;
+
+            if (DesktopWindow == null)
+            {
+                if (UsesTopLevelHost)
+                    guiManager.HideTopLevels();
+
+                return;
+            }
 
             guiManager.EnqueuePresent(DesktopWindowTitle, 0, 0, false, WindowState.Normal);
         }
 
         /// <summary>
-        /// Moves the host pointer to a point in the desktop window's client area, for guests that re-centre
+        /// Moves the host pointer to a point in the client area of the guest window, for guests that re-centre
         /// the cursor themselves.
         /// </summary>
-        public void WarpHostCursor(int ClientX, int ClientY)
+        public void WarpHostCursor(ulong Hwnd, int ClientX, int ClientY)
         {
             if (DesktopDisplay is GuiThreadManager GuiManager)
-                GuiManager.EnqueueWarpCursor(ClientX, ClientY);
+                GuiManager.EnqueueWarpCursor(Hwnd, ClientX, ClientY);
         }
 
-        public void SetHostCursorClip(bool Enabled, int ClientLeft, int ClientTop, int ClientRight, int ClientBottom)
+        public void RequestHostActivation(ulong Hwnd)
+        {
+            if (UsesTopLevelHost)
+                ((GuiThreadManager)DesktopDisplay).RequestActivation(Hwnd);
+        }
+
+        public void EnqueueLayeredUpdate(ulong Hwnd, LayeredUpdate Update)
         {
             if (DesktopDisplay is GuiThreadManager GuiManager)
-                GuiManager.EnqueueSetCursorClip(Enabled, ClientLeft, ClientTop, ClientRight, ClientBottom);
+                GuiManager.EnqueueLayered(Hwnd, Update);
+        }
+
+        public void SetHostCursorClip(ulong Hwnd, bool Enabled, int ClientLeft, int ClientTop, int ClientRight, int ClientBottom)
+        {
+            if (DesktopDisplay is GuiThreadManager GuiManager)
+                GuiManager.EnqueueSetCursorClip(Hwnd, Enabled, ClientLeft, ClientTop, ClientRight, ClientBottom);
         }
 
         /// <summary>
@@ -6477,7 +7344,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        private void PublishForegroundWindow()
+        public void PublishForegroundWindow()
         {
             ulong ServerInfo = EnsureUserServerInfo();
             if (ServerInfo == 0 || !TryGetForegroundWindowOffset(out int Offset))
@@ -6495,6 +7362,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             try
             {
+                if (UsesTopLevelHost)
+                {
+                    PublishForegroundWindow();
+                    PublishSystemColors();
+                    PresentTopLevels((GuiThreadManager)DesktopDisplay);
+                    return;
+                }
+
                 EnsureDesktopWindow();
                 PublishForegroundWindow();
                 PublishSystemColors();
@@ -6502,7 +7377,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return;
 
                 WinWindow Window = GetWindow(GetForegroundWindow());
-                if (Window == null || IsToolWindow(Window) || !Window.Visible || Window.Destroyed)
+                if (Window == null || IsToolWindow(Window) || !IsShownOnHost(Window) || Window.Destroyed)
                     Window = GetTopLevelWindow();
 
                 string title;
@@ -6519,7 +7394,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     title = string.IsNullOrWhiteSpace(Window.Title) ? DesktopWindowTitle : Window.Title;
                     width = Math.Max(ClientWidth, 1);
                     height = Math.Max(ClientHeight, 1);
-                    visible = Window.Visible && !Window.Destroyed;
+                    visible = IsShownOnHost(Window) && !Window.Destroyed;
                     state = Window.Minimized ? WindowState.Minimized : Window.Maximized ? WindowState.Maximized : WindowState.Normal;
                 }
                 else
@@ -6537,6 +7412,121 @@ namespace Brovan.Core.Emulation.OS.Windows
             catch
             {
             }
+        }
+
+        private int TopLevelHostState;
+
+        // Fixed once the display exists.
+        public bool UsesTopLevelHost
+        {
+            get
+            {
+                if (TopLevelHostState == 0)
+                {
+                    EnsureDesktopDisplay();
+                    if (DesktopDisplay == null)
+                        return false;
+
+                    TopLevelHostState = DesktopDisplay is GuiThreadManager GuiManager && GuiManager.SupportsTopLevels ? 1 : 2;
+                    if (TopLevelHostState == 1)
+                        HostEventQueue.Reset();
+                }
+
+                return TopLevelHostState == 1;
+            }
+        }
+
+        private HashSet<ulong> PresentedTopLevels = new();
+        private HashSet<ulong> PresentingTopLevels = new();
+        private readonly List<ulong> StackingScratch = new();
+        private ulong[] PresentedStacking = Array.Empty<ulong>();
+
+        private const uint FrameStateStyles = 0x10000000 | 0x20000000 | 0x01000000 | 0x08000000;
+
+        private static bool IsShownOnHost(WinWindow Window) => Window.Visible || Window.RedrawDisabled;
+
+        private void PresentTopLevels(GuiThreadManager GuiManager)
+        {
+            StackingScratch.Clear();
+            PresentingTopLevels.Clear();
+
+            for (int i = TopLevelWindows.Count - 1; i >= 0; i--)
+            {
+                ulong Hwnd = TopLevelWindows[i];
+                if (Hwnd == Win32kMessageOnlyParent.HwndMessage || !WinWindows.TryGetValue(Hwnd, out WinWindow Window) || Window.Destroyed)
+                    continue;
+
+                BuildTopLevelFrame(Window, out TopLevelFrame Frame);
+                GuiManager.EnqueueTopLevel(Frame);
+                PresentingTopLevels.Add(Hwnd);
+
+                if (Frame.Visible)
+                    StackingScratch.Add(Hwnd);
+            }
+
+            foreach (ulong Gone in PresentedTopLevels)
+            {
+                if (!PresentingTopLevels.Contains(Gone))
+                    GuiManager.EnqueueTopLevelDestroyed(Gone);
+            }
+
+            (PresentedTopLevels, PresentingTopLevels) = (PresentingTopLevels, PresentedTopLevels);
+
+            if (!PresentedStacking.AsSpan().SequenceEqual(CollectionsMarshal.AsSpan(StackingScratch)))
+            {
+                PresentedStacking = StackingScratch.ToArray();
+                GuiManager.EnqueueStacking(PresentedStacking);
+            }
+        }
+
+        private void BuildTopLevelFrame(WinWindow Window, out TopLevelFrame Frame)
+        {
+            Win32kHelper.GetClientRect(Emulator, Window, out int ClientLeft, out int ClientTop, out int ClientWidth, out int ClientHeight);
+
+            Frame = new TopLevelFrame
+            {
+                Window = Window.Hwnd,
+                Owner = Window.OwnerHwnd,
+                Title = Window.Title ?? string.Empty,
+                ClientX = ClientLeft,
+                ClientY = ClientTop,
+                ClientWidth = ClientWidth,
+                ClientHeight = ClientHeight,
+                Style = Window.Style & ~FrameStateStyles,
+                ExStyle = Window.ExStyle,
+
+                // A host frame would still show around a window with no area.
+                Visible = IsShownOnHost(Window) && Window.Width != 0 && Window.Height != 0,
+                Enabled = (Window.Style & Win32kHelper.WindowStyleDisabled) == 0,
+                State = Window.Minimized ? WindowState.Minimized : Window.Maximized ? WindowState.Maximized : WindowState.Normal,
+                DpiAwareness = Win32kDpi.GetHostAwareness(Emulator),
+                LayeredByAttributes = Window.LayeredByAttributes,
+                LayeredFlags = Window.LayeredFlags,
+                LayeredColorKey = Window.LayeredColorKey,
+                LayeredAlpha = Window.LayeredAlpha,
+            };
+        }
+
+        private IntPtr EnsureTopLevelHostHandle(GuiThreadManager GuiManager, ulong GuestHwnd)
+        {
+            WinWindow Root = GetRootWindow(GetWindow(GuestHwnd))
+                ?? GetWindow(GetForegroundWindow())
+                ?? GetWindow(GetTopVisibleWindow());
+
+            if (Root == null)
+                return IntPtr.Zero;
+
+            BuildTopLevelFrame(Root, out TopLevelFrame Frame);
+            GuiManager.EnqueueTopLevel(Frame);
+            return GuiManager.EnsureTopLevelHandle(Root.Hwnd);
+        }
+
+        public WinWindow GetRootWindow(WinWindow Window)
+        {
+            for (int Depth = 0; Window != null && Window.ParentHwnd != 0 && Depth < MaxWindowAncestorDepth; Depth++)
+                Window = GetWindow(Window.ParentHwnd);
+
+            return Window == null || Window.Hwnd == Win32kMessageOnlyParent.HwndMessage ? null : Window;
         }
 
         private void EnsureDesktopDisplay()
@@ -6579,13 +7569,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Ensures the single host desktop window exists and returns its native handle (an HWND on
-        /// Windows), or IntPtr.Zero if no host window backend is available. BrovVulk binds a Vulkan
-        /// surface to THIS real on-screen window rather than any guest-side HWND, so a guest swapchain
-        /// presents to the actual Brovan window.
+        /// Returns the native handle (an HWND on Windows) of the host window a Vulkan surface for the guest window
+        /// presents to, or IntPtr.Zero if no host window backend is available. A zero guest window means the
+        /// foreground one.
         /// </summary>
-        public IntPtr EnsureHostWindowHandle()
+        public IntPtr EnsureHostWindowHandle(ulong GuestHwnd)
         {
+            if (UsesTopLevelHost)
+                return EnsureTopLevelHostHandle((GuiThreadManager)DesktopDisplay, GuestHwnd);
+
             EnsureDesktopWindow();
             return DesktopWindow?.NativeHandle ?? IntPtr.Zero;
         }
@@ -6654,15 +7646,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             MaterializeUserWindow(Window);
             WinWindows[Window.Hwnd] = Window;
 
-            if (Window.Visible)
-            {
-                if (ActiveWindow == 0)
-                    ActiveWindow = Window.Hwnd;
-
-                if (FocusWindow == 0)
-                    FocusWindow = Window.Hwnd;
-            }
-
             if (Window.ParentHwnd != 0 && WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow Parent))
             {
                 if (!Parent.Children.Contains(Window.Hwnd))
@@ -6672,15 +7655,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                if (!TopLevelWindows.Contains(Window.Hwnd))
-                    TopLevelWindows.Add(Window.Hwnd);
+                LinkTopLevelWindow(Window);
             }
 
             if (Window.Visible && Window.ParentHwnd == 0)
                 SetThreadWindowContext(Window);
 
-            Win32kHelper.MarkWindowDirty(Emulator, Window);
+            if (Window.Visible)
+            {
+                Win32kHelper.InvalidateWholeWindow(Emulator, Window);
+                Win32kHelper.InvalidateParentArea(Emulator, Window);
+            }
+
             MaterializeUserWindow(Window);
+
+            if (Window.Visible && Win32kHelper.CanActivateImplicitly(Window))
+                Win32kHelper.ActivateWindow(Emulator, Window, false);
+
             PresentDesktop();
         }
 
@@ -6836,26 +7827,38 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             const uint WS_VISIBLE = 0x10000000;
 
+            Window.RedrawDisabled = false;
             if (!Window.Visible && (Window.Style & WS_VISIBLE) == 0)
                 return;
 
             Window.Visible = false;
             Window.Style &= ~WS_VISIBLE;
             MaterializeUserWindow(Window);
+            Win32kHelper.ClearUpdateTree(Emulator, Window);
+            Win32kHelper.InvalidateParentArea(Emulator, Window);
+
+            if (Window.Hwnd == ActiveWindow)
+                Win32kHelper.ActivateNextWindow(Emulator, Window);
+
             PresentDesktop();
         }
 
         // NT unlinks the window before WM_NCDESTROY but keeps ParentHwnd until it is freed.
         private void UnlinkDestroyedWindow(WinWindow Window)
         {
+            WindowLayoutGeneration++;
+            WindowClips.Remove(Window.Hwnd);
+
             if (Window.ParentHwnd != 0 && WinWindows.TryGetValue(Window.ParentHwnd, out WinWindow Parent))
             {
                 if (Parent.Children.Remove(Window.Hwnd))
                     RefreshWindowFamily(Parent);
             }
-            else
+            else if (TopLevelWindows.Remove(Window.Hwnd))
             {
-                TopLevelWindows.Remove(Window.Hwnd);
+                RelinkTopLevelWindows();
+
+                PresentDesktop();
             }
         }
 
@@ -6870,6 +7873,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (FocusWindow == Hwnd)
                 FocusWindow = 0;
+
+            if (ForegroundWindow == Hwnd)
+                ForegroundWindow = 0;
 
             Window.Destroyed = true;
             ClearUserWindowHandleEntry(Window);

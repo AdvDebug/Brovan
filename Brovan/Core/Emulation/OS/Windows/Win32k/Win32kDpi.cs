@@ -90,7 +90,33 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return ScaleToProcess(Instance, HostDisplayMetrics.ScreenHeight);
         }
 
-        private static int ScaleToProcess(BinaryEmulator Instance, int PhysicalPixels)
+        internal static void GetWorkArea(BinaryEmulator Instance, out int Left, out int Top, out int Right, out int Bottom)
+        {
+            HostDisplayMetrics.GetWorkArea(out int HostLeft, out int HostTop, out int HostRight, out int HostBottom);
+            Left = ScalePositionToProcess(Instance, HostLeft);
+            Top = ScalePositionToProcess(Instance, HostTop);
+            Right = ScalePositionToProcess(Instance, HostRight);
+            Bottom = ScalePositionToProcess(Instance, HostBottom);
+        }
+
+        internal static bool TryGetHostCursorPosition(BinaryEmulator Instance, out int X, out int Y)
+        {
+            X = 0;
+            Y = 0;
+            if (!HostDisplayMetrics.TryGetCursorPosition(out int HostX, out int HostY))
+                return false;
+
+            X = ScalePositionToProcess(Instance, HostX);
+            Y = ScalePositionToProcess(Instance, HostY);
+            return true;
+        }
+
+        private static int ScalePositionToProcess(BinaryEmulator Instance, int PhysicalPixels)
+        {
+            return ScaleToProcess(Instance, PhysicalPixels, int.MinValue);
+        }
+
+        private static int ScaleToProcess(BinaryEmulator Instance, int PhysicalPixels, int Minimum = 1)
         {
             if (!HostDisplayMetrics.VirtualizesUnawareWindows)
                 return PhysicalPixels;
@@ -100,7 +126,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Dpi == SystemDpi || SystemDpi == 0)
                 return PhysicalPixels;
 
-            return Math.Max((int)((long)PhysicalPixels * Dpi / SystemDpi), 1);
+            return Math.Max((int)((long)PhysicalPixels * Dpi / SystemDpi), Minimum);
         }
 
         internal static uint BuildContext(uint Awareness, bool GdiScaled = false)

@@ -6,6 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     internal class NtUserGetThreadState : IWinSyscall
     {
         private const uint ThreadStateCaptureWindow = 0x2;
+        private const uint ThreadStateMessageTime = 0x9;
         private const uint ThreadStateWin32ThreadInfo = 0xE;
         private const ulong Win32ThreadInfoSlabSizeX64 = 0x2000;
         private const ulong Win32ThreadInfoBiasX64 = 0x800;
@@ -28,6 +29,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Routine == ThreadStateCaptureWindow)
             {
                 Instance.SetRawSyscallReturn(Win32kHelper.GetCaptureWindow(Instance));
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            if (Routine == ThreadStateMessageTime)
+            {
+                WindowsThreadState Reader = WinEmulatedThread.TryGetState(Instance.CurrentThread);
+                Instance.SetRawSyscallReturn(Reader == null ? 0 : (ulong)(long)(int)Reader.LastMessageTime);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 

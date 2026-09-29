@@ -1352,11 +1352,12 @@ namespace Brovan.Generators
             if (c.Name == "vkCreateWin32SurfaceKHR")
                 return "            case " + id + ":\n            {\n" +
                     "                System.IntPtr vi = st.Lookup(r.ReadU32(), \"VkInstance\");\n" +
+                    "                ulong gh = r.Remaining >= 8 ? r.ReadU64() : 0;\n" +
                     "                System.IntPtr surf = System.IntPtr.Zero;\n" +
                     "                int rr;\n" +
                     "                if (Brovan.Android.AndroidHost.IsActive)\n" +
                     "                {\n" +
-                    "                    System.IntPtr awin = inst.EnsureHostWindowHandle();\n" +
+                    "                    System.IntPtr awin = inst.EnsureHostWindowHandle(gh);\n" +
                     "                    byte* ci = stackalloc byte[32];\n" +
                     "                    for (int z = 0; z < 32; z++) ci[z] = 0;\n" +
                     "                    *(int*)(ci + 0) = " + "1000008000" + ";\n" +
@@ -1376,7 +1377,7 @@ namespace Brovan.Generators
                     "                }\n" +
                     "                else\n" +
                     "                {\n" +
-                    "                    System.IntPtr hwnd = inst.EnsureHostWindowHandle();\n" +
+                    "                    System.IntPtr hwnd = inst.EnsureHostWindowHandle(gh);\n" +
                     "                    System.IntPtr hinst = BrovVulkGenNative.GetModuleHandleW(System.IntPtr.Zero);\n" +
                     "                    byte* ci = stackalloc byte[40];\n" +
                     "                    for (int z = 0; z < 40; z++) ci[z] = 0;\n" +
@@ -2257,9 +2258,10 @@ namespace Brovan.Generators
             if (c.Name == "vkCreateWin32SurfaceKHR")
                 return "VKAPI_ATTR VkResult VKAPI_CALL vkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32SurfaceCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface)\n" +
                     "{\n" +
-                    "    (void)pCreateInfo; (void)pAllocator;\n" +
+                    "    (void)pAllocator;\n" +
                     "    bvk_rq_reset();\n" +
                     "    bvk_w_u32((uint32_t)(uintptr_t)instance);\n" +
+                    "    bvk_w_u64((uint64_t)(uintptr_t)(pCreateInfo ? pCreateInfo->hwnd : 0));\n" +
                     "    unsigned char bvk_out[64]; unsigned int bvk_outLen = 0;\n" +
                     "    int bvk_r = bvk_rq_send(BVK_vkCreateWin32SurfaceKHR, bvk_out, sizeof(bvk_out), &bvk_outLen);\n" +
                     "    if (bvk_r >= 0 && pSurface && bvk_outLen >= 8) { uint32_t id; memcpy(&id, bvk_out + 4, 4); *pSurface = (VkSurfaceKHR)(uintptr_t)id; }\n" +

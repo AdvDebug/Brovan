@@ -8,7 +8,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
 
             ulong Hwnd = Instance.WinHelper.GetArg(0);
-            if (Hwnd != 0 && Instance.WinHelper.GetWindow(Hwnd) == null)
+            WinWindow Window = Hwnd == 0 ? null : Instance.WinHelper.GetWindow(Hwnd);
+            if (Hwnd != 0 && Window == null)
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
                 Instance.SetRawSyscallReturn(0);
@@ -16,14 +17,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             ulong Previous = Instance.WinHelper.FocusWindow;
-            Instance.WinHelper.FocusWindow = Hwnd;
-            if (Hwnd != 0)
+
+            // NT: focus in another top-level window activates that window.
+            if (Window != null)
             {
-                Instance.WinHelper.ActiveWindow = Hwnd;
-                WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
-                if (Window != null)
-                    Instance.WinHelper.SetThreadWindowContext(Window);
+                WinWindow Root = Instance.WinHelper.GetRootWindow(Window);
+                if (Root != null && Root.Hwnd != Instance.WinHelper.ActiveWindow)
+                    Win32kHelper.ActivateWindow(Instance, Root, false);
+
+                Instance.WinHelper.SetThreadWindowContext(Window);
             }
+
+            Win32kHelper.MoveFocus(Instance, Hwnd);
 
             Instance.SetLastWinError(0);
             Instance.SetRawSyscallReturn(Previous);

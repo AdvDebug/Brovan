@@ -14,8 +14,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong SrcPtr = Instance.WinHelper.GetArg(2);
             uint Count = (uint)Instance.WinHelper.GetArg(3);
 
-            ulong Hwnd = Instance.WinHelper.GetHwndFromDc(Hdc);
-            if (Hwnd == 0 || SrcPtr == 0 || Count == 0)
+            if (!Win32kHelper.IsKnownDc(Instance, Hdc) || SrcPtr == 0 || Count == 0)
             {
                 Instance.SetRawSyscallReturn(0);
                 return NTSTATUS.STATUS_SUCCESS;
@@ -37,8 +36,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (BrushHandle == 0)
                     BrushHandle = Instance.WinHelper.ReadDcSelectedBrush(Hdc);
 
-                Win32kPenBrush Brush = Win32kHelper.ResolvePenBrush(Instance, BrushHandle, false);
-                Instance.WinHelper.EnqueueGdiFillRect(Hwnd, Hdc, X, Y, X + Width, Y + Height, Brush.ColorRef, Rop);
+                Win32kHelper.PatBltDc(Instance, Hdc, X, Y, Width, Height, Rop, BrushHandle);
             }
 
             Instance.SetRawSyscallReturn(1);

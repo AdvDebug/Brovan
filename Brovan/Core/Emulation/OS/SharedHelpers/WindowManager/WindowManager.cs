@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -13,17 +14,24 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_MOUSEMOVE = 0x0200;
         private const int InitialCapacity = 256;
 
-        private struct HostEvent
+        // Window is 0 on a single surface backend. A pointer position is relative to the origin.
+        internal struct HostEvent
         {
             public uint Message;
             public ulong WParam;
             public ulong LParam;
+            public ulong Window;
+            public bool HasOrigin;
+            public int OriginX;
+            public int OriginY;
         }
 
         private static readonly object InputSync = new();
         private static HostEvent[] _input = new HostEvent[InitialCapacity];
         private static int _head;
         private static int _count;
+        private static readonly List<ulong> _repaintWindows = new();
+        private static readonly Dictionary<ulong, int> _pendingGeometry = new();
 
         // Pointer travel reported by the host input device instead of a pointer position. Motion derived from
         // positions cannot survive a warp: the host reports where the pointer ended up, not how it got there.
@@ -34,8 +42,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static int _pendingRepaint;
         private static int _closeRequested;
         private static int _pendingDpi;
-
-        private static int _pendingGeometry;
 
         // The GUI thread fills this queue, and DrainHostEvents on the scheduler thread is the only thing that
         // moves it into a guest message queue. Without the bump a scheduler that skips its wakeup scan never
@@ -55,6 +61,17 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             Enqueue(WM_CLOSE, 0, 0);
         }
 
+        public static void RequestClose(ulong window)
+        {
+            if (window == 0)
+            {
+                RequestClose();
+                return;
+            }
+
+            Enqueue(WM_CLOSE, 0, 0, window);
+        }
+
         public static void Reset()
         {
             Interlocked.Exchange(ref _closeRequested, 0);
@@ -65,11 +82,18 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 _head = 0;
                 _count = 0;
-                Volatile.Write(ref _pendingGeometry, 0);
+                _repaintWindows.Clear();
+                _pendingGeometry.Clear();
             }
         }
 
-        public static bool GeometryPending => Volatile.Read(ref _pendingGeometry) != 0;
+        public static bool GeometryPending => IsGeometryPending(0);
+
+        public static bool IsGeometryPending(ulong window)
+        {
+            lock (InputSync)
+                return _pendingGeometry.ContainsKey(window);
+        }
 
         public static void MarkDpiChanged(uint dpi)
         {
@@ -88,9 +112,43 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             Signal();
         }
 
+        public static void MarkRepaint(ulong window)
+        {
+            if (window == 0)
+            {
+                MarkRepaint();
+                return;
+            }
+
+            lock (InputSync)
+            {
+                if (!_repaintWindows.Contains(window))
+                    _repaintWindows.Add(window);
+            }
+
+            Signal();
+        }
+
         public static bool ConsumeRepaint()
         {
             return Interlocked.Exchange(ref _pendingRepaint, 0) != 0;
+        }
+
+        public static bool TryTakeRepaint(out ulong window)
+        {
+            lock (InputSync)
+            {
+                int Last = _repaintWindows.Count - 1;
+                if (Last < 0)
+                {
+                    window = 0;
+                    return false;
+                }
+
+                window = _repaintWindows[Last];
+                _repaintWindows.RemoveAt(Last);
+                return true;
+            }
         }
 
         public static void EnqueueRawMouseMotion(int deltaX, int deltaY)
@@ -115,27 +173,59 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 if (_count == _input.Length)
                     Grow();
 
-                ref HostEvent slot = ref _input[(_head + _count) & (_input.Length - 1)];
-                slot.Message = RawMouseMotion;
-                slot.WParam = unchecked((ulong)(long)deltaX);
-                slot.LParam = unchecked((ulong)(long)deltaY);
+                _input[(_head + _count) & (_input.Length - 1)] = new HostEvent
+                {
+                    Message = RawMouseMotion,
+                    WParam = unchecked((ulong)(long)deltaX),
+                    LParam = unchecked((ulong)(long)deltaY)
+                };
                 _count++;
             }
 
             Signal();
         }
 
+        public static ulong MakeLParam(int low, int high)
+        {
+            return (ulong)(uint)(((high & 0xFFFF) << 16) | (low & 0xFFFF));
+        }
+
         public static void Enqueue(uint message, ulong wParam, ulong lParam)
         {
+            Enqueue(message, wParam, lParam, 0);
+        }
+
+        public static void Enqueue(uint message, ulong wParam, ulong lParam, ulong window)
+        {
+            Enqueue(new HostEvent { Message = message, WParam = wParam, LParam = lParam, Window = window });
+        }
+
+        public static void EnqueuePointer(uint message, ulong wParam, ulong lParam, ulong window, int originX, int originY)
+        {
+            Enqueue(new HostEvent
+            {
+                Message = message,
+                WParam = wParam,
+                LParam = lParam,
+                Window = window,
+                HasOrigin = true,
+                OriginX = originX,
+                OriginY = originY
+            });
+        }
+
+        private static void Enqueue(in HostEvent hostEvent)
+        {
+            uint message = hostEvent.Message;
+
             lock (InputSync)
             {
                 if ((message == WM_MOUSEMOVE || message == WM_SIZE || message == WM_MOVE) && _count != 0)
                 {
                     ref HostEvent tail = ref _input[(_head + _count - 1) & (_input.Length - 1)];
-                    if (tail.Message == message)
+                    if (tail.Message == message && tail.Window == hostEvent.Window)
                     {
-                        tail.WParam = wParam;
-                        tail.LParam = lParam;
+                        tail = hostEvent;
                         Signal();
                         return;
                     }
@@ -144,41 +234,39 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 if (_count == _input.Length)
                     Grow();
 
-                ref HostEvent slot = ref _input[(_head + _count) & (_input.Length - 1)];
-                slot.Message = message;
-                slot.WParam = wParam;
-                slot.LParam = lParam;
+                _input[(_head + _count) & (_input.Length - 1)] = hostEvent;
                 _count++;
 
                 if (message == WM_SIZE || message == WM_MOVE)
-                    Volatile.Write(ref _pendingGeometry, _pendingGeometry + 1);
+                    _pendingGeometry[hostEvent.Window] = _pendingGeometry.GetValueOrDefault(hostEvent.Window) + 1;
             }
 
             Signal();
         }
 
-        public static bool TryDequeue(out uint message, out ulong wParam, out ulong lParam)
+        public static bool TryDequeue(out HostEvent hostEvent)
         {
             lock (InputSync)
             {
                 if (_count == 0)
                 {
-                    message = 0;
-                    wParam = 0;
-                    lParam = 0;
+                    hostEvent = default;
                     return false;
                 }
 
-                ref HostEvent slot = ref _input[_head];
-                message = slot.Message;
-                wParam = slot.WParam;
-                lParam = slot.LParam;
+                hostEvent = _input[_head];
 
                 _head = (_head + 1) & (_input.Length - 1);
                 _count--;
 
-                if (message == WM_SIZE || message == WM_MOVE)
-                    Volatile.Write(ref _pendingGeometry, _pendingGeometry - 1);
+                uint message = hostEvent.Message;
+                if ((message == WM_SIZE || message == WM_MOVE) && _pendingGeometry.TryGetValue(hostEvent.Window, out int Pending))
+                {
+                    if (Pending <= 1)
+                        _pendingGeometry.Remove(hostEvent.Window);
+                    else
+                        _pendingGeometry[hostEvent.Window] = Pending - 1;
+                }
 
                 return true;
             }
@@ -229,6 +317,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const int SmCyScreen = 1;
         private const int FallbackScreenWidth = 1920;
         private const int FallbackScreenHeight = 1080;
+        private const int MonitorInfoSize = 40;
+        private const int MonitorInfoWorkOffset = 20;
         private const uint MinimumDpi = 48;
         private const uint MaximumDpi = 480;
 
@@ -241,6 +331,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static uint _rawDpi;
         private static int _screenWidth;
         private static int _screenHeight;
+        private static int _workLeft;
+        private static int _workTop;
+        private static int _workRight;
+        private static int _workBottom;
+        private static IntPtr _pointerDisplay;
 
         public static bool VirtualizesUnawareWindows => OperatingSystem.IsWindows();
 
@@ -323,6 +418,86 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
         }
 
+        // Physical pixels.
+        public static void GetWorkArea(out int left, out int top, out int right, out int bottom)
+        {
+            Ensure();
+            lock (Sync)
+            {
+                left = _workLeft;
+                top = _workTop;
+                right = _workRight;
+                bottom = _workBottom;
+            }
+        }
+
+        // Physical pixels. False on a touch-only host.
+        public static unsafe bool TryGetCursorPosition(out int x, out int y)
+        {
+            x = 0;
+            y = 0;
+
+            if (Brovan.Android.AndroidHost.IsActive)
+                return false;
+
+            if (OperatingSystem.IsLinux())
+                return TryQueryX11Pointer(out x, out y);
+
+            if (!OperatingSystem.IsWindows())
+                return false;
+
+            // GetPhysicalCursorPos is DPI virtualized too. Only a per-monitor aware thread gets physical pixels.
+            int* point = stackalloc int[2];
+            IntPtr previous = EnterWindowDpiContext(DpiAwareness.PerMonitor);
+            try
+            {
+                if (!NativeWinImports.GetPhysicalCursorPos(point))
+                    return false;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return false;
+            }
+            finally
+            {
+                LeaveWindowDpiContext(previous);
+            }
+
+            x = point[0];
+            y = point[1];
+            return true;
+        }
+
+        // Own connection. Xlib state is not shared with the GUI thread.
+        private static bool TryQueryX11Pointer(out int x, out int y)
+        {
+            x = 0;
+            y = 0;
+
+            lock (Sync)
+            {
+                try
+                {
+                    if (_pointerDisplay == IntPtr.Zero)
+                        _pointerDisplay = X11.XOpenDisplay(IntPtr.Zero);
+
+                    if (_pointerDisplay == IntPtr.Zero)
+                        return false;
+
+                    IntPtr root = X11.XRootWindow(_pointerDisplay, X11.XDefaultScreen(_pointerDisplay));
+                    return X11.XQueryPointer(_pointerDisplay, root, out _, out _, out x, out y, out _, out _, out _) != 0;
+                }
+                catch (DllNotFoundException)
+                {
+                    return false;
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    return false;
+                }
+            }
+        }
+
         public static void Invalidate()
         {
             lock (Sync)
@@ -340,10 +515,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _rawDpi = DefaultDpi;
                 _screenWidth = FallbackScreenWidth;
                 _screenHeight = FallbackScreenHeight;
+                SetWorkAreaToScreen();
 
                 if (Brovan.Android.AndroidHost.IsActive)
                 {
                     EnsureFromAndroidSurface();
+                    SetWorkAreaToScreen();
                     return;
                 }
 
@@ -380,6 +557,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         _screenWidth = width;
                         _screenHeight = height;
                     }
+
+                    SetWorkAreaToScreen();
+                    if (monitor != IntPtr.Zero)
+                        ReadMonitorWorkArea(monitor);
                 }
                 catch
                 {
@@ -398,6 +579,39 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     }
                 }
             }
+        }
+
+        private static void SetWorkAreaToScreen()
+        {
+            _workLeft = 0;
+            _workTop = 0;
+            _workRight = _screenWidth;
+            _workBottom = _screenHeight;
+        }
+
+        private static unsafe void ReadMonitorWorkArea(IntPtr monitor)
+        {
+            Span<byte> info = stackalloc byte[MonitorInfoSize];
+            info.Clear();
+            BinaryPrimitives.WriteInt32LittleEndian(info, MonitorInfoSize);
+
+            fixed (byte* buffer = info)
+            {
+                if (!NativeWinImports.GetMonitorInfoW(monitor, buffer))
+                    return;
+            }
+
+            int left = BinaryPrimitives.ReadInt32LittleEndian(info.Slice(MonitorInfoWorkOffset));
+            int top = BinaryPrimitives.ReadInt32LittleEndian(info.Slice(MonitorInfoWorkOffset + 4));
+            int right = BinaryPrimitives.ReadInt32LittleEndian(info.Slice(MonitorInfoWorkOffset + 8));
+            int bottom = BinaryPrimitives.ReadInt32LittleEndian(info.Slice(MonitorInfoWorkOffset + 12));
+            if (right <= left || bottom <= top)
+                return;
+
+            _workLeft = left;
+            _workTop = top;
+            _workRight = right;
+            _workBottom = bottom;
         }
 
         private static void EnsureFromAndroidSurface()
@@ -436,6 +650,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     _screenHeight = height;
                 }
 
+                SetWorkAreaToScreen();
+                ReadX11WorkArea(display, screen);
+
                 if (TryReadXftDpi(X11.XResourceManagerString(display), out uint dpi))
                 {
                     _systemDpi = dpi;
@@ -452,6 +669,40 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 if (display != IntPtr.Zero)
                     X11.XCloseDisplay(display);
+            }
+        }
+
+        // _NET_WORKAREA holds x, y, width and height for each desktop.
+        private static void ReadX11WorkArea(IntPtr display, int screen)
+        {
+            IntPtr atom = X11.XInternAtom(display, "_NET_WORKAREA", 1);
+            if (atom == IntPtr.Zero)
+                return;
+
+            if (X11.XGetWindowProperty(display, X11.XRootWindow(display, screen), atom, 0, 4, 0, IntPtr.Zero, out _, out int format, out ulong count, out _, out IntPtr data) != 0 || data == IntPtr.Zero)
+                return;
+
+            try
+            {
+                // A format of 32 means an array of long, not of int32, on LP64.
+                if (format != 32 || count < 4)
+                    return;
+
+                int x = (int)Marshal.ReadIntPtr(data, 0);
+                int y = (int)Marshal.ReadIntPtr(data, IntPtr.Size);
+                int width = (int)Marshal.ReadIntPtr(data, IntPtr.Size * 2);
+                int height = (int)Marshal.ReadIntPtr(data, IntPtr.Size * 3);
+                if (width <= 0 || height <= 0)
+                    return;
+
+                _workLeft = x;
+                _workTop = y;
+                _workRight = x + width;
+                _workBottom = y + height;
+            }
+            finally
+            {
+                X11.XFree(data);
             }
         }
 
@@ -536,7 +787,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
     public interface ITextRenderSupport
     {
-        void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options);
+        void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options, GdiClipRect[] clip);
     }
 
     public enum GdiPrimitiveKind
@@ -548,7 +799,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         RoundRect,
         Polygon,
         Polyline,
-        Blit
+        Blit,
+        Copy
     }
 
     public struct GdiPenDescriptor
@@ -566,6 +818,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
     {
         public int X;
         public int Y;
+    }
+
+    public struct GdiClipRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
     }
 
     public struct GdiPrimitive
@@ -588,8 +848,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         // Blit only. Top-down 32 bit rows, stretched onto the destination rectangle.
         public uint[] Pixels;
+        public bool PixelsPooled;
         public int SourceWidth;
         public int SourceHeight;
+
+        // Copy only. Read from the same surface as it was before the copy.
+        public int SourceX;
+        public int SourceY;
+
+        // Null draws anywhere, empty draws nothing. Shared and never changed once built.
+        public GdiClipRect[] Clip;
     }
 
     public interface IGdiRenderSupport
@@ -734,6 +1002,101 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         void Hide();
 
         void Close();
+    }
+
+    /// <summary>
+    /// The client rectangle is in guest screen coordinates. The host window takes the guest's DPI awareness, so
+    /// these are host screen coordinates too.
+    /// </summary>
+    public struct TopLevelFrame
+    {
+        public ulong Window;
+        public ulong Owner;
+        public string Title;
+        public int ClientX;
+        public int ClientY;
+        public int ClientWidth;
+        public int ClientHeight;
+        public uint Style;
+        public uint ExStyle;
+        public bool Visible;
+        public bool Enabled;
+        public WindowState State;
+        public DpiAwareness DpiAwareness;
+
+        public bool LayeredByAttributes;
+        public uint LayeredFlags;
+        public uint LayeredColorKey;
+        public byte LayeredAlpha;
+
+        public bool HostGeometryStale;
+
+        public bool Matches(in TopLevelFrame other)
+        {
+            return Owner == other.Owner
+                && ClientX == other.ClientX
+                && ClientY == other.ClientY
+                && ClientWidth == other.ClientWidth
+                && ClientHeight == other.ClientHeight
+                && Style == other.Style
+                && ExStyle == other.ExStyle
+                && Visible == other.Visible
+                && Enabled == other.Enabled
+                && State == other.State
+                && DpiAwareness == other.DpiAwareness
+                && LayeredByAttributes == other.LayeredByAttributes
+                && LayeredFlags == other.LayeredFlags
+                && LayeredColorKey == other.LayeredColorKey
+                && LayeredAlpha == other.LayeredAlpha
+                && string.Equals(Title, other.Title, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// Pixels is the dirty block as premultiplied top-down 32 bit rows, or null when only position or blend changes.
+    /// </summary>
+    public sealed class LayeredUpdate
+    {
+        public int X;
+        public int Y;
+        public int Width;
+        public int Height;
+        public uint[] Pixels;
+        public bool PixelsPooled;
+        public int DirtyLeft;
+        public int DirtyTop;
+        public int DirtyWidth;
+        public int DirtyHeight;
+        public uint ColorKey;
+        public byte ConstantAlpha;
+        public byte AlphaFormat;
+        public uint Flags;
+    }
+
+    public interface ITopLevelWindow : IWindow
+    {
+        void SetFrame(uint style, uint exStyle);
+
+        void SetOwner(ITopLevelWindow owner);
+
+        void SetClientBounds(int x, int y, int width, int height);
+
+        void SetEnabled(bool enabled);
+
+        void SetShown(bool shown);
+
+        void Activate();
+
+        void SetLayeredAttributes(uint colorKey, byte alpha, uint flags);
+
+        void UpdateLayered(LayeredUpdate update);
+    }
+
+    public interface ITopLevelWindowHost
+    {
+        ITopLevelWindow CreateTopLevel(in TopLevelFrame frame, ITopLevelWindow owner);
+
+        void Restack(ReadOnlySpan<ITopLevelWindow> topToBottom);
     }
 
     public static class WindowManagerFactory

@@ -1,12 +1,10 @@
-using System.Buffers.Binary;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtUserGetUpdateRect : IWinSyscall
     {
-        private const int RectSize = 16;
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong Hwnd = Instance.WinHelper.GetArg(0);
@@ -20,27 +18,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            // The update area is one flag here, so a paint owed covers the whole client area.
-            bool Pending = Window.PaintPending && Window.Visible;
+            bool Pending = Win32kHelper.GetUpdateRect(Instance, Window, out GdiClipRect Update);
 
             if (RectPtr != 0)
             {
-                if (!Instance.IsRegionMapped(RectPtr, RectSize))
+                if (!Instance.IsRegionMapped(RectPtr, Win32kHelper.GuestRectSize))
                 {
                     Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
                     Instance.SetBooleanSyscallReturn(false);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
-                Win32kHelper.GetClientRect(Instance, Window, out int Left, out int Top, out int Width, out int Height);
-
-                Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RectSize).Slice(0, RectSize);
-                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x00, 4), Pending ? Left : 0);
-                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x04, 4), Pending ? Top : 0);
-                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x08, 4), Pending ? Left + Width : 0);
-                BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x0C, 4), Pending ? Top + Height : 0);
-
-                if (!Instance.WriteMemory(RectPtr, Buffer))
+                if (!Win32kHelper.TryWriteGuestRect(Instance, RectPtr, Update))
                 {
                     Instance.SetBooleanSyscallReturn(false);
                     return NTSTATUS.STATUS_SUCCESS;

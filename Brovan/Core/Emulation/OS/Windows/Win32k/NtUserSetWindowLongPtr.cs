@@ -76,7 +76,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Win32kHelper.MarkWindowDirty(Instance, Window);
             Instance.WinHelper.MaterializeUserWindow(Window);
             Instance.WinHelper.PresentDesktop();
 

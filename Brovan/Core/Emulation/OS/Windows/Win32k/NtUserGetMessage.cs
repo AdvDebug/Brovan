@@ -8,9 +8,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
 
-            if (Win32kHelper.TryGetMessage(Instance, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, true, Thread.ThreadId, out Win32kMessage Message))
+            if (Win32kHelper.TryGetMessage(Instance, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
             {
-                bool Written = Win32kHelper.WriteMessage(Instance, State.GetMessageMessagePtr, Message);
+                bool Written = Win32kHelper.WriteMessage(Instance, State.GetMessageMessagePtr, Message, State);
                 Instance.WinHelper.ClearWaitState(Thread);
 
                 if (!Written)
@@ -66,9 +66,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, true, Thread.ThreadId, out Win32kMessage Message))
+            if (Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
             {
-                if (!Win32kHelper.WriteMessage(Instance, MessagePtr, Message))
+                if (!Win32kHelper.WriteMessage(Instance, MessagePtr, Message, State))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 Instance.SetLastWinError(0);
@@ -79,14 +79,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            // NT: a sent message runs inside GetMessage, which then goes on waiting.
+            ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Thread, false);
+            if (Win32kHelper.TryDeliverWindowPosChanged(Instance, 0, SyscallRip))
+                return NTSTATUS.STATUS_SUCCESS;
+
             Thread.WaitActive = true;
             Thread.WaitHandles = null;
             Thread.WaitAll = false;
             Thread.WaitDeadline = Win32kHelper.GetNextTimerDue(Instance, HwndFilter, Thread.ThreadId, MinMessage, MaxMessage);
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_PENDING;
-            State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
+            State.WaitResumeRIP = SyscallRip;
             State.WaitReturnRIP = State.WaitResumeRIP + 2;
+            State.RetrySyscallNumber = Instance.WinHelper.ReadSyscallNumber();
             State.WaitAlertable = false;
             State.GetMessageWaitActive = true;
             State.GetMessageMessagePtr = MessagePtr;

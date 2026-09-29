@@ -90,6 +90,24 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [LibraryImport("libX11.so.6")]
         public static partial int XFree(IntPtr data);
 
+        [StructLayout(LayoutKind.Sequential)]
+        public struct XRectangle
+        {
+            public short X;
+            public short Y;
+            public ushort Width;
+            public ushort Height;
+        }
+
+        [LibraryImport("libX11.so.6")]
+        public static unsafe partial int XSetClipRectangles(IntPtr display, IntPtr gc, int clipXOrigin, int clipYOrigin, XRectangle* rectangles, int count, int ordering);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XSetClipMask(IntPtr display, IntPtr gc, IntPtr pixmap);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XQueryPointer(IntPtr display, IntPtr window, out IntPtr rootReturn, out IntPtr childReturn, out int rootX, out int rootY, out int windowX, out int windowY, out uint mask);
+
         [LibraryImport("libX11.so.6")]
         public static partial int XPending(IntPtr display);
 
@@ -290,6 +308,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             int srcX, int srcY, int destX, int destY, uint width, uint height);
 
         [LibraryImport("libX11.so.6")]
+        public static partial int XCopyArea(IntPtr display, IntPtr source, IntPtr destination, IntPtr gc,
+            int srcX, int srcY, uint width, uint height, int destX, int destY);
+
+        [LibraryImport("libX11.so.6")]
         public static unsafe partial int XFillPolygon(IntPtr display, IntPtr drawable, IntPtr gc, XPoint* points, int count, int shape, int mode);
 
         [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
@@ -318,6 +340,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public const int FocusIn = 9;
         public const int FocusOut = 10;
         public const int Expose = 12;
+        public const int GraphicsExpose = 13;
         public const int ConfigureNotify = 22;
         public const int PropertyNotify = 28;
         public const int ClientMessage = 33;
@@ -589,6 +612,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             X11.StructureNotifyMask | X11.FocusChangeMask | X11.PropertyChangeMask;
 
         private const int StackPointLimit = 128;
+        private const int StackClipLimit = 256;
         private const int NetWmStateAtomLimit = 32;
         private const int EFD_CLOEXEC = 0x80000;
         private const int EFD_NONBLOCK = 0x800;
@@ -610,6 +634,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private int _wakeFd = -1;
         private IntPtr _colormap;
         private IntPtr _gc;
+        private GdiClipRect[] _gcClip;
         private IntPtr _fontStruct;
         private IntPtr _rasterPixmap;
         private IntPtr _rasterGc;
@@ -927,11 +952,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     {
                         ref X11.XMotionEvent motion = ref Unsafe.As<X11.XEvent, X11.XMotionEvent>(ref nativeEvent);
                         _modifierState = motion.State;
-                        HostEventQueue.Enqueue(WM_MOUSEMOVE, StateToMouseKeys(motion.State), MakeLParam(motion.X, motion.Y));
+                        HostEventQueue.Enqueue(WM_MOUSEMOVE, StateToMouseKeys(motion.State), HostEventQueue.MakeLParam(motion.X, motion.Y));
                         return;
                     }
 
+                // XCopyArea sends GraphicsExpose for source areas it could not read.
                 case X11.Expose:
+                case X11.GraphicsExpose:
                     HostEventQueue.MarkRepaint();
                     return;
 
@@ -944,9 +971,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         // A reparenting window manager makes ConfigureNotify's coordinates relative to the frame
                         // it inserted, so the client's screen origin has to be resolved against the root instead.
                         if (X11.XTranslateCoordinates(_xDisplay, configure.Window, X11.XRootWindow(_xDisplay, _screen), 0, 0, out int rootX, out int rootY, out _) != 0)
-                            HostEventQueue.Enqueue(WM_MOVE, 0, MakeLParam(rootX, rootY));
+                            HostEventQueue.Enqueue(WM_MOVE, 0, HostEventQueue.MakeLParam(rootX, rootY));
 
-                        HostEventQueue.Enqueue(WM_SIZE, window is { Maximized: true } ? SIZE_MAXIMIZED : SIZE_RESTORED, MakeLParam(configure.Width, configure.Height));
+                        HostEventQueue.Enqueue(WM_SIZE, window is { Maximized: true } ? SIZE_MAXIMIZED : SIZE_RESTORED, HostEventQueue.MakeLParam(configure.Width, configure.Height));
                         HostEventQueue.MarkRepaint();
                         return;
                     }
@@ -987,7 +1014,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private void TranslateButton(ref X11.XButtonEvent button, bool pressed)
         {
             uint keys = StateToMouseKeys(button.State);
-            ulong position = MakeLParam(button.X, button.Y);
+            ulong position = HostEventQueue.MakeLParam(button.X, button.Y);
 
             switch (button.Button)
             {
@@ -1008,7 +1035,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         return;
 
                     short delta = button.Button == 4 ? (short)120 : (short)-120;
-                    HostEventQueue.Enqueue(WM_MOUSEWHEEL, keys | ((ulong)(ushort)delta << 16), MakeLParam(button.XRoot, button.YRoot));
+                    HostEventQueue.Enqueue(WM_MOUSEWHEEL, keys | ((ulong)(ushort)delta << 16), HostEventQueue.MakeLParam(button.XRoot, button.YRoot));
                     return;
 
                 case 8:
@@ -1017,11 +1044,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     HostEventQueue.Enqueue(pressed ? WM_XBUTTONDOWN : WM_XBUTTONUP, keys | ((ulong)xbutton << 16), position);
                     return;
             }
-        }
-
-        private static ulong MakeLParam(int low, int high)
-        {
-            return (ulong)(uint)(((high & 0xFFFF) << 16) | (low & 0xFFFF));
         }
 
         private void ReportWindowState(LinuxWindow window, IntPtr handle)
@@ -1033,7 +1055,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (Hidden)
                 HostEventQueue.Enqueue(WM_SIZE, SIZE_MINIMIZED, 0);
             else
-                HostEventQueue.Enqueue(WM_SIZE, Maximized ? SIZE_MAXIMIZED : SIZE_RESTORED, MakeLParam(window.Width, window.Height));
+                HostEventQueue.Enqueue(WM_SIZE, Maximized ? SIZE_MAXIMIZED : SIZE_RESTORED, HostEventQueue.MakeLParam(window.Width, window.Height));
 
             HostEventQueue.MarkRepaint();
         }
@@ -1268,6 +1290,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     X11.XFreeGC(_xDisplay, _gc);
                     _gc = IntPtr.Zero;
+                    _gcClip = null;
                 }
 
                 ReleaseRasterSurface();
@@ -1467,6 +1490,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return _gc;
 
             _gc = X11.XCreateGC(_xDisplay, drawable, 0, IntPtr.Zero);
+            _gcClip = null;
             if (_gc == IntPtr.Zero)
                 return _gc;
 
@@ -1479,6 +1503,45 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             SetGraphicsForeground(_gc, _blackPixel);
             _gcStateKnown = true;
             return _gc;
+        }
+
+        private unsafe void ApplyClip(IntPtr gc, GdiClipRect[] clip)
+        {
+            if (ReferenceEquals(clip, _gcClip))
+                return;
+
+            _gcClip = clip;
+            if (clip == null)
+            {
+                X11.XSetClipMask(_xDisplay, gc, IntPtr.Zero);
+                return;
+            }
+
+            int count = clip.Length;
+            X11.XRectangle[] rented = count > StackClipLimit ? ArrayPool<X11.XRectangle>.Shared.Rent(count) : null;
+            Span<X11.XRectangle> rectangles = rented != null ? rented.AsSpan(0, count) : stackalloc X11.XRectangle[count];
+
+            try
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    rectangles[i] = new X11.XRectangle
+                    {
+                        X = (short)clip[i].Left,
+                        Y = (short)clip[i].Top,
+                        Width = (ushort)Math.Max(clip[i].Right - clip[i].Left, 0),
+                        Height = (ushort)Math.Max(clip[i].Bottom - clip[i].Top, 0),
+                    };
+                }
+
+                fixed (X11.XRectangle* first = rectangles)
+                    X11.XSetClipRectangles(_xDisplay, gc, 0, 0, first, count, 0);
+            }
+            finally
+            {
+                if (rented != null)
+                    ArrayPool<X11.XRectangle>.Shared.Return(rented);
+            }
         }
 
         private void SetGraphicsFunction(IntPtr gc, int function)
@@ -1547,6 +1610,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (gc == IntPtr.Zero)
                 return;
 
+            ApplyClip(gc, primitive.Clip);
             SetGraphicsFunction(gc, X11.GXcopy);
             SetGraphicsLineWidth(gc, (uint)Math.Max(primitive.Pen.Width, 1));
 
@@ -1594,6 +1658,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 case GdiPrimitiveKind.Blit:
                     DrawBlit(windowHandle, gc, primitive);
+                    break;
+
+                case GdiPrimitiveKind.Copy:
+                    if (primitive.X2 > primitive.X1 && primitive.Y2 > primitive.Y1)
+                        X11.XCopyArea(_xDisplay, windowHandle, windowHandle, gc, primitive.SourceX, primitive.SourceY,
+                            (uint)(primitive.X2 - primitive.X1), (uint)(primitive.Y2 - primitive.Y1), primitive.X1, primitive.Y1);
                     break;
             }
         }
@@ -1794,7 +1864,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             height = (uint)Math.Abs(primitive.Y2 - primitive.Y1);
         }
 
-        public void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        public void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options, GdiClipRect[] clip)
         {
             if (_xDisplay == IntPtr.Zero || windowHandle == IntPtr.Zero || string.IsNullOrEmpty(text))
                 return;
@@ -1806,6 +1876,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             X11.XFontStruct metrics = ReadFont(fontStruct);
 
+            ApplyClip(gc, clip);
             SetGraphicsFunction(gc, X11.GXcopy);
             SetGraphicsForeground(gc, _blackPixel);
             X11.XSetFont(_xDisplay, gc, metrics.Fid);

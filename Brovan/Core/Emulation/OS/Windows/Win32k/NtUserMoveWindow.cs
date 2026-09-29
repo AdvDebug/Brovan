@@ -1,4 +1,3 @@
-using System;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -13,30 +12,30 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int Y = unchecked((int)Instance.WinHelper.GetArg(2));
             int Width = unchecked((int)Instance.WinHelper.GetArg(3));
             int Height = unchecked((int)Instance.WinHelper.GetArg(4));
-            bool Repaint = Instance.WinHelper.GetArg(5) != 0;
+            bool Repaint = Instance.WinHelper.GetArg32(5) != 0;
 
-            WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
-            if (Window == null)
+            // NT: SetWindowPos with SWP_NOZORDER | SWP_NOACTIVATE, and SWP_NOREDRAW when bRepaint is FALSE.
+            Win32kHelper.Win32kDeferredWindowPos Position = new Win32kHelper.Win32kDeferredWindowPos
+            {
+                Hwnd = Hwnd,
+                X = X,
+                Y = Y,
+                Width = Width,
+                Height = Height,
+                Flags = Win32kHelper.SwpNoZOrder | Win32kHelper.SwpNoActivate | (Repaint ? 0 : Win32kHelper.SwpNoRedraw),
+            };
+
+            Instance.SetLastWinError(0);
+            if (Win32kHelper.SendWindowPos(Instance, Position, out bool Success))
+                return NTSTATUS.STATUS_SUCCESS;
+
+            if (!Success)
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
                 Instance.SetBooleanSyscallReturn(false);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Window.X = X;
-            Window.Y = Y;
-            Window.Width = (uint)Math.Max(Width, 0);
-            Window.Height = (uint)Math.Max(Height, 0);
-            Win32kHelper.MarkWindowDirty(Instance, Window);
-
-            Instance.WinHelper.MaterializeUserWindow(Window);
-
-            if (Repaint)
-                Win32kHelper.InvalidateWindow(Instance, Hwnd);
-            else
-                Instance.WinHelper.PresentDesktop();
-
-            Instance.SetLastWinError(0);
             Instance.SetBooleanSyscallReturn(true);
             return NTSTATUS.STATUS_SUCCESS;
         }

@@ -1,35 +1,16 @@
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtUserRedrawWindow : IWinSyscall
     {
-        private const uint RdwInvalidate = 0x0001;
-        private const uint RdwValidate = 0x0008;
-        private const uint RdwUpdateNow = 0x0100;
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong Hwnd = Instance.WinHelper.GetArg(0);
+            ulong RectPtr = Instance.WinHelper.GetArg(1);
+            ulong Region = Instance.WinHelper.GetArg(2);
             uint Flags = (uint)Instance.WinHelper.GetArg32(3);
-
-            if ((Flags & RdwValidate) != 0)
-            {
-                WinWindow Target = Instance.WinHelper.GetWindow(Hwnd);
-                if (Target == null)
-                {
-                    Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                    Instance.SetBooleanSyscallReturn(false);
-                    return NTSTATUS.STATUS_SUCCESS;
-                }
-
-                Target.Dirty = false;
-                Target.PaintPending = false;
-                Instance.WinHelper.PublishWindowPaintState(Target);
-                Instance.SetLastWinError(0);
-                Instance.SetBooleanSyscallReturn(true);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
 
@@ -41,12 +22,21 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            bool Success = (Flags & RdwInvalidate) != 0
-                ? Win32kHelper.InvalidateWindow(Instance, Hwnd)
-                : Hwnd == 0 || Window != null;
+            if ((Flags & Win32kHelper.RDW_RESERVED) != 0 || (Hwnd != 0 && Window == null))
+            {
+                Instance.SetLastWinError(Window == null && Hwnd != 0 ? Win32kHelper.ERROR_INVALID_WINDOW_HANDLE : Win32kHelper.ERROR_INVALID_FLAGS);
+                Instance.SetBooleanSyscallReturn(false);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            List<GdiClipRect> Area = Win32kHelper.GetRedrawArea(Instance);
+            bool HasArea = (Region != 0 && Win32kHelper.TryReadRegion(Instance, Region, Area))
+                || (RectPtr != 0 && Win32kHelper.TryReadGuestRect(Instance, RectPtr, Area));
+
+            Win32kHelper.RedrawWindow(Instance, Window, HasArea ? Area : null, Flags);
 
             // WM_PAINT runs the window procedure, so this syscall runs again when the callback returns.
-            if (Success && (Flags & RdwUpdateNow) != 0 && Window != null && Window.Dirty && Window.Visible)
+            if ((Flags & Win32kHelper.RDW_UPDATENOW) != 0 && Window != null && Window.Dirty && Win32kHelper.IsWindowShown(Instance, Window))
             {
                 ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Instance.CurrentThread, false);
                 Window.Dirty = false;
@@ -58,8 +48,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Win32kHelper.MarkWindowDirty(Instance, Window);
             }
 
-            Instance.SetLastWinError(Success ? 0u : Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-            Instance.SetBooleanSyscallReturn(Success);
+            Instance.SetLastWinError(0);
+            Instance.SetBooleanSyscallReturn(true);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

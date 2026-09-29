@@ -1,3 +1,4 @@
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -25,7 +26,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (!Win32kHelper.WritePaintStruct(Instance, PaintStructPtr, Hdc, Window))
+            List<GdiClipRect> PaintArea = new List<GdiClipRect>();
+            Win32kHelper.GetPaintArea(Instance, Window, PaintArea, out GdiClipRect Bounds);
+
+            bool Owed = Window.PaintPending;
+            bool Erase = Window.SendEraseBackground;
+            if (Erase)
+            {
+                Window.SendEraseBackground = false;
+                Window.BackgroundUnerased = false;
+            }
+
+            if (!Win32kHelper.WritePaintStruct(Instance, PaintStructPtr, Hdc, Bounds, Window.BackgroundUnerased))
             {
                 Win32kHelper.ReleaseDeviceContext(Instance, Hdc);
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
@@ -33,10 +45,21 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Window.Dirty = false;
-            Window.PaintPending = false;
-            Instance.WinHelper.PublishWindowPaintState(Window);
+            Window.UpdateDirty = false;
+            Win32kHelper.SetDcPaintArea(Instance, Hdc, PaintArea);
+            Win32kHelper.ClearUpdateArea(Instance, Window);
             Instance.SetLastWinError(0);
+
+            if (Erase && Owed && !Window.Minimized && PaintArea.Count != 0)
+            {
+                WinPaintBegin Paint = new WinPaintBegin { Hwnd = Hwnd, Hdc = Hdc, PaintStruct = PaintStructPtr };
+                if (Win32kHelper.SendEraseBackground(Instance, Window, Paint))
+                    return NTSTATUS.STATUS_SUCCESS;
+
+                Window.BackgroundUnerased = true;
+                Win32kHelper.WritePaintErase(Instance, PaintStructPtr, true);
+            }
+
             Instance.SetRawSyscallReturn(Hdc);
             return NTSTATUS.STATUS_SUCCESS;
         }

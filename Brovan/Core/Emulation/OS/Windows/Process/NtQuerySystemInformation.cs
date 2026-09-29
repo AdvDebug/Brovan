@@ -185,6 +185,28 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
                         }
 
+                    // NT requires exactly this size.
+                    case SYSTEM_INFORMATION_CLASS.SystemCodeIntegrityPolicyInformation:
+                        {
+                            const uint RequiredLength = 0x20;
+
+                            if (SystemInformationLength != RequiredLength)
+                            {
+                                NTSTATUS ShortStatus = SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
+                                return ShortStatus != NTSTATUS.STATUS_SUCCESS ? ShortStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                            }
+
+                            if (!Instance.IsRegionMapped(SystemInformationPtr, RequiredLength))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            Span<byte> Policy = stackalloc byte[(int)RequiredLength];
+                            Policy.Clear();
+                            if (!Instance.WriteMemory(SystemInformationPtr, Policy))
+                                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                            return SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
+                        }
+
                     case SYSTEM_INFORMATION_CLASS.SystemKernelDebuggerInformation:
                         {
                             uint RequiredLength = 2;

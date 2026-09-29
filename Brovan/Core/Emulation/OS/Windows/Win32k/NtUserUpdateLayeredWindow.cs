@@ -1,4 +1,6 @@
 using System.Buffers;
+using Brovan.Core.Emulation.OS.SharedHelpers;
+using Brovan.Core.Settings;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -6,6 +8,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     internal class NtUserUpdateLayeredWindow : IWinSyscall
     {
         private const uint SrcCopy = 0x00CC0020;
+        private const uint UlwExNoResize = 0x00000008;
+        private const uint ValidFlags = 0x0000002F;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -14,47 +18,104 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong SizePtr = Instance.WinHelper.GetArg(3);
             ulong SourceDc = Instance.WinHelper.GetArg(4);
             ulong SourcePointPtr = Instance.WinHelper.GetArg(5);
+            uint ColorKey = (uint)Instance.WinHelper.GetArg(6);
+            ulong BlendPtr = Instance.WinHelper.GetArg(7);
+            uint Flags = (uint)Instance.WinHelper.GetArg(8);
+            ulong DirtyPtr = Instance.WinHelper.GetArg(9);
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Fail(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             int Width = (int)Window.Width;
             int Height = (int)Window.Height;
-
-            if (SizePtr != 0 && TryReadPair(Instance, SizePtr, out int NewWidth, out int NewHeight))
+            bool Sized = SizePtr != 0;
+            if (Sized)
             {
-                Width = NewWidth;
-                Height = NewHeight;
+                if (!TryReadPair(Instance, SizePtr, out Width, out Height))
+                    return Fail(Instance, Win32kHelper.ERROR_NOACCESS);
+
+                if (Width < 0 || Height < 0)
+                    return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
             }
 
             int DestX = Window.X;
             int DestY = Window.Y;
-            bool Moved = DestPointPtr != 0 && TryReadPair(Instance, DestPointPtr, out DestX, out DestY);
+            bool Moved = DestPointPtr != 0;
+            if (Moved && !TryReadPair(Instance, DestPointPtr, out DestX, out DestY))
+                return Fail(Instance, Win32kHelper.ERROR_NOACCESS);
 
-            uint Flags = Win32kHelper.SwpNoZOrder | Win32kHelper.SwpNoActivate | (Moved ? 0u : Win32kHelper.SwpNoMove);
-            Win32kHelper.ApplyWindowPos(Instance, new Win32kHelper.Win32kDeferredWindowPos
+            byte ConstantAlpha = 0xFF;
+            byte AlphaFormat = 0;
+            if (BlendPtr != 0)
             {
-                Hwnd = Hwnd,
-                X = DestX,
-                Y = DestY,
-                Width = Width,
-                Height = Height,
-                Flags = Flags,
-            });
+                if (!Instance.IsRegionMapped(BlendPtr, 4))
+                    return Fail(Instance, Win32kHelper.ERROR_NOACCESS);
+
+                uint Blend = Instance.ReadMemoryUInt(BlendPtr);
+                ConstantAlpha = (byte)(Blend >> 16);
+                AlphaFormat = (byte)(Blend >> 24);
+            }
+
+            GdiClipRect Dirty = new GdiClipRect { Right = Width, Bottom = Height };
+            if (DirtyPtr != 0)
+            {
+                if (!Win32kHelper.TryReadGuestRect(Instance, DirtyPtr, out Dirty))
+                    return Fail(Instance, Win32kHelper.ERROR_NOACCESS);
+
+                if (Dirty.Left < 0 || Dirty.Top < 0)
+                    return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+            }
+
+            if ((Flags & ~ValidFlags) != 0)
+                return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+
+            // NT: fails on a window layered by SetLayeredWindowAttributes.
+            if ((Window.ExStyle & Win32kHelper.WindowExStyleLayered) == 0 || Window.LayeredByAttributes)
+                return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+
+            if ((Flags & UlwExNoResize) != 0 && Sized && (Width != (int)Window.Width || Height != (int)Window.Height))
+                return Fail(Instance, Win32kHelper.ERROR_INCORRECT_SIZE);
+
+            Window.X = DestX;
+            Window.Y = DestY;
+            Window.Width = (uint)Width;
+            Window.Height = (uint)Height;
+            Window.LayeredByUpdate = true;
+            Instance.WinHelper.MaterializeUserWindow(Window);
 
             int SourceX = 0;
             int SourceY = 0;
             if (SourcePointPtr != 0)
                 TryReadPair(Instance, SourcePointPtr, out SourceX, out SourceY);
 
-            // The layered surface is the whole window.
-            if (SourceDc != 0 && Win32kHelper.IsBlitExtentValid(Width, Height))
+            if (Instance.WinHelper.UsesTopLevelHost)
             {
+                LayeredUpdate Update = new LayeredUpdate
+                {
+                    X = Window.X,
+                    Y = Window.Y,
+                    Width = (int)Window.Width,
+                    Height = (int)Window.Height,
+                    ColorKey = ColorKey,
+                    ConstantAlpha = ConstantAlpha,
+                    AlphaFormat = AlphaFormat,
+                    Flags = Flags,
+                };
+
+                int DirtyLeft = Math.Min(Dirty.Left, Update.Width);
+                int DirtyTop = Math.Min(Dirty.Top, Update.Height);
+                int DirtyWidth = Math.Clamp(Dirty.Right, DirtyLeft, Update.Width) - DirtyLeft;
+                int DirtyHeight = Math.Clamp(Dirty.Bottom, DirtyTop, Update.Height) - DirtyTop;
+
+                if (SourceDc != 0 && DirtyWidth > 0 && DirtyHeight > 0 && Win32kHelper.IsBlitExtentValid(DirtyWidth, DirtyHeight))
+                    ReadDirtyBlock(Instance, Update, SourceDc, SourceX + DirtyLeft, SourceY + DirtyTop, DirtyLeft, DirtyTop, DirtyWidth, DirtyHeight);
+
+                Instance.WinHelper.EnqueueLayeredUpdate(Hwnd, Update);
+            }
+            else if (SourceDc != 0 && Win32kHelper.IsBlitExtentValid(Width, Height))
+            {
+                // A single surface host has no layered window, so the surface is drawn opaque.
                 int Count = Width * Height;
                 uint[] Pixels = ArrayPool<uint>.Shared.Rent(Count);
                 try
@@ -73,6 +134,37 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Instance.SetLastWinError(Win32kHelper.ERROR_SUCCESS);
             Instance.SetBooleanSyscallReturn(true);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // The host keeps the rows until it draws them, so a large block is not pooled.
+        private static void ReadDirtyBlock(BinaryEmulator Instance, LayeredUpdate Update, ulong SourceDc, int SourceX, int SourceY,
+            int Left, int Top, int Width, int Height)
+        {
+            int Count = Width * Height;
+            bool Pooled = (ulong)Count * 4 <= MemoryBudget.PooledIoBytes;
+            uint[] Pixels = Pooled ? ArrayPool<uint>.Shared.Rent(Count) : new uint[Count];
+
+            if (!Win32kHelper.TryReadDcBlock(Instance, SourceDc, SourceX, SourceY, Width, Height, Pixels.AsSpan(0, Count)))
+            {
+                if (Pooled)
+                    ArrayPool<uint>.Shared.Return(Pixels);
+
+                return;
+            }
+
+            Update.Pixels = Pixels;
+            Update.PixelsPooled = Pooled;
+            Update.DirtyLeft = Left;
+            Update.DirtyTop = Top;
+            Update.DirtyWidth = Width;
+            Update.DirtyHeight = Height;
+        }
+
+        private static NTSTATUS Fail(BinaryEmulator Instance, uint Error)
+        {
+            Instance.SetLastWinError(Error);
+            Instance.SetBooleanSyscallReturn(false);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

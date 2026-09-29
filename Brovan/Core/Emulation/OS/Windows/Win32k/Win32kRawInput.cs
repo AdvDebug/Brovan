@@ -456,7 +456,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             State.WarpPending = true;
             State.WarpX = ClampedX - OriginX;
             State.WarpY = ClampedY - OriginY;
-            Instance.WinHelper.WarpHostCursor(State.WarpX, State.WarpY);
+            Instance.WinHelper.WarpHostCursor(Hwnd, State.WarpX, State.WarpY);
         }
 
         private static bool TryGetRecord(BinaryEmulator Instance, ulong Handle, out RawRecord Record)

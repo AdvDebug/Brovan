@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Brovan.Core.Helpers;
@@ -15,6 +17,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         WarpCursor,
         SetCursorClip,
         SetCursorVisible,
+        EnsureTopLevel,
+        HideTopLevels,
         Shutdown,
     }
 
@@ -31,6 +35,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public int RectRight;
         public int RectBottom;
         public string Text;
+        public GdiClipRect[] Clip;
         public object Request;
         public GdiPrimitive Primitive;
     }
@@ -43,6 +48,24 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public CreateWindowRequest(WindowOptions options)
         {
             Options = options;
+        }
+    }
+
+    // Pending, Applied and PendingLayered need the present lock. Host and ApplyingLayered are GUI thread only.
+    internal sealed class TopLevelEntry
+    {
+        public readonly ulong Window;
+        public TopLevelFrame? Pending;
+        public TopLevelFrame? Applied;
+        public List<LayeredUpdate> PendingLayered = new();
+        public List<LayeredUpdate> ApplyingLayered = new();
+        public bool Queued;
+        public bool Destroyed;
+        public ITopLevelWindow Host;
+
+        public TopLevelEntry(ulong window)
+        {
+            Window = window;
         }
     }
 
@@ -88,6 +111,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private ITextRenderSupport _textRender;
         private ITextMetricsSupport _textMetrics;
         private IKeyboardTranslateSupport _keyboardTranslate;
+        private ITopLevelWindowHost _topLevelHost;
 
         private volatile IWindow _window;
         private volatile bool _disposed;
@@ -98,6 +122,20 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private bool _hasPendingPresent;
         private bool _hasAppliedPresent;
         private int _parked;
+
+        private const int MaxOwnerDepth = 16;
+
+        private readonly Dictionary<ulong, TopLevelEntry> _topLevels = new();
+        private List<TopLevelEntry> _dirtyTopLevels = new();
+        private List<TopLevelEntry> _destroyedTopLevels = new();
+        private ulong[] _pendingStacking;
+        private ulong? _pendingActivation;
+
+        // GUI thread only.
+        private readonly Dictionary<ulong, ITopLevelWindow> _hostWindows = new();
+        private List<TopLevelEntry> _applyingTopLevels = new();
+        private List<TopLevelEntry> _applyingDestroyed = new();
+        private ITopLevelWindow[] _stackScratch = Array.Empty<ITopLevelWindow>();
 
         public GuiThreadManager(Func<IDisplayConnection> displayFactory)
         {
@@ -150,15 +188,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         /// <summary>
         /// Moves the host pointer to a point in the window's client area.
         /// </summary>
-        public void EnqueueWarpCursor(int clientX, int clientY)
+        public void EnqueueWarpCursor(ulong hwnd, int clientX, int clientY)
         {
             if (_disposed)
                 return;
 
-            Submit(new GuiCommand { Kind = GuiCommandKind.WarpCursor, X = clientX, Y = clientY });
+            Submit(new GuiCommand { Kind = GuiCommandKind.WarpCursor, Hwnd = hwnd, X = clientX, Y = clientY });
         }
 
-        public void EnqueueSetCursorClip(bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom)
+        public void EnqueueSetCursorClip(ulong hwnd, bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom)
         {
             if (_disposed)
                 return;
@@ -166,6 +204,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             Submit(new GuiCommand
             {
                 Kind = GuiCommandKind.SetCursorClip,
+                Hwnd = hwnd,
                 X = enabled ? 1 : 0,
                 RectLeft = clientLeft,
                 RectTop = clientTop,
@@ -212,7 +251,184 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             WakeGuiThread();
         }
 
-        public void EnqueueTextRender(ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        public bool SupportsTopLevels => !_disposed && WaitForInitialization() && _topLevelHost != null;
+
+        public void EnqueueTopLevel(in TopLevelFrame frame)
+        {
+            if (_disposed)
+                return;
+
+            TopLevelFrame present = frame;
+            present.HostGeometryStale = HostEventQueue.IsGeometryPending(frame.Window);
+
+            lock (_presentSync)
+            {
+                TopLevelEntry entry = GetOrAddTopLevel(frame.Window);
+
+                if (entry.Pending is TopLevelFrame pending)
+                {
+                    if (pending.Matches(present) && (!pending.HostGeometryStale || present.HostGeometryStale))
+                        return;
+                }
+                else if (entry.Applied is TopLevelFrame applied && applied.Matches(present))
+                {
+                    return;
+                }
+
+                entry.Pending = present;
+                MarkTopLevelDirty(entry);
+            }
+
+            WakeGuiThread();
+        }
+
+        public void EnqueueTopLevelDestroyed(ulong window)
+        {
+            if (_disposed)
+                return;
+
+            lock (_presentSync)
+            {
+                if (!_topLevels.Remove(window, out TopLevelEntry entry))
+                    return;
+
+                entry.Destroyed = true;
+                ReturnLayered(entry.PendingLayered);
+                _destroyedTopLevels.Add(entry);
+            }
+
+            WakeGuiThread();
+        }
+
+        public void EnqueueStacking(ulong[] topToBottom)
+        {
+            if (_disposed)
+                return;
+
+            lock (_presentSync)
+                _pendingStacking = topToBottom;
+
+            WakeGuiThread();
+        }
+
+        public void RequestActivation(ulong window)
+        {
+            if (_disposed)
+                return;
+
+            lock (_presentSync)
+                _pendingActivation = window;
+
+            WakeGuiThread();
+        }
+
+        // A partial update needs the queued ones before it. An update without pixels is repeated by the next one.
+        public void EnqueueLayered(ulong window, LayeredUpdate update)
+        {
+            if (_disposed)
+            {
+                ReturnLayered(update);
+                return;
+            }
+
+            lock (_presentSync)
+            {
+                TopLevelEntry entry = GetOrAddTopLevel(window);
+
+                List<LayeredUpdate> pending = entry.PendingLayered;
+                bool wholeSurface = update.Pixels != null && update.DirtyLeft == 0 && update.DirtyTop == 0
+                    && update.DirtyWidth >= update.Width && update.DirtyHeight >= update.Height;
+
+                if (wholeSurface)
+                {
+                    ReturnLayered(pending);
+                }
+                else if (pending.Count > 0 && pending[^1].Pixels == null)
+                {
+                    pending.RemoveAt(pending.Count - 1);
+                }
+
+                pending.Add(update);
+                MarkTopLevelDirty(entry);
+            }
+
+            WakeGuiThread();
+        }
+
+        /// <summary>
+        /// Blocks until the GUI thread answers.
+        /// </summary>
+        public IntPtr EnsureTopLevelHandle(ulong window)
+        {
+            if (!SupportsTopLevels)
+                return IntPtr.Zero;
+
+            TaskCompletionSource<IntPtr> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            Submit(new GuiCommand { Kind = GuiCommandKind.EnsureTopLevel, Hwnd = window, Request = completion });
+
+            try
+            {
+                if (completion.Task.Wait(InitializationTimeoutMilliseconds))
+                    return completion.Task.Result;
+
+                Utils.LogError("[GuiThreadManager] EnsureTopLevelHandle timed out");
+            }
+            catch (Exception ex)
+            {
+                Utils.LogError($"[GuiThreadManager] EnsureTopLevelHandle failed: {ex.Message}");
+            }
+
+            return IntPtr.Zero;
+        }
+
+        public void HideTopLevels()
+        {
+            if (_disposed)
+                return;
+
+            Submit(new GuiCommand { Kind = GuiCommandKind.HideTopLevels });
+        }
+
+        private TopLevelEntry GetOrAddTopLevel(ulong window)
+        {
+            if (!_topLevels.TryGetValue(window, out TopLevelEntry entry))
+            {
+                entry = new TopLevelEntry(window);
+                _topLevels.Add(window, entry);
+            }
+
+            return entry;
+        }
+
+        private void MarkTopLevelDirty(TopLevelEntry entry)
+        {
+            if (entry.Queued)
+                return;
+
+            entry.Queued = true;
+            _dirtyTopLevels.Add(entry);
+        }
+
+        private static void ReturnLayered(List<LayeredUpdate> updates)
+        {
+            foreach (LayeredUpdate update in updates)
+                ReturnLayered(update);
+
+            updates.Clear();
+        }
+
+        private static void ReturnLayered(LayeredUpdate update)
+        {
+            if (update == null || update.Pixels == null)
+                return;
+
+            if (update.PixelsPooled)
+                ArrayPool<uint>.Shared.Return(update.Pixels);
+
+            update.Pixels = null;
+        }
+
+        public void EnqueueTextRender(ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options, GdiClipRect[] clip)
         {
             if (_disposed || string.IsNullOrEmpty(text))
                 return;
@@ -230,6 +446,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 RectRight = rectRight,
                 RectBottom = rectBottom,
                 TextOptions = options,
+                Clip = clip,
             });
         }
 
@@ -387,7 +604,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return true;
 
             lock (_presentSync)
-                return _hasPendingPresent;
+                return _hasPendingPresent || HasPendingTopLevels();
+        }
+
+        private bool HasPendingTopLevels()
+        {
+            return _dirtyTopLevels.Count != 0 || _destroyedTopLevels.Count != 0 || _pendingStacking != null || _pendingActivation.HasValue;
         }
 
         private void GuiThreadMain()
@@ -399,6 +621,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _textRender = _display as ITextRenderSupport;
                 _textMetrics = _display as ITextMetricsSupport;
                 _keyboardTranslate = _display as IKeyboardTranslateSupport;
+                _topLevelHost = _display as ITopLevelWindowHost;
             }
             catch (Exception ex)
             {
@@ -414,6 +637,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 try
                 {
                     bool worked = ApplyPendingPresent();
+                    worked |= ApplyPendingTopLevels();
                     worked |= DrainCommands();
 
                     _display.PumpEvents();
@@ -449,16 +673,21 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private void Execute(in GuiCommand command)
         {
-            IWindow window = _window;
+            IWindow window;
 
             switch (command.Kind)
             {
                 case GuiCommandKind.GdiPrimitive:
+                    window = ResolveWindow(command.Primitive.Hwnd);
                     if (window != null && _gdiRender != null)
                         _gdiRender.ExecuteGdiPrimitive(window.NativeHandle, command.Primitive);
+
+                    if (command.Primitive.PixelsPooled)
+                        ArrayPool<uint>.Shared.Return(command.Primitive.Pixels);
                     return;
 
                 case GuiCommandKind.RenderText:
+                    window = ResolveWindow(command.Hwnd);
                     if (window != null && _textRender != null)
                     {
                         _textRender.RenderText(
@@ -472,7 +701,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                             command.RectTop,
                             command.RectRight,
                             command.RectBottom,
-                            command.TextOptions);
+                            command.TextOptions,
+                            command.Clip);
                     }
 
                     return;
@@ -482,20 +712,290 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     return;
 
                 case GuiCommandKind.WarpCursor:
-                    window?.WarpCursor(command.X, command.Y);
+                    ResolveWindow(command.Hwnd)?.WarpCursor(command.X, command.Y);
                     return;
 
                 case GuiCommandKind.SetCursorClip:
-                    window?.SetCursorClip(command.X != 0, command.RectLeft, command.RectTop, command.RectRight, command.RectBottom);
+                    ResolveWindow(command.Hwnd)?.SetCursorClip(command.X != 0, command.RectLeft, command.RectTop, command.RectRight, command.RectBottom);
                     return;
 
                 case GuiCommandKind.SetCursorVisible:
-                    window?.SetCursorVisible(command.X != 0);
+                    _window?.SetCursorVisible(command.X != 0);
+                    foreach (ITopLevelWindow TopLevel in _hostWindows.Values)
+                        TopLevel.SetCursorVisible(command.X != 0);
+                    return;
+
+                case GuiCommandKind.EnsureTopLevel:
+                    ApplyPendingTopLevels();
+                    ((TaskCompletionSource<IntPtr>)command.Request).SetResult(EnsureHostWindow(command.Hwnd, 0)?.NativeHandle ?? IntPtr.Zero);
+                    return;
+
+                case GuiCommandKind.HideTopLevels:
+                    foreach (ITopLevelWindow TopLevel in _hostWindows.Values)
+                        TopLevel.SetShown(false);
                     return;
 
                 case GuiCommandKind.Shutdown:
-                    ExecuteShutdown((TaskCompletionSource<bool>)command.Request, window);
+                    ExecuteShutdown((TaskCompletionSource<bool>)command.Request, _window);
                     return;
+            }
+        }
+
+        private IWindow ResolveWindow(ulong hwnd)
+        {
+            if (_topLevelHost == null)
+                return _window;
+
+            if (_hostWindows.TryGetValue(hwnd, out ITopLevelWindow window))
+                return window;
+
+            if (ApplyPendingTopLevels() && _hostWindows.TryGetValue(hwnd, out window))
+                return window;
+
+            return null;
+        }
+
+        private bool ApplyPendingTopLevels()
+        {
+            ulong[] stacking;
+            ulong? activation;
+
+            lock (_presentSync)
+            {
+                if (!HasPendingTopLevels())
+                    return false;
+
+                (_dirtyTopLevels, _applyingTopLevels) = (_applyingTopLevels, _dirtyTopLevels);
+                (_destroyedTopLevels, _applyingDestroyed) = (_applyingDestroyed, _destroyedTopLevels);
+                stacking = _pendingStacking;
+                _pendingStacking = null;
+                activation = _pendingActivation;
+                _pendingActivation = null;
+            }
+
+            for (int i = 0; i < _applyingDestroyed.Count; i++)
+                DestroyHostWindow(_applyingDestroyed[i]);
+
+            _applyingDestroyed.Clear();
+
+            for (int i = 0; i < _applyingTopLevels.Count; i++)
+                ApplyTopLevel(_applyingTopLevels[i]);
+
+            _applyingTopLevels.Clear();
+
+            if (stacking != null)
+                Restack(stacking);
+
+            if (activation is ulong target && _hostWindows.TryGetValue(target, out ITopLevelWindow active))
+                RunHostCall(active, static window => window.Activate());
+
+            return true;
+        }
+
+        private void ApplyTopLevel(TopLevelEntry entry)
+        {
+            TopLevelFrame frame;
+            List<LayeredUpdate> layered;
+
+            lock (_presentSync)
+            {
+                entry.Queued = false;
+                if (entry.Destroyed)
+                    return;
+
+                TopLevelFrame? next = entry.Pending ?? entry.Applied;
+                entry.Pending = null;
+
+                if (next == null)
+                    return;
+
+                frame = next.Value;
+
+                if (entry.Host == null && !frame.Visible)
+                {
+                    entry.Applied = frame;
+                    return;
+                }
+
+                (entry.PendingLayered, entry.ApplyingLayered) = (entry.ApplyingLayered, entry.PendingLayered);
+                layered = entry.ApplyingLayered;
+            }
+
+            if (entry.Host == null && CreateHostWindow(entry, frame, 0) == null)
+            {
+                ReturnLayered(layered);
+                return;
+            }
+
+            TopLevelFrame baseline;
+            lock (_presentSync)
+                baseline = entry.Applied.GetValueOrDefault();
+
+            TopLevelFrame record = frame;
+            ITopLevelWindow host = entry.Host;
+
+            try
+            {
+                if (!string.Equals(baseline.Title, frame.Title, StringComparison.Ordinal))
+                    host.Title = frame.Title;
+
+                bool frameChanged = baseline.Style != frame.Style || baseline.ExStyle != frame.ExStyle;
+                if (frameChanged)
+                    host.SetFrame(frame.Style, frame.ExStyle);
+
+                if (baseline.Enabled != frame.Enabled)
+                    host.SetEnabled(frame.Enabled);
+
+                if (baseline.Owner != frame.Owner)
+                    host.SetOwner(frame.Owner != 0 ? EnsureHostWindow(frame.Owner, 1) : null);
+
+                if (frame.LayeredByAttributes && (!baseline.LayeredByAttributes || frameChanged || baseline.LayeredFlags != frame.LayeredFlags
+                    || baseline.LayeredColorKey != frame.LayeredColorKey || baseline.LayeredAlpha != frame.LayeredAlpha))
+                {
+                    host.SetLayeredAttributes(frame.LayeredColorKey, frame.LayeredAlpha, frame.LayeredFlags);
+                }
+
+                if (frame.HostGeometryStale)
+                {
+                    record.State = baseline.State;
+                    record.ClientX = baseline.ClientX;
+                    record.ClientY = baseline.ClientY;
+                    record.ClientWidth = baseline.ClientWidth;
+                    record.ClientHeight = baseline.ClientHeight;
+                }
+                else
+                {
+                    if (baseline.State != frame.State)
+                        host.State = frame.State;
+
+                    if (frameChanged || baseline.ClientX != frame.ClientX || baseline.ClientY != frame.ClientY
+                        || baseline.ClientWidth != frame.ClientWidth || baseline.ClientHeight != frame.ClientHeight)
+                    {
+                        host.SetClientBounds(frame.ClientX, frame.ClientY, frame.ClientWidth, frame.ClientHeight);
+                    }
+                }
+
+                if (baseline.Visible != frame.Visible)
+                    host.SetShown(frame.Visible);
+
+                foreach (LayeredUpdate update in layered)
+                    host.UpdateLayered(update);
+            }
+            catch (Exception ex)
+            {
+                Utils.LogError($"[GuiThreadManager] Top-level window {entry.Window:X} update failed: {ex.Message}");
+            }
+            finally
+            {
+                ReturnLayered(layered);
+            }
+
+            lock (_presentSync)
+                entry.Applied = record;
+        }
+
+        // An owned host window needs a host owner to stay above it.
+        private ITopLevelWindow EnsureHostWindow(ulong window, int depth)
+        {
+            if (_hostWindows.TryGetValue(window, out ITopLevelWindow existing))
+                return existing;
+
+            if (depth > MaxOwnerDepth)
+                return null;
+
+            TopLevelEntry entry;
+            TopLevelFrame frame;
+            lock (_presentSync)
+            {
+                if (!_topLevels.TryGetValue(window, out entry) || entry.Destroyed || (entry.Applied ?? entry.Pending) is not TopLevelFrame current)
+                    return null;
+
+                frame = current;
+            }
+
+            return entry.Host ?? CreateHostWindow(entry, frame, depth);
+        }
+
+        // CreateTopLevel makes the window hidden and normal. The rest of the frame is applied as a change.
+        private ITopLevelWindow CreateHostWindow(TopLevelEntry entry, in TopLevelFrame frame, int depth)
+        {
+            ITopLevelWindow owner = frame.Owner != 0 ? EnsureHostWindow(frame.Owner, depth + 1) : null;
+
+            ITopLevelWindow host;
+            try
+            {
+                host = _topLevelHost.CreateTopLevel(frame, owner);
+            }
+            catch (Exception ex)
+            {
+                Utils.LogError($"[GuiThreadManager] Top-level window {entry.Window:X} creation failed: {ex.Message}");
+                return null;
+            }
+
+            TopLevelFrame created = frame;
+            created.Visible = false;
+            created.State = WindowState.Normal;
+            created.LayeredByAttributes = false;
+            created.LayeredFlags = 0;
+            created.LayeredColorKey = 0;
+            created.LayeredAlpha = 0;
+            created.HostGeometryStale = false;
+
+            entry.Host = host;
+            _hostWindows[entry.Window] = host;
+
+            lock (_presentSync)
+                entry.Applied = created;
+
+            return host;
+        }
+
+        private void DestroyHostWindow(TopLevelEntry entry)
+        {
+            ITopLevelWindow host = entry.Host;
+            if (host == null)
+                return;
+
+            entry.Host = null;
+            if (_hostWindows.TryGetValue(entry.Window, out ITopLevelWindow mapped) && mapped == host)
+                _hostWindows.Remove(entry.Window);
+
+            RunHostCall(host, static window => window.Dispose());
+        }
+
+        private void Restack(ulong[] topToBottom)
+        {
+            if (_stackScratch.Length < topToBottom.Length)
+                _stackScratch = new ITopLevelWindow[topToBottom.Length];
+
+            int count = 0;
+            for (int i = 0; i < topToBottom.Length; i++)
+            {
+                if (_hostWindows.TryGetValue(topToBottom[i], out ITopLevelWindow window))
+                    _stackScratch[count++] = window;
+            }
+
+            try
+            {
+                _topLevelHost.Restack(_stackScratch.AsSpan(0, count));
+            }
+            catch (Exception ex)
+            {
+                Utils.LogError($"[GuiThreadManager] Restack failed: {ex.Message}");
+            }
+
+            Array.Clear(_stackScratch, 0, count);
+        }
+
+        private static void RunHostCall(ITopLevelWindow window, Action<ITopLevelWindow> call)
+        {
+            try
+            {
+                call(window);
+            }
+            catch (Exception ex)
+            {
+                Utils.LogError($"[GuiThreadManager] Top-level window call failed: {ex.Message}");
             }
         }
 

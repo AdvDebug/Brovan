@@ -35,7 +35,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             List<ulong> Handles = new List<ulong>();
-            Collect(Instance, Roots, EnumChildren, ThreadId, Handles);
+            Collect(Instance, Roots, ParentHwnd == 0, EnumChildren, ThreadId, Handles);
 
             // The list user32 walks is terminated by a null entry, and the count covers it.
             uint Needed = (uint)Handles.Count + 1;
@@ -71,11 +71,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static void Collect(BinaryEmulator Instance, List<ulong> Windows, bool Recurse, uint ThreadId, List<ulong> Handles)
+        private static void Collect(BinaryEmulator Instance, List<ulong> Windows, bool BottomFirst, bool Recurse, uint ThreadId, List<ulong> Handles)
         {
             for (int i = 0; i < Windows.Count; i++)
             {
-                WinWindow Window = Instance.WinHelper.GetWindow(Windows[i]);
+                WinWindow Window = Instance.WinHelper.GetWindow(Windows[BottomFirst ? Windows.Count - 1 - i : i]);
                 if (Window == null)
                     continue;
 
@@ -83,7 +83,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Handles.Add(Window.Hwnd);
 
                 if (Recurse && Window.Children.Count != 0)
-                    Collect(Instance, Window.Children, true, ThreadId, Handles);
+                    Collect(Instance, Window.Children, false, true, ThreadId, Handles);
             }
         }
     }

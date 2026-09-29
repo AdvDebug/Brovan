@@ -1,3 +1,4 @@
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -6,14 +7,32 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-
             ulong Hwnd = Instance.WinHelper.GetArg(0);
             ulong RectPtr = Instance.WinHelper.GetArg(1);
-            bool Erase = Instance.WinHelper.GetArg(2) != 0;
+            bool Erase = Instance.WinHelper.GetArg32(2) != 0;
 
-            bool Success = Win32kHelper.InvalidateWindow(Instance, Hwnd);
-            Instance.SetLastWinError(Success ? 0u : Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-            Instance.SetBooleanSyscallReturn(Success);
+            // NT: xxxInvalidateRect answers TRUE for no window and invalidates nothing.
+            if (Hwnd == 0)
+            {
+                Instance.SetLastWinError(0);
+                Instance.SetBooleanSyscallReturn(true);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
+            List<GdiClipRect> Area = Win32kHelper.GetRedrawArea(Instance);
+            if (Window == null || (RectPtr != 0 && !Win32kHelper.TryReadGuestRect(Instance, RectPtr, Area)))
+            {
+                Instance.SetLastWinError(Window == null ? Win32kHelper.ERROR_INVALID_WINDOW_HANDLE : Win32kHelper.ERROR_NOACCESS);
+                Instance.SetBooleanSyscallReturn(false);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            Win32kHelper.RedrawWindow(Instance, Window, RectPtr != 0 ? Area : null,
+                Win32kHelper.RDW_INVALIDATE | (Erase ? Win32kHelper.RDW_ERASE : 0));
+
+            Instance.SetLastWinError(0);
+            Instance.SetBooleanSyscallReturn(true);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

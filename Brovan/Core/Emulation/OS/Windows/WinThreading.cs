@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Emulation.OS.Windows.WinSysHelper;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -72,6 +73,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong GetMessageHwndFilter { get; set; }
         public uint GetMessageMinMessage { get; set; }
         public uint GetMessageMaxMessage { get; set; }
+
+        // GetMessagePos and GetMessageTime report these.
+        public int LastMessageX { get; set; }
+        public int LastMessageY { get; set; }
+        public uint LastMessageTime { get; set; }
+
         public Stack<WinUserCallbackFrame> UserCallbackFrames { get; set; } = new();
 
         // Set by a returning WM_PAINT callback, so the re-run of its syscall knows itself apart from a
@@ -104,12 +111,39 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinWindowCreation WindowCreation;
         public WinWindowDestruction WindowDestruction;
+        public WinWindowPosChange WindowPosChange;
+        public WinPaintBegin PaintBegin;
+        public WinScrollChildMoves ScrollChildMoves;
+    }
+
+    public sealed class WinScrollChildMoves
+    {
+        public readonly List<ulong> Children = new();
+        public int Next;
+        public int Result;
+        public ulong UpdateAddress;
+        public GdiClipRect UpdateRect;
+    }
+
+    public sealed class WinPaintBegin
+    {
+        public ulong Hwnd;
+        public ulong Hdc;
+        public ulong PaintStruct;
     }
 
     public sealed class WinWindowCreation
     {
         public ulong Hwnd;
         public WinWindowCreationStep Step;
+    }
+
+    // One SetWindowPos in progress. WM_WINDOWPOSCHANGING can change the request.
+    public sealed class WinWindowPosChange
+    {
+        internal Win32k.Win32kHelper.Win32kDeferredWindowPos Position;
+        public ulong WindowPos;
+        public bool Changed;
     }
 
     public sealed class WinWindowDestruction

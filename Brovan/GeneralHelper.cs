@@ -157,6 +157,12 @@ namespace Brovan
         [DllImport("user32.dll")]
         public static extern IntPtr MonitorFromWindow(IntPtr hWnd, int dwFlags);
 
+        [DllImport("user32.dll")]
+        public static extern unsafe bool GetMonitorInfoW(IntPtr hMonitor, byte* lpmi);
+
+        [DllImport("user32.dll")]
+        public static extern unsafe bool GetPhysicalCursorPos(int* lpPoint);
+
         [DllImport("shcore.dll")]
         public static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
     }
@@ -1219,7 +1225,7 @@ namespace Brovan
             private static void WriteLinuxTextFileIfMissing(string Root, string RelativePath, string Content)
             {
                 string HostPath = CombineLinuxRelativePath(Root, RelativePath);
-                if (string.IsNullOrWhiteSpace(HostPath) || File.Exists(HostPath) || Directory.Exists(HostPath))
+                if (string.IsNullOrWhiteSpace(HostPath) || Path.Exists(HostPath))
                     return;
 
                 string Parent = Path.GetDirectoryName(HostPath);
@@ -2080,7 +2086,7 @@ namespace Brovan
                 string VirtualPath = ResolveVirtualHostPathInternal(WinPath, CreateDirectories, PreserveFinalLink);
                 if (!string.IsNullOrEmpty(VirtualPath))
                 {
-                    if (CreateDirectories || File.Exists(VirtualPath) || Directory.Exists(VirtualPath))
+                    if (CreateDirectories || Path.Exists(VirtualPath))
                         return VirtualPath;
                 }
 
@@ -2089,7 +2095,7 @@ namespace Brovan
                 {
                     string Native = GetNativeFullPath(WinPath, CreateDirectories);
 
-                    if (!CreateDirectories && !string.IsNullOrEmpty(Native) && !File.Exists(Native) && !Directory.Exists(Native))
+                    if (!CreateDirectories && !string.IsNullOrEmpty(Native) && !Path.Exists(Native))
                     {
                         string Shipped = TryResolveFromWindowsLibs(WinPath);
                         if (!string.IsNullOrEmpty(Shipped))
@@ -2293,7 +2299,7 @@ namespace Brovan
                 if (IsWindows || string.IsNullOrEmpty(HostPath))
                     return HostPath;
 
-                if (File.Exists(HostPath) || Directory.Exists(HostPath))
+                if (Path.Exists(HostPath))
                     return HostPath;
 
                 string Root = Path.GetPathRoot(HostPath);
@@ -2315,7 +2321,7 @@ namespace Brovan
                         continue;
 
                     string Candidate = Path.Combine(Resolved, Component);
-                    if (File.Exists(Candidate) || Directory.Exists(Candidate))
+                    if (Path.Exists(Candidate))
                     {
                         Resolved = Candidate;
                         continue;
@@ -2832,7 +2838,7 @@ namespace Brovan
                 if (string.IsNullOrWhiteSpace(HostPath))
                     return false;
 
-                return File.Exists(HostPath) || Directory.Exists(HostPath);
+                return Path.Exists(HostPath);
             }
 
             private static IEnumerable<string> EnumerateLinuxPathAliases(string LinuxPath)
@@ -3101,10 +3107,34 @@ namespace Brovan
             private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> SandboxLinkCache =
                 new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
 
+            public static bool TryGetHostAttributes(FileInfo Info, out FileAttributes Attributes)
+            {
+                try
+                {
+                    Attributes = Info.Attributes;
+                }
+                catch (Exception Ex) when (Ex is IOException || Ex is UnauthorizedAccessException)
+                {
+                    Attributes = 0;
+                    return false;
+                }
+
+                // FileSystemInfo.Attributes is -1 for a missing entry.
+                return (int)Attributes != -1;
+            }
+
             /// <summary>
             /// Drops the memoized reparse-point walks. Call whenever a link or a directory in the sandbox changes shape.
             /// </summary>
-            public static void InvalidateSandboxLinkCache() => SandboxLinkCache.Clear();
+            public static void InvalidateSandboxLinkCache()
+            {
+                SandboxLinkCache.Clear();
+                SandboxPlainComponents.Clear();
+            }
+
+            // Components known to exist and not be reparse points. All walks share them.
+            private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> SandboxPlainComponents =
+                new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
 
             private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, bool EnforceAllowedRoots = true)
             {
@@ -3150,33 +3180,35 @@ namespace Brovan
                     return Normalized;
 
                 string Current = Root;
+                bool Missing = false;
                 for (int i = 0; i < Parts.Length; i++)
                 {
                     Current = Path.Combine(Current, Parts[i]);
 
                     bool IsFinal = i == Parts.Length - 1;
-                    if (IsFinal && !IncludeFinal)
+                    if ((IsFinal && !IncludeFinal) || Missing)
                         continue;
 
                     string LinkTarget;
                     if (IsWindows)
                     {
-                        // A throw per missing component costs an unwind through the backend's own frames.
-                        if (!Path.Exists(Current))
+                        if (SandboxPlainComponents.ContainsKey(Current))
                             continue;
 
-                        FileAttributes Attributes;
-                        try
+                        if (!TryGetHostAttributes(new FileInfo(Current), out FileAttributes Attributes))
                         {
-                            Attributes = File.GetAttributes(Current);
-                        }
-                        catch
-                        {
+                            Missing = true;
                             continue;
                         }
 
                         if ((Attributes & FileAttributes.ReparsePoint) == 0)
+                        {
+                            if (SandboxPlainComponents.Count >= SandboxLinkCacheLimit)
+                                SandboxPlainComponents.Clear();
+
+                            SandboxPlainComponents.TryAdd(Current, 0);
                             continue;
+                        }
 
                         if (!TryReadHostSymlinkTarget(Current, out LinkTarget))
                         {
@@ -3499,7 +3531,7 @@ namespace Brovan
                     return null;
 
                 string Full = GetSandboxedFullPath(Candidate, CreateDirectories: false);
-                if (!string.IsNullOrEmpty(Full) && (File.Exists(Full) || Directory.Exists(Full)))
+                if (!string.IsNullOrEmpty(Full) && Path.Exists(Full))
                     return Full;
 
                 // Fall back to a case-insensitive leaf search.

@@ -92,41 +92,27 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance._emulator.WriteMemory(ReturnLengthPtr, Length);
             }
 
-            static byte[] BuildSid(byte Revision, byte[] IdentifierAuthority, params uint[] SubAuthorities)
-            {
-                byte SubAuthCount = (byte)(SubAuthorities?.Length ?? 0);
-                int Size = 8 + (4 * SubAuthCount);
-
-                byte[] Sid = new byte[Size];
-                Sid[0] = Revision;
-                Sid[1] = SubAuthCount;
-
-                for (int i = 0; i < 6; i++)
-                    Sid[2 + i] = (i < IdentifierAuthority.Length) ? IdentifierAuthority[i] : (byte)0;
-
-                for (int i = 0; i < SubAuthCount; i++)
-                {
-                    BinaryPrimitives.WriteUInt32LittleEndian(Sid.AsSpan(8 + (i * 4), 4), SubAuthorities[i]);
-                }
-
-                return Sid;
-            }
-
-            static byte[] SidLocalSystem() => BuildSid(1, new byte[] { 0, 0, 0, 0, 0, 5 }, 18);
-            static byte[] SidIntegrity(uint Rid) => BuildSid(1, new byte[] { 0, 0, 0, 0, 0, 16 }, Rid);
-            static byte[] SidFallbackUser() => BuildSid(1, new byte[] { 0, 0, 0, 0, 0, 5 }, 21, 1000, 1000, 1000, 1001);
+            static byte[] SidLocalSystem() => BuildSid(1, 5, 18);
+            static byte[] SidIntegrity(uint Rid) => BuildSid(1, 16, Rid);
+            static byte[] SidFallbackUser() => BuildSid(1, 5, 21, 1000, 1000, 1000, 1001);
 
             WinProcess OwnerProcess = Instance.WinHelper.WinProcesses.FirstOrDefault(p => p.PID == (uint)Token.OwningProcessId);
 
             byte[] UserSid = SidFallbackUser();
-            if (OwnerProcess != null)
+            if (Token.IsAnonymous)
+            {
+                UserSid = BuildSid(1, 5, 7);
+            }
+            else if (OwnerProcess != null)
             {
                 if (OwnerProcess.RunningUser == User.System || OwnerProcess.RunningUser == User.LocalService || OwnerProcess.RunningUser == User.WindowManager)
                     UserSid = SidLocalSystem();
             }
 
             uint IntegrityRid = 0x2000;
-            if (OwnerProcess != null)
+            if (Token.IsAnonymous)
+                IntegrityRid = 0;
+            else if (OwnerProcess != null)
             {
                 if (OwnerProcess.RunningUser == User.System || OwnerProcess.RunningUser == User.LocalService || OwnerProcess.RunningUser == User.WindowManager)
                     IntegrityRid = 0x4000;
@@ -478,6 +464,26 @@ namespace Brovan.Core.Emulation.OS.Windows
                 default:
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
+        }
+
+        internal static byte[] BuildSid(byte Revision, ulong IdentifierAuthority, params uint[] SubAuthorities)
+        {
+            byte SubAuthCount = (byte)(SubAuthorities?.Length ?? 0);
+            int Size = 8 + (4 * SubAuthCount);
+
+            byte[] Sid = new byte[Size];
+            Sid[0] = Revision;
+            Sid[1] = SubAuthCount;
+
+            for (int i = 0; i < 6; i++)
+                Sid[2 + i] = (byte)(IdentifierAuthority >> ((5 - i) * 8));
+
+            for (int i = 0; i < SubAuthCount; i++)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(Sid.AsSpan(8 + (i * 4), 4), SubAuthorities[i]);
+            }
+
+            return Sid;
         }
     }
 }

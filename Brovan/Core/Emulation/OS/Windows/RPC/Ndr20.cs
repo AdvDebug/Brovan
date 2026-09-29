@@ -83,6 +83,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             Position += ContextHandleSize;
         }
 
+        public void WriteContextHandle(Guid Uuid)
+        {
+            AlignTo(4);
+            WriteUInt32(0);
+            Reserve(16);
+            Uuid.TryWriteBytes(Buffer.AsSpan(Position, 16));
+            Position += 16;
+        }
+
         public void WriteSystemHandle(int HandleIndex)
         {
             AlignTo(4);
@@ -202,6 +211,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public void Align(int Alignment)
         {
             Position = (Position + Alignment - 1) & ~(Alignment - 1);
+        }
+
+        public bool TrySkip(int Count)
+        {
+            if (Count < 0 || Position + Count > Data.Length)
+                return false;
+
+            Position += Count;
+            return true;
         }
 
         public bool TryReadConformantWideString(out string Value)

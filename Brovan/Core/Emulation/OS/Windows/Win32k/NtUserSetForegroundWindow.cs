@@ -16,9 +16,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Instance.WinHelper.ActiveWindow = Hwnd;
-            Instance.WinHelper.FocusWindow = Hwnd;
-            Instance.WinHelper.SetThreadWindowContext(Window);
+            Win32kHelper.ActivateWindow(Instance, Window, false);
 
             Instance.SetLastWinError(0);
             Instance.SetBooleanSyscallReturn(true);

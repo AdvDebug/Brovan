@@ -153,7 +153,7 @@ namespace Brovan.Core.Emulation
 
         OS.SharedHelpers.DpiAwareness GuestDpiAwareness { get; }
 
-        IntPtr EnsureHostWindowHandle();
+        IntPtr EnsureHostWindowHandle(ulong GuestHwnd);
 
         void EnsureHostXlibSurfaceHandles(out IntPtr Connection, out IntPtr Window);
     }

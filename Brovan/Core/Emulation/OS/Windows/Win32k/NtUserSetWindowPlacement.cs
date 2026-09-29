@@ -42,8 +42,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int Right = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x24, 4));
             int Bottom = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x28, 4));
 
-            Window.Minimized = ShowCommand == SwShowMinimized || ShowCommand == SwShowMinNoActive;
-            Window.Maximized = ShowCommand == SwShowMaximized;
+            Win32kHelper.SetShowState(Window, ShowCommand == SwShowMinimized || ShowCommand == SwShowMinNoActive, ShowCommand == SwShowMaximized);
 
             uint Flags = SwpNoZOrder | (ShowCommand == SwHide ? SwpHideWindow : SwpShowWindow);
 

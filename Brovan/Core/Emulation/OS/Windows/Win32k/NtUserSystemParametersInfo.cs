@@ -34,7 +34,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 case SpiGetWorkArea:
                 {
-                    if (!Instance.WinHelper.TryGetPrimaryMonitorRect(out int Left, out int Top, out int Right, out int Bottom))
+                    if (!Instance.WinHelper.TryGetPrimaryMonitorWorkRect(out int Left, out int Top, out int Right, out int Bottom))
                         break;
 
                     Span<uint> Rect = stackalloc uint[4] { (uint)Left, (uint)Top, (uint)Right, (uint)Bottom };

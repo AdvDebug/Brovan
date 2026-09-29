@@ -4,7 +4,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtGdiCreateRectRgn : IWinSyscall
     {
-        private const int RegionObjectSize = 0x30;
+        private const int RegionObjectSize = Win32kHelper.RegionObjectSize;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -26,7 +26,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            ulong RegionObject = Instance.MapUniqueAddress((ulong)RegionObjectSize, MemoryProtection.ReadWrite);
+            ulong RegionObject = Instance.WinHelper.GetGdiRegionObject(Handle);
             if (RegionObject != 0)
             {
                 Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RegionObjectSize);

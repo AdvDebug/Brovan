@@ -77,15 +77,36 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 ParentHwnd = 0;
             }
 
+            // NT adds these implied styles.
+            const uint WS_POPUP = 0x80000000;
+            const uint WS_CAPTION = 0x00C00000;
+            const uint WS_CLIPSIBLINGS = 0x04000000;
+            const uint WS_DLGFRAME = 0x00400000;
+            const uint WS_THICKFRAME = 0x00040000;
+            const uint WS_EX_DLGMODALFRAME = 0x00000001;
+            const uint WS_EX_WINDOWEDGE = 0x00000100;
+
+            uint Style = (uint)StyleArg;
+            uint ExStyle = (uint)exStyleArg;
+            if ((Style & WS_CHILD) == 0)
+            {
+                Style |= WS_CLIPSIBLINGS;
+                if ((Style & WS_POPUP) == 0)
+                    Style |= WS_CAPTION;
+            }
+
+            if ((ExStyle & WS_EX_DLGMODALFRAME) != 0 || (Style & (WS_DLGFRAME | WS_THICKFRAME)) != 0)
+                ExStyle |= WS_EX_WINDOWEDGE;
+
             WinWindow window = new WinWindow
             {
                 Hwnd = hwnd,
                 ClassAtom = WindowClass.Atom,
                 Title = title,
                 ClassName = string.IsNullOrEmpty(ClassName) ? "#UNNAMED" : ClassName,
-                Visible = ((uint)StyleArg & 0x10000000U) != 0, // WS_VISIBLE
-                Style = (uint)StyleArg,
-                ExStyle = (uint)exStyleArg,
+                Visible = (Style & 0x10000000U) != 0, // WS_VISIBLE
+                Style = Style,
+                ExStyle = ExStyle,
                 X = x,
                 Y = y,
                 Width = (uint)Math.Max(width, 0),

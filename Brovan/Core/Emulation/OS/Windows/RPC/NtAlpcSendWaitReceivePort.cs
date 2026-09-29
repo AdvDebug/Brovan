@@ -111,6 +111,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Port.ReceivedHandles = ReadHandleAttribute(Instance, SendMessageAttributesPtr);
                     Port.Handler(Port, SendBytes, Reply, Instance);
                     ReplyBytes = Reply.Data ?? SendBytes;
+
+                    long Delay = Reply.NotBeforeTick - Instance.EmulatedTickCount64;
+                    if (Delay > 0 && Instance.WinHelper.TryContinuePipeWait(PortHandle, (int)Delay, (int)Delay))
+                        return NTSTATUS.STATUS_PENDING;
                 }
                 else if (SendBytes != null)
                 {

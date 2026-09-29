@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using Brovan;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -10,16 +11,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         // FILE_BASIC_INFORMATION is 0x28 on x64 (40 bytes).
         private const uint FileBasicInformationSize = 0x28;
 
-        public NTSTATUS Handle(BinaryEmulator Instance)
-        {
+        // FILE_NETWORK_OPEN_INFORMATION is 0x38 on both x64 and x86.
+        private const uint FileNetworkOpenInformationSize = 0x38;
 
+        public NTSTATUS Handle(BinaryEmulator Instance) => Query(Instance, NetworkOpen: false);
+
+        internal static NTSTATUS Query(BinaryEmulator Instance, bool NetworkOpen)
+        {
+            string SyscallName = NetworkOpen ? nameof(NtQueryFullAttributesFile) : nameof(NtQueryAttributesFile);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(0);
             ulong FileInformationPtr = Instance.WinHelper.GetArg(1);
 
             if (ObjectAttributesPtr == 0 || FileInformationPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(FileInformationPtr, FileBasicInformationSize))
+            if (!Instance.IsRegionMapped(FileInformationPtr, NetworkOpen ? FileNetworkOpenInformationSize : FileBasicInformationSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out ulong AttributesRoot, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
@@ -36,79 +42,70 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(HostPath))
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
-            bool Exists = File.Exists(HostPath) || Directory.Exists(HostPath);
-            if (!Exists)
+            FileInfo Info = new FileInfo(HostPath);
+            if (!GeneralHelper.IO.TryGetHostAttributes(Info, out FileAttributes Attributes))
             {
 
                 if (!Instance.WinHelper.IsSyntheticDirectory(EmulatedPath))
                 {
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                        Instance.TriggerEventMessage($"[!] NtQueryAttributesFile: file not found: Name=\"{Name}\", FullName=\"{FullName}\", SyntheticDir=\"{EmulatedPath}\".", LogFlags.Syscall);
+                        Instance.TriggerEventMessage($"[!] {SyscallName}: file not found: Name=\"{Name}\", FullName=\"{FullName}\", SyntheticDir=\"{EmulatedPath}\".", LogFlags.Syscall);
                     return NtCreateFile.ParentDirectoryExists(EmulatedPath)
                         ? NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND
                         : NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
                 }
 
-                FillSyntheticDirectoryInformation(Instance, FileInformationPtr);
+                long Now = DateTime.UtcNow.ToFileTimeUtc();
+                if (!WriteInformation(Instance, FileInformationPtr, NetworkOpen, Now, Now, Now, 0, FileAttributes.Directory))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                    Instance.TriggerEventMessage($"[+] NtQueryAttributesFile: Name=\"{Name}\", FullName=\"{FullName}\", SyntheticDir=\"{EmulatedPath}\".", LogFlags.Syscall);
+                    Instance.TriggerEventMessage($"[+] {SyscallName}: Name=\"{Name}\", FullName=\"{FullName}\", SyntheticDir=\"{EmulatedPath}\".", LogFlags.Syscall);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            FillFileBasicInformation(Instance, FileInformationPtr, HostPath);
+            ulong EndOfFile = 0;
+            if (NetworkOpen)
+            {
+                if ((Attributes & FileAttributes.Directory) == 0)
+                    EndOfFile = (ulong)Math.Max(Info.Length, 0);
+
+                if (Attributes == 0)
+                    Attributes = FileAttributes.Normal;
+            }
+
+            if (!WriteInformation(Instance, FileInformationPtr, NetworkOpen, Info.CreationTimeUtc.ToFileTimeUtc(), Info.LastAccessTimeUtc.ToFileTimeUtc(),
+                Info.LastWriteTimeUtc.ToFileTimeUtc(), EndOfFile, Attributes))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                Instance.TriggerEventMessage($"[+] NtQueryAttributesFile: Name=\"{Name}\", FullName=\"{FullName}\", HostPath=\"{HostPath}\".", LogFlags.Syscall);
+                Instance.TriggerEventMessage($"[+] {SyscallName}: Name=\"{Name}\", FullName=\"{FullName}\", HostPath=\"{HostPath}\".", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static void FillSyntheticDirectoryInformation(BinaryEmulator Instance, ulong FileInformationPtr)
+        private static bool WriteInformation(BinaryEmulator Instance, ulong FileInformationPtr, bool NetworkOpen, long CreationTime, long LastAccessTime,
+            long LastWriteTime, ulong EndOfFile, FileAttributes Attributes)
         {
-            long Now = DateTime.UtcNow.ToFileTimeUtc();
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x00, (ulong)Now, 8);
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x08, (ulong)Now, 8);
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x10, (ulong)Now, 8);
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x18, (ulong)Now, 8);
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x20, (uint)FileAttributes.Directory, 4);
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x24, 0u, 4);
-        }
+            Span<byte> Buffer = stackalloc byte[(int)FileNetworkOpenInformationSize];
+            BinaryPrimitives.WriteInt64LittleEndian(Buffer, CreationTime);
+            BinaryPrimitives.WriteInt64LittleEndian(Buffer.Slice(0x08), LastAccessTime);
+            BinaryPrimitives.WriteInt64LittleEndian(Buffer.Slice(0x10), LastWriteTime);
+            BinaryPrimitives.WriteInt64LittleEndian(Buffer.Slice(0x18), LastWriteTime);
 
-        private static void FillFileBasicInformation(BinaryEmulator Instance, ulong FileInformationPtr, string HostPath)
-        {
-            FileAttributes Attr;
-            DateTime CreationUtc;
-            DateTime LastAccessUtc;
-            DateTime LastWriteUtc;
-
-            if (Directory.Exists(HostPath))
+            if (!NetworkOpen)
             {
-                DirectoryInfo di = new DirectoryInfo(HostPath);
-                Attr = di.Attributes;
-                CreationUtc = di.CreationTimeUtc;
-                LastAccessUtc = di.LastAccessTimeUtc;
-                LastWriteUtc = di.LastWriteTimeUtc;
-            }
-            else
-            {
-                FileInfo fi = new FileInfo(HostPath);
-                Attr = fi.Attributes;
-                CreationUtc = fi.CreationTimeUtc;
-                LastAccessUtc = fi.LastAccessTimeUtc;
-                LastWriteUtc = fi.LastWriteTimeUtc;
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x20), (uint)Attributes);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x24), 0);
+                return Instance.WriteMemory(FileInformationPtr, Buffer.Slice(0, (int)FileBasicInformationSize));
             }
 
-            long CreationTime = CreationUtc.ToFileTimeUtc();
-            long LastAccessTime = LastAccessUtc.ToFileTimeUtc();
-            long LastWriteTime = LastWriteUtc.ToFileTimeUtc();
-            long ChangeTime = LastWriteTime;
-
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x00, (ulong)CreationTime, 8);
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x08, (ulong)LastAccessTime, 8);
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x10, (ulong)LastWriteTime, 8);
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x18, (ulong)ChangeTime, 8);
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x20, (uint)Attr, 4);
-            Instance._emulator.WriteMemory(FileInformationPtr + 0x24, 0u, 4);
+            ulong AllocationSize = EndOfFile == 0 ? 0UL : (EndOfFile + 0xFFF) & ~0xFFFUL;
+            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x20), AllocationSize);
+            BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x28), EndOfFile);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x30), (uint)Attributes);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x34), 0);
+            return Instance.WriteMemory(FileInformationPtr, Buffer);
         }
 
     }

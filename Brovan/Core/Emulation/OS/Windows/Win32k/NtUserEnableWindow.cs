@@ -25,6 +25,21 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 Window.Style = Enable ? Window.Style & ~WS_DISABLED : Window.Style | WS_DISABLED;
                 Instance.WinHelper.MaterializeUserWindow(Window);
+
+                // A disabled host window passes clicks to the window it owns.
+                if (Window.ParentHwnd == 0)
+                    Instance.WinHelper.PresentDesktop();
+
+                Instance.SetLastWinError(0);
+
+                // NT: xxxEnableWindow sends WM_ENABLE before it returns.
+                uint ThreadId = Instance.CurrentThread?.ThreadId ?? 0;
+                if (Window.OwnerThreadId == ThreadId
+                    && Instance.WinHelper.BeginGuestCall(Window.WndProc, Hwnd, WM_ENABLE, Enable ? 1UL : 0UL, 0, WasDisabled ? 1UL : 0UL))
+                {
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
                 Win32kHelper.PostMessage(Instance, Hwnd, WM_ENABLE, Enable ? 1UL : 0UL, 0);
             }
 
