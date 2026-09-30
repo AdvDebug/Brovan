@@ -606,7 +606,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             GetClientRect(Instance, Window, out int OldClientX, out int OldClientY, out int OldClientWidth, out int OldClientHeight);
 
             ApplyWindowPos(Instance, Change.Position);
-            Instance.WinHelper.PresentDesktop();
+
+            // A child move changes no host frame.
+            if (Window.ParentHwnd == 0)
+                Instance.WinHelper.PresentDesktop();
 
             uint Flags = Change.Position.Flags | SwpNoClientSize | SwpNoClientMove;
             if (Window.X == OldX && Window.Y == OldY)
@@ -1782,11 +1785,32 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Type;
         }
 
-        internal static int GetRegionType(List<GdiClipRect> Rects) => GetRegionType(Rects.Count);
+        internal static int GetRegionType(List<GdiClipRect> Rects) => GetRegionType(CollectionsMarshal.AsSpan(Rects));
 
-        private static int GetRegionType(int RectCount)
+        // NT merges a region into bands, so disjoint rectangles that fill their bounds are one rectangle.
+        private static int GetRegionType(ReadOnlySpan<GdiClipRect> Rects)
         {
-            return RectCount == 0 ? RegionNull : RectCount == 1 ? RegionSimple : RegionComplex;
+            ulong Covered = 0;
+            GdiClipRect Bounds = default;
+            foreach (GdiClipRect Rect in Rects)
+            {
+                if (IsEmpty(Rect))
+                    continue;
+
+                Bounds = Covered == 0 ? Rect : new GdiClipRect
+                {
+                    Left = Math.Min(Bounds.Left, Rect.Left),
+                    Top = Math.Min(Bounds.Top, Rect.Top),
+                    Right = Math.Max(Bounds.Right, Rect.Right),
+                    Bottom = Math.Max(Bounds.Bottom, Rect.Bottom),
+                };
+                Covered += GetRectArea(Rect);
+            }
+
+            if (Covered == 0)
+                return RegionNull;
+
+            return Covered == GetRectArea(Bounds) ? RegionSimple : RegionComplex;
         }
 
         internal static void GetRegionBounds(List<GdiClipRect> Rects, out GdiClipRect Bounds)
@@ -2081,7 +2105,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Moved[i] = ShiftRect(Dc.Clip[i], X, Y);
 
             Dc.Clip = Moved;
-            return GetRegionType(Moved.Length);
+            return GetRegionType(Moved);
         }
 
         // In logical coordinates.
@@ -2955,14 +2979,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             WinSysHelper Helper = Instance.WinHelper;
             bool Active = Helper.ActiveWindow == Message.Hwnd;
+            bool Foreground = Helper.GetForegroundWindow() != 0;
 
             return Message.Message switch
             {
                 WM_ACTIVATE => ((Message.WParam & 0xFFFF) != WA_INACTIVE) != Active,
-                WM_NCACTIVATE => (Message.WParam != 0) != Active,
+                WM_NCACTIVATE => (Message.WParam != 0) != (Active && Foreground),
                 WM_SETFOCUS => Helper.FocusWindow != Message.Hwnd,
                 WM_KILLFOCUS => Helper.FocusWindow == Message.Hwnd,
-                WM_ACTIVATEAPP => (Message.WParam != 0) != (Helper.GetForegroundWindow() != 0),
+                WM_ACTIVATEAPP => (Message.WParam != 0) != (Foreground || Helper.ActiveWindow != 0),
                 _ => false,
             };
         }
@@ -4173,6 +4198,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 && (Window.ExStyle & WindowExStyleNoActivate) == 0;
         }
 
+        // Another host process holds the foreground, so the guest cannot take it.
+        internal static bool IsApplicationInBackground(BinaryEmulator Instance)
+        {
+            return !GetState(Instance).HostFocused && Instance.WinHelper.GetForegroundWindow() == 0;
+        }
+
         private static ulong MinimizedFlag(WinWindow Window) => Window.Minimized ? 0x10000UL : 0;
 
         /// <summary>
@@ -4188,7 +4219,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong Hwnd = Window.Hwnd;
             ulong Previous = Helper.ActiveWindow;
             bool ApplicationActive = Helper.GetForegroundWindow() != 0;
-            if (Previous == Hwnd && ApplicationActive)
+
+            // NT: in the background the thread still activates its own windows, with inactive captions.
+            bool Background = !FromHost && IsApplicationInBackground(Instance);
+            if (Previous == Hwnd && (ApplicationActive || Background))
                 return;
 
             WinWindow Old = Previous != Hwnd ? Helper.GetWindow(Previous) : null;
@@ -4200,14 +4234,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Helper.RaiseActivatedWindow(Window);
 
-            if (!ApplicationActive)
+            if (!ApplicationActive && Previous == 0)
                 PostActivateApp(Instance, true, FromHost);
 
             Helper.ActiveWindow = Hwnd;
-            Helper.ForegroundWindow = Hwnd;
+            if (!Background)
+                Helper.ForegroundWindow = Hwnd;
             GetState(Instance).LastActiveWindow = Hwnd;
 
-            PostNotification(Instance, Hwnd, WM_NCACTIVATE, 1, 0, FromHost);
+            PostNotification(Instance, Hwnd, WM_NCACTIVATE, Background ? 0UL : 1UL, 0, FromHost);
             PostNotification(Instance, Hwnd, WM_ACTIVATE, WA_ACTIVE | MinimizedFlag(Window), Old != null ? Previous : 0, FromHost);
             MoveFocus(Instance, Window.Minimized ? 0 : Hwnd, FromHost);
 
@@ -4496,14 +4531,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     continue;
                 }
 
-                if (!Instance.WinHelper.BeginGuestCall(Window.WndProc, Hwnd, WM_WINDOWPOSCHANGED, 0, WindowPos, SyscallResult, SyscallRetryRip))
-                {
-                    Pending.Enqueue(Hwnd);
-                    return false;
-                }
-
+                // Dropped when the procedure cannot be called. A queued one would wake every GetMessage wait.
                 Window.PendingWindowPosChanged = false;
-                return true;
+                if (Instance.WinHelper.BeginGuestCall(Window.WndProc, Hwnd, WM_WINDOWPOSCHANGED, 0, WindowPos, SyscallResult, SyscallRetryRip))
+                    return true;
             }
 
             return false;
@@ -4945,7 +4976,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint RdwWholeWindow = RdwUncovered | RDW_FRAME;
 
         private const int MaxUpdateRects = 32;
-        private const int MaxClipRects = 256;
 
         internal static List<GdiClipRect> GetRedrawArea(BinaryEmulator Instance)
         {
@@ -4981,11 +5011,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Window == null)
                 return FailWithError(Instance, ERROR_INVALID_WINDOW_HANDLE);
 
+            // NT: a region it cannot read redraws nothing.
             List<GdiClipRect> Area = GetRedrawArea(Instance);
-            bool HasArea = Region != 0 && TryReadRegion(Instance, Region, Area);
-            RedrawWindow(Instance, Window, HasArea ? Area : null, Flags);
+            bool BadRegion = Region != 0 && !TryReadRegion(Instance, Region, Area);
+            RedrawWindow(Instance, Window, Region != 0 ? Area : null, Flags);
 
-            Instance.SetLastWinError(0);
+            Instance.SetLastWinError(BadRegion ? ERROR_INVALID_HANDLE : 0);
             Instance.SetBooleanSyscallReturn(true);
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -5056,6 +5087,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if ((Flags & RDW_INVALIDATE) != 0)
                 Instance.WinHelper.PresentInvalidation();
+        }
+
+        // NT: GetTopLevelWindow walks up while the window is WS_CHILD.
+        internal static WinWindow GetTopLevelWindow(BinaryEmulator Instance, WinWindow Window)
+        {
+            for (int Depth = 0; Window != null && (Window.Style & WindowStyleChild) != 0 && Depth < MaxWindowTreeDepth; Depth++)
+                Window = Instance.WinHelper.GetWindow(Window.ParentHwnd);
+
+            return Window;
         }
 
         internal static bool IsWindowShown(BinaryEmulator Instance, WinWindow Window)
@@ -5344,9 +5384,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 GdiClipRect Rect = Rects[i];
                 if (Cut.Left >= Rect.Right || Cut.Right <= Rect.Left || Cut.Top >= Rect.Bottom || Cut.Bottom <= Rect.Top)
                     continue;
-
-                if (Rects.Count + 3 > MaxClipRects)
-                    return;
 
                 Rects.RemoveAt(i);
                 if (Rect.Top < Cut.Top)
@@ -5814,7 +5851,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return;
 
             // The source is read whole before any write, so an overlap reads no copied pixels.
-            uint[] Rented = ArrayPool<uint>.Shared.Rent(Width * Height);
+            uint[] Rented = RentGuiPixels(Width * Height, out bool Pooled);
             try
             {
                 Span<uint> Block = Rented.AsSpan(0, Width * Height);
@@ -5823,7 +5860,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
             finally
             {
-                ArrayPool<uint>.Shared.Return(Rented);
+                if (Pooled)
+                    ArrayPool<uint>.Shared.Return(Rented);
             }
         }
 

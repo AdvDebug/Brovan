@@ -44,6 +44,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Moved && !TryReadPair(Instance, DestPointPtr, out DestX, out DestY))
                 return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
 
+            // NT: probed even without a source DC.
+            int SourceX = 0;
+            int SourceY = 0;
+            if (SourcePointPtr != 0 && !TryReadPair(Instance, SourcePointPtr, out SourceX, out SourceY))
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
+
             byte ConstantAlpha = 0xFF;
             byte AlphaFormat = 0;
             if (BlendPtr != 0)
@@ -83,12 +89,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Window.LayeredByUpdate = true;
             Instance.WinHelper.MaterializeUserWindow(Window);
 
-            int SourceX = 0;
-            int SourceY = 0;
-            if (SourcePointPtr != 0)
-                TryReadPair(Instance, SourcePointPtr, out SourceX, out SourceY);
-
-            if (Instance.WinHelper.UsesTopLevelHost)
+            if (Instance.WinHelper.UsesTopLevelHost && Window.ParentHwnd == 0)
             {
                 LayeredUpdate Update = new LayeredUpdate
                 {
@@ -101,6 +102,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     AlphaFormat = AlphaFormat,
                     Flags = Flags,
                 };
+
+                // A hidden window may have no host surface to keep the pixels a partial update leaves out.
+                if (!Window.Visible)
+                    Dirty = new GdiClipRect { Right = Update.Width, Bottom = Update.Height };
 
                 int DirtyLeft = Math.Min(Dirty.Left, Update.Width);
                 int DirtyTop = Math.Min(Dirty.Top, Update.Height);
@@ -115,7 +120,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
             else if (SourceDc != 0 && Win32kHelper.IsBlitExtentValid(Width, Height))
             {
-                // A single surface host has no layered window, so the surface is drawn opaque.
+                // A child window or a single surface host has no layered host window, so the surface is drawn opaque.
                 int Count = Width * Height;
                 uint[] Pixels = ArrayPool<uint>.Shared.Rent(Count);
                 try

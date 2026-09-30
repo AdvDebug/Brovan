@@ -3113,7 +3113,13 @@ namespace Brovan
                 {
                     Attributes = Info.Attributes;
                 }
-                catch (Exception Ex) when (Ex is IOException || Ex is UnauthorizedAccessException)
+                catch (IOException)
+                {
+                    // An invalid name cannot exist, so it reads as missing.
+                    Attributes = (FileAttributes)(-1);
+                    return false;
+                }
+                catch (UnauthorizedAccessException)
                 {
                     Attributes = 0;
                     return false;

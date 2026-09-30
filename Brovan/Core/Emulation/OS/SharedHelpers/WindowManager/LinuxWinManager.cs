@@ -1523,14 +1523,19 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             try
             {
+                // XRectangle holds 16 bit coordinates.
                 for (int i = 0; i < count; i++)
                 {
+                    int left = Math.Clamp(clip[i].Left, short.MinValue, short.MaxValue);
+                    int top = Math.Clamp(clip[i].Top, short.MinValue, short.MaxValue);
+                    int right = Math.Clamp(clip[i].Right, short.MinValue, short.MaxValue);
+                    int bottom = Math.Clamp(clip[i].Bottom, short.MinValue, short.MaxValue);
                     rectangles[i] = new X11.XRectangle
                     {
-                        X = (short)clip[i].Left,
-                        Y = (short)clip[i].Top,
-                        Width = (ushort)Math.Max(clip[i].Right - clip[i].Left, 0),
-                        Height = (ushort)Math.Max(clip[i].Bottom - clip[i].Top, 0),
+                        X = (short)left,
+                        Y = (short)top,
+                        Width = (ushort)Math.Max(right - left, 0),
+                        Height = (ushort)Math.Max(bottom - top, 0),
                     };
                 }
 

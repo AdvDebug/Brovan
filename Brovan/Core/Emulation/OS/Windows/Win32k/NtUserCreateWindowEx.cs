@@ -60,11 +60,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             string title = Win32kHelper.ReadLargeString(Instance, WindowNamePtr) ?? string.Empty;
             ulong hwnd = Instance.WinHelper.AllocateUserHandle();
 
-            // Without WS_CHILD the argument names the owner, not the parent.
+            // Without WS_CHILD the argument names the owner, not the parent. NT owns by its top-level window.
             ulong OwnerHwnd = 0;
             if (((uint)StyleArg & Win32kHelper.WindowStyleChild) == 0 && ParentHwnd != Win32kMessageOnlyParent.HwndMessage)
             {
-                OwnerHwnd = ParentHwnd;
+                OwnerHwnd = Win32kHelper.GetTopLevelWindow(Instance, Instance.WinHelper.GetWindow(ParentHwnd))?.Hwnd ?? 0;
                 ParentHwnd = 0;
             }
 

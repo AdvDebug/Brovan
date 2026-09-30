@@ -335,7 +335,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             lock (_presentSync)
             {
-                TopLevelEntry entry = GetOrAddTopLevel(window);
+                // Only a presented top-level window drains its updates.
+                if (!_topLevels.TryGetValue(window, out TopLevelEntry entry))
+                {
+                    ReturnLayered(update);
+                    return;
+                }
 
                 List<LayeredUpdate> pending = entry.PendingLayered;
                 bool wholeSurface = update.Pixels != null && update.DirtyLeft == 0 && update.DirtyTop == 0
@@ -949,6 +954,27 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             entry.Host = null;
             if (_hostWindows.TryGetValue(entry.Window, out ITopLevelWindow mapped) && mapped == host)
                 _hostWindows.Remove(entry.Window);
+
+            // The host destroys owned windows with their owner, so windows that still name it are released first.
+            List<ITopLevelWindow> owned = null;
+            lock (_presentSync)
+            {
+                foreach (TopLevelEntry candidate in _topLevels.Values)
+                {
+                    if (candidate.Host == null || candidate.Applied is not TopLevelFrame applied || applied.Owner != entry.Window)
+                        continue;
+
+                    applied.Owner = 0;
+                    candidate.Applied = applied;
+                    (owned ??= new List<ITopLevelWindow>()).Add(candidate.Host);
+                }
+            }
+
+            if (owned != null)
+            {
+                foreach (ITopLevelWindow ownedWindow in owned)
+                    RunHostCall(ownedWindow, static window => window.SetOwner(null));
+            }
 
             RunHostCall(host, static window => window.Dispose());
         }

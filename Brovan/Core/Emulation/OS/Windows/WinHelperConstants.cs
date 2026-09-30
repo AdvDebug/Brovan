@@ -1773,9 +1773,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool Ansi;
     }
 
+    public readonly record struct WinWindowLayout(int X, int Y, uint Width, uint Height, uint Style, uint ExStyle, bool Visible, ulong ParentHwnd);
+
     public class WinWindow : IHandleObject
     {
         public ulong Hwnd;
+
+        // What MaterializeUserWindow last published. The window clip cache is rebuilt only when it changes.
+        public WinWindowLayout PublishedLayout;
 
         // Dirty is a WM_PAINT owed to the message fetch.
         // PaintPending is the update region user32 reads, cleared only on validation.

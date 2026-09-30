@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using Brovan.Core.Emulation.OS.SharedHelpers;
+using Brovan.Core.Settings;
 
 namespace Brovan.Android
 {
@@ -286,22 +287,30 @@ namespace Brovan.Android
 
             int width = right - left;
             int height = bottom - top;
-            int[] saved = ArrayPool<int>.Shared.Rent(width * height);
-            for (int y = 0; y < height; y++)
-                Array.Copy(target.Pixels, (top + y - dy) * target.Width + left - dx, saved, y * width, width);
-
-            foreach (GdiClipRect rect in primitive.Clip ?? Unclipped)
+            int count = width * height;
+            bool pooled = (ulong)count * sizeof(int) <= MemoryBudget.PooledIoBytes;
+            int[] saved = pooled ? ArrayPool<int>.Shared.Rent(count) : new int[count];
+            try
             {
-                int clipLeft = Math.Max(left, rect.Left);
-                int clipTop = Math.Max(top, rect.Top);
-                int clipRight = Math.Min(right, rect.Right);
-                int clipBottom = Math.Min(bottom, rect.Bottom);
+                for (int y = 0; y < height; y++)
+                    Array.Copy(target.Pixels, (top + y - dy) * target.Width + left - dx, saved, y * width, width);
 
-                for (int y = clipTop; y < clipBottom && clipLeft < clipRight; y++)
-                    Array.Copy(saved, (y - top) * width + clipLeft - left, target.Pixels, y * target.Width + clipLeft, clipRight - clipLeft);
+                foreach (GdiClipRect rect in primitive.Clip ?? Unclipped)
+                {
+                    int clipLeft = Math.Max(left, rect.Left);
+                    int clipTop = Math.Max(top, rect.Top);
+                    int clipRight = Math.Min(right, rect.Right);
+                    int clipBottom = Math.Min(bottom, rect.Bottom);
+
+                    for (int y = clipTop; y < clipBottom && clipLeft < clipRight; y++)
+                        Array.Copy(saved, (y - top) * width + clipLeft - left, target.Pixels, y * target.Width + clipLeft, clipRight - clipLeft);
+                }
             }
-
-            ArrayPool<int>.Shared.Return(saved);
+            finally
+            {
+                if (pooled)
+                    ArrayPool<int>.Shared.Return(saved);
+            }
         }
 
         private static unsafe void Post(IntPtr window, WindowBuffer source)

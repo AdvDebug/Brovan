@@ -5873,6 +5873,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (UserDesktopInfoAddress != 0 && Emulator.IsRegionMapped(UserDesktopInfoAddress, UserDesktopInfoSize))
                 WriteUserDisplayInfo(UserDesktopInfoAddress, UserPrimaryMonitorAddress);
 
+            // Frame insets follow the DPI.
+            WindowLayoutGeneration++;
+
             foreach (WinWindow Window in WinWindows.Values)
             {
                 if (Window.ClientWindowAddress != 0 && Emulator.IsRegionMapped(Window.ClientWindowAddress, UserWindowObjectSize))
@@ -6017,7 +6020,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Window == null || Window.Hwnd == 0)
                 return false;
 
-            WindowLayoutGeneration++;
+            WinWindowLayout Layout = new WinWindowLayout(Window.X, Window.Y, Window.Width, Window.Height, Window.Style, Window.ExStyle,
+                Window.Visible, Window.ParentHwnd);
+            if (Layout != Window.PublishedLayout)
+            {
+                Window.PublishedLayout = Layout;
+                WindowLayoutGeneration++;
+            }
 
             if (!EnsureUserSharedInfo(out _, out ulong HandleTable, out uint EntrySize))
                 return false;
@@ -7652,9 +7661,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     // NT keeps another thread's window alive and clears its owner.
                     if (OwnedByCurrentThread(Owned))
+                    {
                         PlanWindowDestruction(Destruction, Owned, Depth + 1);
+                    }
                     else
+                    {
                         Owned.OwnerHwnd = 0;
+                        MaterializeUserWindow(Owned);
+                    }
                 }
             }
 

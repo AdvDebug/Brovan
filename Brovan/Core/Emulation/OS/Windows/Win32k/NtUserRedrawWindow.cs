@@ -32,15 +32,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if ((Flags & Win32kHelper.RDW_RESERVED) != 0)
                 return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_FLAGS);
 
+            // NT: the region wins over the rectangle, and a region it cannot read redraws nothing.
             List<GdiClipRect> Area = Win32kHelper.GetRedrawArea(Instance);
-            bool HasArea = Region != 0 && Win32kHelper.TryReadRegion(Instance, Region, Area);
-            if (!HasArea && RectPtr != 0)
-            {
+            bool BadRegion = Region != 0 && !Win32kHelper.TryReadRegion(Instance, Region, Area);
+            if (Region == 0 && RectPtr != 0)
                 Area.Add(Rect);
-                HasArea = true;
-            }
 
-            Win32kHelper.RedrawWindow(Instance, Window, HasArea ? Area : null, Flags);
+            Win32kHelper.RedrawWindow(Instance, Window, Region != 0 || RectPtr != 0 ? Area : null, Flags);
 
             // WM_PAINT runs the window procedure, so this syscall runs again when the callback returns.
             if ((Flags & Win32kHelper.RDW_UPDATENOW) != 0 && Window != null && Window.Dirty && Win32kHelper.IsWindowShown(Instance, Window))
@@ -55,7 +53,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Win32kHelper.MarkWindowDirty(Instance, Window);
             }
 
-            Instance.SetLastWinError(0);
+            Instance.SetLastWinError(BadRegion ? Win32kHelper.ERROR_INVALID_HANDLE : 0);
             Instance.SetBooleanSyscallReturn(true);
             return NTSTATUS.STATUS_SUCCESS;
         }
