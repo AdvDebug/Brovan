@@ -167,22 +167,24 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             CreateWindowRequest request = new(options ?? new WindowOptions());
             Submit(new GuiCommand { Kind = GuiCommandKind.CreateWindow, Request = request });
+            return WaitForGuiThread(request.Completion.Task, nameof(CreateWindow));
+        }
 
+        private static T WaitForGuiThread<T>(Task<T> task, string name)
+        {
             try
             {
-                if (!request.Completion.Task.Wait(InitializationTimeoutMilliseconds))
-                {
-                    Utils.LogError("[GuiThreadManager] CreateWindow timed out");
-                    return null;
-                }
+                if (task.Wait(InitializationTimeoutMilliseconds))
+                    return task.Result;
 
-                return request.Completion.Task.Result;
+                Utils.LogError($"[GuiThreadManager] {name} timed out");
             }
             catch (Exception ex)
             {
-                Utils.LogError($"[GuiThreadManager] CreateWindow failed: {ex.Message}");
-                return null;
+                Utils.LogError($"[GuiThreadManager] {name} failed: {ex.Message}");
             }
+
+            return default;
         }
 
         /// <summary>
@@ -365,20 +367,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             TaskCompletionSource<IntPtr> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
             Submit(new GuiCommand { Kind = GuiCommandKind.EnsureTopLevel, Hwnd = window, Request = completion });
-
-            try
-            {
-                if (completion.Task.Wait(InitializationTimeoutMilliseconds))
-                    return completion.Task.Result;
-
-                Utils.LogError("[GuiThreadManager] EnsureTopLevelHandle timed out");
-            }
-            catch (Exception ex)
-            {
-                Utils.LogError($"[GuiThreadManager] EnsureTopLevelHandle failed: {ex.Message}");
-            }
-
-            return IntPtr.Zero;
+            return WaitForGuiThread(completion.Task, nameof(EnsureTopLevelHandle));
         }
 
         public void HideTopLevels()
@@ -908,7 +897,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             TopLevelFrame frame;
             lock (_presentSync)
             {
-                if (!_topLevels.TryGetValue(window, out entry) || entry.Destroyed || (entry.Applied ?? entry.Pending) is not TopLevelFrame current)
+                if (!_topLevels.TryGetValue(window, out entry) || (entry.Applied ?? entry.Pending) is not TopLevelFrame current)
                     return null;
 
                 frame = current;

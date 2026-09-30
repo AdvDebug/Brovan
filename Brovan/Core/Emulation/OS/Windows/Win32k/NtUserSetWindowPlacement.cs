@@ -22,19 +22,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null || PlacementPtr == 0 || !Instance.IsRegionMapped(PlacementPtr, WindowPlacementSize))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(WindowPlacementSize).Slice(0, WindowPlacementSize);
             if (!Instance.ReadMemory(PlacementPtr, Buffer))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             uint ShowCommand = BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x08, 4));
             int Left = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x1C, 4));
@@ -47,7 +39,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             uint Flags = SwpNoZOrder | (ShowCommand == SwHide ? SwpHideWindow : SwpShowWindow);
 
             Instance.SetLastWinError(0);
-            if (Win32kHelper.SendWindowPos(Instance, new Win32kHelper.Win32kDeferredWindowPos
+            if (Win32kHelper.SendWindowPos(Instance, Window, new Win32kHelper.Win32kDeferredWindowPos
             {
                 Hwnd = Hwnd,
                 X = Left,
@@ -55,7 +47,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Width = Right - Left,
                 Height = Bottom - Top,
                 Flags = Flags,
-            }, out _))
+            }))
             {
                 return NTSTATUS.STATUS_SUCCESS;
             }

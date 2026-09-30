@@ -20,11 +20,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int Size = Wide ? 0x20 : 0x14;
 
             if (IconInfoPtr == 0 || !Instance.IsRegionMapped(IconInfoPtr, (ulong)Size))
-                return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             // The stock cursor is the host's shape, so it has no image.
             if (!Win32kHelper.TryGetCursorIcon(Instance, Handle, out Win32kHelper.Win32kCursorIcon Data))
-                return Fail(Instance, Win32kHelper.ERROR_INVALID_CURSOR_HANDLE);
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_CURSOR_HANDLE);
 
             // A colour icon's mask is stored at twice its height. The top half is returned unless internal.
             int MaskRows = !Internal && Data.ColorBitmap != 0 && Win32kHelper.TryGetBitmap(Instance, Data.MaskBitmap, out Win32kBitmap Stored)
@@ -36,7 +36,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 DeleteCopy(Instance, Mask);
                 DeleteCopy(Instance, Color);
-                return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
             }
 
             Span<byte> Info = stackalloc byte[0x20];
@@ -56,7 +56,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             if (!Instance.WriteMemory(IconInfoPtr, Info.Slice(0, Size)))
-                return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             ClearNameLength(Instance, ModuleNamePtr);
             ClearNameLength(Instance, ResourceNamePtr);
@@ -77,15 +77,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static void DeleteCopy(BinaryEmulator Instance, ulong Bitmap)
         {
-            if (Bitmap != 0 && Win32kHelper.RemoveBitmap(Instance, Bitmap))
-                Instance.WinHelper.FreeGdiHandle(Bitmap);
-        }
-
-        private static NTSTATUS Fail(BinaryEmulator Instance, uint Error)
-        {
-            Instance.SetLastWinError(Error);
-            Instance.SetBooleanSyscallReturn(false);
-            return NTSTATUS.STATUS_SUCCESS;
+            if (Bitmap != 0)
+                Win32kHelper.DeleteGdiObject(Instance, Bitmap);
         }
     }
 }

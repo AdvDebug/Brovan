@@ -14,11 +14,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             uint Flags = (uint)Instance.WinHelper.GetArg(4);
 
             if (!Win32kHelper.IsKnownWindow(Instance, HwndFilter))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
+
+            Win32kHelper.DrainHostEvents(Instance);
 
             uint WakeMask = Win32kHelper.WakeMaskFromPeekFlags(Flags);
             if ((WakeMask & Win32kHelper.QS_SENDMESSAGE) != 0

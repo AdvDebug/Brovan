@@ -17,20 +17,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (!Win32kHelper.TryReadOptionalRect(Instance, ScrollPtr, out GdiClipRect? Scroll)
                 || !Win32kHelper.TryReadOptionalRect(Instance, ClipPtr, out GdiClipRect? Clip))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_NOACCESS);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
 
             int Result = Win32kHelper.ScrollDc(Instance, Hdc, Dx, Dy, Scroll, Clip, Region, UpdatePtr != 0, out GdiClipRect UpdateRect);
 
             if (UpdatePtr != 0 && !Win32kHelper.TryWriteGuestRect(Instance, UpdatePtr, UpdateRect))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_NOACCESS);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
 
             Instance.SetBooleanSyscallReturn(Result != Win32kHelper.RegionError);
             return NTSTATUS.STATUS_SUCCESS;

@@ -16,7 +16,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint SW_RESTORE = 9;
         private const uint SW_SHOWDEFAULT = 10;
         private const uint SW_FORCEMINIMIZE = 11;
-        private const uint WS_VISIBLE = 0x10000000;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -25,18 +24,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             if (Command > SW_FORCEMINIMIZE)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             bool WasVisible = Window.Visible;
             bool WasMinimized = Window.Minimized;
@@ -52,7 +43,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Window.Visible = Command != SW_HIDE;
+            Win32kHelper.SetVisible(Window, Command != SW_HIDE);
             bool Activate = false;
             bool Minimizing = false;
 
@@ -95,9 +86,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     break;
             }
 
-            Window.Style = Window.Visible ? Window.Style | WS_VISIBLE : Window.Style & ~WS_VISIBLE;
-            Window.RedrawDisabled = false;
-
             if (Window.ParentHwnd == 0)
                 Instance.WinHelper.LinkTopLevelWindow(Window);
 
@@ -124,15 +112,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             // user32 answers IsWindowVisible and GetWindowLong out of the client window object.
             Instance.WinHelper.MaterializeUserWindow(Window);
 
-            if (Window.ParentHwnd == 0)
-            {
-                bool Leaving = (!Window.Visible || Minimizing) && Window.Hwnd == Instance.WinHelper.ActiveWindow;
-                if (Leaving)
-                    Win32kHelper.ActivateNextWindow(Instance, Window);
-                else if (Activate && Win32kHelper.CanActivateImplicitly(Window))
-                    Win32kHelper.ActivateWindow(Instance, Window, false);
-            }
-
+            Win32kHelper.ActivateAfterShow(Instance, Window, !Window.Visible || Minimizing, Activate);
             Instance.WinHelper.PresentDesktop();
 
             Instance.SetLastWinError(0);

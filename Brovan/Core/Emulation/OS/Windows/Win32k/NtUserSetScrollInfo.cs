@@ -71,7 +71,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Window.VerticalScroll = Info;
 
             if (Redraw)
-                Win32kHelper.InvalidateWindow(Instance, Hwnd);
+                Win32kHelper.RedrawWindow(Instance, Window, null, Win32kHelper.RDW_INVALIDATE);
 
             Instance.SetLastWinError(0);
             Instance.SetRawSyscallReturn(unchecked((ulong)(long)Info.Position));

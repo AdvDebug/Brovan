@@ -10,11 +10,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong Hwnd = Instance.WinHelper.GetArg(0);
             WinWindow Window = Hwnd == 0 ? null : Instance.WinHelper.GetWindow(Hwnd);
             if (Hwnd != 0 && Window == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             ulong Previous = Instance.WinHelper.FocusWindow;
 

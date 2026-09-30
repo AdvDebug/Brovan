@@ -37,11 +37,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 ParentHwnd = Win32kMessageOnlyParent.HwndMessage;
             }
             else if (ParentHwnd != 0 && Instance.WinHelper.GetWindow(ParentHwnd) == null)
-            {
-                Instance.SetLastWinError(ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, ERROR_INVALID_WINDOW_HANDLE);
 
             string ClassName = Win32kHelper.ReadLargeString(Instance, ClassNamePtr);
             string classVersion = Win32kHelper.ReadLargeString(Instance, ClassVersionPtr) ?? string.Empty;
@@ -59,44 +55,32 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             // Answering "no such class" is what makes user32 register a standard control and call back in.
             if (WindowClass == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_CANNOT_FIND_WND_CLASS);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_CANNOT_FIND_WND_CLASS);
 
             string title = Win32kHelper.ReadLargeString(Instance, WindowNamePtr) ?? string.Empty;
             ulong hwnd = Instance.WinHelper.AllocateUserHandle();
 
             // Without WS_CHILD the argument names the owner, not the parent.
-            const uint WS_CHILD = 0x40000000;
             ulong OwnerHwnd = 0;
-            if (((uint)StyleArg & WS_CHILD) == 0 && ParentHwnd != Win32kMessageOnlyParent.HwndMessage)
+            if (((uint)StyleArg & Win32kHelper.WindowStyleChild) == 0 && ParentHwnd != Win32kMessageOnlyParent.HwndMessage)
             {
                 OwnerHwnd = ParentHwnd;
                 ParentHwnd = 0;
             }
 
             // NT adds these implied styles.
-            const uint WS_POPUP = 0x80000000;
-            const uint WS_CAPTION = 0x00C00000;
-            const uint WS_CLIPSIBLINGS = 0x04000000;
-            const uint WS_DLGFRAME = 0x00400000;
-            const uint WS_THICKFRAME = 0x00040000;
-            const uint WS_EX_DLGMODALFRAME = 0x00000001;
-            const uint WS_EX_WINDOWEDGE = 0x00000100;
-
             uint Style = (uint)StyleArg;
             uint ExStyle = (uint)exStyleArg;
-            if ((Style & WS_CHILD) == 0)
+            if ((Style & Win32kHelper.WindowStyleChild) == 0)
             {
-                Style |= WS_CLIPSIBLINGS;
-                if ((Style & WS_POPUP) == 0)
-                    Style |= WS_CAPTION;
+                Style |= Win32kHelper.WindowStyleClipSiblings;
+                if ((Style & Win32kHelper.WindowStylePopup) == 0)
+                    Style |= Win32kHelper.WindowStyleCaption;
             }
 
-            if ((ExStyle & WS_EX_DLGMODALFRAME) != 0 || (Style & (WS_DLGFRAME | WS_THICKFRAME)) != 0)
-                ExStyle |= WS_EX_WINDOWEDGE;
+            if ((ExStyle & Win32kHelper.WindowExStyleDlgModalFrame) != 0
+                || (Style & (Win32kHelper.WindowStyleDlgFrame | Win32kHelper.WindowStyleThickFrame)) != 0)
+                ExStyle |= Win32kHelper.WindowExStyleWindowEdge;
 
             WinWindow window = new WinWindow
             {
@@ -104,7 +88,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 ClassAtom = WindowClass.Atom,
                 Title = title,
                 ClassName = string.IsNullOrEmpty(ClassName) ? "#UNNAMED" : ClassName,
-                Visible = (Style & 0x10000000U) != 0, // WS_VISIBLE
+                Visible = (Style & Win32kHelper.WindowStyleVisible) != 0,
                 Style = Style,
                 ExStyle = ExStyle,
                 X = x,

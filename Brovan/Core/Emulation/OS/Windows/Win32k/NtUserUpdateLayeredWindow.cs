@@ -1,6 +1,5 @@
 using System.Buffers;
 using Brovan.Core.Emulation.OS.SharedHelpers;
-using Brovan.Core.Settings;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -25,7 +24,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
-                return Fail(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             int Width = (int)Window.Width;
             int Height = (int)Window.Height;
@@ -33,24 +32,24 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Sized)
             {
                 if (!TryReadPair(Instance, SizePtr, out Width, out Height))
-                    return Fail(Instance, Win32kHelper.ERROR_NOACCESS);
+                    return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
 
                 if (Width < 0 || Height < 0)
-                    return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+                    return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
             }
 
             int DestX = Window.X;
             int DestY = Window.Y;
             bool Moved = DestPointPtr != 0;
             if (Moved && !TryReadPair(Instance, DestPointPtr, out DestX, out DestY))
-                return Fail(Instance, Win32kHelper.ERROR_NOACCESS);
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
 
             byte ConstantAlpha = 0xFF;
             byte AlphaFormat = 0;
             if (BlendPtr != 0)
             {
                 if (!Instance.IsRegionMapped(BlendPtr, 4))
-                    return Fail(Instance, Win32kHelper.ERROR_NOACCESS);
+                    return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
 
                 uint Blend = Instance.ReadMemoryUInt(BlendPtr);
                 ConstantAlpha = (byte)(Blend >> 16);
@@ -61,21 +60,21 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (DirtyPtr != 0)
             {
                 if (!Win32kHelper.TryReadGuestRect(Instance, DirtyPtr, out Dirty))
-                    return Fail(Instance, Win32kHelper.ERROR_NOACCESS);
+                    return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
 
                 if (Dirty.Left < 0 || Dirty.Top < 0)
-                    return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+                    return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
             }
 
             if ((Flags & ~ValidFlags) != 0)
-                return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             // NT: fails on a window layered by SetLayeredWindowAttributes.
             if ((Window.ExStyle & Win32kHelper.WindowExStyleLayered) == 0 || Window.LayeredByAttributes)
-                return Fail(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             if ((Flags & UlwExNoResize) != 0 && Sized && (Width != (int)Window.Width || Height != (int)Window.Height))
-                return Fail(Instance, Win32kHelper.ERROR_INCORRECT_SIZE);
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INCORRECT_SIZE);
 
             Window.X = DestX;
             Window.Y = DestY;
@@ -138,13 +137,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        // The host keeps the rows until it draws them, so a large block is not pooled.
         private static void ReadDirtyBlock(BinaryEmulator Instance, LayeredUpdate Update, ulong SourceDc, int SourceX, int SourceY,
             int Left, int Top, int Width, int Height)
         {
             int Count = Width * Height;
-            bool Pooled = (ulong)Count * 4 <= MemoryBudget.PooledIoBytes;
-            uint[] Pixels = Pooled ? ArrayPool<uint>.Shared.Rent(Count) : new uint[Count];
+            uint[] Pixels = Win32kHelper.RentGuiPixels(Count, out bool Pooled);
 
             if (!Win32kHelper.TryReadDcBlock(Instance, SourceDc, SourceX, SourceY, Width, Height, Pixels.AsSpan(0, Count)))
             {
@@ -160,13 +157,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Update.DirtyTop = Top;
             Update.DirtyWidth = Width;
             Update.DirtyHeight = Height;
-        }
-
-        private static NTSTATUS Fail(BinaryEmulator Instance, uint Error)
-        {
-            Instance.SetLastWinError(Error);
-            Instance.SetBooleanSyscallReturn(false);
-            return NTSTATUS.STATUS_SUCCESS;
         }
 
         private static bool TryReadPair(BinaryEmulator Instance, ulong Address, out int First, out int Second)

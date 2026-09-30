@@ -15,18 +15,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             if ((Flags & ~ValidFlags) != 0 || (Window.ExStyle & Win32kHelper.WindowExStyleLayered) == 0)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             // NT: works on a window layered by UpdateLayeredWindow.
             Window.LayeredByUpdate = false;

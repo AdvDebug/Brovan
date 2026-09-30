@@ -13,6 +13,11 @@ namespace Brovan.Android
 
         private const int MaximumWindows = 32;
 
+        private static readonly GdiClipRect[] Unclipped =
+        {
+            new GdiClipRect { Left = int.MinValue, Top = int.MinValue, Right = int.MaxValue, Bottom = int.MaxValue },
+        };
+
         private sealed class WindowBuffer
         {
             public int[] Pixels = Array.Empty<int>();
@@ -44,14 +49,9 @@ namespace Brovan.Android
                 {
                     CopyWithin(target, primitive);
                 }
-                else if (primitive.Clip == null)
-                {
-                    SetClip(target, 0, 0, target.Width, target.Height);
-                    Draw(target, primitive);
-                }
                 else
                 {
-                    foreach (GdiClipRect rect in primitive.Clip)
+                    foreach (GdiClipRect rect in primitive.Clip ?? Unclipped)
                     {
                         SetClip(target, rect.Left, rect.Top, rect.Right, rect.Bottom);
                         Draw(target, primitive);
@@ -91,18 +91,12 @@ namespace Brovan.Android
                 }
 
                 // TA_TOP: the reference point is the top of the cell, not the baseline.
-                if (clip == null)
+                foreach (GdiClipRect rect in clip ?? Unclipped)
                 {
-                    Blend(target, bitmap, x - bitmap.Padding, y - bitmap.Padding, left, top, right, bottom);
+                    Blend(target, bitmap, x - bitmap.Padding, y - bitmap.Padding, Math.Max(left, rect.Left), Math.Max(top, rect.Top),
+                        Math.Min(right, rect.Right), Math.Min(bottom, rect.Bottom));
                 }
-                else
-                {
-                    foreach (GdiClipRect rect in clip)
-                    {
-                        Blend(target, bitmap, x - bitmap.Padding, y - bitmap.Padding, Math.Max(left, rect.Left), Math.Max(top, rect.Top),
-                            Math.Min(right, rect.Right), Math.Min(bottom, rect.Bottom));
-                    }
-                }
+
                 target.Dirty = true;
                 _lastDrawn = hwnd;
             }
@@ -296,14 +290,12 @@ namespace Brovan.Android
             for (int y = 0; y < height; y++)
                 Array.Copy(target.Pixels, (top + y - dy) * target.Width + left - dx, saved, y * width, width);
 
-            GdiClipRect[] clip = primitive.Clip;
-            int count = clip?.Length ?? 1;
-            for (int i = 0; i < count; i++)
+            foreach (GdiClipRect rect in primitive.Clip ?? Unclipped)
             {
-                int clipLeft = clip == null ? left : Math.Max(left, clip[i].Left);
-                int clipTop = clip == null ? top : Math.Max(top, clip[i].Top);
-                int clipRight = clip == null ? right : Math.Min(right, clip[i].Right);
-                int clipBottom = clip == null ? bottom : Math.Min(bottom, clip[i].Bottom);
+                int clipLeft = Math.Max(left, rect.Left);
+                int clipTop = Math.Max(top, rect.Top);
+                int clipRight = Math.Min(right, rect.Right);
+                int clipBottom = Math.Min(bottom, rect.Bottom);
 
                 for (int y = clipTop; y < clipBottom && clipLeft < clipRight; y++)
                     Array.Copy(saved, (y - top) * width + clipLeft - left, target.Pixels, y * target.Width + clipLeft, clipRight - clipLeft);

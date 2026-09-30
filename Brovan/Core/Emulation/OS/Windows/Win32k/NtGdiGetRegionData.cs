@@ -18,11 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Win32kHelper.GetRegionScratch(Instance, out List<GdiClipRect> Rects, out _, out _);
             if (!Win32kHelper.TryReadRegion(Instance, Region, Rects))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_HANDLE);
 
             uint Needed = (uint)(HeaderSize + Rects.Count * Win32kHelper.GuestRectSize);
             if (DataPtr == 0)
@@ -32,11 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             if (Count < Needed)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             Win32kHelper.GetRegionBounds(Rects, out GdiClipRect Bounds);
             Span<byte> Span = Instance.WinHelper.Shared.GetSpan((ulong)Needed).Slice(0, (int)Needed);
@@ -49,11 +41,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Win32kHelper.WriteGuestRect(Span.Slice(HeaderSize + i * Win32kHelper.GuestRectSize), Rects[i]);
 
             if (!Instance.WriteMemory(DataPtr, Span))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             Instance.SetRawSyscallReturn(Needed);
             return NTSTATUS.STATUS_SUCCESS;

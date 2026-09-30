@@ -620,20 +620,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         {
             Guid ContextId = Guid.NewGuid();
             EventLogContexts[ContextId] = "Application";
-            return BuildEventLogHandleStub(ContextId);
+            return Ndr20Writer.BuildContextHandleReply(ContextId);
         }
 
         private static byte[] BuildEventLogCloseStub()
         {
-            return BuildEventLogHandleStub(Guid.Empty);
-        }
-
-        private static byte[] BuildEventLogHandleStub(Guid ContextId)
-        {
-            Ndr20Writer Writer = new Ndr20Writer(Ndr20Writer.ContextHandleSize + 4);
-            Writer.WriteContextHandle(ContextId);
-            Writer.WriteUInt32((uint)NTSTATUS.STATUS_SUCCESS);
-            return Writer.ToArray();
+            return Ndr20Writer.BuildContextHandleReply(Guid.Empty);
         }
 
         private static byte[] BuildEventLogReportStub(bool ExVariant)

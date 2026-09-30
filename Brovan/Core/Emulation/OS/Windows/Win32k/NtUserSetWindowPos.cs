@@ -17,16 +17,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Flags = (uint)Instance.WinHelper.GetArg(6),
             };
 
-            Instance.SetLastWinError(0);
-            if (Win32kHelper.SendWindowPos(Instance, Position, out bool Success))
-                return NTSTATUS.STATUS_SUCCESS;
+            WinWindow Window = Instance.WinHelper.GetWindow(Position.Hwnd);
+            if (Window == null)
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
-            if (!Success)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetBooleanSyscallReturn(false);
+            Instance.SetLastWinError(0);
+            if (Win32kHelper.SendWindowPos(Instance, Window, Position))
                 return NTSTATUS.STATUS_SUCCESS;
-            }
 
             Win32kHelper.ReturnAfterNotifications(Instance, 1);
             return NTSTATUS.STATUS_SUCCESS;

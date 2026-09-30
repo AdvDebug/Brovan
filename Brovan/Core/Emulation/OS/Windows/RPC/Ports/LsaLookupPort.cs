@@ -33,11 +33,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             switch (ProcNumber)
             {
                 case ProcOpenLocalPolicy:
-                    Reply = BuildHandleReply(true);
+                    Reply = Ndr20Writer.BuildContextHandleReply(Guid.NewGuid());
                     return true;
 
                 case ProcClose:
-                    Reply = BuildHandleReply(false);
+                    Reply = Ndr20Writer.BuildContextHandleReply(Guid.Empty);
                     return true;
 
                 case ProcGetDomainInfo:
@@ -129,12 +129,5 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return Name.Length == 0 ? DefaultComputerName : Name;
         }
 
-        private static byte[] BuildHandleReply(bool Opened)
-        {
-            Ndr20Writer Writer = new Ndr20Writer(Ndr20Writer.ContextHandleSize + 4);
-            Writer.WriteContextHandle(Opened ? Guid.NewGuid() : Guid.Empty);
-            Writer.WriteUInt32(StatusSuccess);
-            return Writer.ToArray();
-        }
     }
 }

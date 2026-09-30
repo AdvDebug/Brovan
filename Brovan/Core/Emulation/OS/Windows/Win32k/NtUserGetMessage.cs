@@ -8,6 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
 
+            Win32kHelper.DrainHostEvents(Instance);
             if (Win32kHelper.TryGetMessage(Instance, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
             {
                 bool Written = Win32kHelper.WriteMessage(Instance, State.GetMessageMessagePtr, Message, State);
@@ -60,11 +61,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return ContinueWait(Instance, Thread);
 
             if (!Win32kHelper.IsKnownWindow(Instance, HwndFilter))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
+
+            Win32kHelper.DrainHostEvents(Instance);
 
             // NT: a sent message runs inside GetMessage, which then goes on waiting.
             ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Thread, false);

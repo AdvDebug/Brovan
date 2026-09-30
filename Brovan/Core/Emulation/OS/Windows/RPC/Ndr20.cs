@@ -85,11 +85,18 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
 
         public void WriteContextHandle(Guid Uuid)
         {
-            AlignTo(4);
-            WriteUInt32(0);
-            Reserve(16);
-            Uuid.TryWriteBytes(Buffer.AsSpan(Position, 16));
-            Position += 16;
+            Span<byte> Cookie = stackalloc byte[ContextHandleSize];
+            Cookie.Slice(0, 4).Clear();
+            Uuid.TryWriteBytes(Cookie.Slice(4));
+            WriteContextHandle(Cookie);
+        }
+
+        public static byte[] BuildContextHandleReply(Guid Uuid)
+        {
+            Ndr20Writer Writer = new Ndr20Writer(ContextHandleSize + 4);
+            Writer.WriteContextHandle(Uuid);
+            Writer.WriteUInt32(0);
+            return Writer.ToArray();
         }
 
         public void WriteSystemHandle(int HandleIndex)

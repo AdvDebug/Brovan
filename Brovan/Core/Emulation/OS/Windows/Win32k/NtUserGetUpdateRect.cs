@@ -12,22 +12,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             bool Pending = Win32kHelper.GetUpdateRect(Instance, Window, out GdiClipRect Update);
 
             if (RectPtr != 0)
             {
                 if (!Instance.IsRegionMapped(RectPtr, Win32kHelper.GuestRectSize))
-                {
-                    Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                    Instance.SetBooleanSyscallReturn(false);
-                    return NTSTATUS.STATUS_SUCCESS;
-                }
+                    return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
                 if (!Win32kHelper.TryWriteGuestRect(Instance, RectPtr, Update))
                 {

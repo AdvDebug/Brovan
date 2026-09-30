@@ -176,7 +176,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.AlignTo(4);
             Writer.WriteBytes(Identifier);
 
-            // Five self-relative descriptors, each granting Everyone.
             byte[] Descriptor = BuildEveryoneDescriptor();
             uint DescriptorsSize = (uint)(Descriptor.Length * SecurityDescriptorCount);
             for (int i = 0; i < SecurityDescriptorCount; i++)

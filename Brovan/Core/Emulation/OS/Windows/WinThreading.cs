@@ -109,53 +109,89 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong SavedArg2;
         public ulong SavedArg3;
 
-        public WinWindowCreation WindowCreation;
-        public WinWindowDestruction WindowDestruction;
-        public WinWindowPosChange WindowPosChange;
-        public WinPaintBegin PaintBegin;
-        public WinScrollChildMoves ScrollChildMoves;
+        public WinCallbackContinuation Continuation;
         public ulong? DeferredSyscallResult;
     }
 
-    public sealed class WinScrollChildMoves
+    // Runs when the callback returns, on the caller's stack. True when it entered another callback.
+    public abstract class WinCallbackContinuation
+    {
+        internal abstract bool Resume(BinaryEmulator Emulator, ref ulong Value);
+    }
+
+    public sealed class WinScrollChildMoves : WinCallbackContinuation
     {
         public readonly List<ulong> Children = new();
         public int Next;
         public int Result;
         public ulong UpdateAddress;
         public GdiClipRect UpdateRect;
+
+        internal override bool Resume(BinaryEmulator Emulator, ref ulong Value)
+        {
+            if (Win32k.Win32kHelper.SendScrollChildMoves(Emulator, this))
+                return true;
+
+            Value = Win32k.Win32kHelper.FinishScrollWindow(Emulator, UpdateAddress, UpdateRect, Result);
+            return false;
+        }
     }
 
-    public sealed class WinPaintBegin
+    public sealed class WinPaintBegin : WinCallbackContinuation
     {
         public ulong Hwnd;
         public ulong Hdc;
         public ulong PaintStruct;
+
+        internal override bool Resume(BinaryEmulator Emulator, ref ulong Value)
+        {
+            Value = Win32k.Win32kHelper.FinishBeginPaint(Emulator, this, Value);
+            return false;
+        }
     }
 
-    public sealed class WinWindowCreation
+    public sealed class WinWindowCreation : WinCallbackContinuation
     {
         public ulong Hwnd;
         public WinWindowCreationStep Step;
+
+        internal override bool Resume(BinaryEmulator Emulator, ref ulong Value)
+        {
+            return Emulator.WinHelper.ContinueWindowCreation(this, Value, out Value);
+        }
     }
 
     // One SetWindowPos or EndDeferWindowPos entry in progress. WM_WINDOWPOSCHANGING can change the request.
-    public sealed class WinWindowPosChange
+    public sealed class WinWindowPosChange : WinCallbackContinuation
     {
         internal Win32k.Win32kHelper.Win32kDeferredWindowPos Position;
         public ulong WindowPos;
         public bool Changed;
         internal List<Win32k.Win32kHelper.Win32kDeferredWindowPos> Batch;
         public int Next;
+
+        internal override bool Resume(BinaryEmulator Emulator, ref ulong Value)
+        {
+            return Win32k.Win32kHelper.ContinueWindowPos(Emulator, this, out Value);
+        }
     }
 
-    public sealed class WinWindowDestruction
+    public sealed class WinWindowDestruction : WinCallbackContinuation
     {
         public ulong Result;
         public readonly List<WinWindowDestructionStep> Steps = new();
         public readonly HashSet<ulong> Planned = new();
         public int Next;
         public ulong PendingRelease;
+
+        internal override bool Resume(BinaryEmulator Emulator, ref ulong Value)
+        {
+            if (Emulator.WinHelper.RunWindowDestruction(this))
+                return true;
+
+            Value = Result;
+            return false;
+        }
     }
 
     public readonly struct WinWindowDestructionStep

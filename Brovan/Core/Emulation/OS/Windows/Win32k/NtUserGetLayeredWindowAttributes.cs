@@ -14,18 +14,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             if ((Window.ExStyle & Win32kHelper.WindowExStyleLayered) == 0)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             if (!Window.LayeredByAttributes)
             {
@@ -36,11 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if ((ColorKeyPtr != 0 && !Instance._emulator.WriteMemory(ColorKeyPtr, Window.LayeredColorKey, 4))
                 || (AlphaPtr != 0 && !Instance._emulator.WriteMemory(AlphaPtr, Window.LayeredAlpha, 1))
                 || (FlagsPtr != 0 && !Instance._emulator.WriteMemory(FlagsPtr, Window.LayeredFlags & 3, 4)))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_NOACCESS);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
 
             Instance.SetBooleanSyscallReturn(true);
             return NTSTATUS.STATUS_SUCCESS;

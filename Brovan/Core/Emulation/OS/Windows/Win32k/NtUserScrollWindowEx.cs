@@ -18,19 +18,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             if (!Win32kHelper.TryReadOptionalRect(Instance, ScrollPtr, out GdiClipRect? Scroll)
                 || !Win32kHelper.TryReadOptionalRect(Instance, ClipPtr, out GdiClipRect? Clip))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_NOACCESS);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
 
             int Result = Win32kHelper.ScrollWindow(Instance, Window, Dx, Dy, Scroll, Clip, Region, UpdatePtr != 0, Flags,
                 out GdiClipRect UpdateRect, out WinScrollChildMoves Moves);

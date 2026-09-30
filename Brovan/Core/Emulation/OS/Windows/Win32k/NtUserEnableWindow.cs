@@ -4,7 +4,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtUserEnableWindow : IWinSyscall
     {
-        private const uint WS_DISABLED = 0x08000000;
         private const uint WM_ENABLE = 0x000A;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -14,16 +13,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
-            bool WasDisabled = (Window.Style & WS_DISABLED) != 0;
+            bool WasDisabled = (Window.Style & Win32kHelper.WindowStyleDisabled) != 0;
             if (WasDisabled == Enable)
             {
-                Window.Style = Enable ? Window.Style & ~WS_DISABLED : Window.Style | WS_DISABLED;
+                Window.Style = Enable ? Window.Style & ~Win32kHelper.WindowStyleDisabled : Window.Style | Win32kHelper.WindowStyleDisabled;
                 Instance.WinHelper.MaterializeUserWindow(Window);
 
                 // A disabled host window passes clicks to the window it owns.
@@ -33,8 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Instance.SetLastWinError(0);
 
                 // NT: xxxEnableWindow sends WM_ENABLE before it returns.
-                uint ThreadId = Instance.CurrentThread?.ThreadId ?? 0;
-                if (Window.OwnerThreadId == ThreadId
+                if (Win32kHelper.IsOwnedByCurrentThread(Instance, Window)
                     && Instance.WinHelper.BeginGuestCall(Window.WndProc, Hwnd, WM_ENABLE, Enable ? 1UL : 0UL, 0, WasDisabled ? 1UL : 0UL))
                 {
                     return NTSTATUS.STATUS_SUCCESS;

@@ -13,11 +13,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             ulong Hdc = Win32kHelper.CreateDeviceContext(Instance, Hwnd, false, true);
             if (Hdc == 0)
@@ -39,9 +35,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!Win32kHelper.WritePaintStruct(Instance, PaintStructPtr, Hdc, Bounds, Window.BackgroundUnerased))
             {
                 Win32kHelper.ReleaseDeviceContext(Instance, Hdc);
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
             }
 
             Window.UpdateDirty = false;

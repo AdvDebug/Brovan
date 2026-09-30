@@ -11,7 +11,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const int GWL_STYLE = -16;
         private const int GWL_EXSTYLE = -20;
         private const int GWL_USERDATA = -21;
-        private const uint WS_VISIBLE = 0x10000000;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -22,11 +21,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             uint Previous;
             switch (Index)
@@ -34,7 +29,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 case GWL_STYLE:
                     Previous = Window.Style;
                     Window.Style = NewValue;
-                    Window.Visible = (NewValue & WS_VISIBLE) != 0;
+                    Window.Visible = (NewValue & Win32kHelper.WindowStyleVisible) != 0;
                     break;
 
                 case GWL_EXSTYLE:
@@ -65,11 +60,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
                 default:
                     if (!Win32kHelper.TryExchangeWindowExtra(Instance, Window, Index, NewValue, 4, out ulong PreviousExtra))
-                    {
-                        Instance.SetLastWinError(ERROR_INVALID_INDEX);
-                        Instance.SetRawSyscallReturn(0);
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
+                        return Win32kHelper.FailWithError(Instance, ERROR_INVALID_INDEX);
 
                     Instance.SetLastWinError(0);
                     Instance.SetRawSyscallReturn((uint)PreviousExtra);
