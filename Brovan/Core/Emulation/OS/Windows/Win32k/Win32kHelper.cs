@@ -544,7 +544,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private static bool SendWindowPos(BinaryEmulator Instance, WinWindow Window, WinWindowPosChange Change)
         {
             if ((Change.Position.Flags & SwpNoSendChanging) == 0 && IsOwnedByCurrentThread(Instance, Window)
-                && SendWindowPosMessage(Instance, Window, WM_WINDOWPOSCHANGING, Change))
+                && SendWindowPosMessage(Instance, Window, WM_WINDOWPOSCHANGING, Change.Position, Change))
             {
                 return true;
             }
@@ -645,25 +645,29 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Change.Position.Height = (int)Window.Height;
             Change.Position.Flags = Flags;
             Change.Changed = true;
-            return SendWindowPosMessage(Instance, Window, WM_WINDOWPOSCHANGED, Change);
+            return SendWindowPosMessage(Instance, Window, WM_WINDOWPOSCHANGED, Change.Position, Change);
         }
 
-        private static bool SendWindowPosMessage(BinaryEmulator Instance, WinWindow Window, uint Message, WinWindowPosChange Change)
+        private static bool SendWindowPosMessage(BinaryEmulator Instance, WinWindow Window, uint Message, in Win32kDeferredWindowPos Position,
+            WinWindowPosChange Change, ulong SyscallRetryRip = 0, ulong? DeferredSyscallResult = null)
         {
             if (!TryBeginWindowProcCallback(Instance, Window.WndProc, out ulong Callback, out ulong ArgumentBuffer))
                 return false;
 
             Span<byte> Data = stackalloc byte[WindowPosStructSize];
             Data.Clear();
-            WinSysHelper.WriteWindowPos(Data, true, Change.Position);
+            WinSysHelper.WriteWindowPos(Data, true, Position);
 
             ulong WindowPos = ArgumentBuffer + WindowProcArgumentHeaderSize;
             if (!Instance._emulator.WriteMemory(WindowPos, Data))
                 return false;
 
-            Change.WindowPos = WindowPos;
+            if (Change != null)
+                Change.WindowPos = WindowPos;
+
             WriteWindowProcCallbackArguments(Instance, ArgumentBuffer, Window.Hwnd, Window.WndProc, Message, 0, WindowPos);
-            return Instance.WinHelper.EnterUserCallback(Callback, WindowProcCallbackIndex, ArgumentBuffer, Change);
+            return Instance.WinHelper.EnterUserCallback(Callback, WindowProcCallbackIndex, ArgumentBuffer, Change, SyscallRetryRip,
+                DeferredSyscallResult: DeferredSyscallResult);
         }
 
         internal static bool IsOwnedByCurrentThread(BinaryEmulator Instance, WinWindow Window)
@@ -1906,7 +1910,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (Dc.Hwnd != 0)
             {
-                GetClientSize(Instance, Instance.WinHelper.GetWindow(Dc.Hwnd), out Extent.Right, out Extent.Bottom);
+                WinWindow Window = Instance.WinHelper.GetWindow(Dc.Hwnd);
+                if (Window != null)
+                    GetClientSize(Instance, Window, out Extent.Right, out Extent.Bottom);
+
                 return;
             }
 
@@ -3247,6 +3254,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         RemoveMessageAt(State, Index);
                         if (Candidate.Message == WM_INPUT)
                             Win32kRawInput.NoteInputDelivered(Instance, (uint)Candidate.LParam);
+                        else if (Candidate.Message == WM_CLOSE)
+                            HostEventQueue.AnswerClose(Candidate.Hwnd);
                     }
                     return true;
                 }
@@ -3502,7 +3511,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             uint Bits = State.QuitPosted ? Queued | QS_POSTMESSAGE : Queued;
-            if ((WakeMask & QS_SENDMESSAGE) != 0 && HasIncomingNotification(Instance, State, ThreadId))
+            if ((WakeMask & QS_SENDMESSAGE) != 0 && HasSentMessageFor(Instance, ThreadId))
                 Bits |= QS_SENDMESSAGE;
 
             if ((WakeMask & QS_PAINT) != 0 && FindDirtyWindow(Instance, 0, ThreadId) != null)
@@ -4561,16 +4570,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     continue;
                 }
 
-                ulong WindowPos = Instance.WinHelper.EnsureWindowPosStruct(Window, Window.PendingWindowPosFlags);
-                if (WindowPos == 0)
+                Win32kDeferredWindowPos Position = new Win32kDeferredWindowPos
                 {
-                    Window.PendingWindowPosChanged = false;
-                    continue;
-                }
+                    Hwnd = Hwnd,
+                    X = Window.X,
+                    Y = Window.Y,
+                    Width = (int)Window.Width,
+                    Height = (int)Window.Height,
+                    Flags = SwpNoZOrder | SwpNoActivate | Window.PendingWindowPosFlags,
+                };
 
                 // Dropped when the procedure cannot be called. A queued one would wake every GetMessage wait.
                 Window.PendingWindowPosChanged = false;
-                if (Instance.WinHelper.BeginGuestCall(Window.WndProc, Hwnd, WM_WINDOWPOSCHANGED, 0, WindowPos, SyscallResult, SyscallRetryRip))
+                if (SendWindowPosMessage(Instance, Window, WM_WINDOWPOSCHANGED, Position, null, SyscallRetryRip, SyscallResult))
                     return true;
             }
 
@@ -4727,9 +4739,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             uint Width = (uint)(LParam & 0xFFFF);
             uint Height = (uint)((LParam >> 16) & 0xFFFF);
 
-            // A frame with no client area is iconic whatever it calls itself. Only the client rectangle
+            // NT: a restored window can have an empty client area. Only the client rectangle of an iconic window
             // collapses, so the size and maximized flag keep the values to restore to.
-            bool Minimized = WParam == SIZE_MINIMIZED || Width == 0 || Height == 0;
+            bool Minimized = WParam == SIZE_MINIMIZED;
             bool Maximized = Window.Maximized;
             uint OuterWidth = Window.Width;
             uint OuterHeight = Window.Height;

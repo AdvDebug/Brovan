@@ -1825,7 +1825,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong ClientTextAddress;
         public uint ClientTextBytes;
         public ulong UserHandleEntryAddress;
-        public ulong WindowPosAddress;
         public bool PendingWindowPosChanged;
         public uint PendingWindowPosFlags;
 

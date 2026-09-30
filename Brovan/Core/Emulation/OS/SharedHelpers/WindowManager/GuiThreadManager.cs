@@ -51,11 +51,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         }
     }
 
-    // Pending, Applied and PendingLayered need the present lock. Host and ApplyingLayered are GUI thread only.
+    // Pending, Applying, Applied and PendingLayered need the present lock. Host and ApplyingLayered are GUI thread only.
     internal sealed class TopLevelEntry
     {
         public readonly ulong Window;
         public TopLevelFrame? Pending;
+        public TopLevelFrame? Applying;
         public TopLevelFrame? Applied;
         public List<LayeredUpdate> PendingLayered = new();
         public List<LayeredUpdate> ApplyingLayered = new();
@@ -268,7 +269,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 TopLevelEntry entry = GetOrAddTopLevel(frame.Window);
 
-                if (entry.Pending is TopLevelFrame pending)
+                if ((entry.Pending ?? entry.Applying) is TopLevelFrame pending)
                 {
                     if (pending.Matches(present) && (!pending.HostGeometryStale || present.HostGeometryStale))
                         return;
@@ -835,6 +836,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     return;
                 }
 
+                entry.Applying = frame;
                 (entry.PendingLayered, entry.ApplyingLayered) = (entry.ApplyingLayered, entry.PendingLayered);
                 layered = entry.ApplyingLayered;
             }
@@ -842,6 +844,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (entry.Host == null && CreateHostWindow(entry, frame, 0) == null)
             {
                 ReturnLayered(layered);
+                lock (_presentSync)
+                    entry.Applying = null;
+
                 return;
             }
 
@@ -909,7 +914,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
 
             lock (_presentSync)
+            {
                 entry.Applied = record;
+                entry.Applying = null;
+            }
         }
 
         // An owned host window needs a host owner to stay above it.

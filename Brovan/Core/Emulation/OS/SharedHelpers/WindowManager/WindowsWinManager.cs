@@ -146,6 +146,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_SETFOCUS = 0x0007;
         private const uint WM_KILLFOCUS = 0x0008;
         private const uint WM_ACTIVATE = 0x0006;
+        private const uint WM_MOUSEACTIVATE = 0x0021;
+        private const int MA_NOACTIVATE = 3;
         private const uint WA_INACTIVE = 0;
         private const uint RID_INPUT = 0x10000003;
         private const uint RIM_TYPEMOUSE = 0;
@@ -167,6 +169,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private const uint WS_OVERLAPPEDWINDOW = 0x00CF0000;
         private const uint WS_POPUP = 0x80000000;
+        private const uint WS_CHILD = 0x40000000;
         private const uint WS_VISIBLE = 0x10000000;
         private const uint WS_CAPTION = 0x00C00000;
         private const uint WS_THICKFRAME = 0x00040000;
@@ -306,7 +309,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             ApplyDpiAwareness(frame.DpiAwareness);
 
             uint style = HostStyle(frame.Style);
-            uint exStyle = HostExStyle(frame.ExStyle);
+            uint exStyle = HostExStyle(frame.Style, frame.ExStyle);
             RECT outer = ClientToOuter(style, exStyle, frame.ClientX, frame.ClientY, frame.ClientWidth, frame.ClientHeight, FrameDpi(IntPtr.Zero));
 
             IntPtr hwnd = CreateWindowExW(
@@ -368,9 +371,21 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return (unchecked((uint)GetWindowLongPtrW(hwnd, GWL_EXSTYLE).ToInt64()) & WS_EX_TOPMOST) != 0;
         }
 
-        private static uint HostStyle(uint guestStyle) => (guestStyle & GuestFrameStyles) | WS_CLIPSIBLINGS;
+        // NT never activates a WS_CHILD window, also when its parent is the desktop. The host gives a caption to a
+        // window that has neither WS_CHILD nor WS_POPUP.
+        private static bool IsDesktopChild(uint guestStyle) => (guestStyle & (WS_CHILD | WS_POPUP)) == WS_CHILD;
 
-        private static uint HostExStyle(uint guestExStyle) => guestExStyle & GuestFrameExStyles;
+        private static uint HostStyle(uint guestStyle)
+        {
+            uint style = (guestStyle & GuestFrameStyles) | WS_CLIPSIBLINGS;
+            return IsDesktopChild(guestStyle) ? style | WS_POPUP : style;
+        }
+
+        private static uint HostExStyle(uint guestStyle, uint guestExStyle)
+        {
+            uint exStyle = guestExStyle & GuestFrameExStyles;
+            return IsDesktopChild(guestStyle) ? exStyle | WS_EX_NOACTIVATE : exStyle;
+        }
 
         private static RECT ClientToOuter(uint style, uint exStyle, int x, int y, int width, int height, uint dpi)
         {
@@ -1190,6 +1205,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private readonly bool _resizable;
             private uint _style;
             private uint _exStyle;
+            private bool _desktopChild;
             private bool _cursorVisible = true;
             private bool _cursorClipped;
             private RECT _cursorClip;
@@ -1239,6 +1255,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _resizable = (style & WS_THICKFRAME) != 0;
                 _style = style;
                 _exStyle = exStyle;
+                _desktopChild = IsDesktopChild(frame.Style);
                 _boundsX = frame.ClientX;
                 _boundsY = frame.ClientY;
                 _boundsWidth = _width;
@@ -1442,7 +1459,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 uint current = unchecked((uint)GetWindowLongPtrW(_hwnd, GWL_STYLE).ToInt64());
                 uint hostStyle = HostStyle(style) | (current & HostWindowState);
-                uint hostExStyle = HostExStyle(exStyle);
+                uint hostExStyle = HostExStyle(style, exStyle);
                 bool topmostChanged = ((hostExStyle ^ _exStyle) & WS_EX_TOPMOST) != 0;
 
                 using (new GuestApplyScope(_manager))
@@ -1463,6 +1480,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 _style = hostStyle & ~HostWindowState;
                 _exStyle = hostExStyle;
+                _desktopChild = IsDesktopChild(style);
                 _decorated = (_style & WS_CAPTION) == WS_CAPTION;
 
                 if ((hostExStyle & WS_EX_LAYERED) == 0)
@@ -1911,6 +1929,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                         break;
 
+                    // WS_EX_NOACTIVATE alone still lets a click activate the window while the application has the
+                    // foreground.
+                    case WM_MOUSEACTIVATE:
+                        if (_desktopChild)
+                            return new IntPtr(MA_NOACTIVATE);
+
+                        break;
+
                     case WM_SIZE:
                         TrackHostResize(unchecked((uint)(long)wParam), unchecked((ulong)(long)lParam));
                         ApplyCursorClip();
@@ -1959,13 +1985,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 int width = (int)(lParam & 0xFFFF);
                 int height = (int)((lParam >> 16) & 0xFFFF);
-                bool iconic = sizeType == SIZE_MINIMIZED || width <= 0 || height <= 0;
+                bool iconic = sizeType == SIZE_MINIMIZED || IsIconic(_hwnd);
 
                 _state = iconic ? WindowState.Minimized
                     : sizeType == SIZE_MAXIMIZED ? WindowState.Maximized
                     : WindowState.Normal;
 
-                if (!iconic)
+                if (!iconic && width > 0 && height > 0)
                 {
                     _width = width;
                     _height = height;

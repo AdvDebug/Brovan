@@ -41,6 +41,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private static int _pendingRepaint;
         private static int _closeRequested;
+        private static long _unansweredClose;
         private static int _pendingDpi;
 
         // The GUI thread fills this queue, and DrainHostEvents on the scheduler thread is the only thing that
@@ -61,6 +62,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             Enqueue(WM_CLOSE, 0, 0);
         }
 
+        // A second close of a window whose guest never took the first one means the guest stopped pumping messages.
         public static void RequestClose(ulong window)
         {
             if (window == 0)
@@ -69,12 +71,21 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return;
             }
 
+            if ((ulong)Interlocked.Exchange(ref _unansweredClose, (long)window) == window)
+                Environment.Exit(0);
+
             Enqueue(WM_CLOSE, 0, 0, window);
+        }
+
+        public static void AnswerClose(ulong window)
+        {
+            Interlocked.CompareExchange(ref _unansweredClose, 0, (long)window);
         }
 
         public static void Reset()
         {
             Interlocked.Exchange(ref _closeRequested, 0);
+            Interlocked.Exchange(ref _unansweredClose, 0);
             Interlocked.Exchange(ref _pendingRepaint, 0);
             Interlocked.Exchange(ref _pendingDpi, 0);
 

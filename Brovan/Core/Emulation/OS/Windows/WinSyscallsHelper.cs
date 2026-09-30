@@ -3861,8 +3861,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Builds the page a guest callback returns to. Its code hands the stored result back through
-        /// NtCallbackReturn, which unwinds the frame pushed by BeginGuestCall.
+        /// Builds the page a guest callback returns to. Its code calls NtCallbackReturn, which unwinds the
+        /// frame pushed by BeginGuestCall.
         /// </summary>
         private ulong EnsureGuestCallTrampoline()
         {
@@ -3927,14 +3927,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Page == 0)
                 return false;
 
-            Emulator._emulator.WriteMemory(Page + GuestCallResultOffset, ResultValue, 8);
-
             ulong CurrentRsp = Emulator.ReadRegister(Registers.UC_X86_REG_RSP);
             WinUserCallbackFrame Frame = new WinUserCallbackFrame
             {
                 SavedRsp = CurrentRsp,
                 SavedReturnAddress = Emulator.ReadMemoryULong(CurrentRsp),
                 SyscallRetryRip = SyscallRetryRip,
+                DeferredSyscallResult = ResultValue,
             };
 
             if (SyscallRetryRip != 0)
@@ -4523,16 +4522,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             return DcAttr;
         }
 
-        private static ulong EncryptGdiPointer(ulong Pointer)
+        // A 32 bit gdi32 decodes only the low half of the entry, with a 32 bit rotation.
+        private ulong EncryptGdiPointer(ulong Pointer)
         {
             ulong Cookie = 1;
             ulong Xored = Pointer ^ Cookie;
+            if (PointerSize == 4)
+                return ((uint)Xored << 31) | ((uint)Xored >> 1);
+
             return ((Xored << 63) | (Xored >> 1));
         }
 
-        private static ulong DecryptGdiPointer(ulong Encrypted)
+        private ulong DecryptGdiPointer(ulong Encrypted)
         {
-            ulong RotatedBack = (Encrypted << 1) | (Encrypted >> 63);
+            ulong RotatedBack = PointerSize == 4
+                ? ((uint)Encrypted << 1) | ((uint)Encrypted >> 31)
+                : (Encrypted << 1) | (Encrypted >> 63);
             return RotatedBack ^ 1;
         }
 
@@ -6400,45 +6405,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (WinWindows.TryGetValue(ChildHwnd, out WinWindow Child))
                     PublishWindowRects(Child, Depth + 1);
             }
-        }
-
-        // The window's current frame geometry as a WINDOWPOS, for the lParam of WM_WINDOWPOSCHANGED.
-        public ulong EnsureWindowPosStruct(WinWindow Window, uint Flags)
-        {
-            const uint SWP_NOZORDER = 0x0004;
-            const uint SWP_NOACTIVATE = 0x0010;
-
-            if (Window == null)
-                return 0;
-
-            bool Is64 = Emulator._binary.Architecture == BinaryArchitecture.x64;
-            uint StructSize = Is64 ? 0x28u : 0x1Cu;
-
-            if (Window.WindowPosAddress == 0 || !Emulator.IsRegionMapped(Window.WindowPosAddress, StructSize))
-            {
-                ulong Address = Emulator.MapUniqueAddress(StructSize, MemoryProtection.ReadWrite);
-                if (Address == 0)
-                    return 0;
-
-                Window.WindowPosAddress = Address;
-            }
-
-            Span<byte> Data = Shared.GetSpan(StructSize).Slice(0, (int)StructSize);
-            Data.Clear();
-            WriteWindowPos(Data, Is64, new Win32kHelper.Win32kDeferredWindowPos
-            {
-                Hwnd = Window.Hwnd,
-                X = Window.X,
-                Y = Window.Y,
-                Width = (int)Window.Width,
-                Height = (int)Window.Height,
-                Flags = SWP_NOZORDER | SWP_NOACTIVATE | Flags,
-            });
-
-            if (!Emulator._emulator.WriteMemory(Window.WindowPosAddress, Data))
-                return 0;
-
-            return Window.WindowPosAddress;
         }
 
         internal static void WriteWindowPos(Span<byte> Data, bool Is64, in Win32kHelper.Win32kDeferredWindowPos Position)
