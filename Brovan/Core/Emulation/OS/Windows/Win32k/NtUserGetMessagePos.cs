@@ -1,3 +1,4 @@
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -7,7 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             WindowsThreadState State = WinEmulatedThread.TryGetState(Instance.CurrentThread);
-            ulong Position = State == null ? 0 : WinSysHelper.PackCoordinates(State.LastMessageX, State.LastMessageY);
+            ulong Position = State == null ? 0 : HostEventQueue.MakeLParam(State.LastMessageX, State.LastMessageY);
 
             Instance.SetRawSyscallReturn(Position);
             return NTSTATUS.STATUS_SUCCESS;

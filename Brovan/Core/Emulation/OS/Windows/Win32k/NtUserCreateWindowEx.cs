@@ -60,27 +60,31 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             string title = Win32kHelper.ReadLargeString(Instance, WindowNamePtr) ?? string.Empty;
             ulong hwnd = Instance.WinHelper.AllocateUserHandle();
 
+            // NT: a child has WS_CHILD without WS_POPUP.
+            uint Style = (uint)StyleArg;
+            uint ExStyle = (uint)exStyleArg;
+            bool Child = (Style & (Win32kHelper.WindowStyleChild | Win32kHelper.WindowStylePopup)) == Win32kHelper.WindowStyleChild;
+
             // Without WS_CHILD the argument names the owner, not the parent. NT owns by its top-level window.
             ulong OwnerHwnd = 0;
-            if (((uint)StyleArg & Win32kHelper.WindowStyleChild) == 0 && ParentHwnd != Win32kMessageOnlyParent.HwndMessage)
+            if (!Child && ParentHwnd != Win32kMessageOnlyParent.HwndMessage)
             {
                 OwnerHwnd = Win32kHelper.GetTopLevelWindow(Instance, Instance.WinHelper.GetWindow(ParentHwnd))?.Hwnd ?? 0;
                 ParentHwnd = 0;
             }
 
             // NT adds these implied styles.
-            uint Style = (uint)StyleArg;
-            uint ExStyle = (uint)exStyleArg;
-            if ((Style & Win32kHelper.WindowStyleChild) == 0)
-            {
+            if (!Child)
                 Style |= Win32kHelper.WindowStyleClipSiblings;
-                if ((Style & Win32kHelper.WindowStylePopup) == 0)
-                    Style |= Win32kHelper.WindowStyleCaption;
-            }
 
-            if ((ExStyle & Win32kHelper.WindowExStyleDlgModalFrame) != 0
-                || (Style & (Win32kHelper.WindowStyleDlgFrame | Win32kHelper.WindowStyleThickFrame)) != 0)
-                ExStyle |= Win32kHelper.WindowExStyleWindowEdge;
+            if ((Style & (Win32kHelper.WindowStyleChild | Win32kHelper.WindowStylePopup)) == 0)
+                Style |= Win32kHelper.WindowStyleCaption;
+
+            // NT: NeedsWindowEdge, with the image version NtUserCreateWindowEx gets in its 15th argument.
+            ushort ExpWinVer = (ushort)Instance.WinHelper.GetArg(14);
+            ExStyle = Win32kHelper.NeedsWindowEdge(Style, ExStyle, ExpWinVer >= 0x400)
+                ? ExStyle | Win32kHelper.WindowExStyleWindowEdge
+                : ExStyle & ~Win32kHelper.WindowExStyleWindowEdge;
 
             WinWindow window = new WinWindow
             {

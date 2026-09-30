@@ -16,6 +16,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             // NT: nothing is invalidated.
             Window.Title = TextPtr == 0 ? string.Empty : Win32kHelper.ReadLargeString(Instance, TextPtr) ?? string.Empty;
             Instance.WinHelper.MaterializeUserWindow(Window);
+            if (Window.ParentHwnd == 0)
+                Instance.WinHelper.PresentDesktop();
 
             Instance.SetLastWinError(0);
             Instance.SetBooleanSyscallReturn(true);

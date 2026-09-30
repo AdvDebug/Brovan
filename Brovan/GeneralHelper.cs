@@ -3102,8 +3102,6 @@ namespace Brovan
                 return Resolved;
             }
 
-            private const int SandboxLinkCacheLimit = 1 << 15;
-
             private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> SandboxLinkCache =
                 new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
 
@@ -3153,7 +3151,7 @@ namespace Brovan
 
                 string Resolved = ResolveSandboxLinks(FullPath, IncludeFinal, EnforceAllowedRoots, 0);
 
-                if (SandboxLinkCache.Count >= SandboxLinkCacheLimit)
+                if (SandboxLinkCache.Count >= Core.Settings.MemoryBudget.SandboxPathCacheEntries)
                     SandboxLinkCache.Clear();
 
                 SandboxLinkCache[Key] = Resolved;
@@ -3210,7 +3208,8 @@ namespace Brovan
 
                         if ((Attributes & FileAttributes.ReparsePoint) == 0)
                         {
-                            if (SandboxPlainComponents.Count >= SandboxLinkCacheLimit)
+                            // Cleared, not trimmed. An entry is one attribute query to rebuild, and a reset follows the paths in use now.
+                            if (SandboxPlainComponents.Count >= Core.Settings.MemoryBudget.SandboxPathCacheEntries)
                                 SandboxPlainComponents.Clear();
 
                             SandboxPlainComponents.TryAdd(Current, 0);

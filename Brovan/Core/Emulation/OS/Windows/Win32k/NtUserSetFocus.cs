@@ -12,6 +12,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Hwnd != 0 && Window == null)
                 return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
+            // NT: a window on another thread's queue is refused.
+            if (Window != null && !Win32kHelper.SharesInputQueue(Instance, Window, Instance.CurrentThread?.ThreadId ?? 0))
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_ACCESS_DENIED);
+
+            if (Window != null && !Win32kHelper.CanTakeFocus(Instance, Window))
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
+
             ulong Previous = Instance.WinHelper.FocusWindow;
 
             // NT: focus in another top-level window activates that window.

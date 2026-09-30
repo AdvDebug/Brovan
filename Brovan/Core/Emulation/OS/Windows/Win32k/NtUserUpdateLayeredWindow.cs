@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Buffers.Binary;
 using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -54,12 +55,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             byte AlphaFormat = 0;
             if (BlendPtr != 0)
             {
-                if (!Instance.IsRegionMapped(BlendPtr, 4))
+                Span<byte> Blend = stackalloc byte[4];
+                if (!Instance.ReadMemory(BlendPtr, Blend))
                     return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
 
-                uint Blend = Instance.ReadMemoryUInt(BlendPtr);
-                ConstantAlpha = (byte)(Blend >> 16);
-                AlphaFormat = (byte)(Blend >> 24);
+                ConstantAlpha = Blend[2];
+                AlphaFormat = Blend[3];
             }
 
             GdiClipRect Dirty = new GdiClipRect { Right = Width, Bottom = Height };
@@ -169,11 +170,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             First = 0;
             Second = 0;
 
-            if (!Instance.IsRegionMapped(Address, 8))
+            Span<byte> Pair = stackalloc byte[8];
+            if (!Instance.ReadMemory(Address, Pair))
                 return false;
 
-            First = unchecked((int)Instance.ReadMemoryUInt(Address));
-            Second = unchecked((int)Instance.ReadMemoryUInt(Address + 4));
+            First = BinaryPrimitives.ReadInt32LittleEndian(Pair);
+            Second = BinaryPrimitives.ReadInt32LittleEndian(Pair.Slice(4));
             return true;
         }
     }

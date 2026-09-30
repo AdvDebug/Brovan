@@ -100,6 +100,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         // GUI thread only. Non-zero while the host applies a guest request, so its events are not echoed back.
         private int _applyingGuestState;
 
+        // GUI thread only. Set when host activation leaves Brovan, so the next activation is not an echo.
+        private bool _hostFocusLost;
+
         private readonly ref struct GuestApplyScope
         {
             private readonly WindowsWinManager _manager;
@@ -1717,11 +1720,19 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     SetCursorPos(Point.X, Point.Y);
             }
 
+            // The host clip is global, so only the window that holds it sets or releases it.
             public void SetCursorClip(bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom)
             {
                 EnsureAlive();
 
-                _cursorClipped = enabled;
+                if (!enabled)
+                {
+                    ReleaseCursorClip();
+                    _cursorClipped = false;
+                    return;
+                }
+
+                _cursorClipped = true;
                 _cursorClip = new RECT { Left = clientLeft, Top = clientTop, Right = clientRight, Bottom = clientBottom };
                 ApplyCursorClip();
             }
@@ -1730,10 +1741,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private void ApplyCursorClip()
             {
                 if (!_cursorClipped)
-                {
-                    ClipCursor(IntPtr.Zero);
                     return;
-                }
 
                 if (!GetClientRect(_hwnd, out RECT Client))
                     return;
@@ -1818,7 +1826,19 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _selectedPen = IntPtr.Zero;
                 _selectedBrush = IntPtr.Zero;
                 _textStateApplied = false;
+
+                // The window leaves the table before DestroyWindow deactivates it, so the loss is read afterwards.
+                bool foreground = IsTopLevel && GetForegroundWindow() == _hwnd;
                 CloseWindowHandle(_hwnd);
+
+                if (foreground && !_manager.IsHostWindow(GetForegroundWindow()))
+                    ReportHostFocusLost();
+            }
+
+            private void ReportHostFocusLost()
+            {
+                HostEventQueue.Enqueue(WM_KILLFOCUS, 0, 0, _guestWindow);
+                _manager._hostFocusLost = true;
             }
 
             internal IntPtr HandleMessage(uint msg, IntPtr wParam, IntPtr lParam)
@@ -1862,14 +1882,20 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         if ((unchecked((uint)(long)wParam) & 0xFFFF) == WA_INACTIVE)
                         {
                             ReleaseCursorClip();
-                            if (!EchoesGuest && !(IsTopLevel && _manager.IsHostWindow(lParam)))
-                                HostEventQueue.Enqueue(WM_KILLFOCUS, 0, 0, _guestWindow);
+
+                            // Activation that leaves Brovan is never an echo, even while a guest request runs.
+                            if (!(IsTopLevel && _manager.IsHostWindow(lParam)))
+                                ReportHostFocusLost();
                         }
                         else
                         {
                             ApplyCursorClip();
-                            if (!EchoesGuest)
+
+                            // After a real loss, the guest has to hear that the host took it back.
+                            if (!EchoesGuest || _manager._hostFocusLost)
                                 HostEventQueue.Enqueue(WM_SETFOCUS, 0, 0, _guestWindow);
+
+                            _manager._hostFocusLost = false;
                         }
 
                         break;

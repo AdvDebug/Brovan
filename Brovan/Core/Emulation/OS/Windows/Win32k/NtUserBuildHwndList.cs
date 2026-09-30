@@ -8,7 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong ParentHwnd = Instance.WinHelper.GetArg(1);
-            bool EnumChildren = Instance.WinHelper.GetArg(2) != 0;
+            bool EnumChildren = Instance.WinHelper.GetArg32(2) != 0;
             uint ThreadId = (uint)Instance.WinHelper.GetArg(4);
             uint MaxCount = (uint)Instance.WinHelper.GetArg(5);
             ulong ListPtr = Instance.WinHelper.GetArg(6);

@@ -133,6 +133,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         // GUI thread only.
         private readonly Dictionary<ulong, ITopLevelWindow> _hostWindows = new();
+        private readonly HashSet<ITopLevelWindow> _surfaceHosts = new();
         private List<TopLevelEntry> _applyingTopLevels = new();
         private List<TopLevelEntry> _applyingDestroyed = new();
         private ITopLevelWindow[] _stackScratch = Array.Empty<ITopLevelWindow>();
@@ -672,12 +673,18 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             switch (command.Kind)
             {
                 case GuiCommandKind.GdiPrimitive:
-                    window = ResolveWindow(command.Primitive.Hwnd);
-                    if (window != null && _gdiRender != null)
-                        _gdiRender.ExecuteGdiPrimitive(window.NativeHandle, command.Primitive);
+                    try
+                    {
+                        window = ResolveWindow(command.Primitive.Hwnd);
+                        if (window != null && _gdiRender != null)
+                            _gdiRender.ExecuteGdiPrimitive(window.NativeHandle, command.Primitive);
+                    }
+                    finally
+                    {
+                        if (command.Primitive.PixelsPooled)
+                            ArrayPool<uint>.Shared.Return(command.Primitive.Pixels);
+                    }
 
-                    if (command.Primitive.PixelsPooled)
-                        ArrayPool<uint>.Shared.Return(command.Primitive.Pixels);
                     return;
 
                 case GuiCommandKind.RenderText:
@@ -710,8 +717,18 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     return;
 
                 case GuiCommandKind.SetCursorClip:
-                    ResolveWindow(command.Hwnd)?.SetCursorClip(command.X != 0, command.RectLeft, command.RectTop, command.RectRight, command.RectBottom);
+                {
+                    // The host clip is global, so no other window may keep one to apply again.
+                    IWindow target = ResolveWindow(command.Hwnd);
+                    foreach (ITopLevelWindow TopLevel in _hostWindows.Values)
+                    {
+                        if (TopLevel != target)
+                            TopLevel.SetCursorClip(false, 0, 0, 0, 0);
+                    }
+
+                    target?.SetCursorClip(command.X != 0, command.RectLeft, command.RectTop, command.RectRight, command.RectBottom);
                     return;
+                }
 
                 case GuiCommandKind.SetCursorVisible:
                     _window?.SetCursorVisible(command.X != 0);
@@ -720,9 +737,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     return;
 
                 case GuiCommandKind.EnsureTopLevel:
+                {
                     ApplyPendingTopLevels();
-                    ((TaskCompletionSource<IntPtr>)command.Request).SetResult(EnsureHostWindow(command.Hwnd, 0)?.NativeHandle ?? IntPtr.Zero);
+                    ITopLevelWindow host = EnsureHostWindow(command.Hwnd, 0);
+                    if (host != null)
+                        _surfaceHosts.Add(host);
+
+                    ((TaskCompletionSource<IntPtr>)command.Request).SetResult(host?.NativeHandle ?? IntPtr.Zero);
                     return;
+                }
 
                 case GuiCommandKind.HideTopLevels:
                     foreach (ITopLevelWindow TopLevel in _hostWindows.Values)
@@ -974,6 +997,18 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             {
                 foreach (ITopLevelWindow ownedWindow in owned)
                     RunHostCall(ownedWindow, static window => window.SetOwner(null));
+            }
+
+            // A guest swapchain may still present to this HWND, and destroying it faults the host driver.
+            // The host destroys owned windows with their owner, so it keeps no owner either.
+            if (_surfaceHosts.Contains(host))
+            {
+                RunHostCall(host, static window =>
+                {
+                    window.SetOwner(null);
+                    window.SetShown(false);
+                });
+                return;
             }
 
             RunHostCall(host, static window => window.Dispose());

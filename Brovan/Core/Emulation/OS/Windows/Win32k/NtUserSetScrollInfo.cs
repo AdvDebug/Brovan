@@ -19,7 +19,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong Hwnd = Instance.WinHelper.GetArg(0);
             int Bar = unchecked((int)Instance.WinHelper.GetArg(1));
             ulong InfoPtr = Instance.WinHelper.GetArg(2);
-            bool Redraw = Instance.WinHelper.GetArg(3) != 0;
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null || (Bar != SbHorizontal && Bar != SbVertical) || InfoPtr == 0)
@@ -70,9 +69,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             else
                 Window.VerticalScroll = Info;
 
-            if (Redraw)
-                Win32kHelper.RedrawWindow(Instance, Window, null, Win32kHelper.RDW_INVALIDATE);
-
+            // NT: fRedraw repaints only the non-client bar, which is not drawn here. The client is not invalidated.
             Instance.SetLastWinError(0);
             Instance.SetRawSyscallReturn(unchecked((ulong)(long)Info.Position));
             return NTSTATUS.STATUS_SUCCESS;

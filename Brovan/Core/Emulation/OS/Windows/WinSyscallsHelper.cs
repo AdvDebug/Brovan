@@ -416,6 +416,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             ClearWaitState(Thread, true);
+            Win32kHelper.DetachThreadInput(Emulator, Thread.ThreadId);
 
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
             if (State == null)
@@ -4113,15 +4114,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             // A control sizes itself from WM_SIZE, not from the CREATESTRUCT.
             if (Creation.Step == WinWindowCreationStep.Size)
                 return Win32kHelper.InvokeWindowProc(Emulator, Window.Hwnd, Window.WndProc, Win32kHelper.WM_SIZE,
-                    SizeRestored, PackCoordinates(ClientWidth, ClientHeight), Creation);
+                    SizeRestored, HostEventQueue.MakeLParam(ClientWidth, ClientHeight), Creation);
 
             return Win32kHelper.InvokeWindowProc(Emulator, Window.Hwnd, Window.WndProc, Win32kHelper.WM_MOVE,
-                0, PackCoordinates(ClientLeft, ClientTop), Creation);
-        }
-
-        internal static ulong PackCoordinates(int Low, int High)
-        {
-            return (ulong)(uint)((Low & 0xFFFF) | (High << 16));
+                0, HostEventQueue.MakeLParam(ClientLeft, ClientTop), Creation);
         }
 
         public MemoryProtection ConvertWinProtectToInternal(ulong Protect)
@@ -7149,6 +7145,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Above = Window.ClientWindowAddress;
             }
+
+            if (Above == 0 && UserDesktopWindowAddress != 0)
+                Emulator._emulator.WriteMemory(UserDesktopWindowAddress + (ulong)UserWindowChildOffset, 0UL, 8);
         }
 
         public ulong ForegroundWindow;

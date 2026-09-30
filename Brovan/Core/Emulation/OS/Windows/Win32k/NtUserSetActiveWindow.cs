@@ -20,7 +20,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             // NT: another thread's window is refused with no error.
-            if (!Win32kHelper.OwnedByThread(Window, Instance.CurrentThread?.ThreadId ?? 0))
+            if (!Win32kHelper.SharesInputQueue(Instance, Window, Instance.CurrentThread?.ThreadId ?? 0))
             {
                 Instance.SetRawSyscallReturn(0);
                 return NTSTATUS.STATUS_SUCCESS;

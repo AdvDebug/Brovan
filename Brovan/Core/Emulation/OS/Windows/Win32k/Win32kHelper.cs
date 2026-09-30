@@ -278,6 +278,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public ulong LastActiveWindow;
 
             public readonly Queue<ulong> PendingWindowPosChanged = new();
+            public readonly List<Win32kInputAttachment> InputAttachments = new();
             public readonly List<Win32kSentNotification> SentNotifications = new();
             public int QueuedNotifications;
             public ulong CursorHandle;
@@ -419,6 +420,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public ulong Bitmap;
             public ulong Font;
             public GdiClipRect[] Clip;
+
+            // Rented, DcAttributeSaveSize bytes used.
             public byte[] Attributes;
         }
 
@@ -895,8 +898,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return false;
 
             Win32kState State = GetState(Instance);
-            if (!State.DeviceContexts.Remove(Hdc))
+            if (!State.DeviceContexts.Remove(Hdc, out Win32kDeviceContext Dc))
                 return false;
+
+            if (Dc.SavedStates != null)
+                ReturnSavedStates(Dc, 0);
 
             Instance.WinHelper.FreeGdiHandle(Hdc);
             return true;
@@ -2319,9 +2325,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong AttributeBlock = Instance.WinHelper.GetDcAttributeAddress(Hdc);
             if (AttributeBlock != 0)
             {
-                Attributes = new byte[DcAttributeSaveSize];
-                if (!Instance.ReadMemory(AttributeBlock, Attributes))
+                Attributes = ArrayPool<byte>.Shared.Rent(DcAttributeSaveSize);
+                if (!Instance.ReadMemory(AttributeBlock, Attributes.AsSpan(0, DcAttributeSaveSize)))
+                {
+                    ArrayPool<byte>.Shared.Return(Attributes);
                     Attributes = null;
+                }
             }
 
             Dc.SavedStates ??= new List<Win32kDcState>();
@@ -2344,14 +2353,26 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Dc.SelectedBitmap = Saved.Bitmap;
             Dc.SelectedFont = Saved.Font;
             Dc.Clip = Saved.Clip;
-            Dc.SavedStates.RemoveRange(Target, Dc.SavedStates.Count - Target);
 
             ulong AttributeBlock = Instance.WinHelper.GetDcAttributeAddress(Hdc);
             if (Saved.Attributes != null && AttributeBlock != 0)
-                Instance.WriteMemory(AttributeBlock, Saved.Attributes);
+                Instance.WriteMemory(AttributeBlock, Saved.Attributes.AsSpan(0, DcAttributeSaveSize));
+
+            ReturnSavedStates(Dc, Target);
 
             PublishDcVisibleArea(Instance, Hdc);
             return true;
+        }
+
+        private static void ReturnSavedStates(Win32kDeviceContext Dc, int First)
+        {
+            for (int i = First; i < Dc.SavedStates.Count; i++)
+            {
+                if (Dc.SavedStates[i].Attributes != null)
+                    ArrayPool<byte>.Shared.Return(Dc.SavedStates[i].Attributes);
+            }
+
+            Dc.SavedStates.RemoveRange(First, Dc.SavedStates.Count - First);
         }
 
         internal static ulong SelectDcPalette(BinaryEmulator Instance, ulong Hdc, ulong Palette)
@@ -3814,26 +3835,24 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 ulong WParam = Event.WParam;
                 ulong LParam = Event.LParam;
                 ulong Source = Event.Window;
+                bool SourceGone = Source != 0 && Instance.WinHelper.GetWindow(Source) == null;
 
-                ulong Root = Presented;
-                if (Source != 0)
+                // Host focus belongs to the application, so it counts even when its window is gone.
+                if (Message == WM_SETFOCUS || Message == WM_KILLFOCUS)
                 {
-                    if (Instance.WinHelper.GetWindow(Source) == null)
-                        continue;
-
-                    Root = Source;
+                    ApplyHostFocus(Instance, State, SourceGone ? 0 : Source, Message == WM_SETFOCUS);
+                    continue;
                 }
+
+                if (SourceGone)
+                    continue;
+
+                ulong Root = Source != 0 ? Source : Presented;
 
                 if (Message == HostEventQueue.RawMouseMotion)
                 {
                     ulong RawTarget = Instance.WinHelper.GetForegroundWindow();
                     Win32kRawInput.DeliverHostRawMouse(Instance, RawTarget != 0 ? RawTarget : Root, unchecked((int)(uint)WParam), unchecked((int)(uint)LParam));
-                    continue;
-                }
-
-                if (Message == WM_SETFOCUS || Message == WM_KILLFOCUS)
-                {
-                    ApplyHostFocus(Instance, State, Source, Message == WM_SETFOCUS);
                     continue;
                 }
 
@@ -3889,7 +3908,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             State.CursorScreenX = ScreenX;
             State.CursorScreenY = ScreenY;
 
-            return WinSysHelper.PackCoordinates(ScreenX - GuestX, ScreenY - GuestY);
+            return HostEventQueue.MakeLParam(ScreenX - GuestX, ScreenY - GuestY);
         }
 
         private const uint SwpPositionFlags = SwpNoSize | SwpNoMove | SwpNoClientSize | SwpNoClientMove;
@@ -4194,7 +4213,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 && !Window.Destroyed
                 && Window.ParentHwnd == 0
                 && Window.Hwnd != Win32kMessageOnlyParent.HwndMessage
-                && (Window.Style & (WindowStyleChild | WindowStyleDisabled)) == 0
+                && (Window.Style & (WindowStyleChild | WindowStylePopup)) != WindowStyleChild
+                && (Window.Style & WindowStyleDisabled) == 0
                 && (Window.ExStyle & WindowExStyleNoActivate) == 0;
         }
 
@@ -4249,10 +4269,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Helper.SetThreadWindowContext(Window);
             Helper.PublishForegroundWindow();
 
+            // The host drops an activation for a window its frame has not shown yet.
+            Helper.PresentDesktop();
             if (!FromHost)
                 Helper.RequestHostActivation(Hwnd);
-
-            Helper.PresentDesktop();
         }
 
         internal static void DeactivateApplication(BinaryEmulator Instance, bool FromHost)
@@ -4345,6 +4365,23 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Helper.PublishFocusState(Focus, Helper.ActiveWindow);
         }
 
+        private const uint WM_ENABLE = 0x000A;
+        private const uint WM_CANCELMODE = 0x001F;
+
+        // NT: xxxEnableWindowWorker. Disabling sends WM_CANCELMODE and takes the focus away, and a change sends WM_ENABLE.
+        internal static void PostEnableNotifications(BinaryEmulator Instance, WinWindow Window, bool Enable, bool Changed)
+        {
+            if (!Enable)
+            {
+                PostNotification(Instance, Window.Hwnd, WM_CANCELMODE, 0, 0, false);
+                if (Instance.WinHelper.FocusWindow == Window.Hwnd)
+                    MoveFocus(Instance, 0, false);
+            }
+
+            if (Changed)
+                PostNotification(Instance, Window.Hwnd, WM_ENABLE, Enable ? 1UL : 0UL, 0, false);
+        }
+
         private static readonly (byte Vk, uint Message)[] MouseButtonReleases =
         {
             (VkLButton, WM_LBUTTONUP),
@@ -4357,7 +4394,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private static void ReleaseHeldButtons(BinaryEmulator Instance, Win32kState State, ulong Foreground)
         {
             GetClientOrigin(Instance, Instance.WinHelper.GetWindow(Foreground), out int OriginX, out int OriginY);
-            ulong Position = WinSysHelper.PackCoordinates(State.CursorScreenX - OriginX, State.CursorScreenY - OriginY);
+            ulong Position = HostEventQueue.MakeLParam(State.CursorScreenX - OriginX, State.CursorScreenY - OriginY);
 
             for (int i = 0; i < MouseButtonReleases.Length; i++)
             {
@@ -4430,7 +4467,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             GetClientScreenOrigin(Instance, Target, out int TargetX, out int TargetY);
             int ClientX = X + RootX - TargetX;
             int ClientY = Y + RootY - TargetY;
-            LParam = WinSysHelper.PackCoordinates(ClientX, ClientY);
+            LParam = HostEventQueue.MakeLParam(ClientX, ClientY);
             return Target;
         }
 
@@ -4743,7 +4780,44 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Window.LayeredByUpdate = false;
             }
 
-            Window.ExStyle = ExStyle;
+            // NT: only SetWindowPos changes WS_EX_TOPMOST.
+            Window.ExStyle = (ExStyle & ~WindowExStyleTopmost) | (Window.ExStyle & WindowExStyleTopmost);
+        }
+
+        // NT: xxxSetWindowStyle masks a new extended style, which also drops the client-side visible state bit.
+        private const uint SetWindowLongExStyleMask = 0x0A7F77FF;
+
+        internal static void SetWindowLongStyle(WinWindow Window, uint Style)
+        {
+            Window.Style = Style;
+            Window.Visible = (Style & WindowStyleVisible) != 0;
+            UpdateWindowEdge(Window);
+        }
+
+        internal static void SetWindowLongExStyle(WinWindow Window, uint ExStyle)
+        {
+            SetExStyle(Window, ExStyle & SetWindowLongExStyleMask);
+            UpdateWindowEdge(Window);
+        }
+
+        // NT: xxxSetWindowStyle runs NeedsWindowEdge after every change, as for a 4.0 image.
+        private static void UpdateWindowEdge(WinWindow Window)
+        {
+            Window.ExStyle = NeedsWindowEdge(Window.Style, Window.ExStyle, true)
+                ? Window.ExStyle | WindowExStyleWindowEdge
+                : Window.ExStyle & ~WindowExStyleWindowEdge;
+        }
+
+        internal static bool NeedsWindowEdge(uint Style, uint ExStyle, bool Version4)
+        {
+            if ((ExStyle & WindowExStyleDlgModalFrame) != 0)
+                return true;
+
+            if ((ExStyle & WindowExStyleStaticEdge) != 0)
+                return false;
+
+            uint Frame = Style & WindowStyleCaption;
+            return (Style & WindowStyleThickFrame) != 0 || Frame == WindowStyleDlgFrame || (Frame == WindowStyleCaption && Version4);
         }
 
         /// <summary>
@@ -5089,10 +5163,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Instance.WinHelper.PresentInvalidation();
         }
 
-        // NT: GetTopLevelWindow walks up while the window is WS_CHILD.
+        // NT: GetTopLevelWindow walks up while the window is WS_CHILD without WS_POPUP.
         internal static WinWindow GetTopLevelWindow(BinaryEmulator Instance, WinWindow Window)
         {
-            for (int Depth = 0; Window != null && (Window.Style & WindowStyleChild) != 0 && Depth < MaxWindowTreeDepth; Depth++)
+            for (int Depth = 0; Window != null && (Window.Style & (WindowStyleChild | WindowStylePopup)) == WindowStyleChild && Depth < MaxWindowTreeDepth; Depth++)
                 Window = Instance.WinHelper.GetWindow(Window.ParentHwnd);
 
             return Window;
@@ -5808,7 +5882,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     continue;
 
                 GetClientRect(Instance, Child, out int Left, out int Top, out _, out _);
-                ulong LParam = WinSysHelper.PackCoordinates(Left, Top);
+                ulong LParam = HostEventQueue.MakeLParam(Left, Top);
 
                 if (IsOwnedByCurrentThread(Instance, Child)
                     && InvokeWindowProc(Instance, Child.Hwnd, Child.WndProc, WM_MOVE, 0, LParam, Moves))
@@ -6159,7 +6233,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 case WM_SETTEXT:
                     Window.Title = ReadWindowTextPointer(Instance, LParam, Ansi) ?? string.Empty;
                     Instance.WinHelper.MaterializeUserWindow(Window);
-                    Instance.WinHelper.PresentDesktop();
+                    if (Window.ParentHwnd == 0)
+                        Instance.WinHelper.PresentDesktop();
+
                     return 1;
 
                 case WM_SETREDRAW:
@@ -6308,6 +6384,105 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static bool OwnedByThread(WinWindow Window, uint ThreadId)
         {
             return ThreadId == 0 || Window.OwnerThreadId == 0 || Window.OwnerThreadId == ThreadId;
+        }
+
+        private sealed class Win32kInputAttachment
+        {
+            public uint First;
+            public uint Second;
+            public int Count;
+        }
+
+        // NT: zzzAttachThreadInput. A pair counts its attaches, and a detach of a pair that is not attached fails.
+        internal static bool AttachThreadInput(BinaryEmulator Instance, uint ThreadId, uint TargetThreadId, bool Attach)
+        {
+            List<Win32kInputAttachment> Attachments = GetState(Instance).InputAttachments;
+            for (int i = 0; i < Attachments.Count; i++)
+            {
+                Win32kInputAttachment Pair = Attachments[i];
+                if ((Pair.First != ThreadId || Pair.Second != TargetThreadId) && (Pair.First != TargetThreadId || Pair.Second != ThreadId))
+                    continue;
+
+                if (Attach)
+                {
+                    if (Pair.Count == int.MaxValue)
+                        return false;
+
+                    Pair.Count++;
+                }
+                else if (--Pair.Count == 0)
+                {
+                    Attachments.RemoveAt(i);
+                }
+
+                return true;
+            }
+
+            if (!Attach)
+                return false;
+
+            Attachments.Add(new Win32kInputAttachment { First = ThreadId, Second = TargetThreadId, Count = 1 });
+            return true;
+        }
+
+        // NT drops the attachments of a thread that ends.
+        internal static void DetachThreadInput(BinaryEmulator Instance, uint ThreadId)
+        {
+            if (!States.TryGetValue(Instance, out Win32kState State))
+                return;
+
+            List<Win32kInputAttachment> Attachments = State.InputAttachments;
+            for (int i = Attachments.Count - 1; i >= 0; i--)
+            {
+                if (Attachments[i].First == ThreadId || Attachments[i].Second == ThreadId)
+                    Attachments.RemoveAt(i);
+            }
+        }
+
+        // NT compares message queues, and AttachThreadInput joins the queues of every thread it links.
+        internal static bool SharesInputQueue(BinaryEmulator Instance, WinWindow Window, uint ThreadId)
+        {
+            if (OwnedByThread(Window, ThreadId))
+                return true;
+
+            List<Win32kInputAttachment> Attachments = GetState(Instance).InputAttachments;
+            if (Attachments.Count == 0)
+                return false;
+
+            List<uint> Joined = new List<uint> { ThreadId };
+            for (int i = 0; i < Joined.Count; i++)
+            {
+                foreach (Win32kInputAttachment Pair in Attachments)
+                {
+                    uint Other = Pair.First == Joined[i] ? Pair.Second : Pair.Second == Joined[i] ? Pair.First : 0;
+                    if (Other == 0 || Joined.Contains(Other))
+                        continue;
+
+                    if (Other == Window.OwnerThreadId)
+                        return true;
+
+                    Joined.Add(Other);
+                }
+            }
+
+            return false;
+        }
+
+        // NT: xxxSetFocus refuses a window when it, or a WS_CHILD ancestor up to the top-level, is disabled or minimized.
+        internal static bool CanTakeFocus(BinaryEmulator Instance, WinWindow Window)
+        {
+            for (int Depth = 0; Window != null && Depth < MaxWindowTreeDepth; Depth++)
+            {
+                if ((Window.Style & (WindowStyleDisabled | WindowStyleMinimize)) != 0)
+                    return false;
+
+                if ((Window.Style & (WindowStyleChild | WindowStylePopup)) != WindowStyleChild)
+                    break;
+
+                Window = Instance.WinHelper.GetWindow(Window.ParentHwnd);
+            }
+
+            return true;
         }
 
         private static void RemoveMessageAt(Win32kState State, int Index)

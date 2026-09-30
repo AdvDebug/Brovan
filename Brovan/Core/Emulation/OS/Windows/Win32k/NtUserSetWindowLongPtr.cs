@@ -28,14 +28,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 case GWL_STYLE:
                     Previous = Window.Style;
-                    Window.Style = (uint)NewValue;
-                    Window.Visible = (NewValue & Win32kHelper.WindowStyleVisible) != 0;
+                    Win32kHelper.SetWindowLongStyle(Window, (uint)NewValue);
                     break;
 
                 case GWL_EXSTYLE:
                     Previous = Window.ExStyle;
-                    // The visible state bit shares this dword client-side and belongs to Visible.
-                    Win32kHelper.SetExStyle(Window, (uint)NewValue & ~WinSysHelper.UserWindowStateVisible);
+                    Win32kHelper.SetWindowLongExStyle(Window, (uint)NewValue);
                     break;
 
                 case GWLP_USERDATA:
