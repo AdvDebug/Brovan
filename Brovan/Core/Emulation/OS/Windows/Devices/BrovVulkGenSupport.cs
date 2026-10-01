@@ -30,6 +30,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             return s;
         }
 
+        public int Remaining => _len - _pos;
+
         public uint ReadU32() => BinaryPrimitives.ReadUInt32LittleEndian(Take(4));
 
         public ulong ReadU64() => BinaryPrimitives.ReadUInt64LittleEndian(Take(8));

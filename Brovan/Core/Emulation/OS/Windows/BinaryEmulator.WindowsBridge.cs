@@ -53,7 +53,7 @@ namespace Brovan.Core.Emulation
 
         bool IGuestMemory.ReadMemory(ulong Address, Span<byte> Destination) => ReadMemory(Address, Destination);
 
-        IntPtr IGuestMemory.EnsureHostWindowHandle() => WinHelper.EnsureHostWindowHandle();
+        IntPtr IGuestMemory.EnsureHostWindowHandle(ulong GuestHwnd) => WinHelper.EnsureHostWindowHandle(GuestHwnd);
 
         void IGuestMemory.EnsureHostXlibSurfaceHandles(out IntPtr Connection, out IntPtr Window) =>
             WinHelper.EnsureHostXlibSurfaceHandles(out Connection, out Window);
@@ -825,9 +825,17 @@ namespace Brovan.Core.Emulation
 
             if (State != null && State.GetMessageWaitActive)
             {
-                if (Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, true, Thread.ThreadId, out Win32kMessage Message))
+                Win32kHelper.DrainHostEvents(this);
+                if (WinHelper.SupportsUserCallbacks && Win32kHelper.HasSentMessageFor(this, Thread.ThreadId))
                 {
-                    Win32kHelper.WriteMessage(this, State.GetMessageMessagePtr, Message);
+                    State.GetMessageWaitActive = false;
+                    State.RetrySyscallActive = true;
+                    return true;
+                }
+
+                if (Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
+                {
+                    Win32kHelper.WriteMessage(this, State.GetMessageMessagePtr, Message, State);
                     State.GetMessageWaitActive = false;
                     Thread.WaitSatisfiedIndex = Message.Message == Win32kHelper.WM_QUIT ? 0 : 1;
                     State.WaitStatus = NTSTATUS.STATUS_SUCCESS;

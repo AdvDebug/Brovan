@@ -37,11 +37,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 ParentHwnd = Win32kMessageOnlyParent.HwndMessage;
             }
             else if (ParentHwnd != 0 && Instance.WinHelper.GetWindow(ParentHwnd) == null)
-            {
-                Instance.SetLastWinError(ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, ERROR_INVALID_WINDOW_HANDLE);
 
             string ClassName = Win32kHelper.ReadLargeString(Instance, ClassNamePtr);
             string classVersion = Win32kHelper.ReadLargeString(Instance, ClassVersionPtr) ?? string.Empty;
@@ -59,23 +55,36 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             // Answering "no such class" is what makes user32 register a standard control and call back in.
             if (WindowClass == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_CANNOT_FIND_WND_CLASS);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_CANNOT_FIND_WND_CLASS);
 
             string title = Win32kHelper.ReadLargeString(Instance, WindowNamePtr) ?? string.Empty;
             ulong hwnd = Instance.WinHelper.AllocateUserHandle();
 
-            // Without WS_CHILD the argument names the owner, not the parent.
-            const uint WS_CHILD = 0x40000000;
+            // NT: a child has WS_CHILD without WS_POPUP.
+            uint Style = (uint)StyleArg;
+            uint ExStyle = (uint)exStyleArg;
+            bool Child = (Style & (Win32kHelper.WindowStyleChild | Win32kHelper.WindowStylePopup)) == Win32kHelper.WindowStyleChild;
+
+            // Without WS_CHILD the argument names the owner, not the parent. NT owns by its top-level window.
             ulong OwnerHwnd = 0;
-            if (((uint)StyleArg & WS_CHILD) == 0 && ParentHwnd != Win32kMessageOnlyParent.HwndMessage)
+            if (!Child && ParentHwnd != Win32kMessageOnlyParent.HwndMessage)
             {
-                OwnerHwnd = ParentHwnd;
+                OwnerHwnd = Win32kHelper.GetTopLevelWindow(Instance, Instance.WinHelper.GetWindow(ParentHwnd))?.Hwnd ?? 0;
                 ParentHwnd = 0;
             }
+
+            // NT adds these implied styles.
+            if (!Child)
+                Style |= Win32kHelper.WindowStyleClipSiblings;
+
+            if ((Style & (Win32kHelper.WindowStyleChild | Win32kHelper.WindowStylePopup)) == 0)
+                Style |= Win32kHelper.WindowStyleCaption;
+
+            // NT: NeedsWindowEdge, with the image version NtUserCreateWindowEx gets in its 15th argument.
+            ushort ExpWinVer = (ushort)Instance.WinHelper.GetArg(14);
+            ExStyle = Win32kHelper.NeedsWindowEdge(Style, ExStyle, ExpWinVer >= 0x400)
+                ? ExStyle | Win32kHelper.WindowExStyleWindowEdge
+                : ExStyle & ~Win32kHelper.WindowExStyleWindowEdge;
 
             WinWindow window = new WinWindow
             {
@@ -83,9 +92,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 ClassAtom = WindowClass.Atom,
                 Title = title,
                 ClassName = string.IsNullOrEmpty(ClassName) ? "#UNNAMED" : ClassName,
-                Visible = ((uint)StyleArg & 0x10000000U) != 0, // WS_VISIBLE
-                Style = (uint)StyleArg,
-                ExStyle = (uint)exStyleArg,
+                Visible = (Style & Win32kHelper.WindowStyleVisible) != 0,
+                Style = Style,
+                ExStyle = ExStyle,
                 X = x,
                 Y = y,
                 Width = (uint)Math.Max(width, 0),
@@ -110,7 +119,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             // The callback path is x64 only, so a 32-bit guest gets the window with none of its creation
             // messages and the class has to cope on its own.
-            Instance.SetRawSyscallReturn(hwnd);
+            Win32kHelper.ReturnAfterNotifications(Instance, hwnd);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

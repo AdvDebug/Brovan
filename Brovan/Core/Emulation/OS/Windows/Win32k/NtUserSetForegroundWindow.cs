@@ -10,18 +10,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong Hwnd = Instance.WinHelper.GetArg(0);
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null || !Window.Visible)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
-            Instance.WinHelper.ActiveWindow = Hwnd;
-            Instance.WinHelper.FocusWindow = Hwnd;
-            Instance.WinHelper.SetThreadWindowContext(Window);
+            // NT: refused while another process holds the foreground.
+            bool Refused = Win32kHelper.IsApplicationInBackground(Instance);
+            Win32kHelper.ActivateWindow(Instance, Window, false);
 
             Instance.SetLastWinError(0);
-            Instance.SetBooleanSyscallReturn(true);
+            Win32kHelper.ReturnAfterNotifications(Instance, Refused ? 0UL : 1UL);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

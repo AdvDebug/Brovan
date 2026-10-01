@@ -14,18 +14,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int Height = unchecked((int)Instance.WinHelper.GetArg(4));
             uint Rop = (uint)Instance.WinHelper.GetArg(5);
 
-            ulong Hwnd = Instance.WinHelper.GetHwndFromDc(Hdc);
-            if (Hwnd == 0)
-            {
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
-            ulong BrushHandle = Instance.WinHelper.ReadDcSelectedBrush(Hdc);
-            Win32kPenBrush Brush = Win32kHelper.ResolvePenBrush(Instance, BrushHandle, false);
-            Instance.WinHelper.EnqueueGdiFillRect(Hwnd, Hdc, X, Y, X + Width, Y + Height, Brush.ColorRef, Rop);
-
-            Instance.SetRawSyscallReturn(1);
+            bool Drawn = Win32kHelper.PatBltDc(Instance, Hdc, X, Y, Width, Height, Rop, Instance.WinHelper.ReadDcSelectedBrush(Hdc));
+            Instance.SetRawSyscallReturn(Drawn ? 1UL : 0UL);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

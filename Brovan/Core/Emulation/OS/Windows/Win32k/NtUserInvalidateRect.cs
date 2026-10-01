@@ -6,15 +6,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-
-            ulong Hwnd = Instance.WinHelper.GetArg(0);
-            ulong RectPtr = Instance.WinHelper.GetArg(1);
-            bool Erase = Instance.WinHelper.GetArg(2) != 0;
-
-            bool Success = Win32kHelper.InvalidateWindow(Instance, Hwnd);
-            Instance.SetLastWinError(Success ? 0u : Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-            Instance.SetBooleanSyscallReturn(Success);
-            return NTSTATUS.STATUS_SUCCESS;
+            bool Erase = Instance.WinHelper.GetArg32(2) != 0;
+            return Win32kHelper.RedrawFromRect(Instance, Instance.WinHelper.GetArg(0), Instance.WinHelper.GetArg(1),
+                Win32kHelper.RDW_INVALIDATE | (Erase ? Win32kHelper.RDW_ERASE : 0));
         }
     }
 }

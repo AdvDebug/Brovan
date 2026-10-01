@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -9,9 +11,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong First = Instance.WinHelper.GetArg(0);
             ulong Second = Instance.WinHelper.GetArg(1);
 
-            bool Equal = Win32kHelper.TryReadRegionRect(Instance, First, out int ALeft, out int ATop, out int ARight, out int ABottom)
-                && Win32kHelper.TryReadRegionRect(Instance, Second, out int BLeft, out int BTop, out int BRight, out int BBottom)
-                && ALeft == BLeft && ATop == BTop && ARight == BRight && ABottom == BBottom;
+            Win32kHelper.GetRegionScratch(Instance, out List<GdiClipRect> A, out List<GdiClipRect> B, out List<GdiClipRect> Difference);
+            bool Equal = Win32kHelper.TryReadRegion(Instance, First, A)
+                && Win32kHelper.TryReadRegion(Instance, Second, B)
+                && Win32kHelper.CombineRegions(A, B, Win32kHelper.RgnXor, Difference)
+                && Difference.Count == 0;
 
             Instance.SetLastWinError(0);
             Instance.SetRawSyscallReturn(Equal ? 1UL : 0UL);

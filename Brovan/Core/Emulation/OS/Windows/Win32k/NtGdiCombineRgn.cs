@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -11,33 +13,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong SourceB = Instance.WinHelper.GetArg(2);
             int Mode = unchecked((int)Instance.WinHelper.GetArg(3));
 
-            if (!Win32kHelper.TryReadRegionRect(Instance, SourceA, out int ALeft, out int ATop, out int ARight, out int ABottom))
+            Win32kHelper.GetRegionScratch(Instance, out List<GdiClipRect> A, out List<GdiClipRect> B, out List<GdiClipRect> Result);
+            if (!Win32kHelper.TryReadRegion(Instance, SourceA, A)
+                || (Mode != Win32kHelper.RgnCopy && !Win32kHelper.TryReadRegion(Instance, SourceB, B))
+                || !Win32kHelper.CombineRegions(A, B, Mode, Result))
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_HANDLE);
                 Instance.SetRawSyscallReturn((ulong)Win32kHelper.RegionError);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (!Win32kHelper.TryReadRegionRect(Instance, SourceB, out int BLeft, out int BTop, out int BRight, out int BBottom))
-            {
-                BLeft = 0;
-                BTop = 0;
-                BRight = 0;
-                BBottom = 0;
-            }
-
-            int Result = Win32kHelper.CombineRegionRects(Mode, ALeft, ATop, ARight, ABottom, BLeft, BTop, BRight, BBottom,
-                out int Left, out int Top, out int Right, out int Bottom);
-
-            if (!Win32kHelper.TryWriteRegionRect(Instance, Destination, Left, Top, Right, Bottom))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_HANDLE);
-                Instance.SetRawSyscallReturn((ulong)Win32kHelper.RegionError);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
-            Instance.SetLastWinError(0);
-            Instance.SetRawSyscallReturn((ulong)Result);
+            int Type = Win32kHelper.WriteRegion(Instance, Destination, Result);
+            Instance.SetLastWinError(Type == Win32kHelper.RegionError ? Win32kHelper.ERROR_INVALID_HANDLE : 0u);
+            Instance.SetRawSyscallReturn((ulong)Type);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

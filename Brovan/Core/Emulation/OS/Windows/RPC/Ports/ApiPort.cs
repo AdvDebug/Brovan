@@ -101,7 +101,10 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Reply.Data = HandleGenericRpcPort(Port, SendData, Instance);
+            if (DwmApiPortHandler.TryHandle(Port?.Name, SendData, Reply, Instance))
+                return NTSTATUS.STATUS_SUCCESS;
+
+            Reply.Data = HandleGenericRpcPort(Port, SendData, Reply.Connection, Instance);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -193,7 +196,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return Reply;
         }
 
-        private static byte[] HandleGenericRpcPort(WinPort Port, byte[] SendData, BinaryEmulator Instance)
+        private static byte[] HandleGenericRpcPort(WinPort Port, byte[] SendData, ulong Connection, BinaryEmulator Instance)
         {
             if (TryBuildDceRpcReply(Port, SendData, out byte[] RpcReply, Instance))
             {
@@ -204,6 +207,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             if (LrpcPacket.TryParse(SendData, out LrpcMessage Message))
             {
+                if (RpcssPortHandler.TryHandle(Port?.Name, Connection, Message, Instance.WinHelper.PID, out byte[] RpcssReply))
+                    return RpcssReply;
+
                 if (Message.Type == LrpcMessageType.Bind)
                     return LrpcPacket.BuildBindAccept(Message, out _);
 
@@ -211,6 +217,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 {
                     if (ScmPortHandler.TryHandle(Port?.Name, Message.ProcNumber, Message.StubData, out byte[] ScmReply))
                         return LrpcPacket.BuildResponse(Message, ScmReply);
+
+                    if (LsaLookupPortHandler.TryHandle(Port?.Name, Message.ProcNumber, Message.StubData, Instance, out byte[] LsaReply))
+                        return LrpcPacket.BuildResponse(Message, LsaReply);
 
                     if ((Instance.Settings.Flags & LogFlags.General) != 0)
                         Instance.TriggerEventMessage($"[!] No server for proc {Message.ProcNumber} on \"{Port?.Name}\"; faulting.", LogFlags.General);
@@ -319,7 +328,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (DisplayInfo == 0)
                 return false;
 
-            if (!Instance.WinHelper.EnsureUserMessageBitmask(out ulong Bitmask))
+            if (!Instance.WinHelper.EnsureUserMessageBitmask(out ulong Bitmask)
+                || !Instance.WinHelper.EnsureUserDefWindowMessageBitmask(out ulong DefWindowBitmask))
                 return false;
 
             Data.Clear();
@@ -340,7 +350,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             {
                 int Offset = UserConnectHeaderSize + WinSysHelper.UserSharedInfoMessageTableOffset(Index);
                 WriteU32(Data, Offset, WinSysHelper.UserMessageBitmaskLastMessage);
-                WriteU64(Data, Offset + 8, Bitmask);
+                WriteU64(Data, Offset + 8, Index == WinSysHelper.UserDefWindowMessageTableIndex ? DefWindowBitmask : Bitmask);
             }
 
             return true;
@@ -608,20 +618,14 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private static byte[] BuildEventLogOpenStub()
         {
-            byte[] Stub = new byte[0x18];
             Guid ContextId = Guid.NewGuid();
             EventLogContexts[ContextId] = "Application";
-            WriteContextHandle(Stub, 0x00, ContextId);
-            WriteU32(Stub, 0x14, (uint)NTSTATUS.STATUS_SUCCESS);
-            return Stub;
+            return Ndr20Writer.BuildContextHandleReply(ContextId);
         }
 
         private static byte[] BuildEventLogCloseStub()
         {
-            byte[] Stub = new byte[0x18];
-            WriteContextHandle(Stub, 0x00, Guid.Empty);
-            WriteU32(Stub, 0x14, (uint)NTSTATUS.STATUS_SUCCESS);
-            return Stub;
+            return Ndr20Writer.BuildContextHandleReply(Guid.Empty);
         }
 
         private static byte[] BuildEventLogReportStub(bool ExVariant)
@@ -657,13 +661,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             WriteBytes(Reply, o + 0x18, Stub);
             SetPortMessageLengths(Reply, RpcLength);
             return Reply;
-        }
-
-        private static void WriteContextHandle(byte[] b, int o, Guid ContextId)
-        {
-            WriteU32(b, o + 0x00, 0);
-            if (o + 0x14 <= b.Length)
-                ContextId.TryWriteBytes(b.AsSpan(o + 0x04, 0x10));
         }
 
         private static byte[] BuildDceRpcBindAck(byte[] SendData, int RpcOffset)

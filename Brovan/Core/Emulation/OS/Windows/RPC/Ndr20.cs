@@ -83,6 +83,22 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             Position += ContextHandleSize;
         }
 
+        public void WriteContextHandle(Guid Uuid)
+        {
+            Span<byte> Cookie = stackalloc byte[ContextHandleSize];
+            Cookie.Slice(0, 4).Clear();
+            Uuid.TryWriteBytes(Cookie.Slice(4));
+            WriteContextHandle(Cookie);
+        }
+
+        public static byte[] BuildContextHandleReply(Guid Uuid)
+        {
+            Ndr20Writer Writer = new Ndr20Writer(ContextHandleSize + 4);
+            Writer.WriteContextHandle(Uuid);
+            Writer.WriteUInt32(0);
+            return Writer.ToArray();
+        }
+
         public void WriteSystemHandle(int HandleIndex)
         {
             AlignTo(4);
@@ -202,6 +218,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public void Align(int Alignment)
         {
             Position = (Position + Alignment - 1) & ~(Alignment - 1);
+        }
+
+        public bool TrySkip(int Count)
+        {
+            if (Count < 0 || Position + Count > Data.Length)
+                return false;
+
+            Position += Count;
+            return true;
         }
 
         public bool TryReadConformantWideString(out string Value)

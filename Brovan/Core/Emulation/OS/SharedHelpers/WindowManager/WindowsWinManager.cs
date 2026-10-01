@@ -7,7 +7,7 @@ using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
-    internal sealed class WindowsWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport, IGdiRenderSupport, IKeyboardTranslateSupport
+    internal sealed class WindowsWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport, IGdiRenderSupport, IKeyboardTranslateSupport, ITopLevelWindowHost
     {
         private static readonly ConcurrentDictionary<IntPtr, WindowsWindow> Windows = new();
 
@@ -16,12 +16,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private static readonly object MetricsLock = new();
         private static IntPtr _metricsDc = IntPtr.Zero;
-        private static IntPtr _rasterDc = IntPtr.Zero;
-        private static IntPtr _rasterBitmap = IntPtr.Zero;
-        private static IntPtr _rasterPreviousBitmap = IntPtr.Zero;
-        private static IntPtr _rasterBits = IntPtr.Zero;
-        private static int _rasterWidth;
-        private static int _rasterHeight;
+        private static DibSurface _raster;
         private static IntPtr _metricsFont = IntPtr.Zero;
         private static IntPtr _metricsPreviousFont = IntPtr.Zero;
 
@@ -100,8 +95,30 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private readonly AutoResetEvent _wakeEvent = new(false);
 
         private bool _disposed;
+        private bool _rawMouseFollowsFocus;
+
+        // GUI thread only. Non-zero while the host applies a guest request, so its events are not echoed back.
+        private int _applyingGuestState;
+
+        // GUI thread only. Set when host activation leaves Brovan, so the next activation is not an echo.
+        private bool _hostFocusLost;
+
+        private readonly ref struct GuestApplyScope
+        {
+            private readonly WindowsWinManager _manager;
+
+            public GuestApplyScope(WindowsWinManager manager)
+            {
+                _manager = manager;
+                manager._applyingGuestState++;
+            }
+
+            public void Dispose() => _manager._applyingGuestState--;
+        }
 
         private const int GWL_STYLE = -16;
+        private const int GWL_EXSTYLE = -20;
+        private const int GWLP_HWNDPARENT = -8;
 
         private const uint WM_DESTROY = 0x0002;
         private const uint WM_CLOSE = 0x0010;
@@ -123,12 +140,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_CHAR = 0x0102;
         private const uint WM_SYSKEYDOWN = 0x0104;
         private const uint WM_SYSKEYUP = 0x0105;
+        private const uint WM_SYSCOMMAND = 0x0112;
+        private const uint SC_KEYMENU = 0xF100;
         private const uint WM_MOUSEMOVE = 0x0200;
         private const uint WM_SETCURSOR = 0x0020;
         private const uint WM_INPUT = 0x00FF;
         private const uint WM_SETFOCUS = 0x0007;
         private const uint WM_KILLFOCUS = 0x0008;
         private const uint WM_ACTIVATE = 0x0006;
+        private const uint WM_MOUSEACTIVATE = 0x0021;
+        private const int MA_NOACTIVATE = 3;
         private const uint WA_INACTIVE = 0;
         private const uint RID_INPUT = 0x10000003;
         private const uint RIM_TYPEMOUSE = 0;
@@ -150,23 +171,56 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private const uint WS_OVERLAPPEDWINDOW = 0x00CF0000;
         private const uint WS_POPUP = 0x80000000;
+        private const uint WS_CHILD = 0x40000000;
         private const uint WS_VISIBLE = 0x10000000;
         private const uint WS_CAPTION = 0x00C00000;
         private const uint WS_THICKFRAME = 0x00040000;
         private const uint WS_MINIMIZEBOX = 0x00020000;
         private const uint WS_MAXIMIZEBOX = 0x00010000;
         private const uint WS_SYSMENU = 0x00080000;
+        private const uint WS_MINIMIZE = 0x20000000;
+        private const uint WS_MAXIMIZE = 0x01000000;
+        private const uint WS_DISABLED = 0x08000000;
+        private const uint WS_CLIPSIBLINGS = 0x04000000;
+
+        private const uint WS_EX_DLGMODALFRAME = 0x00000001;
+        private const uint WS_EX_TOPMOST = 0x00000008;
+        private const uint WS_EX_TRANSPARENT = 0x00000020;
+        private const uint WS_EX_TOOLWINDOW = 0x00000080;
+        private const uint WS_EX_WINDOWEDGE = 0x00000100;
+        private const uint WS_EX_CLIENTEDGE = 0x00000200;
+        private const uint WS_EX_STATICEDGE = 0x00020000;
+        private const uint WS_EX_APPWINDOW = 0x00040000;
+        private const uint WS_EX_LAYERED = 0x00080000;
+        private const uint WS_EX_NOACTIVATE = 0x08000000;
+
+        private const uint GuestFrameStyles = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        private const uint GuestFrameExStyles = WS_EX_DLGMODALFRAME | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW
+            | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE | WS_EX_APPWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE;
+        private const uint HostWindowState = WS_VISIBLE | WS_MINIMIZE | WS_MAXIMIZE | WS_DISABLED;
 
         private const int SW_HIDE = 0;
         private const int SW_SHOWNORMAL = 1;
+        private const int SW_SHOWNOACTIVATE = 4;
         private const int SW_SHOW = 5;
         private const int SW_MINIMIZE = 6;
+        private const int SW_SHOWMINNOACTIVE = 7;
+        private const int SW_SHOWNA = 8;
         private const int SW_MAXIMIZE = 3;
         private const int SW_RESTORE = 9;
+
+        private static readonly IntPtr HWND_TOPMOST = new(-1);
+        private static readonly IntPtr HWND_NOTOPMOST = new(-2);
+
+        private const uint ULW_COLORKEY = 0x00000001;
+        private const uint ULW_ALPHA = 0x00000002;
+        private const uint ULW_OPAQUE = 0x00000004;
+        private const byte AC_SRC_OVER = 0x00;
 
         private const uint PM_REMOVE = 0x0001;
 
         private const int StackPointLimit = 128;
+        private const int StackClipLimit = 256;
 
         private const uint QS_ALLINPUT = 0x04FF;
         private const uint MWMO_INPUTAVAILABLE = 0x0004;
@@ -179,6 +233,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint SWP_NOZORDER = 0x0004;
         private const uint SWP_NOACTIVATE = 0x0010;
         private const uint SWP_FRAMECHANGED = 0x0020;
+        private const uint SWP_NOOWNERZORDER = 0x0200;
 
         private const uint WM_DPICHANGED = 0x02E0;
 
@@ -247,6 +302,101 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             ApplyInitialState(window, options);
             return window;
         }
+
+        public ITopLevelWindow CreateTopLevel(in TopLevelFrame frame, ITopLevelWindow owner)
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(WindowsWinManager));
+
+            ApplyDpiAwareness(frame.DpiAwareness);
+
+            uint style = HostStyle(frame.Style);
+            uint exStyle = HostExStyle(frame.Style, frame.ExStyle);
+            RECT outer = ClientToOuter(style, exStyle, frame.ClientX, frame.ClientY, frame.ClientWidth, frame.ClientHeight, FrameDpi(IntPtr.Zero));
+
+            IntPtr hwnd = CreateWindowExW(
+                unchecked((int)exStyle),
+                _className,
+                WindowsWindow.FormatTitle(frame.Title),
+                style,
+                outer.Left,
+                outer.Top,
+                outer.Right - outer.Left,
+                outer.Bottom - outer.Top,
+                owner?.NativeHandle ?? IntPtr.Zero,
+                IntPtr.Zero,
+                _instanceHandle,
+                IntPtr.Zero);
+
+            if (hwnd == IntPtr.Zero)
+                throw new InvalidOperationException("CreateWindowExW failed.");
+
+            WindowsWindow window = new(this, hwnd, frame, style, exStyle);
+            Windows[hwnd] = window;
+
+            ApplyBrovanAccent(hwnd);
+
+            // A null target makes raw input follow the keyboard focus.
+            if (!_rawMouseFollowsFocus)
+            {
+                RegisterRawMouse(IntPtr.Zero);
+                _rawMouseFollowsFocus = true;
+            }
+
+            if (!frame.Enabled)
+                EnableWindow(hwnd, false);
+
+            window.SetClientBounds(frame.ClientX, frame.ClientY, frame.ClientWidth, frame.ClientHeight);
+            return window;
+        }
+
+        // A window inserted behind a topmost window becomes topmost, so each band is restacked on its own.
+        public void Restack(ReadOnlySpan<ITopLevelWindow> topToBottom)
+        {
+            using (new GuestApplyScope(this))
+            {
+                bool aboveTopmost = topToBottom.Length != 0 && IsTopmostHostWindow(topToBottom[0].NativeHandle);
+                for (int i = 1; i < topToBottom.Length; i++)
+                {
+                    IntPtr window = topToBottom[i].NativeHandle;
+                    bool topmost = IsTopmostHostWindow(window);
+                    if (topmost == aboveTopmost)
+                        SetWindowPos(window, topToBottom[i - 1].NativeHandle, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+
+                    aboveTopmost = topmost;
+                }
+            }
+        }
+
+        private static bool IsTopmostHostWindow(IntPtr hwnd)
+        {
+            return (unchecked((uint)GetWindowLongPtrW(hwnd, GWL_EXSTYLE).ToInt64()) & WS_EX_TOPMOST) != 0;
+        }
+
+        // NT never activates a WS_CHILD window, also when its parent is the desktop. The host gives a caption to a
+        // window that has neither WS_CHILD nor WS_POPUP.
+        private static bool IsDesktopChild(uint guestStyle) => (guestStyle & (WS_CHILD | WS_POPUP)) == WS_CHILD;
+
+        private static uint HostStyle(uint guestStyle)
+        {
+            uint style = (guestStyle & GuestFrameStyles) | WS_CLIPSIBLINGS;
+            return IsDesktopChild(guestStyle) ? style | WS_POPUP : style;
+        }
+
+        private static uint HostExStyle(uint guestStyle, uint guestExStyle)
+        {
+            uint exStyle = guestExStyle & GuestFrameExStyles;
+            return IsDesktopChild(guestStyle) ? exStyle | WS_EX_NOACTIVATE : exStyle;
+        }
+
+        private static RECT ClientToOuter(uint style, uint exStyle, int x, int y, int width, int height, uint dpi)
+        {
+            RECT rect = new RECT { Left = x, Top = y, Right = x + Math.Max(width, 0), Bottom = y + Math.Max(height, 0) };
+            AdjustFrameRect(ref rect, style, exStyle, dpi);
+            return rect;
+        }
+
+        private bool IsHostWindow(IntPtr hwnd) => hwnd != IntPtr.Zero && Windows.ContainsKey(hwnd);
 
         public void PumpEvents()
         {
@@ -575,7 +725,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return style;
         }
 
-        public void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        public void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options, GdiClipRect[] clip)
         {
             if (string.IsNullOrEmpty(text) || !Windows.TryGetValue(windowHandle, out WindowsWindow? window))
                 return;
@@ -583,6 +733,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             IntPtr hdc = window.EnsureTextDeviceContext();
             if (hdc == IntPtr.Zero)
                 return;
+
+            window.ApplyClip(hdc, clip);
 
             IntPtr previous = font != IntPtr.Zero ? SelectObject(hdc, font) : IntPtr.Zero;
             RECT rect = new RECT { Left = rectLeft, Top = rectTop, Right = rectRight, Bottom = rectBottom };
@@ -601,6 +753,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (hdc == IntPtr.Zero)
                 return;
 
+            window.ApplyClip(hdc, primitive.Clip);
             window.SelectPen(primitive.HasPen
                 ? GetOrCreatePen(primitive.Pen.Width, unchecked((int)primitive.Pen.ColorRef))
                 : StockBlackPen);
@@ -639,6 +792,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 case GdiPrimitiveKind.Blit:
                     DrawBlit(hdc, primitive);
+                    break;
+
+                // BitBlt handles an overlapping copy.
+                case GdiPrimitiveKind.Copy:
+                    BitBlt(hdc, primitive.X1, primitive.Y1, primitive.X2 - primitive.X1, primitive.Y2 - primitive.Y1,
+                        hdc, primitive.SourceX, primitive.SourceY, SRCCOPY);
                     break;
             }
         }
@@ -905,10 +1064,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             lock (MetricsLock)
             {
-                if (!EnsureRasterSurface(width, height, out IntPtr hdc, out IntPtr bits))
+                if (!_raster.Ensure(width, height))
                     return false;
 
-                Span<uint> surface = new Span<uint>((void*)bits, Count);
+                IntPtr hdc = _raster.Dc;
+                Span<uint> surface = new Span<uint>((void*)_raster.Bits, Count);
                 pixels.Slice(0, Count).CopyTo(surface);
 
                 IntPtr previousFont = font != IntPtr.Zero ? SelectObject(hdc, font) : IntPtr.Zero;
@@ -935,77 +1095,78 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return true;
         }
 
-        private static unsafe bool EnsureRasterSurface(int width, int height, out IntPtr hdc, out IntPtr bits)
+        // Use in place through the owner's field. A copy shares the owner's GDI objects.
+        private struct DibSurface
         {
-            if (_rasterDc != IntPtr.Zero && _rasterWidth == width && _rasterHeight == height)
+            private IntPtr _bitmap;
+            private IntPtr _previousBitmap;
+
+            public IntPtr Dc { get; private set; }
+
+            public IntPtr Bits { get; private set; }
+
+            public int Width { get; private set; }
+
+            public int Height { get; private set; }
+
+            public readonly bool Matches(int width, int height) => Dc != IntPtr.Zero && Width == width && Height == height;
+
+            public unsafe bool Ensure(int width, int height)
             {
-                hdc = _rasterDc;
-                bits = _rasterBits;
+                if (Matches(width, height))
+                    return true;
+
+                Release();
+
+                IntPtr screenDc = GetDC(IntPtr.Zero);
+                if (screenDc == IntPtr.Zero)
+                    return false;
+
+                IntPtr memoryDc = CreateCompatibleDC(screenDc);
+                ReleaseDC(IntPtr.Zero, screenDc);
+                if (memoryDc == IntPtr.Zero)
+                    return false;
+
+                BITMAPINFOHEADER header = default;
+                header.biSize = (uint)sizeof(BITMAPINFOHEADER);
+                header.biWidth = width;
+                header.biHeight = -height;
+                header.biPlanes = 1;
+                header.biBitCount = 32;
+                header.biCompression = BI_RGB;
+
+                IntPtr dib = CreateDIBSection(memoryDc, ref header, DIB_RGB_COLORS, out IntPtr bits, IntPtr.Zero, 0);
+                if (dib == IntPtr.Zero || bits == IntPtr.Zero)
+                {
+                    if (dib != IntPtr.Zero)
+                        DeleteObject(dib);
+                    DeleteDC(memoryDc);
+                    return false;
+                }
+
+                _previousBitmap = SelectObject(memoryDc, dib);
+                _bitmap = dib;
+                Dc = memoryDc;
+                Bits = bits;
+                Width = width;
+                Height = height;
                 return true;
             }
 
-            ReleaseRasterSurface();
-
-            hdc = IntPtr.Zero;
-            bits = IntPtr.Zero;
-
-            IntPtr screenDc = GetDC(IntPtr.Zero);
-            if (screenDc == IntPtr.Zero)
-                return false;
-
-            IntPtr memoryDc = CreateCompatibleDC(screenDc);
-            ReleaseDC(IntPtr.Zero, screenDc);
-            if (memoryDc == IntPtr.Zero)
-                return false;
-
-            BITMAPINFOHEADER header = default;
-            header.biSize = (uint)sizeof(BITMAPINFOHEADER);
-            header.biWidth = width;
-            header.biHeight = -height;
-            header.biPlanes = 1;
-            header.biBitCount = 32;
-            header.biCompression = BI_RGB;
-
-            IntPtr dib = CreateDIBSection(memoryDc, ref header, DIB_RGB_COLORS, out IntPtr surface, IntPtr.Zero, 0);
-            if (dib == IntPtr.Zero || surface == IntPtr.Zero)
+            public void Release()
             {
-                if (dib != IntPtr.Zero)
-                    DeleteObject(dib);
-                DeleteDC(memoryDc);
-                return false;
+                if (Dc == IntPtr.Zero)
+                    return;
+
+                if (_previousBitmap != IntPtr.Zero)
+                    SelectObject(Dc, _previousBitmap);
+
+                if (_bitmap != IntPtr.Zero)
+                    DeleteObject(_bitmap);
+
+                DeleteDC(Dc);
+                this = default;
             }
-
-            _rasterPreviousBitmap = SelectObject(memoryDc, dib);
-            _rasterDc = memoryDc;
-            _rasterBitmap = dib;
-            _rasterBits = surface;
-            _rasterWidth = width;
-            _rasterHeight = height;
-
-            hdc = memoryDc;
-            bits = surface;
-            return true;
-        }
-
-        private static void ReleaseRasterSurface()
-        {
-            if (_rasterDc == IntPtr.Zero)
-                return;
-
-            if (_rasterPreviousBitmap != IntPtr.Zero)
-                SelectObject(_rasterDc, _rasterPreviousBitmap);
-
-            if (_rasterBitmap != IntPtr.Zero)
-                DeleteObject(_rasterBitmap);
-
-            DeleteDC(_rasterDc);
-
-            _rasterDc = IntPtr.Zero;
-            _rasterBitmap = IntPtr.Zero;
-            _rasterPreviousBitmap = IntPtr.Zero;
-            _rasterBits = IntPtr.Zero;
-            _rasterWidth = 0;
-            _rasterHeight = 0;
         }
 
         private static IntPtr EnsureMetricsDc()
@@ -1031,10 +1192,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return _metricsDc;
         }
 
-        private sealed class WindowsWindow : IWindow
+        private sealed class WindowsWindow : ITopLevelWindow
         {
             private readonly WindowsWinManager _manager;
             private readonly IntPtr _hwnd;
+            private readonly ulong _guestWindow;
             private bool _disposed;
             private string _title;
             private int _width;
@@ -1044,14 +1206,27 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private bool _decorated;
             private readonly bool _resizable;
             private uint _style;
+            private uint _exStyle;
+            private bool _desktopChild;
             private bool _cursorVisible = true;
             private bool _cursorClipped;
             private RECT _cursorClip;
 
             private IntPtr _hdc;
+            private GdiClipRect[] _clip;
             private IntPtr _selectedPen;
             private IntPtr _selectedBrush;
             private bool _textStateApplied;
+
+            private bool _activated;
+            private bool _layeredByUpdate;
+            private bool _layeredByAttributes;
+            private int _boundsX;
+            private int _boundsY;
+            private int _boundsWidth;
+            private int _boundsHeight;
+
+            private DibSurface _layered;
 
             internal WindowsWindow(WindowsWinManager manager, IntPtr hwnd, WindowOptions options)
             {
@@ -1068,6 +1243,35 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _style = unchecked((uint)GetWindowLongPtrW(hwnd, GWL_STYLE).ToInt64());
                 _style = _manager.ApplyDecorations(_hwnd, _style, _decorated, _resizable);
             }
+
+            internal WindowsWindow(WindowsWinManager manager, IntPtr hwnd, in TopLevelFrame frame, uint style, uint exStyle)
+            {
+                _manager = manager;
+                _hwnd = hwnd;
+                _guestWindow = frame.Window;
+                _title = FormatTitle(frame.Title);
+                _width = Math.Max(frame.ClientWidth, 0);
+                _height = Math.Max(frame.ClientHeight, 0);
+                _state = WindowState.Normal;
+                _decorated = (style & WS_CAPTION) == WS_CAPTION;
+                _resizable = (style & WS_THICKFRAME) != 0;
+                _style = style;
+                _exStyle = exStyle;
+                _desktopChild = IsDesktopChild(frame.Style);
+                _boundsX = frame.ClientX;
+                _boundsY = frame.ClientY;
+                _boundsWidth = _width;
+                _boundsHeight = _height;
+            }
+
+            internal static string FormatTitle(string title)
+            {
+                return string.IsNullOrEmpty(title) ? "Brovan" : string.Concat(title, " - Brovan");
+            }
+
+            private bool IsTopLevel => _guestWindow != 0;
+
+            private bool EchoesGuest => IsTopLevel && _manager._applyingGuestState != 0;
 
             internal IntPtr EnsureDeviceContext()
             {
@@ -1091,6 +1295,66 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 SetBkMode(hdc, TRANSPARENT);
                 _textStateApplied = true;
                 return hdc;
+            }
+
+            internal unsafe void ApplyClip(IntPtr hdc, GdiClipRect[] clip)
+            {
+                if (ReferenceEquals(clip, _clip))
+                    return;
+
+                _clip = clip;
+                if (clip == null)
+                {
+                    SelectClipRgn(hdc, IntPtr.Zero);
+                    return;
+                }
+
+                RGNDATAHEADER header = new RGNDATAHEADER
+                {
+                    Size = (uint)sizeof(RGNDATAHEADER),
+                    Type = RDH_RECTANGLES,
+                    Count = (uint)clip.Length,
+                    RegionSize = (uint)(clip.Length * sizeof(GdiClipRect)),
+                };
+
+                for (int i = 0; i < clip.Length; i++)
+                {
+                    GdiClipRect rect = clip[i];
+                    header.Bound = i == 0
+                        ? new RECT { Left = rect.Left, Top = rect.Top, Right = rect.Right, Bottom = rect.Bottom }
+                        : new RECT
+                        {
+                            Left = Math.Min(header.Bound.Left, rect.Left),
+                            Top = Math.Min(header.Bound.Top, rect.Top),
+                            Right = Math.Max(header.Bound.Right, rect.Right),
+                            Bottom = Math.Max(header.Bound.Bottom, rect.Bottom),
+                        };
+                }
+
+                int bytes = sizeof(RGNDATAHEADER) + (int)header.RegionSize;
+                byte[] rented = clip.Length > StackClipLimit ? ArrayPool<byte>.Shared.Rent(bytes) : null;
+                Span<byte> data = rented != null ? rented.AsSpan(0, bytes) : stackalloc byte[bytes];
+
+                IntPtr region;
+                try
+                {
+                    MemoryMarshal.Write(data, in header);
+                    MemoryMarshal.AsBytes(clip.AsSpan()).CopyTo(data.Slice(sizeof(RGNDATAHEADER)));
+
+                    fixed (byte* buffer = data)
+                        region = ExtCreateRegion(IntPtr.Zero, (uint)bytes, buffer);
+                }
+                finally
+                {
+                    if (rented != null)
+                        ArrayPool<byte>.Shared.Return(rented);
+                }
+
+                if (region == IntPtr.Zero)
+                    return;
+
+                SelectClipRgn(hdc, region);
+                DeleteObject(region);
             }
 
             internal void SelectPen(IntPtr pen)
@@ -1117,7 +1381,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 set
                 {
                     EnsureAlive();
-                    _title = string.Concat(value, " - Brovan") ?? string.Empty;
+                    _title = IsTopLevel ? FormatTitle(value) : string.Concat(value, " - Brovan");
                     _manager.UpdateWindowText(_hwnd, _title);
                 }
             }
@@ -1164,6 +1428,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     EnsureAlive();
                     _state = value;
+
+                    if (IsTopLevel)
+                    {
+                        if (_visible)
+                            ShowInState();
+
+                        return;
+                    }
+
                     if (_visible)
                         _manager.UpdateWindowState(_hwnd, _state);
                 }
@@ -1182,6 +1455,282 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 }
             }
 
+            public void SetFrame(uint style, uint exStyle)
+            {
+                EnsureAlive();
+
+                uint current = unchecked((uint)GetWindowLongPtrW(_hwnd, GWL_STYLE).ToInt64());
+                uint hostStyle = HostStyle(style) | (current & HostWindowState);
+                uint hostExStyle = HostExStyle(style, exStyle);
+                bool topmostChanged = ((hostExStyle ^ _exStyle) & WS_EX_TOPMOST) != 0;
+
+                using (new GuestApplyScope(_manager))
+                {
+                    SetWindowLongPtrW(_hwnd, GWL_STYLE, (IntPtr)hostStyle);
+                    SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, (IntPtr)hostExStyle);
+
+                    // WS_EX_TOPMOST changes only through SetWindowPos.
+                    if (topmostChanged)
+                    {
+                        SetWindowPos(_hwnd, (hostExStyle & WS_EX_TOPMOST) != 0 ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                    }
+
+                    SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+                }
+
+                _style = hostStyle & ~HostWindowState;
+                _exStyle = hostExStyle;
+                _desktopChild = IsDesktopChild(style);
+                _decorated = (_style & WS_CAPTION) == WS_CAPTION;
+
+                if ((hostExStyle & WS_EX_LAYERED) == 0)
+                    ForgetLayeredMode();
+            }
+
+            private void ForgetLayeredMode()
+            {
+                _layeredByUpdate = false;
+                _layeredByAttributes = false;
+                _layered.Release();
+            }
+
+            public void SetOwner(ITopLevelWindow owner)
+            {
+                EnsureAlive();
+                SetWindowLongPtrW(_hwnd, GWLP_HWNDPARENT, owner?.NativeHandle ?? IntPtr.Zero);
+            }
+
+            public void SetClientBounds(int x, int y, int width, int height)
+            {
+                EnsureAlive();
+
+                _boundsX = x;
+                _boundsY = y;
+                _boundsWidth = width;
+                _boundsHeight = height;
+
+                // The host picks its own maximized rectangle for a window without a caption, so the guest's is applied.
+                if (_state == WindowState.Normal || (_state == WindowState.Maximized && IsZoomed(_hwnd)))
+                    ApplyBounds();
+            }
+
+            // AdjustWindowRectEx adds a padded border a fixed frame does not draw. Measure the live frame.
+            private void ApplyBounds()
+            {
+                RECT outer;
+                if (TryGetFrameInsets(out int left, out int top, out int right, out int bottom))
+                {
+                    outer = new RECT
+                    {
+                        Left = _boundsX - left,
+                        Top = _boundsY - top,
+                        Right = _boundsX + Math.Max(_boundsWidth, 0) + right,
+                        Bottom = _boundsY + Math.Max(_boundsHeight, 0) + bottom,
+                    };
+                }
+                else
+                {
+                    outer = ClientToOuter(_style, _exStyle, _boundsX, _boundsY, _boundsWidth, _boundsHeight, _manager.FrameDpi(_hwnd));
+                }
+
+                using (new GuestApplyScope(_manager))
+                {
+                    SetWindowPos(_hwnd, IntPtr.Zero, outer.Left, outer.Top, outer.Right - outer.Left, outer.Bottom - outer.Top,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                }
+
+                ReportGeometry(_boundsX, _boundsY, _boundsWidth, _boundsHeight);
+            }
+
+            public void SetEnabled(bool enabled)
+            {
+                EnsureAlive();
+                EnableWindow(_hwnd, enabled);
+            }
+
+            public void SetShown(bool shown)
+            {
+                EnsureAlive();
+
+                if (_visible == shown)
+                    return;
+
+                _visible = shown;
+                ShowInState();
+            }
+
+            // Foreground lock. Only the first activation can take the foreground from another process.
+            public void Activate()
+            {
+                EnsureAlive();
+
+                if (!_visible)
+                    return;
+
+                IntPtr foreground = GetForegroundWindow();
+                if (_activated && foreground != IntPtr.Zero && !_manager.IsHostWindow(foreground))
+                    return;
+
+                _activated = true;
+
+                using (new GuestApplyScope(_manager))
+                    SetForegroundWindow(_hwnd);
+            }
+
+            public void SetLayeredAttributes(uint colorKey, byte alpha, uint flags)
+            {
+                EnsureAlive();
+
+                if ((_exStyle & WS_EX_LAYERED) == 0)
+                    return;
+
+                if (_layeredByUpdate)
+                    ForgetLayeredMode();
+
+                SetLayeredWindowAttributes(_hwnd, colorKey, alpha, flags);
+                _layeredByAttributes = true;
+            }
+
+            public unsafe void UpdateLayered(LayeredUpdate update)
+            {
+                EnsureAlive();
+
+                if ((_exStyle & WS_EX_LAYERED) == 0 || update.Width <= 0 || update.Height <= 0)
+                    return;
+
+                // NT: UpdateLayeredWindow fails after SetLayeredWindowAttributes until the style is cleared and set again.
+                if (_layeredByAttributes)
+                {
+                    using (new GuestApplyScope(_manager))
+                    {
+                        SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, (IntPtr)(_exStyle & ~WS_EX_LAYERED));
+                        SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, (IntPtr)_exStyle);
+                    }
+
+                    ForgetLayeredMode();
+                }
+
+                _layeredByUpdate = true;
+
+                if (update.Pixels != null && _layered.Ensure(update.Width, update.Height))
+                {
+                    int left = Math.Max(update.DirtyLeft, 0);
+                    int top = Math.Max(update.DirtyTop, 0);
+                    int right = Math.Min(update.DirtyLeft + update.DirtyWidth, update.Width);
+                    int bottom = Math.Min(update.DirtyTop + update.DirtyHeight, update.Height);
+
+                    if (right > left && bottom > top && update.Pixels.Length >= update.DirtyWidth * update.DirtyHeight)
+                    {
+                        uint* surface = (uint*)_layered.Bits;
+                        for (int row = top; row < bottom; row++)
+                        {
+                            ReadOnlySpan<uint> source = update.Pixels.AsSpan((row - update.DirtyTop) * update.DirtyWidth + (left - update.DirtyLeft), right - left);
+                            source.CopyTo(new Span<uint>(surface + (long)row * _layered.Width + left, right - left));
+                        }
+                    }
+                }
+
+                bool haveSurface = _layered.Matches(update.Width, update.Height);
+
+                POINT destination = new POINT { X = update.X, Y = update.Y };
+                SIZE size = new SIZE { cx = update.Width, cy = update.Height };
+                POINT source0 = new POINT { X = 0, Y = 0 };
+                BLENDFUNCTION blend = new BLENDFUNCTION
+                {
+                    BlendOp = AC_SRC_OVER,
+                    BlendFlags = 0,
+                    SourceConstantAlpha = update.ConstantAlpha,
+                    AlphaFormat = update.AlphaFormat,
+                };
+
+                using (new GuestApplyScope(_manager))
+                {
+                    // NT: with no source DC, UpdateLayeredWindow fails a size or source point.
+                    if (!haveSurface)
+                    {
+                        SetWindowPos(_hwnd, IntPtr.Zero, update.X, update.Y, update.Width, update.Height,
+                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                    }
+
+                    UpdateLayeredWindow(_hwnd, IntPtr.Zero, haveSurface ? &destination : null, haveSurface ? &size : null,
+                        haveSurface ? _layered.Dc : IntPtr.Zero, haveSurface ? &source0 : null, update.ColorKey, &blend,
+                        update.Flags & (ULW_COLORKEY | ULW_ALPHA | ULW_OPAQUE));
+                }
+            }
+
+            private void ShowInState()
+            {
+                int command;
+                if (!_visible)
+                    command = SW_HIDE;
+                else if (_state == WindowState.Minimized)
+                    command = SW_SHOWMINNOACTIVE;
+                else if (_state == WindowState.Maximized || _state == WindowState.Fullscreen)
+                    command = SW_MAXIMIZE;
+                else if (IsIconic(_hwnd) || IsZoomed(_hwnd))
+                    command = SW_SHOWNOACTIVATE;
+                else
+                    command = SW_SHOWNA;
+
+                using (new GuestApplyScope(_manager))
+                    ShowWindow(_hwnd, command);
+
+                if (!_visible)
+                    return;
+
+                if (_state == WindowState.Normal)
+                    ApplyBounds();
+                else
+                    ReportGeometry(int.MinValue, int.MinValue, -1, -1);
+            }
+
+            private void ReportGeometry(int x, int y, int width, int height)
+            {
+                if (IsIconic(_hwnd))
+                {
+                    HostEventQueue.Enqueue(WM_SIZE, SIZE_MINIMIZED, 0, _guestWindow);
+                    return;
+                }
+
+                if (!GetClientRect(_hwnd, out RECT client))
+                    return;
+
+                POINT origin = new POINT { X = 0, Y = 0 };
+                if (!ClientToScreen(_hwnd, ref origin))
+                    return;
+
+                if (origin.X != x || origin.Y != y)
+                    HostEventQueue.Enqueue(WM_MOVE, 0, HostEventQueue.MakeLParam(origin.X, origin.Y), _guestWindow);
+
+                int clientWidth = client.Right - client.Left;
+                int clientHeight = client.Bottom - client.Top;
+                if (clientWidth != width || clientHeight != height)
+                {
+                    uint sizeType = IsZoomed(_hwnd) ? SIZE_MAXIMIZED : 0;
+                    HostEventQueue.Enqueue(WM_SIZE, sizeType, HostEventQueue.MakeLParam(clientWidth, clientHeight), _guestWindow);
+                }
+            }
+
+            private bool TryGetFrameInsets(out int left, out int top, out int right, out int bottom)
+            {
+                left = top = right = bottom = 0;
+
+                if (IsIconic(_hwnd) || IsZoomed(_hwnd) || !GetWindowRect(_hwnd, out RECT window) || !GetClientRect(_hwnd, out RECT client))
+                    return false;
+
+                POINT origin = new POINT { X = 0, Y = 0 };
+                if (!ClientToScreen(_hwnd, ref origin))
+                    return false;
+
+                left = origin.X - window.Left;
+                top = origin.Y - window.Top;
+                right = window.Right - (origin.X + client.Right);
+                bottom = window.Bottom - (origin.Y + client.Bottom);
+                return left >= 0 && top >= 0 && right >= 0 && bottom >= 0;
+            }
+
             public void WarpCursor(int clientX, int clientY)
             {
                 EnsureAlive();
@@ -1191,11 +1740,19 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     SetCursorPos(Point.X, Point.Y);
             }
 
+            // The host clip is global, so only the window that holds it sets or releases it.
             public void SetCursorClip(bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom)
             {
                 EnsureAlive();
 
-                _cursorClipped = enabled;
+                if (!enabled)
+                {
+                    ReleaseCursorClip();
+                    _cursorClipped = false;
+                    return;
+                }
+
+                _cursorClipped = true;
                 _cursorClip = new RECT { Left = clientLeft, Top = clientTop, Right = clientRight, Bottom = clientBottom };
                 ApplyCursorClip();
             }
@@ -1204,10 +1761,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private void ApplyCursorClip()
             {
                 if (!_cursorClipped)
-                {
-                    ClipCursor(IntPtr.Zero);
                     return;
-                }
 
                 if (!GetClientRect(_hwnd, out RECT Client))
                     return;
@@ -1284,14 +1838,27 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     return;
 
                 ReleaseCursorClip();
+                _layered.Release();
                 _cursorClipped = false;
                 _disposed = true;
                 _hdc = IntPtr.Zero;
+                _clip = null;
                 _selectedPen = IntPtr.Zero;
                 _selectedBrush = IntPtr.Zero;
                 _textStateApplied = false;
-                _manager.RemoveWindow(_hwnd);
+
+                // The window leaves the table before DestroyWindow deactivates it, so the loss is read afterwards.
+                bool foreground = IsTopLevel && GetForegroundWindow() == _hwnd;
                 CloseWindowHandle(_hwnd);
+
+                if (foreground && !_manager.IsHostWindow(GetForegroundWindow()))
+                    ReportHostFocusLost();
+            }
+
+            private void ReportHostFocusLost()
+            {
+                HostEventQueue.Enqueue(WM_KILLFOCUS, 0, 0, _guestWindow);
+                _manager._hostFocusLost = true;
             }
 
             internal IntPtr HandleMessage(uint msg, IntPtr wParam, IntPtr lParam)
@@ -1307,6 +1874,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     case WM_MBUTTONUP:
                     case WM_XBUTTONDOWN:
                     case WM_XBUTTONUP:
+                    {
+                        POINT origin = new POINT { X = 0, Y = 0 };
+                        if (ClientToScreen(_hwnd, ref origin))
+                            HostEventQueue.EnqueuePointer(msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam), _guestWindow, origin.X, origin.Y);
+                        else
+                            HostEventQueue.Enqueue(msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam), _guestWindow);
+
+                        break;
+                    }
+
                     case WM_MOUSEWHEEL:
                     case WM_MOUSEHWHEEL:
                     case WM_KEYDOWN:
@@ -1314,7 +1891,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     case WM_CHAR:
                     case WM_SYSKEYDOWN:
                     case WM_SYSKEYUP:
-                        HostEventQueue.Enqueue(msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam));
+                        HostEventQueue.Enqueue(msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam), _guestWindow);
                         break;
 
                     case WM_INPUT:
@@ -1325,12 +1902,20 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         if ((unchecked((uint)(long)wParam) & 0xFFFF) == WA_INACTIVE)
                         {
                             ReleaseCursorClip();
-                            HostEventQueue.Enqueue(WM_KILLFOCUS, 0, 0);
+
+                            // Activation that leaves Brovan is never an echo, even while a guest request runs.
+                            if (!(IsTopLevel && _manager.IsHostWindow(lParam)))
+                                ReportHostFocusLost();
                         }
                         else
                         {
                             ApplyCursorClip();
-                            HostEventQueue.Enqueue(WM_SETFOCUS, 0, 0);
+
+                            // After a real loss, the guest has to hear that the host took it back.
+                            if (!EchoesGuest || _manager._hostFocusLost)
+                                HostEventQueue.Enqueue(WM_SETFOCUS, 0, 0, _guestWindow);
+
+                            _manager._hostFocusLost = false;
                         }
 
                         break;
@@ -1346,35 +1931,55 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                         break;
 
+                    // WS_EX_NOACTIVATE alone still lets a click activate the window while the application has the
+                    // foreground.
+                    case WM_MOUSEACTIVATE:
+                        if (_desktopChild)
+                            return new IntPtr(MA_NOACTIVATE);
+
+                        break;
+
+                    // A lone Alt or F10 starts a modal menu loop that takes the next key from the guest. Alt+Space
+                    // still opens the system menu.
+                    case WM_SYSCOMMAND:
+                        if ((unchecked((uint)(long)wParam) & 0xFFF0) == SC_KEYMENU && (unchecked((uint)(long)lParam) & 0xFFFF) != ' ')
+                            return IntPtr.Zero;
+
+                        break;
+
                     case WM_SIZE:
                         TrackHostResize(unchecked((uint)(long)wParam), unchecked((ulong)(long)lParam));
                         ApplyCursorClip();
-                        HostEventQueue.MarkRepaint();
+                        if (!EchoesGuest && !_layeredByUpdate)
+                            HostEventQueue.MarkRepaint(_guestWindow);
                         break;
 
                     case WM_MOVE:
                         ApplyCursorClip();
-                        HostEventQueue.Enqueue(WM_MOVE, 0, unchecked((ulong)(long)lParam));
+                        if (!EchoesGuest)
+                            HostEventQueue.Enqueue(WM_MOVE, 0, unchecked((ulong)(long)lParam), _guestWindow);
                         break;
 
+                    // No WM_PAINT for an UpdateLayeredWindow surface. The host keeps it.
                     case WM_PAINT:
                     case WM_SHOWWINDOW:
-                        HostEventQueue.MarkRepaint();
+                        if (!_layeredByUpdate)
+                            HostEventQueue.MarkRepaint(_guestWindow);
                         break;
 
                     case WM_DPICHANGED:
                         HostDisplayMetrics.Invalidate();
                         HostEventQueue.MarkDpiChanged(unchecked((uint)(long)wParam) & 0xFFFF);
-                        HostEventQueue.MarkRepaint();
+                        HostEventQueue.MarkRepaint(_guestWindow);
                         return IntPtr.Zero;
 
                     case WM_CLOSE:
-                        HostEventQueue.RequestClose();
+                        HostEventQueue.RequestClose(_guestWindow);
                         return IntPtr.Zero;
 
                     case WM_DESTROY:
                         _manager.RemoveWindow(_hwnd);
-                        if (Windows.IsEmpty)
+                        if (!IsTopLevel && Windows.IsEmpty)
                             PostQuitMessage(0);
 
                         return IntPtr.Zero;
@@ -1390,19 +1995,20 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 int width = (int)(lParam & 0xFFFF);
                 int height = (int)((lParam >> 16) & 0xFFFF);
-                bool iconic = sizeType == SIZE_MINIMIZED || width <= 0 || height <= 0;
+                bool iconic = sizeType == SIZE_MINIMIZED || IsIconic(_hwnd);
 
                 _state = iconic ? WindowState.Minimized
                     : sizeType == SIZE_MAXIMIZED ? WindowState.Maximized
                     : WindowState.Normal;
 
-                if (!iconic)
+                if (!iconic && width > 0 && height > 0)
                 {
                     _width = width;
                     _height = height;
                 }
 
-                HostEventQueue.Enqueue(WM_SIZE, sizeType, lParam);
+                if (!EchoesGuest)
+                    HostEventQueue.Enqueue(WM_SIZE, sizeType, lParam, _guestWindow);
             }
 
             private void EnsureAlive()
@@ -1524,7 +2130,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetWindowTextW(IntPtr hWnd, string lpString);
 
-        [DllImport("user32.dll", SetLastError = true)]
+        [DllImport("user32.dll", EntryPoint = "DestroyWindow", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool DestroyWindowNative(IntPtr hWnd);
 
@@ -1535,6 +2141,43 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool EnableWindow(IntPtr hWnd, [MarshalAs(UnmanagedType.Bool)] bool bEnable);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsZoomed(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BLENDFUNCTION
+        {
+            public byte BlendOp;
+            public byte BlendFlags;
+            public byte SourceConstantAlpha;
+            public byte AlphaFormat;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern unsafe bool UpdateLayeredWindow(IntPtr hWnd, IntPtr hdcDst, POINT* pptDst, SIZE* psize, IntPtr hdcSrc,
+            POINT* pptSrc, uint crKey, BLENDFUNCTION* pblend, uint dwFlags);
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -1659,6 +2302,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             int xSrc, int ySrc, int srcWidth, int srcHeight, void* bits, ref BITMAPINFOHEADER bmi, uint usage, uint rop);
 
         [DllImport("gdi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool BitBlt(IntPtr hdc, int x, int y, int width, int height, IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
+
+        private const uint SRCCOPY = 0x00CC0020;
+
+        [DllImport("gdi32.dll", SetLastError = true)]
         private static extern bool DeleteDC(IntPtr hdc);
 
         [DllImport("gdi32.dll")]
@@ -1772,6 +2421,24 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [DllImport("gdi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool DeleteObject(IntPtr hObject);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RGNDATAHEADER
+        {
+            public uint Size;
+            public uint Type;
+            public uint Count;
+            public uint RegionSize;
+            public RECT Bound;
+        }
+
+        private const uint RDH_RECTANGLES = 1;
+
+        [DllImport("gdi32.dll")]
+        private static extern unsafe IntPtr ExtCreateRegion(IntPtr transform, uint count, byte* data);
+
+        [DllImport("gdi32.dll")]
+        private static extern int SelectClipRgn(IntPtr hdc, IntPtr region);
 
         [DllImport("gdi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

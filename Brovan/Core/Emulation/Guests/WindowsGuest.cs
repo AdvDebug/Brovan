@@ -656,6 +656,8 @@ namespace Brovan.Core.Emulation.Guests
             return Args;
         }
 
+        private const uint Win32kServiceBase = 0x1000;
+
         public bool TryHandleSyscall(BinaryEmulator Instance)
         {
             WinHelper?.LdrTracker?.SyncFromSyscall();
@@ -714,6 +716,9 @@ namespace Brovan.Core.Emulation.Guests
 
                 if (IsImplemented)
                 {
+                    if (Syscall >= Win32kServiceBase)
+                        Instance.WinHelper.FlushGdiBatch();
+
                     Instance.WinHelper.BeginSyscall();
                     NTSTATUS Status;
                     try

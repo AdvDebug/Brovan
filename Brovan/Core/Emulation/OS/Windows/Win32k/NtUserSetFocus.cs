@@ -8,25 +8,33 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
 
             ulong Hwnd = Instance.WinHelper.GetArg(0);
-            if (Hwnd != 0 && Instance.WinHelper.GetWindow(Hwnd) == null)
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+            WinWindow Window = Hwnd == 0 ? null : Instance.WinHelper.GetWindow(Hwnd);
+            if (Hwnd != 0 && Window == null)
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
+
+            // NT: a window on another thread's queue is refused.
+            if (Window != null && !Win32kHelper.SharesInputQueue(Instance, Window, Instance.CurrentThread?.ThreadId ?? 0))
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_ACCESS_DENIED);
+
+            if (Window != null && !Win32kHelper.CanTakeFocus(Instance, Window))
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             ulong Previous = Instance.WinHelper.FocusWindow;
-            Instance.WinHelper.FocusWindow = Hwnd;
-            if (Hwnd != 0)
+
+            // NT: focus in another top-level window activates that window.
+            if (Window != null)
             {
-                Instance.WinHelper.ActiveWindow = Hwnd;
-                WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
-                if (Window != null)
-                    Instance.WinHelper.SetThreadWindowContext(Window);
+                WinWindow Root = Instance.WinHelper.GetRootWindow(Window);
+                if (Root != null && Root.Hwnd != Instance.WinHelper.ActiveWindow)
+                    Win32kHelper.ActivateWindow(Instance, Root, false);
+
+                Instance.WinHelper.SetThreadWindowContext(Window);
             }
 
+            Win32kHelper.MoveFocus(Instance, Hwnd, false);
+
             Instance.SetLastWinError(0);
-            Instance.SetRawSyscallReturn(Previous);
+            Win32kHelper.ReturnAfterNotifications(Instance, Previous);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

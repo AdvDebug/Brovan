@@ -57,7 +57,7 @@ namespace Brovan.Android
                 _ => WM_MOUSEMOVE,
             };
 
-            HostEventQueue.Enqueue(message, buttons, MakeLParam(x, y));
+            HostEventQueue.Enqueue(message, buttons, HostEventQueue.MakeLParam(x, y));
         }
 
         // Travel the finger reported, not the difference between two cursor positions: the cursor stops at the
@@ -69,7 +69,7 @@ namespace Brovan.Android
 
         public static void Scroll(int delta, int x, int y, uint buttons)
         {
-            HostEventQueue.Enqueue(WM_MOUSEWHEEL, buttons | ((ulong)(ushort)(short)delta << 16), MakeLParam(x, y));
+            HostEventQueue.Enqueue(WM_MOUSEWHEEL, buttons | ((ulong)(ushort)(short)delta << 16), HostEventQueue.MakeLParam(x, y));
         }
 
         public static void Key(bool down, uint virtualKey, uint scanCode)
@@ -100,13 +100,8 @@ namespace Brovan.Android
 
         public static void Resize(int width, int height)
         {
-            HostEventQueue.Enqueue(WM_SIZE, 0, MakeLParam(width, height));
+            HostEventQueue.Enqueue(WM_SIZE, 0, HostEventQueue.MakeLParam(width, height));
             HostEventQueue.MarkRepaint();
-        }
-
-        private static ulong MakeLParam(int low, int high)
-        {
-            return (ulong)(uint)(((high & 0xFFFF) << 16) | (low & 0xFFFF));
         }
 
         private static ulong BuildKeyLParam(uint scanCode, uint virtualKey, bool down, bool altHeld)

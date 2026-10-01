@@ -17,9 +17,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (PaintStructPtr != 0 && Instance.IsRegionMapped(PaintStructPtr, 8))
+            if (PaintStructPtr != 0 && Instance.IsRegionMapped(PaintStructPtr, (uint)Instance.WinHelper.PointerSize))
             {
-                ulong Hdc = Instance.ReadMemoryULong(PaintStructPtr);
+                ulong Hdc = Instance.WinHelper.ReadPointer(PaintStructPtr);
                 Win32kHelper.ReleaseDeviceContext(Instance, Hdc);
             }
 

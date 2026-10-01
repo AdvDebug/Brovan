@@ -231,7 +231,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static WinPort FindPortByName(BinaryEmulator Instance, string Name)
+        internal static WinPort FindPortByName(BinaryEmulator Instance, string Name)
         {
             foreach (WinPort Port in Instance.WinHelper.WinPorts)
             {

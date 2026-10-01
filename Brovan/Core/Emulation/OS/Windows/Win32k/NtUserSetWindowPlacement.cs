@@ -22,19 +22,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null || PlacementPtr == 0 || !Instance.IsRegionMapped(PlacementPtr, WindowPlacementSize))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_WINDOW_HANDLE);
 
             Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(WindowPlacementSize).Slice(0, WindowPlacementSize);
             if (!Instance.ReadMemory(PlacementPtr, Buffer))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                Instance.SetBooleanSyscallReturn(false);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_INVALID_PARAMETER);
 
             uint ShowCommand = BinaryPrimitives.ReadUInt32LittleEndian(Buffer.Slice(0x08, 4));
             int Left = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x1C, 4));
@@ -42,12 +34,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int Right = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x24, 4));
             int Bottom = BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0x28, 4));
 
-            Window.Minimized = ShowCommand == SwShowMinimized || ShowCommand == SwShowMinNoActive;
-            Window.Maximized = ShowCommand == SwShowMaximized;
+            Win32kHelper.SetShowState(Window, ShowCommand == SwShowMinimized || ShowCommand == SwShowMinNoActive, ShowCommand == SwShowMaximized);
 
             uint Flags = SwpNoZOrder | (ShowCommand == SwHide ? SwpHideWindow : SwpShowWindow);
 
-            Win32kHelper.ApplyWindowPos(Instance, new Win32kHelper.Win32kDeferredWindowPos
+            Instance.SetLastWinError(0);
+            if (Win32kHelper.SendWindowPos(Instance, Window, new Win32kHelper.Win32kDeferredWindowPos
             {
                 Hwnd = Hwnd,
                 X = Left,
@@ -55,12 +47,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Width = Right - Left,
                 Height = Bottom - Top,
                 Flags = Flags,
-            });
+            }))
+            {
+                return NTSTATUS.STATUS_SUCCESS;
+            }
 
-            Instance.WinHelper.PresentDesktop();
-
-            Instance.SetLastWinError(0);
-            Instance.SetBooleanSyscallReturn(true);
+            Win32kHelper.ReturnAfterNotifications(Instance, 1);
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

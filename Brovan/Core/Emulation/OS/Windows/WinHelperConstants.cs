@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -62,6 +63,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         [FieldOffset(0x08)]
         public ulong PrimaryMonitor;
+
+        [FieldOffset(0x18)]
+        public int ScreenLeft;
+
+        [FieldOffset(0x1C)]
+        public int ScreenTop;
+
+        [FieldOffset(0x20)]
+        public int ScreenRight;
+
+        [FieldOffset(0x24)]
+        public int ScreenBottom;
 
         [FieldOffset(0x40)]
         public uint CompositionFlags;
@@ -1078,6 +1091,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public TokenType Type;
         public uint SessionId;
+        public bool IsAnonymous;
         public bool IsElevated;
         public bool IsRestricted;
         public bool EffectiveOnly;
@@ -1759,13 +1773,29 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool Ansi;
     }
 
+    public readonly record struct WinWindowLayout(int X, int Y, uint Width, uint Height, uint Style, uint ExStyle, bool Visible, ulong ParentHwnd);
+
     public class WinWindow : IHandleObject
     {
         public ulong Hwnd;
 
+        // What MaterializeUserWindow last published. The window clip cache is rebuilt only when it changes.
+        public WinWindowLayout PublishedLayout;
+
         // Dirty is a WM_PAINT owed to the message fetch.
         // PaintPending is the update region user32 reads, cleared only on validation.
-        public bool PaintPending;
+        public bool PaintPending => UpdateRegion is { Count: > 0 };
+
+        // Disjoint rectangles in client coordinates.
+        public List<GdiClipRect> UpdateRegion;
+
+        // NT: WFSENDERASEBKGND, WFERASEBKGND and WFUPDATEDIRTY.
+        public bool SendEraseBackground;
+        public bool BackgroundUnerased;
+        public bool UpdateDirty;
+
+        // NT: hidden by WM_SETREDRAW, but the composed desktop keeps showing it.
+        public bool RedrawDisabled;
         public ushort ClassAtom;
         public string Title;
         public string ClassName;
@@ -1795,12 +1825,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong ClientTextAddress;
         public uint ClientTextBytes;
         public ulong UserHandleEntryAddress;
-        public ulong WindowPosAddress;
         public bool PendingWindowPosChanged;
+        public uint PendingWindowPosFlags;
+
+        public bool LayeredByAttributes;
+        public bool LayeredByUpdate;
+        public uint LayeredFlags;
+        public uint LayeredColorKey;
+        public byte LayeredAlpha;
 
         public Dictionary<ushort, ulong> AtomProperties = new();
         public Dictionary<string, ulong> StringProperties = new(StringComparer.OrdinalIgnoreCase);
 
+        // Top of the z-order first.
         public List<ulong> Children = new();
 
         public ulong WndProc;
@@ -2159,6 +2196,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public byte[] Data;
         public List<ulong> Handles;
+        public long NotBeforeTick;
+        public ulong Connection;
 
         public void AttachHandle(ulong Handle)
         {
@@ -2175,6 +2214,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     public sealed class WinPort : IHandleObject
     {
         public string Name;
+
+        // From NtAlpcCreatePort. Nothing connects, so no message arrives.
+        public bool IsServer;
 
         /// <summary>
         /// Optional per-port message handler invoked by NtAlpcSendWaitReceivePort.

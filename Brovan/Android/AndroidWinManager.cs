@@ -86,13 +86,8 @@ namespace Brovan.Android
             _publishedWidth = width;
             _publishedHeight = height;
 
-            HostEventQueue.Enqueue(WM_SIZE, SIZE_RESTORED, MakeLParam(width, height));
+            HostEventQueue.Enqueue(WM_SIZE, SIZE_RESTORED, HostEventQueue.MakeLParam(width, height));
             HostEventQueue.MarkRepaint();
-        }
-
-        private static ulong MakeLParam(int low, int high)
-        {
-            return (ulong)(uint)(((high & 0xFFFF) << 16) | (low & 0xFFFF));
         }
 
         public void ExecuteGdiPrimitive(IntPtr windowHandle, GdiPrimitive primitive)
@@ -102,10 +97,10 @@ namespace Brovan.Android
         }
 
         // Android draws with one system face, so a font handle selects nothing.
-        public void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options)
+        public void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options, GdiClipRect[] clip)
         {
             if (!_disposed)
-                _gdi.DrawText(hwnd, text, x, y, rectLeft, rectTop, rectRight, rectBottom, options);
+                _gdi.DrawText(hwnd, text, x, y, rectLeft, rectTop, rectRight, rectBottom, options, clip);
         }
 
         public bool MeasureText(IntPtr font, string text, out int width, out int height)
