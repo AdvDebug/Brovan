@@ -4508,10 +4508,31 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (X < ChildX || Y < ChildY || X >= ChildX + (int)Child.Width || Y >= ChildY + (int)Child.Height)
                     continue;
 
-                return ChildFromPoint(Instance, Child.Hwnd, X, Y, Depth + 1);
+                ulong Hit = ChildFromPoint(Instance, Child.Hwnd, X, Y, Depth + 1);
+                if (Hit == Child.Hwnd && IsHitTransparent(Child))
+                    continue;
+
+                return Hit;
             }
 
             return Hwnd;
+        }
+
+        private const uint ButtonStyleTypeMask = 0x0F;
+        private const uint ButtonStyleGroupBox = 0x07;
+        private const uint StaticStyleNotify = 0x0100;
+
+        // NT: the user32 and comctl32 control procedures answer WM_NCHITTEST with HTTRANSPARENT for a group box
+        // and for a Static without SS_NOTIFY, so the hit test goes on to the sibling below.
+        private static bool IsHitTransparent(WinWindow Window)
+        {
+            if (Window.Fnid == FnidButton || string.Equals(Window.ClassName, "Button", StringComparison.OrdinalIgnoreCase))
+                return (Window.Style & ButtonStyleTypeMask) == ButtonStyleGroupBox;
+
+            if (Window.Fnid == FnidStatic || string.Equals(Window.ClassName, "Static", StringComparison.OrdinalIgnoreCase))
+                return (Window.Style & StaticStyleNotify) == 0;
+
+            return false;
         }
 
         internal static void DropRawInputMessages(BinaryEmulator Instance, uint LastHandle)
@@ -4684,6 +4705,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (Hit != 0)
                     return Hit;
             }
+
+            // NT sends WM_NCHITTEST only to windows of the calling thread.
+            if (IsOwnedByCurrentThread(Instance, Window) && IsHitTransparent(Window))
+                return 0;
 
             return Window.Hwnd;
         }

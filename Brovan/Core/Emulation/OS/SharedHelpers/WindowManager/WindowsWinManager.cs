@@ -140,6 +140,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_CHAR = 0x0102;
         private const uint WM_SYSKEYDOWN = 0x0104;
         private const uint WM_SYSKEYUP = 0x0105;
+        private const uint WM_SYSCOMMAND = 0x0112;
+        private const uint SC_KEYMENU = 0xF100;
         private const uint WM_MOUSEMOVE = 0x0200;
         private const uint WM_SETCURSOR = 0x0020;
         private const uint WM_INPUT = 0x00FF;
@@ -1934,6 +1936,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     case WM_MOUSEACTIVATE:
                         if (_desktopChild)
                             return new IntPtr(MA_NOACTIVATE);
+
+                        break;
+
+                    // A lone Alt or F10 starts a modal menu loop that takes the next key from the guest. Alt+Space
+                    // still opens the system menu.
+                    case WM_SYSCOMMAND:
+                        if ((unchecked((uint)(long)wParam) & 0xFFF0) == SC_KEYMENU && (unchecked((uint)(long)lParam) & 0xFFFF) != ' ')
+                            return IntPtr.Zero;
 
                         break;
 

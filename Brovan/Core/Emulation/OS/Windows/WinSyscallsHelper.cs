@@ -7027,7 +7027,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void MoveToTopOfBand(WinWindow Window)
         {
-            TopLevelWindows.Remove(Window.Hwnd);
+            if (!TopLevelWindows.Remove(Window.Hwnd))
+                return;
+
             TopLevelWindows.Insert(IsTopmost(Window) ? TopLevelWindows.Count : LowestTopmostIndex(), Window.Hwnd);
         }
 
@@ -7074,7 +7076,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinWindow Root = Window;
             for (int Depth = 0; Root.OwnerHwnd != 0 && Depth < MaxWindowAncestorDepth; Depth++)
             {
-                if (!WinWindows.TryGetValue(Root.OwnerHwnd, out WinWindow Owner) || Owner.Destroyed)
+                if (!WinWindows.TryGetValue(Root.OwnerHwnd, out WinWindow Owner) || Owner.Destroyed || !TopLevelWindows.Contains(Owner.Hwnd))
                     break;
 
                 Root = Owner;
