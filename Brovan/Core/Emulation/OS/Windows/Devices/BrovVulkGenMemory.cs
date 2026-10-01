@@ -26,7 +26,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static int CreateDevice(GenReader r, GenBuf w, GenState st, int createInfoSid)
         {
-            IntPtr pd = st.Lookup(r.ReadU32(), "VkPhysicalDevice");
+            uint pdId = r.ReadU32();
+            IntPtr pd = st.Lookup(pdId, "VkPhysicalDevice");
             uint hasCi = r.ReadU32();
             if (hasCi == 0)
                 return VkErrorInitializationFailed;
@@ -78,7 +79,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ImportStats.Record(ImportOutcome.DeviceExtensionAbsent, 0);
             }
 
-            w.WriteU32(st.Register(device, "VkDevice"));
+            w.WriteU32(st.Register(device, "VkDevice", pdId));
             return rr;
         }
 
@@ -126,7 +127,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static int AllocateMemory(GenReader r, GenBuf w, GenState st, IGuestMemory inst, int allocInfoSid)
         {
-            IntPtr device = st.Lookup(r.ReadU32(), "VkDevice");
+            uint deviceId = r.ReadU32();
+            IntPtr device = st.Lookup(deviceId, "VkDevice");
             uint hasInfo = r.ReadU32();
             if (hasInfo == 0)
                 return VkErrorInitializationFailed;
@@ -199,7 +201,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (rr < 0)
                 return rr;
 
-            uint id = st.Register(memory, "VkDeviceMemory");
+            uint id = st.Register(memory, "VkDeviceMemory", deviceId);
             st.SetMemorySize(id, requested);
             if (imported != 0)
                 st.MarkImported(id);

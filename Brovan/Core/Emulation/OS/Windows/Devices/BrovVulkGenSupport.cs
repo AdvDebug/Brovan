@@ -327,7 +327,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const ulong WholeSize = ulong.MaxValue;
 
-        private readonly Dictionary<uint, (IntPtr Ptr, string Type)> _handles = new Dictionary<uint, (IntPtr, string)>();
+        private readonly Dictionary<uint, (IntPtr Ptr, string Type, uint Parent)> _handles = new Dictionary<uint, (IntPtr, string, uint)>();
+        private readonly Dictionary<(IntPtr Ptr, string Type), uint> _ids = new Dictionary<(IntPtr, string), uint>();
+        private readonly Dictionary<uint, HashSet<uint>> _children = new Dictionary<uint, HashSet<uint>>();
+        private readonly Stack<uint> _forgetting = new Stack<uint>();
         private readonly Dictionary<uint, MapEntry> _mappings = new Dictionary<uint, MapEntry>();
         private readonly HashSet<uint> _importedMem = new HashSet<uint>();
         private readonly Dictionary<uint, ulong> _memorySizes = new Dictionary<uint, ulong>();
@@ -343,14 +346,38 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private readonly GenArena _arena = new GenArena();
 
-        public uint Register(IntPtr ptr, string type)
+        // A handle ends with its parent, so forgetting the parent forgets everything under it.
+        public uint Register(IntPtr ptr, string type, uint parent)
         {
             if (ptr == IntPtr.Zero)
                 return 0;
             uint id = _next++;
-            _handles[id] = (ptr, type);
+            _handles[id] = (ptr, type, parent);
+            _ids[(ptr, type)] = id;
+
+            if (parent != 0)
+            {
+                if (!_children.TryGetValue(parent, out HashSet<uint>? siblings))
+                {
+                    siblings = new HashSet<uint>();
+                    _children[parent] = siblings;
+                }
+                siblings.Add(id);
+            }
+
             return id;
         }
+
+        public uint RegisterQueried(IntPtr ptr, string type, uint parent)
+        {
+            if (ptr != IntPtr.Zero && _ids.TryGetValue((ptr, type), out uint id)
+                && _handles.TryGetValue(id, out (IntPtr Ptr, string Type, uint Parent) e) && e.Parent == parent)
+                return id;
+
+            return Register(ptr, type, parent);
+        }
+
+        public uint IdOf(IntPtr ptr, string type) => ptr != IntPtr.Zero && _ids.TryGetValue((ptr, type), out uint id) ? id : 0;
 
         // A driver may dereference a required handle without checking it.
         public IntPtr LookupRequired(uint id, string type)
@@ -370,7 +397,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 return IntPtr.Zero;
             }
-            if (_handles.TryGetValue(id, out (IntPtr Ptr, string Type) e) && e.Type == type)
+            if (_handles.TryGetValue(id, out (IntPtr Ptr, string Type, uint Parent) e) && e.Type == type)
                 return e.Ptr;
             throw new InvalidOperationException($"BrovVulk generic: bad handle id {id} (expected {type}).");
         }
@@ -392,22 +419,47 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void Forget(uint id)
         {
-            if (_handles.TryGetValue(id, out (IntPtr Ptr, string Type) e))
+            _forgetting.Push(id);
+            while (_forgetting.Count != 0)
             {
-                if (e.Type == "VkPipelineLayout")
-                    _layoutSets.Remove(e.Ptr);
-                else if (e.Type == "VkBuffer")
-                    _bufferSizes.Remove(e.Ptr);
-                else if (e.Type == "VkDevice")
-                    _devicePhysical.Remove(e.Ptr);
-                else if (e.Type == "VkSwapchainKHR" || e.Type == "VkSurfaceKHR")
-                    Wsi.Forget(e.Ptr, e.Type);
-            }
+                uint next = _forgetting.Pop();
+                if (_handles.Remove(next, out (IntPtr Ptr, string Type, uint Parent) e))
+                {
+                    if (e.Type == "VkPipelineLayout")
+                        _layoutSets.Remove(e.Ptr);
+                    else if (e.Type == "VkBuffer")
+                        _bufferSizes.Remove(e.Ptr);
+                    else if (e.Type == "VkDevice")
+                        _devicePhysical.Remove(e.Ptr);
+                    else if (e.Type == "VkSwapchainKHR" || e.Type == "VkSurfaceKHR")
+                        Wsi.Forget(e.Ptr, e.Type);
 
-            _handles.Remove(id);
-            _mappings.Remove(id);
-            _importedMem.Remove(id);
-            _memorySizes.Remove(id);
+                    if (_ids.TryGetValue((e.Ptr, e.Type), out uint mapped) && mapped == next)
+                        _ids.Remove((e.Ptr, e.Type));
+
+                    if (e.Parent != 0 && _children.TryGetValue(e.Parent, out HashSet<uint>? siblings))
+                        siblings.Remove(next);
+                }
+
+                _mappings.Remove(next);
+                _importedMem.Remove(next);
+                _memorySizes.Remove(next);
+
+                if (_children.Remove(next, out HashSet<uint>? children))
+                {
+                    foreach (uint child in children)
+                        _forgetting.Push(child);
+                }
+            }
+        }
+
+        public void ForgetChildren(uint id)
+        {
+            if (!_children.Remove(id, out HashSet<uint>? children))
+                return;
+
+            foreach (uint child in children)
+                Forget(child);
         }
 
         public void SetPipelineLayoutSets(IntPtr layout, uint setLayoutCount)

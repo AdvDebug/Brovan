@@ -432,12 +432,12 @@ internal static unsafe class VulkanBootstrap
     {
         if (!Available)
             return;
-        st.Register(Instance, "VkInstance");
-        st.Register(PhysicalDevice, "VkPhysicalDevice");
-        st.Register(Device, "VkDevice");
-        st.Register(Queue, "VkQueue");
+        uint instanceId = st.Register(Instance, "VkInstance", 0);
+        uint physicalId = st.Register(PhysicalDevice, "VkPhysicalDevice", instanceId);
+        uint deviceId = st.Register(Device, "VkDevice", physicalId);
+        st.Register(Queue, "VkQueue", deviceId);
         st.SetDevicePhysical(Device, PhysicalDevice);
-        st.Register(Surface, "VkSurfaceKHR");
+        st.Register(Surface, "VkSurfaceKHR", instanceId);
     }
 
     public static void SetStandIns(GenState st, int bits)

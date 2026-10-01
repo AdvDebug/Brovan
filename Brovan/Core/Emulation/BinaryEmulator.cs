@@ -1143,15 +1143,6 @@ namespace Brovan.Core.Emulation
                 _memory.Sort(_memoryRegionBaseComparer);
         }
 
-        /// <summary>
-        /// Replaces the mapped memory region list and restores base-address order.
-        /// </summary>
-        internal void ReplaceMemoryRegions(List<MemoryRegion> Regions)
-        {
-            _memory = Regions ?? new List<MemoryRegion>();
-            _memory.Sort(_memoryRegionBaseComparer);
-        }
-
         internal bool TryFindMemoryRegion(ulong Address, out MemoryRegion Region)
         {
             if (TryFindMemoryRegionIndex(Address, out int Index))
@@ -1377,7 +1368,7 @@ namespace Brovan.Core.Emulation
             CommittedSize = Committed;
         }
 
-        private int FindFirstRegionStartingBefore(ulong Address)
+        internal int FindFirstRegionStartingBefore(ulong Address)
         {
             int Left = 0;
             int Right = _memory.Count - 1;

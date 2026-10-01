@@ -535,29 +535,22 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             try
             {
-                if (Directory.Exists(HostPath))
+                FileInfo Info = new FileInfo(HostPath);
+                if (GeneralHelper.IO.TryGetHostAttributes(Info, out FileAttributes HostAttributes))
                 {
-                    DirectoryInfo DirectoryInfo = new DirectoryInfo(HostPath);
-                    Attributes = DirectoryInfo.Attributes;
-                    CreationTime = DirectoryInfo.CreationTimeUtc.ToFileTimeUtc();
-                    LastAccessTime = DirectoryInfo.LastAccessTimeUtc.ToFileTimeUtc();
-                    LastWriteTime = DirectoryInfo.LastWriteTimeUtc.ToFileTimeUtc();
+                    Attributes = HostAttributes;
+                    CreationTime = Info.CreationTimeUtc.ToFileTimeUtc();
+                    LastAccessTime = Info.LastAccessTimeUtc.ToFileTimeUtc();
+                    LastWriteTime = Info.LastWriteTimeUtc.ToFileTimeUtc();
                     ChangeTime = LastWriteTime;
-                    IsDirectory = true;
-                    if ((Attributes & FileAttributes.Directory) == 0)
-                        Attributes |= FileAttributes.Directory;
-                    return;
-                }
 
-                if (System.IO.File.Exists(HostPath))
-                {
-                    FileInfo FileInfo = new FileInfo(HostPath);
-                    Attributes = FileInfo.Attributes;
-                    CreationTime = FileInfo.CreationTimeUtc.ToFileTimeUtc();
-                    LastAccessTime = FileInfo.LastAccessTimeUtc.ToFileTimeUtc();
-                    LastWriteTime = FileInfo.LastWriteTimeUtc.ToFileTimeUtc();
-                    ChangeTime = LastWriteTime;
-                    EndOfFile = (ulong)Math.Max(FileInfo.Length, 0);
+                    if ((Attributes & FileAttributes.Directory) != 0)
+                    {
+                        IsDirectory = true;
+                        return;
+                    }
+
+                    EndOfFile = (ulong)Math.Max(Info.Length, 0);
                     AllocationSize = AlignUp(EndOfFile, 0x1000);
                     if (Attributes == 0)
                         Attributes = FileAttributes.Normal;

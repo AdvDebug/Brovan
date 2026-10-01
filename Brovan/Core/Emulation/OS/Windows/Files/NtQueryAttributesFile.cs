@@ -38,12 +38,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(EmulatedPath))
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
-            string HostPath = GeneralHelper.IO.ResolveHostPath(EmulatedPath, BinaryFormat.PE);
-            if (string.IsNullOrEmpty(HostPath))
-                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+            using WindowsFileStream Stream = WindowsFileStream.FromGuestPath(EmulatedPath);
+            string HostPath = Stream.WriteHostPath;
+            bool Found = TryGetLayerAttributes(HostPath, out FileInfo Info, out FileAttributes Attributes);
+            if (!Found)
+            {
+                if (string.IsNullOrEmpty(Stream.ReadHostPath))
+                    return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
-            FileInfo Info = new FileInfo(HostPath);
-            if (!GeneralHelper.IO.TryGetHostAttributes(Info, out FileAttributes Attributes))
+                if (!string.Equals(Stream.ReadHostPath, HostPath, StringComparison.Ordinal))
+                {
+                    HostPath = Stream.ReadHostPath;
+                    Found = TryGetLayerAttributes(HostPath, out Info, out Attributes);
+                }
+            }
+
+            if (!Found)
             {
 
                 if (!Instance.WinHelper.IsSyntheticDirectory(EmulatedPath))
@@ -82,6 +92,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.TriggerEventMessage($"[+] {SyscallName}: Name=\"{Name}\", FullName=\"{FullName}\", HostPath=\"{HostPath}\".", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static bool TryGetLayerAttributes(string HostPath, out FileInfo Info, out FileAttributes Attributes)
+        {
+            Info = null;
+            Attributes = 0;
+            if (string.IsNullOrEmpty(HostPath))
+                return false;
+
+            Info = new FileInfo(HostPath);
+            return GeneralHelper.IO.TryGetHostAttributes(Info, out Attributes);
         }
 
         private static bool WriteInformation(BinaryEmulator Instance, ulong FileInformationPtr, bool NetworkOpen, long CreationTime, long LastAccessTime,

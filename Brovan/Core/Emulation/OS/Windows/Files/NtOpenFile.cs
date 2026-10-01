@@ -71,13 +71,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Path = Path.Replace('/', '\\').TrimEnd('\0');
 
-            bool DirectoryExists = IsDriveRootPath(Path) || GeneralHelper.IO.DirectoryExists(Path, BinaryFormat.PE);
+            WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
+            bool DirectoryExists = IsDriveRootPath(Path) || Stream.ExistsAsDirectory;
 
             // With neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE the caller takes whatever is there,
             // which is how SetFileAttributes opens a directory
             IsDirectory = IsDirectory || (DirectoryExists && (OpenOptions & FILE_NON_DIRECTORY_FILE) == 0);
 
-            bool Exists = IsDirectory ? DirectoryExists : GeneralHelper.IO.FileExists(Path, BinaryFormat.PE);
+            bool Exists = IsDirectory ? DirectoryExists : Stream.ExistsAsFile;
             if (!Exists)
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
@@ -87,17 +88,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!NtCreateFile.HasDeleteAccess((AccessMask)DesiredAccess))
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                using WindowsFileStream Probe = WindowsFileStream.FromGuestPath(Path);
-                if (Probe.IsReadOnly)
+                if (Stream.IsReadOnly)
                     return NTSTATUS.STATUS_CANNOT_DELETE;
             }
 
-            if (!IsDirectory)
-            {
-                using WindowsFileStream Probe = WindowsFileStream.FromGuestPath(Path);
-                if (NtCreateFile.RefusesWriteAccess(Probe, (AccessMask)DesiredAccess, FILE_OPEN))
-                    return NTSTATUS.STATUS_ACCESS_DENIED;
-            }
+            if (!IsDirectory && NtCreateFile.RefusesWriteAccess(Stream, (AccessMask)DesiredAccess, FILE_OPEN))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
 
             if (!Instance.WinHelper.ShareAccessAllows(Path, (AccessMask)DesiredAccess, ShareAccess))
                 return NTSTATUS.STATUS_SHARING_VIOLATION;
@@ -110,6 +106,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Directory = IsDirectory,
                 Position = 0,
                 Handler = null,
+                FileStream = Stream,
                 DeletePending = DeleteOnClose,
                 GrantedAccess = (AccessMask)DesiredAccess,
                 ShareAccess = ShareAccess

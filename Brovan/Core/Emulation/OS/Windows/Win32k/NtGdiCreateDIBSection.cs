@@ -32,8 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Handle == 0 || !Win32kHelper.TryGetBitmap(Instance, Handle, out Win32kBitmap Bitmap))
                 return Fail(Instance, BitsPointerOut);
 
-            if (BitsPointerOut == 0 || !Instance.IsRegionMapped(BitsPointerOut, 8)
-                || !Instance._emulator.WriteMemory(BitsPointerOut, Bitmap.BitsAddress, 8))
+            if (BitsPointerOut == 0 || !Instance.WinHelper.WritePointer(BitsPointerOut, Bitmap.BitsAddress))
             {
                 Win32kHelper.RemoveBitmap(Instance, Handle);
                 Instance.WinHelper.FreeGdiHandle(Handle);
@@ -47,8 +46,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static NTSTATUS Fail(BinaryEmulator Instance, ulong BitsPointerOut)
         {
-            if (BitsPointerOut != 0 && Instance.IsRegionMapped(BitsPointerOut, 8))
-                Instance._emulator.WriteMemory(BitsPointerOut, 0UL, 8);
+            if (BitsPointerOut != 0)
+                Instance.WinHelper.WritePointer(BitsPointerOut, 0);
 
             Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
             Instance.SetRawSyscallReturn(0);

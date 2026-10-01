@@ -301,82 +301,68 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Entries;
         }
 
+        private static readonly EnumerationOptions DirectoryListing = new EnumerationOptions
+        {
+            AttributesToSkip = 0,
+            IgnoreInaccessible = false,
+        };
+
         private static void AddDirectoryContents(List<WinDirectoryEntry> Entries, HashSet<string> Seen, string DirectoryPath, string Mask, string GuestPath)
         {
-            IEnumerable<string> FileSystemEntries;
+            FileSystemEnumerable<WinDirectoryEntry> HostEntries;
 
             try
             {
-                FileSystemEntries = Directory.EnumerateFileSystemEntries(DirectoryPath);
+                HostEntries = new FileSystemEnumerable<WinDirectoryEntry>(DirectoryPath, ToDirectoryEntry, DirectoryListing)
+                {
+                    ShouldIncludePredicate = (ref FileSystemEntry Entry) => MatchesMask(Entry.FileName, Mask)
+                };
             }
             catch
             {
                 return;
             }
 
-            foreach (string CurrentPath in FileSystemEntries)
+            foreach (WinDirectoryEntry Entry in HostEntries)
             {
-                string Name = Path.GetFileName(CurrentPath);
-                if (string.IsNullOrEmpty(Name))
+                if (!Seen.Add(Entry.Name))
                     continue;
 
-                if (!MatchesMask(Name, Mask))
-                    continue;
-
-                if (!Seen.Add(Name))
-                    continue;
-
-                bool IsDirectory = Directory.Exists(CurrentPath);
-                FileAttributes Attributes;
-                DateTime CreationUtc;
-                DateTime LastAccessUtc;
-                DateTime LastWriteUtc;
-                ulong EndOfFile = 0;
-                ulong AllocationSize = 0;
-
-                if (IsDirectory)
-                {
-                    DirectoryInfo DirectoryInfo = new DirectoryInfo(CurrentPath);
-                    Attributes = DirectoryInfo.Attributes;
-                    CreationUtc = DirectoryInfo.CreationTimeUtc;
-                    LastAccessUtc = DirectoryInfo.LastAccessTimeUtc;
-                    LastWriteUtc = DirectoryInfo.LastWriteTimeUtc;
-                    if ((Attributes & FileAttributes.Directory) == 0)
-                        Attributes |= FileAttributes.Directory;
-                }
-                else
-                {
-                    FileInfo FileInfo = new FileInfo(CurrentPath);
-                    Attributes = FileInfo.Attributes;
-                    CreationUtc = FileInfo.CreationTimeUtc;
-                    LastAccessUtc = FileInfo.LastAccessTimeUtc;
-                    LastWriteUtc = FileInfo.LastWriteTimeUtc;
-                    EndOfFile = (ulong)Math.Max(FileInfo.Length, 0);
-                    AllocationSize = AlignUp(EndOfFile, 0x1000);
-                }
-
-                Entries.Add(new WinDirectoryEntry
-                {
-                    Name = Name,
-                    EndOfFile = EndOfFile,
-                    AllocationSize = AllocationSize,
-                    FileAttributes = (uint)Attributes,
-                    CreationTime = CreationUtc.ToFileTimeUtc(),
-                    LastAccessTime = LastAccessUtc.ToFileTimeUtc(),
-                    LastWriteTime = LastWriteUtc.ToFileTimeUtc(),
-                    ChangeTime = LastWriteUtc.ToFileTimeUtc(),
-                    FileId = WinFile.MakeFileId(CombineGuestPath(GuestPath, Name))
-                });
+                Entry.FileId = WinFile.MakeFileId(CombineGuestPath(GuestPath, Entry.Name));
+                Entries.Add(Entry);
             }
-
         }
 
-        private static bool MatchesMask(string Name, string Mask)
+        private static WinDirectoryEntry ToDirectoryEntry(ref FileSystemEntry Entry)
+        {
+            FileAttributes Attributes = Entry.Attributes;
+            ulong EndOfFile = 0;
+
+            if (Entry.IsDirectory)
+                Attributes |= FileAttributes.Directory;
+            else
+                EndOfFile = (ulong)Math.Max(Entry.Length, 0);
+
+            long LastWriteTime = Entry.LastWriteTimeUtc.ToFileTime();
+            return new WinDirectoryEntry
+            {
+                Name = Entry.FileName.ToString(),
+                EndOfFile = EndOfFile,
+                AllocationSize = AlignUp(EndOfFile, 0x1000),
+                FileAttributes = (uint)Attributes,
+                CreationTime = Entry.CreationTimeUtc.ToFileTime(),
+                LastAccessTime = Entry.LastAccessTimeUtc.ToFileTime(),
+                LastWriteTime = LastWriteTime,
+                ChangeTime = LastWriteTime
+            };
+        }
+
+        private static bool MatchesMask(ReadOnlySpan<char> Name, string Mask)
         {
             if (string.IsNullOrEmpty(Mask) || Mask == "*" || Mask == "*.*")
                 return true;
 
-            return FileSystemName.MatchesSimpleExpression(TranslateDosWildcards(Mask).AsSpan(), Name.AsSpan(), ignoreCase: true);
+            return FileSystemName.MatchesSimpleExpression(TranslateDosWildcards(Mask).AsSpan(), Name, ignoreCase: true);
         }
 
         /// <summary>

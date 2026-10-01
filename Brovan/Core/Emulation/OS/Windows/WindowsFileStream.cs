@@ -533,11 +533,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private SafeFileHandle AcquireWriteHandle()
         {
-            EnsureWriteStore(true);
-
             if (CachedHandle != null && CachedHandleWritable && string.Equals(CachedHandlePath, WriteHostPath, StringComparison.Ordinal))
                 return CachedHandle;
 
+            EnsureWriteStore(true);
             CloseCachedHandle();
             CachedHandle = File.OpenHandle(WriteHostPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, ShareMode);
             CachedHandlePath = WriteHostPath;

@@ -2378,24 +2378,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong ViewBase = Module.MappedBase;
                 ulong End = ViewBase + Module.SizeOfImage;
 
-                List<MemoryRegion> RegionsToUnmap = Emulator._memory
-                    .Where(R => R.BaseAddress >= ViewBase && R.BaseAddress < End)
-                    .OrderByDescending(R => R.BaseAddress)
-                    .ToList();
+                int First = Emulator.FindFirstRegionStartingBefore(ViewBase) + 1;
+                int Last = Emulator.FindFirstRegionStartingBefore(End) + 1;
 
                 bool UnmappedAny = false;
-                for (int i = 0; i < RegionsToUnmap.Count; i++)
+                for (int i = Last - 1; i >= First; i--)
                 {
-                    MemoryRegion Region = RegionsToUnmap[i];
+                    MemoryRegion Region = Emulator._memory[i];
                     ulong Size = Region.Size != 0 ? Region.Size : (Region.RequestedSize + 0xFFF) & ~0xFFFUL;
                     if (Size == 0)
                         continue;
 
                     if (Emulator._emulator.UnmapMemory(Region.BaseAddress, Size))
                     {
-                        if (Emulator.TryFindMemoryRegionByBase(Region.BaseAddress, out int MemIndex, out _))
-                            Emulator.RemoveMemoryRegionAt(MemIndex);
-
+                        Emulator.RemoveMemoryRegionAt(i);
                         Emulator.AddFreedRegion(Region.BaseAddress, Size);
                         UnmappedAny = true;
                     }
@@ -8091,12 +8087,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             WinMutex Mutex = null;
 
-            if (!string.IsNullOrEmpty(Name))
+            if (string.IsNullOrEmpty(Name))
+                Name = GenerateAnonymousObjectName("Mutant_");
+            else
                 Mutex = WinMutexes.FirstOrDefault(m => m.Name.Equals(Name, StringComparison.OrdinalIgnoreCase));
 
             if (Mutex == null)
             {
-                Mutex = new WinMutex { Name = string.IsNullOrEmpty(Name) ? $"\\UnnamedMutant\\{WinMutexes.Count:X}" : Name, Signaled = true };
+                Mutex = new WinMutex { Name = Name, Signaled = true };
                 WinMutexes.Add(Mutex);
             }
 
@@ -9618,6 +9616,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Closing.Pipe.Dispose();
                         Closing.Pipe = null;
                     }
+
+                    if (Closing?.Handler?.Target is AfdDevice Endpoint && HandleManager.CountHandlesByObjectId(Closing.ObjectId) <= 1)
+                        Endpoint.Dispose();
 
                     if (Closing != null && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
                     {

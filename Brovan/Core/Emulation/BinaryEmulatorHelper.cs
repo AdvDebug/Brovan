@@ -515,6 +515,12 @@ namespace Brovan.Core.Emulation
             return _socket.Send(data, offset, size, flags);
         }
 
+        public int Send(ReadOnlySpan<byte> data, SocketFlags flags, out SocketError error)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.Send(data, flags, out error);
+        }
+
         public int SendTo(byte[] data, int offset, int size, SocketFlags flags, EndPoint remoteEP)
         {
             EnsureCanAccessEndpoint(remoteEP);
@@ -537,6 +543,12 @@ namespace Brovan.Core.Emulation
         {
             EnsureCurrentRemoteAllowed();
             return _socket.Receive(data, offset, size, flags);
+        }
+
+        public int Receive(Span<byte> data, SocketFlags flags, out SocketError error)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.Receive(data, flags, out error);
         }
 
         public int ReceiveFrom(byte[] buffer, int offset, int size, SocketFlags flags, ref EndPoint remoteEP)

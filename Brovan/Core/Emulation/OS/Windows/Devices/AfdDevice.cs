@@ -23,7 +23,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int AFD_SEND = 7;
         private const int AFD_SEND_DATAGRAM = 8;
         private const int AFD_POLL = 9;
+        private const int AFD_PARTIAL_DISCONNECT = 10;
         private const int AFD_GET_ADDRESS = 11;
+        private const int AFD_SET_INFO = 14;
         private const int AFD_EVENT_SELECT = 33;
         private const int AFD_ENUM_NETWORK_EVENTS = 34;
         private const int AFD_ROUTING_INTERFACE_QUERY = 42;
@@ -46,12 +48,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint PollWriteEvents = AFD_POLL_SEND | AFD_POLL_CONNECT;
         private const uint PollErrorEvents = AFD_POLL_CONNECT_FAIL | AFD_POLL_ABORT | AFD_POLL_LOCAL_CLOSE;
 
-        private const int DefaultIoTimeoutMs = 5000;
+        private const uint AFD_INFO_BLOCKING_MODE = 2;
+        private const uint AfdInfoSize = 0x10;
+        private const uint AFD_OVERLAPPED = 0x2;
+
+        private const uint AFD_DISCONNECT_SEND = 0x1;
+        private const uint AFD_DISCONNECT_RECV = 0x2;
+        private const uint AfdDisconnectInfoSize = 0x10;
+
         private const int PollRetrySliceMs = 1;
 
         private BrovanSocket? _socket;
         private NetworkAccessPolicy _policy;
         private bool IsListening;
+        private bool _nonBlocking;
+        private (int ThreadId, ulong Buffer, uint Length, int Sent) _sendResume;
         private bool _connectPending;
         private NTSTATUS _connectFailure;
 
@@ -139,9 +150,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!IsSupportedSocketShape(Type, Protocol))
                 throw new NotSupportedException("The requested socket type is not available to the guest.");
 
-            _socket = new BrovanSocket(Family, Type, Protocol, _policy);
-            _socket.SendTimeout = DefaultIoTimeoutMs;
-            _socket.ReceiveTimeout = DefaultIoTimeoutMs;
+            // A handler runs under the kernel lock, so no host socket call may wait.
+            _socket = new BrovanSocket(Family, Type, Protocol, _policy) { Blocking = false };
 
             if (Protocol == ProtocolType.Tcp)
             {
@@ -518,6 +528,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (AcceptFile.Handler.Target is not AfdDevice TargetEndpoint)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            Accepted.Blocking = false;
             TargetEndpoint._socket?.Dispose();
             TargetEndpoint._socket = Accepted;
             TargetEndpoint.IsListening = false;
@@ -565,26 +576,84 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Length > int.MaxValue)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            byte[] Payload = Instance.WinHelper.Shared.GetBuffer(Length);
-            if (!Instance._emulator.ReadMemory(BufferPtr, Payload.AsSpan(0, (int)Length), Length))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
             if (!IsSocketRemoteAllowed(Instance, _socket, true))
                 return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
 
-            try
-            {
-                int Sent = _socket.Send(Payload, 0, (int)Length, SocketFlags.None);
-                if (Sent > 0)
-                    NetworkTrafficPcapCapture.RecordOutbound(_socket, Payload.AsSpan(0, Sent));
+            uint AfdFlags = ReadU32(Data.InputBuffer, PtrSize + 4);
 
-                Data.Information = (ulong)Sent;
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-            catch
+            // AFD takes all of a blocking or overlapped send, so a parked send resumes where the host stopped.
+            bool MustFinish = !_nonBlocking || (AfdFlags & AFD_OVERLAPPED) != 0;
+            (int ThreadId, ulong Buffer, uint Length, int Sent) Resume = _sendResume;
+            _sendResume = default;
+
+            int Sent = 0;
+            if (Resume.ThreadId == Instance.CurrentThreadId && Resume.Buffer == BufferPtr && Resume.Length == Length &&
+                Instance.WinHelper.IsPipeWaitActive(Data.FileHandle))
+                Sent = Resume.Sent;
+
+            SocketError Error = SocketError.Success;
+            bool Faulted = false;
+
+            while ((uint)Sent < Length)
             {
-                return NTSTATUS.STATUS_UNSUCCESSFUL;
+                int Chunk = (int)Math.Min(Length - (uint)Sent, (uint)NtReadFile.IoChunkBytes);
+                byte[] Payload = Instance.WinHelper.Shared.GetBuffer((uint)Chunk);
+                if (!Instance._emulator.ReadMemory(BufferPtr + (ulong)Sent, Payload.AsSpan(0, Chunk), (uint)Chunk))
+                {
+                    if (Sent == 0)
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    Faulted = true;
+                    break;
+                }
+
+                int Moved = _socket.Send(Payload.AsSpan(0, Chunk), SocketFlags.None, out Error);
+                if (Moved > 0)
+                {
+                    NetworkTrafficPcapCapture.RecordOutbound(_socket, Payload.AsSpan(0, Moved));
+                    Sent += Moved;
+                }
+
+                if (Error != SocketError.Success || Moved < Chunk)
+                    break;
             }
+
+            if ((uint)Sent < Length && !Faulted && (Error == SocketError.Success || Error == SocketError.WouldBlock))
+            {
+                if (MustFinish && Instance.WinHelper.TryContinuePipeWait(Data.FileHandle, int.MaxValue, PollRetrySliceMs))
+                {
+                    _sendResume = (Instance.CurrentThreadId, BufferPtr, Length, Sent);
+                    return NTSTATUS.STATUS_PENDING;
+                }
+
+                if (!MustFinish && Sent == 0)
+                {
+                    Instance.WinHelper.ClearPipeWait();
+                    return NTSTATUS.STATUS_DEVICE_NOT_READY;
+                }
+            }
+
+            Instance.WinHelper.ClearPipeWait();
+            if (Sent == 0 && Error != SocketError.Success)
+                return Error == SocketError.WouldBlock ? NTSTATUS.STATUS_IO_TIMEOUT : MapSocketError(Error);
+
+            Data.Information = (ulong)Sent;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // AFD fails a receive that finds no data on a non-blocking endpoint unless it is overlapped.
+        private NTSTATUS WaitForData(in DeviceData Data, BinaryEmulator Instance, uint AfdFlags)
+        {
+            if (_nonBlocking && (AfdFlags & AFD_OVERLAPPED) == 0)
+            {
+                Instance.WinHelper.ClearPipeWait();
+                return NTSTATUS.STATUS_DEVICE_NOT_READY;
+            }
+
+            if (Instance.WinHelper.TryContinuePipeWait(Data.FileHandle, int.MaxValue, PollRetrySliceMs))
+                return NTSTATUS.STATUS_PENDING;
+
+            return NTSTATUS.STATUS_IO_TIMEOUT;
         }
 
         private NTSTATUS IoctlReceive(ref DeviceData Data, BinaryEmulator Instance)
@@ -626,33 +695,70 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Length > int.MaxValue)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            byte[] RecvBuffer = Instance.WinHelper.Shared.GetBuffer(Length);
-
             if (!IsSocketRemoteAllowed(Instance, _socket, true))
                 return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
 
+            // A stream receive may return less than asked, so one request moves at most one chunk.
+            int Want = (int)Math.Min(Length, (uint)NtReadFile.IoChunkBytes);
+            byte[] RecvBuffer = Instance.WinHelper.Shared.GetBuffer((uint)Want);
+            int Received = _socket.Receive(RecvBuffer.AsSpan(0, Want), SocketFlags.None, out SocketError Error);
+
+            if (Error == SocketError.WouldBlock)
+                return WaitForData(in Data, Instance, ReadU32(Data.InputBuffer, PtrSize + 4));
+
+            Instance.WinHelper.ClearPipeWait();
+            if (Error != SocketError.Success)
+                return MapSocketError(Error);
+
+            if (Received > 0)
+            {
+                if (!Instance.WriteMemory(BufferPtr, RecvBuffer.AsSpan(0, Received)))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                NetworkTrafficPcapCapture.RecordInbound(_socket, RecvBuffer.AsSpan(0, Received));
+            }
+
+            Data.Information = (ulong)Received;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private NTSTATUS IoctlPartialDisconnect(in DeviceData Data)
+        {
+            if (Data.InputBuffer == null || GuestInputLength(in Data) < AfdDisconnectInfoSize)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (_socket?.SocketType == SocketType.Dgram)
+                return NTSTATUS.STATUS_SUCCESS;
+
+            if (_socket == null || !_socket.Connected)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            uint DisconnectType = ReadU32(Data.InputBuffer, 0);
             try
             {
-                int Received = _socket.Receive(RecvBuffer, 0, (int)Length, SocketFlags.None);
+                if ((DisconnectType & AFD_DISCONNECT_RECV) != 0)
+                    _socket.Shutdown(SocketShutdown.Receive);
 
-                if (Received > 0)
-                {
-                    Instance.WriteMemory(BufferPtr, RecvBuffer.AsSpan(0, Received));
-                    NetworkTrafficPcapCapture.RecordInbound(_socket, RecvBuffer.AsSpan(0, Received));
-                }
+                if ((DisconnectType & AFD_DISCONNECT_SEND) != 0)
+                    _socket.Shutdown(SocketShutdown.Send);
 
-                Data.Information = (ulong)Math.Max(0, Received);
                 return NTSTATUS.STATUS_SUCCESS;
             }
-            catch (SocketException Se) when (Se.SocketErrorCode == SocketError.TimedOut)
+            catch (SocketException Ex)
             {
-                Data.Information = 0;
-                return NTSTATUS.STATUS_TIMEOUT;
+                return MapSocketError(Ex.SocketErrorCode);
             }
-            catch
-            {
-                return NTSTATUS.STATUS_UNSUCCESSFUL;
-            }
+        }
+
+        private NTSTATUS IoctlSetInfo(in DeviceData Data)
+        {
+            if (Data.InputBuffer == null || GuestInputLength(in Data) < AfdInfoSize)
+                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+
+            if (ReadU32(Data.InputBuffer, 0) == AFD_INFO_BLOCKING_MODE)
+                _nonBlocking = Data.InputBuffer[8] != 0;
+
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         private NTSTATUS IoctlGetAddress(ref DeviceData Data)
@@ -851,6 +957,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     AFD_RECEIVE => IoctlReceive(ref Data, Instance),
                     AFD_GET_ADDRESS => IoctlGetAddress(ref Data),
                     AFD_POLL => IoctlPoll(ref Data, Instance),
+                    AFD_SET_INFO => IoctlSetInfo(in Data),
+                    AFD_PARTIAL_DISCONNECT => IoctlPartialDisconnect(in Data),
                     AFD_EVENT_SELECT => NTSTATUS.STATUS_SUCCESS,
                     AFD_ENUM_NETWORK_EVENTS => NTSTATUS.STATUS_SUCCESS,
                     AFD_RECEIVE_DATAGRAM => Policy.Mode == NetworkAccessMode.Full ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_NETWORK_UNREACHABLE,
@@ -951,7 +1059,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             catch (Exception Ex)
             {
-                return Ex is SocketException SocketEx ? MapConnectError(SocketEx.SocketErrorCode) : NTSTATUS.STATUS_UNSUCCESSFUL;
+                return Ex is SocketException SocketEx ? MapSocketError(SocketEx.SocketErrorCode) : NTSTATUS.STATUS_UNSUCCESSFUL;
             }
         }
 
@@ -975,7 +1083,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS MapConnectError(SocketError Error) => Error switch
+        private static NTSTATUS MapSocketError(SocketError Error) => Error switch
         {
             SocketError.Success => NTSTATUS.STATUS_SUCCESS,
             SocketError.ConnectionRefused => NTSTATUS.STATUS_CONNECTION_REFUSED,
@@ -989,6 +1097,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             SocketError.AddressNotAvailable => NTSTATUS.STATUS_INVALID_ADDRESS_COMPONENT,
             SocketError.AccessDenied => NTSTATUS.STATUS_ACCESS_DENIED,
             SocketError.OperationAborted => NTSTATUS.STATUS_CANCELLED,
+            SocketError.Shutdown => NTSTATUS.STATUS_PIPE_DISCONNECTED,
             _ => NTSTATUS.STATUS_UNSUCCESSFUL
         };
 
@@ -1044,7 +1153,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 catch (Exception Ex)
                 {
                     Args.Dispose();
-                    return Ex is SocketException SocketEx ? MapConnectError(SocketEx.SocketErrorCode) : NTSTATUS.STATUS_UNSUCCESSFUL;
+                    return Ex is SocketException SocketEx ? MapSocketError(SocketEx.SocketErrorCode) : NTSTATUS.STATUS_UNSUCCESSFUL;
                 }
 
                 Begin();
@@ -1077,7 +1186,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             internal void Complete(BinaryEmulator Instance)
             {
-                NTSTATUS Status = MapConnectError(Result);
+                NTSTATUS Status = MapSocketError(Result);
                 Endpoint._connectPending = false;
                 Endpoint._connectFailure = (int)Status < 0 ? Status : NTSTATUS.STATUS_SUCCESS;
 

@@ -104,6 +104,7 @@ namespace Brovan.Generators
         private sealed class Model
         {
             public readonly Dictionary<string, bool> Handles = new Dictionary<string, bool>();
+            public readonly Dictionary<string, string> HandleParents = new Dictionary<string, string>();
             public readonly Dictionary<string, VkStruct> Structs = new Dictionary<string, VkStruct>();
             public readonly Dictionary<string, Command> Commands = new Dictionary<string, Command>();
             public readonly HashSet<string> Enums = new HashSet<string>();
@@ -254,6 +255,9 @@ namespace Brovan.Generators
                     string txt = RawText(t);
                     bool dispatch = txt.Contains("VK_DEFINE_HANDLE") && !txt.Contains("NON_DISPATCHABLE");
                     m.Handles[name] = dispatch;
+                    string parent = (string)t.Attribute("parent");
+                    if (!string.IsNullOrEmpty(parent))
+                        m.HandleParents[name] = parent.Split(',')[0].Trim();
                 }
                 else if (cat == "struct" || cat == "union")
                 {
@@ -1230,6 +1234,39 @@ namespace Brovan.Generators
             return idx;
         }
 
+        // A vkGet or vkEnumerate command hands back the same object on every call, so it keeps one id.
+        private static string RegisterCall(Model m, Command c, string ptrExpr, string handleType)
+        {
+            bool queried = c.Name.StartsWith("vkGet", StringComparison.Ordinal) || c.Name.StartsWith("vkEnumerate", StringComparison.Ordinal);
+            return "st." + (queried ? "RegisterQueried" : "Register") + "(" + ptrExpr + ", \"" + handleType + "\", " + ParentIdExpr(m, c, handleType) + ")";
+        }
+
+        // Swapchain images end with their swapchain, not with the device vk.xml names.
+        private static string ParentIdExpr(Model m, Command c, string handleType)
+        {
+            string parentType = c.Name == "vkGetSwapchainImagesKHR" ? "VkSwapchainKHR"
+                : m.HandleParents.TryGetValue(handleType, out string declared) ? declared : null;
+            if (parentType == null)
+                return "0u";
+
+            for (int j = 0; j < c.Params.Count; j++)
+                if (c.Params[j].Type == parentType && ParamKind(m, c.Params[j]) == "HandleIn")
+                    return "p" + j + "Id";
+
+            for (int j = 0; j < c.Params.Count; j++)
+            {
+                Param sp = c.Params[j];
+                if (ParamKind(m, sp) != "StructIn" || !StructId.ContainsKey(sp.Type) || !m.Structs.TryGetValue(sp.Type, out VkStruct s))
+                    continue;
+
+                Member owner = s.Members.FirstOrDefault(x => x.Type == parentType && x.PtrDepth == 0 && x.ArrayLen == 1);
+                if (owner != null)
+                    return "(p" + j + " != System.IntPtr.Zero ? st.IdOf(*(System.IntPtr*)(p" + j + " + BrovVulkLayout.MemberOffset[\"" + sp.Type + "." + owner.Name + "\"]), \"" + parentType + "\") : 0u)";
+            }
+
+            return "0u";
+        }
+
         private static int ParamLenIndex(Command c, Param p, int i)
         {
             if (p.Length == null)
@@ -1347,11 +1384,12 @@ namespace Brovan.Generators
                     "                int rr = (int)BrovVulkApi.vkCreateInstance(ci, System.IntPtr.Zero, (System.IntPtr)(&vki));\n" +
                     "                if (rr >= 0 && vki == System.IntPtr.Zero) rr = -3;\n" +
                     "                if (rr >= 0) BrovVulkProc.HostInstance = vki;\n" +
-                    "                w.WriteU32(rr >= 0 ? st.Register(vki, \"VkInstance\") : 0u);\n" +
+                    "                w.WriteU32(rr >= 0 ? st.Register(vki, \"VkInstance\", 0u) : 0u);\n" +
                     "                return rr;\n            }\n";
             if (c.Name == "vkCreateWin32SurfaceKHR")
                 return "            case " + id + ":\n            {\n" +
-                    "                System.IntPtr vi = st.Lookup(r.ReadU32(), \"VkInstance\");\n" +
+                    "                uint viId = r.ReadU32();\n" +
+                    "                System.IntPtr vi = st.Lookup(viId, \"VkInstance\");\n" +
                     "                ulong gh = r.Remaining >= 8 ? r.ReadU64() : 0;\n" +
                     "                System.IntPtr surf = System.IntPtr.Zero;\n" +
                     "                int rr;\n" +
@@ -1387,7 +1425,7 @@ namespace Brovan.Generators
                     "                    rr = (int)BrovVulkApi.vkCreateWin32SurfaceKHR(vi, (System.IntPtr)ci, System.IntPtr.Zero, (System.IntPtr)(&surf));\n" +
                     "                }\n" +
                     "                if (rr >= 0 && surf == System.IntPtr.Zero) rr = -3;\n" +
-                    "                w.WriteU32(rr >= 0 ? st.Register(surf, \"VkSurfaceKHR\") : 0u);\n" +
+                    "                w.WriteU32(rr >= 0 ? st.Register(surf, \"VkSurfaceKHR\", viId) : 0u);\n" +
                     "                return rr;\n            }\n";
             if (c.Name == "vkEnumerateInstanceExtensionProperties")
                 return "            case " + id + ":\n                return BrovVulkGenExt.Instance(w);\n";
@@ -1453,7 +1491,7 @@ namespace Brovan.Generators
                         check.Add("                if (rr >= 0 && " + local + "pr != 0) for (uint k = 0; k < " + local + "c; k++) if (System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + "a, (int)k * 8) == System.IntPtr.Zero) { rr = -3; break; }");
                     post.Add("                w.WriteU32(" + local + "c);");
                     if (elemHandle)
-                        post.Add("                if (" + gate + local + "pr != 0) for (uint k = 0; k < " + local + "c; k++) w.WriteU32(st.Register(System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + "a, (int)k * 8), \"" + a.Type + "\"));");
+                        post.Add("                if (" + gate + local + "pr != 0) for (uint k = 0; k < " + local + "c; k++) w.WriteU32(" + RegisterCall(m, c, "System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + "a, (int)k * 8)", a.Type) + ");");
                     else if (elemStruct && StructId.ContainsKey(a.Type))
                         post.Add("                if (" + gate + local + "pr != 0) for (uint k = 0; k < " + local + "c; k++) BrovVulkGenStruct.WritebackBody(" + StructId[a.Type] + ", w, " + local + "a + (int)(k * (uint)(" + esz + ")));");
                     else if (elemChain)
@@ -1503,15 +1541,15 @@ namespace Brovan.Generators
                 }
                 else if (kind == "HandleIn")
                 {
+                    b.Append("                uint ").Append(local).Append("Id = r.ReadU32();\n");
                     if (i == forgetIdx)
                     {
-                        b.Append("                uint ").Append(local).Append("Id = r.ReadU32();\n");
                         b.Append("                System.IntPtr ").Append(local).Append(" = st.Lookup(").Append(local).Append("Id, \"").Append(p.Type).Append("\");\n");
                         post.Add("                st.Forget(" + local + "Id);");
                     }
                     else
                     {
-                        b.Append("                System.IntPtr ").Append(local).Append(" = st.").Append(p.Optional ? "Lookup" : "LookupRequired").Append("(r.ReadU32(), \"").Append(p.Type).Append("\");\n");
+                        b.Append("                System.IntPtr ").Append(local).Append(" = st.").Append(p.Optional ? "Lookup" : "LookupRequired").Append("(").Append(local).Append("Id, \"").Append(p.Type).Append("\");\n");
                     }
                     callArgs.Add(local);
                 }
@@ -1522,10 +1560,10 @@ namespace Brovan.Generators
                     if (vkRes)
                     {
                         check.Add("                if (rr >= 0 && " + local + " == System.IntPtr.Zero) rr = -3;");
-                        post.Add("                w.WriteU32(rr >= 0 ? st.Register(" + local + ", \"" + p.Type + "\") : 0u);");
+                        post.Add("                w.WriteU32(rr >= 0 ? " + RegisterCall(m, c, local, p.Type) + " : 0u);");
                     }
                     else
-                        post.Add("                w.WriteU32(st.Register(" + local + ", \"" + p.Type + "\"));");
+                        post.Add("                w.WriteU32(" + RegisterCall(m, c, local, p.Type) + ");");
                 }
                 else if (kind == "AllocatorIn")
                 {
@@ -1610,7 +1648,7 @@ namespace Brovan.Generators
                     callArgs.Add(local);
                     if (vkRes)
                         check.Add("                if (rr >= 0) for (uint k = 0; k < " + local + "n; k++) if (System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8) == System.IntPtr.Zero) { rr = -3; break; }");
-                    post.Add("                " + (vkRes ? "if (rr >= 0) " : "") + "for (uint k = 0; k < " + local + "n; k++) w.WriteU32(st.Register(System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8), \"" + p.Type + "\"));");
+                    post.Add("                " + (vkRes ? "if (rr >= 0) " : "") + "for (uint k = 0; k < " + local + "n; k++) w.WriteU32(" + RegisterCall(m, c, "System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8)", p.Type) + ");");
                 }
                 else if (kind == "ArrayOut" && m.Handles.ContainsKey(p.Type) && ParamLenIndex(c, p, i) >= 0)
                 {
@@ -1619,7 +1657,7 @@ namespace Brovan.Generators
                     callArgs.Add(local);
                     if (vkRes)
                         check.Add("                if (rr >= 0) for (uint k = 0; k < p" + liOut + "; k++) if (System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8) == System.IntPtr.Zero) { rr = -3; break; }");
-                    post.Add("                " + (vkRes ? "if (rr >= 0) " : "") + "for (uint k = 0; k < p" + liOut + "; k++) w.WriteU32(st.Register(System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8), \"" + p.Type + "\"));");
+                    post.Add("                " + (vkRes ? "if (rr >= 0) " : "") + "for (uint k = 0; k < p" + liOut + "; k++) w.WriteU32(" + RegisterCall(m, c, "System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8)", p.Type) + ");");
                 }
                 else if (kind == "ArrayOut" && m.Handles.ContainsKey(p.Type))
                 {
@@ -1628,10 +1666,10 @@ namespace Brovan.Generators
                     if (vkRes)
                     {
                         check.Add("                if (rr >= 0 && " + local + " == System.IntPtr.Zero) rr = -3;");
-                        post.Add("                w.WriteU32(rr >= 0 ? st.Register(" + local + ", \"" + p.Type + "\") : 0u);");
+                        post.Add("                w.WriteU32(rr >= 0 ? " + RegisterCall(m, c, local, p.Type) + " : 0u);");
                     }
                     else
-                        post.Add("                w.WriteU32(st.Register(" + local + ", \"" + p.Type + "\"));");
+                        post.Add("                w.WriteU32(" + RegisterCall(m, c, local, p.Type) + ");");
                 }
                 else if (kind == "VoidIn" && c.Params.Any(x => x.Name == p.Length))
                 {
@@ -1694,6 +1732,14 @@ namespace Brovan.Generators
                         ? "                if (rr >= 0 && p" + infoIdx + " != System.IntPtr.Zero) st.SetBufferSize(p" + outIdx + ", *(ulong*)(p" + infoIdx + " + BrovVulkLayout.MemberOffset[\"" + t + ".size\"]));"
                         : "                if (rr >= 0 && p" + infoIdx + " != System.IntPtr.Zero) st.SetPipelineLayoutSets(p" + outIdx + ", *(uint*)(p" + infoIdx + " + BrovVulkLayout.MemberOffset[\"" + t + ".setLayoutCount\"]));");
                 }
+            }
+
+            // Resetting a descriptor pool frees every set allocated from it.
+            if (c.Name == "vkResetDescriptorPool")
+            {
+                int poolIdx = c.Params.FindIndex(x => x.Type == "VkDescriptorPool" && ParamKind(m, x) == "HandleIn");
+                if (poolIdx >= 0)
+                    post.Add("                if (rr >= 0) st.ForgetChildren(p" + poolIdx + "Id);");
             }
 
             bool early = EmitStandInHooks(c, b, post, out string guard);
