@@ -778,7 +778,7 @@ namespace Brovan.EmulationMenu
                 return;
             }
 
-            if (!TryGetInclusiveEnd(GAddress, (ulong)GBytes.Length, out ulong GEnd))
+            if (GBytes.Length > uint.MaxValue || !TryGetInclusiveEnd(GAddress, (ulong)GBytes.Length, out ulong GEnd))
             {
                 PrintHighlight("[-] Ghost patch range overflows the address space.", true);
                 return;
@@ -870,7 +870,7 @@ namespace Brovan.EmulationMenu
                 null
             };
 
-            bool Success = Generic.Invoke(null, InvokeArgs) is true;
+            bool Success = (bool)Generic.Invoke(null, InvokeArgs);
             if (!Success)
             {
                 PrintHighlight("[-] Failed to parse struct.", true);
@@ -1243,7 +1243,7 @@ namespace Brovan.EmulationMenu
                     Console.ResetColor();
                     Console.ForegroundColor = ConsoleColor.White;
                     Console.BackgroundColor = ConsoleColor.Black;
-                    Environment.Exit(Environment.ExitCode);
+                    Environment.Exit(0);
                     break;
 
                 case "showinstrs":
@@ -2430,7 +2430,7 @@ namespace Brovan.EmulationMenu
                         EntryAddress = PendingGenericEntryAddress,
                         StackSize = PendingGenericStackSize
                     }, PendingWindowsBlobLaunchMode);
-                    Emulator = new BinaryEmulator(Windows, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary.GetBinaryData(), Binary);
+                    Emulator = new BinaryEmulator(Windows, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary);
                     MappedMainModuleBase = Windows.BlobMappedBase;
 
                     SetBlobEntryPoint(PendingGenericLoadAddress, MappedMainModuleBase, PendingGenericEntryAddress);
@@ -2443,7 +2443,7 @@ namespace Brovan.EmulationMenu
                         EntryAddress = PendingGenericEntryAddress,
                         StackSize = PendingGenericStackSize
                     });
-                    Emulator = new BinaryEmulator(Linux, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary.GetBinaryData(), Binary);
+                    Emulator = new BinaryEmulator(Linux, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary);
                     MappedMainModuleBase = Linux.BlobMappedBase;
 
                     SetBlobEntryPoint(PendingGenericLoadAddress, MappedMainModuleBase, PendingGenericEntryAddress);
@@ -2451,7 +2451,7 @@ namespace Brovan.EmulationMenu
                 else if (UseGenericGuest)
                 {
                     GenericGuest Generic = new GenericGuest(PendingGenericArch, PendingGenericMode, PendingGenericLoadAddress, PendingGenericEntryAddress, PendingGenericStackSize);
-                    Emulator = new BinaryEmulator(Generic, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary.GetBinaryData(), Binary);
+                    Emulator = new BinaryEmulator(Generic, EmulatorSettings, PendingGenericMode, PendingGenericArch, Binary);
                     MappedMainModuleBase = Generic.MappedBase;
 
                     SetBlobEntryPoint(PendingGenericLoadAddress, MappedMainModuleBase, PendingGenericEntryAddress);
@@ -2593,7 +2593,7 @@ namespace Brovan.EmulationMenu
                         Console.ResetColor();
                         Console.ForegroundColor = ConsoleColor.White;
                         Console.BackgroundColor = ConsoleColor.Black;
-                        Environment.Exit(Environment.ExitCode);
+                        Environment.Exit(0);
                     }
 
                     if (string.IsNullOrWhiteSpace(Input))
