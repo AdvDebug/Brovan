@@ -92,6 +92,12 @@
                 </Style>
             </ControlTheme>
 
+            <ControlTheme x:Key="UntitledDecorations" TargetType="WindowDrawnDecorations" BasedOn="{StaticResource {x:Type WindowDrawnDecorations}}">
+                <Style Selector="^:has-titlebar /template/ Panel#PART_TitleTextPanel">
+                    <Setter Property="IsVisible" Value="False" />
+                </Style>
+            </ControlTheme>
+
             <StreamGeometry x:Key="IconPlus">M12 5v14M5 12h14</StreamGeometry>
             <StreamGeometry x:Key="IconTrash">M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6</StreamGeometry>
             <StreamGeometry x:Key="IconPlay">M6 4l14 8-14 8z</StreamGeometry>

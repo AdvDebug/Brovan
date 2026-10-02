@@ -7,6 +7,7 @@
         Title="Brovan"
         Width="1180" Height="800" MinWidth="900" MinHeight="600"
         Background="{DynamicResource BgWindow}"
+        WindowDecorationsTheme="{StaticResource UntitledDecorations}"
         WindowStartupLocation="CenterScreen">
 
     <Window.DataTemplates>
