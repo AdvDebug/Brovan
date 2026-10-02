@@ -121,6 +121,13 @@ namespace Brovan.Core.Emulation
         /// visible at more than one guest address.
         /// </summary>
         bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, IntPtr hostPointer);
+
+        /// <summary>
+        /// The storage lives until <see cref="ReleaseSharedStorage"/> is called and the last mapping is gone.
+        /// </summary>
+        IntPtr AllocateSharedStorage(ulong size);
+        void ReleaseSharedStorage(IntPtr storage);
+
         bool UnmapMemory(ulong address, ulong size);
         bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection);
 

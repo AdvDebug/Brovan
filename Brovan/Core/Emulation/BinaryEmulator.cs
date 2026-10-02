@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Reflection.PortableExecutable;
 using System.Text;
@@ -275,7 +276,8 @@ namespace Brovan.Core.Emulation
         internal IEmulationBackend _emulator;
 
         internal List<MemoryRegion> _memory = new();
-        internal List<MemoryRegion> _freedmemory = new();
+        // Sorted and coalesced. Change it only through AddFreedRegion and ConsumeFreedMemoryRange.
+        internal List<FreedRange> _freedmemory = new();
         private readonly Queue<int>[] MlfqReadyQueues = new Queue<int>[32];
         private readonly HashSet<int> MlfqQueuedThreads = new();
         private readonly uint[] MlfqQuanta = new uint[32];
@@ -296,7 +298,6 @@ namespace Brovan.Core.Emulation
         private long EarliestWaitDeadline = long.MaxValue;
         private long LastFullWakeupScanTick;
         private uint SlicesSinceFullWakeupScan;
-        private bool _freedMemorySorted = true;
 
         private static readonly MemoryRegionBaseComparer _memoryRegionBaseComparer = new();
 
@@ -993,8 +994,6 @@ namespace Brovan.Core.Emulation
             if (Size == 0 || _freedmemory.Count == 0)
                 return;
 
-            EnsureFreedMemorySorted();
-
             ulong End = GetRangeEnd(Address, Size);
 
             int lo = 0, hi = _freedmemory.Count - 1, firstCandidate = -1;
@@ -1018,71 +1017,32 @@ namespace Brovan.Core.Emulation
 
             for (int i = firstCandidate; i < _freedmemory.Count; i++)
             {
-                MemoryRegion FreedMemory = _freedmemory[i];
-                ulong FreedStart = FreedMemory.BaseAddress;
-                ulong FreedEnd = GetRangeEnd(FreedMemory.BaseAddress, FreedMemory.Size);
+                FreedRange Freed = _freedmemory[i];
+                ulong FreedEnd = GetRangeEnd(Freed.BaseAddress, Freed.Size);
 
-                if (FreedStart >= End)
+                if (Freed.BaseAddress >= End)
                     break;
 
-                if (!RegionsOverlap(Address, Size, FreedStart, FreedMemory.Size))
+                if (!RegionsOverlap(Address, Size, Freed.BaseAddress, Freed.Size))
                     continue;
 
-                if (Address <= FreedStart && End >= FreedEnd)
-                {
-                    _freedmemory.RemoveAt(i);
-                    i--;
-                    continue;
-                }
+                bool KeepLeft = Address > Freed.BaseAddress;
+                bool KeepRight = End < FreedEnd;
 
-                if (Address <= FreedStart)
-                {
-                    FreedMemory.BaseAddress = End;
-                    FreedMemory.Size = FreedEnd > End ? FreedEnd - End : 0;
-                    FreedMemory.RequestedSize = FreedMemory.Size;
+                if (KeepLeft)
+                    _freedmemory[i] = new FreedRange(Freed.BaseAddress, Address - Freed.BaseAddress);
 
-                    if (FreedMemory.Size == 0)
-                    {
-                        _freedmemory.RemoveAt(i);
-                        i--;
-                    }
+                if (KeepRight)
+                {
+                    FreedRange Right = new FreedRange(End, FreedEnd - End);
+                    if (KeepLeft)
+                        _freedmemory.Insert(++i, Right);
                     else
-                    {
-                        _freedmemory[i] = FreedMemory;
-                    }
-
-                    continue;
+                        _freedmemory[i] = Right;
                 }
 
-                if (End >= FreedEnd)
-                {
-                    FreedMemory.Size = Address - FreedStart;
-                    FreedMemory.RequestedSize = FreedMemory.Size;
-
-                    if (FreedMemory.Size == 0)
-                    {
-                        _freedmemory.RemoveAt(i);
-                        i--;
-                    }
-                    else
-                    {
-                        _freedmemory[i] = FreedMemory;
-                    }
-
-                    continue;
-                }
-
-                MemoryRegion Right = FreedMemory;
-                Right.BaseAddress = End;
-                Right.Size = FreedEnd - End;
-                Right.RequestedSize = Right.Size;
-
-                FreedMemory.Size = Address - FreedStart;
-                FreedMemory.RequestedSize = FreedMemory.Size;
-
-                _freedmemory[i] = FreedMemory;
-                _freedmemory.Insert(i + 1, Right);
-                i++;
+                if (!KeepLeft && !KeepRight)
+                    _freedmemory.RemoveAt(i--);
             }
         }
 
@@ -1407,81 +1367,116 @@ namespace Brovan.Core.Emulation
             return TryFindOverlappingMemoryRegion(Address, Size, out _);
         }
 
-        /// <summary>
-        /// Walks the sorted memory-region index and returns the first
-        /// <paramref name="Alignment"/>-aligned gap of at least <paramref name="Size"/>
-        /// bytes between <paramref name="MinAddress"/> and <paramref name="MaxAddress"/>.
-        /// </summary>
         internal bool TryFindFreeBaseAddress(ulong Size, ulong Alignment, ulong MinAddress, ulong MaxAddress, out ulong Result)
         {
             Result = 0;
-            if (Size == 0 || Alignment == 0)
+            if (Size == 0 || Alignment == 0 || Size > MaxAddress)
                 return false;
 
+            ulong Limit = MaxAddress - Size;
             ulong Candidate = AlignUp(MinAddress, Alignment);
-            if (Candidate < MinAddress || Candidate >= MaxAddress)
+            if (Candidate < MinAddress || Candidate > Limit)
                 return false;
 
-            int Count = _memory.Count;
-            for (int i = 0; i < Count; i++)
+            ReadOnlySpan<MemoryRegion> Regions = CollectionsMarshal.AsSpan(_memory);
+            int First = Math.Max(FindFirstRegionStartingBefore(Candidate), 0);
+
+            // A window of up to two alignment units never gallops, so it gets a loop without the gallop branch.
+            ulong GallopBelow = Size >> 1;
+            if (GallopBelow <= Alignment)
             {
-                MemoryRegion Region = _memory[i];
-
-                ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
-                if (RegionEnd <= Candidate)
-                    continue;
-
-                if (Region.BaseAddress <= Candidate)
+                for (int i = First; i < Regions.Length; i++)
                 {
+                    ref readonly MemoryRegion Region = ref Regions[i];
+
+                    ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
+                    if (RegionEnd <= Candidate)
+                        continue;
+
+                    if (Region.BaseAddress > Candidate && Region.BaseAddress - Candidate >= Size)
+                        break;
+
                     ulong Next = AlignUp(RegionEnd, Alignment);
-                    if (Next < RegionEnd || Next >= MaxAddress)
+                    if (Next < RegionEnd || Next > Limit)
                         return false;
 
                     Candidate = Next;
-                    continue;
                 }
-
-                ulong Available = Region.BaseAddress - Candidate;
-                if (Available >= Size)
-                {
-                    Result = Candidate;
-                    return true;
-                }
-
-                ulong After = AlignUp(RegionEnd, Alignment);
-                if (After < RegionEnd || After >= MaxAddress)
-                    return false;
-
-                Candidate = After;
             }
-
-            if (MaxAddress - Candidate >= Size)
+            else
             {
-                Result = Candidate;
-                return true;
+                for (int i = First; i < Regions.Length; i++)
+                {
+                    ref readonly MemoryRegion Region = ref Regions[i];
+
+                    ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
+                    if (RegionEnd <= Candidate)
+                        continue;
+
+                    if (Region.BaseAddress > Candidate && Region.BaseAddress - Candidate >= Size)
+                        break;
+
+                    ulong Next = AlignUp(RegionEnd, Alignment);
+                    if (Next - Candidate < GallopBelow)
+                    {
+                        i = GallopLastRegionStartingBefore(Regions, i, Candidate + Size, out RegionEnd);
+                        Next = AlignUp(RegionEnd, Alignment);
+                    }
+
+                    if (Next < RegionEnd || Next > Limit)
+                        return false;
+
+                    Candidate = Next;
+                }
             }
 
-            return false;
+            Result = Candidate;
+            return true;
         }
 
-        /// <summary>
-        /// Returns true if the entire [Address, Address+Size) range is covered by committed regions.
-        /// This is used for validating reads/writes (commit semantics).
-        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int GallopLastRegionStartingBefore(ReadOnlySpan<MemoryRegion> Regions, int First, ulong Address, out ulong LastEnd)
+        {
+            int Last = First;
+            int Step = 1;
+            while (Step < Regions.Length - Last && Regions[Last + Step].BaseAddress < Address)
+            {
+                Last += Step;
+                LastEnd = GetRangeEnd(Regions[Last].BaseAddress, Regions[Last].Size);
+                if (LastEnd >= Address)
+                    return Last;
+
+                Step = Last - First;
+            }
+
+            for (Step >>= 1; Step > 0; Step >>= 1)
+            {
+                if (Step < Regions.Length - Last && Regions[Last + Step].BaseAddress < Address)
+                    Last += Step;
+            }
+
+            LastEnd = GetRangeEnd(Regions[Last].BaseAddress, Regions[Last].Size);
+            return Last;
+        }
+
         public bool IsRegionCommitted(ulong Address, ulong Size)
         {
             if (Size == 0)
                 return true;
 
-            ulong End = Address + Size;
+            ulong End = GetRangeEnd(Address, Size);
             ulong Current = Address;
 
             while (Current < End)
             {
-                if (!TryFindMemoryRegion(Current, out MemoryRegion Region) || !Region.IsCommitted)
+                if (!TryFindMemoryRegion(Current, out MemoryRegion Region) || (Region.IsReserved && !Region.IsCommitted))
                     return false;
 
-                Current = Region.BaseAddress + Region.Size;
+                ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
+                if (RegionEnd <= Current)
+                    return false;
+
+                Current = RegionEnd;
             }
 
             return true;
@@ -1534,17 +1529,10 @@ namespace Brovan.Core.Emulation
 
         public ulong MapUniqueAddress(ulong Size, MemoryProtection Protection)
         {
-            ulong CurrentAddress = BaseAddress;
             ulong AlignedSize = AlignToPageSize(Size);
-            while (CurrentAddress + AlignedSize < MaxAddress)
+            ulong SearchFrom = BaseAddress;
+            while (TryFindFreeBaseAddress(AlignedSize, PageSize, SearchFrom, MaxAddress, out ulong CurrentAddress))
             {
-                if (TryFindOverlappingMemoryRegion(CurrentAddress, AlignedSize, out MemoryRegion Occupied))
-                {
-                    ulong NextAddress = AlignToPageSize(GetRangeEnd(Occupied.BaseAddress, Occupied.Size));
-                    CurrentAddress = NextAddress > CurrentAddress ? NextAddress : CurrentAddress + 0x1000;
-                    continue;
-                }
-
                 if (_emulator.MapMemory(CurrentAddress, AlignedSize, Protection))
                 {
                     ConsumeFreedMemoryRange(CurrentAddress, AlignedSize);
@@ -1568,7 +1556,7 @@ namespace Brovan.Core.Emulation
                     return CurrentAddress;
                 }
 
-                CurrentAddress += AlignedSize;
+                SearchFrom = CurrentAddress + AlignedSize;
             }
 
             TriggerDebugMessage(() => $"memory: unique map failed size=0x{AlignedSize:X} prot={Protection}");
@@ -1602,8 +1590,6 @@ namespace Brovan.Core.Emulation
             if (_freedmemory.Count == 0)
                 return false;
 
-            EnsureFreedMemorySorted();
-
             if (WholeMemory)
             {
                 int lo = 0, hi = _freedmemory.Count - 1, cand = -1;
@@ -1614,7 +1600,7 @@ namespace Brovan.Core.Emulation
                     else hi = mid - 1;
                 }
                 if (cand < 0) return false;
-                MemoryRegion r = _freedmemory[cand];
+                FreedRange r = _freedmemory[cand];
                 return BaseAddress >= r.BaseAddress && BaseAddress < r.BaseAddress + r.Size;
             }
             else
@@ -1632,14 +1618,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private void EnsureFreedMemorySorted()
-        {
-            if (_freedMemorySorted)
-                return;
-            _freedmemory.Sort(_memoryRegionBaseComparer);
-            _freedMemorySorted = true;
-        }
-
         /// <summary>
         /// Unmaps a memory region.
         /// </summary>
@@ -1653,27 +1631,31 @@ namespace Brovan.Core.Emulation
 
             if (!TryFindMemoryRegion(Address, out MemoryRegion Region) || Region.BaseAddress != Address)
             {
-                TriggerDebugMessage(() => $"memory: unmap failed, base not found 0x{Address:X}");
+                if (Debug)
+                    TriggerDebugMessage($"memory: unmap failed, base not found 0x{Address:X}");
                 return false;
             }
 
             if (!UnmapImage && Region.Flags.HasFlag(AllocationType.Image))
             {
-                TriggerDebugMessage(() => $"memory: unmap denied image base=0x{Address:X} size=0x{Region.Size:X}");
+                if (Debug)
+                    TriggerDebugMessage($"memory: unmap denied image base=0x{Address:X} size=0x{Region.Size:X}");
                 return false;
             }
 
-            if (_emulator.UnmapMemory(Address, AlignToPageSize(Region.Size)))
+            bool HostBacked = Region.IsCommitted || !Region.IsReserved;
+            if (HostBacked && !_emulator.UnmapMemory(Address, AlignToPageSize(Region.Size)))
             {
-                RemoveMemoryRegion(Region);
-                _freedmemory.Add(Region);
-                _freedMemorySorted = false;
-                TriggerDebugMessage(() => $"memory: unmapped base=0x{Address:X} size=0x{Region.Size:X}");
-                return true;
+                if (Debug)
+                    TriggerDebugMessage($"memory: unmap failed base=0x{Address:X} size=0x{Region.Size:X} error={GetLastError()}");
+                return false;
             }
 
-            TriggerDebugMessage(() => $"memory: unmap failed base=0x{Address:X} size=0x{Region.Size:X} error={GetLastError()}");
-            return false;
+            RemoveMemoryRegion(Region);
+            AddFreedRegion(Region.BaseAddress, Region.Size);
+            if (Debug)
+                TriggerDebugMessage($"memory: unmapped base=0x{Address:X} size=0x{Region.Size:X}");
+            return true;
         }
 
         public void AddFreedRegion(ulong BaseAddress, ulong Size)
@@ -1681,19 +1663,17 @@ namespace Brovan.Core.Emulation
             if (BaseAddress == 0 || Size == 0)
                 return;
 
-            EnsureFreedMemorySorted();
-
             ulong Start = BaseAddress;
             ulong End = BaseAddress + Size;
 
-            int lo = 0, hi = _freedmemory.Count - 1, firstOverlap = -1;
+            int lo = 0, hi = _freedmemory.Count - 1, firstTouch = _freedmemory.Count;
             while (lo <= hi)
             {
                 int mid = lo + ((hi - lo) >> 1);
                 ulong midEnd = _freedmemory[mid].BaseAddress + _freedmemory[mid].Size;
                 if (midEnd >= Start)
                 {
-                    firstOverlap = mid;
+                    firstTouch = mid;
                     hi = mid - 1;
                 }
                 else
@@ -1702,33 +1682,24 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            int insertIdx = firstOverlap < 0 ? _freedmemory.Count : firstOverlap;
-
-            if (firstOverlap >= 0)
+            int lastTouch = firstTouch;
+            for (; lastTouch < _freedmemory.Count && _freedmemory[lastTouch].BaseAddress <= End; lastTouch++)
             {
-                for (int i = firstOverlap; i < _freedmemory.Count; i++)
-                {
-                    MemoryRegion Region = _freedmemory[i];
-                    ulong RegionStart = Region.BaseAddress;
-                    ulong RegionEnd = Region.BaseAddress + Region.Size;
-
-                    if (End < RegionStart)
-                        break;
-
-                    Start = Math.Min(Start, RegionStart);
-                    End = Math.Max(End, RegionEnd);
-                    _freedmemory.RemoveAt(i);
-                    i--;
-                    insertIdx = i + 1;
-                }
+                FreedRange Region = _freedmemory[lastTouch];
+                Start = Math.Min(Start, Region.BaseAddress);
+                End = Math.Max(End, Region.BaseAddress + Region.Size);
             }
 
-            _freedmemory.Insert(insertIdx < 0 ? 0 : insertIdx, new MemoryRegion
+            FreedRange Merged = new FreedRange(Start, End - Start);
+            if (lastTouch == firstTouch)
             {
-                BaseAddress = Start,
-                Size = End - Start,
-                RequestedSize = End - Start
-            });
+                _freedmemory.Insert(firstTouch, Merged);
+                return;
+            }
+
+            _freedmemory[firstTouch] = Merged;
+            if (lastTouch - firstTouch > 1)
+                _freedmemory.RemoveRange(firstTouch + 1, lastTouch - firstTouch - 1);
         }
 
         /// <summary>
@@ -1739,24 +1710,14 @@ namespace Brovan.Core.Emulation
         public ulong GetSuitableBaseAddress(ulong Size)
         {
             ulong AlignedSize = AlignToPageSize(Size);
-            ulong CurrentAddress = BaseAddress;
+            ulong SearchFrom = BaseAddress;
 
-            while (CurrentAddress + AlignedSize < MaxAddress)
+            while (TryFindFreeBaseAddress(AlignedSize, PageSize, SearchFrom, MaxAddress, out ulong Candidate))
             {
-                if (TryFindOverlappingMemoryRegion(CurrentAddress, AlignedSize, out MemoryRegion Region))
-                {
-                    ulong NextAddress = AlignToPageSize(GetRangeEnd(Region.BaseAddress, Region.Size));
-                    CurrentAddress = NextAddress > CurrentAddress ? NextAddress : CurrentAddress + 0x1000;
-                    continue;
-                }
+                if (!IsRegionFreed(Candidate, WholeMemory: false))
+                    return Candidate;
 
-                if (IsRegionFreed(CurrentAddress, WholeMemory: false))
-                {
-                    CurrentAddress += 0x1000;
-                    continue;
-                }
-
-                return CurrentAddress;
+                SearchFrom = Candidate + PageSize;
             }
 
             return 0;

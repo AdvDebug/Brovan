@@ -86,12 +86,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (BaseAddress == 0 || !Instance.IsRegionMapped(BaseAddress, 1))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            WinSection Section = FindSectionByAddress(Instance, BaseAddress);
+            WinSection Section = FindSectionByAddress(Instance, BaseAddress, out ulong SectionOffset, out ulong ViewRemaining);
             if (Section == null)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            ulong SectionOffset = BaseAddress - Section.BackingAddress;
-            ulong Available = Section.Size > SectionOffset ? Section.Size - SectionOffset : 0;
+            ulong Available = Section.Size > SectionOffset ? Math.Min(Section.Size - SectionOffset, ViewRemaining) : 0;
             if (Available == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -102,11 +101,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(Section.Path) || Section.IsImage)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            if (FlushedSize > int.MaxValue || SectionOffset > int.MaxValue || FlushedSize > (ulong)int.MaxValue - SectionOffset)
-                return NTSTATUS.STATUS_NO_MEMORY;
-
-            byte[] FlushedBytes = Instance.ReadMemory(BaseAddress, (uint)FlushedSize);
-            if (FlushedBytes == null || (ulong)FlushedBytes.Length < FlushedSize)
+            if (!Instance.IsRegionCommitted(BaseAddress, FlushedSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             WindowsFileStream Stream = Section.GetFileStream(true);
@@ -115,7 +110,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             try
             {
-                Stream.WriteAt((long)SectionOffset, FlushedBytes, 0, (int)FlushedSize);
+                for (ulong Done = 0; Done < FlushedSize;)
+                {
+                    int ChunkSize = (int)Math.Min(FlushedSize - Done, (ulong)NtReadFile.IoChunkBytes);
+                    Span<byte> Chunk = Instance.WinHelper.ReadMemorySpan(BaseAddress + Done, (uint)ChunkSize);
+                    if (Chunk.Length < ChunkSize)
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                    Stream.WriteAt((long)(SectionOffset + Done), Chunk);
+                    Done += (ulong)ChunkSize;
+                }
             }
             catch
             {
@@ -127,17 +131,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static WinSection FindSectionByAddress(BinaryEmulator Instance, ulong Address)
+        private static WinSection FindSectionByAddress(BinaryEmulator Instance, ulong Address, out ulong SectionOffset, out ulong ViewRemaining)
         {
             foreach (WinSection Section in Instance.WinHelper.WinSections)
             {
-                if (Section == null || Section.BackingAddress == 0 || Section.Size == 0)
+                if (Section == null || Section.Size == 0)
                     continue;
 
-                if (Address >= Section.BackingAddress && Address - Section.BackingAddress < Section.Size)
+                if (Section.TryFindView(Address, out WinSectionView View))
+                {
+                    SectionOffset = View.Offset + (Address - View.Base);
+                    ViewRemaining = View.Size - (Address - View.Base);
                     return Section;
+                }
+
+                if (Section.BackingAddress != 0 && Address >= Section.BackingAddress && Address - Section.BackingAddress < Section.Size)
+                {
+                    SectionOffset = Address - Section.BackingAddress;
+                    ViewRemaining = Section.Size - SectionOffset;
+                    return Section;
+                }
             }
 
+            SectionOffset = 0;
+            ViewRemaining = 0;
             return null;
         }
 

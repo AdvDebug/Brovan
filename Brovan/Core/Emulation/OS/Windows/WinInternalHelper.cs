@@ -497,14 +497,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             LastUpdateTimestamp = 0;
 
             RefreshedOnRead = Emulator._emulator.MapMmio(Emulator.KUSER_SHARED_DATA, PageSize, FillTimeFields, IgnoreWrite);
+            if (!Emulator.MapSecuredPage(Emulator.KUSER_SHARED_DATA, RefreshedOnRead))
+                Utils.LogError($"[KUSER_MANAGER] Failed to map KUSER_SHARED_DATA: {Emulator.GetLastError()}");
+
             if (!RefreshedOnRead)
             {
-                if (!Emulator.IsRegionMapped(Emulator.KUSER_SHARED_DATA, PageSize) &&
-                    Emulator.MapMemoryRegion(Emulator.KUSER_SHARED_DATA, PageSize, MemoryProtection.Read) == 0)
-                {
-                    Utils.LogError($"[KUSER_MANAGER] Failed to map KUSER_SHARED_DATA: {Emulator.GetLastError()}");
-                }
-
                 ReadHook = OnRead;
                 RefreshedOnRead = Emulator._emulator.AddMemoryHook(Emulator.KUSER_SHARED_DATA,
                     Emulator.KUSER_SHARED_DATA + (PageSize - 1), BackendHookType.MemoryRead, ReadHook) != IntPtr.Zero;
@@ -528,8 +525,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             ulong Address = Emulator.KUSER_SHARED_DATA + PageSize;
-            if (!Emulator.IsRegionMapped(Address, PageSize) &&
-                Emulator.MapMemoryRegion(Address, PageSize, MemoryProtection.Read) == 0)
+            if (!Emulator.MapSecuredPage(Address, false))
             {
                 Utils.LogError($"[KUSER_MANAGER] Failed to map the hypervisor shared page: {Emulator.GetLastError()}");
                 return;

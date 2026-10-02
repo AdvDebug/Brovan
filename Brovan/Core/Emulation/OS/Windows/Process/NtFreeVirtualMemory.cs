@@ -79,7 +79,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong Start = BaseAddress & ~(PageSize - 1);
             if (!Instance.TryFindMemoryRegion(Start, out MemoryRegion Region))
             {
-                if (Release && Instance.IsRegionFreed(BaseAddress, false) && (Instance.Settings.Flags & LogFlags.Issues) != 0)
+                if (Release && (Instance.Settings.Flags & LogFlags.Issues) != 0 && Instance.IsRegionFreed(BaseAddress, true))
                     Instance.TriggerEventMessage($"[!!] Double-Free detected for the allocated memory that have the base address 0x{BaseAddress:X}.", LogFlags.Issues);
                 return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
             }
@@ -96,6 +96,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (End > AllocationBase + AllocationSize)
                 return NTSTATUS.STATUS_UNABLE_TO_FREE_VM;
+
+            NTSTATUS Secured = Instance.CheckSecuredRange(Start, End - Start, NTSTATUS.STATUS_INVALID_PAGE_PROTECTION);
+            if (Secured != NTSTATUS.STATUS_SUCCESS)
+                return Secured;
 
             if (Release)
             {

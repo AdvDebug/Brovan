@@ -205,6 +205,7 @@ struct brov_ops {
     int (*reg_ptr)(struct uc_struct *uc, int regid, void **ptr, size_t *size, uint32_t *flags);
     void (*set_budget)(struct uc_struct *uc, int32_t budget);
     int32_t *(*budget_ptr)(struct uc_struct *uc);
+    bool (*page_has_tbs)(struct uc_struct *uc, uint64_t ram_addr);
 };
 
 /* One jump cache entry. See brovan_tcg_budget.inc.h.
@@ -235,6 +236,13 @@ typedef struct brov_flagset {
     uint32_t cf_mask;
 } brov_flagset;
 
+/* See brovan_notdirty.inc.h. */
+typedef struct brov_alias_range {
+    uint64_t guest;
+    uint64_t size;
+    uintptr_t host;
+} brov_alias_range;
+
 /* brovan_tcg_lookup.inc.h emits the same hash and key inline. The two must
  * agree or a block is taken for the wrong guest address. */
 static inline unsigned brov_jmp_slot(uint64_t pc)
@@ -260,6 +268,9 @@ static inline uint64_t brov_jmp_key(uint64_t pc, unsigned id)
     unsigned brov_jmp_flush;                                                   \
     unsigned char brov_jmp_off;                                                \
     unsigned char brov_jmp_dirty;                                              \
+    brov_alias_range *brov_aliases;                                            \
+    uint32_t brov_alias_count;                                                 \
+    uint32_t brov_alias_cap;                                                   \
     struct brov_ops brov;
 
 #define BROVAN_TCG_FIELDS                                                      \

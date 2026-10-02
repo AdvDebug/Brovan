@@ -1275,6 +1275,13 @@ static int32_t *brov_budget_ptr_impl(struct uc_struct *uc)
     return &cpu_neg(uc->cpu)->brov_insn_budget;
 }
 
+static bool brov_page_has_tbs_impl(struct uc_struct *uc, uint64_t ram_addr)
+{
+    PageDesc *p = page_find(uc, ram_addr >> TARGET_PAGE_BITS);
+
+    return p && p->first_tb;
+}
+
 static void brov_install(struct uc_struct *uc)
 {
     uc->brov.info = brov_info_impl;
@@ -1285,6 +1292,7 @@ static void brov_install(struct uc_struct *uc)
     uc->brov.reg_ptr = brov_reg_ptr_impl;
     uc->brov.set_budget = brov_set_budget_impl;
     uc->brov.budget_ptr = brov_budget_ptr_impl;
+    uc->brov.page_has_tbs = brov_page_has_tbs_impl;
 
     /* Starts on so that the first uc_emu_start() does not have to flush the
      * blocks a restored cache just installed. */

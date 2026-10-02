@@ -82,6 +82,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.TryFindMemoryRegion(BaseAddress, out MemoryRegion OldRegion))
                 return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
+            NTSTATUS Secured = Instance.CheckSecuredRange(AlignedBase, AlignedSize, NTSTATUS.STATUS_INVALID_PAGE_PROTECTION);
+            if (Secured != NTSTATUS.STATUS_SUCCESS)
+                return Secured;
+
             if ((NewProtection & PageGuard) != 0 && (NewProtection & 0xFF) == PageNoAccess)
                 return NTSTATUS.STATUS_INVALID_PAGE_PROTECTION;
 

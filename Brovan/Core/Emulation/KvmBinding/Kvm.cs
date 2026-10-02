@@ -58,6 +58,7 @@ namespace Brovan.Core.Emulation
 
         private readonly Dictionary<ulong, MappedPage> _mappedPages = new();
         private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
+        private readonly List<long> _backingStarts = new();
         private ulong _backingBytes;
         // A page watched for writes only keeps a read-only memslot, so its reads run natively.
         private readonly Dictionary<ulong, bool> _trappedPages = new();
@@ -207,6 +208,7 @@ namespace Brovan.Core.Emulation
             public ulong Size;
             public int LivePages;
             public int AliasPages;
+            public bool Held;
         }
 
         private struct InstalledSlot
@@ -357,6 +359,37 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        public IntPtr AllocateSharedStorage(ulong size)
+        {
+            if (DisposedCheck()) return IntPtr.Zero;
+
+            if (size == 0 || (size & KvmConstants.PageMask) != 0)
+            {
+                _error = KvmErrors.InvalidArgument;
+                return IntPtr.Zero;
+            }
+
+            // Section offset 0 lands on a 2 MiB boundary.
+            if (!TryAllocateGuestBacking(0, size, out IntPtr backing))
+            {
+                _error = KvmErrors.NoMemory;
+                return IntPtr.Zero;
+            }
+
+            AddBackingAllocation(backing, new BackingAllocation { Size = size, Held = true });
+            _error = KvmErrors.Ok;
+            return backing;
+        }
+
+        public void ReleaseSharedStorage(IntPtr storage)
+        {
+            if (DisposedCheck()) return;
+            if (!_backingAllocations.TryGetValue(storage, out BackingAllocation? allocation) || !allocation.Held) return;
+
+            allocation.Held = false;
+            FreeIfUnreferenced(storage, allocation);
+        }
+
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
         {
             if (DisposedCheck()) return false;
@@ -388,11 +421,11 @@ namespace Brovan.Core.Emulation
                 }
 
                 long backingAddr = backing.ToInt64();
-                _backingAllocations[backing] = new BackingAllocation
+                AddBackingAllocation(backing, new BackingAllocation
                 {
                     Size = size,
                     LivePages = (int)(size / KvmConstants.PageSize),
-                };
+                });
 
                 for (ulong off = 0; off < size; off += KvmConstants.PageSize)
                 {
@@ -432,11 +465,11 @@ namespace Brovan.Core.Emulation
                         return false;
                     }
 
-                    _backingAllocations[backing] = new BackingAllocation
+                    AddBackingAllocation(backing, new BackingAllocation
                     {
                         Size = KvmConstants.PageSize,
                         LivePages = 1,
-                    };
+                    });
                     page.HostPage = backing;
                     page.OwnedBacking = backing;
                 }
@@ -1465,6 +1498,7 @@ namespace Brovan.Core.Emulation
                 foreach (KeyValuePair<IntPtr, BackingAllocation> kv in _backingAllocations)
                     FreeBackingMemory(kv.Key, kv.Value.Size);
                 _backingAllocations.Clear();
+                _backingStarts.Clear();
                 _mappedPages.Clear();
                 _lastLookupPageBase = ulong.MaxValue;
                 _lastLookupPage = null;
@@ -1716,24 +1750,44 @@ namespace Brovan.Core.Emulation
             else
                 allocation.LivePages--;
 
-            if (allocation.LivePages > 0 || allocation.AliasPages > 0) return;
+            FreeIfUnreferenced(page.OwnedBacking, allocation);
+        }
 
-            FreeBackingMemory(page.OwnedBacking, allocation.Size);
-            _backingAllocations.Remove(page.OwnedBacking);
+        private void FreeIfUnreferenced(IntPtr backing, BackingAllocation allocation)
+        {
+            if (allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Held) return;
+
+            FreeBackingMemory(backing, allocation.Size);
+            _backingAllocations.Remove(backing);
+
+            int index = _backingStarts.BinarySearch(backing.ToInt64());
+            if (index >= 0)
+                _backingStarts.RemoveAt(index);
+        }
+
+        private void AddBackingAllocation(IntPtr backing, BackingAllocation allocation)
+        {
+            _backingAllocations[backing] = allocation;
+
+            int index = _backingStarts.BinarySearch(backing.ToInt64());
+            if (index < 0)
+                _backingStarts.Insert(~index, backing.ToInt64());
         }
 
         private IntPtr FindBackingAllocation(IntPtr hostPointer)
         {
             long target = hostPointer.ToInt64();
+            int index = _backingStarts.BinarySearch(target);
+            if (index < 0)
+                index = ~index - 1;
 
-            foreach (KeyValuePair<IntPtr, BackingAllocation> entry in _backingAllocations)
-            {
-                long start = entry.Key.ToInt64();
-                if (target >= start && (ulong)(target - start) < entry.Value.Size)
-                    return entry.Key;
-            }
+            if (index < 0)
+                return IntPtr.Zero;
 
-            return IntPtr.Zero;
+            IntPtr start = new IntPtr(_backingStarts[index]);
+            return _backingAllocations.TryGetValue(start, out BackingAllocation allocation) && (ulong)(target - start.ToInt64()) < allocation.Size
+                ? start
+                : IntPtr.Zero;
         }
 
         private unsafe ref LinuxKvmRun GetRunRef()

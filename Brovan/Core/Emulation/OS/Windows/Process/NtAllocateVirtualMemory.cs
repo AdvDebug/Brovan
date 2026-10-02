@@ -8,7 +8,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtAllocateVirtualMemory : IWinSyscall
     {
         private const ulong PageSize = 0x1000;
-        private const ulong AllocationGranularity = 0x10000;
         private const uint MemCommit = 0x00001000;
         private const uint MemReserve = 0x00002000;
         private const uint MemReset = 0x00080000;
@@ -32,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             public static AddressRequirements None => new AddressRequirements { Highest = ulong.MaxValue };
 
-            public bool Limited => Lowest != 0 || Highest != ulong.MaxValue || Alignment > AllocationGranularity;
+            public bool Limited => Lowest != 0 || Highest != ulong.MaxValue || Alignment > WinSysHelper.AllocationGranularity;
         }
 
         private static bool TryApplyResetState(BinaryEmulator Instance, ulong BaseAddress, ulong RegionSize, bool Reset, out NTSTATUS Status)
@@ -57,6 +56,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Status = NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
                 return false;
             }
+
+            Status = Instance.CheckSecuredRange(BaseAddress, RegionSize, NTSTATUS.STATUS_SECTION_PROTECTION);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return false;
 
             ulong Current = BaseAddress;
             ulong AllocationBase = 0;
@@ -258,9 +261,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong Lowest = Requirements.Lowest != 0
                     ? Requirements.Lowest
                     : Requirements.Limited || Instance.WinHelper.PointerSize != 8 ? LowSearchStart : 0x0000000100000000UL;
-                ulong Alignment = Math.Max(Requirements.Alignment, AllocationGranularity);
+                ulong Alignment = Math.Max(Requirements.Alignment, WinSysHelper.AllocationGranularity);
 
-                if (!Instance.TryFindFreeBaseAddress(RegionSize, Alignment, BinaryEmulator.AlignUp(Lowest, AllocationGranularity), Highest, out BaseAddress) ||
+                if (!Instance.TryFindFreeBaseAddress(RegionSize, Alignment, BinaryEmulator.AlignUp(Lowest, WinSysHelper.AllocationGranularity), Highest, out BaseAddress) ||
                     BaseAddress + RegionSize - 1 > Highest)
                 {
                     return Requirements.Limited ? NTSTATUS.STATUS_CONFLICTING_ADDRESSES : NTSTATUS.STATUS_NO_MEMORY;
@@ -269,7 +272,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             else
             {
                 ulong RequestedEnd = BinaryEmulator.AlignUp(BaseAddress + RegionSize, PageSize);
-                BaseAddress &= ~((Reserve ? AllocationGranularity : PageSize) - 1);
+                BaseAddress &= ~((Reserve ? WinSysHelper.AllocationGranularity : PageSize) - 1);
                 RegionSize = RequestedEnd - BaseAddress;
             }
 
@@ -278,6 +281,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Reserve && !Instance.TryFindMemoryRegion(BaseAddress, out _))
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+            if (!Reserve)
+            {
+                NTSTATUS Secured = Instance.CheckSecuredRange(BaseAddress, RegionSize, NTSTATUS.STATUS_INVALID_PAGE_PROTECTION);
+                if (Secured != NTSTATUS.STATUS_SUCCESS)
+                    return Secured;
+            }
 
             if (Reserve && !Instance.ReserveMemory(BaseAddress, RegionSize, Protect))
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;

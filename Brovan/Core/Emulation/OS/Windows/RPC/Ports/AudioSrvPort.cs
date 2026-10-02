@@ -501,7 +501,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             PublishHandlePort(Instance, Stream);
 
             Stream.SectionHandle = Instance.WinHelper.CreateSectionHandle(
-                null, SectionSize, PageReadWrite, 0, null, Backing, AccessMask.StandardRightsAll).Handle;
+                null, SectionSize, PageReadWrite, 0, null, Backing,
+                AccessMask.StandardRightsAll | AccessMask.SectionMapRead | AccessMask.SectionMapWrite).Handle;
 
             HoldServerSectionReference(Instance, Stream);
 

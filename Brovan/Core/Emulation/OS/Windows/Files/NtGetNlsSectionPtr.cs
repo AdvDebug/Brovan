@@ -5,46 +5,59 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtGetNlsSectionPtr : IWinSyscall
     {
+        private const uint PAGE_READONLY = 0x02;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             uint SectionType = (uint)Instance.WinHelper.GetArg(0);
             uint SectionData = (uint)Instance.WinHelper.GetArg(1);
+            ulong ContextData = Instance.WinHelper.GetArg(2);
             ulong SectionPointerPtr = Instance.WinHelper.GetArg(3);
             ulong SectionSizePtr = Instance.WinHelper.GetArg(4);
+            uint Width = (uint)Instance.WinHelper.PointerSize;
 
-            if (SectionPointerPtr != 0 && !Instance.IsRegionMapped(SectionPointerPtr, (uint)Instance.WinHelper.PointerSize))
+            // NT: the WOW64 thunk does not probe the caller's size.
+            bool SizeIsChecked = SectionSizePtr != 0 && Width == 8;
+
+            if (SectionPointerPtr == 0 && ContextData == 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (SectionPointerPtr != 0 && !Instance.IsRegionCommitted(SectionPointerPtr, Width))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (SectionSizePtr != 0 && !Instance.IsRegionMapped(SectionSizePtr, 4))
+            if (SizeIsChecked && !Instance.IsRegionCommitted(SectionSizePtr, Width))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            // NT: only a kernel caller may ask for the section object.
+            if (ContextData != 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER_3;
 
             if (SectionType != 11)
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
 
-            string Path = $@"C:\Windows\System32\C_{SectionData}.NLS";
+            WinSection Section = Instance.WinHelper.GetNlsSection($@"\NLS\NlsSectionCP{SectionData}", $@"C:\Windows\System32\C_{SectionData}.NLS", out NTSTATUS Status);
+            if (Section == null)
+                return Status;
 
-            // The kernel publishes the NLS tables as section objects, so they never follow WOW64 redirection.
-            WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path, false, true);
-            if (!Stream.TryReadAllBytes(out byte[] Data) || Data.Length == 0)
-                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+            ulong ViewSize = BinaryEmulator.AlignUp(Section.Size, 0x1000);
+            Status = NtMapViewOfSection.MapDataView(Instance, Section, 0, ViewSize, 0, PAGE_READONLY, out ulong ViewBase);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            ulong Size = BinaryEmulator.AlignUp((ulong)Data.Length, 0x1000);
-
-            ulong Address = Instance.MapUniqueAddress((uint)Size, MemoryProtection.Read);
-            if (Address == 0)
-                return NTSTATUS.STATUS_NO_MEMORY;
-
-            if (!Instance.WriteMemory(Address, Data))
+            if (!Instance.WinHelper.WritePointer(SectionPointerPtr, ViewBase))
+            {
+                Instance.WinHelper.UnmapViewOfSection(ViewBase);
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
 
-            if (SectionPointerPtr != 0)
-                Instance.WinHelper.WritePointer(SectionPointerPtr, Address);
-
-            if (SectionSizePtr != 0)
-                Instance.WinHelper.WriteUInt32(SectionSizePtr, (uint)Size);
+            if (SectionSizePtr != 0 && !Instance.WinHelper.WritePointer(SectionSizePtr, ViewSize) && SizeIsChecked)
+            {
+                Instance.WinHelper.UnmapViewOfSection(ViewBase);
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                Instance.TriggerEventMessage($"[+] NtGetNlsSectionPtr: C_{SectionData}.NLS -> 0x{Address:X} (0x{Size:X}).", LogFlags.Syscall);
+                Instance.TriggerEventMessage($"[+] NtGetNlsSectionPtr: C_{SectionData}.NLS -> 0x{ViewBase:X} (0x{ViewSize:X}).", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

@@ -335,6 +335,11 @@ void brov_free_uc(void *p)
         uc->brov_ram_starts = NULL;
         uc->brov_ram_starts_cap = 0;
 
+        free(uc->brov_aliases);
+        uc->brov_aliases = NULL;
+        uc->brov_alias_count = 0;
+        uc->brov_alias_cap = 0;
+
         /* The table is arena memory, not heap. */
         uc->brov_jmp = NULL;
     }
@@ -395,6 +400,86 @@ uc_err brov_tsc_configure(uc_engine *uc, int64_t host_start, int64_t host_freq, 
     uc->brov_tsc.tsc_per_qpc = tsc_per_qpc;
     uc->brov_tsc.skew_counts = skew_counts;
     uc->brov_tsc.armed = armed;
+    return UC_ERR_OK;
+}
+
+static bool brov_alias_push(uc_engine *uc, uint64_t guest, uint64_t size, uintptr_t host)
+{
+    if (uc->brov_alias_count == uc->brov_alias_cap) {
+        uint32_t cap = uc->brov_alias_cap ? uc->brov_alias_cap * 2 : 16;
+        brov_alias_range *grown = realloc(uc->brov_aliases, cap * sizeof(*grown));
+
+        if (!grown) {
+            return false;
+        }
+        uc->brov_aliases = grown;
+        uc->brov_alias_cap = cap;
+    }
+
+    uc->brov_aliases[uc->brov_alias_count].guest = guest;
+    uc->brov_aliases[uc->brov_alias_count].size = size;
+    uc->brov_aliases[uc->brov_alias_count].host = host;
+    uc->brov_alias_count++;
+    return true;
+}
+
+UNICORN_EXPORT
+uc_err brov_mem_alias_add(uc_engine *uc, uint64_t address, uint64_t size, void *host)
+{
+    uint32_t i;
+
+    if (!uc || !host || size == 0 || address + size < address) {
+        return UC_ERR_ARG;
+    }
+
+    for (i = 0; i < uc->brov_alias_count; i++) {
+        const brov_alias_range *alias = &uc->brov_aliases[i];
+
+        if (alias->guest == address && alias->size == size && alias->host == (uintptr_t)host) {
+            return UC_ERR_OK;
+        }
+    }
+
+    return brov_alias_push(uc, address, size, (uintptr_t)host) ? UC_ERR_OK : UC_ERR_NOMEM;
+}
+
+UNICORN_EXPORT
+uc_err brov_mem_alias_remove(uc_engine *uc, uint64_t address, uint64_t size)
+{
+    uint64_t end = address + size;
+    uint32_t i = 0;
+
+    if (!uc || size == 0 || end < address) {
+        return UC_ERR_ARG;
+    }
+
+    while (i < uc->brov_alias_count) {
+        brov_alias_range *alias = &uc->brov_aliases[i];
+        uint64_t alias_end = alias->guest + alias->size;
+
+        if (alias_end <= address || alias->guest >= end) {
+            i++;
+        } else if (alias->guest < address && alias_end > end) {
+            uintptr_t tail_host = alias->host + (uintptr_t)(end - alias->guest);
+
+            alias->size = address - alias->guest;
+            if (!brov_alias_push(uc, end, alias_end - end, tail_host)) {
+                return UC_ERR_NOMEM;
+            }
+            i++;
+        } else if (alias->guest < address) {
+            alias->size = address - alias->guest;
+            i++;
+        } else if (alias_end > end) {
+            alias->host += (uintptr_t)(end - alias->guest);
+            alias->size = alias_end - end;
+            alias->guest = end;
+            i++;
+        } else {
+            uc->brov_aliases[i] = uc->brov_aliases[--uc->brov_alias_count];
+        }
+    }
+
     return UC_ERR_OK;
 }
 

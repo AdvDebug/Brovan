@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Buffers.Binary;
-using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -446,15 +445,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                              QueryAddress >= Region.BaseAddress &&
                              QueryAddress < BinaryEmulator.AlignUp(Region.BaseAddress + Region.Size, 0x1000);
 
-            MemoryRegion Freed = default;
-            bool HasFreed = false;
-
-            if (!HasRegion)
-            {
-                Freed = Instance._freedmemory.FirstOrDefault(R => QueryAddress >= R.BaseAddress && QueryAddress < (R.BaseAddress + R.Size));
-                HasFreed = Freed.BaseAddress != 0;
-            }
-
             if (HasRegion)
             {
                 bool IsImage = Region.Flags.HasFlag(AllocationType.Image);
@@ -496,28 +486,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            ulong FreeSize;
-
+            // NT: free space is one span up to the next allocation.
             // RegionSize must be whole pages, or a VirtualQuery walk loops on the same page.
-            if (HasFreed)
-            {
-                FreeSize = BinaryEmulator.AlignUp(Freed.BaseAddress + Freed.Size, 0x1000) - QueryAddress;
-            }
-            else
-            {
-                ulong Next = AlignDownPage(MaxUserAddress) + 0x1000;
+            ulong Next = AlignDownPage(MaxUserAddress) + 0x1000;
 
-                if (Instance.TryFindNextMemoryRegionBase(QueryAddress, out ulong NextMapped) && NextMapped < Next)
-                    Next = NextMapped;
+            if (Instance.TryFindNextMemoryRegionBase(QueryAddress, out ulong NextMapped) && NextMapped < Next)
+                Next = NextMapped;
 
-                foreach (var R in Instance._freedmemory)
-                {
-                    if (R.BaseAddress > QueryAddress && R.BaseAddress < Next)
-                        Next = R.BaseAddress;
-                }
-
-                FreeSize = Next > QueryAddress ? BinaryEmulator.AlignUp(Next, 0x1000) - QueryAddress : 0x1000UL;
-            }
+            ulong FreeSize = Next > QueryAddress ? BinaryEmulator.AlignUp(Next, 0x1000) - QueryAddress : 0x1000UL;
 
             Info.BaseAddress = QueryAddress;
             Info.AllocationBase = 0;

@@ -942,7 +942,6 @@ namespace Brovan.Core.Emulation.Guests
         {
             const uint PAGE_READWRITE = 0x04;
             const uint PAGE_GUARD = 0x100;
-            const ulong AllocationGranularity = 0x10000;
 
             StackLimit = 0;
 

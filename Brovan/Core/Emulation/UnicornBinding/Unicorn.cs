@@ -42,6 +42,7 @@ namespace Brovan.Core.Emulation
         private readonly List<MappedRegion> _mappedRegions = new List<MappedRegion>();
         private readonly List<IntPtr> _pendingFrees = new List<IntPtr>();
         private readonly Dictionary<IntPtr, nuint> _bufferSizes = new Dictionary<IntPtr, nuint>();
+        private readonly List<IntPtr> _heldBuffers = new List<IntPtr>();
         private ulong _pendingFreeBytes;
         private readonly List<MappedRegion> _unmapSurvivors = new List<MappedRegion>();
         private ulong[] _regionStarts = Array.Empty<ulong>();
@@ -57,6 +58,7 @@ namespace Brovan.Core.Emulation
             public ulong Size;
             public IntPtr Ptr;
             public IntPtr BufferBase;
+            public bool Aliased;
         }
 
         private readonly object _memoryLock = new object();
@@ -163,13 +165,83 @@ namespace Brovan.Core.Emulation
                     return false;
 
                 IntPtr OwnerBuffer = FindBufferBase(hostPointer);
+                bool Aliased = OwnerBuffer != IntPtr.Zero && IsBufferMapped(OwnerBuffer);
+                if (Aliased && !RegisterAliases(OwnerBuffer, address, size, hostPointer))
+                    return false;
 
                 _error = uc_mem_map_ptr(_uc, address, new UIntPtr(size), protection, hostPointer);
                 if (_error != UCErrors.UC_ERR_OK)
+                {
+                    if (Aliased)
+                        brov_mem_alias_remove(_uc, address, size);
+                    return false;
+                }
+
+                InsertMappedRegion(new MappedRegion { Address = address, Size = size, Ptr = hostPointer, BufferBase = OwnerBuffer, Aliased = Aliased });
+                return true;
+            }
+        }
+
+        // Unicorn tracks translated code per mapping, not per host page.
+        private bool RegisterAliases(IntPtr Buffer, ulong Address, ulong Size, IntPtr HostPointer)
+        {
+            for (int i = 0; i < _mappedRegions.Count; i++)
+            {
+                MappedRegion Region = _mappedRegions[i];
+                if (Region.BufferBase != Buffer || Region.Aliased)
+                    continue;
+
+                _error = brov_mem_alias_add(_uc, Region.Address, Region.Size, Region.Ptr);
+                if (_error != UCErrors.UC_ERR_OK)
                     return false;
 
-                InsertMappedRegion(new MappedRegion { Address = address, Size = size, Ptr = hostPointer, BufferBase = OwnerBuffer });
-                return true;
+                Region.Aliased = true;
+            }
+
+            _error = brov_mem_alias_add(_uc, Address, Size, HostPointer);
+            return _error == UCErrors.UC_ERR_OK;
+        }
+
+        private bool IsBufferMapped(IntPtr Buffer)
+        {
+            for (int i = 0; i < _mappedRegions.Count; i++)
+            {
+                if (_mappedRegions[i].BufferBase == Buffer)
+                    return true;
+            }
+
+            return false;
+        }
+
+        public unsafe IntPtr AllocateSharedStorage(ulong size)
+        {
+            lock (_mapsLock)
+            {
+                if (DisposedCheck())
+                    return IntPtr.Zero;
+
+                byte* ptr = AllocateBacking((nuint)size);
+                if (ptr == null)
+                {
+                    _error = UCErrors.UC_ERR_NOMEM;
+                    return IntPtr.Zero;
+                }
+
+                _bufferSizes[(IntPtr)ptr] = (nuint)size;
+                _heldBuffers.Add((IntPtr)ptr);
+                _error = UCErrors.UC_ERR_OK;
+                return (IntPtr)ptr;
+            }
+        }
+
+        public void ReleaseSharedStorage(IntPtr storage)
+        {
+            lock (_mapsLock)
+            {
+                if (DisposedCheck() || !_heldBuffers.Remove(storage))
+                    return;
+
+                FreeIfUnmapped(storage);
             }
         }
 
@@ -269,6 +341,13 @@ namespace Brovan.Core.Emulation
                     return Region.BufferBase;
             }
 
+            for (int i = 0; i < _heldBuffers.Count; i++)
+            {
+                byte* Start = (byte*)_heldBuffers[i];
+                if (_bufferSizes.TryGetValue(_heldBuffers[i], out nuint Size) && Target >= Start && Target < Start + Size)
+                    return _heldBuffers[i];
+            }
+
             return IntPtr.Zero;
         }
 
@@ -276,6 +355,7 @@ namespace Brovan.Core.Emulation
         {
             ulong end = address + size;
             bool changed = false;
+            bool aliased = false;
 
             _unmapSurvivors.Clear();
             _unmapReleasedBuffers.Clear();
@@ -293,6 +373,7 @@ namespace Brovan.Core.Emulation
                 _mappedRegions.RemoveAt(i);
                 InvalidateRegionIndex();
                 changed = true;
+                aliased |= Region.Aliased;
 
                 if (OverlapStart > Region.Address)
                 {
@@ -301,7 +382,8 @@ namespace Brovan.Core.Emulation
                         Address = Region.Address,
                         Size = OverlapStart - Region.Address,
                         Ptr = Region.Ptr,
-                        BufferBase = Region.BufferBase
+                        BufferBase = Region.BufferBase,
+                        Aliased = Region.Aliased
                     });
                 }
 
@@ -316,7 +398,8 @@ namespace Brovan.Core.Emulation
                         Address = OverlapEnd,
                         Size = RegionEnd - OverlapEnd,
                         Ptr = TailPtr,
-                        BufferBase = Region.BufferBase
+                        BufferBase = Region.BufferBase,
+                        Aliased = Region.Aliased
                     });
                 }
 
@@ -327,30 +410,28 @@ namespace Brovan.Core.Emulation
             if (!changed)
                 return;
 
+            if (aliased)
+                brov_mem_alias_remove(_uc, address, size);
+
             for (int i = 0; i < _unmapSurvivors.Count; i++)
                 InsertMappedRegion(_unmapSurvivors[i]);
 
             for (int i = 0; i < _unmapReleasedBuffers.Count; i++)
             {
                 IntPtr Buffer = _unmapReleasedBuffers[i];
-                bool StillAliased = false;
-
-                for (int j = 0; j < _mappedRegions.Count; j++)
-                {
-                    if (_mappedRegions[j].BufferBase == Buffer)
-                    {
-                        StillAliased = true;
-                        break;
-                    }
-                }
-
-                if (!StillAliased)
-                {
-                    _pendingFrees.Add(Buffer);
-                    if (_bufferSizes.TryGetValue(Buffer, out nuint Bytes))
-                        _pendingFreeBytes += Bytes;
-                }
+                if (!_heldBuffers.Contains(Buffer))
+                    FreeIfUnmapped(Buffer);
             }
+        }
+
+        private void FreeIfUnmapped(IntPtr Buffer)
+        {
+            if (IsBufferMapped(Buffer))
+                return;
+
+            _pendingFrees.Add(Buffer);
+            if (_bufferSizes.TryGetValue(Buffer, out nuint Bytes))
+                _pendingFreeBytes += Bytes;
 
             // Buffers are released at the end of the slice, so a guest that commits and decommits large
             // blocks inside one slice keeps every dead buffer resident. Cut the slice short instead.
@@ -2087,7 +2168,11 @@ namespace Brovan.Core.Emulation
 
                                 foreach (IntPtr ptr in _pendingFrees)
                                     ReleaseBacking(ptr);
+
+                                foreach (IntPtr ptr in _heldBuffers)
+                                    ReleaseBacking(ptr);
                             }
+                            _heldBuffers.Clear();
                             _pendingFrees.Clear();
                             _pendingFreeBytes = 0;
                             _bufferSizes.Clear();

@@ -82,7 +82,10 @@ insert-after|uc.c|uc->emu_count = count;|    brov_arm_budget(uc, count);
 insert-before|qemu/include/exec/exec-all.h|static inline bool uc_mem_hook_installed(struct uc_struct *uc, hwaddr paddr)|#include "brovan_mem_hooks.inc.h"
 insert-in-body|qemu/include/exec/exec-all.h|static inline bool uc_mem_hook_installed(struct uc_struct *uc, hwaddr paddr)|    return brov_mem_hook_needs_slow_path(uc, paddr);
 insert-after|qemu/accel/tcg/cputlb.c|#include <glib_compat.h>|#include "brovan_notdirty.inc.h"
-insert-in-body|qemu/accel/tcg/cputlb.c|static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,|    if (brov_notdirty_promote(cpu, mem_vaddr, tlbe)) { tlb_set_dirty(cpu, mem_vaddr); }
+insert-in-body|qemu/accel/tcg/cputlb.c|static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,|    if (!brov_alias_store(cpu, mem_vaddr, size, retaddr, tlbe) && brov_notdirty_promote(cpu, mem_vaddr, tlbe)) { tlb_set_dirty(cpu, mem_vaddr); }
+
+# --- one host page mapped at several guest addresses shares its translated blocks
+insert-in-body|qemu/accel/tcg/cputlb.c|void tlb_protect_code(struct uc_struct *uc, ram_addr_t ram_addr)|    brov_alias_protect_code(uc, ram_addr);
 insert-before|uc.c|if (remove_exec) {|    uc->tcg_flush_tlb(uc); /* brov: a cached TLB entry may predate these perms */
 replace-all|uc.c|if (count > 0 && uc->count_hook == 0) {|if (count > 0 && uc->count_hook == 0 && !uc->brov_budget_mode) {
 

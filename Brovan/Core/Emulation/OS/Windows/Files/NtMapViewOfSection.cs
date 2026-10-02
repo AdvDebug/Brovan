@@ -13,6 +13,46 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static ulong AlignDown(ulong v, ulong a) => v & ~(a - 1);
 
+        // NT: MmMakeSectionAccess.
+        private static ReadOnlySpan<byte> SectionAccessByMask => new byte[] { 0x04, 0x04, 0x08, 0x0C, 0x02, 0x04, 0x0A, 0x0C };
+
+        // NT: MmCompatibleProtectionMask.
+        private static ReadOnlySpan<byte> CompatibleViewProtection => new byte[] { 0x01, 0x0B, 0x11, 0xBB, 0x0F, 0x0B, 0xFF, 0xBB };
+
+        // NT: MiSectionMapping. Handle access still holds generic rights.
+        private static AccessMask MapSectionAccess(AccessMask Granted)
+        {
+            if ((Granted & (AccessMask.GenericAll | AccessMask.MaximumAllowed)) != 0)
+                return AccessMask.SectionAllAccess;
+
+            if ((Granted & AccessMask.GenericRead) != 0)
+                Granted |= AccessMask.SectionMapRead | AccessMask.SectionQuery;
+
+            if ((Granted & AccessMask.GenericWrite) != 0)
+                Granted |= AccessMask.SectionMapWrite;
+
+            if ((Granted & AccessMask.GenericExecute) != 0)
+                Granted |= AccessMask.SectionMapExecute;
+
+            return Granted;
+        }
+
+        private static NTSTATUS CheckDataViewProtection(uint SectionProtect, uint Win32Protect)
+        {
+            if ((Win32Protect & WinSysHelper.PageTargetsInvalid) != 0 && (Win32Protect & 0xF0) == 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            // KnownDlls sections that Brovan builds have no page protection.
+            int SectionMask = WinSysHelper.MakeProtectionMask(SectionProtect & 0xFFF);
+            if (SectionMask < 0)
+                return NTSTATUS.STATUS_SUCCESS;
+
+            uint Allowed = CompatibleViewProtection[SectionMask & 7] | 0x700u;
+            return ((Win32Protect & ~WinSysHelper.PageTargetsInvalid) & ~Allowed) == 0
+                ? NTSTATUS.STATUS_SUCCESS
+                : NTSTATUS.STATUS_SECTION_PROTECTION;
+        }
+
         private static void InitializeWindowsSharedSection(BinaryEmulator Instance, ulong Base)
         {
             Instance._emulator.WriteMemory(Base + 0x8, 0x10UL, 8);
@@ -159,6 +199,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint AllocationType = (uint)Instance.WinHelper.GetArg(8);
             uint Win32Protect = (uint)Instance.WinHelper.GetArg(9);
 
+            // NT checks the protection before either handle.
+            int ProtectionMask = WinSysHelper.MakeProtectionMask(Win32Protect & ~WinSysHelper.PageTargetsInvalid);
+            if (ProtectionMask < 0)
+                return NTSTATUS.STATUS_INVALID_PAGE_PROTECTION;
+
             NTSTATUS ProcessStatus = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess TargetProcess);
             if (ProcessStatus != NTSTATUS.STATUS_SUCCESS)
                 return ProcessStatus;
@@ -175,6 +220,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinSection Section = Instance.WinHelper.GetSectionByHandle(SectionHandle, AccessMask.GiveTemp);
             if (Section == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            AccessMask RequiredAccess = (AccessMask)SectionAccessByMask[ProtectionMask & 7];
+            if ((MapSectionAccess(Instance.WinHelper.HandleManager.GetPermissionsByHandle(SectionHandle)) & RequiredAccess) != RequiredAccess)
+                return NTSTATUS.STATUS_ACCESS_DENIED;
 
             bool IsSharedSection = !string.IsNullOrEmpty(Section.Name) && (string.Equals(Section.Name, "\\Windows\\SharedSection", StringComparison.OrdinalIgnoreCase) || Section.Name.EndsWith("\\Windows\\SharedSection", StringComparison.OrdinalIgnoreCase));
 
@@ -195,6 +244,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.WritePointer(BaseAddressPtr, Base);
                 Instance.WinHelper.WritePointer(ViewSizePtr, Size);
                 Section.MappedViewCount++;
+                Section.BackingViewCount++;
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtMapViewOfSection: SharedSection Base=0x{Base:X}, Size=0x{Size:X}", LogFlags.Syscall);
@@ -214,14 +264,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 SectionOffset = Instance._emulator.ReadMemoryULong(SectionOffsetPtr);
             }
 
-            if (SectionOffset > Section.Size)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
             ulong ReturnedBase = 0;
             ulong ReturnedSize = 0;
 
             if (Section.IsImage)
             {
+                if ((Win32Protect & WinSysHelper.PageTargetsInvalid) != 0)
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                if (SectionOffset > Section.Size)
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
                 WindowsFileStream Stream = Section.GetFileStream();
                 if (Stream == null || !Stream.ExistsAsFile)
                     return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
@@ -290,71 +343,32 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            ulong Available = Section.Size - SectionOffset;
-            ReturnedSize = BinaryEmulator.AlignUp(Available, PageSize);
+            if ((SectionOffset & (WinSysHelper.AllocationGranularity - 1)) != 0 || (RequestedBase & (WinSysHelper.AllocationGranularity - 1)) != 0)
+                return NTSTATUS.STATUS_MAPPED_ALIGNMENT;
 
-            if (RequestedSize != 0 && RequestedSize < ReturnedSize)
-                ReturnedSize = BinaryEmulator.AlignUp(RequestedSize, PageSize);
+            NTSTATUS ProtectStatus = CheckDataViewProtection(Section.Protection, Win32Protect);
+            if (ProtectStatus != NTSTATUS.STATUS_SUCCESS)
+                return ProtectStatus;
 
-            if (ReturnedSize == 0)
+            Win32Protect &= ~WinSysHelper.PageTargetsInvalid;
+
+            ulong SectionEnd = BinaryEmulator.AlignUp(Section.Size, PageSize);
+            if (SectionOffset >= Section.Size || RequestedSize > SectionEnd - SectionOffset)
+                return NTSTATUS.STATUS_INVALID_VIEW_SIZE;
+
+            ReturnedSize = RequestedSize != 0 ? BinaryEmulator.AlignUp(RequestedSize, PageSize) : SectionEnd - SectionOffset;
+
+            // MaxAddress is inclusive on x64 and exclusive on x86.
+            ulong UserEnd = BinaryEmulator.AlignUp(Instance.MaxAddress, PageSize);
+            if (RequestedBase != 0 && RequestedBase >= UserEnd)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            ulong ExistingStorage = Section.FindViewStorage(SectionOffset, ReturnedSize, out bool TrackedStorage);
-
-            // A SEC_RESERVE section has no backing store. the view is a reservation and the guest commits
-            // into it with NtAllocateVirtualMemory. Measured on the my actual host. the fresh
-            // view reads back as MEM_RESERVE carrying the section's page protection
-            bool ReserveOnlyView = ExistingStorage == 0 && !Section.IsImage;
-            if (ReserveOnlyView)
-            {
-                // Honour the requested base. a caller that picks its own addresses fails the check below,
-                // answers that by querying and retrying forever, and leaks a reservation each time.
-                ulong ViewBase = RequestedBase;
-                if (ViewBase == 0 &&
-                    !Instance.TryFindFreeBaseAddress(ReturnedSize, 0x10000, Instance.BaseAddress, Instance.MaxAddress, out ViewBase))
-                    return NTSTATUS.STATUS_NO_MEMORY;
-
-                // AllocationProtect is the view's protection, not the section.
-                if (!Instance.ReserveMemory(ViewBase, ReturnedSize, Win32Protect != 0 ? Win32Protect : Section.Protection))
-                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
-
-                // Only a view that spans the whole section may stand in as the section's backing range.
-                // latching a partial one makes every address above it look like part of this section.
-                if (Section.BackingAddress == 0 && SectionOffset == 0 && ReturnedSize >= Section.Size)
-                    Section.BackingAddress = ViewBase;
-
-                Section.AddView(SectionOffset, ViewBase, ReturnedSize, false, Instance.WinHelper.ConvertWinProtectToInternal(Section.Protection));
-                ReturnedBase = ViewBase;
-            }
-            else
-            {
-                ReturnedBase = ExistingStorage;
-            }
-
-            bool AliasView = !ReserveOnlyView && RequestedBase != ReturnedBase && (TrackedStorage || RequestedBase != 0);
-            if (AliasView)
-            {
-                ulong AliasBase = RequestedBase;
-                if (AliasBase == 0 &&
-                    !Instance.TryFindFreeBaseAddress(ReturnedSize, 0x10000, Instance.BaseAddress, Instance.MaxAddress, out AliasBase))
-                    return NTSTATUS.STATUS_NO_MEMORY;
-
-                if (Instance.IsRegionMapped(AliasBase, ReturnedSize))
-                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
-
-                MemoryProtection ViewProtection = Instance.WinHelper.ConvertWinProtectToInternal(Win32Protect);
-                if (!Instance.MapSharedMemoryRange(AliasBase, ReturnedBase, ReturnedSize, ViewProtection, Win32Protect != 0 ? Win32Protect : Section.Protection))
-                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
-
-                Section.AddView(SectionOffset, AliasBase, ReturnedSize, true, ViewProtection);
-                ReturnedBase = AliasBase;
-            }
-            else if (RequestedBase != 0 && RequestedBase != ReturnedBase)
+            if (RequestedBase != 0 && ReturnedSize > UserEnd - RequestedBase)
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
-            MemoryProtection Protection = Instance.WinHelper.ConvertWinProtectToInternal(Win32Protect);
-            if (!ReserveOnlyView && !AliasView)
-                Instance.ProtectViewRange(ReturnedBase, ReturnedSize, Protection, Win32Protect);
+            NTSTATUS MapStatus = MapDataView(Instance, Section, SectionOffset, ReturnedSize, RequestedBase, Win32Protect, out ReturnedBase);
+            if (MapStatus != NTSTATUS.STATUS_SUCCESS)
+                return MapStatus;
 
             if (!Instance.WinHelper.WritePointer(BaseAddressPtr, ReturnedBase))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -362,11 +376,70 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.WritePointer(ViewSizePtr, ReturnedSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Section.MappedViewCount++;
-
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtMapViewOfSection: Section=0x{SectionHandle:X}, Base=0x{ReturnedBase:X}, Size=0x{ReturnedSize:X}, Image={Section.IsImage}, Prot=0x{Win32Protect:X}", LogFlags.Syscall);
 
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // A view congruent to its section offset modulo 2 MiB can use 2 MiB host pages.
+        private static bool TryFindViewBase(BinaryEmulator Instance, ulong SectionOffset, ulong ViewSize, out ulong ViewBase)
+        {
+            const ulong LargePage = 0x200000;
+
+            if (ViewSize >= LargePage)
+            {
+                ulong Skew = SectionOffset & (LargePage - 1);
+                if (Instance.TryFindFreeBaseAddress(ViewSize + Skew, LargePage, Instance.BaseAddress, Instance.MaxAddress, out ulong LargeBase))
+                {
+                    ViewBase = LargeBase + Skew;
+                    return true;
+                }
+            }
+
+            return Instance.TryFindFreeBaseAddress(ViewSize, WinSysHelper.AllocationGranularity, Instance.BaseAddress, Instance.MaxAddress, out ViewBase);
+        }
+
+        // The caller aligns and bounds SectionOffset and ViewSize.
+        internal static NTSTATUS MapDataView(BinaryEmulator Instance, WinSection Section, ulong SectionOffset, ulong ViewSize, ulong RequestedBase, uint Win32Protect, out ulong ViewBase)
+        {
+            ViewBase = RequestedBase;
+            if (ViewBase == 0 && !TryFindViewBase(Instance, SectionOffset, ViewSize, out ViewBase))
+                return NTSTATUS.STATUS_NO_MEMORY;
+
+            uint AllocationProtect = Win32Protect != 0 ? Win32Protect : Section.Protection;
+            ulong ExistingStorage = Section.Storage == IntPtr.Zero ? Section.FindViewStorage(SectionOffset, ViewSize, out _) : 0;
+
+            if (Section.Storage == IntPtr.Zero && ExistingStorage == 0)
+            {
+                // SEC_RESERVE: the view is a reservation that NtAllocateVirtualMemory commits into.
+                if (!Instance.ReserveMemory(ViewBase, ViewSize, AllocationProtect))
+                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+                // Only a view that spans the whole section may stand in as the section's backing range.
+                // latching a partial one makes every address above it look like part of this section.
+                if (Section.BackingAddress == 0 && SectionOffset == 0 && ViewSize >= Section.Size)
+                    Section.BackingAddress = ViewBase;
+
+                Section.AddView(SectionOffset, ViewBase, ViewSize, false, Instance.WinHelper.ConvertWinProtectToInternal(Section.Protection));
+            }
+            else
+            {
+                if (Instance.IsRegionMapped(ViewBase, ViewSize))
+                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+                MemoryProtection ViewProtection = Instance.WinHelper.ConvertWinProtectToInternal(Win32Protect);
+                bool Mapped = Section.Storage != IntPtr.Zero
+                    ? Instance.MapSharedMemoryRegion(ViewBase, ViewSize, ViewProtection, (nint)Section.Storage + (nint)SectionOffset, AllocationProtect, ViewBase)
+                    : Instance.MapSharedMemoryRange(ViewBase, ExistingStorage, ViewSize, ViewProtection, AllocationProtect);
+                if (!Mapped)
+                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+                Section.AddView(SectionOffset, ViewBase, ViewSize, true, ViewProtection);
+            }
+
+            Instance.WinHelper.TrackSectionRange(ViewBase, ViewSize);
+            Section.MappedViewCount++;
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

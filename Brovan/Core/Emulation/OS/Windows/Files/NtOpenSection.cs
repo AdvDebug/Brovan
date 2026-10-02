@@ -102,21 +102,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             bool IsImage = (AllocationAttributes & SEC_IMAGE) != 0;
-            ulong BackingAddress = 0;
+            IntPtr Storage = IntPtr.Zero;
             if (!IsImage)
             {
-                BackingAddress = Instance.MapUniqueAddress((uint)Size, MemoryProtection.ReadWrite);
-                if (BackingAddress == 0)
-                    return NTSTATUS.STATUS_NO_MEMORY;
+                Storage = Instance._emulator.AllocateSharedStorage(Instance.AlignToPageSize(Size));
+                if (Storage == IntPtr.Zero)
+                    return NTSTATUS.STATUS_COMMITMENT_LIMIT;
 
-                if (!Stream.TryReadAllBytes(out byte[] Data))
+                if (!NtCreateSection.CopyToStorage(Stream, Storage, Size))
+                {
+                    Instance._emulator.ReleaseSharedStorage(Storage);
                     return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
-
-                if (Data.Length != 0 && !Instance.WriteMemory(BackingAddress, Data))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                }
             }
 
-            WinHandle Handle = Instance.WinHelper.CreateSectionHandle(FullName, Size, SectionPageProtection, AllocationAttributes, ResolvedBackingPath, BackingAddress, DesiredAccess);
+            WinHandle Handle = Instance.WinHelper.CreateSectionHandle(FullName, Size, SectionPageProtection, AllocationAttributes, ResolvedBackingPath, 0, DesiredAccess, Storage);
 
             if (!Instance.WinHelper.WritePointer(SectionHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

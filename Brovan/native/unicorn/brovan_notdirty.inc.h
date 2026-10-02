@@ -133,4 +133,77 @@ static inline void brov_fault_exit(struct uc_struct *uc, uintptr_t retaddr)
     }
 }
 
+/* Each uc_mem_map_ptr mapping is its own RAMBlock, and a block is filed under
+ * the mapping it was fetched through. For ranges registered with
+ * brov_mem_alias_add(), a store through one mapping must also invalidate the
+ * blocks of every other mapping of the same host page. */
+
+/* Paging is off, so the guest address is the TLB virtual address. */
+static inline void brov_alias_protect_code(struct uc_struct *uc, ram_addr_t ram_addr)
+{
+    uintptr_t host;
+    uint32_t i;
+
+    if (uc->brov_alias_count == 0) {
+        return;
+    }
+
+    host = (uintptr_t)qemu_map_ram_ptr(uc, NULL, ram_addr & TARGET_PAGE_MASK);
+    for (i = 0; i < uc->brov_alias_count; i++) {
+        const brov_alias_range *alias = &uc->brov_aliases[i];
+
+        if (host - alias->host < alias->size) {
+            tlb_reset_dirty_by_vaddr(uc->cpu, alias->guest + (host - alias->host), TARGET_PAGE_SIZE);
+        }
+    }
+}
+
+/* True while any mapping of the host page still holds blocks. */
+static inline bool brov_alias_store(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+                                    uintptr_t retaddr, CPUTLBEntry *tlbe)
+{
+    struct uc_struct *uc = cpu->uc;
+    bool code_left = false;
+    uintptr_t host;
+    uint32_t i;
+
+    if (uc->brov_alias_count == 0) {
+        return false;
+    }
+
+    host = (uintptr_t)mem_vaddr + tlbe->addend;
+    for (i = 0; i < uc->brov_alias_count; i++) {
+        const brov_alias_range *alias = &uc->brov_aliases[i];
+        struct page_collection *pages;
+        MemoryRegion *mr;
+        ram_addr_t ram_addr;
+        uint64_t guest;
+
+        if (host - alias->host >= alias->size) {
+            continue;
+        }
+
+        guest = alias->guest + (host - alias->host);
+        mr = uc->memory_mapping(uc, guest);
+        if (!mr || !mr->ram_block) {
+            continue;
+        }
+
+        ram_addr = memory_region_get_ram_addr(mr) + (guest - mr->addr);
+        if (uc->brov.page_has_tbs && !uc->brov.page_has_tbs(uc, ram_addr)) {
+            continue;
+        }
+
+        pages = page_collection_lock(uc, ram_addr, ram_addr + size);
+        tb_invalidate_phys_page_fast(uc, pages, ram_addr, size, retaddr);
+        page_collection_unlock(pages);
+
+        if (!uc->brov.page_has_tbs || uc->brov.page_has_tbs(uc, ram_addr)) {
+            code_left = true;
+        }
+    }
+
+    return code_left;
+}
+
 #endif

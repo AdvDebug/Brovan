@@ -54,7 +54,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static bool TryGetStackReserve(BinaryEmulator Instance, ulong ImageReserve, ulong CommitSize, ulong ReserveSize, out ulong Reserve)
         {
             const ulong Megabyte = 0x100000;
-            const ulong Granularity = 0x10000;
 
             Reserve = ReserveSize != 0 ? ReserveSize : ImageReserve;
             if (CommitSize > Instance.MaxAddress || Reserve > Instance.MaxAddress)
@@ -63,7 +62,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (CommitSize >= Reserve)
                 Reserve = BinaryEmulator.AlignUp(CommitSize, Megabyte);
 
-            Reserve = BinaryEmulator.AlignUp(Reserve, Granularity);
+            Reserve = BinaryEmulator.AlignUp(Reserve, WinSysHelper.AllocationGranularity);
             return Reserve != 0 && Reserve <= Instance.MaxAddress;
         }
 

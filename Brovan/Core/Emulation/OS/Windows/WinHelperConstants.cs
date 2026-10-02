@@ -182,6 +182,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_NO_MEMORY = 0xC0000017,
         STATUS_COMMITMENT_LIMIT = 0xC000012D,
         STATUS_CONFLICTING_ADDRESSES = 0xC0000018,
+        STATUS_NOT_MAPPED_VIEW = 0xC0000019,
         STATUS_UNABLE_TO_FREE_VM = 0xC000001A,
         STATUS_ILLEGAL_INSTRUCTION = 0xC000001D,
         STATUS_INVALID_LOCK_SEQUENCE = 0xC000001E,
@@ -216,6 +217,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_INVALID_PAGE_PROTECTION = 0xC0000045,
         STATUS_SUSPEND_COUNT_EXCEEDED = 0xC000004A,
         STATUS_THREAD_IS_TERMINATING = 0xC000004B,
+        STATUS_SECTION_PROTECTION = 0xC000004E,
         STATUS_PRIVILEGE_NOT_HELD = 0xC0000061,
         STATUS_FREE_VM_NOT_AT_BASE = 0xC000009F,
         STATUS_INVALID_PARAMETER_3 = 0xC00000F1,
@@ -250,6 +252,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_NO_MORE_ENTRIES = 0x8000001A,
         STATUS_NOT_SUPPORTED = 0xC00000BB,
         STATUS_APP_INIT_FAILURE = 0xC0000145,
+        STATUS_MAPPED_ALIGNMENT = 0xC0000220,
         STATUS_NOT_FOUND = 0xC0000225,
         STATUS_WMI_GUID_NOT_FOUND = 0xC0000295,
         STATUS_NO_MORE_FILES = 0x80000006,
@@ -1618,6 +1621,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public string Path;
         public WindowsFileStream FileStream;
         public ulong BackingAddress;
+        public int BackingViewCount;
+
+        // Host pages, mapped only through the section's views.
+        public IntPtr Storage;
         public ulong ImageSectionId;
         public int MappedViewCount;
         public bool IsImage => ((Attributes & 0x01000000) != 0);
@@ -1633,19 +1640,31 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong ViewLow = ulong.MaxValue;
         private ulong ViewHigh;
 
-        public bool IsViewAddress(ulong Address)
+        private int FindViewIndex(ulong Address)
         {
             if (Views == null || Address < ViewLow || Address >= ViewHigh)
-                return false;
+                return -1;
 
             for (int Index = 0; Index < Views.Count; Index++)
             {
                 WinSectionView View = Views[Index];
                 if (Address >= View.Base && Address - View.Base < View.Size)
-                    return true;
+                    return Index;
             }
 
-            return false;
+            return -1;
+        }
+
+        public bool IsViewAddress(ulong Address)
+        {
+            return FindViewIndex(Address) >= 0;
+        }
+
+        public bool TryFindView(ulong Address, out WinSectionView View)
+        {
+            int Index = FindViewIndex(Address);
+            View = Index >= 0 ? Views[Index] : default;
+            return Index >= 0;
         }
 
         /// <summary>
@@ -1710,22 +1729,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool RemoveViewContaining(ulong Address, out WinSectionView Removed)
         {
-            if (Views != null && Address >= ViewLow && Address < ViewHigh)
+            int Index = FindViewIndex(Address);
+            if (Index < 0)
             {
-                for (int Index = 0; Index < Views.Count; Index++)
-                {
-                    WinSectionView View = Views[Index];
-                    if (Address >= View.Base && Address - View.Base < View.Size)
-                    {
-                        Views.RemoveAt(Index);
-                        Removed = View;
-                        return true;
-                    }
-                }
+                Removed = default;
+                return false;
             }
 
-            Removed = default;
-            return false;
+            Removed = Views[Index];
+            Views.RemoveAt(Index);
+            return true;
         }
 
         public WindowsFileStream GetFileStream(bool CreateWriteDirectories = false)

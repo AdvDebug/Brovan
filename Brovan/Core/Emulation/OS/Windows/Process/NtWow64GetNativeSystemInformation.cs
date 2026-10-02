@@ -83,7 +83,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.WriteUInt32(SystemInformationPtr + 0x0C, NumberOfPhysicalPages);
             Instance.WinHelper.WriteUInt32(SystemInformationPtr + 0x10, LowestPhysicalPageNumber);
             Instance.WinHelper.WriteUInt32(SystemInformationPtr + 0x14, HighestPhysicalPageNumber);
-            Instance.WinHelper.WriteUInt32(SystemInformationPtr + 0x18, 0x10000u);
+            Instance.WinHelper.WriteUInt32(SystemInformationPtr + 0x18, (uint)WinSysHelper.AllocationGranularity);
 
             if (Wide)
             {

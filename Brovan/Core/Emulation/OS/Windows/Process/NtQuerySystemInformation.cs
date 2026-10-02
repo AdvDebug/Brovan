@@ -389,7 +389,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             uint NumberOfPhysicalPages = Settings.MemoryBudget.GuestPhysicalPages;
                             uint LowestPhysicalPageNumber = 0x00000001;
                             uint HighestPhysicalPageNumber = LowestPhysicalPageNumber + NumberOfPhysicalPages - 1;
-                            uint AllocationGranularity = 0x10000;
                             uint TimerResolution = 156250;
 
                             Instance.WinHelper.WriteZeroMemory(SystemInformationPtr, RequiredLength);
@@ -398,7 +397,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x0C, NumberOfPhysicalPages);
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x10, LowestPhysicalPageNumber);
                             Instance._emulator.WriteMemory(SystemInformationPtr + 0x14, HighestPhysicalPageNumber);
-                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x18, AllocationGranularity);
+                            Instance._emulator.WriteMemory(SystemInformationPtr + 0x18, (uint)WinSysHelper.AllocationGranularity);
 
                             Instance.WinHelper.WritePointer(PointerFields, MinimumUserModeAddress);
                             Instance.WinHelper.WritePointer(PointerFields + PointerSize, Instance.MaxAddress);

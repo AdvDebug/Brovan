@@ -1157,6 +1157,7 @@ namespace Brovan.Core.Emulation
                    Left.IsReserved == Right.IsReserved &&
                    Left.IsCommitted == Right.IsCommitted &&
                    Left.IsReset == Right.IsReset &&
+                   Left.IsSecured == Right.IsSecured &&
                    Left.Protections == Right.Protections &&
                    Left.InitialProtections == Right.InitialProtections &&
                    Left.SpecialProtections == Right.SpecialProtections &&
@@ -1363,32 +1364,6 @@ namespace Brovan.Core.Emulation
             };
 
             GuestEnvironment.QueueUserModeException(this, Status, Info);
-            return true;
-        }
-
-        // NT reports a view's protection as both Protect and AllocationProtect
-        public bool ProtectViewRange(ulong BaseAddress, ulong Size, MemoryProtection Protection, uint WinProtect)
-        {
-            if (!ProtectWinMemoryRange(BaseAddress, Size, Protection, WinProtect))
-                return false;
-
-            if (WinProtect == 0)
-                return true;
-
-            List<MemoryRegion> Covered = new List<MemoryRegion>();
-            AddOverlappingMemoryRegions(BaseAddress, Size, Covered);
-
-            for (int Index = 0; Index < Covered.Count; Index++)
-            {
-                MemoryRegion Region = Covered[Index];
-                if (Region.AllocationProtect == WinProtect)
-                    continue;
-
-                RemoveMemoryRegion(Region);
-                Region.AllocationProtect = WinProtect;
-                AddMemoryRegion(Region);
-            }
-
             return true;
         }
 
@@ -1838,60 +1813,7 @@ namespace Brovan.Core.Emulation
             if (IsRegionInUse(BaseAddress, Size))
                 return false;
 
-            if (_freedmemory.Count > 0)
-            {
-                ulong Start = BaseAddress;
-                ulong End = BaseAddress + Size;
-
-                for (int Index = 0; Index < _freedmemory.Count; Index++)
-                {
-                    MemoryRegion Freed = _freedmemory[Index];
-                    ulong FreedStart = Freed.BaseAddress;
-                    ulong FreedEnd = Freed.BaseAddress + Freed.Size;
-
-                    if (End <= FreedStart || Start >= FreedEnd)
-                        continue;
-
-                    if (Start <= FreedStart && End >= FreedEnd)
-                    {
-                        _freedmemory.RemoveAt(Index);
-                        Index--;
-                        continue;
-                    }
-
-                    if (Start <= FreedStart && End < FreedEnd)
-                    {
-                        Freed.BaseAddress = End;
-                        Freed.Size = FreedEnd - End;
-                        _freedmemory[Index] = Freed;
-                        continue;
-                    }
-
-                    if (Start > FreedStart && End >= FreedEnd)
-                    {
-                        Freed.Size = Start - FreedStart;
-                        _freedmemory[Index] = Freed;
-                        continue;
-                    }
-
-                    if (Start > FreedStart && End < FreedEnd)
-                    {
-                        ulong LeftSize = Start - FreedStart;
-                        ulong RightStart = End;
-                        ulong RightSize = FreedEnd - End;
-
-                        Freed.Size = LeftSize;
-                        _freedmemory[Index] = Freed;
-                        _freedmemory.Insert(Index + 1, new MemoryRegion
-                        {
-                            BaseAddress = RightStart,
-                            Size = RightSize,
-                            RequestedSize = RightSize
-                        });
-                        Index++;
-                    }
-                }
-            }
+            ConsumeFreedMemoryRange(BaseAddress, Size);
 
             if (WinHelper == null)
                 return false;
@@ -1914,6 +1836,53 @@ namespace Brovan.Core.Emulation
             });
 
             return true;
+        }
+
+        public bool MapSecuredPage(ulong BaseAddress, bool HostMapped)
+        {
+            const uint PAGE_READONLY = 0x02;
+
+            if (!HostMapped && !_emulator.MapMemory(BaseAddress, PageSize, MemoryProtection.Read))
+                return false;
+
+            ConsumeFreedMemoryRange(BaseAddress, PageSize);
+            AddMemoryRegion(new MemoryRegion
+            {
+                BaseAddress = BaseAddress,
+                Size = PageSize,
+                RequestedSize = PageSize,
+                AllocationBase = BaseAddress,
+                AllocationProtect = PAGE_READONLY,
+                Protect = PAGE_READONLY,
+                IsReserved = true,
+                IsCommitted = true,
+                IsSecured = true,
+                InitialProtections = MemoryProtection.Read,
+                Protections = MemoryProtection.Read,
+                SpecialProtections = SpecialProtections.None,
+                Flags = AllocationType.Commited
+            });
+
+            return true;
+        }
+
+        internal NTSTATUS CheckSecuredRange(ulong BaseAddress, ulong Size, NTSTATUS Refusal)
+        {
+            ulong End = GetRangeEnd(BaseAddress, Size);
+            FindWinRegionWindow(BaseAddress, End, out int First, out int Last);
+
+            for (int i = First; i < Last; i++)
+            {
+                MemoryRegion Region = _memory[i];
+                if (!Region.IsSecured)
+                    continue;
+
+                return BaseAddress < Region.BaseAddress || End > GetRangeEnd(Region.BaseAddress, Region.Size)
+                    ? NTSTATUS.STATUS_CONFLICTING_ADDRESSES
+                    : Refusal;
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         /// <summary>
@@ -2131,9 +2100,7 @@ namespace Brovan.Core.Emulation
 
             if (!TryFindMemoryRegion(BaseAddress, out MemoryRegion Region) || !Region.IsReserved)
             {
-                // A view of an ordinary SEC_COMMIT section is backed the moment it is mapped, so it is not
-                // carried as "reserved". Committing over memory that is already backed is a protection
-                // change on the host, not an error.
+                // Brovan's own mappings are backed but not reserved. A commit there only changes protection.
                 if (!IsRegionMapped(BaseAddress, Size))
                     return false;
 
@@ -2436,23 +2403,7 @@ namespace Brovan.Core.Emulation
 
             _memory.RemoveRange(Kept, Last - Kept);
 
-            _freedmemory.Add(new MemoryRegion
-            {
-                BaseAddress = Start,
-                Size = End - Start,
-                RequestedSize = End - Start,
-                AllocationBase = Start,
-                AllocationProtect = 0,
-                Protect = 0,
-                IsReserved = false,
-                IsCommitted = false,
-                InitialProtections = MemoryProtection.None,
-                Protections = MemoryProtection.None,
-                SpecialProtections = SpecialProtections.None,
-                Flags = AllocationType.None
-            });
-            _freedMemorySorted = false;
-
+            AddFreedRegion(Start, End - Start);
             return true;
         }
 
@@ -2506,17 +2457,10 @@ namespace Brovan.Core.Emulation
 
         public ulong MapWinUniqueAddress(ulong Size, MemoryProtection Protection, SpecialProtections Special, AllocationType Flags)
         {
-            ulong CurrentAddress = BaseAddress;
             ulong AlignedSize = AlignToPageSize(Size);
-            while (CurrentAddress + AlignedSize < MaxAddress)
+            ulong SearchFrom = BaseAddress;
+            while (TryFindFreeBaseAddress(AlignedSize, PageSize, SearchFrom, MaxAddress, out ulong CurrentAddress))
             {
-                if (TryFindOverlappingMemoryRegion(CurrentAddress, AlignedSize, out MemoryRegion Occupied))
-                {
-                    ulong NextAddress = AlignToPageSize(GetRangeEnd(Occupied.BaseAddress, Occupied.Size));
-                    CurrentAddress = NextAddress > CurrentAddress ? NextAddress : CurrentAddress + PageSize;
-                    continue;
-                }
-
                 if (_emulator.MapMemory(CurrentAddress, AlignedSize, GetGuardedHostProtection(Protection, Special)))
                 {
                     ConsumeFreedMemoryRange(CurrentAddress, AlignedSize);
@@ -2546,7 +2490,7 @@ namespace Brovan.Core.Emulation
                     return CurrentAddress;
                 }
 
-                CurrentAddress += AlignedSize;
+                SearchFrom = CurrentAddress + AlignedSize;
             }
 
             return 0;

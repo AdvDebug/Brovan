@@ -29,11 +29,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.IsCurrentProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            if (BaseAddress == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!Instance.WinHelper.UnmapViewOfSection(BaseAddress))
-                return NTSTATUS.STATUS_INVALID_ADDRESS;
+            if (BaseAddress == 0 || !Instance.WinHelper.UnmapViewOfSection(BaseAddress))
+                return NTSTATUS.STATUS_NOT_MAPPED_VIEW;
 
             Instance.WinHelper.LdrTracker?.NotifyImageMapped();
 

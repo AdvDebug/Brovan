@@ -169,6 +169,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal const ulong Int2EInstructionLength = 2;
 
+        internal const ulong AllocationGranularity = 0x10000;
+
         /// <summary>
         /// Returns the address of the syscall instruction that is currently being handled.
         /// </summary>
@@ -2221,6 +2223,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     BackingAddress = PreAllocSharedBase,
                     Initialized = false
                 });
+                TrackSectionRange(PreAllocSharedBase, PreAllocSharedSectionSize);
             }
 
             foreach (string PortName in new[]
@@ -2323,22 +2326,54 @@ namespace Brovan.Core.Emulation.OS.Windows
             private static readonly ulong[] SingleZeroParameter = new ulong[1];
         }
 
-        public bool IsSectionViewAddress(ulong Address)
+        private readonly record struct SectionRange(ulong Base, ulong End);
+
+        // Sorted by base and disjoint.
+        private readonly List<SectionRange> SectionRanges = new();
+
+        private int FindSectionRangeIndex(ulong Address)
         {
-            for (int Index = 0; Index < WinSections.Count; Index++)
+            int Low = 0;
+            int High = SectionRanges.Count - 1;
+            int Found = -1;
+
+            while (Low <= High)
             {
-                WinSection Section = WinSections[Index];
-                if (Section == null)
-                    continue;
-
-                if (Section.BackingAddress != 0 && Address >= Section.BackingAddress && Address - Section.BackingAddress < Section.Size)
-                    return true;
-
-                if (Section.IsViewAddress(Address))
-                    return true;
+                int Middle = Low + ((High - Low) >> 1);
+                if (SectionRanges[Middle].Base <= Address)
+                {
+                    Found = Middle;
+                    Low = Middle + 1;
+                }
+                else
+                {
+                    High = Middle - 1;
+                }
             }
 
-            return false;
+            return Found;
+        }
+
+        internal void TrackSectionRange(ulong Base, ulong Size)
+        {
+            int Index = FindSectionRangeIndex(Base);
+            if (Index >= 0 && SectionRanges[Index].Base == Base)
+                return;
+
+            SectionRanges.Insert(Index + 1, new SectionRange(Base, Base + Size));
+        }
+
+        internal void UntrackSectionRange(ulong Base)
+        {
+            int Index = FindSectionRangeIndex(Base);
+            if (Index >= 0 && SectionRanges[Index].Base == Base)
+                SectionRanges.RemoveAt(Index);
+        }
+
+        public bool IsSectionViewAddress(ulong Address)
+        {
+            int Index = FindSectionRangeIndex(Address);
+            return Index >= 0 && Address < SectionRanges[Index].End;
         }
 
         public void MirrorCommitToSectionAliases(ulong Address, ulong Size)
@@ -2421,6 +2456,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Section == null || !Section.RemoveViewContaining(BaseAddress, out WinSectionView Removed))
                     continue;
 
+                UntrackSectionRange(Removed.Base);
+
                 if (Section.MappedViewCount > 0)
                     Section.MappedViewCount--;
 
@@ -2437,6 +2474,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinSection? ViewSection = FindSectionByBackingAddress(BaseAddress);
             if (ViewSection != null)
             {
+                if (ViewSection.BackingViewCount == 0)
+                    return false;
+
+                ViewSection.BackingViewCount--;
                 if (ViewSection.MappedViewCount > 0)
                     ViewSection.MappedViewCount--;
 
@@ -2445,11 +2486,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
             }
 
-            if (!Emulator.TryFindMemoryRegion(BaseAddress, out MemoryRegion ViewRegion))
-                return false;
-
-            ForgetLockedRegion(ViewRegion.BaseAddress);
-            return Emulator.UnmapMemoryRegion(ViewRegion.BaseAddress);
+            return false;
         }
 
         private WinSection? FindSectionByBackingAddress(ulong Address)
@@ -2476,7 +2513,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 ForgetLockedPages(Section.BackingAddress, Section.BackingAddress + Section.Size);
                 Emulator.UnmapMemoryRegion(Section.BackingAddress);
+                UntrackSectionRange(Section.BackingAddress);
                 Section.BackingAddress = 0;
+            }
+
+            if (Section.Storage != IntPtr.Zero)
+            {
+                Emulator._emulator.ReleaseSharedStorage(Section.Storage);
+                Section.Storage = IntPtr.Zero;
             }
 
             Section.ReleaseFileStream();
@@ -4169,6 +4213,46 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return PAGE_READONLY;
 
             return PAGE_NOACCESS;
+        }
+
+        internal const uint PageTargetsInvalid = 0x40000000;
+
+        private const int ProtectionMaskNoAccess = 0x18;
+
+        private static ReadOnlySpan<sbyte> ProtectionMaskByLowNibble => new sbyte[] { -1, ProtectionMaskNoAccess, 1, -1, 4, -1, -1, -1, 5, -1, -1, -1, -1, -1, -1, -1 };
+
+        private static ReadOnlySpan<sbyte> ProtectionMaskByHighNibble => new sbyte[] { -1, 2, 3, -1, 6, -1, -1, -1, 7, -1, -1, -1, -1, -1, -1, -1 };
+
+        // NT: MiMakeProtectionMask.
+        internal static int MakeProtectionMask(uint Protect)
+        {
+            if (Protect >= 0x800)
+                return -1;
+
+            uint Low = Protect & 0xF;
+            uint High = (Protect >> 4) & 0xF;
+            if ((Low != 0) == (High != 0))
+                return -1;
+
+            int Mask = Low != 0 ? ProtectionMaskByLowNibble[(int)Low] : ProtectionMaskByHighNibble[(int)High];
+            if (Mask < 0)
+                return -1;
+
+            if ((Protect & 0x100) != 0)
+            {
+                if (Mask == ProtectionMaskNoAccess || (Protect & 0x600) != 0)
+                    return -1;
+
+                Mask |= 0x10;
+            }
+
+            if ((Protect & 0x200) != 0)
+                return Mask == ProtectionMaskNoAccess || (Protect & 0x400) != 0 ? -1 : Mask | 0x08;
+
+            if ((Protect & 0x400) != 0)
+                return Mask == ProtectionMaskNoAccess || (Mask & 0x02) != 0 ? -1 : Mask | 0x18;
+
+            return Mask;
         }
 
         public AllocationType ConvertWinAllocType(ulong AllocTypes)
@@ -9546,7 +9630,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HandleManager.GetObjectByHandle<WinSemaphore>(Handle);
         }
 
-        public WinHandle CreateSectionHandle(string Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, AccessMask Permissions)
+        public WinHandle CreateSectionHandle(string Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, AccessMask Permissions, IntPtr Storage = default)
+        {
+            WinSection Sec = CreateSection(Name, Size, Protection, Attributes, Path, BackingAddress, Storage);
+
+            WinHandle Handle = HandleManager.AddHandle(Sec, Permissions);
+            AddWinHandle(Handle);
+            return Handle;
+        }
+
+        private WinSection CreateSection(string Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, IntPtr Storage)
         {
             if (string.IsNullOrEmpty(Name))
                 Name = GenerateAnonymousObjectName("Section_");
@@ -9559,17 +9652,67 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Attributes = Attributes,
                 Path = Path,
                 FileStream = string.IsNullOrEmpty(Path) ? null : WindowsFileStream.FromGuestPath(Path),
-                BackingAddress = BackingAddress
+                BackingAddress = BackingAddress,
+                Storage = Storage
             };
 
             if (Sec.IsImage && !string.IsNullOrEmpty(Path))
                 AttachImageSectionIdentity(Sec, Path);
 
             WinSections.Add(Sec);
+            if (BackingAddress != 0)
+                TrackSectionRange(BackingAddress, Size);
 
-            WinHandle Handle = HandleManager.AddHandle(Sec, Permissions);
-            AddWinHandle(Handle);
-            return Handle;
+            return Sec;
+        }
+
+        private WinSection NlsLocaleSection;
+
+        // A null name selects the unnamed locale.nls section.
+        internal WinSection GetNlsSection(string Name, string GuestPath, out NTSTATUS Status)
+        {
+            const uint SEC_COMMIT = 0x08000000;
+
+            WinSection Section = Name != null ? FindSectionByName(Name, null) : NlsLocaleSection;
+            if (Section != null)
+            {
+                Status = NTSTATUS.STATUS_SUCCESS;
+                return Section;
+            }
+
+            // NT: native system directory, no WOW64 redirection.
+            using WindowsFileStream Stream = WindowsFileStream.FromGuestPath(GuestPath, false, true);
+            ulong Size = Stream.ExistsAsFile ? (ulong)Stream.Length : 0;
+            if (Size == 0 || Size > uint.MaxValue)
+            {
+                Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+                return null;
+            }
+
+            IntPtr Storage = Emulator._emulator.AllocateSharedStorage(Emulator.AlignToPageSize(Size));
+            if (Storage == IntPtr.Zero)
+            {
+                Status = NTSTATUS.STATUS_COMMITMENT_LIMIT;
+                return null;
+            }
+
+            if (!NtCreateSection.CopyToStorage(Stream, Storage, Size))
+            {
+                Emulator._emulator.ReleaseSharedStorage(Storage);
+                Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+                return null;
+            }
+
+            Section = CreateSection(Name, Size, PAGE_READONLY, SEC_COMMIT, null, 0, Storage);
+
+            // NT keeps these sections for the life of the system.
+            Section.MappedViewCount++;
+
+            if (Name == null)
+                NlsLocaleSection = Section;
+
+            Status = NTSTATUS.STATUS_SUCCESS;
+            return Section;
         }
 
         public WinSection FindSectionByName(string FullName, string ShortName)

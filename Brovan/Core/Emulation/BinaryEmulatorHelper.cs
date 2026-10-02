@@ -198,6 +198,9 @@ namespace Brovan.Core.Emulation
         public bool IsCommitted;
         public bool IsReset;
 
+        // NT: secured VAD.
+        public bool IsSecured;
+
         /// <summary>
         /// Initial memory protections when the region was allocated.
         /// </summary>
@@ -222,6 +225,18 @@ namespace Brovan.Core.Emulation
         /// Indicates the start and end of the poisoned memory. will only be set if the page size is not aligned.
         /// </summary>
         public ValueTuple<ulong, ulong> PoisonedMemory;
+    }
+
+    public readonly struct FreedRange
+    {
+        public readonly ulong BaseAddress;
+        public readonly ulong Size;
+
+        public FreedRange(ulong BaseAddress, ulong Size)
+        {
+            this.BaseAddress = BaseAddress;
+            this.Size = Size;
+        }
     }
 
     public class EmulatorSnapshot

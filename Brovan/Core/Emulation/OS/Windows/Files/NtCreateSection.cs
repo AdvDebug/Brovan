@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using System.IO;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -98,19 +98,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Size > uint.MaxValue && !IsReserveOnly)
                 return NTSTATUS.STATUS_NO_MEMORY;
 
-            ulong BackingAddress = 0;
+            IntPtr Storage = IntPtr.Zero;
             if (!IsImage && !IsReserveOnly)
             {
-                BackingAddress = Instance.MapWinUniqueAddress(Size, MemoryProtection.ReadWrite,
-                    SpecialProtections.None, AllocationType.Commited);
-                if (BackingAddress == 0)
-                    return NTSTATUS.STATUS_NO_MEMORY;
+                Storage = Instance._emulator.AllocateSharedStorage(Instance.AlignToPageSize(Size));
+                if (Storage == IntPtr.Zero)
+                    return NTSTATUS.STATUS_COMMITMENT_LIMIT;
 
-                if (Source != null && !CopyToBacking(Instance, Source, BackingAddress, Size))
+                if (Source != null && !CopyToStorage(Source, Storage, Size))
+                {
+                    Instance._emulator.ReleaseSharedStorage(Storage);
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                }
             }
 
-            WinHandle Handle = Instance.WinHelper.CreateSectionHandle(FullName, Size, SectionPageProtection, AllocationAttributes, Path, BackingAddress, (AccessMask)(uint)DesiredAccess);
+            WinHandle Handle = Instance.WinHelper.CreateSectionHandle(FullName, Size, SectionPageProtection, AllocationAttributes, Path, 0, (AccessMask)(uint)DesiredAccess, Storage);
 
             if (!Instance.WinHelper.WritePointer(SectionHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -121,39 +123,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        // A data section is as large as the file behind it, so the backing fills through a pooled window.
-        private static bool CopyToBacking(BinaryEmulator Instance, WindowsFileStream Source, ulong Address, ulong Size)
+        internal static unsafe bool CopyToStorage(WindowsFileStream Source, IntPtr Storage, ulong Size)
         {
-            const int WindowSize = 256 * 1024;
-
-            byte[] Window = ArrayPool<byte>.Shared.Rent((int)Math.Min(Size, WindowSize));
-
             try
             {
                 ulong Offset = 0;
 
                 while (Offset < Size)
                 {
-                    int Want = (int)Math.Min(Size - Offset, (ulong)Window.Length);
-                    int Read = Source.ReadAt((long)Offset, Window.AsSpan(0, Want));
+                    int Want = (int)Math.Min(Size - Offset, (ulong)NtReadFile.IoChunkBytes);
+                    int Read = Source.ReadAt((long)Offset, new Span<byte>((byte*)Storage + Offset, Want));
                     if (Read <= 0)
                         break;
-
-                    if (!Instance.WriteMemory(Address + Offset, Window.AsSpan(0, Read)))
-                        return false;
 
                     Offset += (ulong)Read;
                 }
 
                 return true;
             }
-            catch (IOException)
+            catch (Exception Ex) when (Ex is IOException || Ex is UnauthorizedAccessException)
             {
+                Utils.LogError($"[NtCreateSection] Reading \"{Source.GuestPath}\" into section storage failed: {Ex.Message}");
                 return false;
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(Window);
             }
         }
     }

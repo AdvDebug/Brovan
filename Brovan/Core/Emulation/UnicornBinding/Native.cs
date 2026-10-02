@@ -242,6 +242,12 @@ namespace Brovan.Core.Emulation
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         public static extern UCErrors brov_budget_ptr(IntPtr uc, out IntPtr ptr);
 
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_mem_alias_add(IntPtr uc, ulong address, ulong size, IntPtr host);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_mem_alias_remove(IntPtr uc, ulong address, ulong size);
+
         public const uint MEM_COMMIT = 0x1000;
         public const uint MEM_RESERVE = 0x2000;
         public const uint MEM_RELEASE = 0x8000;

@@ -93,140 +93,178 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        private const uint SecurityQosSize = 0x0C;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
+            WinSysHelper Helper = Instance.WinHelper;
+            ulong PortHandlePtr = Helper.GetArg(0);
+            ulong PortNamePtr = Helper.GetArg(1);
+            ulong SecurityQosPtr = Helper.GetArg(2);
+            ulong ClientViewPtr = Helper.GetArg(3);
+            ulong ServerViewPtr = Helper.GetArg(4);
+            ulong MaxMessageLengthPtr = Helper.GetArg(5);
+            ulong ConnectionInfoPtr = Helper.GetArg(6);
+            ulong ConnectionInfoLengthPtr = Helper.GetArg(7);
+            bool Is64 = Helper.PointerSize == 8;
 
-            ulong PortHandlePtr = Instance.WinHelper.GetArg(0);
-            ulong PortNamePtr = Instance.WinHelper.GetArg(1);
-            ulong SecurityQosPtr = Instance.WinHelper.GetArg(2);
-            ulong ClientViewPtr = Instance.WinHelper.GetArg(3);
-            ulong ServerViewPtr = Instance.WinHelper.GetArg(4);
-            ulong MaxMessageLengthPtr = Instance.WinHelper.GetArg(5);
-            ulong ConnectionInfoPtr = Instance.WinHelper.GetArg(6);
-            ulong ConnectionInfoLengthPtr = Instance.WinHelper.GetArg(7);
-
-            if (PortHandlePtr == 0 || PortNamePtr == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!Instance.IsRegionMapped(PortHandlePtr, (uint)Instance.WinHelper.PointerSize))
+            // NT probes every argument before it looks up the port.
+            if (!Instance.IsRegionCommitted(PortHandlePtr, (uint)Helper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.TryReadUnicodeString(PortNamePtr, out string PortName, out NTSTATUS PortNameStatus))
+            uint ConnectionInfoLength = 0;
+            if (ConnectionInfoLengthPtr != 0)
+            {
+                if (!Instance.IsRegionCommitted(ConnectionInfoLengthPtr, sizeof(uint)))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                ConnectionInfoLength = Instance.ReadMemoryUInt(ConnectionInfoLengthPtr);
+                if (!Instance.IsRegionCommitted(ConnectionInfoPtr, ConnectionInfoLength))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
+
+            PORT_VIEW ClientView = default;
+            if (ClientViewPtr != 0)
+            {
+                if (!Instance.IsRegionCommitted(ClientViewPtr, PORT_VIEW.SizeOf(Is64)))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                ClientView = PORT_VIEW.ReadFrom(Instance, ClientViewPtr, Is64);
+                NTSTATUS ClientStatus = CheckViewLength(ClientViewPtr, ClientView.Length, PORT_VIEW.SizeOf(false), PORT_VIEW.SizeOf(true), Is64);
+                if (ClientStatus != NTSTATUS.STATUS_SUCCESS)
+                    return ClientStatus;
+            }
+
+            REMOTE_PORT_VIEW ServerView = default;
+            if (ServerViewPtr != 0)
+            {
+                if (!Instance.IsRegionCommitted(ServerViewPtr, REMOTE_PORT_VIEW.SizeOf(Is64)))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                ServerView = REMOTE_PORT_VIEW.ReadFrom(Instance, ServerViewPtr, Is64);
+                NTSTATUS ServerStatus = CheckViewLength(ServerViewPtr, ServerView.Length, REMOTE_PORT_VIEW.SizeOf(false), REMOTE_PORT_VIEW.SizeOf(true), Is64);
+                if (ServerStatus != NTSTATUS.STATUS_SUCCESS)
+                    return ServerStatus;
+            }
+
+            if (MaxMessageLengthPtr != 0 && !Instance.IsRegionCommitted(MaxMessageLengthPtr, sizeof(uint)))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (SecurityQosPtr != 0 && !Instance.IsRegionCommitted(SecurityQosPtr, SecurityQosSize))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (PortNamePtr == 0)
+                return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+
+            if (!Helper.TryReadUnicodeString(PortNamePtr, out string PortName, out NTSTATUS PortNameStatus))
                 return PortNameStatus;
 
             if (string.IsNullOrEmpty(PortName))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            WinPort ExistingPort = FindPortByName(Instance, PortName);
-            WinHandle Handle;
-
-            if (ExistingPort != null)
+            WinSection PortSection = null;
+            if (ClientViewPtr != 0)
             {
-                Handle = Instance.WinHelper.HandleManager.AddHandle(
-                    ExistingPort,
-                    AccessMask.StandardRightsAll
-                );
+                PortSection = Helper.GetSectionByHandle(ClientView.SectionHandle, AccessMask.GiveTemp);
+                if (PortSection == null)
+                    return NTSTATUS.STATUS_INVALID_HANDLE;
             }
-            else
+
+            ulong ViewBase = 0;
+            ulong ViewSize = 0;
+            if (PortSection != null)
             {
-                WinPort Port = new WinPort
+                ViewSize = ClientView.ViewSize;
+                if (ViewSize == 0 || ViewSize > PortSection.Size)
+                    ViewSize = PortSection.Size;
+
+                ViewSize = BinaryEmulator.AlignUp(ViewSize, 0x1000);
+
+                // Brovan is the server, so both ends share the client's view.
+                uint ViewProtect = (uint)Helper.ConvertInternalToWinProtect(MemoryProtection.ReadWrite);
+                NTSTATUS ViewStatus = NtMapViewOfSection.MapDataView(Instance, PortSection, 0, ViewSize, 0, ViewProtect, out ViewBase);
+                if (ViewStatus != NTSTATUS.STATUS_SUCCESS)
+                    return ViewStatus;
+            }
+
+            WinPort Port = FindPortByName(Instance, PortName);
+            if (Port == null)
+            {
+                Port = new WinPort
                 {
                     Name = PortName,
                     Handler = CsrssPortHandler.Handle
                 };
 
-                Instance.WinHelper.WinPorts.Add(Port);
-
-                Handle = Instance.WinHelper.HandleManager.AddHandle(Port, AccessMask.StandardRightsAll);
+                Helper.WinPorts.Add(Port);
+            }
+            else if (Port.Handler == null)
+            {
+                Port.Handler = CsrssPortHandler.Handle;
             }
 
-            if (ExistingPort != null && ExistingPort.Handler == null)
-                ExistingPort.Handler = CsrssPortHandler.Handle;
+            WinHandle Handle = Helper.HandleManager.AddHandle(Port, AccessMask.StandardRightsAll);
+            Helper.AddWinHandle(Handle);
 
-            Instance.WinHelper.AddWinHandle(Handle);
+            bool Written = Helper.WritePointer(PortHandlePtr, Handle.Handle);
 
-            if (!Instance.WinHelper.WritePointer(PortHandlePtr, Handle.Handle))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            if (ClientViewPtr != 0)
+            if (Written && PortSection != null)
             {
-                bool Is64 = Instance.WinHelper.PointerSize == 8;
-                uint ClientViewSize = PORT_VIEW.SizeOf(Is64);
-
-                if (!Instance.IsRegionMapped(ClientViewPtr, ClientViewSize))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                PORT_VIEW ClientView = PORT_VIEW.ReadFrom(Instance, ClientViewPtr, Is64);
-
-                if (ClientView.Length < ClientViewSize)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                WinSection PortSection = Instance.WinHelper.GetSectionByHandle(ClientView.SectionHandle, AccessMask.GiveTemp);
-                if (PortSection == null)
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-
-                ulong ViewSize = ClientView.ViewSize;
-                if (ViewSize == 0 || ViewSize > PortSection.Size)
-                    ViewSize = PortSection.Size;
-
                 ClientView.ViewSize = ViewSize;
-                ClientView.ViewBase = PortSection.BackingAddress;
-                ClientView.ViewRemoteBase = PortSection.BackingAddress;
+                ClientView.ViewBase = ViewBase;
+                ClientView.ViewRemoteBase = ViewBase;
+                Written = ClientView.WriteResult(Instance, ClientViewPtr, Is64);
 
-                if (!ClientView.WriteResult(Instance, ClientViewPtr, Is64))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                // CsrClientConnectToServer closes the section handle as soon as the connect returns and
-                // keeps using this view, so the port view has to hold the section alive on its own.
-                PortSection.MappedViewCount++;
-
-                if (ServerViewPtr != 0)
+                if (Written && ServerViewPtr != 0)
                 {
-                    uint ServerViewSize = REMOTE_PORT_VIEW.SizeOf(Is64);
-
-                    if (!Instance.IsRegionMapped(ServerViewPtr, ServerViewSize))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                    REMOTE_PORT_VIEW ServerView = REMOTE_PORT_VIEW.ReadFrom(Instance, ServerViewPtr, Is64);
-
-                    if (ServerView.Length < ServerViewSize)
-                        return NTSTATUS.STATUS_INVALID_PARAMETER;
-
                     ServerView.ViewSize = ViewSize;
-                    ServerView.ViewBase = ClientView.ViewRemoteBase;
-
-                    if (!ServerView.WriteResult(Instance, ServerViewPtr, Is64))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    ServerView.ViewBase = ViewBase;
+                    Written = ServerView.WriteResult(Instance, ServerViewPtr, Is64);
                 }
             }
 
-            if (MaxMessageLengthPtr != 0 && Instance.IsRegionMapped(MaxMessageLengthPtr, 4))
-                Instance._emulator.WriteMemory(MaxMessageLengthPtr, 0x148u);
+            if (Written && MaxMessageLengthPtr != 0)
+                Written = Helper.WriteUInt32(MaxMessageLengthPtr, 0x148u);
 
-            if (ConnectionInfoLengthPtr != 0 && Instance.IsRegionMapped(ConnectionInfoLengthPtr, 4))
+            if (Written && ConnectionInfoLengthPtr != 0)
             {
-                uint Requested = Instance._emulator.ReadMemoryUInt(ConnectionInfoLengthPtr);
-
-                if (ConnectionInfoPtr != 0 && Requested >= 0x20 && Instance.IsRegionMapped(ConnectionInfoPtr, Requested))
+                if (ConnectionInfoPtr != 0 && ConnectionInfoLength >= 0x20)
                 {
                     WinSection SharedSection = FindSectionByName(Instance, "\\Windows\\SharedSection");
                     if (SharedSection != null)
                     {
                         ulong SharedBase = SharedSection.BackingAddress;
-                        ulong StaticPtr = SharedBase + 0x10;
 
-                        bool ok = Instance._emulator.WriteMemory(ConnectionInfoPtr + 0x00, SharedBase, 8) && Instance._emulator.WriteMemory(ConnectionInfoPtr + 0x08, SharedBase + 0x10, 8) && Instance._emulator.WriteMemory(ConnectionInfoPtr + 0x10, 4UL, 8);
-
-                        if (!ok)
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        Written = Instance._emulator.WriteMemory(ConnectionInfoPtr + 0x00, SharedBase, 8) && Instance._emulator.WriteMemory(ConnectionInfoPtr + 0x08, SharedBase + 0x10, 8) && Instance._emulator.WriteMemory(ConnectionInfoPtr + 0x10, 4UL, 8);
                     }
                 }
 
-                Instance._emulator.WriteMemory(ConnectionInfoLengthPtr, Requested, 4);
+                Written = Written && Helper.WriteUInt32(ConnectionInfoLengthPtr, ConnectionInfoLength);
+            }
+
+            if (!Written)
+            {
+                Helper.CloseHandle(Handle.Handle);
+                if (ViewBase != 0)
+                    Helper.UnmapViewOfSection(ViewBase);
+
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtConnectPort: Port=\"{PortName}\", Handle=0x{Handle.Handle:X}", LogFlags.Syscall);
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT: WOW64 also accepts the x64 length and skips the alignment check.
+        private static NTSTATUS CheckViewLength(ulong Address, uint Length, uint Size32, uint Size64, bool Is64)
+        {
+            if (Length != Size64 && (Is64 || Length != Size32))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (Is64 && (Address & 3) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
 
             return NTSTATUS.STATUS_SUCCESS;
         }

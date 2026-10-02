@@ -6,7 +6,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtAllocateVirtualMemoryEx : IWinSyscall
     {
-        private const ulong AllocationGranularity = 0x10000;
         private const uint MaxExtendedParameters = 16;
         private const int ExtendedParameterSize = 0x10;
 
@@ -106,10 +105,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong Highest = Instance.WinHelper.ReadPointer(Address + PointerSize);
             ulong Alignment = Instance.WinHelper.ReadPointer(Address + PointerSize * 2);
 
-            if (Alignment != 0 && (Alignment < AllocationGranularity || (Alignment & (Alignment - 1)) != 0))
+            if (Alignment != 0 && (Alignment < WinSysHelper.AllocationGranularity || (Alignment & (Alignment - 1)) != 0))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if ((Lowest & (AllocationGranularity - 1)) != 0 || (Highest != 0 && ((Highest + 1) & (AllocationGranularity - 1)) != 0) ||
+            if ((Lowest & (WinSysHelper.AllocationGranularity - 1)) != 0 || (Highest != 0 && ((Highest + 1) & (WinSysHelper.AllocationGranularity - 1)) != 0) ||
                 (Highest != 0 && Highest <= Lowest))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
