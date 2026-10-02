@@ -836,18 +836,18 @@ namespace Brovan.Core.Emulation
             InitializeEmulationEnvironment(this.Settings);
         }
 
-        public BinaryEmulator(IGuestEnvironment Guest, BinaryEmulatorSettings Settings, Mode mode, Arch arch, ReadOnlySpan<byte> Data, BinaryFile Binary = null!)
+        public BinaryEmulator(IGuestEnvironment Guest, BinaryEmulatorSettings Settings, Mode mode, Arch arch, BinaryFile Binary)
         {
-            if (Data.Length == 0)
-                throw new NullReferenceException(nameof(Data));
+            if (Binary == null)
+                throw new NullReferenceException(nameof(Binary));
 
             BindMainWorker();
-            _binary = Binary ?? new BinaryFile(Data, true);
+            _binary = Binary;
             BackendArch = arch;
             BackendMode = mode;
-            GeneralHelper.IO.Wow64FileRedirect = Binary?.FileFormat == BinaryFormat.PE && Binary?.Architecture == BinaryArchitecture.x86;
+            GeneralHelper.IO.Wow64FileRedirect = Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86;
             GuestImagePath = ResolveGuestImagePath(_binary, Guest);
-            _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks, GuestImagePath, _binary?.Location);
+            _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks, GuestImagePath, _binary.Location);
             this.Settings = Settings;
             Debug = Settings.Debug;
             RawProgramArguments = Settings.RawProgramArguments ?? string.Empty;

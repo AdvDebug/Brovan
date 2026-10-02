@@ -763,6 +763,7 @@ namespace Brovan.Core.Helpers
 
             public DotNetMember[] DotNetMembers = Array.Empty<DotNetMember>();
 
+            // Reads the binary data in place. DisposeBinaryData clears it.
             public MetadataReader MetaReader;
         }
 
@@ -901,39 +902,12 @@ namespace Brovan.Core.Helpers
 
     public sealed unsafe class MappedMemoryBytes : IDisposable
     {
-        private byte[] ManagedData;
-
         private MemoryMappedFile Mmf;
         private MemoryMappedViewAccessor View;
         private SafeMemoryMappedViewHandle Handle;
         public byte* BasePtr;
 
         public int Length { get; private set; }
-        public bool IsMemoryMapped => ManagedData == null;
-
-        public MappedMemoryBytes(byte[] Data)
-        {
-            if (Data == null || Data.Length == 0)
-                throw new ArgumentNullException(nameof(Data));
-            ManagedData = Data ?? Array.Empty<byte>();
-            Length = ManagedData.Length;
-        }
-
-        public MappedMemoryBytes(Span<byte> Data)
-        {
-            if (Data.IsEmpty || Data.Length == 0)
-                throw new ArgumentNullException(nameof(Data));
-            BasePtr = (byte*)&Data;
-            Length = Data.Length;
-        }
-
-        public MappedMemoryBytes(ReadOnlySpan<byte> Data)
-        {
-            if (Data.IsEmpty || Data.Length == 0)
-                throw new ArgumentNullException(nameof(Data));
-            BasePtr = (byte*)&Data;
-            Length = Data.Length;
-        }
 
         public MappedMemoryBytes(string Path)
         {
@@ -969,9 +943,6 @@ namespace Brovan.Core.Helpers
                 if ((uint)Offset >= (uint)Length)
                     throw new ArgumentOutOfRangeException(nameof(Offset));
 
-                if (ManagedData != null)
-                    return ManagedData[Offset];
-
                 return BasePtr[Offset];
             }
         }
@@ -983,9 +954,6 @@ namespace Brovan.Core.Helpers
                 if ((uint)Offset >= (uint)Length)
                     throw new ArgumentOutOfRangeException(nameof(Offset));
 
-                if (ManagedData != null)
-                    return ManagedData[Offset];
-
                 return BasePtr[Offset];
             }
         }
@@ -994,9 +962,6 @@ namespace Brovan.Core.Helpers
         {
             if (Offset < 0 || Size < 0 || (long)Offset + Size > Length)
                 throw new ArgumentOutOfRangeException();
-
-            if (ManagedData != null)
-                return new ReadOnlySpan<byte>(ManagedData, Offset, Size);
 
             return new ReadOnlySpan<byte>(BasePtr + Offset, Size);
         }
@@ -1008,9 +973,6 @@ namespace Brovan.Core.Helpers
 
         public byte[] ToArray()
         {
-            if (ManagedData != null)
-                return ManagedData;
-
             byte[] Buffer = new byte[Length];
             AsSpan(0, Length).CopyTo(Buffer);
             return Buffer;
@@ -1025,14 +987,6 @@ namespace Brovan.Core.Helpers
 
         public void Dispose()
         {
-            // If we're backed by a managed array, nothing to release.
-            if (ManagedData != null)
-            {
-                ManagedData = null;
-                Length = 0;
-                return;
-            }
-
             if (Handle != null && !Handle.IsClosed)
                 Handle.ReleasePointer();
 

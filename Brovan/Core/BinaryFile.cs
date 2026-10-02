@@ -186,6 +186,7 @@ namespace Brovan.Core
                 return;
 
             Data = null;
+            DotNet.MetaReader = null;
             Old.Dispose();
         }
 
@@ -1662,7 +1663,7 @@ namespace Brovan.Core
             try
             {
                 // Gonna use PEReader (no manual parsing for now)
-                PEReader PEReader = new PEReader(Data.BasePtr, Data.Length, true);
+                PEReader PEReader = new PEReader(Data.BasePtr, Data.Length, false);
                 MetadataReader = PEReader.GetMetadataReader();
                 foreach (TypeDefinitionHandle TypeHandle in MetadataReader.TypeDefinitions)
                 {
@@ -2639,50 +2640,6 @@ namespace Brovan.Core
         }
 
         /// <summary>
-        /// Initialize the Binary File instance with a byte array.
-        /// </summary>
-        /// <param name="BinaryData">The byte array of the binary to be parsed.</param>
-        /// <exception cref="NullReferenceException"></exception>
-        /// <exception cref="ArgumentOutOfRangeException"></exception>
-        /// <exception cref="IndexOutOfRangeException"></exception>
-        /// <exception cref="ArgumentNullException"></exception>
-        /// <exception cref="OverflowException"></exception>
-        public BinaryFile(byte[] BinaryData, bool Quick)
-        {
-            if (BinaryData == null || BinaryData.Length == 0)
-                throw new NullReferenceException("Binary data cannot be null or empty.");
-            PE = new PortableExecutable();
-            ELF = new ELF();
-            DotNet = new DotNet();
-            Data = new MappedMemoryBytes(BinaryData);
-            this.Quick = Quick;
-            ParseBinary(Data.AsSpan());
-            this.Location = null;
-        }
-
-        /// <summary>
-        /// Initialize the Binary File instance with a <see cref="ReadOnlySpan{T}"/>.
-        /// </summary>
-        /// <param name="BinaryData">The span of the binary to be parsed.</param>
-        /// <exception cref="NullReferenceException"></exception>
-        /// <exception cref="ArgumentOutOfRangeException"></exception>
-        /// <exception cref="IndexOutOfRangeException"></exception>
-        /// <exception cref="ArgumentNullException"></exception>
-        /// <exception cref="OverflowException"></exception>
-        public BinaryFile(ReadOnlySpan<byte> BinaryData, bool Quick)
-        {
-            if (BinaryData.Length == 0)
-                throw new NullReferenceException("Binary data cannot be null or empty.");
-            PE = new PortableExecutable();
-            ELF = new ELF();
-            DotNet = new DotNet();
-            Data = new MappedMemoryBytes(BinaryData);
-            this.Quick = Quick;
-            ParseBinary(Data.AsSpan());
-            this.Location = null;
-        }
-
-        /// <summary>
         /// Copy constructor for BinaryFile, used by Clone().
         /// </summary>
         /// <param name="Copy">The original BinaryFile to clone.</param>
@@ -2920,16 +2877,12 @@ namespace Brovan.Core
             ClearArray(DotNet.DotNetFields);
             ClearArray(DotNet.DotNetTypes);
             ClearArray(DotNet.DotNetMembers);
+            DisposeBinaryData();
 
             // Set objects to null
             PE = null;
             ELF = null;
             DotNet = null;
-            if (Data != null)
-            {
-                Data.Dispose();
-                Data = null;
-            }
 
             IsDisposed = true;
             GC.SuppressFinalize(this);
