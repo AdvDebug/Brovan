@@ -17,6 +17,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             ulong FileHandle = Instance.WinHelper.GetArg64(0);
             ulong EventHandle = Instance.WinHelper.GetArg64(1);
+            ulong ApcRoutine = Instance.WinHelper.GetArg64(2);
+            ulong ApcContext = Instance.WinHelper.GetArg64(3);
             ulong IoStatusBlockPtr = Instance.WinHelper.GetArg64(4);
             uint FsControlCode = (uint)Instance.WinHelper.GetArg64(5, true);
             ulong InputBufferPtr = Instance.WinHelper.GetArg64(6);
@@ -24,13 +26,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong OutputBufferPtr = Instance.WinHelper.GetArg64(8);
             uint OutputBufferLength = (uint)Instance.WinHelper.GetArg64(9, true);
 
-            return ControlFile(Instance, FileHandle, EventHandle, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, Is64Bit: true);
+            return ControlFile(Instance, FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, Is64Bit: true);
         }
 
         private static NTSTATUS Handle32(BinaryEmulator Instance)
         {
             uint FileHandle = Instance.WinHelper.GetArg32(0);
             uint EventHandle = Instance.WinHelper.GetArg32(1);
+            uint ApcRoutine = Instance.WinHelper.GetArg32(2);
+            uint ApcContext = Instance.WinHelper.GetArg32(3);
             uint IoStatusBlockPtr = Instance.WinHelper.GetArg32(4);
             uint FsControlCode = Instance.WinHelper.GetArg32(5);
             uint InputBufferPtr = Instance.WinHelper.GetArg32(6);
@@ -38,10 +42,35 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint OutputBufferPtr = Instance.WinHelper.GetArg32(8);
             uint OutputBufferLength = Instance.WinHelper.GetArg32(9);
 
-            return ControlFile(Instance, FileHandle, EventHandle, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, Is64Bit: false);
+            return ControlFile(Instance, FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, Is64Bit: false);
         }
 
-        private static NTSTATUS ControlFile(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong IoStatusBlockPtr, uint FsControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength, bool Is64Bit)
+        private static NTSTATUS QueuePipeControl(BinaryEmulator Instance, WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, uint FsControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength, bool Is64Bit)
+        {
+            GuestNamedPipe Pipe = File.Pipe;
+            bool Listen = FsControlCode == GuestNamedPipe.FSCTL_PIPE_LISTEN;
+
+            if (Listen && Pipe.IsServer && Pipe.Channel.Connected)
+                return WriteIoStatus(Instance, IoStatusBlockPtr, Pipe.Channel.PeerClosed ? NTSTATUS.STATUS_PIPE_CLOSING : NTSTATUS.STATUS_PIPE_CONNECTED, 0, Is64Bit);
+
+            PipeRequest Request = Instance.WinHelper.PipeRequests.Create(Instance, Listen ? PipeRequestKind.Listen : PipeRequestKind.Transceive, File, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr);
+
+            if (!Listen)
+            {
+                if (InputBufferLength > GuestNamedPipe.MaxMessageBytes)
+                    return WriteIoStatus(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0, Is64Bit);
+
+                if (!PipeRequestQueue.TryTakeData(Instance, Request, InputBufferPtr, (int)InputBufferLength))
+                    return WriteIoStatus(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0, Is64Bit);
+
+                Request.Buffer = OutputBufferPtr;
+                Request.Length = (int)Math.Min(OutputBufferLength, (uint)GuestNamedPipe.MaxMessageBytes);
+            }
+
+            return Instance.WinHelper.PipeRequests.Submit(Instance, Request);
+        }
+
+        private static NTSTATUS ControlFile(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, uint FsControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength, bool Is64Bit)
         {
             if (IoStatusBlockPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -63,6 +92,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return WriteIoStatus(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0, Is64Bit);
 
             Instance.WinHelper.ResetIoEvent(EventHandle);
+
+            if (File.Pipe != null && !File.Pipe.IsRoot &&
+                (FsControlCode == GuestNamedPipe.FSCTL_PIPE_LISTEN || FsControlCode == GuestNamedPipe.FSCTL_PIPE_TRANSCEIVE))
+                return QueuePipeControl(Instance, File, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, Is64Bit);
 
             DeviceData Data = new DeviceData();
 
@@ -93,21 +126,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Status = NTSTATUS.STATUS_UNSUCCESSFUL;
             }
 
+            // Only FSCTL_PIPE_WAIT returns pending here.
             if (File.Pipe != null && Status == NTSTATUS.STATUS_PENDING)
             {
-                int TimeoutMilliseconds = FsControlCode == GuestNamedPipe.FSCTL_PIPE_WAIT
-                    ? GuestNamedPipe.ReadWaitTimeoutMilliseconds(Data.InputBuffer, Data.InputLength)
-                    : GuestNamedPipe.BlockingIoMilliseconds;
-
+                int TimeoutMilliseconds = GuestNamedPipe.ReadWaitTimeoutMilliseconds(Data.InputBuffer, Data.InputLength);
                 if (Instance.WinHelper.TryContinuePipeWait(FileHandle, TimeoutMilliseconds, GuestNamedPipe.PollSliceMilliseconds))
                     return NTSTATUS.STATUS_PENDING;
 
-                Status = FsControlCode switch
-                {
-                    GuestNamedPipe.FSCTL_PIPE_WAIT => NTSTATUS.STATUS_IO_TIMEOUT,
-                    GuestNamedPipe.FSCTL_PIPE_TRANSCEIVE => NTSTATUS.STATUS_PIPE_EMPTY,
-                    _ => NTSTATUS.STATUS_PIPE_LISTENING,
-                };
+                Status = NTSTATUS.STATUS_IO_TIMEOUT;
             }
             else if (File.Pipe != null)
             {

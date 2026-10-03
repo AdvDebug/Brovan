@@ -338,6 +338,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.RetrySyscallNumber = 0;
             State.PipeWaitHandle = 0;
             State.PipeWaitDeadline = -1;
+            State.PipeIoRequest = null;
             State.ResetIoCompletionWait();
 
             if (ClearAlertByThreadId)
@@ -476,13 +477,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.StopEmulation();
         }
 
-        public void CompletePendingIo(in WinPendingIo Io, NTSTATUS Status, ulong Information)
+        /// <param name="QueueCompletion">False for a request that failed without pending, which gets no APC or packet.</param>
+        public void CompletePendingIo(in WinPendingIo Io, NTSTATUS Status, ulong Information, bool QueueCompletion = true)
         {
             if (IsPendingIoLive(in Io))
                 WriteIoStatusBlock(Emulator, Io.IoStatusBlock, Status, Information);
 
             if (Io.Event != null)
                 Io.Event.Signaled = true;
+
+            if (!QueueCompletion)
+                return;
 
             Emulator.Threads.TryGetValue((uint)Io.ThreadId, out EmulatedThread? Thread);
             QueueIoCompletion(Io.File, Thread, Io.ApcRoutine, Io.ApcContext, Io.IoStatusBlock, Status, Information);
@@ -641,6 +646,55 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool Ok32 = TryReadObjectAttributesName32((uint)ObjectAttributesPtr, out uint Root32, out _, out Name, out FullName, out Status);
             RootDirectory = Root32;
             return Ok32;
+        }
+
+        // ObpCaptureObjectName ignores MaximumLength, so a name with a zero maximum still opens.
+        private bool TryReadObjectName(ulong UnicodeStringPtr, out string Name, out NTSTATUS Status)
+        {
+            Name = string.Empty;
+            Status = NTSTATUS.STATUS_SUCCESS;
+
+            int Size = PointerSize * 2;
+            Span<byte> Raw = stackalloc byte[16];
+            if (!Emulator.ReadMemory(UnicodeStringPtr, Raw.Slice(0, Size)))
+            {
+                Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
+                return false;
+            }
+
+            ushort Length = BinaryPrimitives.ReadUInt16LittleEndian(Raw);
+            ulong Buffer = PointerSize == 8 ? BinaryPrimitives.ReadUInt64LittleEndian(Raw.Slice(8)) : BinaryPrimitives.ReadUInt32LittleEndian(Raw.Slice(4));
+
+            if (Length == 0)
+                return true;
+
+            if ((Buffer & 1) != 0)
+            {
+                Status = NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
+                return false;
+            }
+
+            if ((Length & 1) != 0 || Length == 0xFFFE)
+            {
+                Status = NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+                return false;
+            }
+
+            if (!Emulator.IsMemoryRangeMapped(Buffer, Length))
+            {
+                Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
+                return false;
+            }
+
+            Name = Emulator._emulator.ReadMemoryString(Buffer, Length, Encoding.Unicode).TrimEnd('\0');
+            return true;
+        }
+
+        internal const uint OBJ_INHERIT = 0x2;
+
+        public uint ReadObjectAttributesFlags(ulong ObjectAttributesPtr)
+        {
+            return ObjectAttributesPtr == 0 ? 0 : Emulator._emulator.ReadMemoryUInt(ObjectAttributesPtr + (PointerSize == 8 ? 0x18UL : 0x0CUL));
         }
 
         public ulong ReadPointer(ulong Address) => ReadPointer(Address, (uint)PointerSize);
@@ -902,7 +956,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            if (!TryReadUnicodeString64(Attributes.ObjectName, out Name, out Status))
+            if (!TryReadObjectName(Attributes.ObjectName, out Name, out Status))
                 return false;
 
             FullName = ResolveObjectNameWithRootDirectory(Attributes.RootDirectory, Name);
@@ -944,7 +998,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            if (!TryReadUnicodeString32(ObjectName, out Name, out Status))
+            if (!TryReadObjectName(ObjectName, out Name, out Status))
                 return false;
 
             FullName = ResolveObjectNameWithRootDirectory(RootDirectory, Name);
@@ -1658,6 +1712,27 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint InitialThreadId;
         public WinHandle STD_OUT;
         public WinHandle STD_IN;
+        public WinHandle STD_ERR;
+
+        // Inherited standard handles go into the process parameters whatever the subsystem is.
+        internal bool InheritedStandardHandles;
+
+        private bool StdInInherited;
+        private bool StdOutInherited;
+
+        private WinHandle InheritedStandardHandle(ulong Value)
+        {
+            if (Value == 0 || !HandleManager.TryGetHandle(Value, out HandleEntry Entry))
+                return null;
+
+            InheritedStandardHandles = true;
+            return new WinHandle { Handle = Value, HandleType = Entry.Object.ObjectType, Permissions = Entry.Permissions };
+        }
+
+        // An inherited standard handle is a real file, not the host's stdin or stdout.
+        internal bool IsHostStdIn(ulong Handle) => !StdInInherited && STD_IN != null && Handle == STD_IN.Handle;
+
+        internal bool IsHostStdOut(ulong Handle) => !StdOutInherited && STD_OUT != null && Handle == STD_OUT.Handle;
         public WinHandle ConsoleHandle;
         public readonly ConsoleState ConsoleState = new ConsoleState();
 
@@ -1865,6 +1940,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinSemaphore> WinSemaphores = new List<WinSemaphore>();
         public List<WinRegistryNotification> RegistryNotifications = new List<WinRegistryNotification>();
         internal readonly AfdDevice.HostConnects AfdConnects = new AfdDevice.HostConnects();
+        internal readonly PipeRequestQueue PipeRequests = new PipeRequestQueue();
         public List<WinSection> WinSections = new List<WinSection>();
         private readonly Dictionary<ulong, int> WinHandleIndex = new Dictionary<ulong, int>();
         internal void AddWinHandle(WinHandle h)
@@ -2080,6 +2156,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             SyntheticVolumeGuidSymbolicLink = $"\\??\\Volume{{{SyntheticVolumeGuid}}}";
             SyntheticVolumeWin32GuidPath = $"\\\\?\\Volume{{{SyntheticVolumeGuid}}}\\";
             SyntheticMountDevUniqueId = Guid.Parse(SyntheticVolumeGuid).ToByteArray();
+
+            // Before any handle of this process, so every inherited one keeps its value.
+            ulong[] InheritedStd = InheritedHandles.Apply(Emulator, this);
             KuserSharedData = new KuserSharedDataManager(Emulator);
             PID = AdoptHostProcessId();
 
@@ -2111,15 +2190,23 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Steam = SteamAppContext.Resolve(Emulator, GenerateRandomPID());
 
+            STD_IN = InheritedStandardHandle(InheritedStd[0]);
+            STD_OUT = InheritedStandardHandle(InheritedStd[1]);
+            STD_ERR = InheritedStandardHandle(InheritedStd[2]);
+            StdInInherited = STD_IN != null;
+            StdOutInherited = STD_OUT != null;
+
             if (Binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui))
             {
-                STD_IN = HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Input), AccessMask.FileReadData);
-                STD_OUT = HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Output), AccessMask.FileWriteData);
+                STD_IN ??= HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Input), AccessMask.FileReadData);
+                STD_OUT ??= HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Output), AccessMask.FileWriteData);
+                STD_ERR ??= StdOutInherited ? HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Output), AccessMask.FileWriteData) : STD_OUT;
             }
-            else
+            else if (!InheritedStandardHandles)
             {
-                STD_IN = HandleManager.AddHandle(new WinFile(), AccessMask.None);
-                STD_OUT = HandleManager.AddHandle(new WinFile(), AccessMask.FileWriteData);
+                STD_IN ??= HandleManager.AddHandle(new WinFile(), AccessMask.None);
+                STD_OUT ??= HandleManager.AddHandle(new WinFile(), AccessMask.FileWriteData);
+                STD_ERR ??= STD_OUT;
             }
             // Generate some processes for the emulated program to work with
             uint WininitPID = GenerateRandomPID();
@@ -3002,6 +3089,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 && !Emulator._emulator.WriteMemory(State.IoCompletionEntriesRemovedPtr, 0u, 4))
                 InterruptStatus = NTSTATUS.STATUS_ACCESS_VIOLATION;
             State.ResetIoCompletionWait();
+            State.PipeIoRequest = null;
 
             if (State.RetrySyscallActive)
             {
@@ -9770,6 +9858,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     WinFile Closing = Entry.Object as WinFile;
                     if (Closing?.Pipe != null && HandleManager.CountHandlesByObjectId(Closing.ObjectId) <= 1)
                     {
+                        PipeRequests.CompleteFile(Emulator, Closing, NTSTATUS.STATUS_PIPE_BROKEN);
                         Closing.Pipe.Dispose();
                         Closing.Pipe = null;
                     }
@@ -9788,6 +9877,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 ApplyDeleteOnClose(Closing);
                             else
                                 Closing.ReleaseFileStream();
+
+                            Closing.ReleaseSharedPosition();
                         }
                     }
                 }

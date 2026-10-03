@@ -134,8 +134,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinHandle AddHandle(IHandleObject obj, AccessMask Permissions)
         {
-            ulong handle = AllocateHandleValue();
+            return Insert(AllocateHandleValue(), obj, Permissions, ObjectHandleFlags.None);
+        }
 
+        // NT gives an inherited handle the value it had in the creator. Null when the value is taken or invalid.
+        public WinHandle AddHandleAt(ulong Handle, IHandleObject obj, AccessMask Permissions, ObjectHandleFlags Flags)
+        {
+            if (Handle == 0 || (Handle & 3) != 0 || Handle > uint.MaxValue || HandleTable.ContainsKey(Handle) || IsReservedHandleValue(Handle))
+                return null;
+
+            return Insert(Handle, obj, Permissions, Flags);
+        }
+
+        private WinHandle Insert(ulong handle, IHandleObject obj, AccessMask Permissions, ObjectHandleFlags Flags)
+        {
             // Entering the table is the first moment a thread can wait on this object, so it is also the first
             // moment its state changes are worth reporting.
             if (obj is WaitableHandleObject Waitable)
@@ -148,7 +160,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Permissions = Permissions
             };
 
-            HandleTable[handle] = new HandleEntry { Object = obj, Permissions = Permissions, Flags = ObjectHandleFlags.None };
+            HandleTable[handle] = new HandleEntry { Object = obj, Permissions = Permissions, Flags = Flags };
             Version++;
 
             if (!ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))

@@ -12,6 +12,361 @@ namespace Brovan.Core.Emulation.OS.Windows
     // True only means the request was accepted. The process reports itself in the session table under SpawnToken.
     internal delegate bool GuestHostLauncher(string HostImage, string GuestArguments, string GuestDirectory, string SessionId, uint SpawnToken, int Depth);
 
+    // The handles a new process gets from its creator, passed in a session file named by the spawn token.
+    internal static class InheritedHandles
+    {
+        private const uint Magic = 0x48495642;
+        private const uint Version = 1;
+        private const int MaxEntries = 4096;
+        private const int MaxFileBytes = 4 << 20;
+
+        private const byte KindPipe = 1;
+        private const byte KindFile = 2;
+        private const byte KindDevice = 3;
+
+        internal const uint StdHandleRequestDuplicate = 1;
+        internal const uint StdHandleAlwaysDuplicate = 2;
+
+        private const ulong ParamsStandardInput64 = 0x20;
+        private const ulong ParamsStandardInput32 = 0x18;
+
+        internal static string PathFor(uint SpawnToken) => Path.Combine(GuestSession.Directory, $"inherit-{SpawnToken:x8}.bin");
+
+        private static bool ReadStandardHandles(BinaryEmulator Instance, ulong ProcessParameters, ulong[] Std)
+        {
+            if (ProcessParameters == 0)
+                return false;
+
+            bool Is64 = Instance.WinHelper.PointerSize == 8;
+            ulong First = ProcessParameters + (Is64 ? ParamsStandardInput64 : ParamsStandardInput32);
+            Span<byte> Raw = stackalloc byte[24];
+            int Bytes = Is64 ? 24 : 12;
+            if (!Instance.ReadMemory(First, Raw.Slice(0, Bytes)))
+                return false;
+
+            for (int i = 0; i < 3; i++)
+                Std[i] = Is64 ? BinaryPrimitives.ReadUInt64LittleEndian(Raw.Slice(i * 8)) : BinaryPrimitives.ReadUInt32LittleEndian(Raw.Slice(i * 4));
+
+            return true;
+        }
+
+        // NT duplicates requested standard handles whether they are inheritable or not (PspCopyAndFixupParameters).
+        internal static byte[] Build(BinaryEmulator Instance, ulong ProcessParameters, bool InheritHandles, List<ulong> HandleList,
+            uint StdHandleState, uint StdHandleSubsystem, uint ImageSubsystem)
+        {
+            HandleManager Handles = Instance.WinHelper.HandleManager;
+            Dictionary<ulong, HandleEntry> Chosen = new Dictionary<ulong, HandleEntry>();
+
+            // NT answers a request only for an image of the subsystem it names (PspSetupUserProcessAddressSpace).
+            if (StdHandleState == StdHandleRequestDuplicate && ImageSubsystem != StdHandleSubsystem)
+                StdHandleState = 0;
+
+            ulong[] Std = new ulong[3];
+            ReadStandardHandles(Instance, ProcessParameters, Std);
+
+            if (StdHandleState == StdHandleRequestDuplicate || StdHandleState == StdHandleAlwaysDuplicate)
+            {
+                if (StdHandleState == StdHandleRequestDuplicate)
+                {
+                    ulong OwnParameters = Instance.WinHelper.ReadPointer(Instance.PEB + (Instance.WinHelper.PointerSize == 8 ? 0x20UL : 0x10UL));
+                    ReadStandardHandles(Instance, OwnParameters, Std);
+                }
+
+                for (int i = 0; i < 3; i++)
+                {
+                    if (Std[i] != 0 && Handles.TryGetHandle(Std[i], out HandleEntry Entry))
+                        Chosen[Std[i] & ~3UL] = Entry;
+                }
+            }
+
+            if (InheritHandles)
+            {
+                if (HandleList != null)
+                {
+                    foreach (ulong Listed in HandleList)
+                    {
+                        if (Handles.TryGetHandle(Listed, out HandleEntry Entry) && (Entry.Flags & ObjectHandleFlags.Inherit) != 0)
+                            Chosen[Listed & ~3UL] = Entry;
+                    }
+                }
+                else
+                {
+                    foreach (KeyValuePair<ulong, IHandleObject> Pair in Handles.SnapshotHandles())
+                    {
+                        if (Handles.TryGetHandle(Pair.Key, out HandleEntry Entry) && (Entry.Flags & ObjectHandleFlags.Inherit) != 0)
+                            Chosen[Pair.Key] = Entry;
+                    }
+                }
+            }
+
+            if (Chosen.Count == 0)
+                return null;
+
+            using MemoryStream Buffer = new MemoryStream();
+            using BinaryWriter Writer = new BinaryWriter(Buffer, Encoding.UTF8);
+            Writer.Write(Magic);
+            Writer.Write(Version);
+            Writer.Write(Std[0]);
+            Writer.Write(Std[1]);
+            Writer.Write(Std[2]);
+
+            long CountPosition = Buffer.Position;
+            Writer.Write(0);
+            int Count = 0;
+
+            foreach (KeyValuePair<ulong, HandleEntry> Pair in Chosen)
+            {
+                if (Pair.Value.Object is not WinFile File)
+                {
+                    if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                        Instance.TriggerEventMessage($"[-] Handle 0x{Pair.Key:X} ({Pair.Value.Object?.ObjectType}) cannot pass to another process.", LogFlags.Issues);
+                    continue;
+                }
+
+                if (!TryWriteFile(Writer, Pair.Key, Pair.Value, File))
+                {
+                    if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                        Instance.TriggerEventMessage($"[-] File handle 0x{Pair.Key:X} ({File.Path}) cannot pass to another process.", LogFlags.Issues);
+                    continue;
+                }
+
+                Count++;
+            }
+
+            if (Count == 0)
+                return null;
+
+            Buffer.Position = CountPosition;
+            Writer.Write(Count);
+            return Buffer.ToArray();
+        }
+
+        private static bool TryWriteFile(BinaryWriter Writer, ulong Handle, HandleEntry Entry, WinFile File)
+        {
+            if (File.Pipe != null)
+            {
+                GuestPipeChannel Channel = File.Pipe.Channel;
+                if (Channel == null)
+                    return false;
+
+                WriteHeader(Writer, Handle, Entry, KindPipe);
+                Writer.Write(File.Pipe.GuestPath ?? string.Empty);
+                Writer.Write(Channel.BackingPath);
+                Writer.Write(Channel.IsServer);
+                Writer.Write(Channel.ConnectedGeneration);
+                Writer.Write(File.Pipe.ReadMode);
+                Writer.Write(File.Pipe.CompletionMode);
+                Writer.Write(File.Mode);
+                return true;
+            }
+
+            if (File.Device)
+            {
+                if (!NullDevice.IsNullDevicePath(File.Path))
+                    return false;
+
+                WriteHeader(Writer, Handle, Entry, KindDevice);
+                Writer.Write(File.Path);
+                Writer.Write(File.Mode);
+                return true;
+            }
+
+            if (File.ConsoleKind != ConsoleObjectKind.None || string.IsNullOrEmpty(File.Path))
+                return false;
+
+            File.SharedPosition ??= SharedFilePosition.Create(File.Position);
+            if (File.SharedPosition == null)
+                return false;
+
+            WriteHeader(Writer, Handle, Entry, KindFile);
+            Writer.Write(File.Path);
+            Writer.Write(File.Directory);
+            Writer.Write(File.ShareAccess);
+            Writer.Write(File.Mode);
+            Writer.Write(File.SharedPosition.CellPath);
+            return true;
+        }
+
+        private static void WriteHeader(BinaryWriter Writer, ulong Handle, HandleEntry Entry, byte Kind)
+        {
+            Writer.Write(Handle);
+            Writer.Write((uint)Entry.Permissions);
+            Writer.Write((uint)Entry.Flags);
+            Writer.Write(Kind);
+        }
+
+        // Returns the standard handles that arrived, zero for each one this process makes itself.
+        internal static ulong[] Apply(BinaryEmulator Emulator, WinSysHelper Helper)
+        {
+            ulong[] Arrived = new ulong[3];
+            uint SpawnToken = GuestSession.SpawnToken;
+            if (SpawnToken == 0)
+                return Arrived;
+
+            string RecordPath = PathFor(SpawnToken);
+            byte[] Record;
+            try
+            {
+                if (!File.Exists(RecordPath))
+                    return Arrived;
+
+                FileInfo Info = new FileInfo(RecordPath);
+                Record = Info.Length <= MaxFileBytes ? File.ReadAllBytes(RecordPath) : null;
+                File.Delete(RecordPath);
+            }
+            catch (Exception Error)
+            {
+                Utils.LogError($"[InheritedHandles] Cannot read the inherited handles: {Error.Message}");
+                return Arrived;
+            }
+
+            if (Record == null)
+            {
+                Utils.LogError("[InheritedHandles] The inherited handle record is too large.");
+                return Arrived;
+            }
+
+            ulong[] Std = new ulong[3];
+            try
+            {
+                using BinaryReader Reader = new BinaryReader(new MemoryStream(Record), Encoding.UTF8);
+                if (Reader.ReadUInt32() != Magic || Reader.ReadUInt32() != Version)
+                    return Arrived;
+
+                for (int i = 0; i < 3; i++)
+                    Std[i] = Reader.ReadUInt64();
+
+                int Count = Reader.ReadInt32();
+                if (Count < 0 || Count > MaxEntries)
+                    return Arrived;
+
+                for (int i = 0; i < Count; i++)
+                    ApplyEntry(Emulator, Helper, Reader);
+            }
+            catch (Exception Error) when (Error is EndOfStreamException || Error is IOException || Error is FormatException || Error is ArgumentException)
+            {
+                Utils.LogError($"[InheritedHandles] The inherited handle record is damaged: {Error.Message}");
+            }
+
+            for (int i = 0; i < 3; i++)
+            {
+                if (Std[i] != 0 && Helper.HandleManager.HandleExists(Std[i]))
+                    Arrived[i] = Std[i];
+            }
+
+            return Arrived;
+        }
+
+        private static void ApplyEntry(BinaryEmulator Emulator, WinSysHelper Helper, BinaryReader Reader)
+        {
+            ulong Handle = Reader.ReadUInt64();
+            AccessMask Access = (AccessMask)Reader.ReadUInt32();
+            ObjectHandleFlags Flags = (ObjectHandleFlags)Reader.ReadUInt32();
+            byte Kind = Reader.ReadByte();
+
+            WinFile File;
+            switch (Kind)
+            {
+                case KindPipe:
+                {
+                    string GuestPath = Reader.ReadString();
+                    string BackingPath = Reader.ReadString();
+                    bool Server = Reader.ReadBoolean();
+                    uint Generation = Reader.ReadUInt32();
+                    uint ReadMode = Reader.ReadUInt32();
+                    uint CompletionMode = Reader.ReadUInt32();
+                    uint Mode = Reader.ReadUInt32();
+
+                    if (!IsPipeBacking(BackingPath) ||
+                        GuestNamedPipe.TryAttach(GuestPath, BackingPath, Server, Generation, ReadMode, CompletionMode, out GuestNamedPipe Pipe) != NTSTATUS.STATUS_SUCCESS)
+                    {
+                        Utils.LogError($"[InheritedHandles] Pipe handle 0x{Handle:X} ({GuestPath}) could not be attached.");
+                        return;
+                    }
+
+                    File = new WinFile { Path = GuestPath, Device = true, Mode = Mode, Handler = Pipe.HandleControl, Pipe = Pipe };
+                    break;
+                }
+
+                case KindDevice:
+                {
+                    string DevicePath = Reader.ReadString();
+                    uint Mode = Reader.ReadUInt32();
+                    if (!Helper.TryCreateDevice(DevicePath, null, out string InternalPath, out WinDeviceDelegate Handler, out NTSTATUS Status) || Status != NTSTATUS.STATUS_SUCCESS)
+                        return;
+
+                    File = new WinFile { Path = InternalPath, Device = true, Mode = Mode, Handler = Handler };
+                    break;
+                }
+
+                case KindFile:
+                {
+                    string GuestPath = Reader.ReadString();
+                    bool Directory = Reader.ReadBoolean();
+                    uint ShareAccess = Reader.ReadUInt32();
+                    uint Mode = Reader.ReadUInt32();
+                    string CellPath = Reader.ReadString();
+
+                    WindowsFileStream Stream = WindowsFileStream.FromGuestPath(GuestPath);
+                    if (Directory ? !Stream.ExistsAsDirectory : !Stream.ExistsAsFile)
+                    {
+                        Utils.LogError($"[InheritedHandles] File handle 0x{Handle:X} ({GuestPath}) no longer exists.");
+                        return;
+                    }
+
+                    SharedFilePosition Position = SharedFilePosition.Open(CellPath);
+                    if (Position == null)
+                    {
+                        Utils.LogError($"[InheritedHandles] File handle 0x{Handle:X} ({GuestPath}) lost its shared position.");
+                        return;
+                    }
+
+                    File = new WinFile
+                    {
+                        Path = GuestPath,
+                        Real = true,
+                        Directory = Directory,
+                        FileStream = Stream,
+                        GrantedAccess = Access,
+                        ShareAccess = ShareAccess,
+                        Mode = Mode,
+                        SharedPosition = Position,
+                    };
+                    break;
+                }
+
+                default:
+                    throw new FormatException($"unknown handle kind {Kind}");
+            }
+
+            WinHandle Added = Helper.HandleManager.AddHandleAt(Handle, File, Access, Flags);
+            if (Added == null)
+            {
+                Utils.LogError($"[InheritedHandles] Handle value 0x{Handle:X} is not usable here.");
+                File.Pipe?.Dispose();
+                File.ReleaseFileStream();
+                File.ReleaseSharedPosition();
+                return;
+            }
+
+            Helper.WinFiles.Add(File);
+            Helper.RegisterOpenFile(File);
+            Helper.AddWinHandle(Added);
+        }
+
+        // The record comes from another process, so it may only name pipes in this session.
+        private static bool IsPipeBacking(string BackingPath)
+        {
+            if (string.IsNullOrEmpty(BackingPath))
+                return false;
+
+            string Full = Path.GetFullPath(BackingPath);
+            string Root = Path.GetFullPath(GuestSession.Directory) + Path.DirectorySeparatorChar;
+            return Full.StartsWith(Root, GeneralHelper.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) &&
+                Full.EndsWith(".pipe", StringComparison.Ordinal);
+        }
+    }
+
     internal static class GuestProcessLauncher
     {
         // Set on hosts where the system starts the process because Environment.ProcessPath is empty.
@@ -49,7 +404,28 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ushort OptionalHeaderMagic32 = 0x10B;
         private const ushort OptionalHeaderMagic64 = 0x20B;
 
-        internal static bool TryLaunch(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, bool StartSuspended, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
+        /// <param name="InheritRecordFor">Builds the inheritance record once the image subsystem is known.</param>
+        internal static bool TryLaunch(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, bool StartSuspended, Func<uint, byte[]> InheritRecordFor, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
+        {
+            string InheritPath = null;
+            bool Launched = TryLaunchWithRecord(Instance, ProcessParameters, ImageNameHint, StartSuspended, InheritRecordFor, ref InheritPath, out Process, out ImageInformation, out Status);
+
+            if (!Launched && InheritPath != null)
+            {
+                try
+                {
+                    File.Delete(InheritPath);
+                }
+                catch (Exception Error)
+                {
+                    Utils.LogError($"[GuestProcessLauncher] Cannot remove an unused handle record: {Error.Message}");
+                }
+            }
+
+            return Launched;
+        }
+
+        private static bool TryLaunchWithRecord(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, bool StartSuspended, Func<uint, byte[]> InheritRecordFor, ref string InheritPath, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
         {
             Process = null;
             ImageInformation = default;
@@ -109,6 +485,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             string GuestArguments = StripArgv0(CommandLine);
             string WorkingDirectory = ResolveWorkingDirectory(CurrentDirectory, HostImage);
             uint SpawnToken = NextSpawnToken();
+
+            byte[] InheritRecord = InheritRecordFor?.Invoke(ImageInformation.SubSystemType);
+            if (InheritRecord != null)
+            {
+                try
+                {
+                    System.IO.Directory.CreateDirectory(GuestSession.Directory);
+                    InheritPath = InheritedHandles.PathFor(SpawnToken);
+                    File.WriteAllBytes(InheritPath, InheritRecord);
+                }
+                catch (Exception Error)
+                {
+                    Utils.LogError($"[GuestProcessLauncher] Cannot pass the inherited handles: {Error.Message}");
+                    Status = NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
+                    return false;
+                }
+            }
 
             Process HostProcess;
 

@@ -738,6 +738,110 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        private const int LivenessCacheMilliseconds = 100;
+        private const int LivenessCacheLimit = 64;
+        private static readonly Dictionary<ulong, long> AliveCheckedAt = new();
+
+        // A holder is a host process id and, in the high half, its start time, so a reused process id is another holder.
+        internal static readonly ulong OwnHolder = CurrentHolder();
+
+        private static ulong CurrentHolder()
+        {
+            uint Self = (uint)Environment.ProcessId;
+            TryGetStartStamp(Self, out uint Stamp);
+            return ((ulong)Stamp << 32) | Self;
+        }
+
+        // On Linux Process.StartTime uses each process's own wall clock, so two processes disagree by milliseconds.
+        private static bool TryGetStartStamp(uint HostProcessId, out uint Stamp)
+        {
+            Stamp = 0;
+
+            try
+            {
+                if (GeneralHelper.IsLinux)
+                {
+                    // proc(5). The command name is in parentheses and may hold spaces, so fields count from the last ')'.
+                    string Stat = File.ReadAllText($"/proc/{HostProcessId}/stat");
+                    int NameEnd = Stat.LastIndexOf(')');
+                    if (NameEnd < 0 || NameEnd + 2 >= Stat.Length)
+                        return false;
+
+                    string[] Fields = Stat.Substring(NameEnd + 2).Split(' ');
+                    if (Fields.Length < 20 || Fields[0] == "Z" || Fields[0] == "X" ||
+                        !ulong.TryParse(Fields[19], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out ulong StartTicks))
+                        return false;
+
+                    Stamp = (uint)StartTicks;
+                    return true;
+                }
+
+                using System.Diagnostics.Process Existing = System.Diagnostics.Process.GetProcessById((int)HostProcessId);
+                if (Existing.HasExited)
+                    return false;
+
+                Stamp = (uint)(Existing.StartTime.ToUniversalTime().Ticks / TimeSpan.TicksPerMillisecond);
+                return true;
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException || Error is ArgumentException ||
+                                          Error is InvalidOperationException || Error is System.ComponentModel.Win32Exception ||
+                                          Error is NotSupportedException)
+            {
+                return false;
+            }
+        }
+
+        private static bool IsHolderAlive(ulong Holder)
+            => TryGetStartStamp((uint)Holder, out uint Stamp) && (((ulong)Stamp << 32) | (uint)Holder) == Holder;
+
+        internal static bool IsHolderAliveCached(ulong Holder)
+        {
+            if (Holder == 0)
+                return false;
+
+            if (Holder == OwnHolder)
+                return true;
+
+            if ((uint)Holder == (uint)Environment.ProcessId)
+                return false;
+
+            long Now = Environment.TickCount64;
+            lock (AliveCheckedAt)
+            {
+                if (AliveCheckedAt.TryGetValue(Holder, out long CheckedAt) && Now - CheckedAt < LivenessCacheMilliseconds)
+                    return true;
+            }
+
+            bool Alive = IsHolderAlive(Holder);
+
+            lock (AliveCheckedAt)
+            {
+                if (!Alive)
+                {
+                    AliveCheckedAt.Remove(Holder);
+                    return false;
+                }
+
+                if (AliveCheckedAt.Count >= LivenessCacheLimit)
+                {
+                    List<ulong> Stale = new List<ulong>();
+                    foreach (KeyValuePair<ulong, long> Entry in AliveCheckedAt)
+                    {
+                        if (Now - Entry.Value >= LivenessCacheMilliseconds)
+                            Stale.Add(Entry.Key);
+                    }
+
+                    foreach (ulong Key in Stale)
+                        AliveCheckedAt.Remove(Key);
+                }
+
+                if (AliveCheckedAt.Count < LivenessCacheLimit)
+                    AliveCheckedAt[Holder] = Now;
+            }
+
+            return true;
+        }
+
         private static string Sanitize(string Value)
         {
             StringBuilder Builder = new StringBuilder(Value.Length);
@@ -748,6 +852,229 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return Builder.Length == 0 ? "default" : Builder.ToString();
+        }
+    }
+
+    internal static unsafe class SessionHolders
+    {
+        internal const int EntryBytes = 8;
+
+        private static ref ulong Entry(byte* Table, int Slot) => ref *(ulong*)(Table + Slot * EntryBytes);
+
+        // -1 when every slot has a live holder.
+        internal static int Register(byte* Table, int Slots)
+        {
+            for (int i = 0; i < Slots; i++)
+            {
+                ref ulong Holder = ref Entry(Table, i);
+                ulong Current = Volatile.Read(ref Holder);
+                if (Current != 0 && !GuestSession.IsHolderAliveCached(Current))
+                    Interlocked.CompareExchange(ref Holder, 0, Current);
+
+                if (Interlocked.CompareExchange(ref Holder, GuestSession.OwnHolder, 0) == 0)
+                    return i;
+            }
+
+            return -1;
+        }
+
+        internal static void Release(byte* Table, int Slot)
+        {
+            if (Slot >= 0)
+                Interlocked.CompareExchange(ref Entry(Table, Slot), 0, GuestSession.OwnHolder);
+        }
+
+        internal static void Claim(byte* Table, int Slot) => Volatile.Write(ref Entry(Table, Slot), GuestSession.OwnHolder);
+
+        internal static void Clear(byte* Table, int Slots)
+        {
+            for (int i = 0; i < Slots; i++)
+                Volatile.Write(ref Entry(Table, i), 0);
+        }
+
+        internal static bool HasLive(byte* Table, int Slots, bool ClearDead)
+        {
+            for (int i = 0; i < Slots; i++)
+            {
+                ref ulong Holder = ref Entry(Table, i);
+                ulong Current = Volatile.Read(ref Holder);
+                if (Current == 0)
+                    continue;
+
+                if (GuestSession.IsHolderAliveCached(Current))
+                    return true;
+
+                if (ClearDead)
+                    Interlocked.CompareExchange(ref Holder, 0, Current);
+            }
+
+            return false;
+        }
+
+        internal static bool HasLiveProcess(byte* Table, int Slots, uint HostProcessId)
+        {
+            for (int i = 0; i < Slots; i++)
+            {
+                ulong Current = Volatile.Read(ref Entry(Table, i));
+                if ((uint)Current == HostProcessId && GuestSession.IsHolderAliveCached(Current))
+                    return true;
+            }
+
+            return false;
+        }
+    }
+
+    // NT keeps one position per file object, so a child that writes an inherited file moves its creator's position.
+    internal sealed unsafe class SharedFilePosition : IDisposable
+    {
+        private const uint Magic = 0x50465642;
+        private const int MagicOffset = 0x00;
+        private const int PositionOffset = 0x08;
+        private const int HoldersOffset = 0x10;
+        private const int HolderSlots = 64;
+        private const int CellBytes = HoldersOffset + HolderSlots * SessionHolders.EntryBytes;
+        private const string CellDirectoryName = "files";
+        private const string CellExtension = ".pos";
+
+        private FileStream Stream;
+        private MemoryMappedFile Map;
+        private MemoryMappedViewAccessor View;
+        private byte* Base;
+        private int Slot = -1;
+
+        internal string CellPath { get; }
+
+        private SharedFilePosition(string CellPath, FileStream Stream, MemoryMappedFile Map, MemoryMappedViewAccessor View, byte* Base)
+        {
+            this.CellPath = CellPath;
+            this.Stream = Stream;
+            this.Map = Map;
+            this.View = View;
+            this.Base = Base;
+        }
+
+        private static string CellDirectory => Path.Combine(GuestSession.Directory, CellDirectoryName);
+
+        internal long Value
+        {
+            get => Volatile.Read(ref *(long*)(Base + PositionOffset));
+            set => Volatile.Write(ref *(long*)(Base + PositionOffset), value);
+        }
+
+        internal static SharedFilePosition Create(long Position)
+        {
+            try
+            {
+                System.IO.Directory.CreateDirectory(CellDirectory);
+                string CellPath = Path.Combine(CellDirectory, Guid.NewGuid().ToString("N") + CellExtension);
+                SharedFilePosition Cell = MapCell(CellPath, FileMode.CreateNew);
+                if (Cell == null)
+                    return null;
+
+                Cell.Value = Position;
+                Volatile.Write(ref *(uint*)(Cell.Base + MagicOffset), Magic);
+                if (!Cell.TryRegister())
+                {
+                    Cell.Dispose();
+                    return null;
+                }
+
+                return Cell;
+            }
+            catch (IOException Error)
+            {
+                Utils.LogError($"[SharedFilePosition] Cannot create a shared position: {Error.Message}");
+                return null;
+            }
+        }
+
+        // Null for a path outside this session's cells.
+        internal static SharedFilePosition Open(string CellPath)
+        {
+            if (string.IsNullOrEmpty(CellPath) || !CellPath.EndsWith(CellExtension, StringComparison.Ordinal))
+                return null;
+
+            string Full = Path.GetFullPath(CellPath);
+            string Root = Path.GetFullPath(CellDirectory) + Path.DirectorySeparatorChar;
+            if (!Full.StartsWith(Root, GeneralHelper.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                return null;
+
+            SharedFilePosition Cell = MapCell(Full, FileMode.Open);
+            if (Cell == null)
+                return null;
+
+            if (Volatile.Read(ref *(uint*)(Cell.Base + MagicOffset)) != Magic || !Cell.TryRegister())
+            {
+                Cell.Dispose();
+                return null;
+            }
+
+            return Cell;
+        }
+
+        private static SharedFilePosition MapCell(string CellPath, FileMode Mode)
+        {
+            FileStream CellStream = null;
+            MemoryMappedFile Mapping = null;
+            MemoryMappedViewAccessor CellView = null;
+
+            try
+            {
+                CellStream = new FileStream(CellPath, Mode, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+                if (CellStream.Length < CellBytes)
+                    CellStream.SetLength(CellBytes);
+
+                Mapping = MemoryMappedFile.CreateFromFile(CellStream, null, CellBytes, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, true);
+                CellView = Mapping.CreateViewAccessor(0, CellBytes, MemoryMappedFileAccess.ReadWrite);
+
+                byte* Pointer = null;
+                CellView.SafeMemoryMappedViewHandle.AcquirePointer(ref Pointer);
+                if (Pointer != null)
+                    return new SharedFilePosition(CellPath, CellStream, Mapping, CellView, Pointer);
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[SharedFilePosition] Cannot map {CellPath}: {Error.Message}");
+            }
+
+            CellView?.Dispose();
+            Mapping?.Dispose();
+            CellStream?.Dispose();
+            return null;
+        }
+
+        private bool TryRegister()
+        {
+            Slot = SessionHolders.Register(Base + HoldersOffset, HolderSlots);
+            return Slot >= 0;
+        }
+
+        public void Dispose()
+        {
+            if (Base == null)
+                return;
+
+            SessionHolders.Release(Base + HoldersOffset, Slot);
+
+            bool Last = !SessionHolders.HasLive(Base + HoldersOffset, HolderSlots, false);
+
+            View.SafeMemoryMappedViewHandle.ReleasePointer();
+            View.Dispose();
+            Map.Dispose();
+            Stream.Dispose();
+            Base = null;
+
+            if (!Last)
+                return;
+
+            try
+            {
+                File.Delete(CellPath);
+            }
+            catch (IOException Error)
+            {
+                Utils.LogError($"[SharedFilePosition] Cannot remove {CellPath}: {Error.Message}");
+            }
         }
     }
 

@@ -35,7 +35,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (FileHandle == (ulong)Instance.WinHelper.STD_IN.Handle || Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp)?.ConsoleKind == ConsoleObjectKind.Input)
+            WinFile PipeFile = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
+            if (PipeFile?.Pipe != null)
+                return ReadPipe(Instance, FileHandle, PipeFile, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
+
+            if (Instance.WinHelper.IsHostStdIn(FileHandle) || PipeFile?.ConsoleKind == ConsoleObjectKind.Input)
                 return HandleStdIn(Instance, IoStatusBlockPtr, BufferPtr, Length);
 
             if (Length == 0)
@@ -58,31 +62,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Instance.WinHelper.ResetIoEvent(EventHandle);
-
-            if (FileObj.Pipe != null)
-            {
-                if (!HasReadAccess(Instance, FileHandle))
-                {
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                    return NTSTATUS.STATUS_ACCESS_DENIED;
-                }
-
-                int PipeLength = Length > GuestNamedPipe.MaxMessageBytes ? GuestNamedPipe.MaxMessageBytes : (int)Length;
-                Span<byte> PipeBuffer = Instance.WinHelper.Shared.GetSpan((uint)PipeLength);
-                NTSTATUS PipeStatus = FileObj.Pipe.Read(PipeBuffer.Slice(0, PipeLength), out int PipeRead);
-
-                if (PipeStatus == NTSTATUS.STATUS_PIPE_EMPTY && FileObj.Pipe.BlockingMode &&
-                    Instance.WinHelper.TryContinuePipeWait(FileHandle, GuestNamedPipe.BlockingIoMilliseconds, GuestNamedPipe.PollSliceMilliseconds))
-                    return NTSTATUS.STATUS_PENDING;
-
-                Instance.WinHelper.ClearPipeWait();
-
-                if (PipeRead != 0)
-                    Instance._emulator.WriteMemory(BufferPtr, PipeBuffer.Slice(0, PipeRead));
-
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, PipeStatus, (ulong)PipeRead);
-                return PipeStatus;
-            }
 
             if (FileObj.Device)
             {
@@ -176,6 +155,28 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.TriggerEventMessage($"[+] NtReadFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Read=0x{Done:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS ReadPipe(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
+        {
+            if (Length != 0 && !Instance.IsMemoryRangeMapped(BufferPtr, Length))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
+
+            Instance.WinHelper.ResetIoEvent(EventHandle);
+
+            if (!HasReadAccess(Instance, FileHandle))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+            }
+
+            PipeRequest Request = Instance.WinHelper.PipeRequests.Create(Instance, PipeRequestKind.Read, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr);
+            Request.Buffer = BufferPtr;
+            Request.Length = (int)Math.Min(Length, (uint)GuestNamedPipe.MaxMessageBytes);
+            return Instance.WinHelper.PipeRequests.Submit(Instance, Request);
         }
 
         private static NTSTATUS HandleStdIn(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)

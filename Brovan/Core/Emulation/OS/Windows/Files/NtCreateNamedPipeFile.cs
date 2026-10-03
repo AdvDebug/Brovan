@@ -14,6 +14,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
             ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(3);
             uint CreateDisposition = (uint)Instance.WinHelper.GetArg(5);
+            uint CreateOptions = (uint)Instance.WinHelper.GetArg(6);
             uint NamedPipeType = (uint)Instance.WinHelper.GetArg(7);
             uint ReadMode = (uint)Instance.WinHelper.GetArg(8);
             uint CompletionMode = (uint)Instance.WinHelper.GetArg(9);
@@ -33,13 +34,29 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (CreateDisposition != FILE_CREATE && CreateDisposition != FILE_OPEN_IF)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out _, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
+            if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out ulong RootDirectory, out string Name, out string FullName, out NTSTATUS ObjectNameStatus))
                 return ObjectNameStatus;
 
-            if (string.IsNullOrEmpty(Name))
-                return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+            bool Inherit = (Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributesPtr) & WinSysHelper.OBJ_INHERIT) != 0;
 
-            string GuestPath = WinSysHelper.NormalizePipePath(FullName);
+            string GuestPath;
+            GuestNamedPipe Related = RootDirectory == 0 ? null : Instance.WinHelper.HandleManager.GetObjectByHandle<WinFile>(RootDirectory)?.Pipe;
+            if (Related != null)
+            {
+                // NPFS takes only the device root as the related file. An empty name there is an anonymous pipe.
+                if (!Related.IsRoot || (Name.Length != 0 && Name[0] == '\\'))
+                    return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+
+                GuestPath = Name.Length == 0 ? GuestNamedPipe.NextAnonymousPath() : GuestNamedPipe.DeviceName + "\\" + Name;
+            }
+            else
+            {
+                if (string.IsNullOrEmpty(Name))
+                    return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+
+                GuestPath = WinSysHelper.NormalizePipePath(FullName);
+            }
+
             if (!GuestNamedPipe.IsPipePath(GuestPath) || GuestPath.Length <= GuestNamedPipe.DeviceName.Length)
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
@@ -50,7 +67,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Status;
             }
 
-            return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, GuestPath, Pipe.HandleControl, Pipe);
+            return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, GuestPath, Pipe.HandleControl, Pipe, CreateOptions, Inherit);
         }
     }
 }

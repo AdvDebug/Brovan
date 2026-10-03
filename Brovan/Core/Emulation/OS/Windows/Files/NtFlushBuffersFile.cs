@@ -46,7 +46,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS FlushHandle(BinaryEmulator Instance, ulong FileHandle)
         {
-            if (Instance.WinHelper.STD_OUT != null && FileHandle == (ulong)Instance.WinHelper.STD_OUT.Handle)
+            if (Instance.WinHelper.IsHostStdOut(FileHandle))
             {
                 Console.Out.Flush();
                 return NTSTATUS.STATUS_SUCCESS;

@@ -65,6 +65,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            bool Inherit = (Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributesPtr) & WinSysHelper.OBJ_INHERIT) != 0;
+
+            if (TryOpenPipeRelative(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, RootDirectoryHandle, ObjectName, CreateOptions, Inherit, out NTSTATUS PipeStatus))
+                return PipeStatus;
+
             string Normalized = NormalizeNtObjectPath(RawPath);
 
             byte[] Ea = Array.Empty<byte>();
@@ -96,7 +101,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return DeviceStatus;
                 }
 
-                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler, DevicePipe);
+                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler, DevicePipe, CreateOptions, Inherit);
             }
 
             string Path = ResolveNtPath(Instance, RawPath, RootDirectoryHandle);
@@ -106,7 +111,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
-            return CreateRegularHandle64(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, Path, CreateDisposition, CreateOptions, ShareAccess);
+            return CreateRegularHandle64(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, Path, CreateDisposition, CreateOptions, ShareAccess, Inherit);
         }
 
         private NTSTATUS Handle32(BinaryEmulator Instance)
@@ -144,6 +149,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            bool Inherit = (Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributesPtr) & WinSysHelper.OBJ_INHERIT) != 0;
+
+            if (TryOpenPipeRelative(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, RootDirectoryHandle, ObjectName, CreateOptions, Inherit, out NTSTATUS PipeStatus))
+                return PipeStatus;
+
             string Normalized = NormalizeNtObjectPath(RawPath);
 
             byte[] Ea = Array.Empty<byte>();
@@ -175,7 +185,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return DeviceStatus;
                 }
 
-                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, DevicePath, DeviceHandler, DevicePipe);
+                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, DevicePath, DeviceHandler, DevicePipe, CreateOptions, Inherit);
             }
 
             string Path = ResolveNtPath(Instance, RawPath, RootDirectoryHandle);
@@ -185,10 +195,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
-            return CreateRegularHandle32(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, Path, CreateDisposition, CreateOptions, ShareAccess);
+            return CreateRegularHandle32(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, Path, CreateDisposition, CreateOptions, ShareAccess, Inherit);
         }
 
-        private static NTSTATUS CreateRegularHandle64(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string Path, uint CreateDisposition, uint CreateOptions, uint ShareAccess)
+        private static NTSTATUS CreateRegularHandle64(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string Path, uint CreateDisposition, uint CreateOptions, uint ShareAccess, bool Inherit)
         {
             Path = NormalizeAndTrimPath(Path);
             bool IsDirectory = (CreateOptions & FILE_DIRECTORY_FILE) != 0 || Path.EndsWith("\\", StringComparison.Ordinal);
@@ -271,7 +281,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 FileStream = Stream,
                 DeletePending = DeleteOnClose,
                 GrantedAccess = Permissions,
-                ShareAccess = ShareAccess
+                ShareAccess = ShareAccess,
+                Mode = ModeFromCreateOptions(CreateOptions)
             };
 
             Instance.WinHelper.WinFiles.Add(FileObj);
@@ -279,6 +290,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
             Instance.WinHelper.AddWinHandle(Handle);
+            if (Inherit)
+                Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
 
             Instance._emulator.WriteMemory(FileHandlePtr, (ulong)Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Information);
@@ -286,7 +299,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS CreateRegularHandle32(BinaryEmulator Instance, uint FileHandlePtr, uint IoStatusBlockPtr, AccessMask Permissions, string Path, uint CreateDisposition, uint CreateOptions, uint ShareAccess)
+        private static NTSTATUS CreateRegularHandle32(BinaryEmulator Instance, uint FileHandlePtr, uint IoStatusBlockPtr, AccessMask Permissions, string Path, uint CreateDisposition, uint CreateOptions, uint ShareAccess, bool Inherit)
         {
             Path = NormalizeAndTrimPath(Path);
             bool IsDirectory = (CreateOptions & FILE_DIRECTORY_FILE) != 0 || Path.EndsWith("\\", StringComparison.Ordinal);
@@ -367,7 +380,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 FileStream = Stream,
                 DeletePending = DeleteOnClose,
                 GrantedAccess = Permissions,
-                ShareAccess = ShareAccess
+                ShareAccess = ShareAccess,
+                Mode = ModeFromCreateOptions(CreateOptions)
             };
 
             Instance.WinHelper.WinFiles.Add(FileObj);
@@ -375,6 +389,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
             Instance.WinHelper.AddWinHandle(Handle);
+            if (Inherit)
+                Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
 
             Instance._emulator.WriteMemory(FileHandlePtr, (uint)Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Information);
@@ -595,7 +611,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                    !RawPath.StartsWith("\\", StringComparison.Ordinal);
         }
 
-        internal static NTSTATUS CreateDeviceHandle(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string InternalPath, WinDeviceDelegate Handler, GuestNamedPipe Pipe = null)
+        internal static NTSTATUS CreateDeviceHandle(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string InternalPath, WinDeviceDelegate Handler, GuestNamedPipe Pipe = null, uint CreateOptions = 0, bool Inherit = false)
         {
             WinFile FileObj = new WinFile
             {
@@ -604,6 +620,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Real = false,
                 Directory = false,
                 Position = 0,
+                Mode = ModeFromCreateOptions(CreateOptions),
                 Handler = Handler,
                 Pipe = Pipe
             };
@@ -611,10 +628,44 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.WinFiles.Add(FileObj);
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
             Instance.WinHelper.AddWinHandle(Handle);
+            if (Inherit)
+                Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
 
             Instance.WinHelper.WritePointer(FileHandlePtr, Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal static uint ModeFromCreateOptions(uint CreateOptions)
+        {
+            return CreateOptions & (WinFile.FILE_SYNCHRONOUS_IO_ALERT | WinFile.FILE_SYNCHRONOUS_IO_NONALERT);
+        }
+
+        internal static bool TryOpenPipeRelative(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, ulong RootDirectory, string Name, uint CreateOptions, bool Inherit, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_SUCCESS;
+            if (!GuestNamedPipe.TryResolveRelative(Instance, RootDirectory, Name, out string GuestPath, out GuestNamedPipe Server))
+                return false;
+
+            GuestNamedPipe Client;
+            if (Server != null)
+                Status = GuestNamedPipe.TryCreateClientOf(Server, out Client);
+            else if (GuestPath != null)
+                Status = GuestNamedPipe.TryCreateClient(GuestPath, out Client);
+            else
+            {
+                Status = NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+                Client = null;
+            }
+
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
+                return true;
+            }
+
+            Status = CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, Permissions, GuestPath, Client.HandleControl, Client, CreateOptions, Inherit);
+            return true;
         }
 
         private static bool TryGetDosVolumeDevicePath(BinaryEmulator Instance, string Path, out string DevicePath)

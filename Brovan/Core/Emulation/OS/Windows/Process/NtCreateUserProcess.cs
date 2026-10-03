@@ -11,8 +11,44 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong PsAttributeClientId = 3 | 0x10000;
         private const ulong PsAttributeImageName = 5 | 0x20000;
         private const ulong PsAttributeImageInfo = 6;
+        private const ulong PsAttributeStdHandleInfo = 10 | 0x20000;
+        private const ulong PsAttributeHandleList = 11 | 0x20000;
+
+        private const uint ProcessCreateFlagsInheritHandles = 0x4;
+        private const int MaxHandleListEntries = 1024;
 
         private const int MaxAttributes = 32;
+
+        private static List<ulong> ReadHandleListAttribute(BinaryEmulator Instance, ulong AttributeList)
+        {
+            if (!TryFindAttribute(Instance, AttributeList, PsAttributeHandleList, out ulong ValuePointer, out ulong Size))
+                return null;
+
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+            ulong Count = Size / PointerSize;
+            List<ulong> Handles = new List<ulong>((int)Math.Min(Count, MaxHandleListEntries));
+            if (ValuePointer == 0 || Count > MaxHandleListEntries)
+                return Handles;
+
+            for (ulong i = 0; i < Count; i++)
+                Handles.Add(Instance.WinHelper.ReadPointer(ValuePointer + i * PointerSize));
+
+            return Handles;
+        }
+
+        // PS_STD_HANDLE_INFO. The state is the low two bits of its first ULONG, the subsystem the second ULONG.
+        private static uint ReadStdHandleState(BinaryEmulator Instance, ulong AttributeList, out uint Subsystem)
+        {
+            Subsystem = 0;
+            if (!TryFindAttribute(Instance, AttributeList, PsAttributeStdHandleInfo, out ulong ValuePointer, out ulong Size))
+                return 0;
+
+            if (ValuePointer == 0 || Size < 8)
+                return 0;
+
+            Subsystem = Instance._emulator.ReadMemoryUInt(ValuePointer + 4);
+            return Instance._emulator.ReadMemoryUInt(ValuePointer) & 3;
+        }
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -33,7 +69,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             // THREAD_CREATE_FLAGS_CREATE_SUSPENDED, the creator wants to act on the process before it runs.
             bool StartSuspended = (Instance.WinHelper.GetArg(7) & 1) != 0;
 
-            if (!GuestProcessLauncher.TryLaunch(Instance, ProcessParameters, ImageNameHint, StartSuspended, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status))
+            uint ProcessFlags = (uint)Instance.WinHelper.GetArg(6);
+            bool InheritHandles = (ProcessFlags & ProcessCreateFlagsInheritHandles) != 0;
+            List<ulong> HandleList = ReadHandleListAttribute(Instance, AttributeList);
+            uint StdHandleState = ReadStdHandleState(Instance, AttributeList, out uint StdHandleSubsystem);
+
+            Func<uint, byte[]> InheritRecordFor = ImageSubsystem => InheritedHandles.Build(
+                Instance, ProcessParameters, InheritHandles, HandleList, StdHandleState, StdHandleSubsystem, ImageSubsystem);
+
+            if (!GuestProcessLauncher.TryLaunch(Instance, ProcessParameters, ImageNameHint, StartSuspended, InheritRecordFor, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status))
                 return Status;
 
             WinRemoteThread Thread = new WinRemoteThread

@@ -67,7 +67,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FILE_INFORMATION_CLASS.FilePositionInformation:
                     return HandleFilePositionInformation(Instance, File, IoStatusBlock, FileInformation, Length);
                 case FILE_INFORMATION_CLASS.FileModeInformation:
-                    return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileModeInformationSize, 0);
+                    return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileModeInformationSize, File.Mode);
                 case FILE_INFORMATION_CLASS.FileAlignmentInformation:
                     return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileAlignmentInformationSize, 0);
                 case FILE_INFORMATION_CLASS.FileAllInformation:

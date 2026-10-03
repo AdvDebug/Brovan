@@ -48,37 +48,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
+            if (FileObj.Pipe != null)
+                return WritePipe(Instance, FileHandle, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
+
             Instance.WinHelper.ResetIoEvent(EventHandle);
 
-            if (FileObj.ConsoleKind == ConsoleObjectKind.Output || FileHandle == Instance.WinHelper.STD_OUT.Handle)
+            if (FileObj.ConsoleKind == ConsoleObjectKind.Output || Instance.WinHelper.IsHostStdOut(FileHandle))
                 return HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
-
-            if (FileObj.Pipe != null)
-            {
-                if (!HasWriteAccess(Instance, FileHandle))
-                {
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                    return NTSTATUS.STATUS_ACCESS_DENIED;
-                }
-
-                if (Length > GuestNamedPipe.MaxMessageBytes)
-                {
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-                }
-
-                Span<byte> PipeBuffer = Instance.WinHelper.Shared.GetSpan(Length);
-                Instance._emulator.ReadMemory(BufferPtr, PipeBuffer.Slice(0, (int)Length));
-                NTSTATUS PipeStatus = FileObj.Pipe.Write(PipeBuffer.Slice(0, (int)Length), GuestNamedPipe.OwnerOf(Instance), out int PipeWritten);
-
-                // NT blocks a synchronous write until the peer reads.
-                if (PipeStatus == NTSTATUS.STATUS_PENDING &&
-                    Instance.WinHelper.TryRetrySyscallAfterSlice(GuestNamedPipe.PollSliceMilliseconds))
-                    return NTSTATUS.STATUS_PENDING;
-
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, PipeStatus, (ulong)PipeWritten);
-                return PipeStatus;
-            }
 
             if (FileObj.Device)
             {
@@ -176,6 +152,43 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.TriggerEventMessage($"[+] NtWriteFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Wrote=0x{Done:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS WritePipe(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
+        {
+            Instance.WinHelper.ResetIoEvent(EventHandle);
+
+            if (!HasWriteAccess(Instance, FileHandle))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+            }
+
+            bool MessagePipe = FileObj.Pipe.PipeType == GuestNamedPipe.FILE_PIPE_MESSAGE_MODE;
+            if (Length > (MessagePipe ? (uint)GuestNamedPipe.MaxMessageBytes : int.MaxValue))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            }
+
+            PipeRequest Request = Instance.WinHelper.PipeRequests.Create(Instance, PipeRequestKind.Write, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr);
+            bool Readable = MessagePipe
+                ? PipeRequestQueue.TryTakeData(Instance, Request, BufferPtr, (int)Length)
+                : Length == 0 || Instance.IsMemoryRangeMapped(BufferPtr, Length);
+
+            if (!Readable)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
+
+            if (!MessagePipe)
+            {
+                Request.Buffer = BufferPtr;
+                Request.DataLength = (int)Length;
+            }
+
+            return Instance.WinHelper.PipeRequests.Submit(Instance, Request);
         }
 
         private static NTSTATUS HandleStdOut(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)

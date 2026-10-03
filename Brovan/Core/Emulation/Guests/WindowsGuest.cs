@@ -377,6 +377,12 @@ namespace Brovan.Core.Emulation.Guests
                 return;
             }
 
+            if (State.PipeIoRequest != null)
+            {
+                CompletePipeIoWait(Instance, Thread, State);
+                return;
+            }
+
             if (State.RetrySyscallActive)
             {
                 CompleteSyscallRetry(Instance, Thread, State);
@@ -443,6 +449,36 @@ namespace Brovan.Core.Emulation.Guests
             State.RetrySyscallNumber = 0;
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
+            State.WaitResumeRIP = 0;
+            State.WaitReturnRIP = 0;
+            State.WaitAlertable = false;
+            State.WaitObjects = null;
+            State.ApcAlertable = false;
+            Thread.WaitTimedOut = false;
+            Thread.WaitSatisfiedIndex = -1;
+
+            if (Instance.CurrentThread == Thread)
+            {
+                Instance.WriteRegister(Registers.UC_X86_REG_RIP, Thread.Context.RIP);
+                Instance.WriteRegister(Registers.UC_X86_REG_RAX, Thread.Context.RAX);
+            }
+        }
+
+        // The request already wrote the IO_STATUS_BLOCK.
+        private static void CompletePipeIoWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
+        {
+            NTSTATUS Status = State.PipeIoRequest.Status;
+
+            if (Thread.Context == null)
+                Thread.Context = new CpuContext();
+
+            ulong ResumeRip = State.WaitReturnRIP != 0 ? State.WaitReturnRIP : (State.WaitResumeRIP != 0 ? State.WaitResumeRIP + 2 : Thread.Context.RIP);
+            Thread.Context.RIP = ResumeRip;
+            Thread.Context.RAX = (ulong)(uint)Status;
+
+            State.PipeIoRequest = null;
+            State.WaitCompleted = false;
+            State.WaitStatus = Status;
             State.WaitResumeRIP = 0;
             State.WaitReturnRIP = 0;
             State.WaitAlertable = false;
@@ -1269,6 +1305,8 @@ namespace Brovan.Core.Emulation.Guests
         }
 
 
+        private const string GuestVariablePrefix = "BROVAN_GUEST_";
+
         public byte[] BuildEnvironment(BinaryEmulator Instance, out ulong size)
         {
             size = 0;
@@ -1334,6 +1372,12 @@ namespace Brovan.Core.Emulation.Guests
                 string Name = HostVariable.Key as string;
                 if (string.IsNullOrEmpty(Name))
                     continue;
+
+                if (Name.Length > GuestVariablePrefix.Length && Name.StartsWith(GuestVariablePrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    Env[Name.Substring(GuestVariablePrefix.Length)] = HostVariable.Value as string ?? string.Empty;
+                    continue;
+                }
 
                 if (!Name.StartsWith("DXVK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VKD3D_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("VK_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("SDL_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("MONO_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("DOTNET_", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("COMPlus_", StringComparison.OrdinalIgnoreCase))
                     continue;
@@ -1512,14 +1556,19 @@ namespace Brovan.Core.Emulation.Guests
 
                     Instance._emulator.WriteMemory(ProcessParams + 0x8, 0x6001u, 4);
                     WriteInlineUnicodeString(0x38, CurrentDir, ForcedMax: 1024);
-                    if (UsesDirectBlobStartup || (IsPeImage && Instance._binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui)))
+                    bool ConsoleApp = UsesDirectBlobStartup || (IsPeImage && Instance._binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui));
+                    if (ConsoleApp)
                     {
                         ulong Handle = WinHelper.ConsoleHandle.Handle;
                         Instance._emulator.WriteMemory(ProcessParams + 0x10, Handle, 8);
                         Instance._emulator.WriteMemory(ProcessParams + 0x18, new byte[] { 0x00, 0x00, 0x00, 0x00 });
-                        Instance._emulator.WriteMemory(ProcessParams + 0x20, WinHelper.STD_IN.Handle, 8);
-                        Instance._emulator.WriteMemory(ProcessParams + 0x28, WinHelper.STD_OUT.Handle, 8);
-                        Instance._emulator.WriteMemory(ProcessParams + 0x30, WinHelper.STD_OUT.Handle, 8);
+                    }
+
+                    if (ConsoleApp || WinHelper.InheritedStandardHandles)
+                    {
+                        Instance._emulator.WriteMemory(ProcessParams + 0x20, WinHelper.STD_IN?.Handle ?? 0, 8);
+                        Instance._emulator.WriteMemory(ProcessParams + 0x28, WinHelper.STD_OUT?.Handle ?? 0, 8);
+                        Instance._emulator.WriteMemory(ProcessParams + 0x30, WinHelper.STD_ERR?.Handle ?? 0, 8);
                     }
                     WriteInlineUnicodeString(0x60, ImagePath);
                     WriteInlineUnicodeString(0x70, CommandLine);
@@ -1649,12 +1698,15 @@ namespace Brovan.Core.Emulation.Guests
 
             Instance._emulator.WriteMemory(Params + 0x08, 0x6001u, 4);
             WriteInlineUnicodeString(0x24, CurrentDir, ForcedMax: 1024);
-            if (Instance._binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui))
-            {
+            bool ConsoleApp = Instance._binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui);
+            if (ConsoleApp)
                 Instance._emulator.WriteMemory(Params + 0x10, (uint)WinHelper.ConsoleHandle.Handle);
-                Instance._emulator.WriteMemory(Params + 0x18, (uint)WinHelper.STD_IN.Handle);
-                Instance._emulator.WriteMemory(Params + 0x1C, (uint)WinHelper.STD_OUT.Handle);
-                Instance._emulator.WriteMemory(Params + 0x20, (uint)WinHelper.STD_OUT.Handle);
+
+            if (ConsoleApp || WinHelper.InheritedStandardHandles)
+            {
+                Instance._emulator.WriteMemory(Params + 0x18, (uint)(WinHelper.STD_IN?.Handle ?? 0));
+                Instance._emulator.WriteMemory(Params + 0x1C, (uint)(WinHelper.STD_OUT?.Handle ?? 0));
+                Instance._emulator.WriteMemory(Params + 0x20, (uint)(WinHelper.STD_ERR?.Handle ?? 0));
             }
             WriteInlineUnicodeString(0x38, ImagePath);
             WriteInlineUnicodeString(0x40, CommandLine);

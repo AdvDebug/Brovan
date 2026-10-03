@@ -1,14 +1,13 @@
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
-    /// <summary>
-    /// One end of a guest named pipe. Messages carry a length prefix, because the channel underneath is a
-    /// byte ring in both directions.
-    /// </summary>
+    // Keeps no data of its own, because an end inherited by another process must see every unread byte.
     internal sealed class GuestNamedPipe : IDisposable
     {
         internal const string DeviceName = "\\Device\\NamedPipe";
@@ -40,32 +39,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int WaitTimeoutSpecifiedOffset = 12;
         private const int WaitNameOffset = 14;
 
-        private const int FrameHeaderBytes = 4;
-        private const int ReadChunkBytes = 0x1000;
-        internal const int MaxMessageBytes = 0x400000;
+        private const int PeekHeaderBytes = 0x10;
+
+        internal const int MaxMessageBytes = GuestPipeChannel.MaxFrameBytes;
 
         internal const int BlockingIoMilliseconds = 5000;
         internal const int PollSliceMilliseconds = 1;
 
-        private readonly GuestPipeChannel Channel;
-        private readonly byte[] ReadChunk;
+        private static int AnonymousCounter;
 
-        private byte[] Incoming = Array.Empty<byte>();
-        private int IncomingStart;
-        private int IncomingEnd;
-
-        private byte[] Current;
-        private int CurrentOffset;
-
-        private byte[] PendingWriteFrame;
-        private int PendingWriteLength;
-        private int PendingWriteSent;
-        private int PendingWriteBytes;
-        private ulong PendingWriteOwner;
-
-        private bool Disposed;
-
-        private int IncomingCount => IncomingEnd - IncomingStart;
+        internal readonly GuestPipeChannel Channel;
 
         internal string GuestPath { get; }
 
@@ -99,10 +82,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             this.Channel = Channel;
             this.ReadMode = ReadMode;
             this.CompletionMode = CompletionMode;
-            ReadChunk = new byte[ReadChunkBytes];
         }
 
         internal static GuestNamedPipe CreateRoot(string GuestPath) => new GuestNamedPipe(GuestPath);
+
+        // NT gives an anonymous pipe no name. The backing file still needs a unique one.
+        internal static string NextAnonymousPath()
+        {
+            uint Counter = (uint)Interlocked.Increment(ref AnonymousCounter);
+            return $"{DeviceName}\\Win32Pipes.{Environment.ProcessId:x8}.{Counter:x8}";
+        }
 
         internal static NTSTATUS TryCreateServer(string GuestPath, uint PipeType, uint ReadMode, uint CompletionMode,
             uint MaximumInstances, uint InboundQuota, uint OutboundQuota, out GuestNamedPipe Pipe)
@@ -125,8 +114,66 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
-            Pipe = new GuestNamedPipe(GuestPath, Channel, Channel.PipeType, FILE_PIPE_QUEUE_OPERATION);
+            Pipe = new GuestNamedPipe(GuestPath, Channel, FILE_PIPE_BYTE_STREAM_MODE, FILE_PIPE_QUEUE_OPERATION);
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT opens the client end of one instance by an empty name relative to its server end.
+        internal static NTSTATUS TryCreateClientOf(GuestNamedPipe Server, out GuestNamedPipe Pipe)
+        {
+            Pipe = null;
+
+            if (Server?.Channel == null || !Server.IsServer)
+                return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+
+            NTSTATUS Status = GuestPipeChannel.TryConnectInstance(Server.Channel.BackingPath, Server.Channel.GuestName, out GuestPipeChannel Channel);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            Pipe = new GuestNamedPipe(Server.GuestPath, Channel, FILE_PIPE_BYTE_STREAM_MODE, FILE_PIPE_QUEUE_OPERATION);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal static NTSTATUS TryAttach(string GuestPath, string BackingPath, bool Server, uint Generation, uint ReadMode, uint CompletionMode, out GuestNamedPipe Pipe)
+        {
+            Pipe = null;
+
+            NTSTATUS Status = GuestPipeChannel.TryOpenEnd(BackingPath, Server, Generation, out GuestPipeChannel Channel);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            Pipe = new GuestNamedPipe(GuestPath, Channel, ReadMode, CompletionMode);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // False when the root is no pipe handle. Under the device root a name names a pipe, and an empty name
+        // under a server end names that instance.
+        internal static bool TryResolveRelative(BinaryEmulator Instance, ulong RootDirectory, string Name, out string GuestPath, out GuestNamedPipe Server)
+        {
+            GuestPath = null;
+            Server = null;
+
+            if (RootDirectory == 0)
+                return false;
+
+            GuestNamedPipe Root = Instance.WinHelper.HandleManager.GetObjectByHandle<WinFile>(RootDirectory)?.Pipe;
+            if (Root == null)
+                return false;
+
+            if (Root.IsRoot)
+            {
+                if (!string.IsNullOrEmpty(Name))
+                    GuestPath = DeviceName + "\\" + Name.TrimStart('\\');
+                return true;
+            }
+
+            if (string.IsNullOrEmpty(Name) && Root.IsServer)
+            {
+                Server = Root;
+                GuestPath = Root.GuestPath;
+            }
+
+            return true;
         }
 
         internal static bool IsPipePath(string DevicePath)
@@ -137,10 +184,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return DevicePath.Length == DeviceName.Length || DevicePath[DeviceName.Length] == '\\';
         }
 
-        private bool Connected => Channel != null && Channel.Connected;
-
-        private bool PeerClosed => Channel == null || Channel.PeerClosed;
-
         internal uint State
         {
             get
@@ -148,213 +191,35 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (IsRoot)
                     return PipeStateListening;
 
-                if (Channel == null)
+                if (Channel == null || Channel.Disconnected)
                     return PipeStateDisconnected;
 
-                if (Connected)
-                    return PeerClosed ? PipeStateClosing : PipeStateConnected;
+                if (Channel.Connected)
+                    return Channel.PeerClosed ? PipeStateClosing : PipeStateConnected;
 
                 return IsServer ? PipeStateListening : PipeStateDisconnected;
             }
         }
 
-        private void AppendIncoming(ReadOnlySpan<byte> Source)
+        internal NTSTATUS UsableStatus(bool Writing)
         {
-            if (IncomingEnd + Source.Length > Incoming.Length)
-            {
-                int Live = IncomingCount;
+            if (IsRoot || Channel == null)
+                return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
 
-                if (IncomingStart != 0 && Live + Source.Length <= Incoming.Length)
-                {
-                    Incoming.AsSpan(IncomingStart, Live).CopyTo(Incoming);
-                }
-                else
-                {
-                    long Capacity = Math.Max(ReadChunkBytes, Incoming.Length == 0 ? ReadChunkBytes : (long)Incoming.Length * 2);
-                    while (Capacity < Live + Source.Length)
-                        Capacity *= 2;
+            if (Channel.Disconnected)
+                return NTSTATUS.STATUS_PIPE_DISCONNECTED;
 
-                    byte[] Grown = new byte[Capacity];
-                    Incoming.AsSpan(IncomingStart, Live).CopyTo(Grown);
-                    Incoming = Grown;
-                }
-
-                IncomingStart = 0;
-                IncomingEnd = Live;
-            }
-
-            Source.CopyTo(Incoming.AsSpan(IncomingEnd));
-            IncomingEnd += Source.Length;
-        }
-
-        private void ResetIncoming()
-        {
-            IncomingStart = 0;
-            IncomingEnd = 0;
-        }
-
-        private void Pump()
-        {
-            if (Disposed || IsRoot || Channel == null)
-                return;
-
-            while (true)
-            {
-                // One whole message has to fit even when the guest asked for less.
-                if (IncomingCount >= FrameHeaderBytes + MaxMessageBytes)
-                    return;
-
-                int Got = Channel.Read(ReadChunk);
-                if (Got <= 0)
-                    return;
-
-                AppendIncoming(ReadChunk.AsSpan(0, Got));
-            }
-        }
-
-        private bool EnsureCurrent()
-        {
-            if (Current != null && CurrentOffset < Current.Length)
-                return true;
-
-            Current = null;
-            CurrentOffset = 0;
-
-            if (IncomingCount < FrameHeaderBytes)
-                return false;
-
-            int Length = BinaryPrimitives.ReadInt32LittleEndian(Incoming.AsSpan(IncomingStart, FrameHeaderBytes));
-            if (Length < 0 || Length > MaxMessageBytes)
-            {
-                ResetIncoming();
-                return false;
-            }
-
-            if (IncomingCount < FrameHeaderBytes + Length)
-                return false;
-
-            byte[] Message = new byte[Length];
-            Incoming.AsSpan(IncomingStart + FrameHeaderBytes, Length).CopyTo(Message);
-
-            IncomingStart += FrameHeaderBytes + Length;
-            if (IncomingStart == IncomingEnd)
-                ResetIncoming();
-
-            Current = Message;
-            return Length != 0;
-        }
-
-        private NTSTATUS EmptyStatus()
-        {
-            if (!Connected)
-                return IsServer ? NTSTATUS.STATUS_PIPE_LISTENING : NTSTATUS.STATUS_PIPE_BROKEN;
-
-            if (PeerClosed)
+            if (Writing && Channel.OutboundBroken)
                 return NTSTATUS.STATUS_PIPE_BROKEN;
 
-            return NTSTATUS.STATUS_PIPE_EMPTY;
-        }
+            // NT lets a client read what the server wrote before it closed.
+            if (IsServer && !Channel.Connected)
+                return NTSTATUS.STATUS_PIPE_LISTENING;
 
-        /// <summary>
-        /// A message longer than the buffer answers STATUS_BUFFER_OVERFLOW, and the rest stays queued.
-        /// </summary>
-        internal NTSTATUS Read(Span<byte> Destination, out int Written)
-        {
-            Written = 0;
-
-            if (IsRoot)
-                return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
-
-            Pump();
-            if (!EnsureCurrent())
-                return EmptyStatus();
-
-            int Available = Current.Length - CurrentOffset;
-            int Copy = Math.Min(Available, Destination.Length);
-            Current.AsSpan(CurrentOffset, Copy).CopyTo(Destination);
-            CurrentOffset += Copy;
-            Written = Copy;
-
-            bool Drained = CurrentOffset >= Current.Length;
-            if (Drained)
-                Current = null;
-
-            if (ReadMode == FILE_PIPE_MESSAGE_MODE && !Drained)
-                return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+            if (Writing && Channel.PeerClosed)
+                return NTSTATUS.STATUS_PIPE_CLOSING;
 
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        /// <summary>
-        /// STATUS_PENDING means the ring took only part of the message and the caller has to ask again.
-        /// </summary>
-        internal NTSTATUS Write(ReadOnlySpan<byte> Source, ulong Owner, out int Written)
-        {
-            Written = 0;
-
-            if (IsRoot)
-                return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
-
-            Pump();
-
-            if (Channel == null || !Connected)
-                return IsServer ? NTSTATUS.STATUS_PIPE_LISTENING : NTSTATUS.STATUS_PIPE_BROKEN;
-
-            if (Source.Length > MaxMessageBytes)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (PendingWriteFrame == null)
-            {
-                int FrameLength = FrameHeaderBytes + Source.Length;
-                PendingWriteFrame = ArrayPool<byte>.Shared.Rent(FrameLength);
-                BinaryPrimitives.WriteInt32LittleEndian(PendingWriteFrame, Source.Length);
-                Source.CopyTo(PendingWriteFrame.AsSpan(FrameHeaderBytes));
-
-                PendingWriteLength = FrameLength;
-                PendingWriteSent = 0;
-                PendingWriteBytes = Source.Length;
-                PendingWriteOwner = Owner;
-            }
-            else if (PendingWriteOwner != Owner)
-            {
-                return NTSTATUS.STATUS_PIPE_BUSY;
-            }
-
-            while (PendingWriteSent < PendingWriteLength)
-            {
-                int Moved = Channel.Write(PendingWriteFrame.AsSpan(PendingWriteSent, PendingWriteLength - PendingWriteSent));
-                if (Moved <= 0)
-                    break;
-
-                PendingWriteSent += Moved;
-            }
-
-            if (PendingWriteSent < PendingWriteLength)
-            {
-                if (PeerClosed)
-                {
-                    ReleasePendingWrite();
-                    return NTSTATUS.STATUS_PIPE_BROKEN;
-                }
-
-                return NTSTATUS.STATUS_PENDING;
-            }
-
-            Written = PendingWriteBytes;
-            ReleasePendingWrite();
-            return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private void ReleasePendingWrite()
-        {
-            if (PendingWriteFrame != null)
-                ArrayPool<byte>.Shared.Return(PendingWriteFrame);
-
-            PendingWriteFrame = null;
-            PendingWriteLength = 0;
-            PendingWriteSent = 0;
-            PendingWriteBytes = 0;
-            PendingWriteOwner = 0;
         }
 
         internal NTSTATUS HandleControl(uint ControlCode, ref DeviceData Data, BinaryEmulator Instance)
@@ -364,11 +229,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FSCTL_PIPE_WAIT:
                     return Wait(ref Data);
 
-                case FSCTL_PIPE_LISTEN:
-                    return Listen();
-
                 case FSCTL_PIPE_DISCONNECT:
-                    return Disconnect();
+                    return Disconnect(Instance, Data.File);
 
                 case FSCTL_PIPE_IMPERSONATE:
                     return NTSTATUS.STATUS_SUCCESS;
@@ -376,26 +238,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FSCTL_PIPE_PEEK:
                     return Peek(ref Data);
 
-                case FSCTL_PIPE_TRANSCEIVE:
-                    return Transceive(ref Data, Instance);
-
                 default:
                     return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
             }
-        }
-
-        private NTSTATUS Listen()
-        {
-            if (Channel == null || !Channel.IsServer)
-                return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
-
-            if (Connected)
-                return NTSTATUS.STATUS_PIPE_CONNECTED;
-
-            if (CompletionMode == FILE_PIPE_COMPLETE_OPERATION)
-                return NTSTATUS.STATUS_PIPE_LISTENING;
-
-            return NTSTATUS.STATUS_PENDING;
         }
 
         /// <summary>
@@ -427,7 +272,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Clamped to the budget every other pipe operation uses.
+        /// Clamped to the budget the pipe wait uses.
         /// </summary>
         internal static int ReadWaitTimeoutMilliseconds(byte[] InputBuffer, uint InputLength)
         {
@@ -442,89 +287,57 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Milliseconds <= 0 ? 0 : (int)Math.Min(Milliseconds, BlockingIoMilliseconds);
         }
 
-        private NTSTATUS Disconnect()
+        private NTSTATUS Disconnect(BinaryEmulator Instance, WinFile File)
         {
             if (Channel == null || !Channel.IsServer)
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
 
-            ReleasePendingWrite();
-            ResetIncoming();
-            Current = null;
-            CurrentOffset = 0;
+            Instance?.WinHelper?.PipeRequests.CompleteFile(Instance, File, NTSTATUS.STATUS_PIPE_DISCONNECTED);
             Channel.Disconnect();
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private int PumpAvailable()
-        {
-            Pump();
-            EnsureCurrent();
-            return Current == null ? 0 : Current.Length - CurrentOffset;
-        }
-
         private NTSTATUS Peek(ref DeviceData Data)
         {
-            const int HeaderBytes = 0x10;
-
-            if (Data.OutputBuffer == null || Data.OutputLength < HeaderBytes)
+            if (Data.OutputBuffer == null || Data.OutputLength < PeekHeaderBytes)
             {
                 Data.Information = 0;
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
-            int Available = PumpAvailable();
+            NTSTATUS Usable = UsableStatus(false);
+            int Available = Channel == null ? 0 : Channel.InboundPayload;
+            if (Usable != NTSTATUS.STATUS_SUCCESS)
+            {
+                Data.Information = 0;
+                return Usable == NTSTATUS.STATUS_PIPE_LISTENING ? NTSTATUS.STATUS_INVALID_PIPE_STATE : Usable;
+            }
+
+            if (Available == 0 && Channel.PeerClosed)
+            {
+                Data.Information = 0;
+                return NTSTATUS.STATUS_PIPE_BROKEN;
+            }
 
             Span<byte> Output = Data.OutputBuffer.AsSpan(0, (int)Data.OutputLength);
             Output.Clear();
 
+            bool MessagePipe = PipeType == FILE_PIPE_MESSAGE_MODE;
+            int Copied = Channel.Peek(Output.Slice(PeekHeaderBytes), MessagePipe, out uint MessageLength);
+
             BinaryPrimitives.WriteUInt32LittleEndian(Output.Slice(0x00), State);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.Slice(0x04), (uint)Available);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.Slice(0x08), Available == 0 ? 0u : 1u);
-            BinaryPrimitives.WriteUInt32LittleEndian(Output.Slice(0x0C), (uint)Available);
+            BinaryPrimitives.WriteUInt32LittleEndian(Output.Slice(0x0C), MessagePipe ? MessageLength : (uint)Copied);
 
-            int Copy = Math.Min(Available, Output.Length - HeaderBytes);
-            if (Copy > 0)
-                Current.AsSpan(CurrentOffset, Copy).CopyTo(Output.Slice(HeaderBytes));
-
-            Data.Information = (ulong)(HeaderBytes + Copy);
-            return Copy < Available ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private NTSTATUS Transceive(ref DeviceData Data, BinaryEmulator Instance)
-        {
-            if (Data.InputBuffer != null && Data.InputLength != 0)
-            {
-                NTSTATUS WriteStatus = Write(Data.InputBuffer.AsSpan(0, (int)Data.InputLength), OwnerOf(Instance), out _);
-                if (WriteStatus != NTSTATUS.STATUS_SUCCESS)
-                {
-                    Data.Information = 0;
-                    return WriteStatus;
-                }
-            }
-
-            if (Data.OutputBuffer == null || Data.OutputLength == 0)
-            {
-                Data.Information = 0;
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
-            NTSTATUS ReadStatus = Read(Data.OutputBuffer.AsSpan(0, (int)Data.OutputLength), out int Written);
-            if (ReadStatus == NTSTATUS.STATUS_PIPE_EMPTY && BlockingMode)
-                return NTSTATUS.STATUS_PENDING;
-
-            Data.Information = (ulong)Written;
-            return ReadStatus;
-        }
-
-        internal static ulong OwnerOf(BinaryEmulator Instance)
-        {
-            EmulatedThread Thread = Instance?.CurrentThread;
-            return Thread == null ? 0ul : (ulong)Thread.ThreadId;
+            Data.Information = (ulong)(PeekHeaderBytes + Copied);
+            return MessagePipe && Copied < MessageLength ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_SUCCESS;
         }
 
         internal void WriteLocalInformation(Span<byte> Destination)
         {
-            int Available = PumpAvailable();
+            int Available = Channel == null ? 0 : Channel.InboundPayload;
+            int WriteSpace = Channel == null ? 0 : Channel.OutboundFree;
 
             Destination.Clear();
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x00), PipeType);
@@ -534,23 +347,528 @@ namespace Brovan.Core.Emulation.OS.Windows
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x10), InboundQuota);
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x14), (uint)Available);
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x18), OutboundQuota);
-            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x1C), OutboundQuota);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x1C), (uint)WriteSpace);
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x20), State);
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x24), IsServer ? PipeEndServer : PipeEndClient);
         }
 
         public void Dispose()
         {
-            if (Disposed)
+            Channel?.Dispose();
+        }
+    }
+
+    internal enum PipeRequestKind : byte
+    {
+        Read,
+        Write,
+        Listen,
+        Transceive
+    }
+
+    internal sealed class PipeRequest
+    {
+        internal PipeRequestKind Kind;
+        internal WinPendingIo Io;
+        internal GuestNamedPipe Pipe;
+        internal uint Token;
+        internal ulong Buffer;
+        internal int Length;
+        internal byte[] Data;
+        internal bool DataPooled;
+        internal int DataLength;
+        internal int Offset;
+        internal bool WriteDone;
+        internal bool PieceStarted;
+        internal bool HoldsReadLock;
+        internal bool HoldsWriteLock;
+        internal bool Completed;
+        internal NTSTATUS Status;
+        internal ulong Information;
+
+        internal WinFile File => Io.File;
+
+        internal bool UsesInbound => Kind == PipeRequestKind.Read || (Kind == PipeRequestKind.Transceive && WriteDone);
+
+        internal bool UsesOutbound => Kind == PipeRequestKind.Write || (Kind == PipeRequestKind.Transceive && !WriteDone);
+    }
+
+    // The scheduler polls these, because data from another process does not wake this one.
+    internal sealed class PipeRequestQueue
+    {
+        private readonly List<PipeRequest> Pending = new List<PipeRequest>();
+        private uint NextToken;
+
+        internal int Count => Pending.Count;
+
+        private uint TakeToken()
+        {
+            NextToken++;
+            if (NextToken == 0)
+                NextToken = 1;
+            return NextToken;
+        }
+
+        internal PipeRequest Create(BinaryEmulator Instance, PipeRequestKind Kind, WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock)
+        {
+            WinEvent Event = EventHandle == 0 ? null : Instance.WinHelper.GetEventByHandle(EventHandle, AccessMask.GiveTemp);
+
+            return new PipeRequest
+            {
+                Kind = Kind,
+                Io = new WinPendingIo(File, Instance.CurrentThreadId, Event, ApcRoutine, ApcContext, IoStatusBlock),
+                Pipe = File.Pipe,
+                Token = TakeToken(),
+            };
+        }
+
+        // NT waits inside the call on a synchronous file, so the calling thread parks until the request ends.
+        internal NTSTATUS Submit(BinaryEmulator Instance, PipeRequest Request)
+        {
+            bool Queued = IsBlockedByEarlier(Request, Pending.Count);
+            if (!Queued && TryProgress(Instance, Request))
+            {
+                Finish(Instance, Request, false);
+                return Request.Status;
+            }
+
+            if (!Request.Pipe.BlockingMode && Request.Kind != PipeRequestKind.Write)
+            {
+                // Part of a message larger than the ring is already in the buffer.
+                Request.Status = Request.Kind == PipeRequestKind.Listen ? NTSTATUS.STATUS_PIPE_LISTENING :
+                    Request.Offset != 0 ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_PIPE_EMPTY;
+                Request.Information = (ulong)Request.Offset;
+                ReleaseLocks(Request);
+                Request.Completed = true;
+                Finish(Instance, Request, false);
+                return Request.Status;
+            }
+
+            if (!Request.Pipe.BlockingMode)
+            {
+                Request.Status = NTSTATUS.STATUS_SUCCESS;
+                Request.Information = (ulong)Request.Offset;
+                ReleaseLocks(Request);
+                Request.Completed = true;
+                Finish(Instance, Request, false);
+                return Request.Status;
+            }
+
+            Pending.Add(Request);
+
+            if (Request.File.Synchronous)
+                ParkForRequest(Instance, Request);
+
+            return NTSTATUS.STATUS_PENDING;
+        }
+
+        private static void ParkForRequest(BinaryEmulator Instance, PipeRequest Request)
+        {
+            EmulatedThread Thread = Instance.CurrentThread;
+            if (Thread == null)
                 return;
 
-            Disposed = true;
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            Thread.WaitActive = true;
+            Thread.WaitHandles = null;
+            Thread.WaitAll = false;
+            Thread.WaitDeadline = -1;
+            State.WaitCompleted = false;
+            State.WaitStatus = NTSTATUS.STATUS_PENDING;
+            State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
+            State.WaitReturnRIP = State.WaitResumeRIP + 2;
+            State.WaitAlertable = false;
+            State.ApcAlertable = false;
+            State.PipeIoRequest = Request;
 
-            ReleasePendingWrite();
-            Channel?.Dispose();
+            Thread.State = EmulatedThreadState.Waiting;
+            Instance._emulator.WriteRegister(Instance.IPRegister, State.WaitResumeRIP);
+            Instance._emulator.StopEmulation();
+        }
 
-            ResetIncoming();
-            Current = null;
+        internal void Poll(BinaryEmulator Instance)
+        {
+            if (Pending.Count == 0)
+                return;
+
+            for (int i = 0; i < Pending.Count; i++)
+            {
+                PipeRequest Request = Pending[i];
+
+                // NT cancels the I/O of a thread that exits. It still writes the IO_STATUS_BLOCK and sets the event.
+                if (!Instance.WinHelper.IsPendingIoLive(in Request.Io))
+                {
+                    Pending.RemoveAt(i--);
+                    End(Request, NTSTATUS.STATUS_CANCELLED, 0);
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, Request.Io.IoStatusBlock, NTSTATUS.STATUS_CANCELLED, 0);
+                    Finish(Instance, Request, true);
+                    continue;
+                }
+
+                if (IsBlockedByEarlier(Request, i))
+                    continue;
+
+                if (!TryProgress(Instance, Request))
+                    continue;
+
+                Pending.RemoveAt(i--);
+                Finish(Instance, Request, true);
+            }
+        }
+
+        // NT queues the requests on one end and direction in order.
+        private bool IsBlockedByEarlier(PipeRequest Request, int Index)
+        {
+            for (int i = 0; i < Index; i++)
+            {
+                PipeRequest Earlier = Pending[i];
+                if (!ReferenceEquals(Earlier.Pipe, Request.Pipe))
+                    continue;
+
+                if ((Earlier.UsesInbound && Request.UsesInbound) || (Earlier.UsesOutbound && Request.UsesOutbound))
+                    return true;
+            }
+
+            return false;
+        }
+
+        // A zero IoStatusBlock matches every request on the file, and a negative thread id matches every thread.
+        internal int Cancel(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, int ThreadId)
+        {
+            int Cancelled = 0;
+            for (int i = 0; i < Pending.Count; i++)
+            {
+                PipeRequest Request = Pending[i];
+                if (!ReferenceEquals(Request.File, File))
+                    continue;
+
+                if (IoStatusBlock != 0 && Request.Io.IoStatusBlock != IoStatusBlock)
+                    continue;
+
+                if (ThreadId >= 0 && Request.Io.ThreadId != ThreadId)
+                    continue;
+
+                Pending.RemoveAt(i--);
+                End(Request, NTSTATUS.STATUS_CANCELLED, 0);
+                Finish(Instance, Request, true);
+                Cancelled++;
+            }
+
+            return Cancelled;
+        }
+
+        internal void CompleteFile(BinaryEmulator Instance, WinFile File, NTSTATUS Status)
+        {
+            for (int i = 0; i < Pending.Count; i++)
+            {
+                PipeRequest Request = Pending[i];
+                if (!ReferenceEquals(Request.File, File))
+                    continue;
+
+                Pending.RemoveAt(i--);
+                End(Request, Status, 0);
+                Finish(Instance, Request, true);
+            }
+        }
+
+        private static void End(PipeRequest Request, NTSTATUS Status, ulong Information)
+        {
+            Request.Status = Status;
+            Request.Information = Information;
+            Request.Completed = true;
+            ReleaseLocks(Request);
+        }
+
+        private static void ReleaseLocks(PipeRequest Request)
+        {
+            GuestPipeChannel Channel = Request.Pipe?.Channel;
+            if (Channel == null)
+                return;
+
+            if (Request.HoldsReadLock)
+            {
+                Channel.UnlockRead(Request.Token);
+                Request.HoldsReadLock = false;
+            }
+
+            if (Request.HoldsWriteLock)
+            {
+                Channel.UnlockWrite(Request.Token);
+                Request.HoldsWriteLock = false;
+            }
+        }
+
+        private static void ReleaseData(PipeRequest Request)
+        {
+            if (Request.Data != null && Request.DataPooled)
+                ArrayPool<byte>.Shared.Return(Request.Data);
+
+            Request.Data = null;
+            Request.DataPooled = false;
+        }
+
+        // A message goes into the ring whole, so its bytes are taken when it is issued.
+        internal static bool TryTakeData(BinaryEmulator Instance, PipeRequest Request, ulong Source, int Length)
+        {
+            Request.DataLength = Length;
+            if (Length == 0)
+                return true;
+
+            Request.DataPooled = (uint)Length <= Brovan.Core.Settings.MemoryBudget.PooledIoBytes;
+            Request.Data = Request.DataPooled ? ArrayPool<byte>.Shared.Rent(Length) : new byte[Length];
+
+            if (Instance.ReadMemory(Source, Request.Data.AsSpan(0, Length)))
+                return true;
+
+            ReleaseData(Request);
+            return false;
+        }
+
+        // NT gives a request that failed without pending no APC and no completion packet.
+        private static void Finish(BinaryEmulator Instance, PipeRequest Request, bool Pended)
+        {
+            ReleaseData(Request);
+
+            bool QueueCompletion = Pended || ((uint)Request.Status >> 30) != 3;
+            Instance.WinHelper.CompletePendingIo(in Request.Io, Request.Status, Request.Information, QueueCompletion);
+
+            if (Pended)
+                Instance.WakeSignal.Bump();
+        }
+
+        private static bool TryProgress(BinaryEmulator Instance, PipeRequest Request)
+        {
+            switch (Request.Kind)
+            {
+                case PipeRequestKind.Read:
+                    return ProgressRead(Instance, Request);
+
+                case PipeRequestKind.Write:
+                    return ProgressWrite(Instance, Request);
+
+                case PipeRequestKind.Listen:
+                    return ProgressListen(Request);
+
+                case PipeRequestKind.Transceive:
+                    if (!Request.WriteDone)
+                    {
+                        if (!ProgressWrite(Instance, Request))
+                            return false;
+
+                        if (Request.Status != NTSTATUS.STATUS_SUCCESS)
+                            return true;
+
+                        Request.WriteDone = true;
+                        Request.Offset = 0;
+                        Request.Completed = false;
+                    }
+
+                    return ProgressRead(Instance, Request);
+
+                default:
+                    End(Request, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
+                    return true;
+            }
+        }
+
+        private static bool ProgressListen(PipeRequest Request)
+        {
+            GuestPipeChannel Channel = Request.Pipe.Channel;
+            if (Channel == null || !Channel.IsServer)
+            {
+                End(Request, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
+                return true;
+            }
+
+            if (!Channel.Connected)
+                return false;
+
+            End(Request, NTSTATUS.STATUS_SUCCESS, 0);
+            return true;
+        }
+
+        private static bool ProgressRead(BinaryEmulator Instance, PipeRequest Request)
+        {
+            GuestNamedPipe Pipe = Request.Pipe;
+            GuestPipeChannel Channel = Pipe.Channel;
+
+            NTSTATUS Usable = Pipe.UsableStatus(false);
+            if (Usable != NTSTATUS.STATUS_SUCCESS)
+            {
+                End(Request, Usable, (ulong)Request.Offset);
+                return true;
+            }
+
+            if (!Request.HoldsReadLock)
+            {
+                if (!Channel.TryLockRead(Request.Token))
+                    return false;
+
+                Request.HoldsReadLock = true;
+            }
+
+            bool Done = Request.Length == 0
+                ? ReadNothing(Request)
+                : Pipe.ReadMode == GuestNamedPipe.FILE_PIPE_MESSAGE_MODE ? ReadMessage(Instance, Request) : ReadBytes(Instance, Request);
+
+            if (!Done && Request.Offset == 0)
+                ReleaseLocks(Request);
+
+            if (!Done && Channel.PeerClosed && !Channel.InboundHasBytes)
+            {
+                End(Request, NTSTATUS.STATUS_PIPE_BROKEN, (ulong)Request.Offset);
+                return true;
+            }
+
+            return Done;
+        }
+
+        // A zero-byte read waits for data to arrive and leaves it queued.
+        private static bool ReadNothing(PipeRequest Request)
+        {
+            if (!Request.Pipe.Channel.InboundHasBytes)
+                return false;
+
+            End(Request, NTSTATUS.STATUS_SUCCESS, 0);
+            return true;
+        }
+
+        private static bool ReadBytes(BinaryEmulator Instance, PipeRequest Request)
+        {
+            GuestPipeChannel Channel = Request.Pipe.Channel;
+            int Wanted = Math.Min(Request.Length, (int)Channel.InboundQuota);
+            Span<byte> Scratch = Instance.WinHelper.Shared.GetSpan((uint)Wanted).Slice(0, Wanted);
+
+            int Copied = Channel.ReadBytes(Scratch);
+            if (Copied == 0)
+                return false;
+
+            NTSTATUS Status = Instance._emulator.WriteMemory(Request.Buffer, Scratch.Slice(0, Copied))
+                ? NTSTATUS.STATUS_SUCCESS
+                : NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            End(Request, Status, (ulong)Copied);
+            return true;
+        }
+
+        private static bool ReadMessage(BinaryEmulator Instance, PipeRequest Request)
+        {
+            GuestPipeChannel Channel = Request.Pipe.Channel;
+            int Wanted = Math.Min(Request.Length - Request.Offset, (int)Channel.InboundQuota);
+            Span<byte> Scratch = Instance.WinHelper.Shared.GetSpan((uint)Math.Max(Wanted, 1)).Slice(0, Wanted);
+
+            if (!Channel.ReadMessage(Scratch, out int Copied, out bool MessageLeft))
+                return false;
+
+            if (Copied != 0 && !Instance._emulator.WriteMemory(Request.Buffer + (ulong)Request.Offset, Scratch.Slice(0, Copied)))
+            {
+                End(Request, NTSTATUS.STATUS_ACCESS_VIOLATION, (ulong)Request.Offset);
+                return true;
+            }
+
+            Request.Offset += Copied;
+
+            if (Request.Offset == Request.Length || !MessageLeft)
+            {
+                End(Request, MessageLeft ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_SUCCESS, (ulong)Request.Offset);
+                return true;
+            }
+
+            // A message larger than the ring. The read lock stays until all of it is read.
+            return false;
+        }
+
+        // Read as the ring frees up, so a large write needs no host copy.
+        private static bool TryWriteGuestBytes(BinaryEmulator Instance, PipeRequest Request)
+        {
+            GuestPipeChannel Channel = Request.Pipe.Channel;
+            int Chunk = Math.Min(Request.DataLength - Request.Offset, Channel.OutboundFree);
+            if (Chunk <= 0)
+                return true;
+
+            Span<byte> Scratch = Instance.WinHelper.Shared.GetSpan((uint)Chunk).Slice(0, Chunk);
+            if (!Instance.ReadMemory(Request.Buffer + (ulong)Request.Offset, Scratch))
+                return false;
+
+            Request.Offset += Channel.WriteBytes(Scratch);
+            return true;
+        }
+
+        private static bool ProgressWrite(BinaryEmulator Instance, PipeRequest Request)
+        {
+            GuestNamedPipe Pipe = Request.Pipe;
+            GuestPipeChannel Channel = Pipe.Channel;
+
+            NTSTATUS Usable = Pipe.UsableStatus(true);
+            if (Usable != NTSTATUS.STATUS_SUCCESS)
+            {
+                End(Request, Usable, (ulong)Request.Offset);
+                return true;
+            }
+
+            bool MessagePipe = Pipe.PipeType == GuestNamedPipe.FILE_PIPE_MESSAGE_MODE;
+            if (Request.DataLength == 0 && !MessagePipe)
+            {
+                End(Request, NTSTATUS.STATUS_SUCCESS, 0);
+                return true;
+            }
+
+            if (!Request.HoldsWriteLock)
+            {
+                if (!Channel.TryLockWrite(Request.Token))
+                    return false;
+
+                Request.HoldsWriteLock = true;
+            }
+
+            ReadOnlySpan<byte> Rest = Request.Data == null
+                ? ReadOnlySpan<byte>.Empty
+                : Request.Data.AsSpan(Request.Offset, Request.DataLength - Request.Offset);
+
+            if (!MessagePipe && Request.Data == null)
+            {
+                if (!TryWriteGuestBytes(Instance, Request))
+                {
+                    End(Request, NTSTATUS.STATUS_ACCESS_VIOLATION, (ulong)Request.Offset);
+                    return true;
+                }
+            }
+            else if (!MessagePipe)
+            {
+                Request.Offset += Channel.WriteBytes(Rest);
+            }
+            else if (Channel.FitsOutbound(Request.DataLength))
+            {
+                if (!Channel.TryWriteFrame(Rest))
+                {
+                    ReleaseLocks(Request);
+                    return false;
+                }
+
+                Request.Offset = Request.DataLength;
+            }
+            else if (Pipe.BlockingMode)
+            {
+                // A non-blocking writer never starts a message it cannot finish.
+                int Taken = Channel.WriteMessagePiece(Rest, Request.DataLength, !Request.PieceStarted);
+                if (Taken >= 0)
+                {
+                    Request.PieceStarted = true;
+                    Request.Offset += Taken;
+                }
+            }
+
+            if (Request.Offset == Request.DataLength)
+            {
+                End(Request, NTSTATUS.STATUS_SUCCESS, (ulong)Request.DataLength);
+                return true;
+            }
+
+            // A message part way into the ring keeps the write lock, or another writer would split it.
+            if (!Request.PieceStarted)
+                ReleaseLocks(Request);
+
+            return false;
         }
     }
 

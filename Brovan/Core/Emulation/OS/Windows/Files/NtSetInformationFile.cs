@@ -374,7 +374,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
-            FileObj.Mode = ReadUInt32(Instance, FileInformation + 0x00);
+            const uint SynchronousBits = WinFile.FILE_SYNCHRONOUS_IO_ALERT | WinFile.FILE_SYNCHRONOUS_IO_NONALERT;
+            FileObj.Mode = (ReadUInt32(Instance, FileInformation + 0x00) & ~SynchronousBits) | (FileObj.Mode & SynchronousBits);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileModeInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }

@@ -44,6 +44,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             ApcContext = Data.ApcContext;
             IoStatusBlock = Data.IoStatusBlock;
         }
+
+        public WinPendingIo(WinFile File, int ThreadId, WinEvent? Event, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock)
+        {
+            this.File = File;
+            this.ThreadId = ThreadId;
+            this.Event = Event;
+            this.ApcRoutine = ApcRoutine;
+            this.ApcContext = ApcContext;
+            this.IoStatusBlock = IoStatusBlock;
+        }
     }
 
     public enum ConsoleObjectKind : byte
@@ -1300,8 +1310,24 @@ namespace Brovan.Core.Emulation.OS.Windows
         public int DirectoryIndex;
         public string DirectoryMask;
         public bool Directory;
-        public long Position;
         public uint Mode;
+
+        private long LocalPosition;
+
+        // Set once a child process inherits this file.
+        internal SharedFilePosition SharedPosition;
+
+        public long Position
+        {
+            get => SharedPosition != null ? SharedPosition.Value : LocalPosition;
+            set
+            {
+                if (SharedPosition != null)
+                    SharedPosition.Value = value;
+                else
+                    LocalPosition = value;
+            }
+        }
         public bool DeletePending;
         public AccessMask GrantedAccess;
         public uint ShareAccess;
@@ -1318,6 +1344,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong CompletionKey;
 
         public ConsoleObjectKind ConsoleKind;
+
+        internal const uint FILE_SYNCHRONOUS_IO_ALERT = 0x10;
+        internal const uint FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
+
+        // NT waits inside every I/O call on a synchronous file.
+        public bool Synchronous => (Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) != 0;
 
         internal GuestNamedPipe Pipe;
 
@@ -1357,6 +1389,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             FileStream?.Dispose();
             FileStream = null;
+        }
+
+        internal void ReleaseSharedPosition()
+        {
+            if (SharedPosition == null)
+                return;
+
+            LocalPosition = SharedPosition.Value;
+            SharedPosition.Dispose();
+            SharedPosition = null;
         }
 
         public string ObjectId => $"FILE_{OpenId}";

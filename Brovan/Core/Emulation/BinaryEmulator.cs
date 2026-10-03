@@ -2980,7 +2980,12 @@ namespace Brovan.Core.Emulation
                     _emulator.ResolveCodeCache();
 
                 if (WinHelper != null)
+                {
                     OS.Windows.RemoteProcessRequests.Drain(this);
+
+                    if (WinHelper.PipeRequests.Count != 0)
+                        WinHelper.PipeRequests.Poll(this);
+                }
 
                 if (Volatile.Read(ref TerminationRequested) != 0 && Interlocked.Exchange(ref TerminationRequested, 0) != 0)
                 {

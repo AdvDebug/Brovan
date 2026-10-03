@@ -27,6 +27,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributes, out ulong AttributesRoot, out string ObjectName, out string FullName, out NTSTATUS ObjectNameStatus))
                 return ObjectNameStatus;
 
+            bool Inherit = (Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributes) & WinSysHelper.OBJ_INHERIT) != 0;
+
+            if (NtCreateFile.TryOpenPipeRelative(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, AttributesRoot, ObjectName, OpenOptions, Inherit, out NTSTATUS PipeStatus))
+                return PipeStatus;
+
             if (string.IsNullOrEmpty(ObjectName))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -57,7 +62,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return DeviceStatus;
                 }
 
-                return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler, DevicePipe);
+                return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler, DevicePipe, OpenOptions, Inherit);
             }
 
             string Path = ResolveNtPath(Instance, FullName, AttributesRoot);
@@ -109,7 +114,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 FileStream = Stream,
                 DeletePending = DeleteOnClose,
                 GrantedAccess = (AccessMask)DesiredAccess,
-                ShareAccess = ShareAccess
+                ShareAccess = ShareAccess,
+                Mode = NtCreateFile.ModeFromCreateOptions(OpenOptions)
             };
 
             Instance.WinHelper.WinFiles.Add(FileObj);
@@ -117,6 +123,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, (AccessMask)DesiredAccess);
             Instance.WinHelper.AddWinHandle(Handle);
+            if (Inherit)
+                Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
 
             Instance.WinHelper.WritePointer(FileHandlePtr, Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);

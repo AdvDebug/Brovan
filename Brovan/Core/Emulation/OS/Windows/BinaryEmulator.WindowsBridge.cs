@@ -729,7 +729,7 @@ namespace Brovan.Core.Emulation
             State.WaitCheckedEpoch = ScanEpoch;
 
             if (Handles == null || Handles.Count == 0 || WinHelper == null
-                || State.WorkerFactoryWaitActive || State.IoCompletionWaitActive || State.AlertByThreadIdWaitActive
+                || State.WorkerFactoryWaitActive || State.IoCompletionWaitActive || State.AlertByThreadIdWaitActive || State.PipeIoRequest != null
                 || State.WaitMessageActive || State.GetMessageWaitActive || State.MsgWaitActive
                 || State.RetrySyscallActive || State.PipeWaitHandle != 0 || State.WaitAlertable || State.ApcAlertable)
                 return;
@@ -779,6 +779,15 @@ namespace Brovan.Core.Emulation
                 }
 
                 return false;
+            }
+
+            if (State != null && State.PipeIoRequest != null)
+            {
+                if (!State.PipeIoRequest.Completed)
+                    return false;
+
+                Thread.WaitSatisfiedIndex = 0;
+                return true;
             }
 
             if (State != null && State.IoCompletionWaitActive)
@@ -989,7 +998,7 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        internal bool HasPendingHostIo() => WinHelper != null && WinHelper.AfdConnects.InFlight != 0;
+        internal bool HasPendingHostIo() => WinHelper != null && (WinHelper.AfdConnects.InFlight != 0 || WinHelper.PipeRequests.Count != 0);
 
         internal bool HasFinishedHostIo() => WinHelper != null && WinHelper.AfdConnects.HasFinished;
 
