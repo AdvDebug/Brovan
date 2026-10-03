@@ -26,11 +26,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 || !Instance.IsRegionMapped(IoStatusBlockPtr, PointerSize * 2))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            WinIoCompletion Completion = Instance.WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(IoCompletionHandle);
-            if (Completion == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
+            NTSTATUS HandleStatus = Instance.WinHelper.ResolveIoCompletionHandle(IoCompletionHandle, out WinIoCompletion Completion);
+            if (HandleStatus != NTSTATUS.STATUS_SUCCESS)
+                return HandleStatus;
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            State.BoundIoCompletion = Completion;
             if (State.WaitCompleted)
             {
                 NTSTATUS Completed = State.WaitStatus;
@@ -80,12 +81,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
                 State.WaitReturnRIP = State.WaitResumeRIP + 2;
                 State.WaitAlertable = false;
+                State.ResetIoCompletionWait();
                 State.IoCompletionWaitActive = true;
                 State.IoCompletionHandle = IoCompletionHandle;
                 State.IoCompletionKeyContextPtr = KeyContextPtr;
                 State.IoCompletionApcContextPtr = ApcContextPtr;
                 State.IoCompletionIoStatusBlockPtr = IoStatusBlockPtr;
-                State.IoCompletionReservedEntry = null;
+                State.IoCompletionMaxEntries = 1;
             }
 
             Thread.State = EmulatedThreadState.Waiting;

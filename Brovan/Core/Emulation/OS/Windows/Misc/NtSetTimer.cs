@@ -13,7 +13,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong TimerApcRoutine = Instance.WinHelper.GetArg(2);
                 ulong TimerContext = Instance.WinHelper.GetArg(3);
                 ulong ResumeTimer = Instance.WinHelper.GetArg(4);
-                long Period = unchecked((long)Instance.WinHelper.GetArg(5));
+                long Period = unchecked((int)Instance.WinHelper.GetArg(5));
                 ulong PreviousStatePtr = Instance.WinHelper.GetArg(6);
 
                 return HandleSetTimer64(Instance, TimerHandle, DueTimePtr, TimerApcRoutine, TimerContext, ResumeTimer, Period, PreviousStatePtr);

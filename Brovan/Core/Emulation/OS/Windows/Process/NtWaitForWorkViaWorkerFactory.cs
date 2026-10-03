@@ -13,7 +13,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Span<byte> Packet = stackalloc byte[0x20];
                 BinaryPrimitives.WriteUInt64LittleEndian(Packet.Slice(0x00, 8), Entry.KeyContext);
                 BinaryPrimitives.WriteUInt64LittleEndian(Packet.Slice(0x08, 8), Entry.ApcContext);
-                BinaryPrimitives.WriteUInt64LittleEndian(Packet.Slice(0x10, 8), unchecked((ulong)(long)(int)Entry.IoStatus));
+                BinaryPrimitives.WriteUInt64LittleEndian(Packet.Slice(0x10, 8), (uint)Entry.IoStatus);
                 BinaryPrimitives.WriteUInt64LittleEndian(Packet.Slice(0x18, 8), Entry.IoStatusInformation);
                 return Instance._emulator.WriteMemory(MiniPackets + (ulong)Index * 0x20, Packet);
             }
@@ -75,6 +75,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            State.BoundIoCompletion = Completion;
             if (State.WaitCompleted && State.WorkerFactoryWaitActive == false && State.WorkerFactoryHandle == 0)
             {
                 NTSTATUS Status = State.WaitStatus;

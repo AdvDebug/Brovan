@@ -338,12 +338,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.RetrySyscallNumber = 0;
             State.PipeWaitHandle = 0;
             State.PipeWaitDeadline = -1;
-            State.IoCompletionWaitActive = false;
-            State.IoCompletionHandle = 0;
-            State.IoCompletionKeyContextPtr = 0;
-            State.IoCompletionApcContextPtr = 0;
-            State.IoCompletionIoStatusBlockPtr = 0;
-            State.IoCompletionReservedEntry = null;
+            State.ResetIoCompletionWait();
 
             if (ClearAlertByThreadId)
             {
@@ -3002,6 +2997,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinEmulatedThread.GetState(Thread).ApcAlertable = false;
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            NTSTATUS InterruptStatus = NTSTATUS.STATUS_USER_APC;
+            if (State.IoCompletionWaitActive && State.IoCompletionEntriesRemovedPtr != 0
+                && !Emulator._emulator.WriteMemory(State.IoCompletionEntriesRemovedPtr, 0u, 4))
+                InterruptStatus = NTSTATUS.STATUS_ACCESS_VIOLATION;
+            State.ResetIoCompletionWait();
+
             if (State.RetrySyscallActive)
             {
                 Thread.Context.RIP = State.WaitResumeRIP;
@@ -3013,7 +3014,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 ulong ResumeRip = WinEmulatedThread.GetState(Thread).WaitReturnRIP != 0 ? WinEmulatedThread.GetState(Thread).WaitReturnRIP : (WinEmulatedThread.GetState(Thread).WaitResumeRIP != 0 ? WinEmulatedThread.GetState(Thread).WaitResumeRIP + 2 : Thread.Context.RIP);
                 Thread.Context.RIP = ResumeRip;
-                Thread.Context.RAX = (ulong)NTSTATUS.STATUS_USER_APC;
+                Thread.Context.RAX = (ulong)InterruptStatus;
             }
 
             WinEmulatedThread.GetState(Thread).WaitResumeRIP = 0;
@@ -9559,6 +9560,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Job.ProcessIds.Add(Process.PID);
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // Statuses follow ObReferenceObjectByHandle.
+        internal NTSTATUS ResolveIoCompletionHandle(ulong Handle, out WinIoCompletion Completion)
+        {
+            Completion = null;
+
+            IHandleObject Object = HandleManager.GetObjectByHandle(Handle);
+            if (Object == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            Completion = Object as WinIoCompletion;
+            return Completion != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
         }
 
         // Statuses follow ObReferenceObjectByHandle.

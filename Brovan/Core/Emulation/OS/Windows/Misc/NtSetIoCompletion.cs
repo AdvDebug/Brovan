@@ -13,9 +13,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             NTSTATUS IoStatus = (NTSTATUS)(int)(uint)Instance.WinHelper.GetArg(3);
             ulong IoStatusInformation = Instance.WinHelper.GetArg(4);
 
-            WinIoCompletion Completion = Instance.WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(IoCompletionHandle);
-            if (Completion == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
+            NTSTATUS HandleStatus = Instance.WinHelper.ResolveIoCompletionHandle(IoCompletionHandle, out WinIoCompletion Completion);
+            if (HandleStatus != NTSTATUS.STATUS_SUCCESS)
+                return HandleStatus;
 
             Completion.Post(new WinIoCompletionEntry
             {

@@ -7,7 +7,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong ContextPtr = Instance.WinHelper.GetArg(0);
-            bool TestAlert = (uint)Instance.WinHelper.GetArg(1) != 0;
+            bool TestAlert = (byte)Instance.WinHelper.GetArg(1) != 0;
 
             return Continue(Instance, ContextPtr, TestAlert);
         }

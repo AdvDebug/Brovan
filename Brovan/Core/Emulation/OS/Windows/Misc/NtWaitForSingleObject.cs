@@ -29,7 +29,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
 
             ulong Handle = Instance.WinHelper.GetArg(0);
-            bool Alertable = (uint)Instance.WinHelper.GetArg(1) != 0;
+            bool Alertable = (byte)Instance.WinHelper.GetArg(1) != 0;
             ulong TimeoutPtr = Instance.WinHelper.GetArg(2);
 
             EmulatedThread Thread = Instance.CurrentThread;

@@ -461,10 +461,18 @@ namespace Brovan.Core.Emulation.Guests
         private void CompleteIoCompletionWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
         {
             NTSTATUS WaitStatus = NTSTATUS.STATUS_TIMEOUT;
-            WinIoCompletionEntry Entry = State.IoCompletionReservedEntry;
+            List<WinIoCompletionEntry> Entries = State.IoCompletionReservedEntries;
 
-            if (Entry != null && WinHelper != null)
+            if (State.IoCompletionInformationPtr != 0)
             {
+                if (!OS.Windows.NtRemoveIoCompletionEx.WriteEntries(Instance, State.IoCompletionInformationPtr, State.IoCompletionEntriesRemovedPtr, Entries))
+                    WaitStatus = NTSTATUS.STATUS_ACCESS_VIOLATION;
+                else if (Entries.Count > 0)
+                    WaitStatus = NTSTATUS.STATUS_SUCCESS;
+            }
+            else if (Entries.Count > 0 && WinHelper != null)
+            {
+                WinIoCompletionEntry Entry = Entries[0];
                 WinHelper.WritePointer(State.IoCompletionKeyContextPtr, Entry.KeyContext);
                 WinHelper.WritePointer(State.IoCompletionApcContextPtr, Entry.ApcContext);
                 WinHelper.WriteIoStatusBlock(Instance, State.IoCompletionIoStatusBlockPtr, Entry.IoStatus, Entry.IoStatusInformation);
@@ -478,12 +486,7 @@ namespace Brovan.Core.Emulation.Guests
             Thread.Context.RIP = ResumeRip;
             Thread.Context.RAX = (ulong)(uint)WaitStatus;
 
-            State.IoCompletionWaitActive = false;
-            State.IoCompletionHandle = 0;
-            State.IoCompletionKeyContextPtr = 0;
-            State.IoCompletionApcContextPtr = 0;
-            State.IoCompletionIoStatusBlockPtr = 0;
-            State.IoCompletionReservedEntry = null;
+            State.ResetIoCompletionWait();
             State.WaitCompleted = false;
             State.WaitStatus = WaitStatus;
             State.WaitResumeRIP = 0;

@@ -11,7 +11,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong MutantHandlePtr = Instance.WinHelper.GetArg(0);
             ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
-            bool InitialOwner = (uint)Instance.WinHelper.GetArg(3) != 0;
+            bool InitialOwner = (byte)Instance.WinHelper.GetArg(3) != 0;
 
             return HandleCreateMutant(Instance, MutantHandlePtr, DesiredAccess, ObjectAttributesPtr, InitialOwner);
         }

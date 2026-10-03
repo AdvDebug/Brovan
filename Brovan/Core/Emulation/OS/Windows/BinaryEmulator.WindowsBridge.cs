@@ -622,9 +622,9 @@ namespace Brovan.Core.Emulation
             Packet.QueuedCompletion = false;
         }
 
-        private bool TryReserveIoCompletionEntry(WindowsThreadState State)
+        private bool TryReserveIoCompletionEntries(WindowsThreadState State)
         {
-            State.IoCompletionReservedEntry = null;
+            State.IoCompletionReservedEntries.Clear();
 
             if (WinHelper == null)
                 return false;
@@ -634,14 +634,18 @@ namespace Brovan.Core.Emulation
                 return false;
 
             MaterializeSignaledWaitPackets(State.IoCompletionHandle);
+            TakeIoCompletionEntries(Completion, State.IoCompletionMaxEntries, State.IoCompletionReservedEntries);
+            return State.IoCompletionReservedEntries.Count > 0;
+        }
 
-            if (Completion.PendingCount == 0)
-                return false;
-
-            WinIoCompletionEntry Entry = Completion.Take();
-            ReleaseWaitCompletionPacket(Entry);
-            State.IoCompletionReservedEntry = Entry;
-            return true;
+        internal void TakeIoCompletionEntries(WinIoCompletion Completion, uint MaxEntries, List<WinIoCompletionEntry> Taken)
+        {
+            while ((uint)Taken.Count < MaxEntries && Completion.PendingCount > 0)
+            {
+                WinIoCompletionEntry Entry = Completion.Take();
+                ReleaseWaitCompletionPacket(Entry);
+                Taken.Add(Entry);
+            }
         }
 
         private bool ReserveWorkerFactoryEntries(ulong WorkerFactoryHandle, uint MaxPackets, List<WinIoCompletionEntry> Reserved)
@@ -779,7 +783,7 @@ namespace Brovan.Core.Emulation
 
             if (State != null && State.IoCompletionWaitActive)
             {
-                if (TryReserveIoCompletionEntry(State))
+                if (TryReserveIoCompletionEntries(State))
                 {
                     Thread.WaitSatisfiedIndex = 0;
                     return true;

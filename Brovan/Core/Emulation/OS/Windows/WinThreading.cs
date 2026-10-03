@@ -46,7 +46,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong IoCompletionKeyContextPtr { get; set; }
         public ulong IoCompletionApcContextPtr { get; set; }
         public ulong IoCompletionIoStatusBlockPtr { get; set; }
-        public WinIoCompletionEntry IoCompletionReservedEntry { get; set; }
+
+        // NtRemoveIoCompletionEx writes FILE_IO_COMPLETION_INFORMATION records here instead of the three pointers above.
+        public ulong IoCompletionInformationPtr { get; set; }
+        public ulong IoCompletionEntriesRemovedPtr { get; set; }
+        public uint IoCompletionMaxEntries { get; set; }
+        public List<WinIoCompletionEntry> IoCompletionReservedEntries { get; set; } = new();
+
+        // KTHREAD.Queue. A thread bound to a port takes its packets before it checks for a user APC.
+        public WinIoCompletion BoundIoCompletion { get; set; }
         public ulong WaitResumeRIP { get; set; }
         public ulong WaitReturnRIP { get; set; }
         public bool WaitAlertable { get; set; }
@@ -94,6 +102,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         public long CreateTime { get; set; }
         public long ExitTime { get; set; }
         public byte IdealProcessor { get; set; }
+
+        public void ResetIoCompletionWait()
+        {
+            IoCompletionWaitActive = false;
+            IoCompletionHandle = 0;
+            IoCompletionKeyContextPtr = 0;
+            IoCompletionApcContextPtr = 0;
+            IoCompletionIoStatusBlockPtr = 0;
+            IoCompletionInformationPtr = 0;
+            IoCompletionEntriesRemovedPtr = 0;
+            IoCompletionMaxEntries = 0;
+            IoCompletionReservedEntries.Clear();
+        }
     }
 
     public sealed class WinUserCallbackFrame
