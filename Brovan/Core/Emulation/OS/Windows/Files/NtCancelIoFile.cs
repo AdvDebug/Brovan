@@ -31,6 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             // Only the calling thread's requests, and the call returns once they ended.
             Instance.WinHelper.PipeRequests.Cancel(Instance, File, 0, Instance.CurrentThreadId);
+            Instance.WinHelper.AfdRequests.Cancel(Instance, File, 0, Instance.CurrentThreadId);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
             return NTSTATUS.STATUS_SUCCESS;
         }

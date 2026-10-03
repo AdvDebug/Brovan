@@ -2580,8 +2580,11 @@ namespace Brovan
                 if (WindowsState.IoCompletionWaitActive)
                     return $"io-completion 0x{WindowsState.IoCompletionHandle:X}";
 
-                if (WindowsState.PipeIoRequest != null)
-                    return $"pipe-{WindowsState.PipeIoRequest.Kind} {WindowsState.PipeIoRequest.Pipe?.GuestPath}";
+                if (WindowsState.IoRequest != null)
+                    return WindowsState.IoRequest.WaitLabel;
+
+                if (WindowsState.HostWorkWaitActive)
+                    return $"host-work {(WindowsState.HostWork?.IsCompleted == true ? "done" : "running")}";
 
                 if (WindowsState.AlertByThreadIdWaitActive)
                     return $"alertbythreadid 0x{WindowsState.AlertByThreadIdAddress:X}";

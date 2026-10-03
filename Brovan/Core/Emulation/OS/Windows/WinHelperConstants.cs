@@ -56,6 +56,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
     }
 
+    internal abstract class ParkedIoRequest
+    {
+        internal bool Completed;
+        internal NTSTATUS Status;
+
+        internal abstract string WaitLabel { get; }
+    }
+
     public enum ConsoleObjectKind : byte
     {
         None = 0,
@@ -242,6 +250,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_STACK_OVERFLOW = 0xC00000FD,
         STATUS_CONTROL_C_EXIT = 0xC000013A,
         STATUS_INVALID_ADDRESS = 0xC0000141,
+        STATUS_TOO_MANY_OPENED_FILES = 0xC000011F,
         STATUS_FILE_INVALID = 0xC0000098,
         STATUS_PRIVILEGED_INSTRUCTION = 0xC0000096,
         STATUS_INTEGER_DIVIDE_BY_ZERO = 0xC0000094,
@@ -272,7 +281,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_CONNECTION_REFUSED = 0xC0000236,
         STATUS_CONNECTION_RESET = 0xC000020D,
         STATUS_CONNECTION_ABORTED = 0xC0000241,
+        STATUS_LOCAL_DISCONNECT = 0xC000013B,
         STATUS_ADDRESS_ALREADY_EXISTS = 0xC000020A,
+        STATUS_ADDRESS_ALREADY_ASSOCIATED = 0xC0000238,
+        STATUS_CONNECTION_ACTIVE = 0xC000023B,
+        STATUS_INVALID_CONNECTION = 0xC0000140,
         STATUS_INVALID_ADDRESS_COMPONENT = 0xC0000207,
         STATUS_HOST_DOWN = 0xC0000350,
         STATUS_CANCELLED = 0xC0000120,
@@ -2254,6 +2267,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<ulong> Handles;
         public long NotBeforeTick;
         public ulong Connection;
+
+        public Task HostWork;
 
         public void AttachHandle(ulong Handle)
         {

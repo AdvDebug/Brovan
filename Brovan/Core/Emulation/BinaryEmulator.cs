@@ -2985,6 +2985,9 @@ namespace Brovan.Core.Emulation
 
                     if (WinHelper.PipeRequests.Count != 0)
                         WinHelper.PipeRequests.Poll(this);
+
+                    if (WinHelper.AfdRequests.HasWork)
+                        WinHelper.AfdRequests.Service(this);
                 }
 
                 if (Volatile.Read(ref TerminationRequested) != 0 && Interlocked.Exchange(ref TerminationRequested, 0) != 0)
@@ -3946,6 +3949,8 @@ namespace Brovan.Core.Emulation
         {
             if (!Disposed)
             {
+                WinHelper?.AfdRequests.Dispose();
+
                 if (_emulator != null)
                 {
                     _emulator.StopEmulation();

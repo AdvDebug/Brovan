@@ -366,7 +366,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         Transceive
     }
 
-    internal sealed class PipeRequest
+    internal sealed class PipeRequest : ParkedIoRequest
     {
         internal PipeRequestKind Kind;
         internal WinPendingIo Io;
@@ -382,11 +382,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal bool PieceStarted;
         internal bool HoldsReadLock;
         internal bool HoldsWriteLock;
-        internal bool Completed;
-        internal NTSTATUS Status;
         internal ulong Information;
 
         internal WinFile File => Io.File;
+
+        internal override string WaitLabel => $"pipe-io {Kind}";
 
         internal bool UsesInbound => Kind == PipeRequestKind.Read || (Kind == PipeRequestKind.Transceive && WriteDone);
 
@@ -457,33 +457,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             Pending.Add(Request);
 
             if (Request.File.Synchronous)
-                ParkForRequest(Instance, Request);
+                Instance.WinHelper.ParkForIoRequest(Request);
 
             return NTSTATUS.STATUS_PENDING;
-        }
-
-        private static void ParkForRequest(BinaryEmulator Instance, PipeRequest Request)
-        {
-            EmulatedThread Thread = Instance.CurrentThread;
-            if (Thread == null)
-                return;
-
-            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
-            Thread.WaitActive = true;
-            Thread.WaitHandles = null;
-            Thread.WaitAll = false;
-            Thread.WaitDeadline = -1;
-            State.WaitCompleted = false;
-            State.WaitStatus = NTSTATUS.STATUS_PENDING;
-            State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
-            State.WaitReturnRIP = State.WaitResumeRIP + 2;
-            State.WaitAlertable = false;
-            State.ApcAlertable = false;
-            State.PipeIoRequest = Request;
-
-            Thread.State = EmulatedThreadState.Waiting;
-            Instance._emulator.WriteRegister(Instance.IPRegister, State.WaitResumeRIP);
-            Instance._emulator.StopEmulation();
         }
 
         internal void Poll(BinaryEmulator Instance)
@@ -495,12 +471,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 PipeRequest Request = Pending[i];
 
-                // NT cancels the I/O of a thread that exits. It still writes the IO_STATUS_BLOCK and sets the event.
                 if (!Instance.WinHelper.IsPendingIoLive(in Request.Io))
                 {
                     Pending.RemoveAt(i--);
                     End(Request, NTSTATUS.STATUS_CANCELLED, 0);
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, Request.Io.IoStatusBlock, NTSTATUS.STATUS_CANCELLED, 0);
                     Finish(Instance, Request, true);
                     continue;
                 }
@@ -555,6 +529,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return Cancelled;
+        }
+
+        internal void CancelThread(BinaryEmulator Instance, int ThreadId)
+        {
+            for (int i = 0; i < Pending.Count; i++)
+            {
+                PipeRequest Request = Pending[i];
+                if (Request.Io.ThreadId != ThreadId || WinSysHelper.CompletesToPort(in Request.Io))
+                    continue;
+
+                Pending.RemoveAt(i--);
+                End(Request, NTSTATUS.STATUS_CANCELLED, 0);
+                Finish(Instance, Request, true);
+            }
         }
 
         internal void CompleteFile(BinaryEmulator Instance, WinFile File, NTSTATUS Status)

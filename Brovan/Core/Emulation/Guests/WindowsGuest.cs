@@ -377,9 +377,9 @@ namespace Brovan.Core.Emulation.Guests
                 return;
             }
 
-            if (State.PipeIoRequest != null)
+            if (State.IoRequest != null)
             {
-                CompletePipeIoWait(Instance, Thread, State);
+                CompleteIoRequestWait(Instance, Thread, State);
                 return;
             }
 
@@ -447,6 +447,7 @@ namespace Brovan.Core.Emulation.Guests
 
             State.RetrySyscallActive = false;
             State.RetrySyscallNumber = 0;
+            State.HostWorkWaitActive = false;
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
             State.WaitResumeRIP = 0;
@@ -465,9 +466,9 @@ namespace Brovan.Core.Emulation.Guests
         }
 
         // The request already wrote the IO_STATUS_BLOCK.
-        private static void CompletePipeIoWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
+        private static void CompleteIoRequestWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
         {
-            NTSTATUS Status = State.PipeIoRequest.Status;
+            NTSTATUS Status = State.IoRequest.Status;
 
             if (Thread.Context == null)
                 Thread.Context = new CpuContext();
@@ -476,7 +477,7 @@ namespace Brovan.Core.Emulation.Guests
             Thread.Context.RIP = ResumeRip;
             Thread.Context.RAX = (ulong)(uint)Status;
 
-            State.PipeIoRequest = null;
+            State.IoRequest = null;
             State.WaitCompleted = false;
             State.WaitStatus = Status;
             State.WaitResumeRIP = 0;
@@ -560,8 +561,9 @@ namespace Brovan.Core.Emulation.Guests
         {
             NTSTATUS WaitStatus = NTSTATUS.STATUS_SUCCESS;
             WinWorkerFactory Factory = WinHelper?.HandleManager.GetObjectByHandle<WinWorkerFactory>(State.WorkerFactoryHandle);
+            bool HasEntries = State.WorkerFactoryReservedEntries != null && State.WorkerFactoryReservedEntries.Count > 0;
 
-            if (Instance.IsEmulatedDeadlineExpired(Thread.WaitDeadline))
+            if (!HasEntries && Instance.IsEmulatedDeadlineExpired(Thread.WaitDeadline))
             {
                 WaitStatus = NTSTATUS.STATUS_TIMEOUT;
                 if (State.WorkerFactoryPacketsReturned != 0)
@@ -579,7 +581,8 @@ namespace Brovan.Core.Emulation.Guests
                 {
                     foreach (WinIoCompletionEntry Entry in State.WorkerFactoryReservedEntries)
                     {
-                        OS.Windows.NtWaitForWorkViaWorkerFactory.WritePacket(Instance, State.WorkerFactoryMiniPackets, Removed, Entry);
+                        if (!OS.Windows.NtWaitForWorkViaWorkerFactory.WritePacket(Instance, State.WorkerFactoryMiniPackets, Removed, Entry))
+                            WaitStatus = NTSTATUS.STATUS_ACCESS_VIOLATION;
                         Removed++;
                     }
                 }

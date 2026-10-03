@@ -273,11 +273,15 @@ namespace Brovan.Core.Emulation
                 throw new UnauthorizedAccessException("Session does not have any socket access.");
         }
 
+        // For Socket.Select only.
+        internal Socket Selectable => _socket;
+
         public int Available => _socket.Available;
         public bool Blocking { get => _socket.Blocking; set => _socket.Blocking = value; }
         public bool Connected => _socket.Connected;
         public bool IsBound => _socket.IsBound;
         public bool DontFragment { get => _socket.DontFragment; set => _socket.DontFragment = value; }
+        public bool DualMode { get => _socket.DualMode; set => _socket.DualMode = value; }
         public bool ExclusiveAddressUse { get => _socket.ExclusiveAddressUse; set => _socket.ExclusiveAddressUse = value; }
         public EndPoint RemoteEndPoint
         {
@@ -534,6 +538,12 @@ namespace Brovan.Core.Emulation
         {
             EnsureCurrentRemoteAllowed();
             return _socket.Send(data, flags, out error);
+        }
+
+        public bool SendAsync(SocketAsyncEventArgs args)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.SendAsync(args);
         }
 
         public int SendTo(byte[] data, int offset, int size, SocketFlags flags, EndPoint remoteEP)

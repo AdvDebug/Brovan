@@ -15,7 +15,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Status;
 
             // Any thread of the process, and a NULL request matches every one on the file.
-            int Cancelled = Instance.WinHelper.PipeRequests.Cancel(Instance, File, IoRequestToCancel, -1);
+            int Cancelled = Instance.WinHelper.PipeRequests.Cancel(Instance, File, IoRequestToCancel, -1) +
+                Instance.WinHelper.AfdRequests.Cancel(Instance, File, IoRequestToCancel, -1);
             Status = Cancelled != 0 ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_NOT_FOUND;
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);

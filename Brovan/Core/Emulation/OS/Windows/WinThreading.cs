@@ -56,7 +56,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         // KTHREAD.Queue. A thread bound to a port takes its packets before it checks for a user APC.
         public WinIoCompletion BoundIoCompletion { get; set; }
 
-        internal PipeRequest PipeIoRequest { get; set; }
+        internal ParkedIoRequest IoRequest { get; set; }
+
+        // HostWork outlives the wait. The re-run consumes it.
+        internal bool HostWorkWaitActive { get; set; }
+        internal Task HostWork { get; set; }
         public ulong WaitResumeRIP { get; set; }
         public ulong WaitReturnRIP { get; set; }
         public bool WaitAlertable { get; set; }

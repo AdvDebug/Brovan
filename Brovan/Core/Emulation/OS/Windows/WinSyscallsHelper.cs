@@ -83,6 +83,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Normalized = "\\Device\\BrovSteam";
             else if (Normalized.Equals("MountPointManager", StringComparison.OrdinalIgnoreCase))
                 Normalized = "\\Device\\MountPointManager";
+            else if (Normalized.Equals("Nsi", StringComparison.OrdinalIgnoreCase))
+                Normalized = "\\Device\\Nsi";
             else if (Normalized.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
                 Normalized.Equals("NUL:", StringComparison.OrdinalIgnoreCase) ||
                 Normalized.Equals("NULL", StringComparison.OrdinalIgnoreCase))
@@ -235,6 +237,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public bool TryRetrySyscallAfterSlice(int SliceMilliseconds)
         {
+            return TryParkForSyscallRetry(Emulator.CreateEmulatedDeadlineMilliseconds(SliceMilliseconds), null);
+        }
+
+        // Whatever completes HostWork must bump WakeSignal after it.
+        public bool TryRetrySyscallWhenDone(Task HostWork)
+        {
+            return TryParkForSyscallRetry(-1, HostWork);
+        }
+
+        private bool TryParkForSyscallRetry(long Deadline, Task HostWork)
+        {
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null)
                 return false;
@@ -244,11 +257,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             State.RetrySyscallNumber = ReadSyscallNumber();
             State.RetrySyscallActive = true;
+            State.HostWorkWaitActive = HostWork != null;
+            if (HostWork != null)
+                State.HostWork = HostWork;
 
             Thread.WaitActive = true;
             Thread.WaitHandles = null;
             Thread.WaitAll = false;
-            Thread.WaitDeadline = Emulator.CreateEmulatedDeadlineMilliseconds(SliceMilliseconds);
+            Thread.WaitDeadline = Deadline;
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_PENDING;
             State.WaitResumeRIP = SyscallRip;
@@ -302,11 +318,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.PipeWaitDeadline = -1;
         }
 
-        public bool IsPipeWaitActive(ulong FileHandle)
+        internal void ParkForIoRequest(ParkedIoRequest Request)
         {
             EmulatedThread Thread = Emulator.CurrentThread;
-            WindowsThreadState? State = Thread == null ? null : WinEmulatedThread.TryGetState(Thread);
-            return State != null && FileHandle != 0 && State.PipeWaitHandle == FileHandle;
+            if (Thread == null)
+                return;
+
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            Thread.WaitActive = true;
+            Thread.WaitHandles = null;
+            Thread.WaitAll = false;
+            Thread.WaitDeadline = -1;
+            State.WaitCompleted = false;
+            State.WaitStatus = NTSTATUS.STATUS_PENDING;
+            State.WaitResumeRIP = GetSyscallRip(Thread, false);
+            State.WaitReturnRIP = State.WaitResumeRIP + 2;
+            State.WaitAlertable = false;
+            State.ApcAlertable = false;
+            State.IoRequest = Request;
+
+            Thread.State = EmulatedThreadState.Waiting;
+            Emulator._emulator.WriteRegister(Emulator.IPRegister, State.WaitResumeRIP);
+            Emulator._emulator.StopEmulation();
         }
 
         /// <summary>
@@ -336,9 +369,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.GetMessageWaitActive = false;
             State.RetrySyscallActive = false;
             State.RetrySyscallNumber = 0;
+            State.HostWorkWaitActive = false;
             State.PipeWaitHandle = 0;
             State.PipeWaitDeadline = -1;
-            State.PipeIoRequest = null;
+            State.IoRequest = null;
             State.ResetIoCompletionWait();
 
             if (ClearAlertByThreadId)
@@ -414,6 +448,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             ClearWaitState(Thread, true);
+
+            // NT cancels thread I/O while its IO_STATUS_BLOCKs are still mapped.
+            PipeRequests.CancelThread(Emulator, (int)Thread.ThreadId);
+            AfdRequests.CancelThread(Emulator, (int)Thread.ThreadId);
             Win32kHelper.DetachThreadInput(Emulator, Thread.ThreadId);
 
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
@@ -496,12 +534,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         // NT cancels a thread's I/O when the thread exits, except I/O that completes to a port.
         public bool IsPendingIoLive(in WinPendingIo Io)
         {
-            if (Io.ApcRoutine == 0 && Io.ApcContext != 0 && Io.File != null && Io.File.CompletionHandle != 0)
+            if (CompletesToPort(in Io))
                 return true;
 
             return Io.ThreadId >= 0 && Emulator.Threads.TryGetValue((uint)Io.ThreadId, out EmulatedThread? Thread) &&
                 Thread.State != EmulatedThreadState.Terminated;
         }
+
+        public static bool CompletesToPort(in WinPendingIo Io) =>
+            Io.ApcRoutine == 0 && Io.ApcContext != 0 && Io.File != null && Io.File.CompletionHandle != 0;
 
         public void QueueIoCompletion(WinFile File, EmulatedThread? Thread, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock, NTSTATUS Status, ulong Information)
         {
@@ -1940,6 +1981,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinSemaphore> WinSemaphores = new List<WinSemaphore>();
         public List<WinRegistryNotification> RegistryNotifications = new List<WinRegistryNotification>();
         internal readonly AfdDevice.HostConnects AfdConnects = new AfdDevice.HostConnects();
+        internal readonly AfdDevice.PendingRequests AfdRequests = new AfdDevice.PendingRequests();
         internal readonly PipeRequestQueue PipeRequests = new PipeRequestQueue();
         public List<WinSection> WinSections = new List<WinSection>();
         private readonly Dictionary<ulong, int> WinHandleIndex = new Dictionary<ulong, int>();
@@ -2343,6 +2385,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Handler = RPC.Ports.AudioSrvPortHandler.Handle
                 });
             }
+
+            WinPorts.Add(new WinPort
+            {
+                Name = RPC.Ports.DnsResolverPortHandler.PortName,
+                Handler = RPC.Ports.DnsResolverPortHandler.Handle
+            });
 
             // The kernel publishes these under \KernelObjects on every system. ntdll's commit-condition
             // path and CreateMemoryResourceNotification open them by name and expect them to exist.
@@ -3089,7 +3137,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 && !Emulator._emulator.WriteMemory(State.IoCompletionEntriesRemovedPtr, 0u, 4))
                 InterruptStatus = NTSTATUS.STATUS_ACCESS_VIOLATION;
             State.ResetIoCompletionWait();
-            State.PipeIoRequest = null;
+            State.IoRequest = null;
 
             if (State.RetrySyscallActive)
             {
@@ -9864,7 +9912,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                     if (Closing?.Handler?.Target is AfdDevice Endpoint && HandleManager.CountHandlesByObjectId(Closing.ObjectId) <= 1)
+                    {
+                        AfdRequests.EndpointClosed(Emulator, Endpoint);
                         Endpoint.Dispose();
+                    }
 
                     if (Closing != null && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
                     {

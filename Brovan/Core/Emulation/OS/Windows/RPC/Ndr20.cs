@@ -124,7 +124,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
 
             WriteUInt32(NextReferentId);
             NextReferentId += 4;
+            WriteConformantWideString(Value);
+        }
 
+        public void WriteConformantWideString(string Value)
+        {
+            AlignTo(4);
             uint CharCount = (uint)Value.Length + 1;
             WriteUInt32(CharCount);
             WriteUInt32(0);
@@ -172,6 +177,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public bool TryReadUInt16(out ushort Value)
         {
             Value = 0;
+            Align(2);
             if (Position + 2 > Data.Length)
                 return false;
 
@@ -183,6 +189,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public bool TryReadUInt32(out uint Value)
         {
             Value = 0;
+            Align(4);
             if (Position + 4 > Data.Length)
                 return false;
 
@@ -245,7 +252,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             int Bytes = (int)ActualCount * 2;
 
             Value = Encoding.Unicode.GetString(Data.Slice(Position, Bytes)).TrimEnd('\0');
-            Position += (Bytes + 3) & ~3;
+            Position += Bytes;
             return true;
         }
 

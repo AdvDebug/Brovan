@@ -5,6 +5,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtWaitForWorkViaWorkerFactory : IWinSyscall
     {
+        private const uint MaxPackets = 0x7FFFFFF;
+
         // FILE_IO_COMPLETION_INFORMATION.
         internal static bool WritePacket(BinaryEmulator Instance, ulong MiniPackets, uint Index, WinIoCompletionEntry Entry)
         {
@@ -59,8 +61,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong DeferredWork = Instance.WinHelper.GetArg(4);
             _ = DeferredWork;
 
-            if (MiniPackets == 0 || Count == 0)
+            if (MiniPackets == 0 || Count == 0 || Count > MaxPackets)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            // NT probes both outputs before it references the factory.
+            ulong PacketSize = Instance.WinHelper.PointerSize == 8 ? 0x20u : 0x10u;
+            if (!Instance.IsMemoryRangeMapped(MiniPackets, Count * PacketSize)
+                || (PacketsReturnedPtr != 0 && !Instance.IsMemoryRangeMapped(PacketsReturnedPtr, 4)))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             EmulatedThread Thread = Instance.CurrentThread;
             if (Thread == null)
@@ -86,39 +94,23 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.MaterializeSignaledWaitPackets(Factory.IoCompletionHandle);
 
-            uint Removed = 0;
-            while (Removed < Count && Completion.PendingCount > 0)
-            {
-                WinIoCompletionEntry Entry = Completion.Take();
-                WorkerFactoryHelper.OnIoCompletionEntryDequeued(Instance, Entry);
+            List<WinIoCompletionEntry> Taken = State.WorkerFactoryReservedEntries;
+            Taken.Clear();
+            Instance.TakeIoCompletionEntries(Completion, Count, Taken);
+            uint Removed = (uint)Taken.Count;
+            bool Written = true;
+            for (int i = 0; i < Taken.Count && Written; i++)
+                Written = WritePacket(Instance, MiniPackets, (uint)i, Taken[i]);
+            Taken.Clear();
 
-                if (Entry.WaitCompletionPacketHandle != 0)
-                {
-                    WinWaitCompletionPacket Packet = Instance.WinHelper.HandleManager.GetObjectByHandle<WinWaitCompletionPacket>(Entry.WaitCompletionPacketHandle);
-                    if (Packet != null)
-                    {
-                        Packet.Associated = false;
-                        Packet.QueuedCompletion = false;
-                    }
-                }
+            if (Written && PacketsReturnedPtr != 0)
+                Written = Instance._emulator.WriteMemory(PacketsReturnedPtr, Removed, 4);
 
-                WritePacket(Instance, MiniPackets, Removed, Entry);
-                Removed++;
-            }
-
-            if (PacketsReturnedPtr != 0)
-            {
-                if (!Instance.IsRegionMapped(PacketsReturnedPtr, 4))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                Instance._emulator.WriteMemory(PacketsReturnedPtr, Removed, 4);
-            }
+            if (!Written)
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (Removed > 0)
-            {
-                State.WorkerFactoryReservedEntries?.Clear();
                 return NTSTATUS.STATUS_SUCCESS;
-            }
 
             long Deadline = ParseTimeoutDeadline(Instance, Factory.Timeout);
             if (Factory.Timeout != 0 && Deadline == Instance.EmulatedTickCount64)

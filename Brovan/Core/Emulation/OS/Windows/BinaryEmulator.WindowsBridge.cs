@@ -640,12 +640,17 @@ namespace Brovan.Core.Emulation
 
         internal void TakeIoCompletionEntries(WinIoCompletion Completion, uint MaxEntries, List<WinIoCompletionEntry> Taken)
         {
+            int First = Taken.Count;
             while ((uint)Taken.Count < MaxEntries && Completion.PendingCount > 0)
             {
                 WinIoCompletionEntry Entry = Completion.Take();
                 ReleaseWaitCompletionPacket(Entry);
                 Taken.Add(Entry);
             }
+
+            // NT requeues the worker factory release packet after the whole batch.
+            for (int i = First; i < Taken.Count; i++)
+                WorkerFactoryHelper.OnIoCompletionEntryDequeued(this, Taken[i]);
         }
 
         private bool ReserveWorkerFactoryEntries(ulong WorkerFactoryHandle, uint MaxPackets, List<WinIoCompletionEntry> Reserved)
@@ -667,24 +672,7 @@ namespace Brovan.Core.Emulation
                 return false;
 
             MaterializeSignaledWaitPackets(Factory.IoCompletionHandle);
-
-            uint Limit = MaxPackets == 0 ? 1u : MaxPackets;
-            while (Reserved.Count < Limit && Completion.PendingCount > 0)
-            {
-                WinIoCompletionEntry Entry = Completion.Take();
-                Reserved.Add(Entry);
-
-                if (Entry.WaitCompletionPacketHandle != 0)
-                {
-                    WinWaitCompletionPacket Packet = WinHelper.HandleManager.GetObjectByHandle<WinWaitCompletionPacket>(Entry.WaitCompletionPacketHandle);
-                    if (Packet != null)
-                    {
-                        Packet.Associated = false;
-                        Packet.QueuedCompletion = false;
-                    }
-                }
-            }
-
+            TakeIoCompletionEntries(Completion, MaxPackets == 0 ? 1u : MaxPackets, Reserved);
             return Reserved.Count > 0;
         }
 
@@ -729,7 +717,7 @@ namespace Brovan.Core.Emulation
             State.WaitCheckedEpoch = ScanEpoch;
 
             if (Handles == null || Handles.Count == 0 || WinHelper == null
-                || State.WorkerFactoryWaitActive || State.IoCompletionWaitActive || State.AlertByThreadIdWaitActive || State.PipeIoRequest != null
+                || State.WorkerFactoryWaitActive || State.IoCompletionWaitActive || State.AlertByThreadIdWaitActive || State.IoRequest != null
                 || State.WaitMessageActive || State.GetMessageWaitActive || State.MsgWaitActive
                 || State.RetrySyscallActive || State.PipeWaitHandle != 0 || State.WaitAlertable || State.ApcAlertable)
                 return;
@@ -781,14 +769,17 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            if (State != null && State.PipeIoRequest != null)
+            if (State != null && State.IoRequest != null)
             {
-                if (!State.PipeIoRequest.Completed)
+                if (!State.IoRequest.Completed)
                     return false;
 
                 Thread.WaitSatisfiedIndex = 0;
                 return true;
             }
+
+            if (State != null && State.HostWorkWaitActive)
+                return State.HostWork == null || State.HostWork.IsCompleted;
 
             if (State != null && State.IoCompletionWaitActive)
             {
@@ -998,7 +989,23 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        internal bool HasPendingHostIo() => WinHelper != null && (WinHelper.AfdConnects.InFlight != 0 || WinHelper.PipeRequests.Count != 0);
+        internal bool HasPendingHostIo() => WinHelper != null &&
+            (WinHelper.AfdConnects.InFlight != 0 || WinHelper.AfdRequests.Count != 0 || WinHelper.PipeRequests.Count != 0 || HasHostWorkWait());
+
+        private bool HasHostWorkWait()
+        {
+            foreach (EmulatedThread Thread in Threads.Values)
+            {
+                if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                    continue;
+
+                WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+                if (State != null && State.HostWorkWaitActive)
+                    return true;
+            }
+
+            return false;
+        }
 
         internal bool HasFinishedHostIo() => WinHelper != null && WinHelper.AfdConnects.HasFinished;
 

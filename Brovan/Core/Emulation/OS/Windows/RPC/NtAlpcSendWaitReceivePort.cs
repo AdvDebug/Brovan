@@ -115,6 +115,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     long Delay = Reply.NotBeforeTick - Instance.EmulatedTickCount64;
                     if (Delay > 0 && Instance.WinHelper.TryContinuePipeWait(PortHandle, (int)Delay, (int)Delay))
                         return NTSTATUS.STATUS_PENDING;
+
+                    if (Reply.HostWork != null && Instance.WinHelper.TryRetrySyscallWhenDone(Reply.HostWork))
+                        return NTSTATUS.STATUS_PENDING;
                 }
                 else if (SendBytes != null)
                 {
