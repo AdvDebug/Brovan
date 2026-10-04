@@ -355,6 +355,10 @@ namespace Brovan.Core.Emulation.Guests
                 return Completion.PendingCount > 0;
             }
 
+            // NT: a console input object is signalled while its buffer holds any record.
+            if (Obj is WinFile File && File.ConsoleKind == ConsoleObjectKind.Input)
+                return WinHelper.ConsoleState.HasInput(Instance);
+
             return false;
         }
 

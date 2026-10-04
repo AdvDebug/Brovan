@@ -199,17 +199,24 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Span<byte> Data = Instance.WinHelper.ReadMemorySpan(BufferPtr, Length);
-            if (Data.Length == 0)
+            for (uint Done = 0; Done < Length;)
             {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                uint Step = Math.Min(Length - Done, (uint)NtReadFile.IoChunkBytes);
+                Span<byte> Data = Instance.WinHelper.ReadMemorySpan(BufferPtr + Done, Step);
+                if (Data.Length == 0)
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                }
+
+                Instance.WinHelper.ConsoleState.TrackOutput(Data);
+                GeneralHelper.ConsoleWrite(Data, Instance.Settings.ConsoleOutputMode);
+                Done += Step;
             }
 
-            GeneralHelper.ConsoleWrite(Data, Instance.Settings.ConsoleOutputMode);
             Console.Out.Flush();
 
-            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Data.Length);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Length);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

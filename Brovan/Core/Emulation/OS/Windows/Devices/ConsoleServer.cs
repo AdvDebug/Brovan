@@ -7,12 +7,82 @@ using System.Text;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
-    public struct ConsoleKeyRecord
+    // INPUT_RECORD. Non-key events keep their raw 16-byte payload.
+    public struct ConsoleInputRecord
     {
+        public const int Size = 20;
+
+        public ushort EventType;
+        public bool KeyDown;
+        public ushort RepeatCount;
         public ushort VirtualKey;
+        public ushort ScanCode;
         public char Character;
         public uint ControlKeyState;
-        public bool KeyDown;
+        public ulong PayloadLow;
+        public ulong PayloadHigh;
+
+        public readonly bool IsKey => EventType == ConsoleState.KeyEvent;
+
+        public static ConsoleInputRecord Key(bool Down, ushort VirtualKey, ushort ScanCode, char Character, uint ControlKeyState)
+        {
+            return new ConsoleInputRecord
+            {
+                EventType = ConsoleState.KeyEvent,
+                KeyDown = Down,
+                RepeatCount = 1,
+                VirtualKey = VirtualKey,
+                ScanCode = ScanCode,
+                Character = Character,
+                ControlKeyState = ControlKeyState
+            };
+        }
+
+        public static ConsoleInputRecord Read(ReadOnlySpan<byte> Source)
+        {
+            ConsoleInputRecord Record = new ConsoleInputRecord { EventType = BinaryPrimitives.ReadUInt16LittleEndian(Source) };
+            if (!Record.IsKey)
+            {
+                Record.PayloadLow = BinaryPrimitives.ReadUInt64LittleEndian(Source.Slice(0x04));
+                Record.PayloadHigh = BinaryPrimitives.ReadUInt64LittleEndian(Source.Slice(0x0C));
+                return Record;
+            }
+
+            Record.KeyDown = BinaryPrimitives.ReadUInt32LittleEndian(Source.Slice(0x04)) != 0;
+            Record.RepeatCount = BinaryPrimitives.ReadUInt16LittleEndian(Source.Slice(0x08));
+            Record.VirtualKey = BinaryPrimitives.ReadUInt16LittleEndian(Source.Slice(0x0A));
+            Record.ScanCode = BinaryPrimitives.ReadUInt16LittleEndian(Source.Slice(0x0C));
+            Record.Character = (char)BinaryPrimitives.ReadUInt16LittleEndian(Source.Slice(0x0E));
+            Record.ControlKeyState = BinaryPrimitives.ReadUInt32LittleEndian(Source.Slice(0x10));
+            return Record;
+        }
+
+        public readonly void Write(Span<byte> Destination)
+        {
+            Destination.Slice(0, Size).Clear();
+            BinaryPrimitives.WriteUInt16LittleEndian(Destination, EventType);
+            if (!IsKey)
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(Destination.Slice(0x04), PayloadLow);
+                BinaryPrimitives.WriteUInt64LittleEndian(Destination.Slice(0x0C), PayloadHigh);
+                return;
+            }
+
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x04), KeyDown ? 1u : 0u);
+            BinaryPrimitives.WriteUInt16LittleEndian(Destination.Slice(0x08), RepeatCount);
+            BinaryPrimitives.WriteUInt16LittleEndian(Destination.Slice(0x0A), VirtualKey);
+            BinaryPrimitives.WriteUInt16LittleEndian(Destination.Slice(0x0C), ScanCode);
+            BinaryPrimitives.WriteUInt16LittleEndian(Destination.Slice(0x0E), Character);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x10), ControlKeyState);
+        }
+    }
+
+    internal enum ConsoleReadResult
+    {
+        Done,
+        NeedInput,
+        EndOfInput,
+        Yield
     }
 
     /// <summary>
@@ -20,11 +90,51 @@ namespace Brovan.Core.Emulation.OS.Windows
     /// </summary>
     public sealed class ConsoleState
     {
-        private const uint LeftCtrlPressed = 0x0008;
-        private const uint LeftAltPressed = 0x0002;
-        private const uint ShiftPressed = 0x0010;
+        internal const ushort KeyEvent = 0x0001;
+        internal const uint EnableProcessedInput = 0x0001;
+        internal const uint EnableLineInput = 0x0002;
+        internal const uint EnableEchoInput = 0x0004;
+        internal const uint EnableVirtualTerminalInput = 0x0200;
+        private const uint EnableVirtualTerminalProcessing = 0x0004;
 
-        public uint InputMode = 0x01F7;
+        private const uint RightAltPressed = 0x0001;
+        private const uint LeftAltPressed = 0x0002;
+        private const uint RightCtrlPressed = 0x0004;
+        private const uint LeftCtrlPressed = 0x0008;
+        private const uint ShiftPressed = 0x0010;
+        private const uint EnhancedKey = 0x0100;
+
+        private const ushort VkBack = 0x08;
+        private const ushort VkTab = 0x09;
+        private const ushort VkReturn = 0x0D;
+        private const ushort VkPause = 0x13;
+        private const ushort VkEscape = 0x1B;
+        private const ushort VkSpace = 0x20;
+        private const ushort VkPrior = 0x21;
+        private const ushort VkNext = 0x22;
+        private const ushort VkEnd = 0x23;
+        private const ushort VkHome = 0x24;
+        private const ushort VkLeft = 0x25;
+        private const ushort VkUp = 0x26;
+        private const ushort VkRight = 0x27;
+        private const ushort VkDown = 0x28;
+        private const ushort VkInsert = 0x2D;
+        private const ushort VkDelete = 0x2E;
+        private const ushort VkF1 = 0x70;
+        private const ushort VkF4 = 0x73;
+        private const ushort VkF5 = 0x74;
+        private const ushort VkF12 = 0x7B;
+
+        // conhost: VkKeyScanW(0) on the US layout.
+        private const ushort NulVirtualKey = 0x32;
+        private const uint NulControlKeyState = ShiftPressed | LeftCtrlPressed;
+
+        private const int MaxLineCharacters = 1 << 16;
+        private const int MaxRecordsPerEdit = 1024;
+
+        private static ReadOnlySpan<byte> FunctionKeyCodes => new byte[] { 15, 17, 18, 19, 20, 21, 23, 24 };
+
+        public uint InputMode { get; private set; } = 0x01F7;
         public uint OutputMode = 0x0003;
         public ushort Attributes = 0x0007;
         public ushort CursorX;
@@ -32,100 +142,731 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint CursorSize = 25;
         public bool CursorVisible = true;
 
-        private readonly Queue<ConsoleKeyRecord> Records = new Queue<ConsoleKeyRecord>();
-        private bool Ended;
+        private readonly Queue<ConsoleInputRecord> Records = new Queue<ConsoleInputRecord>();
+        private int HeadRepeatsTaken;
+        private bool EndDelivered;
+
+        private readonly StringBuilder Line = new StringBuilder();
+        private readonly StringBuilder Echo = new StringBuilder();
+        private int LineCursor;
+        private int LineChangedFrom;
+        private bool LineActive;
+        private bool LineOverwrite;
+        private string PendingText = string.Empty;
+        private int PendingTextOffset;
+        private byte[] PendingBytes = Array.Empty<byte>();
+        private int PendingBytesOffset;
+
+        private enum OutputParse
+        {
+            Ground,
+            Escape,
+            CsiStart,
+            PrivateParameters
+        }
+
+        private bool CursorKeysApplication;
+        private OutputParse OutputState;
+        private int OutputParameter;
+        private bool OutputParameterHasOne;
 
         public int PendingRecords => Records.Count;
 
-        public void FlushRecords() => Records.Clear();
+        public bool InputExhausted => EndDelivered && Records.Count == 0;
 
-        public bool TryTakeRecord(out ConsoleKeyRecord Record) => Records.TryDequeue(out Record);
-
-        public Queue<ConsoleKeyRecord>.Enumerator PeekRecords() => Records.GetEnumerator();
-
-        /// <summary>
-        /// Turns host input into the key events a console reader expects. A live host console is read one
-        /// keystroke at a time with echo suppressed, because the guest draws its own line editor. a redirected
-        /// host stream has no keystrokes to read, so whole lines are expanded into synthetic ones.
-        /// </summary>
-        /// <param name="Blocking">Whether to wait for input that has not arrived yet.</param>
-        /// <returns>False once the host input has ended and the end-of-file key has already been delivered.</returns>
-        public bool FillFromHost(bool Blocking)
+        // Start the host reader now so the forced exit Ctrl+C presses are seen even if the guest never reads.
+        public void SetInputMode(BinaryEmulator Instance, uint Mode)
         {
-            if (Ended)
-                return false;
+            InputMode = Mode;
+            bool ControlCAsInput = (Mode & EnableProcessedInput) == 0;
+            if (ControlCAsInput && !Console.IsInputRedirected)
+                GeneralHelper.HostConsoleInput.EnsureStarted(Instance.WakeSignal);
 
-            if (!Console.IsInputRedirected)
+            GeneralHelper.HostConsoleInput.SetControlCAsInput(ControlCAsInput);
+        }
+
+        // Call under the kernel lock before reading the buffer. The host thread never touches it.
+        public void Poll(BinaryEmulator Instance)
+        {
+            GeneralHelper.HostConsoleInput.EnsureStarted(Instance.WakeSignal);
+
+            bool Ended = GeneralHelper.HostConsoleInput.Ended;
+            while (GeneralHelper.HostConsoleInput.TryTake(out ConsoleKeyInfo Key))
+                AppendHostKey(Key);
+
+            if (Ended && !EndDelivered)
             {
-                bool Added = false;
-                while (Console.KeyAvailable)
+                EndDelivered = true;
+                AppendKeyPress('Z', (char)0x1A, LeftCtrlPressed);
+                AppendKeyPress(VkReturn, '\r', 0);
+            }
+        }
+
+        public bool HasInput(BinaryEmulator Instance)
+        {
+            Poll(Instance);
+            return Records.Count != 0;
+        }
+
+        public void FlushRecords()
+        {
+            Records.Clear();
+            HeadRepeatsTaken = 0;
+        }
+
+        public int CopyRecords(Span<byte> Destination, int Count)
+        {
+            int Copied = 0;
+            foreach (ConsoleInputRecord Record in Records)
+            {
+                if (Copied == Count)
+                    break;
+
+                Record.Write(Destination.Slice(Copied++ * ConsoleInputRecord.Size));
+            }
+
+            return Copied;
+        }
+
+        public void RemoveRecords(int Count)
+        {
+            for (int i = 0; i < Count && Records.Count != 0; i++)
+                Records.Dequeue();
+
+            HeadRepeatsTaken = 0;
+        }
+
+        // conhost: with VT input on, a key press is stored as one record per character of its sequence.
+        public int WriteRecords(ReadOnlySpan<ConsoleInputRecord> Source, bool Append)
+        {
+            int Limit = Settings.MemoryBudget.ConsoleInputRecords;
+            if (Append)
+            {
+                int Accepted = 0;
+                while (Accepted < Source.Length && AppendRecord(Source[Accepted], Limit))
+                    Accepted++;
+
+                return Accepted;
+            }
+
+            int Room = Limit - Records.Count;
+            if (Room <= 0)
+                return 0;
+
+            ConsoleInputRecord[] Existing = Records.ToArray();
+            Records.Clear();
+            int Prepended = 0;
+            while (Prepended < Source.Length && AppendRecord(Source[Prepended], Room))
+                Prepended++;
+
+            foreach (ConsoleInputRecord Record in Existing)
+                Records.Enqueue(Record);
+
+            HeadRepeatsTaken = 0;
+            return Prepended;
+        }
+
+        // DECCKM (CSI ? 1 h / l) changes how cursor keys are encoded.
+        public void TrackOutput(ReadOnlySpan<byte> Data)
+        {
+            if ((OutputMode & EnableVirtualTerminalProcessing) == 0)
+                return;
+
+            for (int i = 0; i < Data.Length; i++)
+            {
+                if (OutputState == OutputParse.Ground)
                 {
-                    Enqueue(Console.ReadKey(true));
-                    Added = true;
+                    int Escape = Data.Slice(i).IndexOf((byte)0x1B);
+                    if (Escape < 0)
+                        return;
+
+                    i += Escape;
+                    OutputState = OutputParse.Escape;
+                    continue;
                 }
 
-                if (!Added && Blocking)
-                    Enqueue(Console.ReadKey(true));
+                byte Value = Data[i];
+                switch (OutputState)
+                {
+                    case OutputParse.Escape:
+                        OutputState = Value == (byte)'[' ? OutputParse.CsiStart : Value == 0x1B ? OutputParse.Escape : OutputParse.Ground;
+                        break;
 
-                return true;
+                    case OutputParse.CsiStart:
+                        OutputParameter = 0;
+                        OutputParameterHasOne = false;
+                        OutputState = Value == (byte)'?' ? OutputParse.PrivateParameters : Value == 0x1B ? OutputParse.Escape : OutputParse.Ground;
+                        break;
+
+                    case OutputParse.PrivateParameters:
+                        if (Value >= (byte)'0' && Value <= (byte)'9')
+                        {
+                            OutputParameter = Math.Min(OutputParameter * 10 + (Value - '0'), 100000);
+                        }
+                        else if (Value == (byte)';')
+                        {
+                            OutputParameterHasOne |= OutputParameter == 1;
+                            OutputParameter = 0;
+                        }
+                        else
+                        {
+                            if ((Value == (byte)'h' || Value == (byte)'l') && (OutputParameterHasOne || OutputParameter == 1))
+                                CursorKeysApplication = Value == (byte)'h';
+
+                            OutputState = Value == 0x1B ? OutputParse.Escape : OutputParse.Ground;
+                        }
+                        break;
+                }
             }
+        }
 
-            if (!Blocking)
-                return true;
+        internal ConsoleReadResult Read(BinaryEmulator Instance, Span<byte> Output, bool Unicode, bool ProcessControlZ,
+            ReadOnlySpan<char> InitialCharacters, uint WakeupMask, out int Written, out uint EndKeyState)
+        {
+            Written = 0;
+            EndKeyState = 0;
 
-            string Line = Console.ReadLine();
-            if (Line == null)
+            if (!Unicode && PendingBytesOffset < PendingBytes.Length)
             {
-                Ended = true;
-                Enqueue((char)0x1A, 0x5A, LeftCtrlPressed);
-                Enqueue('\r', 0x0D, 0);
+                Written = TakePendingBytes(Output);
+                return ConsoleReadResult.Done;
+            }
+
+            if (PendingTextOffset < PendingText.Length)
+            {
+                Written = TakePendingText(Output, Unicode);
+                return ConsoleReadResult.Done;
+            }
+
+            if ((InputMode & EnableLineInput) == 0)
+                return ReadRaw(Output, Unicode, out Written);
+
+            if (!LineActive)
+            {
+                LineActive = true;
+                LineOverwrite = false;
+                Line.Clear();
+                Line.Append(InitialCharacters);
+                LineCursor = Line.Length;
+            }
+
+            ConsoleReadResult Edited = EditLine(Instance, WakeupMask, out EndKeyState);
+            if (Edited == ConsoleReadResult.NeedInput && InputExhausted)
+                return ConsoleReadResult.EndOfInput;
+
+            if (Edited != ConsoleReadResult.Done)
+                return Edited;
+
+            if (ProcessControlZ && PendingText.Length != 0 && PendingText[0] == (char)0x1A)
+            {
+                PendingText = string.Empty;
+                PendingTextOffset = 0;
+                return ConsoleReadResult.Done;
+            }
+
+            Written = TakePendingText(Output, Unicode);
+            return ConsoleReadResult.Done;
+        }
+
+        private ConsoleReadResult ReadRaw(Span<byte> Output, bool Unicode, out int Written)
+        {
+            Written = 0;
+            Encoding Input = ConsoleServer.HostEncoding;
+            Span<byte> Encoded = stackalloc byte[8];
+
+            while (TryPeekKeyDown(out ConsoleInputRecord Key))
+            {
+                if (Key.Character == '\0' && !IsNulKey(Key))
+                {
+                    DropHeadRecord();
+                    continue;
+                }
+
+                int Length;
+                if (Unicode)
+                {
+                    if (Output.Length - Written < 2)
+                        break;
+
+                    BinaryPrimitives.WriteUInt16LittleEndian(Output.Slice(Written), Key.Character);
+                    Length = 2;
+                }
+                else
+                {
+                    Length = EncodeCharacter(Input, Key.Character, Encoded);
+                    if (Output.Length - Written < Length)
+                        break;
+
+                    Encoded.Slice(0, Length).CopyTo(Output.Slice(Written));
+                }
+
+                Written += Length;
+                ConsumeKeyDown();
+            }
+
+            if (Written != 0)
+                return ConsoleReadResult.Done;
+
+            return InputExhausted ? ConsoleReadResult.EndOfInput : ConsoleReadResult.NeedInput;
+        }
+
+        // The record budget keeps one read from holding the kernel lock for long.
+        private ConsoleReadResult EditLine(BinaryEmulator Instance, uint WakeupMask, out uint EndKeyState)
+        {
+            EndKeyState = 0;
+            bool Processed = (InputMode & EnableProcessedInput) != 0;
+            bool EchoInput = (InputMode & EnableEchoInput) != 0;
+            int ShownLength = Line.Length;
+            int ShownCursor = LineCursor;
+            LineChangedFrom = int.MaxValue;
+
+            for (int Budget = MaxRecordsPerEdit; TryPeekKeyDown(out ConsoleInputRecord Key); Budget--)
+            {
+                if (Budget == 0)
+                {
+                    RedrawLine(Instance, EchoInput, ShownLength, ShownCursor);
+                    return ConsoleReadResult.Yield;
+                }
+
+                char Character = Key.Character;
+                bool Nul = IsNulKey(Key);
+                if (Character == '\0' && !Nul && !(Processed && IsEditKey(Key.VirtualKey)))
+                {
+                    DropHeadRecord();
+                    continue;
+                }
+
+                if (Character == '\r')
+                {
+                    ConsumeKeyDown();
+                    EndKeyState = Key.ControlKeyState;
+                    RedrawLine(Instance, EchoInput, ShownLength, ShownCursor);
+                    CompleteLine(Instance, Processed ? "\r\n" : "\r", EchoInput);
+                    return ConsoleReadResult.Done;
+                }
+
+                if (Character != '\0' && Character < ' ' && (WakeupMask & (1u << Character)) != 0)
+                {
+                    ConsumeKeyDown();
+                    RedrawLine(Instance, EchoInput, ShownLength, ShownCursor);
+                    InsertCharacters(Character, 1);
+                    EndKeyState = Key.ControlKeyState;
+                    CompleteLine(Instance, string.Empty, false);
+                    return ConsoleReadResult.Done;
+                }
+
+                int Presses = TakeKeyPresses();
+                if (Processed && !Nul && TryEditKey(Key, Presses))
+                    continue;
+
+                InsertCharacters(Character, Presses);
+            }
+
+            RedrawLine(Instance, EchoInput, ShownLength, ShownCursor);
+            return ConsoleReadResult.NeedInput;
+        }
+
+        // conhost reads NUL only from the VkKeyScanW(0) record.
+        private static bool IsNulKey(in ConsoleInputRecord Key)
+        {
+            return Key.Character == '\0' && Key.VirtualKey == NulVirtualKey &&
+                (Key.ControlKeyState & ShiftPressed) != 0 && (Key.ControlKeyState & (LeftCtrlPressed | RightCtrlPressed)) != 0;
+        }
+
+        private static bool IsEditKey(ushort VirtualKey)
+        {
+            return VirtualKey == VkLeft || VirtualKey == VkRight || VirtualKey == VkHome || VirtualKey == VkEnd ||
+                VirtualKey == VkDelete || VirtualKey == VkInsert;
+        }
+
+        private bool TryEditKey(in ConsoleInputRecord Key, int Presses)
+        {
+            if (Key.Character == '\b')
+            {
+                int Erased = Math.Min(Presses, LineCursor);
+                LineCursor -= Erased;
+                RemoveRange(LineCursor, Erased);
                 return true;
             }
 
-            for (int i = 0; i < Line.Length; i++)
-                Enqueue(Line[i], VirtualKeyFor(Line[i]), 0);
+            if (Key.VirtualKey == VkEscape)
+            {
+                MarkChanged(0);
+                Line.Clear();
+                LineCursor = 0;
+                return true;
+            }
 
-            Enqueue('\r', 0x0D, 0);
+            if (Key.Character != '\0')
+                return false;
+
+            switch (Key.VirtualKey)
+            {
+                case VkLeft:
+                    LineCursor -= Math.Min(Presses, LineCursor);
+                    break;
+
+                case VkRight:
+                    LineCursor += Math.Min(Presses, Line.Length - LineCursor);
+                    break;
+
+                case VkHome:
+                    LineCursor = 0;
+                    break;
+
+                case VkEnd:
+                    LineCursor = Line.Length;
+                    break;
+
+                case VkDelete:
+                    RemoveRange(LineCursor, Math.Min(Presses, Line.Length - LineCursor));
+                    break;
+
+                case VkInsert:
+                    if ((Presses & 1) != 0)
+                        LineOverwrite = !LineOverwrite;
+                    break;
+            }
+
             return true;
         }
 
-        private void Enqueue(ConsoleKeyInfo Key)
+        private void InsertCharacters(char Character, int Count)
         {
-            uint ControlKeyState = 0;
-            if ((Key.Modifiers & ConsoleModifiers.Control) != 0)
-                ControlKeyState |= LeftCtrlPressed;
-            if ((Key.Modifiers & ConsoleModifiers.Alt) != 0)
-                ControlKeyState |= LeftAltPressed;
-            if ((Key.Modifiers & ConsoleModifiers.Shift) != 0)
-                ControlKeyState |= ShiftPressed;
-
-            Enqueue(Key.KeyChar, (ushort)Key.Key, ControlKeyState);
-        }
-
-        private void Enqueue(char Character, ushort VirtualKey, uint ControlKeyState)
-        {
-            Records.Enqueue(new ConsoleKeyRecord { Character = Character, VirtualKey = VirtualKey, ControlKeyState = ControlKeyState, KeyDown = true });
-            Records.Enqueue(new ConsoleKeyRecord { Character = Character, VirtualKey = VirtualKey, ControlKeyState = ControlKeyState, KeyDown = false });
-        }
-
-        private static ushort VirtualKeyFor(char Character)
-        {
-            if (Character >= 'a' && Character <= 'z')
-                return (ushort)(Character - 'a' + 'A');
-
-            if ((Character >= 'A' && Character <= 'Z') || (Character >= '0' && Character <= '9'))
-                return Character;
-
-            switch (Character)
+            if (LineOverwrite && LineCursor < Line.Length)
             {
-                case '\r':
-                case '\n': return 0x0D;
-                case '\b': return 0x08;
-                case '\t': return 0x09;
-                case (char)0x1B: return 0x1B;
-                case ' ': return 0x20;
-                default: return 0;
+                int Replaced = Math.Min(Count, Line.Length - LineCursor);
+                MarkChanged(LineCursor);
+                for (int i = 0; i < Replaced; i++)
+                    Line[LineCursor++] = Character;
+
+                Count -= Replaced;
             }
+
+            int Inserted = Math.Min(Count, MaxLineCharacters - Line.Length);
+            if (Inserted <= 0)
+                return;
+
+            MarkChanged(LineCursor);
+            Line.Insert(LineCursor, Character.ToString(), Inserted);
+            LineCursor += Inserted;
+        }
+
+        private void RemoveRange(int Index, int Count)
+        {
+            if (Count <= 0)
+                return;
+
+            MarkChanged(Index);
+            Line.Remove(Index, Count);
+        }
+
+        private void MarkChanged(int Index) => LineChangedFrom = Math.Min(LineChangedFrom, Index);
+
+        private void RedrawLine(BinaryEmulator Instance, bool EchoInput, int ShownLength, int ShownCursor)
+        {
+            if (!EchoInput)
+                return;
+
+            bool Changed = LineChangedFrom != int.MaxValue;
+            int From = Changed ? LineChangedFrom : LineCursor;
+            Echo.Clear();
+            MoveEchoCursor(ShownCursor, From);
+            if (Changed)
+            {
+                AppendLine(From, Line.Length);
+                int Removed = ShownLength - Line.Length;
+                if (Removed > 0)
+                    Echo.Append(' ', Removed).Append('\b', Removed);
+
+                Echo.Append('\b', Line.Length - LineCursor);
+            }
+
+            if (Echo.Length != 0)
+                ConsoleServer.EchoText(Instance, Echo);
+        }
+
+        private void MoveEchoCursor(int From, int To)
+        {
+            if (From > To)
+                Echo.Append('\b', From - To);
+            else
+                AppendLine(From, To);
+        }
+
+        private void AppendLine(int Start, int End)
+        {
+            for (int i = Start; i < End; i++)
+                Echo.Append(Line[i]);
+        }
+
+        private void CompleteLine(BinaryEmulator Instance, string Terminator, bool EchoInput)
+        {
+            if (EchoInput)
+            {
+                Echo.Clear();
+                AppendLine(LineCursor, Line.Length);
+                Echo.Append(Terminator);
+                ConsoleServer.EchoText(Instance, Echo);
+            }
+
+            Line.Append(Terminator);
+            PendingText = Line.ToString();
+            PendingTextOffset = 0;
+            Line.Clear();
+            LineCursor = 0;
+            LineActive = false;
+        }
+
+        private int TakePendingText(Span<byte> Output, bool Unicode)
+        {
+            if (!Unicode)
+            {
+                PendingBytes = ConsoleServer.HostEncoding.GetBytes(PendingText, PendingTextOffset, PendingText.Length - PendingTextOffset);
+                PendingBytesOffset = 0;
+                PendingText = string.Empty;
+                PendingTextOffset = 0;
+                return TakePendingBytes(Output);
+            }
+
+            int Count = Math.Min(PendingText.Length - PendingTextOffset, Output.Length / 2);
+            for (int i = 0; i < Count; i++)
+                BinaryPrimitives.WriteUInt16LittleEndian(Output.Slice(i * 2), PendingText[PendingTextOffset + i]);
+
+            PendingTextOffset += Count;
+            if (PendingTextOffset == PendingText.Length)
+            {
+                PendingText = string.Empty;
+                PendingTextOffset = 0;
+            }
+
+            return Count * 2;
+        }
+
+        private int TakePendingBytes(Span<byte> Output)
+        {
+            int Count = Math.Min(PendingBytes.Length - PendingBytesOffset, Output.Length);
+            PendingBytes.AsSpan(PendingBytesOffset, Count).CopyTo(Output);
+            PendingBytesOffset += Count;
+            if (PendingBytesOffset == PendingBytes.Length)
+            {
+                PendingBytes = Array.Empty<byte>();
+                PendingBytesOffset = 0;
+            }
+
+            return Count;
+        }
+
+        private static int EncodeCharacter(Encoding Input, char Character, Span<byte> Destination)
+        {
+            if (Character < 0x80)
+            {
+                Destination[0] = (byte)Character;
+                return 1;
+            }
+
+            ReadOnlySpan<char> Single = stackalloc char[1] { Character };
+            return Input.GetBytes(Single, Destination);
+        }
+
+        private bool TryPeekKeyDown(out ConsoleInputRecord Key)
+        {
+            while (Records.TryPeek(out Key))
+            {
+                if (Key.IsKey && Key.KeyDown)
+                    return true;
+
+                Records.Dequeue();
+                HeadRepeatsTaken = 0;
+            }
+
+            return false;
+        }
+
+        private void DropHeadRecord()
+        {
+            Records.Dequeue();
+            HeadRepeatsTaken = 0;
+        }
+
+        private int TakeKeyPresses()
+        {
+            int Presses = Math.Max((int)Records.Peek().RepeatCount, 1) - HeadRepeatsTaken;
+            DropHeadRecord();
+            return Presses;
+        }
+
+        private void ConsumeKeyDown()
+        {
+            ConsoleInputRecord Head = Records.Peek();
+            if (++HeadRepeatsTaken < Math.Max((int)Head.RepeatCount, 1))
+                return;
+
+            Records.Dequeue();
+            HeadRepeatsTaken = 0;
+        }
+
+        private void AppendHostKey(ConsoleKeyInfo Key)
+        {
+            uint State = 0;
+            if ((Key.Modifiers & ConsoleModifiers.Control) != 0)
+                State |= LeftCtrlPressed;
+            if ((Key.Modifiers & ConsoleModifiers.Alt) != 0)
+                State |= LeftAltPressed;
+            if ((Key.Modifiers & ConsoleModifiers.Shift) != 0)
+                State |= ShiftPressed;
+
+            ushort VirtualKey = (ushort)Key.Key;
+            if ((VirtualKey >= VkPrior && VirtualKey <= VkDown) || VirtualKey == VkInsert || VirtualKey == VkDelete)
+                State |= EnhancedKey;
+
+            AppendKeyPress(VirtualKey, Key.KeyChar, State);
+        }
+
+        private void AppendKeyPress(ushort VirtualKey, char Character, uint State)
+        {
+            int Limit = Settings.MemoryBudget.ConsoleInputRecords;
+            AppendRecord(ConsoleInputRecord.Key(true, VirtualKey, 0, Character, State), Limit);
+            AppendRecord(ConsoleInputRecord.Key(false, VirtualKey, 0, Character, State), Limit);
+        }
+
+        private bool AppendRecord(in ConsoleInputRecord Record, int Limit)
+        {
+            if (Records.Count >= Limit)
+                return false;
+
+            if ((InputMode & EnableVirtualTerminalInput) != 0 && Record.IsKey && Record.KeyDown)
+            {
+                Span<char> Sequence = stackalloc char[8];
+                int Length = TranslateKey(Record, Sequence);
+                if (Length != 0)
+                {
+                    for (int i = 0; i < Length; i++)
+                    {
+                        Records.Enqueue(Sequence[i] == '\0'
+                            ? ConsoleInputRecord.Key(true, NulVirtualKey, 0, '\0', NulControlKeyState)
+                            : ConsoleInputRecord.Key(true, 0, 0, Sequence[i], 0));
+                    }
+
+                    return true;
+                }
+            }
+
+            Records.Enqueue(Record);
+            return true;
+        }
+
+        // conhost VT input encoding. Returns 0 when the key has none.
+        private int TranslateKey(in ConsoleInputRecord Key, Span<char> Output)
+        {
+            uint State = Key.ControlKeyState;
+            bool Shift = (State & ShiftPressed) != 0;
+            bool Alt = (State & (LeftAltPressed | RightAltPressed)) != 0;
+            bool Ctrl = (State & (LeftCtrlPressed | RightCtrlPressed)) != 0;
+            int Modifier = 1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0);
+
+            switch (Key.VirtualKey)
+            {
+                case VkUp:
+                    return WriteCursorKey('A', Modifier, Output);
+                case VkDown:
+                    return WriteCursorKey('B', Modifier, Output);
+                case VkRight:
+                    return WriteCursorKey('C', Modifier, Output);
+                case VkLeft:
+                    return WriteCursorKey('D', Modifier, Output);
+                case VkHome:
+                    return WriteCursorKey('H', Modifier, Output);
+                case VkEnd:
+                    return WriteCursorKey('F', Modifier, Output);
+                case VkInsert:
+                    return WriteCsi(2, Modifier, '~', Output);
+                case VkDelete:
+                    return WriteCsi(3, Modifier, '~', Output);
+                case VkPrior:
+                    return WriteCsi(5, Modifier, '~', Output);
+                case VkNext:
+                    return WriteCsi(6, Modifier, '~', Output);
+                case >= VkF1 and <= VkF4:
+                    if (Modifier != 1)
+                        return WriteCsi(1, Modifier, (char)('P' + Key.VirtualKey - VkF1), Output);
+
+                    Output[0] = (char)0x1B;
+                    Output[1] = 'O';
+                    Output[2] = (char)('P' + Key.VirtualKey - VkF1);
+                    return 3;
+                case >= VkF5 and <= VkF12:
+                    return WriteCsi(FunctionKeyCodes[Key.VirtualKey - VkF5], Modifier, '~', Output);
+                case VkBack:
+                    return WritePrefixed(Alt, Ctrl ? '\b' : (char)0x7F, Output);
+                case VkPause:
+                    Output[0] = (char)0x1A;
+                    return 1;
+                case VkTab when Shift && !Ctrl && !Alt:
+                    return WriteCsi(0, 1, 'Z', Output);
+                case VkSpace when Ctrl:
+                    return WritePrefixed(Alt, '\0', Output);
+            }
+
+            if (Key.Character == '\0')
+                return Ctrl && Key.VirtualKey == '2' ? WritePrefixed(Alt, '\0', Output) : 0;
+
+            return WritePrefixed(Alt && !Ctrl, Key.Character, Output);
+        }
+
+        private int WriteCursorKey(char Final, int Modifier, Span<char> Output)
+        {
+            if (Modifier != 1)
+                return WriteCsi(1, Modifier, Final, Output);
+
+            Output[0] = (char)0x1B;
+            Output[1] = CursorKeysApplication ? 'O' : '[';
+            Output[2] = Final;
+            return 3;
+        }
+
+        private static int WriteCsi(int Parameter, int Modifier, char Final, Span<char> Output)
+        {
+            int Length = 0;
+            Output[Length++] = (char)0x1B;
+            Output[Length++] = '[';
+            if (Parameter != 0)
+                Length += WriteNumber(Parameter, Output.Slice(Length));
+
+            if (Modifier != 1)
+            {
+                Output[Length++] = ';';
+                Length += WriteNumber(Modifier, Output.Slice(Length));
+            }
+
+            Output[Length++] = Final;
+            return Length;
+        }
+
+        private static int WriteNumber(int Value, Span<char> Output)
+        {
+            if (Value < 10)
+            {
+                Output[0] = (char)('0' + Value);
+                return 1;
+            }
+
+            Output[0] = (char)('0' + Value / 10);
+            Output[1] = (char)('0' + Value % 10);
+            return 2;
+        }
+
+        private static int WritePrefixed(bool Escape, char Character, Span<char> Output)
+        {
+            if (!Escape)
+            {
+                Output[0] = Character;
+                return 1;
+            }
+
+            Output[0] = (char)0x1B;
+            Output[1] = Character;
+            return 2;
         }
     }
 
@@ -164,15 +905,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint ApiGetLargestConsoleWindowSize = 0x0200000B;
         private const uint ApiSetConsoleTextAttribute = 0x0200000D;
         private const uint ApiSetConsoleWindowInfo = 0x0200000E;
+        private const uint ApiWriteConsoleInput = 0x02000010;
         private const uint ApiGetConsoleTitle = 0x02000014;
         private const uint ApiSetConsoleTitle = 0x02000015;
 
         private const int MessageHeaderSize = 8;
         private const int MaximumDescriptorSize = 128;
-        private const uint InputRecordSize = 20;
-        private const ushort KeyEvent = 0x0001;
-        private const ushort ConsoleInputPeek = 0x0002;
-        private const uint EnableEchoInput = 0x0004;
+        private const ushort ConsoleReadNoRemove = 0x0001;
+        private const ushort ConsoleReadNoWait = 0x0002;
+        private const uint MaxRecordsPerCall = 1 << 16;
+        private const uint MaxReadBytes = 1 << 16;
         private const uint FillAnsiCharacter = 1;
         private const uint FillUnicodeCharacter = 2;
 
@@ -254,8 +996,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Request.TryGetBuffer(Request.InputCount, out uint ReplySize, out ulong ReplyAddress) && ReplySize != 0)
             {
                 uint ToWrite = Math.Min(ReplySize, DescriptorSize);
-                if (ToWrite != 0)
-                    Instance.WriteMemory(ReplyAddress, Descriptor.Slice(0, (int)ToWrite));
+                if (ToWrite != 0 && !Instance.WriteMemory(ReplyAddress, Descriptor.Slice(0, (int)ToWrite)))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
             return NTSTATUS.STATUS_SUCCESS;
@@ -294,7 +1036,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Descriptor.Length < 4)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
                     if (Kind == ConsoleObjectKind.Input)
-                        State.InputMode = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor);
+                        State.SetInputMode(Instance, BinaryPrimitives.ReadUInt32LittleEndian(Descriptor));
                     else if (Kind == ConsoleObjectKind.Output)
                         State.OutputMode = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor);
                     else
@@ -304,7 +1046,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case ApiGetNumberOfInputEvents:
                     if (Kind != ConsoleObjectKind.Input)
                         return NTSTATUS.STATUS_INVALID_HANDLE;
-                    State.FillFromHost(false);
+                    State.Poll(Instance);
                     if (Descriptor.Length >= 4)
                         BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, (uint)State.PendingRecords);
                     return NTSTATUS.STATUS_SUCCESS;
@@ -319,6 +1061,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Kind != ConsoleObjectKind.Input)
                         return NTSTATUS.STATUS_INVALID_HANDLE;
                     return GetConsoleInput(Instance, Descriptor, in Request, State);
+
+                case ApiWriteConsoleInput:
+                    if (Kind != ConsoleObjectKind.Input)
+                        return NTSTATUS.STATUS_INVALID_HANDLE;
+                    return WriteConsoleInput(Instance, Descriptor, in Request, State);
 
                 case ApiReadConsole:
                     if (Kind != ConsoleObjectKind.Input)
@@ -437,28 +1184,37 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             bool Unicode = Descriptor[4] != 0;
-            Span<byte> Text = Instance.WinHelper.ReadMemorySpan(TextAddress, TextSize);
-            if (Text.IsEmpty)
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            if (!Unicode)
-            {
-                GeneralHelper.ConsoleWrite(Text, Instance.Settings.ConsoleOutputMode);
-                BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, TextSize);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
-            ReadOnlySpan<char> Characters = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, char>(Text.Slice(0, (int)(TextSize & ~1u)));
+            uint Total = Unicode ? TextSize & ~1u : TextSize;
             Encoding Output = HostEncoding;
-            byte[] Encoded = ArrayPool<byte>.Shared.Rent(Output.GetMaxByteCount(Characters.Length));
-            try
+            Encoder Split = Unicode && Total > NtReadFile.IoChunkBytes ? Output.GetEncoder() : null;
+
+            for (uint Done = 0; Done < Total;)
             {
-                int Written = Output.GetBytes(Characters, Encoded);
-                GeneralHelper.ConsoleWrite(Encoded.AsSpan(0, Written), Instance.Settings.ConsoleOutputMode);
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(Encoded);
+                uint Step = Math.Min(Total - Done, (uint)NtReadFile.IoChunkBytes);
+                Span<byte> Text = Instance.WinHelper.ReadMemorySpan(TextAddress + Done, Step);
+                if (Text.IsEmpty)
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                Done += Step;
+                if (!Unicode)
+                {
+                    Instance.WinHelper.ConsoleState.TrackOutput(Text);
+                    GeneralHelper.ConsoleWrite(Text, Instance.Settings.ConsoleOutputMode);
+                    continue;
+                }
+
+                ReadOnlySpan<char> Characters = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, char>(Text);
+                byte[] Encoded = ArrayPool<byte>.Shared.Rent(Output.GetMaxByteCount(Characters.Length));
+                try
+                {
+                    int Written = Split != null ? Split.GetBytes(Characters, Encoded, Done == Total) : Output.GetBytes(Characters, Encoded);
+                    Instance.WinHelper.ConsoleState.TrackOutput(Encoded.AsSpan(0, Written));
+                    GeneralHelper.ConsoleWrite(Encoded.AsSpan(0, Written), Instance.Settings.ConsoleOutputMode);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(Encoded);
+                }
             }
 
             BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, TextSize);
@@ -477,82 +1233,71 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             bool Unicode = Descriptor[0] != 0;
-            int MaximumCharacters = (int)(Unicode ? Capacity / 2 : Capacity);
-            if (MaximumCharacters == 0)
-            {
-                BinaryPrimitives.WriteUInt32LittleEndian(Descriptor.Slice(16), 0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+            bool ProcessControlZ = Descriptor[1] != 0;
+            uint InitialBytes = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(4));
+            uint WakeupMask = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(8));
 
-            bool Echo = !Console.IsInputRedirected && (State.InputMode & EnableEchoInput) != 0;
-            char[] Line = ArrayPool<char>.Shared.Rent(MaximumCharacters);
-            int Count = 0;
+            char[] Initial = null;
+            int InitialCount = 0;
             try
             {
-                while (Count < MaximumCharacters)
+                if (Unicode && InitialBytes >= 2 && InitialBytes <= Math.Min(Capacity, MaxReadBytes) &&
+                    Request.TryGetBuffer(2, out uint InitialSize, out ulong InitialAddress) && InitialSize >= InitialBytes)
                 {
-                    if (State.PendingRecords == 0 && !State.FillFromHost(true))
-                        break;
-
-                    if (!State.TryTakeRecord(out ConsoleKeyRecord Record))
-                        break;
-
-                    if (!Record.KeyDown || Record.Character == '\0')
-                        continue;
-
-                    if (Record.Character == '\r')
-                    {
-                        Line[Count++] = '\r';
-                        if (Count < MaximumCharacters)
-                            Line[Count++] = '\n';
-                        if (Echo)
-                            EchoCharacters(Instance, "\r\n");
-                        break;
-                    }
-
-                    if (Record.Character == '\b')
-                    {
-                        if (Count == 0)
-                            continue;
-
-                        Count--;
-                        if (Echo)
-                            EchoCharacters(Instance, "\b \b");
-                        continue;
-                    }
-
-                    Line[Count++] = Record.Character;
-                    if (Echo)
-                        EchoCharacters(Instance, Record.Character.ToString());
+                    InitialCount = (int)(InitialBytes / 2);
+                    Initial = ArrayPool<char>.Shared.Rent(InitialCount);
+                    if (!Instance.ReadMemory(InitialAddress, System.Runtime.InteropServices.MemoryMarshal.AsBytes(Initial.AsSpan(0, InitialCount))))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }
 
-                Encoding Input = Unicode ? Encoding.Unicode : HostEncoding;
-                int Written = 0;
-                if (Count != 0)
-                {
-                    byte[] Encoded = ArrayPool<byte>.Shared.Rent(Input.GetMaxByteCount(Count));
-                    try
-                    {
-                        Written = Input.GetBytes(Line.AsSpan(0, Count), Encoded);
-                        if (Written > Capacity)
-                            Written = (int)Capacity;
+                Task NextInput = GeneralHelper.HostConsoleInput.NextInput;
+                State.Poll(Instance);
 
-                        if (Written != 0 && !Instance.WriteMemory(Address, Encoded.AsSpan(0, Written)))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                    }
-                    finally
-                    {
-                        ArrayPool<byte>.Shared.Return(Encoded);
-                    }
-                }
+                Span<byte> Output = Instance.WinHelper.Shared.GetSpan(Math.Min(Capacity, MaxReadBytes));
+                ConsoleReadResult Result = State.Read(Instance, Output, Unicode, ProcessControlZ,
+                    Initial != null ? Initial.AsSpan(0, InitialCount) : ReadOnlySpan<char>.Empty, WakeupMask, out int Written, out uint EndKeyState);
+                if (Result == ConsoleReadResult.NeedInput || Result == ConsoleReadResult.Yield)
+                    return ParkRead(Instance, Result, NextInput);
 
+                if (Written != 0 && !Instance.WriteMemory(Address, Output.Slice(0, Written)))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                BinaryPrimitives.WriteUInt32LittleEndian(Descriptor.Slice(12), EndKeyState);
                 BinaryPrimitives.WriteUInt32LittleEndian(Descriptor.Slice(16), (uint)Written);
+                return NTSTATUS.STATUS_SUCCESS;
             }
             finally
             {
-                ArrayPool<char>.Shared.Return(Line);
+                if (Initial != null)
+                    ArrayPool<char>.Shared.Return(Initial);
+            }
+        }
+
+        // conhost: an ANSI ReadConsole where a line that starts with Ctrl+Z is end of file.
+        internal static NTSTATUS ReadFile(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
+        {
+            if (Length == 0)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
+                return NTSTATUS.STATUS_SUCCESS;
             }
 
+            ConsoleState State = Instance.WinHelper.ConsoleState;
+            Task NextInput = GeneralHelper.HostConsoleInput.NextInput;
+            State.Poll(Instance);
+
+            Span<byte> Output = Instance.WinHelper.Shared.GetSpan(Math.Min(Length, MaxReadBytes));
+            ConsoleReadResult Result = State.Read(Instance, Output, false, true, ReadOnlySpan<char>.Empty, 0, out int Written, out _);
+            if (Result == ConsoleReadResult.NeedInput || Result == ConsoleReadResult.Yield)
+                return ParkRead(Instance, Result, NextInput);
+
+            if (Written != 0 && !Instance.WriteMemory(BufferPtr, Output.Slice(0, Written)))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
+
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Written);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -561,70 +1306,120 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Descriptor.Length < 8)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            bool Peek = (BinaryPrimitives.ReadUInt16LittleEndian(Descriptor.Slice(4)) & ConsoleInputPeek) != 0;
+            ushort Flags = BinaryPrimitives.ReadUInt16LittleEndian(Descriptor.Slice(4));
 
-            if (!Request.TryGetBuffer(Request.InputCount + 1, out uint Size, out ulong Address) || Size < InputRecordSize)
+            if (!Request.TryGetBuffer(Request.InputCount + 1, out uint Size, out ulong Address) || Size < ConsoleInputRecord.Size)
             {
                 BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, 0);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (State.PendingRecords == 0 && !State.FillFromHost(!Peek))
-                return NTSTATUS.STATUS_END_OF_FILE;
+            Task NextInput = GeneralHelper.HostConsoleInput.NextInput;
+            State.Poll(Instance);
 
             if (State.PendingRecords == 0)
             {
+                if ((Flags & ConsoleReadNoWait) == 0)
+                {
+                    if (State.InputExhausted)
+                        return NTSTATUS.STATUS_END_OF_FILE;
+
+                    return ParkUntilInput(Instance, NextInput);
+                }
+
                 BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, 0);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            uint Count = Math.Min(Size / InputRecordSize, (uint)State.PendingRecords);
-            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(Count * InputRecordSize);
-            Buffer.Clear();
+            uint Count = Math.Min(Math.Min(Size / ConsoleInputRecord.Size, (uint)State.PendingRecords), MaxRecordsPerCall);
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(Count * ConsoleInputRecord.Size);
+            int Copied = State.CopyRecords(Buffer, (int)Count);
 
-            if (Peek)
-            {
-                uint Index = 0;
-                Queue<ConsoleKeyRecord>.Enumerator Pending = State.PeekRecords();
-                while (Index < Count && Pending.MoveNext())
-                    WriteInputRecord(Buffer.Slice((int)(Index++ * InputRecordSize)), Pending.Current);
-            }
-            else
-            {
-                for (uint Index = 0; Index < Count; Index++)
-                {
-                    State.TryTakeRecord(out ConsoleKeyRecord Record);
-                    WriteInputRecord(Buffer.Slice((int)(Index * InputRecordSize)), Record);
-                }
-            }
-
-            if (!Instance.WriteMemory(Address, Buffer.Slice(0, (int)(Count * InputRecordSize))))
+            if (!Instance.WriteMemory(Address, Buffer.Slice(0, Copied * ConsoleInputRecord.Size)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, Count);
+            if ((Flags & ConsoleReadNoRemove) == 0)
+                State.RemoveRecords(Copied);
+
+            BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, (uint)Copied);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static void EchoCharacters(BinaryEmulator Instance, string Text)
+        private static NTSTATUS WriteConsoleInput(BinaryEmulator Instance, Span<byte> Descriptor, in UserIoRequest Request, ConsoleState State)
         {
-            Encoding Output = HostEncoding;
-            Span<byte> Encoded = stackalloc byte[16];
-            int Written = Output.GetBytes(Text.AsSpan(), Encoded);
-            GeneralHelper.ConsoleWrite(Encoded.Slice(0, Written), Instance.Settings.ConsoleOutputMode);
+            if (Descriptor.Length < 8)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            bool Unicode = Descriptor[4] != 0;
+            bool Append = Descriptor[5] != 0;
+
+            if (!Request.TryGetBuffer(1, out uint Size, out ulong Address) || Size < ConsoleInputRecord.Size)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, 0);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            int Count = (int)Math.Min(Size / ConsoleInputRecord.Size, MaxRecordsPerCall);
+            Span<byte> Raw = Instance.WinHelper.ReadMemorySpan(Address, (uint)(Count * ConsoleInputRecord.Size));
+            if (Raw.IsEmpty)
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            ConsoleInputRecord[] Parsed = ArrayPool<ConsoleInputRecord>.Shared.Rent(Count);
+            try
+            {
+                for (int i = 0; i < Count; i++)
+                {
+                    ConsoleInputRecord Record = ConsoleInputRecord.Read(Raw.Slice(i * ConsoleInputRecord.Size));
+                    if (!Unicode && Record.IsKey)
+                        Record.Character = DecodeAnsiCharacter((byte)Record.Character);
+
+                    Parsed[i] = Record;
+                }
+
+                State.Poll(Instance);
+                int Accepted = State.WriteRecords(Parsed.AsSpan(0, Count), Append);
+                BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, (uint)Accepted);
+                if (Accepted != 0)
+                    GeneralHelper.HostConsoleInput.SignalInput();
+            }
+            finally
+            {
+                ArrayPool<ConsoleInputRecord>.Shared.Return(Parsed);
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static void WriteInputRecord(Span<byte> Destination, ConsoleKeyRecord Record)
+        private static char DecodeAnsiCharacter(byte Value)
         {
-            BinaryPrimitives.WriteUInt16LittleEndian(Destination, KeyEvent);
-            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x04), Record.KeyDown ? 1u : 0u);
-            BinaryPrimitives.WriteUInt16LittleEndian(Destination.Slice(0x08), 1);
-            BinaryPrimitives.WriteUInt16LittleEndian(Destination.Slice(0x0A), Record.VirtualKey);
-            BinaryPrimitives.WriteUInt16LittleEndian(Destination.Slice(0x0C), 0);
-            BinaryPrimitives.WriteUInt16LittleEndian(Destination.Slice(0x0E), Record.Character);
-            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x10), Record.ControlKeyState);
+            if (Value < 0x80)
+                return (char)Value;
+
+            ReadOnlySpan<byte> Single = stackalloc byte[1] { Value };
+            Span<char> Decoded = stackalloc char[2];
+            return HostEncoding.GetChars(Single, Decoded) != 0 ? Decoded[0] : '\0';
         }
 
-        private static Encoding HostEncoding
+        private static NTSTATUS ParkUntilInput(BinaryEmulator Instance, Task NextInput)
+        {
+            return Instance.WinHelper.TryRetrySyscallWhenDone(NextInput) ? NTSTATUS.STATUS_PENDING : NTSTATUS.STATUS_UNSUCCESSFUL;
+        }
+
+        private static NTSTATUS ParkRead(BinaryEmulator Instance, ConsoleReadResult Result, Task NextInput)
+        {
+            if (Result == ConsoleReadResult.NeedInput)
+                return ParkUntilInput(Instance, NextInput);
+
+            return Instance.WinHelper.TryRetrySyscallAfterSlice(1) ? NTSTATUS.STATUS_PENDING : NTSTATUS.STATUS_UNSUCCESSFUL;
+        }
+
+        internal static void EchoText(BinaryEmulator Instance, StringBuilder Text)
+        {
+            byte[] Encoded = HostEncoding.GetBytes(Text.ToString());
+            GeneralHelper.ConsoleWrite(Encoded, Instance.Settings.ConsoleOutputMode);
+        }
+
+        internal static Encoding HostEncoding
         {
             get
             {

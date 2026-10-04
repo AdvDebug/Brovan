@@ -569,7 +569,7 @@ namespace Brovan
             PrintHighlight($"[SYSCALL INTERACTIVE] {name} (0x{ctx.Number:X})", true);
             Console.WriteLine($"Args: {string.Join(", ", ctx.Args.Select(a => $"0x{a:X}"))}");
             Console.Write("Action [allow|deny|return <value>]: ");
-            string input = Console.ReadLine()?.Trim() ?? string.Empty;
+            string input = GeneralHelper.HostConsoleInput.ReadLine()?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(input))
                 return;
 

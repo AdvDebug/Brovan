@@ -45,7 +45,7 @@ namespace Brovan.Core.Emulation
         Suppressed,
 
         /// <summary>
-        /// Allow some safe virtual terminal styling while escaping dangerous terminal actions.
+        /// Allow safe virtual terminal styling and cursor control, and drop every other escape sequence.
         /// </summary>
         LightEscaped,
 

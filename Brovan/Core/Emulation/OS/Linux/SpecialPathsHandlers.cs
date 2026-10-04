@@ -1310,7 +1310,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             if (!Write)
                 return -(long)LinuxErrno.EBADF;
 
-            return WriteConsole(Instance, Helper, BufferAddress, Length, Console.OpenStandardOutput());
+            return WriteConsole(Instance, Helper, BufferAddress, Length, false);
         }
 
         public long DevStdErr(BinaryEmulator Instance, LinuxSyscallsHelper Helper, FileObject File, ulong BufferAddress, ulong Length, bool Write = false)
@@ -1318,13 +1318,13 @@ namespace Brovan.Core.Emulation.OS.Linux
             if (!Write)
                 return -(long)LinuxErrno.EBADF;
 
-            return WriteConsole(Instance, Helper, BufferAddress, Length, Console.OpenStandardError());
+            return WriteConsole(Instance, Helper, BufferAddress, Length, true);
         }
 
         public long DevTty(BinaryEmulator Instance, LinuxSyscallsHelper Helper, FileObject File, ulong BufferAddress, ulong Length, bool Write = false)
         {
             if (Write)
-                return WriteConsole(Instance, Helper, BufferAddress, Length, Console.OpenStandardOutput());
+                return WriteConsole(Instance, Helper, BufferAddress, Length, false);
 
             if (Length == 0)
                 return 0;
@@ -1884,7 +1884,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             return (long)TransferLength;
         }
 
-        private static long WriteConsole(BinaryEmulator Instance, LinuxSyscallsHelper Helper, ulong BufferAddress, ulong Length, Stream Output)
+        private static long WriteConsole(BinaryEmulator Instance, LinuxSyscallsHelper Helper, ulong BufferAddress, ulong Length, bool StandardError)
         {
             if (Length == 0)
                 return 0;
@@ -1897,7 +1897,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             if (!Instance.ReadMemory(BufferAddress, Transfer))
                 return -(long)LinuxErrno.EFAULT;
 
-            GeneralHelper.ConsoleWrite(Transfer, Output, Instance.Settings.ConsoleOutputMode);
+            GeneralHelper.ConsoleWrite(Transfer, Instance.Settings.ConsoleOutputMode, StandardError);
             return (long)TransferLength;
         }
 

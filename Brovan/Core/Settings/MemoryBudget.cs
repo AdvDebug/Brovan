@@ -45,6 +45,8 @@ namespace Brovan.Core.Settings
 
         public static int SandboxPathCacheEntries { get; private set; }
 
+        public static int ConsoleInputRecords { get; private set; }
+
         public static ulong GuestPhysicalBytes { get; private set; }
 
         // NT memory reports count in 4 KiB pages.
@@ -65,6 +67,7 @@ namespace Brovan.Core.Settings
             RegistryPathCacheEntries = (int)Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 2048, Aggressive: 1024);
             HostDirectoryIndexNames = (int)Pick(Off: 32768, Minimal: 24576, Medium: 16384, High: 8192, Aggressive: 4096);
             SandboxPathCacheEntries = (int)Pick(Off: 32768, Minimal: 24576, Medium: 16384, High: 8192, Aggressive: 4096);
+            ConsoleInputRecords = (int)Pick(Off: 262144, Minimal: 131072, Medium: 65536, High: 32768, Aggressive: 16384);
             ulong PhysicalMegabytes = Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
 
             GuestPhysicalBytes = Megabytes(PhysicalMegabytes);

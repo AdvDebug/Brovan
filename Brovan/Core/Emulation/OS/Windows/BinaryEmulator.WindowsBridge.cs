@@ -990,7 +990,8 @@ namespace Brovan.Core.Emulation
         }
 
         internal bool HasPendingHostIo() => WinHelper != null &&
-            (WinHelper.AfdConnects.InFlight != 0 || WinHelper.AfdRequests.Count != 0 || WinHelper.PipeRequests.Count != 0 || HasHostWorkWait());
+            (WinHelper.AfdConnects.InFlight != 0 || WinHelper.AfdRequests.Count != 0 || WinHelper.PipeRequests.Count != 0 || HasHostWorkWait() ||
+             GeneralHelper.HostConsoleInput.Active);
 
         private bool HasHostWorkWait()
         {

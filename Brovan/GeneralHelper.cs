@@ -746,179 +746,465 @@ namespace Brovan
             return true;
         }
 
-        private static void AppendEscapedConsoleByte(StringBuilder Builder, byte Value)
+        private const int ConsoleFilterChunkBytes = 1 << 16;
+        private const int MaxSafeConsoleSequenceBytes = 256;
+
+        private static ReadOnlySpan<byte> ConsoleHexDigits => "0123456789ABCDEF"u8;
+        private static ReadOnlySpan<byte> SafeConsoleCsiFinals => "mABCDEFGHfdsu`JKX@PLM"u8;
+        private static readonly System.Buffers.SearchValues<byte> CsiParameterBytes = System.Buffers.SearchValues.Create("0123456789;:"u8);
+
+        private enum ConsoleParseState
         {
+            Ground,
+            Utf8,
+            Escape,
+            EscapeIntermediate,
+            Csi,
+            CsiDiscard,
+            ControlString
+        }
+
+        private sealed class ConsoleFilter
+        {
+            public ConsoleParseState State;
+            public readonly byte[] Pending = new byte[MaxSafeConsoleSequenceBytes];
+            public int PendingLength;
+        }
+
+        private static int WriteEscapedConsoleByte(Span<byte> Destination, byte Value)
+        {
+            Destination[0] = (byte)'\\';
             switch (Value)
             {
-                case 0x09:
-                    Builder.Append('\t');
-                    break;
-
-                case 0x0A:
-                    Builder.Append('\n');
-                    break;
-
-                case 0x0D:
-                    Builder.Append("\\r");
-                    break;
-
-                case 0x1B:
-                    Builder.Append("\\x1B");
-                    break;
+                case 0x07:
+                    Destination[1] = (byte)'a';
+                    return 2;
 
                 case 0x08:
-                    Builder.Append("\\b");
-                    break;
+                    Destination[1] = (byte)'b';
+                    return 2;
 
-                case 0x07:
-                    Builder.Append("\\a");
-                    break;
+                case 0x0D:
+                    Destination[1] = (byte)'r';
+                    return 2;
 
                 default:
-                    if (Value < 0x20 || Value == 0x7F)
-                        Builder.Append("\\x").Append(Value.ToString("X2"));
-                    else
-                        Builder.Append((char)Value);
-                    break;
+                    Destination[1] = (byte)'x';
+                    Destination[2] = ConsoleHexDigits[Value >> 4];
+                    Destination[3] = ConsoleHexDigits[Value & 0xF];
+                    return 4;
             }
         }
 
-        private static void AppendEscapedConsoleBytes(StringBuilder Builder, ReadOnlySpan<byte> Data, int Start, int Length)
+        private static int WriteEscapedConsoleBytes(ReadOnlySpan<byte> Source, Span<byte> Destination)
         {
-            int End = Start + Length;
-            for (int i = Start; i < End; i++)
-                AppendEscapedConsoleByte(Builder, Data[i]);
+            int Written = 0;
+            foreach (byte Value in Source)
+                Written += WriteEscapedConsoleByte(Destination.Slice(Written), Value);
+
+            return Written;
         }
 
-        private static bool IsSafeLightConsoleCsiSequence(ReadOnlySpan<byte> Data, int Start, int Length)
+        // Refuse anything that makes the terminal reply, changes input encoding or switches screen mode.
+        private static bool IsSafeConsoleCsi(ReadOnlySpan<byte> Sequence)
         {
-            if (Length < 3 || Data[Start] != 0x1B || Data[Start + 1] != (byte)'[')
-                return false;
+            byte Final = Sequence[^1];
+            ReadOnlySpan<byte> Parameters = Sequence[2..^1];
 
-            byte Final = Data[Start + Length - 1];
-            bool IsSgr = Final == (byte)'m';
-            bool IsCursorMotion =
-                Final == (byte)'A' || Final == (byte)'B' || Final == (byte)'C' || Final == (byte)'D' ||
-                Final == (byte)'E' || Final == (byte)'F' || Final == (byte)'G' || Final == (byte)'H' ||
-                Final == (byte)'f' || Final == (byte)'s' || Final == (byte)'u';
-
-            if (!IsSgr && !IsCursorMotion)
-                return false;
-
-            for (int i = Start + 2; i < Start + Length - 1; i++)
+            if (!Parameters.IsEmpty && Parameters[0] == (byte)'?')
             {
-                byte Value = Data[i];
-
-                if (IsSgr && Value == (byte)':')
-                    continue;
-
-                if (!((Value >= (byte)'0' && Value <= (byte)'9') || Value == (byte)';'))
-                    return false;
+                ReadOnlySpan<byte> Mode = Parameters.Slice(1);
+                return (Final == (byte)'h' || Final == (byte)'l') && (Mode.SequenceEqual("25"u8) || Mode.SequenceEqual("2026"u8));
             }
 
-            return true;
+            if (Parameters.IndexOfAnyExcept(CsiParameterBytes) >= 0 || !SafeConsoleCsiFinals.Contains(Final))
+                return false;
+
+            if (Final == (byte)'J' && Parameters.TrimStart((byte)'0').SequenceEqual("3"u8))
+                return false;
+
+            return Final == (byte)'m' || !Parameters.Contains((byte)':');
         }
 
-        private static bool TryGetConsoleEscapeSequenceLength(ReadOnlySpan<byte> Data, int Start, out int Length)
+        private static bool TerminalResetRegistered;
+
+        // A hidden cursor and an open synchronized update outlive Brovan on the host terminal.
+        private static void NoteTerminalMode(ReadOnlySpan<byte> Sequence)
         {
-            Length = 1;
+            if (TerminalResetRegistered || (!Sequence.SequenceEqual("\x1b[?25l"u8) && !Sequence.SequenceEqual("\x1b[?2026h"u8)))
+                return;
 
-            if (Start + 1 >= Data.Length)
-                return true;
+            TerminalResetRegistered = true;
+            AppDomain.CurrentDomain.ProcessExit += ResetTerminalModes;
+        }
 
-            byte Type = Data[Start + 1];
-
-            if (Type == (byte)'[')
+        private static void ResetTerminalModes(object Sender, EventArgs Args)
+        {
+            try
             {
-                for (int i = Start + 2; i < Data.Length; i++)
+                Stdout?.Write("\x1b[?2026l\x1b[?25h"u8);
+                Stdout?.Flush();
+            }
+            catch (IOException Ex)
+            {
+                LogError($"Host terminal modes could not be reset: {Ex.Message}");
+            }
+        }
+
+        private static int FilterGroundConsoleByte(ConsoleFilter Filter, byte Value, Span<byte> Destination, bool AllowSafeControls)
+        {
+            if ((Value >= 0x20 && Value <= 0x7E) || Value == (byte)'\t' || Value == (byte)'\n' ||
+                (AllowSafeControls && (Value == (byte)'\r' || Value == (byte)'\b')))
+            {
+                Destination[0] = Value;
+                return 1;
+            }
+
+            if (Value >= 0xC2 && Value <= 0xF4)
+            {
+                Filter.State = ConsoleParseState.Utf8;
+                Filter.Pending[0] = Value;
+                Filter.PendingLength = 1;
+                return 0;
+            }
+
+            if (AllowSafeControls && Value == 0x1B)
+            {
+                Filter.State = ConsoleParseState.Escape;
+                return 0;
+            }
+
+            return WriteEscapedConsoleByte(Destination, Value);
+        }
+
+        private static int EndRefusedConsoleSequence(ConsoleFilter Filter, byte Value, Span<byte> Destination, bool AllowSafeControls)
+        {
+            if (Value == 0x1B)
+            {
+                Filter.State = ConsoleParseState.Escape;
+                return 0;
+            }
+
+            Filter.State = ConsoleParseState.Ground;
+            return Value >= 0x30 && Value <= 0x7E ? 0 : FilterGroundConsoleByte(Filter, Value, Destination, AllowSafeControls);
+        }
+
+        private static int FilterConsoleByte(ConsoleFilter Filter, byte Value, Span<byte> Destination, bool AllowSafeControls)
+        {
+            switch (Filter.State)
+            {
+                case ConsoleParseState.Utf8:
                 {
-                    byte Value = Data[i];
+                    // Pending is always a valid prefix, so only the new byte can break it.
+                    Filter.Pending[Filter.PendingLength] = Value;
+                    ReadOnlySpan<byte> Character = Filter.Pending.AsSpan(0, Filter.PendingLength + 1);
+                    OperationStatus Status = Rune.DecodeFromUtf8(Character, out Rune Decoded, out _);
+                    if (Status == OperationStatus.NeedMoreData)
+                    {
+                        Filter.PendingLength++;
+                        return 0;
+                    }
+
+                    Filter.State = ConsoleParseState.Ground;
+                    if (Status == OperationStatus.Done)
+                    {
+                        if (Rune.IsControl(Decoded))
+                            return WriteEscapedConsoleBytes(Character, Destination);
+
+                        Character.CopyTo(Destination);
+                        return Character.Length;
+                    }
+
+                    int Written = WriteEscapedConsoleBytes(Filter.Pending.AsSpan(0, Filter.PendingLength), Destination);
+                    return Written + FilterGroundConsoleByte(Filter, Value, Destination.Slice(Written), AllowSafeControls);
+                }
+
+                case ConsoleParseState.Escape:
+                    if (Value == (byte)'[')
+                    {
+                        Filter.State = ConsoleParseState.Csi;
+                        Filter.Pending[0] = 0x1B;
+                        Filter.Pending[1] = Value;
+                        Filter.PendingLength = 2;
+                        return 0;
+                    }
+
+                    if (Value == (byte)']' || Value == (byte)'P' || Value == (byte)'X' || Value == (byte)'^' || Value == (byte)'_')
+                    {
+                        Filter.State = ConsoleParseState.ControlString;
+                        return 0;
+                    }
+
+                    if (Value == (byte)'7' || Value == (byte)'8')
+                    {
+                        Filter.State = ConsoleParseState.Ground;
+                        Destination[0] = 0x1B;
+                        Destination[1] = Value;
+                        return 2;
+                    }
+
+                    if (Value >= 0x20 && Value <= 0x2F)
+                    {
+                        Filter.State = ConsoleParseState.EscapeIntermediate;
+                        return 0;
+                    }
+
+                    return EndRefusedConsoleSequence(Filter, Value, Destination, AllowSafeControls);
+
+                case ConsoleParseState.EscapeIntermediate:
+                    return Value >= 0x20 && Value <= 0x2F ? 0 : EndRefusedConsoleSequence(Filter, Value, Destination, AllowSafeControls);
+
+                case ConsoleParseState.Csi:
+                    if (Value >= 0x20 && Value <= 0x3F)
+                    {
+                        if (Filter.PendingLength == Filter.Pending.Length - 1)
+                            Filter.State = ConsoleParseState.CsiDiscard;
+                        else
+                            Filter.Pending[Filter.PendingLength++] = Value;
+
+                        return 0;
+                    }
+
                     if (Value >= 0x40 && Value <= 0x7E)
                     {
-                        Length = i - Start + 1;
-                        return true;
-                    }
-                }
+                        Filter.State = ConsoleParseState.Ground;
+                        Filter.Pending[Filter.PendingLength++] = Value;
+                        ReadOnlySpan<byte> Sequence = Filter.Pending.AsSpan(0, Filter.PendingLength);
+                        if (!IsSafeConsoleCsi(Sequence))
+                            return 0;
 
-                Length = Data.Length - Start;
-                return false;
+                        NoteTerminalMode(Sequence);
+                        Sequence.CopyTo(Destination);
+                        return Sequence.Length;
+                    }
+
+                    return EndRefusedConsoleSequence(Filter, Value, Destination, AllowSafeControls);
+
+                case ConsoleParseState.CsiDiscard:
+                    return Value >= 0x20 && Value <= 0x3F ? 0 : EndRefusedConsoleSequence(Filter, Value, Destination, AllowSafeControls);
+
+                case ConsoleParseState.ControlString:
+                    if (Value == 0x07)
+                        Filter.State = ConsoleParseState.Ground;
+                    else if (Value == 0x1B)
+                        Filter.State = ConsoleParseState.Escape;
+
+                    return 0;
+
+                default:
+                    return FilterGroundConsoleByte(Filter, Value, Destination, AllowSafeControls);
             }
-
-            if (Type == (byte)']' || Type == (byte)'P' || Type == (byte)'^' || Type == (byte)'_' || Type == (byte)'X')
-            {
-                for (int i = Start + 2; i < Data.Length; i++)
-                {
-                    if (Data[i] == 0x07)
-                    {
-                        Length = i - Start + 1;
-                        return true;
-                    }
-
-                    if (Data[i] == 0x1B && i + 1 < Data.Length && Data[i + 1] == (byte)'\\')
-                    {
-                        Length = i - Start + 2;
-                        return true;
-                    }
-                }
-
-                Length = Data.Length - Start;
-                return false;
-            }
-
-            Length = 2;
-            return true;
         }
 
-        /// <summary>
-        /// Writes guest-controlled console bytes while allowing safe styling and cursor-positioning escape sequences.
-        /// </summary>
-        private static void WriteLightEscapedConsoleBytes(ReadOnlySpan<byte> Data, Stream Output)
+        // With safe controls on, refused escape sequences are dropped whole, not escaped, so a program that tracks
+        // the cursor keeps its layout.
+        private static void WriteFilteredConsoleBytes(ConsoleFilter Filter, ReadOnlySpan<byte> Data, Stream Output, bool AllowSafeControls)
         {
-            StringBuilder Builder = new StringBuilder(Data.Length);
-
-            for (int i = 0; i < Data.Length; i++)
+            byte[] Rented = ArrayPool<byte>.Shared.Rent(ConsoleFilterChunkBytes);
+            try
             {
-                byte Value = Data[i];
+                Span<byte> Buffer = Rented.AsSpan(0, ConsoleFilterChunkBytes);
+                int Used = 0;
 
-                if (Value == 0x0D)
+                while (!Data.IsEmpty)
                 {
-                    Builder.Append('\r');
-                    continue;
+                    if (Buffer.Length - Used < MaxSafeConsoleSequenceBytes)
+                    {
+                        Output.Write(Buffer.Slice(0, Used));
+                        Used = 0;
+                    }
+
+                    Span<byte> Room = Buffer.Slice(Used);
+                    int Written = 0;
+                    int Consumed = Filter.State switch
+                    {
+                        ConsoleParseState.Ground => FilterGroundToken(Filter, Data, Room, AllowSafeControls, out Written),
+                        ConsoleParseState.ControlString => SkipControlString(Data),
+                        _ => 0
+                    };
+
+                    if (Consumed == 0)
+                    {
+                        Written = FilterConsoleByte(Filter, Data[0], Room, AllowSafeControls);
+                        Consumed = 1;
+                    }
+
+                    Used += Written;
+                    Data = Data.Slice(Consumed);
                 }
 
-                if (Value != 0x1B)
-                {
-                    AppendEscapedConsoleByte(Builder, Value);
-                    continue;
-                }
-
-                TryGetConsoleEscapeSequenceLength(Data, i, out int SequenceLength);
-
-                if (IsSafeLightConsoleCsiSequence(Data, i, SequenceLength))
-                    Builder.Append(Encoding.ASCII.GetString(Data.Slice(i, SequenceLength)));
-                else
-                    AppendEscapedConsoleBytes(Builder, Data, i, SequenceLength);
-
-                i += SequenceLength - 1;
+                Output.Write(Buffer.Slice(0, Used));
             }
-
-            byte[] Escaped = Encoding.UTF8.GetBytes(Builder.ToString());
-            Output.Write(Escaped, 0, Escaped.Length);
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Rented);
+            }
         }
 
-        private static void WriteEscapedConsoleBytes(ReadOnlySpan<byte> Data, Stream Output)
+        // Fast path. Must give the same output as FilterConsoleByte, and returns 0 to leave the input to it.
+        private static int FilterGroundToken(ConsoleFilter Filter, ReadOnlySpan<byte> Data, Span<byte> Destination, bool AllowSafeControls, out int Written)
         {
-            StringBuilder Builder = new StringBuilder(Data.Length);
+            Written = 0;
+            byte Value = Data[0];
+            if (Value >= 0x20 && Value != 0x7F)
+            {
+                Written = TakeSafeText(Data, Destination);
+                if (Written != 0)
+                    return Written;
+            }
 
-            for (int i = 0; i < Data.Length; i++)
-                AppendEscapedConsoleByte(Builder, Data[i]);
+            if (Value >= 0x80)
+            {
+                OperationStatus Status = Rune.DecodeFromUtf8(Data, out Rune Character, out int Length);
+                if (Status == OperationStatus.NeedMoreData)
+                    return 0;
 
-            byte[] Escaped = Encoding.UTF8.GetBytes(Builder.ToString());
-            Output.Write(Escaped, 0, Escaped.Length);
+                if (Status == OperationStatus.Done && !Rune.IsControl(Character))
+                {
+                    Data.Slice(0, Length).CopyTo(Destination);
+                    Written = Length;
+                    return Length;
+                }
+
+                for (int i = 0; i < Length; i++)
+                    Written += WriteEscapedConsoleByte(Destination.Slice(Written), Data[i]);
+
+                return Length;
+            }
+
+            return Value == 0x1B && AllowSafeControls ? FilterCompleteEscape(Data, Destination, out Written, Filter) : 0;
+        }
+
+        private static int FilterCompleteEscape(ReadOnlySpan<byte> Data, Span<byte> Destination, out int Written, ConsoleFilter Filter)
+        {
+            Written = 0;
+            if (Data.Length < 2)
+                return 0;
+
+            byte Type = Data[1];
+            if (Type == (byte)'[')
+            {
+                bool Discard = false;
+                for (int i = 2; i < Data.Length; i++)
+                {
+                    byte Value = Data[i];
+                    if (Value >= 0x20 && Value <= 0x3F)
+                    {
+                        Discard |= i >= MaxSafeConsoleSequenceBytes - 1;
+                        continue;
+                    }
+
+                    if (Value < 0x40 || Value > 0x7E)
+                        return i;
+
+                    ReadOnlySpan<byte> Sequence = Data.Slice(0, i + 1);
+                    if (!Discard && IsSafeConsoleCsi(Sequence))
+                    {
+                        NoteTerminalMode(Sequence);
+                        Sequence.CopyTo(Destination);
+                        Written = Sequence.Length;
+                    }
+
+                    return i + 1;
+                }
+
+                return 0;
+            }
+
+            if (Type == (byte)']' || Type == (byte)'P' || Type == (byte)'X' || Type == (byte)'^' || Type == (byte)'_')
+            {
+                int End = Data.Slice(2).IndexOfAny((byte)0x07, (byte)0x1B);
+                if (End < 0)
+                {
+                    Filter.State = ConsoleParseState.ControlString;
+                    return Data.Length;
+                }
+
+                return Data[2 + End] == 0x07 ? End + 3 : End + 2;
+            }
+
+            if (Type == (byte)'7' || Type == (byte)'8')
+            {
+                Destination[0] = 0x1B;
+                Destination[1] = Type;
+                Written = 2;
+                return 2;
+            }
+
+            if (Type >= 0x20 && Type <= 0x2F)
+            {
+                for (int i = 2; i < Data.Length; i++)
+                {
+                    byte Value = Data[i];
+                    if (Value < 0x20 || Value > 0x2F)
+                        return Value >= 0x30 && Value <= 0x7E ? i + 1 : i;
+                }
+
+                return 0;
+            }
+
+            return Type >= 0x30 && Type <= 0x7E ? 2 : 1;
+        }
+
+        private static readonly System.Buffers.SearchValues<byte> ConsoleControlBytes = System.Buffers.SearchValues.Create(
+            "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1A\x1B\x1C\x1D\x1E\x1F\x7F"u8);
+
+        private static int TakeSafeText(ReadOnlySpan<byte> Data, Span<byte> Destination)
+        {
+            ReadOnlySpan<byte> Run = Data.Slice(0, Math.Min(Data.Length, Destination.Length));
+            int End = Run.IndexOfAny(ConsoleControlBytes);
+            if (End >= 0)
+                Run = Run.Slice(0, End);
+
+            int Length = Run.Length;
+            if (Run.IndexOfAnyInRange((byte)0x80, (byte)0xFF) >= 0 && (!System.Text.Unicode.Utf8.IsValid(Run) || HasUtf8C1(Run)))
+            {
+                Length = 0;
+                while (Length < Run.Length)
+                {
+                    if (Run[Length] < 0x80)
+                    {
+                        Length++;
+                        continue;
+                    }
+
+                    if (Rune.DecodeFromUtf8(Run.Slice(Length), out Rune Character, out int Size) != OperationStatus.Done || Rune.IsControl(Character))
+                        break;
+
+                    Length += Size;
+                }
+            }
+
+            Run.Slice(0, Length).CopyTo(Destination);
+            return Length;
+        }
+
+        // C1 controls U+0080 to U+009F are C2 80 to C2 9F in UTF-8.
+        private static bool HasUtf8C1(ReadOnlySpan<byte> Text)
+        {
+            for (int At = Text.IndexOf((byte)0xC2); At >= 0 && At + 1 < Text.Length; )
+            {
+                if (Text[At + 1] <= 0x9F)
+                    return true;
+
+                int Next = Text.Slice(At + 1).IndexOf((byte)0xC2);
+                At = Next < 0 ? -1 : At + 1 + Next;
+            }
+
+            return false;
+        }
+
+        private static int SkipControlString(ReadOnlySpan<byte> Data)
+        {
+            int End = Data.IndexOfAny((byte)0x07, (byte)0x1B);
+            return End < 0 ? Data.Length : End;
         }
 
         private static Stream Stdout = null;
+        private static Stream Stderr = null;
         private static Stream Stdin = null;
+        private static readonly ConsoleFilter StdoutFilter = new ConsoleFilter();
+        private static readonly ConsoleFilter StderrFilter = new ConsoleFilter();
 
         /// <summary>
         /// Reads raw bytes from the host standard input stream. Used when the host stdin is redirected and the
@@ -943,9 +1229,282 @@ namespace Brovan
             }
         }
 
-        public static void ConsoleWrite(ReadOnlySpan<byte> Data, Stream Output, GuestConsoleOutputMode Mode)
+        // Once started, the only host keyboard reader. Brovan's own prompts must read through here too, or the
+        // thread takes their keys.
+        public static class HostConsoleInput
         {
-            if (Data.Length == 0 || Output == null)
+            private const int MaxQueuedKeys = 1 << 16;
+            private const int ForcedExitPresses = 3;
+            private const long ForcedExitWindowMilliseconds = 2000;
+
+            private static readonly object Gate = new object();
+            private static readonly System.Collections.Concurrent.ConcurrentQueue<ConsoleKeyInfo> Keys = new();
+            private static readonly SemaphoreSlim Available = new SemaphoreSlim(0);
+            private static TaskCompletionSource InputSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            private static WakeSignal Wake;
+            private static Thread Reader;
+            private static volatile bool InputEnded;
+            private static bool ControlCSaved;
+            private static bool SavedControlCAsInput;
+            private static int ControlCPresses;
+            private static long FirstControlCTick;
+            private static bool OverflowReported;
+
+            public static bool Active => Volatile.Read(ref Reader) != null;
+
+            public static bool Ended => InputEnded;
+
+            // Read before checking for input, so input that arrives before the park still completes this task.
+            public static Task NextInput => Volatile.Read(ref InputSignal).Task;
+
+            public static void EnsureStarted(WakeSignal Signal)
+            {
+                Volatile.Write(ref Wake, Signal);
+                if (Active)
+                    return;
+
+                lock (Gate)
+                {
+                    if (Reader != null)
+                        return;
+
+                    Thread Worker = new Thread(Console.IsInputRedirected ? ReadLines : ReadKeys)
+                    {
+                        IsBackground = true,
+                        Name = "Brovan console input"
+                    };
+                    Worker.Start();
+                    Volatile.Write(ref Reader, Worker);
+                }
+            }
+
+            public static bool TryTake(out ConsoleKeyInfo Key)
+            {
+                Key = default;
+                if (!Available.Wait(0))
+                    return false;
+
+                if (Keys.TryDequeue(out Key))
+                    return true;
+
+                Available.Release();
+                return false;
+            }
+
+            // Every producer of console input must call this, guest writes to the input buffer included.
+            public static void SignalInput()
+            {
+                TaskCompletionSource Previous = Interlocked.Exchange(ref InputSignal, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+                Previous.TrySetResult();
+                Volatile.Read(ref Wake)?.Bump();
+            }
+
+            public static bool KeyAvailable => Active ? !Keys.IsEmpty : Console.KeyAvailable;
+
+            public static ConsoleKeyInfo ReadKey()
+            {
+                if (!Active)
+                    return Console.ReadKey(true);
+
+                Available.Wait();
+                if (Keys.TryDequeue(out ConsoleKeyInfo Key))
+                    return Key;
+
+                Available.Release();
+                throw new InvalidOperationException("The host console input has ended.");
+            }
+
+            public static string ReadLine()
+            {
+                if (!Active)
+                    return Console.ReadLine();
+
+                StringBuilder Line = new StringBuilder();
+                while (true)
+                {
+                    ConsoleKeyInfo Key;
+                    try
+                    {
+                        Key = ReadKey();
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        return Line.Length == 0 ? null : Line.ToString();
+                    }
+
+                    if (Key.Key == ConsoleKey.Enter || Key.KeyChar == '\r' || Key.KeyChar == '\n')
+                    {
+                        Console.WriteLine();
+                        return Line.ToString();
+                    }
+
+                    if (Key.KeyChar == '\b')
+                    {
+                        if (Line.Length != 0)
+                        {
+                            Line.Length--;
+                            Console.Write("\b \b");
+                        }
+                        continue;
+                    }
+
+                    if (Key.KeyChar >= ' ')
+                    {
+                        Line.Append(Key.KeyChar);
+                        Console.Write(Key.KeyChar);
+                    }
+                }
+            }
+
+            public static void SetControlCAsInput(bool Value)
+            {
+                if (Console.IsInputRedirected)
+                    return;
+
+                lock (Gate)
+                {
+                    try
+                    {
+                        if (!ControlCSaved)
+                        {
+                            SavedControlCAsInput = Console.TreatControlCAsInput;
+                            ControlCSaved = true;
+                            AppDomain.CurrentDomain.ProcessExit += RestoreControlC;
+                            AppDomain.CurrentDomain.UnhandledException += RestoreControlC;
+                        }
+
+                        if (Console.TreatControlCAsInput != Value)
+                            Console.TreatControlCAsInput = Value;
+                    }
+                    catch (IOException Ex)
+                    {
+                        LogError($"Host console Ctrl+C mode could not be changed: {Ex.Message}");
+                    }
+                }
+            }
+
+            private static void RestoreControlC(object Sender, EventArgs Args)
+            {
+                try
+                {
+                    Console.TreatControlCAsInput = SavedControlCAsInput;
+                }
+                catch (IOException Ex)
+                {
+                    LogError($"Host console Ctrl+C mode could not be restored: {Ex.Message}");
+                }
+            }
+
+            private static void Publish(ConsoleKeyInfo Key)
+            {
+                if (Keys.Count >= MaxQueuedKeys)
+                {
+                    if (!OverflowReported)
+                    {
+                        OverflowReported = true;
+                        LogError($"Host console input dropped keys, the guest has not read {MaxQueuedKeys} queued keys.");
+                    }
+
+                    return;
+                }
+
+                Keys.Enqueue(Key);
+                Available.Release();
+                SignalInput();
+            }
+
+            private static bool IsForcedExit(ConsoleKeyInfo Key)
+            {
+                if (Key.KeyChar != (char)0x03)
+                {
+                    ControlCPresses = 0;
+                    return false;
+                }
+
+                long Now = Environment.TickCount64;
+                if (ControlCPresses == 0 || Now - FirstControlCTick > ForcedExitWindowMilliseconds)
+                {
+                    ControlCPresses = 0;
+                    FirstControlCTick = Now;
+                }
+
+                return ++ControlCPresses >= ForcedExitPresses;
+            }
+
+            private static void EndInput()
+            {
+                InputEnded = true;
+                Available.Release();
+                SignalInput();
+            }
+
+            private static void ReadKeys()
+            {
+                try
+                {
+                    while (true)
+                    {
+                        ConsoleKeyInfo Key = Console.ReadKey(true);
+                        if (IsForcedExit(Key))
+                        {
+                            Console.ResetColor();
+                            Environment.Exit(0);
+                        }
+
+                        Publish(Key);
+                    }
+                }
+                catch (Exception Ex) when (Ex is InvalidOperationException || Ex is IOException)
+                {
+                    LogError($"Host console input stopped: {Ex.Message}");
+                }
+
+                EndInput();
+            }
+
+            private static void ReadLines()
+            {
+                try
+                {
+                    string Line;
+                    while ((Line = Console.In.ReadLine()) != null)
+                    {
+                        foreach (char Character in Line)
+                            Publish(new ConsoleKeyInfo(Character, KeyFor(Character), false, false, false));
+
+                        Publish(new ConsoleKeyInfo('\r', ConsoleKey.Enter, false, false, false));
+                    }
+                }
+                catch (IOException Ex)
+                {
+                    LogError($"Host console input stopped: {Ex.Message}");
+                }
+
+                EndInput();
+            }
+
+            private static ConsoleKey KeyFor(char Character)
+            {
+                if (Character >= 'a' && Character <= 'z')
+                    return (ConsoleKey)(Character - 'a' + 'A');
+
+                if ((Character >= 'A' && Character <= 'Z') || (Character >= '0' && Character <= '9'))
+                    return (ConsoleKey)Character;
+
+                switch (Character)
+                {
+                    case '\b': return ConsoleKey.Backspace;
+                    case '\t': return ConsoleKey.Tab;
+                    case (char)0x1B: return ConsoleKey.Escape;
+                    case ' ': return ConsoleKey.Spacebar;
+                    default: return 0;
+                }
+            }
+        }
+
+        private static void ConsoleWrite(ReadOnlySpan<byte> Data, Stream Output, ConsoleFilter Filter, GuestConsoleOutputMode Mode)
+        {
+            if (Data.Length == 0)
                 return;
 
             switch (Mode)
@@ -959,24 +1518,16 @@ namespace Brovan
                     return;
 
                 case GuestConsoleOutputMode.LightEscaped:
-                    WriteLightEscapedConsoleBytes(Data, Output);
+                    WriteFilteredConsoleBytes(Filter, Data, Output, true);
                     Output.Flush();
                     return;
 
                 case GuestConsoleOutputMode.Escaped:
                 default:
-                    WriteEscapedConsoleBytes(Data, Output);
+                    WriteFilteredConsoleBytes(Filter, Data, Output, false);
                     Output.Flush();
                     return;
             }
-        }
-
-        public static void ConsoleWrite(byte[] Data, Stream Output, GuestConsoleOutputMode Mode)
-        {
-            if (Data == null)
-                return;
-
-            ConsoleWrite(Data.AsSpan(), Output, Mode);
         }
 
         /// <summary>
@@ -987,21 +1538,23 @@ namespace Brovan
             if (Data == null)
                 return;
 
-            if (Stdout == null)
-                Stdout = Console.OpenStandardOutput();
-
-            ConsoleWrite(Data.AsSpan(), Stdout, Mode);
+            ConsoleWrite(Data.AsSpan(), Mode);
         }
 
         /// <summary>
-        /// Writes guest-controlled console output to the host standard output stream using the configured safety policy.
+        /// Writes guest-controlled console output to the host standard output or error stream using the configured safety policy.
         /// </summary>
-        public static void ConsoleWrite(ReadOnlySpan<byte> Data, GuestConsoleOutputMode Mode)
+        public static void ConsoleWrite(ReadOnlySpan<byte> Data, GuestConsoleOutputMode Mode, bool StandardError = false)
         {
-            if (Stdout == null)
-                Stdout = Console.OpenStandardOutput();
+            if (StandardError)
+            {
+                Stderr ??= Console.OpenStandardError();
+                ConsoleWrite(Data, Stderr, StderrFilter, Mode);
+                return;
+            }
 
-            ConsoleWrite(Data, Stdout, Mode);
+            Stdout ??= Console.OpenStandardOutput();
+            ConsoleWrite(Data, Stdout, StdoutFilter, Mode);
         }
 
         /// <summary>

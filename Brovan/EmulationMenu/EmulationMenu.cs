@@ -235,7 +235,7 @@ namespace Brovan.EmulationMenu
 
         private static int PromptMenuOption(int DefaultValue, params int[] ValidOptions)
         {
-            string Input = Console.ReadLine()?.Trim() ?? string.Empty;
+            string Input = GeneralHelper.HostConsoleInput.ReadLine()?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(Input))
                 return DefaultValue;
 
@@ -254,7 +254,7 @@ namespace Brovan.EmulationMenu
         private static ulong PromptHexOrDefault(string Prompt, ulong DefaultValue)
         {
             Console.Write($"{Prompt} [default: 0x{DefaultValue:X}]: ");
-            string Input = Console.ReadLine()?.Trim() ?? string.Empty;
+            string Input = GeneralHelper.HostConsoleInput.ReadLine()?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(Input))
                 return DefaultValue;
 
@@ -2317,7 +2317,7 @@ namespace Brovan.EmulationMenu
                 if (Binary.IsCorruptedBinary(out string CorruptionReason) != BinaryCorruptionStatus.Clean)
                 {
                     PrintHighlight($"[!] The binary might be corrupted {(!string.IsNullOrEmpty(CorruptionReason) ? $"(reason: {CorruptionReason}) " : string.Empty)}do you want to try to load it anyway (Y/N)? ");
-                    string Response = Console.ReadLine()?.ToLowerInvariant() ?? string.Empty;
+                    string Response = GeneralHelper.HostConsoleInput.ReadLine()?.ToLowerInvariant() ?? string.Empty;
                     if (Response != "y" && Response != "yes")
                     {
                         Binary.Dispose();
@@ -2582,7 +2582,7 @@ namespace Brovan.EmulationMenu
                         Console.ForegroundColor = ConsoleColor.DarkMagenta;
                         Console.Write("> ");
                         Console.ForegroundColor = ConsoleColor.White;
-                        Input = Console.ReadLine()?.Trim();
+                        Input = GeneralHelper.HostConsoleInput.ReadLine()?.Trim();
                     }
 
                     if (Input == null)
