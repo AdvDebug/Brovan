@@ -1758,8 +1758,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Inherited standard handles go into the process parameters whatever the subsystem is.
         internal bool InheritedStandardHandles;
 
-        private bool StdInInherited;
         private bool StdOutInherited;
+
+        internal byte[] InheritedEnvironment;
 
         private WinHandle InheritedStandardHandle(ulong Value)
         {
@@ -1770,10 +1771,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return new WinHandle { Handle = Value, HandleType = Entry.Object.ObjectType, Permissions = Entry.Permissions };
         }
 
-        // An inherited standard handle is a real file, not the host's stdin or stdout.
-        internal bool IsHostStdIn(ulong Handle) => !StdInInherited && STD_IN != null && Handle == STD_IN.Handle;
-
-        internal bool IsHostStdOut(ulong Handle) => !StdOutInherited && STD_OUT != null && Handle == STD_OUT.Handle;
         public WinHandle ConsoleHandle;
         public readonly ConsoleState ConsoleState = new ConsoleState();
 
@@ -1782,15 +1779,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool Redirected = Kind == ConsoleObjectKind.Input ? Console.IsInputRedirected : Console.IsOutputRedirected;
 
             if (Redirected)
-                return new WinFile() { Device = true, Path = "\\Device\\NamedPipe\\Brovan" };
+                return CreateHostStreamFile(Kind == ConsoleObjectKind.Input ? HostStreamKind.Input : HostStreamKind.Output);
 
+            return CreateConsoleObject(Kind);
+        }
+
+        internal static WinFile CreateConsoleObject(ConsoleObjectKind Kind)
+        {
             return new WinFile()
             {
                 Device = true,
-                Path = Kind == ConsoleObjectKind.Input ? "\\Device\\ConDrv\\CurrentIn" : "\\Device\\ConDrv\\CurrentOut",
+                Path = Kind switch
+                {
+                    ConsoleObjectKind.Input => "\\Device\\ConDrv\\CurrentIn",
+                    ConsoleObjectKind.Output => "\\Device\\ConDrv\\CurrentOut",
+                    _ => "\\Device\\ConDrv\\Connect",
+                },
                 ConsoleKind = Kind,
                 Handler = ConsoleServer.Handle
             };
+        }
+
+        internal static WinFile CreateHostStreamFile(HostStreamKind Stream)
+        {
+            return new WinFile() { Device = true, Path = "\\Device\\NamedPipe\\Brovan", HostStream = Stream };
         }
         public uint CurrentPriority = 0x8; // Default priority (Normal), changes only if the program changed it explicitly.
         public uint DefaultHardErrorMode = 1; // Hard error reporting is on until the program turns it off.
@@ -2085,6 +2097,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int MessageBoxStringCaptionBytes = 32;
         private const ulong UserServerInfoLogPixelsOffset = 0x1B56;
         private const ulong UserServerInfoProcessDpiGenerationOffset = 0x1B66;
+        private const ulong UserServerInfoOemToAnsiOffset = 0x564;
+        private const ulong UserServerInfoAnsiToOemOffset = 0x664;
+        private const int OemTranslationTableSize = 256;
+        private const byte OemTranslationDefaultChar = (byte)'_';
+        private const string NlsCodePageKey = "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Nls\\CodePage";
+        private const uint Utf8CodePage = 65001;
+        private const int RegSz = 1;
 
         // aiSysMet, then one block of DPI dependent metrics per DPI plateau.
         private const ulong UserServerInfoSystemMetricsOffset = 0x768;
@@ -2200,7 +2219,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             SyntheticMountDevUniqueId = Guid.Parse(SyntheticVolumeGuid).ToByteArray();
 
             // Before any handle of this process, so every inherited one keeps its value.
-            ulong[] InheritedStd = InheritedHandles.Apply(Emulator, this);
+            ulong[] InheritedStd = ProcessInheritance.Apply(Emulator, this);
             KuserSharedData = new KuserSharedDataManager(Emulator);
             PID = AdoptHostProcessId();
 
@@ -2235,7 +2254,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             STD_IN = InheritedStandardHandle(InheritedStd[0]);
             STD_OUT = InheritedStandardHandle(InheritedStd[1]);
             STD_ERR = InheritedStandardHandle(InheritedStd[2]);
-            StdInInherited = STD_IN != null;
             StdOutInherited = STD_OUT != null;
 
             if (Binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui))
@@ -5619,9 +5637,93 @@ namespace Brovan.Core.Emulation.OS.Windows
             UserServerInfoAddress = Address;
             PublishUserDisplayDpi();
             WriteMessageBoxStrings(Address + UserServerInfoMessageBoxStringsOffset);
+            WriteOemTranslationTables(Address);
 
             ReserveSystemClassAtoms();
             return UserServerInfoAddress;
+        }
+
+        // NT: user32!InitOemXlateTables, passed to NtUserInitAnsiOem.
+        private void WriteOemTranslationTables(ulong ServerInfo)
+        {
+            Span<byte> OemToAnsi = stackalloc byte[OemTranslationTableSize];
+            Span<byte> AnsiToOem = stackalloc byte[OemTranslationTableSize];
+            if (!TryBuildOemTranslationTables(OemToAnsi, AnsiToOem))
+                return;
+
+            Emulator._emulator.WriteMemory(ServerInfo + UserServerInfoOemToAnsiOffset, OemToAnsi);
+            Emulator._emulator.WriteMemory(ServerInfo + UserServerInfoAnsiToOemOffset, AnsiToOem);
+        }
+
+        private bool TryBuildOemTranslationTables(Span<byte> OemToAnsi, Span<byte> AnsiToOem)
+        {
+            ReadSystemCodePages(out uint AnsiCodePage, out uint OemCodePage);
+
+            if (AnsiCodePage == OemCodePage)
+            {
+                for (int i = 0; i < OemTranslationTableSize; i++)
+                {
+                    OemToAnsi[i] = (byte)i;
+                    AnsiToOem[i] = (byte)i;
+                }
+
+                return true;
+            }
+
+            if (!TryGetSingleByteCodePage(AnsiCodePage, out SingleByteCodePage Ansi) || !TryGetSingleByteCodePage(OemCodePage, out SingleByteCodePage Oem))
+            {
+                Utils.LogError($"[win32k] No single byte NLS tables for code pages {AnsiCodePage} and {OemCodePage}. The OEM translation tables stay empty.");
+                return false;
+            }
+
+            Span<char> OemChars = stackalloc char[OemTranslationTableSize];
+            for (int i = 0; i < OemTranslationTableSize; i++)
+            {
+                AnsiToOem[i] = Oem.FromUnicode(Ansi.ToUnicode((byte)i, false), OemTranslationDefaultChar);
+                OemChars[i] = Oem.ToUnicode((byte)i, true);
+            }
+
+            // NT: user32 keeps BEL and DEL and maps 0x0F to the currency sign.
+            OemChars[0x07] = (char)0x0007;
+            OemChars[0x0F] = (char)0x00A4;
+            OemChars[0x7F] = (char)0x007F;
+
+            for (int i = 0; i < OemTranslationTableSize; i++)
+                OemToAnsi[i] = Ansi.FromUnicode(OemChars[i], OemTranslationDefaultChar);
+
+            for (int i = 1; i < 0x20; i++)
+            {
+                if (Ansi.ToUnicode(OemToAnsi[i], false) != OemChars[i])
+                    OemToAnsi[i] = (byte)i;
+            }
+
+            return true;
+        }
+
+        // NT: ntdll RtlpQueryNlsSystemCodePages.
+        private void ReadSystemCodePages(out uint AnsiCodePage, out uint OemCodePage)
+        {
+            AnsiCodePage = Utf8CodePage;
+            OemCodePage = Utf8CodePage;
+
+            if (TryReadCodePageValue("ACP", ref AnsiCodePage) && TryReadCodePageValue("OEMCP", ref OemCodePage))
+                return;
+
+            AnsiCodePage = Utf8CodePage;
+            OemCodePage = Utf8CodePage;
+        }
+
+        private bool TryReadCodePageValue(string Name, ref uint CodePage)
+        {
+            if (!TryReadRegistryValue(NlsCodePageKey, Name, out ValueNode Value))
+                return false;
+
+            if (Value.Type != RegSz)
+                return true;
+
+            string Text = Encoding.Unicode.GetString(Value.Data ?? Array.Empty<byte>());
+            int End = Text.IndexOf('\0');
+            return uint.TryParse(Text.AsSpan(0, End < 0 ? Text.Length : End), out CodePage);
         }
 
         // A guest can declare DPI awareness after user32 is up. That changes the DPI it sees, and the message
@@ -9863,6 +9965,94 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Status = NTSTATUS.STATUS_SUCCESS;
             return Section;
+        }
+
+        internal WinSection GetCodePageNlsSection(uint CodePage, out NTSTATUS Status)
+        {
+            return GetNlsSection($@"\NLS\NlsSectionCP{CodePage}", $@"C:\Windows\System32\C_{CodePage}.NLS", out Status);
+        }
+
+        private unsafe bool TryGetSingleByteCodePage(uint CodePage, out SingleByteCodePage Table)
+        {
+            Table = default;
+
+            WinSection Section = GetCodePageNlsSection(CodePage, out _);
+            if (Section == null || Section.Storage == IntPtr.Zero || Section.Size > int.MaxValue)
+                return false;
+
+            return SingleByteCodePage.TryParse(new ReadOnlySpan<byte>((void*)Section.Storage, (int)Section.Size), out Table);
+        }
+
+        // NT: CPTABLEINFO, RtlInitCodePageTable over a C_*.NLS file.
+        private readonly ref struct SingleByteCodePage
+        {
+            private const int HeaderWords = 13;
+            private const int TableBytes = OemTranslationTableSize * 2;
+            private const int WideCharTableBytes = 0x10000;
+
+            private readonly ReadOnlySpan<byte> MultiByteTable;
+            private readonly ReadOnlySpan<byte> GlyphTable;
+            private readonly ReadOnlySpan<byte> WideCharTable;
+            private readonly byte DefaultChar;
+            private readonly char TransDefaultChar;
+
+            private SingleByteCodePage(ReadOnlySpan<byte> MultiByteTable, ReadOnlySpan<byte> GlyphTable, ReadOnlySpan<byte> WideCharTable,
+                byte DefaultChar, char TransDefaultChar)
+            {
+                this.MultiByteTable = MultiByteTable;
+                this.GlyphTable = GlyphTable;
+                this.WideCharTable = WideCharTable;
+                this.DefaultChar = DefaultChar;
+                this.TransDefaultChar = TransDefaultChar;
+            }
+
+            public static bool TryParse(ReadOnlySpan<byte> File, out SingleByteCodePage Table)
+            {
+                Table = default;
+
+                if (File.Length < HeaderWords * 2)
+                    return false;
+
+                int HeaderBytes = BinaryPrimitives.ReadUInt16LittleEndian(File) * 2;
+                ushort MaximumCharacterSize = BinaryPrimitives.ReadUInt16LittleEndian(File.Slice(4));
+                if (HeaderBytes < HeaderWords * 2 || MaximumCharacterSize != 1)
+                    return false;
+
+                int MultiByteOffset = HeaderBytes + 2;
+                int GlyphFlagOffset = MultiByteOffset + TableBytes;
+                if (GlyphFlagOffset + 2 > File.Length)
+                    return false;
+
+                int WideCharOffset = MultiByteOffset + BinaryPrimitives.ReadUInt16LittleEndian(File.Slice(HeaderBytes)) * 2;
+                if (WideCharOffset > File.Length - WideCharTableBytes)
+                    return false;
+
+                ReadOnlySpan<byte> Glyphs = default;
+                if (BinaryPrimitives.ReadUInt16LittleEndian(File.Slice(GlyphFlagOffset)) != 0)
+                {
+                    if (GlyphFlagOffset + 2 + TableBytes > File.Length)
+                        return false;
+
+                    Glyphs = File.Slice(GlyphFlagOffset + 2, TableBytes);
+                }
+
+                Table = new SingleByteCodePage(File.Slice(MultiByteOffset, TableBytes), Glyphs, File.Slice(WideCharOffset, WideCharTableBytes),
+                    (byte)BinaryPrimitives.ReadUInt16LittleEndian(File.Slice(6)), (char)BinaryPrimitives.ReadUInt16LittleEndian(File.Slice(10)));
+                return true;
+            }
+
+            public char ToUnicode(byte Value, bool UseGlyphs)
+            {
+                ReadOnlySpan<byte> Source = UseGlyphs && !GlyphTable.IsEmpty ? GlyphTable : MultiByteTable;
+                return (char)BinaryPrimitives.ReadUInt16LittleEndian(Source.Slice(Value * 2));
+            }
+
+            // NT: kernelbase GetMBDefault.
+            public byte FromUnicode(char Value, byte Replacement)
+            {
+                byte Result = WideCharTable[Value];
+                return Result == DefaultChar && Value != TransDefaultChar ? Replacement : Result;
+            }
         }
 
         public WinSection FindSectionByName(string FullName, string ShortName)

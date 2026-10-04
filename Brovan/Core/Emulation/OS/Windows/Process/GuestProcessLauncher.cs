@@ -1,4 +1,5 @@
-﻿using System.Buffers.Binary;
+﻿using System.Buffers;
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -12,25 +13,99 @@ namespace Brovan.Core.Emulation.OS.Windows
     // True only means the request was accepted. The process reports itself in the session table under SpawnToken.
     internal delegate bool GuestHostLauncher(string HostImage, string GuestArguments, string GuestDirectory, string SessionId, uint SpawnToken, int Depth);
 
-    // The handles a new process gets from its creator, passed in a session file named by the spawn token.
-    internal static class InheritedHandles
+    // Handles and environment a new process gets from its creator, passed in a session file named by the spawn token.
+    internal static class ProcessInheritance
     {
         private const uint Magic = 0x48495642;
-        private const uint Version = 1;
+        private const uint Version = 2;
         private const int MaxEntries = 4096;
         private const int MaxFileBytes = 4 << 20;
+        private const int MaxEnvironmentBytes = 1 << 20;
 
         private const byte KindPipe = 1;
         private const byte KindFile = 2;
         private const byte KindDevice = 3;
+        private const byte KindConsole = 4;
+        private const byte KindHostStream = 5;
 
         internal const uint StdHandleRequestDuplicate = 1;
         internal const uint StdHandleAlwaysDuplicate = 2;
 
         private const ulong ParamsStandardInput64 = 0x20;
         private const ulong ParamsStandardInput32 = 0x18;
+        private const ulong ParamsEnvironment64 = 0x80;
+        private const ulong ParamsEnvironment32 = 0x48;
+        private const ulong ParamsEnvironmentSize64 = 0x3F0;
+        private const ulong ParamsEnvironmentSize32 = 0x290;
 
         internal static string PathFor(uint SpawnToken) => Path.Combine(GuestSession.Directory, $"inherit-{SpawnToken:x8}.bin");
+
+        // NT: RtlCreateProcessParametersEx pads EnvironmentSize with uninitialized heap. The block ends at its first empty string.
+        internal static NTSTATUS ReadEnvironment(BinaryEmulator Instance, ulong ProcessParameters, out byte[] Block)
+        {
+            Block = null;
+
+            bool Is64 = Instance.WinHelper.PointerSize == 8;
+            int Width = Is64 ? 8 : 4;
+            Span<byte> Field = stackalloc byte[16];
+            if (!Instance.ReadMemory(ProcessParameters + (Is64 ? ParamsEnvironment64 : ParamsEnvironment32), Field.Slice(0, Width)) ||
+                !Instance.ReadMemory(ProcessParameters + (Is64 ? ParamsEnvironmentSize64 : ParamsEnvironmentSize32), Field.Slice(8, Width)))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            ulong Environment = Is64 ? BinaryPrimitives.ReadUInt64LittleEndian(Field) : BinaryPrimitives.ReadUInt32LittleEndian(Field);
+            ulong Size = Is64 ? BinaryPrimitives.ReadUInt64LittleEndian(Field.Slice(8)) : BinaryPrimitives.ReadUInt32LittleEndian(Field.Slice(8));
+            if (Environment == 0 || Size == 0)
+                return NTSTATUS.STATUS_SUCCESS;
+
+            if (Size > MaxEnvironmentBytes)
+            {
+                Utils.LogError($"[ProcessInheritance] An environment block of {Size} bytes is larger than {MaxEnvironmentBytes}.");
+                return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            int Length = (int)Size & ~1;
+            byte[] Raw = ArrayPool<byte>.Shared.Rent(Length + 4);
+            try
+            {
+                Span<byte> Data = Raw.AsSpan(0, Length + 4);
+                if (!Instance.ReadMemory(Environment, Data.Slice(0, Length)))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                Data.Slice(Length).Clear();
+                Block = Data.Slice(0, FindEnvironmentEnd(Data)).ToArray();
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Raw);
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static int FindEnvironmentEnd(ReadOnlySpan<byte> Block)
+        {
+            bool AtStart = true;
+            for (int i = 0; i + 1 < Block.Length; i += 2)
+            {
+                if (Block[i] != 0 || Block[i + 1] != 0)
+                {
+                    AtStart = false;
+                    continue;
+                }
+
+                if (AtStart)
+                    return i + 2;
+
+                AtStart = true;
+            }
+
+            return 0;
+        }
+
+        private static bool IsEnvironmentBlock(byte[] Block)
+        {
+            return Block.Length >= 2 && Block.Length <= MaxEnvironmentBytes + 4 && (Block.Length & 1) == 0 && FindEnvironmentEnd(Block) == Block.Length;
+        }
 
         private static bool ReadStandardHandles(BinaryEmulator Instance, ulong ProcessParameters, ulong[] Std)
         {
@@ -51,7 +126,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT duplicates requested standard handles whether they are inheritable or not (PspCopyAndFixupParameters).
-        internal static byte[] Build(BinaryEmulator Instance, ulong ProcessParameters, bool InheritHandles, List<ulong> HandleList,
+        internal static byte[] Build(BinaryEmulator Instance, ulong ProcessParameters, byte[] Environment, bool InheritHandles, List<ulong> HandleList,
             uint StdHandleState, uint StdHandleSubsystem, uint ImageSubsystem)
         {
             HandleManager Handles = Instance.WinHelper.HandleManager;
@@ -99,7 +174,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            if (Chosen.Count == 0)
+            if (Chosen.Count == 0 && Environment == null)
                 return null;
 
             using MemoryStream Buffer = new MemoryStream();
@@ -109,6 +184,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             Writer.Write(Std[0]);
             Writer.Write(Std[1]);
             Writer.Write(Std[2]);
+            Writer.Write(Environment?.Length ?? 0);
+            if (Environment != null)
+                Writer.Write(Environment);
 
             long CountPosition = Buffer.Position;
             Writer.Write(0);
@@ -133,7 +211,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Count++;
             }
 
-            if (Count == 0)
+            if (Count == 0 && Environment == null)
                 return null;
 
             Buffer.Position = CountPosition;
@@ -143,6 +221,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool TryWriteFile(BinaryWriter Writer, ulong Handle, HandleEntry Entry, WinFile File)
         {
+            // The child emulator shares this host console and these standard streams.
+            if (File.ConsoleKind != ConsoleObjectKind.None)
+            {
+                WriteHeader(Writer, Handle, Entry, KindConsole);
+                Writer.Write((byte)File.ConsoleKind);
+                return true;
+            }
+
+            if (File.HostStream != HostStreamKind.None)
+            {
+                WriteHeader(Writer, Handle, Entry, KindHostStream);
+                Writer.Write((byte)File.HostStream);
+                return true;
+            }
+
             if (File.Pipe != null)
             {
                 GuestPipeChannel Channel = File.Pipe.Channel;
@@ -171,7 +264,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
             }
 
-            if (File.ConsoleKind != ConsoleObjectKind.None || string.IsNullOrEmpty(File.Path))
+            if (string.IsNullOrEmpty(File.Path))
                 return false;
 
             File.SharedPosition ??= SharedFilePosition.Create(File.Position);
@@ -216,13 +309,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             catch (Exception Error)
             {
-                Utils.LogError($"[InheritedHandles] Cannot read the inherited handles: {Error.Message}");
+                Utils.LogError($"[ProcessInheritance] Cannot read the inherited handles: {Error.Message}");
                 return Arrived;
             }
 
             if (Record == null)
             {
-                Utils.LogError("[InheritedHandles] The inherited handle record is too large.");
+                Utils.LogError("[ProcessInheritance] The inherited handle record is too large.");
                 return Arrived;
             }
 
@@ -236,6 +329,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 for (int i = 0; i < 3; i++)
                     Std[i] = Reader.ReadUInt64();
 
+                int EnvironmentLength = Reader.ReadInt32();
+                if (EnvironmentLength < 0 || EnvironmentLength > MaxEnvironmentBytes + 4)
+                    return Arrived;
+
+                if (EnvironmentLength != 0)
+                {
+                    byte[] Environment = Reader.ReadBytes(EnvironmentLength);
+                    if (IsEnvironmentBlock(Environment))
+                        Helper.InheritedEnvironment = Environment;
+                    else
+                        Utils.LogError("[ProcessInheritance] The inherited environment block is damaged.");
+                }
+
                 int Count = Reader.ReadInt32();
                 if (Count < 0 || Count > MaxEntries)
                     return Arrived;
@@ -245,7 +351,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             catch (Exception Error) when (Error is EndOfStreamException || Error is IOException || Error is FormatException || Error is ArgumentException)
             {
-                Utils.LogError($"[InheritedHandles] The inherited handle record is damaged: {Error.Message}");
+                Utils.LogError($"[ProcessInheritance] The inherited handle record is damaged: {Error.Message}");
             }
 
             for (int i = 0; i < 3; i++)
@@ -280,11 +386,31 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!IsPipeBacking(BackingPath) ||
                         GuestNamedPipe.TryAttach(GuestPath, BackingPath, Server, Generation, ReadMode, CompletionMode, out GuestNamedPipe Pipe) != NTSTATUS.STATUS_SUCCESS)
                     {
-                        Utils.LogError($"[InheritedHandles] Pipe handle 0x{Handle:X} ({GuestPath}) could not be attached.");
+                        Utils.LogError($"[ProcessInheritance] Pipe handle 0x{Handle:X} ({GuestPath}) could not be attached.");
                         return;
                     }
 
                     File = new WinFile { Path = GuestPath, Device = true, Mode = Mode, Handler = Pipe.HandleControl, Pipe = Pipe };
+                    break;
+                }
+
+                case KindConsole:
+                {
+                    ConsoleObjectKind Console = (ConsoleObjectKind)Reader.ReadByte();
+                    if (Console != ConsoleObjectKind.Connect && Console != ConsoleObjectKind.Input && Console != ConsoleObjectKind.Output)
+                        throw new FormatException($"unknown console object kind {(byte)Console}");
+
+                    File = WinSysHelper.CreateConsoleObject(Console);
+                    break;
+                }
+
+                case KindHostStream:
+                {
+                    HostStreamKind Stream = (HostStreamKind)Reader.ReadByte();
+                    if (Stream != HostStreamKind.Input && Stream != HostStreamKind.Output)
+                        throw new FormatException($"unknown host stream kind {(byte)Stream}");
+
+                    File = WinSysHelper.CreateHostStreamFile(Stream);
                     break;
                 }
 
@@ -310,14 +436,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     WindowsFileStream Stream = WindowsFileStream.FromGuestPath(GuestPath);
                     if (Directory ? !Stream.ExistsAsDirectory : !Stream.ExistsAsFile)
                     {
-                        Utils.LogError($"[InheritedHandles] File handle 0x{Handle:X} ({GuestPath}) no longer exists.");
+                        Utils.LogError($"[ProcessInheritance] File handle 0x{Handle:X} ({GuestPath}) no longer exists.");
                         return;
                     }
 
                     SharedFilePosition Position = SharedFilePosition.Open(CellPath);
                     if (Position == null)
                     {
-                        Utils.LogError($"[InheritedHandles] File handle 0x{Handle:X} ({GuestPath}) lost its shared position.");
+                        Utils.LogError($"[ProcessInheritance] File handle 0x{Handle:X} ({GuestPath}) lost its shared position.");
                         return;
                     }
 
@@ -342,7 +468,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinHandle Added = Helper.HandleManager.AddHandleAt(Handle, File, Access, Flags);
             if (Added == null)
             {
-                Utils.LogError($"[InheritedHandles] Handle value 0x{Handle:X} is not usable here.");
+                Utils.LogError($"[ProcessInheritance] Handle value 0x{Handle:X} is not usable here.");
                 File.Pipe?.Dispose();
                 File.ReleaseFileStream();
                 File.ReleaseSharedPosition();
@@ -492,7 +618,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 try
                 {
                     System.IO.Directory.CreateDirectory(GuestSession.Directory);
-                    InheritPath = InheritedHandles.PathFor(SpawnToken);
+                    InheritPath = ProcessInheritance.PathFor(SpawnToken);
                     File.WriteAllBytes(InheritPath, InheritRecord);
                 }
                 catch (Exception Error)
@@ -607,7 +733,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 FileName = HostExecutable,
                 UseShellExecute = false,
                 WorkingDirectory = WorkingDirectory,
-                CreateNoWindow = Utils.SilentMode,
+                CreateNoWindow = Utils.SilentMode && GeneralHelper.ChildConsoleOpensWindow(),
             };
 
             string ManagedEntry = GetManagedEntryForSharedHost(HostExecutable);

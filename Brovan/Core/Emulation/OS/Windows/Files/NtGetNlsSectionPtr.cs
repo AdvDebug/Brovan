@@ -35,7 +35,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (SectionType != 11)
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
 
-            WinSection Section = Instance.WinHelper.GetNlsSection($@"\NLS\NlsSectionCP{SectionData}", $@"C:\Windows\System32\C_{SectionData}.NLS", out NTSTATUS Status);
+            WinSection Section = Instance.WinHelper.GetCodePageNlsSection(SectionData, out NTSTATUS Status);
             if (Section == null)
                 return Status;
 

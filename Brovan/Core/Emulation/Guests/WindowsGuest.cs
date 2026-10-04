@@ -1316,6 +1316,13 @@ namespace Brovan.Core.Emulation.Guests
 
         public byte[] BuildEnvironment(BinaryEmulator Instance, out ulong size)
         {
+            byte[] Inherited = Instance.WinHelper?.InheritedEnvironment;
+            if (Inherited != null)
+            {
+                size = (ulong)Inherited.Length;
+                return Inherited;
+            }
+
             size = 0;
 
             string Username = WinSysHelper.CurrentUserName;

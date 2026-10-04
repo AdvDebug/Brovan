@@ -46,15 +46,15 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS FlushHandle(BinaryEmulator Instance, ulong FileHandle)
         {
-            if (Instance.WinHelper.IsHostStdOut(FileHandle))
+            WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
+            if (FileObj == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            if (FileObj.HostStream == HostStreamKind.Output)
             {
                 Console.Out.Flush();
                 return NTSTATUS.STATUS_SUCCESS;
             }
-
-            WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            if (FileObj == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if (FileObj.Device)
                 return NTSTATUS.STATUS_SUCCESS;

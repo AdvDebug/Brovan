@@ -174,15 +174,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool InputExhausted => EndDelivered && Records.Count == 0;
 
-        // Start the host reader now so the forced exit Ctrl+C presses are seen even if the guest never reads.
         public void SetInputMode(BinaryEmulator Instance, uint Mode)
         {
             InputMode = Mode;
-            bool ControlCAsInput = (Mode & EnableProcessedInput) == 0;
-            if (ControlCAsInput && !Console.IsInputRedirected)
-                GeneralHelper.HostConsoleInput.EnsureStarted(Instance.WakeSignal);
-
-            GeneralHelper.HostConsoleInput.SetControlCAsInput(ControlCAsInput);
+            GeneralHelper.HostConsoleInput.SetControlCAsInput((Mode & EnableProcessedInput) == 0);
         }
 
         // Call under the kernel lock before reading the buffer. The host thread never touches it.
@@ -202,10 +197,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        // Only the wait path calls this, so the request blocks.
         public bool HasInput(BinaryEmulator Instance)
         {
+            Task NextInput = GeneralHelper.HostConsoleInput.NextInput;
             Poll(Instance);
-            return Records.Count != 0;
+            if (Records.Count != 0)
+                return true;
+
+            GeneralHelper.HostConsoleInput.Request(true, NextInput);
+            return false;
         }
 
         public void FlushRecords()
@@ -1046,7 +1047,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case ApiGetNumberOfInputEvents:
                     if (Kind != ConsoleObjectKind.Input)
                         return NTSTATUS.STATUS_INVALID_HANDLE;
+                    Task NextInput = GeneralHelper.HostConsoleInput.NextInput;
                     State.Poll(Instance);
+                    if (State.PendingRecords == 0)
+                        GeneralHelper.HostConsoleInput.Request(false, NextInput);
                     if (Descriptor.Length >= 4)
                         BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, (uint)State.PendingRecords);
                     return NTSTATUS.STATUS_SUCCESS;
@@ -1102,7 +1106,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Descriptor.Length >= 4)
                     {
                         ReadHostGeometry(out ushort Width, out ushort Height, out _, out _);
-                        WriteCoord(Descriptor, Width, Height);
+                        ReadHostWindow(Width, Height, out _, out _, out _, out _, out ushort LargestWidth, out ushort LargestHeight);
+                        WriteCoord(Descriptor, LargestWidth, LargestHeight);
                     }
                     return NTSTATUS.STATUS_SUCCESS;
 
@@ -1327,6 +1332,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return ParkUntilInput(Instance, NextInput);
                 }
 
+                GeneralHelper.HostConsoleInput.Request(false, NextInput);
                 BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, 0);
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -1402,6 +1408,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS ParkUntilInput(BinaryEmulator Instance, Task NextInput)
         {
+            GeneralHelper.HostConsoleInput.Request(true, NextInput);
             return Instance.WinHelper.TryRetrySyscallWhenDone(NextInput) ? NTSTATUS.STATUS_PENDING : NTSTATUS.STATUS_UNSUCCESSFUL;
         }
 
@@ -1448,14 +1455,50 @@ namespace Brovan.Core.Emulation.OS.Windows
                 CursorY = State.CursorY;
             }
 
+            ReadHostWindow(Width, Height, out ushort Left, out ushort Top, out ushort WindowWidth, out ushort WindowHeight, out ushort LargestWidth, out ushort LargestHeight);
+
             WriteCoord(Descriptor, Width, Height);
             WriteCoord(Descriptor.Slice(0x04), CursorX, CursorY);
-            WriteCoord(Descriptor.Slice(0x08), 0, 0);
+            WriteCoord(Descriptor.Slice(0x08), Left, Top);
             BinaryPrimitives.WriteUInt16LittleEndian(Descriptor.Slice(0x0C), State.Attributes);
-            WriteCoord(Descriptor.Slice(0x0E), Width, Height);
-            WriteCoord(Descriptor.Slice(0x12), Width, Height);
+            WriteCoord(Descriptor.Slice(0x0E), WindowWidth, WindowHeight);
+            WriteCoord(Descriptor.Slice(0x12), Math.Min(Width, LargestWidth), Math.Min(Height, LargestHeight));
             BinaryPrimitives.WriteUInt16LittleEndian(Descriptor.Slice(0x16), State.Attributes);
             Descriptor[0x18] = 0;
+        }
+
+        private static void ReadHostWindow(ushort BufferWidth, ushort BufferHeight, out ushort Left, out ushort Top, out ushort Width, out ushort Height,
+            out ushort LargestWidth, out ushort LargestHeight)
+        {
+            Left = 0;
+            Top = 0;
+            Width = BufferWidth;
+            Height = BufferHeight;
+            LargestWidth = BufferWidth;
+            LargestHeight = BufferHeight;
+
+            if (!HostConsoleUsable)
+                return;
+
+            try
+            {
+                int HostLeft = Math.Clamp(Console.WindowLeft, 0, BufferWidth - 1);
+                int HostTop = Math.Clamp(Console.WindowTop, 0, BufferHeight - 1);
+                int HostWidth = Math.Clamp(Console.WindowWidth, 1, BufferWidth - HostLeft);
+                int HostHeight = Math.Clamp(Console.WindowHeight, 1, BufferHeight - HostTop);
+                int HostLargestWidth = Math.Clamp(Console.LargestWindowWidth, 1, ushort.MaxValue);
+                int HostLargestHeight = Math.Clamp(Console.LargestWindowHeight, 1, ushort.MaxValue);
+
+                Left = (ushort)HostLeft;
+                Top = (ushort)HostTop;
+                Width = (ushort)HostWidth;
+                Height = (ushort)HostHeight;
+                LargestWidth = (ushort)HostLargestWidth;
+                LargestHeight = (ushort)HostLargestHeight;
+            }
+            catch (Exception Error) when (Error is IOException || Error is PlatformNotSupportedException)
+            {
+            }
         }
 
         /// <summary>

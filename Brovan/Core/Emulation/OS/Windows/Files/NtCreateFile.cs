@@ -57,15 +57,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong RootDirectoryHandle = AttributesRoot;
 
 
+            bool Inherit = (Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributesPtr) & WinSysHelper.OBJ_INHERIT) != 0;
+
             if (IsConsoleRelativeObject(ObjectName, RootDirectoryHandle, Instance) || IsConsolePath(RawPath))
             {
-                ulong HandleValue = OpenConsoleObject(Instance, RawPath, (AccessMask)DesiredAccess);
+                ulong HandleValue = OpenConsoleObject(Instance, RawPath, (AccessMask)DesiredAccess, Inherit);
                 Instance._emulator.WriteMemory(FileHandlePtr, HandleValue);
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
                 return NTSTATUS.STATUS_SUCCESS;
             }
-
-            bool Inherit = (Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributesPtr) & WinSysHelper.OBJ_INHERIT) != 0;
 
             if (TryOpenPipeRelative(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, RootDirectoryHandle, ObjectName, CreateOptions, Inherit, out NTSTATUS PipeStatus))
                 return PipeStatus;
@@ -141,15 +141,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             string RawPath = FullName;
 
 
+            bool Inherit = (Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributesPtr) & WinSysHelper.OBJ_INHERIT) != 0;
+
             if (IsConsoleRelativeObject(ObjectName, RootDirectoryHandle, Instance) || IsConsolePath(RawPath))
             {
-                uint HandleValue = (uint)OpenConsoleObject(Instance, RawPath, (AccessMask)DesiredAccess);
+                uint HandleValue = (uint)OpenConsoleObject(Instance, RawPath, (AccessMask)DesiredAccess, Inherit);
                 Instance._emulator.WriteMemory(FileHandlePtr, HandleValue);
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
                 return NTSTATUS.STATUS_SUCCESS;
             }
-
-            bool Inherit = (Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributesPtr) & WinSysHelper.OBJ_INHERIT) != 0;
 
             if (TryOpenPipeRelative(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, RootDirectoryHandle, ObjectName, CreateOptions, Inherit, out NTSTATUS PipeStatus))
                 return PipeStatus;
@@ -771,7 +771,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return IsConsoleRelativeObject(Path, (ulong)RootDirectoryHandle, Instance);
         }
 
-        private static ulong OpenConsoleObject(BinaryEmulator Instance, string Path, AccessMask DesiredAccess)
+        private static ulong OpenConsoleObject(BinaryEmulator Instance, string Path, AccessMask DesiredAccess, bool Inherit)
         {
             string P = (Path ?? string.Empty).Trim();
 
@@ -789,16 +789,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             else
                 return Instance.WinHelper.ConsoleHandle.Handle;
 
-            WinFile Object = new WinFile
-            {
-                Device = true,
-                Path = Kind == ConsoleObjectKind.Input ? "\\Device\\ConDrv\\CurrentIn" : "\\Device\\ConDrv\\CurrentOut",
-                ConsoleKind = Kind,
-                Handler = ConsoleServer.Handle
-            };
-
             AccessMask Granted = DesiredAccess != 0 ? DesiredAccess : AccessMask.GenericRead | AccessMask.GenericWrite;
-            return Instance.WinHelper.HandleManager.AddHandle(Object, Granted).Handle;
+            ulong Handle = Instance.WinHelper.HandleManager.AddHandle(WinSysHelper.CreateConsoleObject(Kind), Granted).Handle;
+            if (Inherit)
+                Instance.WinHelper.HandleManager.SetHandleFlags(Handle, ObjectHandleFlags.Inherit);
+
+            return Handle;
         }
 
         private bool IsConsolePath(string Path)

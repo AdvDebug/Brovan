@@ -130,6 +130,9 @@ namespace Brovan
         [DllImport("kernel32.dll")]
         public static extern bool SetConsoleMode(IntPtr hConsoleHandle, int dwMode);
 
+        [DllImport("kernel32.dll")]
+        public static extern uint GetConsoleCP();
+
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern SafeFileHandle CreateFileW(string FileName, uint DesiredAccess, FileShare ShareMode, IntPtr SecurityAttributes, FileMode CreationDisposition, uint FlagsAndAttributes, IntPtr TemplateFile);
 
@@ -196,6 +199,15 @@ namespace Brovan
             {
                 return false;
             }
+        }
+
+        // NT: a console child opens a window only when its parent has no console. Otherwise it shares the parent's console and standard handles.
+        public static bool ChildConsoleOpensWindow()
+        {
+            if (!IsWindows)
+                return false;
+
+            return NativeWinImports.GetConsoleCP() == 0;
         }
         /// <summary>
         /// returns true for android too.
@@ -1250,6 +1262,13 @@ namespace Brovan
             private static long FirstControlCTick;
             private static bool OverflowReported;
 
+            private const int DemandNone = 0;
+            private const int DemandIfReady = 1;
+            private const int DemandBlocking = 2;
+            private static int Demand;
+            private static Task DemandFor;
+            private static readonly SemaphoreSlim DemandSignal = new SemaphoreSlim(0);
+
             public static bool Active => Volatile.Read(ref Reader) != null;
 
             public static bool Ended => InputEnded;
@@ -1299,14 +1318,55 @@ namespace Brovan
                 Volatile.Read(ref Wake)?.Bump();
             }
 
-            public static bool KeyAvailable => Active ? !Keys.IsEmpty : Console.KeyAvailable;
+            // Processes on one console share its input, so read the host only when a guest read asks, one key per request.
+            // A non-blocking request takes only a ready key. Seen is NextInput from before the caller polled.
+            public static void Request(bool Blocking, Task Seen)
+            {
+                if (Seen.IsCompleted)
+                    return;
+
+                Volatile.Write(ref DemandFor, Seen);
+                int Wanted = Blocking ? DemandBlocking : DemandIfReady;
+                int Current = Volatile.Read(ref Demand);
+                while (Current < Wanted)
+                {
+                    int Previous = Interlocked.CompareExchange(ref Demand, Wanted, Current);
+                    if (Previous == Current)
+                    {
+                        if (Current == DemandNone)
+                            DemandSignal.Release();
+                        return;
+                    }
+
+                    Current = Previous;
+                }
+            }
+
+            // A redirected stream has no KeyAvailable.
+            private static bool WaitForDemand(bool CanCheck)
+            {
+                DemandSignal.Wait();
+                int Level = Interlocked.Exchange(ref Demand, DemandNone);
+                if (Volatile.Read(ref DemandFor).IsCompleted)
+                    return false;
+
+                return Level == DemandBlocking || !CanCheck || Console.KeyAvailable;
+            }
+
+            public static bool KeyAvailable => Active ? !Keys.IsEmpty || (!Console.IsInputRedirected && Console.KeyAvailable) : Console.KeyAvailable;
 
             public static ConsoleKeyInfo ReadKey()
             {
                 if (!Active)
                     return Console.ReadKey(true);
 
-                Available.Wait();
+                Task Seen = NextInput;
+                if (!Available.Wait(0))
+                {
+                    Request(true, Seen);
+                    Available.Wait();
+                }
+
                 if (Keys.TryDequeue(out ConsoleKeyInfo Key))
                     return Key;
 
@@ -1444,6 +1504,9 @@ namespace Brovan
                 {
                     while (true)
                     {
+                        if (!WaitForDemand(CanCheck: true))
+                            continue;
+
                         ConsoleKeyInfo Key = Console.ReadKey(true);
                         if (IsForcedExit(Key))
                         {
@@ -1466,9 +1529,15 @@ namespace Brovan
             {
                 try
                 {
-                    string Line;
-                    while ((Line = Console.In.ReadLine()) != null)
+                    while (true)
                     {
+                        if (!WaitForDemand(CanCheck: false))
+                            continue;
+
+                        string Line = Console.In.ReadLine();
+                        if (Line == null)
+                            break;
+
                         foreach (char Character in Line)
                             Publish(new ConsoleKeyInfo(Character, KeyFor(Character), false, false, false));
 

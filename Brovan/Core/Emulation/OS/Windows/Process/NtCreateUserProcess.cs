@@ -74,8 +74,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             List<ulong> HandleList = ReadHandleListAttribute(Instance, AttributeList);
             uint StdHandleState = ReadStdHandleState(Instance, AttributeList, out uint StdHandleSubsystem);
 
-            Func<uint, byte[]> InheritRecordFor = ImageSubsystem => InheritedHandles.Build(
-                Instance, ProcessParameters, InheritHandles, HandleList, StdHandleState, StdHandleSubsystem, ImageSubsystem);
+            NTSTATUS EnvironmentStatus = ProcessInheritance.ReadEnvironment(Instance, ProcessParameters, out byte[] Environment);
+            if (EnvironmentStatus != NTSTATUS.STATUS_SUCCESS)
+                return EnvironmentStatus;
+
+            Func<uint, byte[]> InheritRecordFor = ImageSubsystem => ProcessInheritance.Build(
+                Instance, ProcessParameters, Environment, InheritHandles, HandleList, StdHandleState, StdHandleSubsystem, ImageSubsystem);
 
             if (!GuestProcessLauncher.TryLaunch(Instance, ProcessParameters, ImageNameHint, StartSuspended, InheritRecordFor, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status))
                 return Status;

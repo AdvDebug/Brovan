@@ -72,6 +72,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         Output
     }
 
+    // The emulator's own redirected stdin or stdout.
+    public enum HostStreamKind : byte
+    {
+        None = 0,
+        Input,
+        Output
+    }
+
     [StructLayout(LayoutKind.Explicit, Pack = 1)]
     public struct UserSharedDisplayInfo
     {
@@ -1357,6 +1365,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong CompletionKey;
 
         public ConsoleObjectKind ConsoleKind;
+        public HostStreamKind HostStream;
 
         internal const uint FILE_SYNCHRONOUS_IO_ALERT = 0x10;
         internal const uint FILE_SYNCHRONOUS_IO_NONALERT = 0x20;

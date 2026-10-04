@@ -42,7 +42,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (PipeFile?.ConsoleKind == ConsoleObjectKind.Input)
                 return ConsoleServer.ReadFile(Instance, IoStatusBlockPtr, BufferPtr, Length);
 
-            if (Instance.WinHelper.IsHostStdIn(FileHandle))
+            if (PipeFile?.HostStream == HostStreamKind.Input)
                 return HandleStdIn(Instance, IoStatusBlockPtr, BufferPtr, Length);
 
             if (Length == 0)

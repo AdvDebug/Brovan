@@ -53,7 +53,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.ResetIoEvent(EventHandle);
 
-            if (FileObj.ConsoleKind == ConsoleObjectKind.Output || Instance.WinHelper.IsHostStdOut(FileHandle))
+            if (FileObj.ConsoleKind == ConsoleObjectKind.Output || FileObj.HostStream == HostStreamKind.Output)
                 return HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
 
             if (FileObj.Device)
