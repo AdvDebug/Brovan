@@ -27,17 +27,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(FullName))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            WinEvent Ev = Instance.WinHelper.HandleManager.GetObjectByObjectId<WinEvent>(FullName);
-            if (Ev == null)
+            uint Attributes = Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributesPtr);
+            if (!Instance.WinHelper.TryLookupNameForOpen(FullName, Attributes, out WinEvent? Ev, out NTSTATUS Status))
             {
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[!] NtOpenEvent: no event named \"{FullName}\".", LogFlags.Syscall);
 
-                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+                return Status;
             }
 
-            WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Ev, (AccessMask)(uint)DesiredAccess);
-            Instance.WinHelper.AddWinHandle(Handle);
+            WinHandle Handle = Instance.WinHelper.OpenObjectHandle(Ev, (AccessMask)(uint)DesiredAccess);
 
             if (!Instance.WinHelper.WritePointer(EventHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

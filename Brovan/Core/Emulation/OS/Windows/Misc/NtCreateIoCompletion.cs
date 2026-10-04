@@ -7,56 +7,43 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong IoCompletionHandlePtr = Instance.WinHelper.GetArg(0);
-                ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
-                ulong Count = Instance.WinHelper.GetArg(3);
+            ulong IoCompletionHandlePtr = Instance.WinHelper.GetArg(0);
+            AccessMask Permissions = (AccessMask)(uint)Instance.WinHelper.GetArg(1);
+            ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
+            uint Count = (uint)Instance.WinHelper.GetArg(3);
 
-                if (IoCompletionHandlePtr == 0)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                if (!Instance.IsRegionMapped(IoCompletionHandlePtr, (uint)Instance.WinHelper.PointerSize))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                WinIoCompletion IoCompletion = new WinIoCompletion
-                {
-                    Name = Instance.WinHelper.GenerateAnonymousObjectName("IoCompletion_"),
-                    Count = (uint)Count
-                };
-
-                WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(IoCompletion, (AccessMask)DesiredAccess);
-                Instance.WinHelper.AddWinHandle(Handle);
-
-                if (!Instance.WinHelper.WritePointer(IoCompletionHandlePtr, Handle.Handle))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
-            uint IoCompletionHandlePtr32 = (uint)Instance.WinHelper.GetArg(0);
-            uint DesiredAccess32 = (uint)Instance.WinHelper.GetArg(1);
-            uint Count32 = (uint)Instance.WinHelper.GetArg(3);
-
-            if (IoCompletionHandlePtr32 == 0)
+            if (IoCompletionHandlePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(IoCompletionHandlePtr32, 4))
+            if (!Instance.IsRegionMapped(IoCompletionHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            WinIoCompletion IoCompletion32 = new WinIoCompletion
+            NTSTATUS Status = Instance.WinHelper.ReadCreateObjectName(ObjectAttributesPtr, out string Name, out uint Attributes);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            // NT ignores case for I/O completion names.
+            if (!Instance.WinHelper.TryLookupNameForCreate(Name, Attributes, out WinIoCompletion? Existing, out Status, TypeIgnoresCase: true))
+                return Status;
+
+            WinIoCompletion? IoCompletion = Existing;
+            if (IoCompletion == null)
             {
-                Name = Instance.WinHelper.GenerateAnonymousObjectName("IoCompletion_"),
-                Count = Count32
-            };
+                IoCompletion = new WinIoCompletion
+                {
+                    Name = Name ?? Instance.WinHelper.GenerateAnonymousObjectName("IoCompletion_"),
+                    Count = Count
+                };
 
-            WinHandle Handle32 = Instance.WinHelper.HandleManager.AddHandle(IoCompletion32, (AccessMask)DesiredAccess32);
-            Instance.WinHelper.AddWinHandle(Handle32);
+                if (Name != null)
+                    Instance.WinHelper.AddNamedObject(IoCompletion);
+            }
 
-            if (!Instance._emulator.WriteMemory(IoCompletionHandlePtr32, (uint)Handle32.Handle))
+            WinHandle Handle = Instance.WinHelper.OpenObjectHandle(IoCompletion, Permissions);
+            if (!Instance.WinHelper.WritePointer(IoCompletionHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            return NTSTATUS.STATUS_SUCCESS;
+            return Status;
         }
     }
 }

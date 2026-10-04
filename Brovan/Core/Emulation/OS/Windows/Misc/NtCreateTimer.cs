@@ -25,14 +25,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (TimerType > (ulong)TIMER_TYPE.SynchronizationTimer)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!NtTimerHelpers.TryReadTimerObjectName(Instance, ObjectAttributesPtr, out string Name, out NTSTATUS NameStatus))
-                return NameStatus;
+            NTSTATUS Status = Instance.WinHelper.ReadCreateObjectName(ObjectAttributesPtr, out string Name, out uint Attributes);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            WinHandle Handle = Instance.WinHelper.CreateTimerHandle(Name, (TIMER_TYPE)TimerType, (AccessMask)(uint)DesiredAccess);
+            if (!Instance.WinHelper.TryLookupNameForCreate(Name, Attributes, out WinTimer? Existing, out Status))
+                return Status;
+
+            AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
+            WinHandle Handle = Existing != null
+                ? Instance.WinHelper.OpenObjectHandle(Existing, Permissions)
+                : Instance.WinHelper.CreateTimerHandle(Name, (TIMER_TYPE)TimerType, Permissions);
+
             if (!Instance.WinHelper.WritePointer(TimerHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            return NTSTATUS.STATUS_SUCCESS;
+            return Status;
         }
     }
 
@@ -78,73 +86,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Instance.WakeWorkerFactoryWaitersForObject(TimerHandle) || Instance.HasHandleWaiters(TimerHandle))
                     Instance._emulator.StopEmulation();
             }
-        }
-
-        public static bool TryReadTimerObjectName(BinaryEmulator Instance, ulong ObjectAttributesPtr, out string Name, out NTSTATUS Status)
-        {
-            return Instance.WinHelper.PointerSize == 8
-                ? TryReadTimerObjectName64(Instance, ObjectAttributesPtr, out Name, out Status)
-                : TryReadTimerObjectName32(Instance, (uint)ObjectAttributesPtr, out Name, out Status);
-        }
-
-        public static bool TryReadTimerObjectName64(BinaryEmulator Instance, ulong ObjectAttributesPtr, out string Name, out NTSTATUS Status)
-        {
-            Name = string.Empty;
-            Status = NTSTATUS.STATUS_SUCCESS;
-
-            if (ObjectAttributesPtr == 0)
-                return true;
-
-            const uint ObjectAttributesSize = 0x30;
-            if (!Instance.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
-            {
-                Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
-                return false;
-            }
-
-            ulong RootDirectory = Instance._emulator.ReadMemoryULong(ObjectAttributesPtr + 0x08);
-            ulong ObjectName = Instance._emulator.ReadMemoryULong(ObjectAttributesPtr + 0x10);
-            if (ObjectName == 0)
-                return true;
-
-            if (!Instance.WinHelper.TryReadUnicodeString(ObjectName, out string LocalName, out Status))
-                return false;
-
-            Name = Instance.WinHelper.ResolveObjectNameWithRootDirectory(RootDirectory, LocalName);
-            if (string.IsNullOrEmpty(Name))
-                Name = LocalName;
-
-            return true;
-        }
-
-        public static bool TryReadTimerObjectName32(BinaryEmulator Instance, uint ObjectAttributesPtr, out string Name, out NTSTATUS Status)
-        {
-            Name = string.Empty;
-            Status = NTSTATUS.STATUS_SUCCESS;
-
-            if (ObjectAttributesPtr == 0)
-                return true;
-
-            const uint ObjectAttributesSize = 0x18;
-            if (!Instance.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
-            {
-                Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
-                return false;
-            }
-
-            uint RootDirectory = Instance._emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x04);
-            uint ObjectName = Instance._emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x08);
-            if (ObjectName == 0)
-                return true;
-
-            if (!Instance.WinHelper.TryReadUnicodeString32(ObjectName, out string LocalName, out Status))
-                return false;
-
-            Name = Instance.WinHelper.ResolveObjectNameWithRootDirectory(RootDirectory, LocalName);
-            if (string.IsNullOrEmpty(Name))
-                Name = LocalName;
-
-            return true;
         }
 
         public static NTSTATUS WritePreviousState(BinaryEmulator Instance, ulong PreviousStatePtr, bool WasSignaled)

@@ -359,37 +359,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool MatchesMask(ReadOnlySpan<char> Name, string Mask)
         {
-            if (string.IsNullOrEmpty(Mask) || Mask == "*" || Mask == "*.*")
+            if (string.IsNullOrEmpty(Mask) || Mask == "*")
                 return true;
 
-            return FileSystemName.MatchesSimpleExpression(TranslateDosWildcards(Mask).AsSpan(), Name, ignoreCase: true);
+            return FileSystemName.MatchesWin32Expression(Mask.AsSpan(), Name, ignoreCase: true);
         }
-
-        /// <summary>
-        /// Rewrites the DOS wildcards the IO manager receives into the plain ones.
-        /// </summary>
-        private static string TranslateDosWildcards(string Mask)
-        {
-            if (Mask.IndexOfAny(DosWildcards) < 0)
-                return Mask;
-
-            return string.Create(Mask.Length, Mask, static (Destination, Source) =>
-            {
-                for (int i = 0; i < Source.Length; i++)
-                {
-                    char Current = Source[i];
-                    Destination[i] = Current switch
-                    {
-                        '<' => '*',
-                        '>' => '?',
-                        '"' => '.',
-                        _ => Current
-                    };
-                }
-            });
-        }
-
-        private static readonly char[] DosWildcards = { '<', '>', '"' };
 
         private static string ReadUnicodeString64(BinaryEmulator Instance, ulong UnicodeString)
         {

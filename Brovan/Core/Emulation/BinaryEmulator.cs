@@ -369,6 +369,9 @@ namespace Brovan.Core.Emulation
                 return Limit < Mappable ? Limit : Mappable;
             }
         }
+
+        // MaxAddress is inclusive on x64 and exclusive on x86.
+        public ulong UserAddressEnd => AlignUp(MaxAddress, PageSize);
         /// <summary>
         /// How long the scheduler blocks in one go when no guest thread can run.
         /// </summary>
@@ -1707,17 +1710,17 @@ namespace Brovan.Core.Emulation
         /// </summary>
         /// <param name="Size">Size of the address to get.</param>
         /// <returns>Returns the suitable base address to be used.</returns>
-        public ulong GetSuitableBaseAddress(ulong Size)
+        public ulong GetSuitableBaseAddress(ulong Size, ulong Alignment)
         {
             ulong AlignedSize = AlignToPageSize(Size);
             ulong SearchFrom = BaseAddress;
 
-            while (TryFindFreeBaseAddress(AlignedSize, PageSize, SearchFrom, MaxAddress, out ulong Candidate))
+            while (TryFindFreeBaseAddress(AlignedSize, Alignment, SearchFrom, MaxAddress, out ulong Candidate))
             {
                 if (!IsRegionFreed(Candidate, WholeMemory: false))
                     return Candidate;
 
-                SearchFrom = Candidate + PageSize;
+                SearchFrom = Candidate + Alignment;
             }
 
             return 0;

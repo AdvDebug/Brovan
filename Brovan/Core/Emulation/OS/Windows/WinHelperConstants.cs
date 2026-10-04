@@ -278,6 +278,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_PARTIAL_COPY = 0x8000000D,
         STATUS_NO_MORE_ENTRIES = 0x8000001A,
         STATUS_NOT_SUPPORTED = 0xC00000BB,
+        STATUS_DUPLICATE_NAME = 0xC00000BD,
+        STATUS_DUPLICATE_OBJECTID = 0xC000022A,
         STATUS_APP_INIT_FAILURE = 0xC0000145,
         STATUS_MAPPED_ALIGNMENT = 0xC0000220,
         STATUS_NOT_FOUND = 0xC0000225,
@@ -1114,7 +1116,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         Window = 13,
         EtwRegistrationHandle = 14,
         SemaphoreHandle = 15,
-        JobHandle = 16
+        JobHandle = 16,
+        DirectoryHandle = 17
     }
 
     public sealed class WinToken : IHandleObject
@@ -1692,6 +1695,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong ImageSectionId;
         public int MappedViewCount;
         public bool IsImage => ((Attributes & 0x01000000) != 0);
+        public ulong ImageBase;
         public bool Initialized;
 
         /// <summary>
@@ -2268,6 +2272,65 @@ namespace Brovan.Core.Emulation.OS.Windows
         public string ObjectId => FullName;
 
         public HandleType ObjectType => HandleType.FileHandle;
+    }
+
+    public sealed class WinPrivateNamespace : IHandleObject
+    {
+        // NT shows a private namespace object as "\...\<name>". The id after the prefix keeps namespaces apart.
+        public const string PathPrefix = "\\...\\";
+
+        private static long LastId;
+
+        public readonly uint BoundarySize;
+        public readonly byte[][] BoundaryEntries;
+        public readonly string Path;
+        private readonly string Id;
+
+        public WinPrivateNamespace(uint BoundarySize, byte[][] BoundaryEntries)
+        {
+            long Number = System.Threading.Interlocked.Increment(ref LastId);
+            this.BoundarySize = BoundarySize;
+            this.BoundaryEntries = BoundaryEntries;
+            Path = PathPrefix + Number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            Id = "PRIVATENAMESPACE_" + Number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        public string ObjectId => Id;
+        public HandleType ObjectType => HandleType.DirectoryHandle;
+
+        public bool Matches(uint Size, byte[][] Entries)
+        {
+            if (Size != BoundarySize || Entries.Length != BoundaryEntries.Length)
+                return false;
+
+            foreach (byte[] Entry in Entries)
+            {
+                if (!HasEntry(Entry))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private bool HasEntry(byte[] Entry)
+        {
+            foreach (byte[] Own in BoundaryEntries)
+            {
+                if (Own.AsSpan().SequenceEqual(Entry))
+                    return true;
+            }
+
+            return false;
+        }
+
+        public static string ToQueriedName(string Name)
+        {
+            if (Name == null || !Name.StartsWith(PathPrefix, StringComparison.Ordinal))
+                return Name;
+
+            int Leaf = Name.IndexOf('\\', PathPrefix.Length);
+            return Leaf < 0 ? Name : PathPrefix + Name.Substring(Leaf + 1);
+        }
     }
 
     public sealed class PortReply

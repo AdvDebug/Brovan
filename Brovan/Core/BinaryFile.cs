@@ -19,6 +19,8 @@ namespace Brovan.Core
     /// </summary>
     public class BinaryFile : IDisposable
     {
+        private const uint ComImageFlagsILOnly = 0x1;
+
         // public variables (results of analysis)
 
         /// <summary>
@@ -384,6 +386,7 @@ namespace Brovan.Core
                 {
                     int FileOffset = (int)RvaToFileOffset(ComDescriptorRva, PE.Sections);
                     IMAGE_COR20_HEADER CoreHeader = ReadStruct<IMAGE_COR20_HEADER>(Data, FileOffset);
+                    PE.ILOnly = (CoreHeader.Flags & ComImageFlagsILOnly) != 0;
                     int MetaDataOffset = (int)RvaToFileOffset(CoreHeader.MetaData.VirtualAddress, PE.Sections);
                     if (MetaDataOffset < 0 || MetaDataOffset > Data.Length - 4)
                         throw new IndexOutOfRangeException("Metadata signature offset of .NET is outside the binary length.");
@@ -2723,6 +2726,7 @@ namespace Brovan.Core
                     Characteristics = Copy.PE.Characteristics,
                     DllCharacteristics = Copy.PE.DllCharacteristics,
                     DotNetStatus = Copy.PE.DotNetStatus,
+                    ILOnly = Copy.PE.ILOnly,
                     Sections = Copy.PE.Sections?.Select(s => new PortableBinarySection
                     {
                         SectionName = s.SectionName,

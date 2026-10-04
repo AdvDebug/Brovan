@@ -1049,18 +1049,35 @@ namespace Brovan.Core.Emulation
             return Module.MappedBase + (OriginalVA - Module.OriginalBase);
         }
 
-        internal void ApplyPERelocations(WinModule Module, BinaryFile Binary)
+        private static IMAGE_DATA_DIRECTORY GetBaseRelocationDirectory(BinaryFile Binary)
+        {
+            return Binary.Architecture == BinaryArchitecture.x64 ? Binary.PE.OptionalHeader64.DataDirectory[5] : Binary.PE.OptionalHeader32.DataDirectory[5];
+        }
+
+        internal static bool HasBaseRelocations(BinaryFile Binary)
+        {
+            IMAGE_DATA_DIRECTORY Directory = GetBaseRelocationDirectory(Binary);
+            return Directory.VirtualAddress != 0 && Directory.Size != 0;
+        }
+
+        internal void ApplyPERelocations(WinModule Module, BinaryFile Binary, ulong ImageBase = 0)
         {
             ulong PreferredBase = Binary.PE.ImageBase;
             ulong MappedBase = Module.MappedBase;
+            ulong TargetBase = ImageBase != 0 ? ImageBase : MappedBase;
 
-            long RelocationDelta = (long)(MappedBase - PreferredBase);
+            long RelocationDelta = (long)(TargetBase - PreferredBase);
             if (RelocationDelta == 0)
                 return;
 
-            var RelocationDirectory = Binary.Architecture == BinaryArchitecture.x64 ? Binary.PE.OptionalHeader64.DataDirectory[5] : Binary.PE.OptionalHeader32.DataDirectory[5];
-            if (RelocationDirectory.VirtualAddress == 0 || RelocationDirectory.Size == 0)
+            // NT does not relocate IL-only images (LdrpIsILOnlyImage).
+            if (Binary.PE.ILOnly)
                 return;
+
+            if (!HasBaseRelocations(Binary))
+                return;
+
+            var RelocationDirectory = GetBaseRelocationDirectory(Binary);
 
             ulong RelocationTableAddress = MappedBase + RelocationDirectory.VirtualAddress;
             int TableSize = (int)RelocationDirectory.Size;
@@ -1161,6 +1178,16 @@ namespace Brovan.Core.Emulation
             {
                 ArrayPool<byte>.Shared.Return(Table);
                 ArrayPool<byte>.Shared.Return(PageBuffer);
+            }
+
+            // NT writes the relocated base into the header of an ASLR image.
+            if ((Binary.PE.DllCharacteristics & DllCharacteristics.DynamicBase) != 0)
+            {
+                ulong OptionalHeader = MappedBase + ReadMemoryUInt(MappedBase + 0x3C) + 4 + 20;
+                if (Binary.Architecture == BinaryArchitecture.x64)
+                    _emulator.WriteMemory(OptionalHeader + 0x18, TargetBase);
+                else
+                    _emulator.WriteMemory(OptionalHeader + 0x1C, (uint)TargetBase);
             }
         }
 
@@ -1751,7 +1778,7 @@ namespace Brovan.Core.Emulation
             return ApplyWinProtectionRanges(Ranges);
         }
 
-        public WinModule LoadWinLibrary(BinaryFile Library, bool TriggerMessage, bool AddToModuleList = true, ulong RequestedBase = 0, bool MapBySections = false)
+        public WinModule LoadWinLibrary(BinaryFile Library, bool TriggerMessage, bool AddToModuleList = true, ulong RequestedBase = 0, bool MapBySections = false, ulong ImageBase = 0)
         {
             if (Library.FileFormat != BinaryFormat.PE)
                 throw new InvalidOperationException("Emulator tried to load a non-valid PE library.");
@@ -1759,18 +1786,23 @@ namespace Brovan.Core.Emulation
             ulong ImageSize = AlignToPageSize(Library.PE.SizeOfImage != 0 ? Library.PE.SizeOfImage : (uint)Library.BinarySize);
             ulong PreferredBase = Library.PE.ImageBase;
             ulong BaseAddress = 0;
+            ulong UserEnd = UserAddressEnd;
+
+            bool IsFree(ulong Base) => Base != 0 && Base < UserEnd && ImageSize <= UserEnd - Base && !IsRegionMapped(Base, ImageSize);
 
             if (RequestedBase != 0)
             {
-                if (IsRegionMapped(RequestedBase, ImageSize))
+                if (!IsFree(RequestedBase))
                     return null;
 
                 BaseAddress = RequestedBase;
             }
-            else if (PreferredBase != 0 && !IsRegionMapped(PreferredBase, ImageSize))
+            else if (IsFree(ImageBase))
+                BaseAddress = ImageBase;
+            else if (IsFree(PreferredBase))
                 BaseAddress = PreferredBase;
             else
-                BaseAddress = GetSuitableBaseAddress(ImageSize);
+                BaseAddress = GetSuitableBaseAddress(ImageSize, WinSysHelper.AllocationGranularity);
 
             if (BaseAddress == 0)
                 return null;
@@ -1813,7 +1845,7 @@ namespace Brovan.Core.Emulation
                     Module.ExportsByName[Export.FunctionName] = Export.Address;
             }
 
-            ApplyPERelocations(Module, Library);
+            ApplyPERelocations(Module, Library, ImageBase);
             if (!MapBySections && !ApplyPeImageProtections(Library, Module))
                 return null;
 

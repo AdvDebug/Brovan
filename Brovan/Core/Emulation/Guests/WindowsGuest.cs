@@ -76,6 +76,7 @@ namespace Brovan.Core.Emulation.Guests
         internal ulong BlobMappedBase => _blob?.MappedBase ?? 0;
 
         private const ulong TebSameTebFlagsOffset64 = 0x17EE;
+        private const ulong TebSameTebFlagsOffset32 = 0xFCA;
         private const ushort TEB_SAME_TEB_FLAG_SKIP_THREAD_ATTACH = 0x0008;
         private const ushort TEB_SAME_TEB_FLAG_INITIAL_THREAD = 0x0400;
         private const ushort TEB_SAME_TEB_FLAG_LOADER_WORKER = 0x2000;
@@ -1022,8 +1023,9 @@ namespace Brovan.Core.Emulation.Guests
 
         public ulong AllocateAndInitializeTEB(BinaryEmulator Instance, EmulatedThread Thread, uint CreateFlags = 0, bool InitialThread = false)
         {
+            ushort SameTebFlags = BuildSameTebFlags(CreateFlags, InitialThread);
             if (Instance._binary.Architecture != BinaryArchitecture.x64)
-                return AllocateAndInitializeWow64TEB(Instance, Thread);
+                return AllocateAndInitializeWow64TEB(Instance, Thread, SameTebFlags);
 
             ulong Teb = Instance.MapUniqueAddress(0x2000, MemoryProtection.ReadWrite);
             Instance._emulator.WriteMemoryByte(Teb, 0, 0x2000);
@@ -1043,6 +1045,15 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(Teb + 0x1760, (uint)0u);
             Instance._emulator.WriteMemory(Teb + 0x179C, (uint)0u);
             Instance._emulator.WriteMemory(Teb + 0x17A0, (ulong)0ul);
+            Instance._emulator.WriteMemory(Teb + TebSameTebFlagsOffset64, SameTebFlags, 2);
+            Instance._emulator.WriteMemory(Teb + 0x180C, (uint)0u);
+
+            Win32kDpi.ApplyThreadContext(Instance, Teb);
+            return Teb;
+        }
+
+        private static ushort BuildSameTebFlags(uint CreateFlags, bool InitialThread)
+        {
             ushort SameTebFlags = 0;
             if (InitialThread)
                 SameTebFlags |= TEB_SAME_TEB_FLAG_INITIAL_THREAD;
@@ -1052,11 +1063,8 @@ namespace Brovan.Core.Emulation.Guests
                 SameTebFlags |= TEB_SAME_TEB_FLAG_LOADER_WORKER;
             if ((CreateFlags & THREAD_CREATE_FLAGS_SKIP_LOADER_INIT) != 0)
                 SameTebFlags |= TEB_SAME_TEB_FLAG_SKIP_LOADER_INIT;
-            Instance._emulator.WriteMemory(Teb + TebSameTebFlagsOffset64, SameTebFlags, 2);
-            Instance._emulator.WriteMemory(Teb + 0x180C, (uint)0u);
 
-            Win32kDpi.ApplyThreadContext(Instance, Teb);
-            return Teb;
+            return SameTebFlags;
         }
 
         /// <summary>
@@ -1065,7 +1073,7 @@ namespace Brovan.Core.Emulation.Guests
         /// <param name="Instance">The emulator instance.</param>
         /// <param name="Thread">The thread the TEBs belong to.</param>
         /// <returns>Address of the 32-bit TEB.</returns>
-        private ulong AllocateAndInitializeWow64TEB(BinaryEmulator Instance, EmulatedThread Thread)
+        private ulong AllocateAndInitializeWow64TEB(BinaryEmulator Instance, EmulatedThread Thread, ushort SameTebFlags)
         {
             // The native TEB sits one WowTebOffset below the 32-bit one, the way a WOW64 process lays them out.
             const ulong TebSize = 0x2000;
@@ -1089,6 +1097,7 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(Teb + 0x24, Thread.ThreadId);
             Instance._emulator.WriteMemory(Teb + 0x30, (uint)PEB);
             Instance._emulator.WriteMemory(Teb + 0x34, 0u);
+            Instance._emulator.WriteMemory(Teb + TebSameTebFlagsOffset32, SameTebFlags, 2);
             Instance._emulator.WriteMemory(Teb + TebWowTebOffset32, unchecked((uint)-(long)TebSize), 4);
             if (WowSyscallGate != 0)
                 Instance._emulator.WriteMemory(Teb + 0xC0, (uint)WowSyscallGate);
@@ -1108,6 +1117,7 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(NativeTeb + 0x48, (ulong)Thread.ThreadId, 8);
             Instance._emulator.WriteMemory(NativeTeb + 0x60, NativePEB, 8);
             Instance._emulator.WriteMemory(NativeTeb + 0x1478, Thread.StackAddress, 8);
+            Instance._emulator.WriteMemory(NativeTeb + TebSameTebFlagsOffset64, SameTebFlags, 2);
             Instance._emulator.WriteMemory(NativeTeb + TebWowTebOffset64, (uint)TebSize, 4);
 
             // The WOW64 TLS slots live in the native TEB. The 32-bit ones belong to the program.

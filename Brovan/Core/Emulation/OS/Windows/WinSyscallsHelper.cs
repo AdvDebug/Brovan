@@ -6,6 +6,7 @@ using Brovan.Core.Helpers;
 using System.Text;
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Emulation.OS.Windows.Win32k;
 using System.IO;
@@ -732,6 +733,72 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         internal const uint OBJ_INHERIT = 0x2;
+        internal const uint OBJ_CASE_INSENSITIVE = 0x40;
+        internal const uint OBJ_OPENIF = 0x80;
+        private const uint OBJ_KERNEL_HANDLE = 0x200;
+        private const uint ValidObjectAttributes = 0x00011FF2;
+
+        public NTSTATUS ReadObjectAttributes(ulong ObjectAttributesPtr, out uint Length, out ulong RootDirectory, out ulong ObjectName, out uint Attributes)
+        {
+            Length = 0;
+            RootDirectory = 0;
+            ObjectName = 0;
+            Attributes = 0;
+
+            if (ObjectAttributesPtr == 0)
+                return NTSTATUS.STATUS_SUCCESS;
+
+            bool Is64 = PointerSize == 8;
+            if (Is64 && (ObjectAttributesPtr & 7) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
+
+            Span<byte> Raw = stackalloc byte[0x30];
+            if (!Emulator.ReadMemory(ObjectAttributesPtr, Raw.Slice(0, Is64 ? 0x30 : 0x18)))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            Length = BinaryPrimitives.ReadUInt32LittleEndian(Raw);
+            if (Is64)
+            {
+                RootDirectory = BinaryPrimitives.ReadUInt64LittleEndian(Raw.Slice(0x08));
+                ObjectName = BinaryPrimitives.ReadUInt64LittleEndian(Raw.Slice(0x10));
+                Attributes = BinaryPrimitives.ReadUInt32LittleEndian(Raw.Slice(0x18));
+            }
+            else
+            {
+                RootDirectory = BinaryPrimitives.ReadUInt32LittleEndian(Raw.Slice(0x04));
+                ObjectName = BinaryPrimitives.ReadUInt32LittleEndian(Raw.Slice(0x08));
+                Attributes = BinaryPrimitives.ReadUInt32LittleEndian(Raw.Slice(0x0C));
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // Same checks as ObpCaptureObjectCreateInformation.
+        public NTSTATUS ReadCreateObjectName(ulong ObjectAttributesPtr, out string? FullName, out uint Attributes)
+        {
+            FullName = null;
+
+            NTSTATUS Status = ReadObjectAttributes(ObjectAttributesPtr, out uint Length, out ulong RootDirectory, out ulong ObjectName, out Attributes);
+            if (Status != NTSTATUS.STATUS_SUCCESS || ObjectAttributesPtr == 0)
+                return Status;
+
+            if (Length != (uint)(PointerSize == 8 ? 0x30 : 0x18))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if ((Attributes & ~OBJ_KERNEL_HANDLE & ~ValidObjectAttributes) != 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (ObjectName == 0)
+                return RootDirectory != 0 ? NTSTATUS.STATUS_OBJECT_NAME_INVALID : NTSTATUS.STATUS_SUCCESS;
+
+            if (!TryReadObjectName(ObjectName, out string Name, out Status))
+                return Status;
+
+            if (Name.Length != 0)
+                FullName = ResolveObjectNameWithRootDirectory(RootDirectory, Name) ?? Name;
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
 
         public uint ReadObjectAttributesFlags(ulong ObjectAttributesPtr)
         {
@@ -1068,7 +1135,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Returns the NT object-manager path represented by one of Brovan's synthetic object-directory handles.
+        /// Returns the NT object-manager path that a directory handle stands for.
         /// </summary>
         public string GetKnownObjectDirectoryPath(ulong RootDirectory)
         {
@@ -1084,7 +1151,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RootDirectory == HandleManager.RPC_CONTROL_DIRECTORY)
                 return "\\RPC Control";
 
-            return null;
+            return HandleManager.GetObjectByHandle<WinPrivateNamespace>(RootDirectory)?.Path;
         }
 
         /// <summary>
@@ -1275,33 +1342,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint HeaderSize = Is64 ? 0x100u : 0xB8u;
             uint ThreadSize = Is64 ? 0x50u : 0x40u;
 
-            ReapAdoptedSessionProcesses();
-
-            ListedProcesses.Clear();
-            ListedProcessIds.Clear();
-
-            for (int i = 0; i < WinProcesses.Count; i++)
-            {
-                WinProcess Process = WinProcesses[i];
-                if (Process.PID != PID && !IsProcessAlive(Process))
-                    continue;
-
-                if (Process.MainThreadId == 0 && Process.PID != 0)
-                    Process.MainThreadId = GenerateRandomPID();
-
-                ListedProcesses.Add((Process, Process.PID, Process.MainThreadId, Process.Status != ProtectionStatus.Unaccessible ? Process.Name : null));
-                ListedProcessIds.Add(Process.PID);
-            }
-
-            // The other guest processes of the session run in their own emulator instances, and a guest that
-            // enumerates processes has to see them the same way it sees its own.
-            List<(uint ProcessId, uint MainThreadId, string ImageName)> Members = GetSessionMembers();
-
-            for (int i = 0; i < Members.Count; i++)
-            {
-                if (ListedProcessIds.Add(Members[i].ProcessId))
-                    ListedProcesses.Add((null, Members[i].ProcessId, Members[i].MainThreadId, Members[i].ImageName));
-            }
+            CollectListedProcesses();
 
             ulong Total = 0;
             for (int i = 0; i < ListedProcesses.Count; i++)
@@ -1329,6 +1370,101 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return true;
+        }
+
+        private void CollectListedProcesses()
+        {
+            ReapAdoptedSessionProcesses();
+
+            ListedProcesses.Clear();
+            ListedProcessIds.Clear();
+
+            for (int i = 0; i < WinProcesses.Count; i++)
+            {
+                WinProcess Process = WinProcesses[i];
+                if (Process.PID != PID && !IsProcessAlive(Process))
+                    continue;
+
+                if (Process.MainThreadId == 0 && Process.PID != 0)
+                    Process.MainThreadId = GenerateRandomPID();
+
+                ListedProcesses.Add((Process, Process.PID, Process.MainThreadId, Process.Status != ProtectionStatus.Unaccessible ? Process.Name : null));
+                ListedProcessIds.Add(Process.PID);
+            }
+
+            // The other guest processes of the session run in their own emulator instances, and a guest that
+            // enumerates processes has to see them the same way it sees its own.
+            List<(uint ProcessId, uint MainThreadId, string ImageName)> Members = GetSessionMembers();
+
+            for (int i = 0; i < Members.Count; i++)
+            {
+                if (ListedProcessIds.Add(Members[i].ProcessId))
+                    ListedProcesses.Add((null, Members[i].ProcessId, Members[i].MainThreadId, Members[i].ImageName));
+            }
+        }
+
+        public bool TryWriteBasicProcessInformationList(ulong Buffer, uint BufferLength, out uint RequiredLength)
+        {
+            bool Is64 = PointerSize == 8;
+            uint HeaderSize = Is64 ? 0x30u : 0x20u;
+
+            CollectListedProcesses();
+
+            ulong Total = 0;
+            for (int i = 0; i < ListedProcesses.Count; i++)
+                Total += HeaderSize + GetBasicProcessNameSlot(ListedProcesses[i].Name);
+
+            RequiredLength = Total > uint.MaxValue ? uint.MaxValue : (uint)Total;
+            if (BufferLength < RequiredLength)
+                return false;
+
+            ulong Current = Buffer;
+            for (int i = 0; i < ListedProcesses.Count; i++)
+            {
+                (WinProcess Process, uint Pid, uint MainThreadId, string Name) Entry = ListedProcesses[i];
+                uint NameSlot = GetBasicProcessNameSlot(Entry.Name);
+                uint EntrySize = HeaderSize + NameSlot;
+
+                Span<byte> Data = Shared.GetSpan(EntrySize);
+                Data.Clear();
+
+                BinaryPrimitives.WriteUInt32LittleEndian(Data, i == ListedProcesses.Count - 1 ? 0u : EntrySize);
+                if (Is64)
+                {
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x08), Entry.Pid);
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x10), Entry.Process?.PPID ?? 0);
+                }
+                else
+                {
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x04), Entry.Pid);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08), (uint)(Entry.Process?.PPID ?? 0));
+                }
+
+                if (NameSlot != 0)
+                {
+                    int NameString = Is64 ? 0x20 : 0x18;
+                    BinaryPrimitives.WriteUInt16LittleEndian(Data.Slice(NameString), (ushort)(Entry.Name.Length * 2));
+                    BinaryPrimitives.WriteUInt16LittleEndian(Data.Slice(NameString + 2), (ushort)NameSlot);
+                    if (Is64)
+                        BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(NameString + 8), Current + HeaderSize);
+                    else
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(NameString + 4), (uint)(Current + HeaderSize));
+
+                    Encoding.Unicode.GetBytes(Entry.Name.AsSpan(), Data.Slice((int)HeaderSize));
+                }
+
+                if (!Emulator._emulator.WriteMemory(Current, Data))
+                    return false;
+
+                Current += EntrySize;
+            }
+
+            return true;
+        }
+
+        private static uint GetBasicProcessNameSlot(string Name)
+        {
+            return string.IsNullOrEmpty(Name) ? 0u : ((uint)Name.Length * 2 + 2 + 7) & ~7u;
         }
 
         private uint GetProcessEntrySize(uint Pid, string Name, uint HeaderSize, uint ThreadSize)
@@ -1991,6 +2127,112 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public List<WinSemaphore> WinSemaphores = new List<WinSemaphore>();
+
+        // A deleted namespace leaves this list but lives on through its handles.
+        public readonly List<WinPrivateNamespace> PrivateNamespaces = new List<WinPrivateNamespace>();
+
+        public WinPrivateNamespace FindPrivateNamespace(uint BoundarySize, byte[][] BoundaryEntries)
+        {
+            foreach (WinPrivateNamespace Namespace in PrivateNamespaces)
+            {
+                if (Namespace.Matches(BoundarySize, BoundaryEntries))
+                    return Namespace;
+            }
+
+            return null;
+        }
+
+        private readonly Dictionary<string, List<IHandleObject>> NamedObjects = new Dictionary<string, List<IHandleObject>>(StringComparer.OrdinalIgnoreCase);
+
+        public void AddNamedObject(IHandleObject Object)
+        {
+            if (!NamedObjects.TryGetValue(Object.ObjectId, out List<IHandleObject> Spellings))
+            {
+                Spellings = new List<IHandleObject>(1);
+                NamedObjects[Object.ObjectId] = Spellings;
+            }
+
+            Spellings.Add(Object);
+        }
+
+        private void RemoveNamedObject(IHandleObject Object)
+        {
+            if (!NamedObjects.TryGetValue(Object.ObjectId, out List<IHandleObject> Spellings) || !Spellings.Remove(Object))
+                return;
+
+            if (Spellings.Count == 0)
+                NamedObjects.Remove(Object.ObjectId);
+        }
+
+        public IHandleObject? FindNamedObject(string? FullName, bool IgnoreCase)
+        {
+            if (FullName == null || !NamedObjects.TryGetValue(FullName, out List<IHandleObject> Spellings))
+                return null;
+
+            foreach (IHandleObject Object in Spellings)
+            {
+                if (IgnoreCase || string.Equals(Object.ObjectId, FullName, StringComparison.Ordinal))
+                    return Object;
+            }
+
+            return null;
+        }
+
+        public bool TryLookupNameForCreate<T>(string? FullName, uint Attributes, out T? Existing, out NTSTATUS Status, bool TypeIgnoresCase = false) where T : class, IHandleObject
+        {
+            Existing = null;
+            Status = NTSTATUS.STATUS_SUCCESS;
+
+            IHandleObject? Found = FindNamedObject(FullName, TypeIgnoresCase || (Attributes & OBJ_CASE_INSENSITIVE) != 0);
+            if (Found == null)
+                return true;
+
+            if (Found is not T Typed)
+            {
+                Status = NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+                return false;
+            }
+
+            if ((Attributes & OBJ_OPENIF) == 0)
+            {
+                Status = NTSTATUS.STATUS_OBJECT_NAME_COLLISION;
+                return false;
+            }
+
+            Existing = Typed;
+            Status = NTSTATUS.STATUS_OBJECT_NAME_EXISTS;
+            return true;
+        }
+
+        public bool TryLookupNameForOpen<T>(string FullName, uint Attributes, [NotNullWhen(true)] out T? Found, out NTSTATUS Status, bool TypeIgnoresCase = false) where T : class, IHandleObject
+        {
+            Found = null;
+
+            IHandleObject? Named = FindNamedObject(FullName, TypeIgnoresCase || (Attributes & OBJ_CASE_INSENSITIVE) != 0);
+            if (Named == null)
+            {
+                Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+                return false;
+            }
+
+            if (Named is not T Typed)
+            {
+                Status = NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+                return false;
+            }
+
+            Found = Typed;
+            Status = NTSTATUS.STATUS_SUCCESS;
+            return true;
+        }
+
+        public WinHandle OpenObjectHandle(IHandleObject Object, AccessMask Permissions)
+        {
+            WinHandle Handle = HandleManager.AddHandle(Object, Permissions);
+            AddWinHandle(Handle);
+            return Handle;
+        }
+
         public List<WinRegistryNotification> RegistryNotifications = new List<WinRegistryNotification>();
         internal readonly AfdDevice.HostConnects AfdConnects = new AfdDevice.HostConnects();
         internal readonly AfdDevice.PendingRequests AfdRequests = new AfdDevice.PendingRequests();
@@ -8406,24 +8648,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             return unchecked((long)Emulator._emulator.ReadMemoryULong(ByteOffsetPtr));
         }
 
-        public WinHandle CreateMutexHandle(string Name, AccessMask Permissions)
+        public WinHandle CreateMutexHandle(string? Name, AccessMask Permissions)
         {
-            WinMutex Mutex = null;
+            WinMutex Mutex = new WinMutex { Name = string.IsNullOrEmpty(Name) ? GenerateAnonymousObjectName("Mutant_") : Name, Signaled = true };
+            WinMutexes.Add(Mutex);
+            if (!string.IsNullOrEmpty(Name))
+                AddNamedObject(Mutex);
 
-            if (string.IsNullOrEmpty(Name))
-                Name = GenerateAnonymousObjectName("Mutant_");
-            else
-                Mutex = WinMutexes.FirstOrDefault(m => m.Name.Equals(Name, StringComparison.OrdinalIgnoreCase));
-
-            if (Mutex == null)
-            {
-                Mutex = new WinMutex { Name = Name, Signaled = true };
-                WinMutexes.Add(Mutex);
-            }
-
-            WinHandle Handle = HandleManager.AddHandle(Mutex, Permissions);
-            AddWinHandle(Handle);
-            return Handle;
+            return OpenObjectHandle(Mutex, Permissions);
         }
 
         public WinMutex? GetMutexByHandle(ulong Handle, AccessMask Purpose)
@@ -9678,36 +9910,29 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Handle;
         }
 
-        public WinHandle CreateEventHandle(string Name, uint EventType, bool InitialState, AccessMask Permissions)
+        public WinHandle CreateEventHandle(string? Name, uint EventType, bool InitialState, AccessMask Permissions)
         {
-            if (string.IsNullOrEmpty(Name))
-                Name = GenerateAnonymousObjectName("Event_");
+            WinEvent Ev = new WinEvent { Name = string.IsNullOrEmpty(Name) ? GenerateAnonymousObjectName("Event_") : Name, Signaled = InitialState, EventType = EventType };
+            if (!string.IsNullOrEmpty(Name))
+                AddNamedObject(Ev);
 
-            WinEvent Ev = HandleManager.GetObjectByObjectId<WinEvent>(Name)
-                ?? new WinEvent { Name = Name, Signaled = InitialState, EventType = EventType };
-
-            WinHandle Handle = HandleManager.AddHandle(Ev, Permissions);
-            AddWinHandle(Handle);
-            return Handle;
+            return OpenObjectHandle(Ev, Permissions);
         }
 
-        public WinHandle CreateTimerHandle(string Name, TIMER_TYPE TimerType, AccessMask Permissions)
+        public WinHandle CreateTimerHandle(string? Name, TIMER_TYPE TimerType, AccessMask Permissions)
         {
-            if (string.IsNullOrEmpty(Name))
-                Name = GenerateAnonymousObjectName("Timer_");
+            WinTimer Timer = new WinTimer
+            {
+                Name = string.IsNullOrEmpty(Name) ? GenerateAnonymousObjectName("Timer_") : Name,
+                TimerType = TimerType,
+                Signaled = false,
+                Active = false
+            };
 
-            WinTimer Timer = HandleManager.GetObjectByObjectId<WinTimer>(Name)
-                ?? new WinTimer
-                {
-                    Name = Name,
-                    TimerType = TimerType,
-                    Signaled = false,
-                    Active = false
-                };
+            if (!string.IsNullOrEmpty(Name))
+                AddNamedObject(Timer);
 
-            WinHandle Handle = HandleManager.AddHandle(Timer, Permissions);
-            AddWinHandle(Handle);
-            return Handle;
+            return OpenObjectHandle(Timer, Permissions);
         }
 
         public WinTimer? GetTimerByHandle(ulong Handle, AccessMask Purpose)
@@ -9732,16 +9957,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HandleManager.GetObjectByHandle<WinEvent>(Handle);
         }
 
-        public WinHandle CreateJobHandle(string Name, AccessMask Permissions)
+        public WinHandle CreateJobHandle(string? Name, AccessMask Permissions)
         {
-            if (string.IsNullOrEmpty(Name))
-                Name = GenerateAnonymousObjectName("Job_");
+            WinJob Job = new WinJob { Name = string.IsNullOrEmpty(Name) ? GenerateAnonymousObjectName("Job_") : Name };
+            if (!string.IsNullOrEmpty(Name))
+                AddNamedObject(Job);
 
-            WinJob Job = HandleManager.GetObjectByObjectId<WinJob>(Name) ?? new WinJob { Name = Name };
-
-            WinHandle Handle = HandleManager.AddHandle(Job, Permissions);
-            AddWinHandle(Handle);
-            return Handle;
+            return OpenObjectHandle(Job, Permissions);
         }
 
         public WinJob? GetJobByHandle(ulong Handle, AccessMask Purpose)
@@ -9851,24 +10073,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Process.Remote != null ? !Process.Remote.HasExited : Process.ExitTime == 0;
         }
 
-        public WinHandle CreateSemaphoreHandle(string Name, int InitialCount, int MaximumCount, AccessMask Permissions)
+        public WinHandle CreateSemaphoreHandle(string? Name, int InitialCount, int MaximumCount, AccessMask Permissions)
         {
-            WinSemaphore Semaphore = null;
-
-            if (string.IsNullOrEmpty(Name))
-                Name = GenerateAnonymousObjectName("Semaphore_");
-            else
-                Semaphore = WinSemaphores.FirstOrDefault(s => s.Name.Equals(Name, StringComparison.OrdinalIgnoreCase));
-
-            if (Semaphore == null)
+            WinSemaphore Semaphore = new WinSemaphore
             {
-                Semaphore = new WinSemaphore { Name = Name, CurrentCount = InitialCount, MaximumCount = MaximumCount };
-                WinSemaphores.Add(Semaphore);
-            }
+                Name = string.IsNullOrEmpty(Name) ? GenerateAnonymousObjectName("Semaphore_") : Name,
+                CurrentCount = InitialCount,
+                MaximumCount = MaximumCount
+            };
 
-            WinHandle Handle = HandleManager.AddHandle(Semaphore, Permissions);
-            AddWinHandle(Handle);
-            return Handle;
+            WinSemaphores.Add(Semaphore);
+            if (!string.IsNullOrEmpty(Name))
+                AddNamedObject(Semaphore);
+
+            return OpenObjectHandle(Semaphore, Permissions);
         }
 
         public WinSemaphore? GetSemaphoreByHandle(ulong Handle, AccessMask Purpose)
@@ -9882,16 +10100,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HandleManager.GetObjectByHandle<WinSemaphore>(Handle);
         }
 
-        public WinHandle CreateSectionHandle(string Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, AccessMask Permissions, IntPtr Storage = default)
+        public WinHandle CreateSectionHandle(string? Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, AccessMask Permissions, IntPtr Storage = default)
         {
             WinSection Sec = CreateSection(Name, Size, Protection, Attributes, Path, BackingAddress, Storage);
+            if (!string.IsNullOrEmpty(Name))
+                AddNamedObject(Sec);
 
-            WinHandle Handle = HandleManager.AddHandle(Sec, Permissions);
-            AddWinHandle(Handle);
-            return Handle;
+            return OpenObjectHandle(Sec, Permissions);
         }
 
-        private WinSection CreateSection(string Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, IntPtr Storage)
+        private WinSection CreateSection(string? Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, IntPtr Storage)
         {
             if (string.IsNullOrEmpty(Name))
                 Name = GenerateAnonymousObjectName("Section_");
@@ -10138,6 +10356,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 RemoveWinHandle(Handle);
             }
 
+            if (Entry.Object != null && !HandleManager.HasHandleToObject(Entry.Object))
+                RemoveNamedObject(Entry.Object);
+
             if (ClosingSyncObject is WinJob ClosingJob && (ClosingJob.LimitFlags & NtTerminateJobObject.JobLimitKillOnJobClose) != 0 && !HandleManager.HasHandleToObject(ClosingJob))
                 NtTerminateJobObject.TerminateMembers(Emulator, ClosingJob, 0, true);
 
@@ -10164,6 +10385,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case WinPort Port when Port.IsServer:
                     WinPorts.Remove(Port);
+                    break;
+
+                case WinPrivateNamespace Namespace:
+                    PrivateNamespaces.Remove(Namespace);
                     break;
 
                 case EmulatedThread Thread:

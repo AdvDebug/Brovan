@@ -749,6 +749,7 @@ namespace Brovan.Core.Helpers
             public Dictionary<ulong, PEImportFunction> ImportFunctions = new();
 
             public DotNetStatus DotNetStatus;
+            public bool ILOnly;
         }
 
         public class DotNet

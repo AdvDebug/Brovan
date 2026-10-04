@@ -56,7 +56,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FILE_INFORMATION_CLASS.FileStandardInformation:
                     return HandleFileStandardInformation(Instance, File, IoStatusBlock, FileInformation, Length);
                 case FILE_INFORMATION_CLASS.FileInternalInformation:
-                    return HandleFileInternalInformation(Instance, FileHandle, IoStatusBlock, FileInformation, Length);
+                    return HandleFileInternalInformation(Instance, File, IoStatusBlock, FileInformation, Length);
                 case FILE_INFORMATION_CLASS.FileEaInformation:
                     return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileEaInformationSize, 0);
                 case FILE_INFORMATION_CLASS.FileAccessInformation:
@@ -177,7 +177,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS HandleFileInternalInformation(BinaryEmulator Instance, ulong FileHandle, ulong IoStatusBlock, ulong FileInformation, uint Length)
+        private static NTSTATUS HandleFileInternalInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation, uint Length)
         {
             if (Length < FileInternalInformationSize)
             {
@@ -185,7 +185,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
-            Instance._emulator.WriteMemory(FileInformation + 0x00, FileHandle, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x00, WinFile.MakeFileId(File.Path), 8);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileInternalInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -470,7 +470,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.WriteByte(FileInformation + 0x3C, 0x00);
             Instance.WinHelper.WriteByte(FileInformation + 0x3D, IsDirectory ? (byte)0x01 : (byte)0x00);
             Instance._emulator.WriteMemory(FileInformation + 0x3E, 0u, 2);
-            Instance._emulator.WriteMemory(FileInformation + 0x40, FileHandle, 8);
+            Instance._emulator.WriteMemory(FileInformation + 0x40, WinFile.MakeFileId(File.Path), 8);
             Instance._emulator.WriteMemory(FileInformation + 0x48, 0u, 4);
             AccessMask Permissions = Instance.WinHelper.HandleManager.GetPermissionsByHandle(FileHandle);
             Instance._emulator.WriteMemory(FileInformation + 0x4C, (uint)Permissions, 4);

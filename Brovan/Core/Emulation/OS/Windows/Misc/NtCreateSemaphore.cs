@@ -26,21 +26,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (MaximumCount <= 0 || InitialCount < 0 || InitialCount > MaximumCount)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            string Name = string.Empty;
-            if (ObjectAttributesPtr != 0)
-            {
-                if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out _, out _, out string FullName, out NTSTATUS ObjectNameStatus))
-                    return ObjectNameStatus;
+            NTSTATUS Status = Instance.WinHelper.ReadCreateObjectName(ObjectAttributesPtr, out string Name, out uint Attributes);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-                Name = FullName;
-            }
+            if (!Instance.WinHelper.TryLookupNameForCreate(Name, Attributes, out WinSemaphore? Existing, out Status))
+                return Status;
 
             AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
-            WinHandle Handle = Instance.WinHelper.CreateSemaphoreHandle(Name, InitialCount, MaximumCount, Permissions);
+            WinHandle Handle = Existing != null
+                ? Instance.WinHelper.OpenObjectHandle(Existing, Permissions)
+                : Instance.WinHelper.CreateSemaphoreHandle(Name, InitialCount, MaximumCount, Permissions);
+
             if (!Instance.WinHelper.WritePointer(SemaphoreHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            return NTSTATUS.STATUS_SUCCESS;
+            return Status;
         }
     }
 }

@@ -27,27 +27,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(SectionHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            string ShortName = null;
-            string FullName = null;
-            if (ObjectAttributesPtr != 0)
-                Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out _, out ShortName, out FullName, out _);
+            NTSTATUS NameStatus = Instance.WinHelper.ReadCreateObjectName(ObjectAttributesPtr, out string FullName, out uint ObjectAttributes);
+            if (NameStatus != NTSTATUS.STATUS_SUCCESS)
+                return NameStatus;
 
-            if (!string.IsNullOrEmpty(FullName))
+            if (!Instance.WinHelper.TryLookupNameForCreate(FullName, ObjectAttributes, out WinSection? Existing, out NameStatus))
+                return NameStatus;
+
+            if (Existing != null)
             {
-                WinSection Existing = Instance.WinHelper.FindSectionByName(FullName, ShortName);
-                if (Existing != null)
-                {
-                    WinHandle ExistingHandle = Instance.WinHelper.HandleManager.AddHandle(Existing, (AccessMask)(uint)DesiredAccess);
-                    Instance.WinHelper.AddWinHandle(ExistingHandle);
+                WinHandle ExistingHandle = Instance.WinHelper.OpenObjectHandle(Existing, (AccessMask)(uint)DesiredAccess);
+                if (!Instance.WinHelper.WritePointer(SectionHandlePtr, ExistingHandle.Handle))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    if (!Instance.WinHelper.WritePointer(SectionHandlePtr, ExistingHandle.Handle))
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                    Instance.TriggerEventMessage($"[+] NtCreateSection: Name=\"{FullName}\", Handle=0x{ExistingHandle.Handle:X} (reused).", LogFlags.Syscall);
 
-                    if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                        Instance.TriggerEventMessage($"[+] NtCreateSection: Name=\"{FullName}\", Handle=0x{ExistingHandle.Handle:X} (reused).", LogFlags.Syscall);
-
-                    return NTSTATUS.STATUS_OBJECT_NAME_EXISTS;
-                }
+                return NameStatus;
             }
 
             bool IsImage = (AllocationAttributes & SEC_IMAGE) != 0;

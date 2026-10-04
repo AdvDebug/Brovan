@@ -1,5 +1,3 @@
-using System;
-using System.Linq;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -24,27 +22,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(MutantHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            string Name = string.Empty;
-            if (ObjectAttributesPtr != 0)
-            {
-                if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out _, out _, out string FullName, out NTSTATUS ObjectNameStatus))
-                    return ObjectNameStatus;
+            NTSTATUS Status = Instance.WinHelper.ReadCreateObjectName(ObjectAttributesPtr, out string Name, out uint Attributes);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-                Name = FullName;
-            }
-
-            bool CreatedNew = string.IsNullOrEmpty(Name) || Instance.WinHelper.WinMutexes.FirstOrDefault(m => m.Name.Equals(Name, StringComparison.OrdinalIgnoreCase)) == null;
+            if (!Instance.WinHelper.TryLookupNameForCreate(Name, Attributes, out WinMutex? Existing, out Status))
+                return Status;
 
             AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
-            WinHandle Handle = Instance.WinHelper.CreateMutexHandle(Name, Permissions);
-
-            if (CreatedNew && InitialOwner)
-                TakeInitialOwnership(Instance, Handle.Handle);
+            WinHandle Handle;
+            if (Existing != null)
+            {
+                Handle = Instance.WinHelper.OpenObjectHandle(Existing, Permissions);
+            }
+            else
+            {
+                Handle = Instance.WinHelper.CreateMutexHandle(Name, Permissions);
+                if (InitialOwner)
+                    TakeInitialOwnership(Instance, Handle.Handle);
+            }
 
             if (!Instance.WinHelper.WritePointer(MutantHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            return NTSTATUS.STATUS_SUCCESS;
+            return Status;
         }
 
         private static void TakeInitialOwnership(BinaryEmulator Instance, ulong Handle)

@@ -289,6 +289,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return Written ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
                         }
 
+                    case SYSTEM_INFORMATION_CLASS.SystemBasicProcessInformation:
+                        {
+                            bool Written = Instance.WinHelper.TryWriteBasicProcessInformationList(SystemInformationPtr, (uint)SystemInformationLength, out uint RequiredLength);
+
+                            NTSTATUS LengthStatus = SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
+                            if (LengthStatus != NTSTATUS.STATUS_SUCCESS)
+                                return LengthStatus;
+
+                            return Written ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+                        }
+
                     case SYSTEM_INFORMATION_CLASS.SystemProcessorInformation:
                         {
                             const uint RequiredLength = 0x0C;

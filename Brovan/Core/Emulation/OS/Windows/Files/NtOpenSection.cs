@@ -47,7 +47,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 SectionPageProtection = PAGE_EXECUTE_READ;
             }
 
-            WinSection Existing = Instance.WinHelper.FindSectionByName(FullName, Name);
+            if (!Instance.WinHelper.TryLookupNameForOpen(FullName, Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributesPtr), out WinSection? Existing, out NTSTATUS Lookup) &&
+                Lookup == NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH)
+                return Lookup;
+
+            Existing ??= Instance.WinHelper.FindSectionByName(FullName, Name);
             if (Existing != null)
             {
                 if (Existing.IsImage && Existing.ImageSectionId == 0 && !string.IsNullOrEmpty(ResolvedKnownDllBackingPath))

@@ -302,11 +302,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (RequestedBase != 0 && Instance.IsRegionInUse(RequestedBase, ImageSize))
                         return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
-                    WinModule Module = Instance.LoadWinLibrary(Image, false, false, RequestedBase);
+                    // NT relocates an ASLR image once per section, and all views share it. Other images keep their preferred base.
+                    bool Relocatable = !Image.PE.ILOnly && (Image.PE.DllCharacteristics & DllCharacteristics.DynamicBase) != 0 && BinaryEmulator.HasBaseRelocations(Image);
+                    ulong SectionBase = Section.ImageBase != 0 ? Section.ImageBase : Relocatable ? 0 : Image.PE.ImageBase;
+
+                    WinModule Module = Instance.LoadWinLibrary(Image, false, false, RequestedBase, ImageBase: SectionBase);
                     Image = null;
 
                     if (Module == null)
                         return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+                    if (Section.ImageBase == 0)
+                        Section.ImageBase = SectionBase != 0 ? SectionBase : Module.MappedBase;
 
                     if (Section.ImageSectionId != 0)
                     {
@@ -328,7 +335,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance.WinHelper.WritePointer(ViewSizePtr, ReturnedSize))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    NTSTATUS Status = MachineMismatch ? NTSTATUS.STATUS_IMAGE_MACHINE_TYPE_MISMATCH : NTSTATUS.STATUS_SUCCESS;
+                    NTSTATUS Status = MachineMismatch ? NTSTATUS.STATUS_IMAGE_MACHINE_TYPE_MISMATCH
+                        : ReturnedBase != Section.ImageBase ? NTSTATUS.STATUS_IMAGE_NOT_AT_BASE
+                        : NTSTATUS.STATUS_SUCCESS;
 
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                         Instance.TriggerEventMessage(
@@ -358,8 +367,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ReturnedSize = RequestedSize != 0 ? BinaryEmulator.AlignUp(RequestedSize, PageSize) : SectionEnd - SectionOffset;
 
-            // MaxAddress is inclusive on x64 and exclusive on x86.
-            ulong UserEnd = BinaryEmulator.AlignUp(Instance.MaxAddress, PageSize);
+            ulong UserEnd = Instance.UserAddressEnd;
             if (RequestedBase != 0 && RequestedBase >= UserEnd)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 

@@ -69,7 +69,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (MatchCount == 0)
                 return NTSTATUS.STATUS_NOT_FOUND;
 
-            return WriteProviderRefs(Instance, ref Data, Function, RequestedInterface, MatchCount);
+            return WriteProviderRefs(ref Data, Function, RequestedInterface, MatchCount);
         }
 
         private static bool Matches((string Name, uint Interface) Algorithm, string Function, uint RequestedInterface)
@@ -93,9 +93,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Encoding.Unicode.GetString(Input.Slice((int)Offset, End - (int)Offset));
         }
 
-        private static NTSTATUS WriteProviderRefs(BinaryEmulator Instance, ref DeviceData Data, string Function, uint RequestedInterface, int MatchCount)
+        private static NTSTATUS WriteProviderRefs(ref DeviceData Data, string Function, uint RequestedInterface, int MatchCount)
         {
-            int Pointer = Instance.WinHelper.PointerSize;
+            // 64-bit layout for both guest widths. 32-bit bcrypt narrows it in place.
+            const int Pointer = 8;
             int RefsSize = 2 * Pointer;
             int RefSize = 7 * Pointer;
             int ImageRefSize = 2 * Pointer;

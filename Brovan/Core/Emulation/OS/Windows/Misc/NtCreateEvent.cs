@@ -21,16 +21,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (EventType > 1)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            string Name = null;
-            if (ObjectAttributes != 0)
-                Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributes, out _, out _, out Name, out _);
+            NTSTATUS Status = Instance.WinHelper.ReadCreateObjectName(ObjectAttributes, out string Name, out uint Attributes);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            if (!Instance.WinHelper.TryLookupNameForCreate(Name, Attributes, out WinEvent? Existing, out Status))
+                return Status;
 
             AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
-            WinHandle Handle = Instance.WinHelper.CreateEventHandle(Name, EventType, InitialState, Permissions);
+            WinHandle Handle = Existing != null
+                ? Instance.WinHelper.OpenObjectHandle(Existing, Permissions)
+                : Instance.WinHelper.CreateEventHandle(Name, EventType, InitialState, Permissions);
+
             if (!Instance.WinHelper.WritePointer(EventHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            return NTSTATUS.STATUS_SUCCESS;
+            return Status;
         }
     }
 }

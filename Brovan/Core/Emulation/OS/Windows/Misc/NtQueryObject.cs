@@ -226,6 +226,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (HandleObject is WinSymbolicLink)
                 return "SymbolicLink";
+            if (HandleObject is WinPrivateNamespace)
+                return "Directory";
             if (HandleObject is WinProcess)
                 return "Process";
             if (HandleObject is WinFile File)
@@ -260,6 +262,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         private string GetObjectName(BinaryEmulator Instance, ulong Handle, IHandleObject HandleObject)
+        {
+            return WinPrivateNamespace.ToQueriedName(GetRecordedName(Instance, Handle, HandleObject));
+        }
+
+        private string GetRecordedName(BinaryEmulator Instance, ulong Handle, IHandleObject HandleObject)
         {
             if (Handle == HandleManager.KNOWN_DLLS_DIRECTORY)
                 return "\\KnownDlls";

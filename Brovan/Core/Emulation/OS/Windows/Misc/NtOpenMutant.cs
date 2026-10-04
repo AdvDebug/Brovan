@@ -1,5 +1,3 @@
-using System;
-using System.Linq;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -26,13 +24,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.TryReadObjectAttributesName(ObjectAttributesPtr, out _, out _, out string FullName, out NTSTATUS ObjectNameStatus))
                 return ObjectNameStatus;
 
-            WinMutex Mutex = Instance.WinHelper.WinMutexes.FirstOrDefault(m => m.Name.Equals(FullName, StringComparison.OrdinalIgnoreCase));
-            if (Mutex == null)
-                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+            uint Attributes = Instance.WinHelper.ReadObjectAttributesFlags(ObjectAttributesPtr);
+            if (!Instance.WinHelper.TryLookupNameForOpen(FullName, Attributes, out WinMutex? Mutex, out NTSTATUS Status))
+                return Status;
 
-            AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
-            WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Mutex, Permissions);
-            Instance.WinHelper.AddWinHandle(Handle);
+            WinHandle Handle = Instance.WinHelper.OpenObjectHandle(Mutex, (AccessMask)(uint)DesiredAccess);
 
             if (!Instance.WinHelper.WritePointer(MutantHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
