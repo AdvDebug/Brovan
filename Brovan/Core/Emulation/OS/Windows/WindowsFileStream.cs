@@ -82,8 +82,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                WriteProbeIsFile = File.Exists(WriteHostPath);
-                WriteProbeIsDirectory = !WriteProbeIsFile && Directory.Exists(WriteHostPath);
+                GeneralHelper.IO.ProbeHostEntry(WriteHostPath, out WriteProbeIsFile, out WriteProbeIsDirectory);
             }
 
             WriteProbeVersion = Version;
@@ -102,8 +101,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                ReadProbeIsFile = File.Exists(ReadHostPath);
-                ReadProbeIsDirectory = !ReadProbeIsFile && Directory.Exists(ReadHostPath);
+                GeneralHelper.IO.ProbeHostEntry(ReadHostPath, out ReadProbeIsFile, out ReadProbeIsDirectory);
             }
 
             ReadProbeVersion = Version;

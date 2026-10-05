@@ -12,7 +12,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-
+            using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
             ulong FileHandlePtr = Instance.WinHelper.GetArg(0);
             ulong DesiredAccess = Instance.WinHelper.GetArg(1);
             ulong ObjectAttributes = Instance.WinHelper.GetArg(2);

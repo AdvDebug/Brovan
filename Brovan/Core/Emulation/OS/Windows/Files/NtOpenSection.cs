@@ -11,7 +11,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-
+            using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
             ulong SectionHandlePtr = Instance.WinHelper.GetArg(0);
             AccessMask DesiredAccess = (AccessMask)Instance.WinHelper.GetArg(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);

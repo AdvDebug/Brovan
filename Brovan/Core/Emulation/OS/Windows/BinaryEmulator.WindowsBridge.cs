@@ -1585,9 +1585,55 @@ namespace Brovan.Core.Emulation
             return Math.Min(Math.Min((ulong)Section.RawSize, MaxReadable), SectionSize);
         }
 
+        internal readonly struct PeImageExtent
+        {
+            public readonly ulong Rva;
+            public readonly long RawOffset;
+            public readonly ulong Size;
+            public readonly bool IsHeader;
+            public readonly PortableBinarySection Section;
+
+            public PeImageExtent(ulong Rva, long RawOffset, ulong Size, bool IsHeader, PortableBinarySection Section)
+            {
+                this.Rva = Rva;
+                this.RawOffset = RawOffset;
+                this.Size = Size;
+                this.IsHeader = IsHeader;
+                this.Section = Section;
+            }
+        }
+
+        internal static List<PeImageExtent> GetPeImageExtents(BinaryFile Library, ulong ImageSize)
+        {
+            List<PeImageExtent> Extents = new List<PeImageExtent>(Library.PE.Sections.Length + 1);
+
+            int HeaderSize = GetPeHeaderCopySize(Library);
+            if (HeaderSize != 0)
+                Extents.Add(new PeImageExtent(0, 0, (ulong)HeaderSize, true, default));
+
+            foreach (PortableBinarySection Section in Library.PE.Sections)
+            {
+                if (Section.VirtualAddress == 0)
+                    continue;
+
+                ulong VirtualSpan = Section.VirtualSize != 0 ? Section.VirtualSize : Section.RawSize;
+                if (VirtualSpan == 0 || (ulong)Section.VirtualAddress >= ImageSize)
+                    continue;
+
+                ulong SectionSize = AlignUp(VirtualSpan, PageSize);
+                ulong MaxSectionSize = ImageSize - Section.VirtualAddress;
+                if (SectionSize > MaxSectionSize)
+                    SectionSize = MaxSectionSize;
+
+                Extents.Add(new PeImageExtent(Section.VirtualAddress, Section.RawOffset, GetPeSectionCopySize(Library, Section, SectionSize), false, Section));
+            }
+
+            return Extents;
+        }
+
         private static FileStream? OpenBinaryReadStream(BinaryFile Library)
         {
-            if (string.IsNullOrEmpty(Library.Location) || !File.Exists(Library.Location))
+            if (string.IsNullOrEmpty(Library.Location))
                 return null;
 
             try
@@ -1655,35 +1701,51 @@ namespace Brovan.Core.Emulation
         /// <param name="BaseAddress">Mapped image base.</param>
         /// <param name="ImageSize">Mapped image size.</param>
         /// <param name="Module">Module metadata to populate with mapped sections.</param>
+        /// <param name="Extents">Output of <see cref="GetPeImageExtents"/>.</param>
         /// <returns>True if the image bytes were written successfully; otherwise false.</returns>
-        internal bool WritePeImageHeadersAndSections(BinaryFile Library, ulong BaseAddress, ulong ImageSize, WinModule Module)
+        internal bool WritePeImageHeadersAndSections(BinaryFile Library, ulong BaseAddress, ulong ImageSize, WinModule Module, List<PeImageExtent> Extents)
         {
             using FileStream? Stream = OpenBinaryReadStream(Library);
 
-            int HeaderSize = GetPeHeaderCopySize(Library);
-            if (HeaderSize != 0 && !WritePeFileRange(Library, Stream, BaseAddress, 0, (ulong)HeaderSize))
+            foreach (PeImageExtent Extent in Extents)
+            {
+                bool Ok = Extent.Size == 0 || WritePeFileRange(Library, Stream, BaseAddress + Extent.Rva, Extent.RawOffset, Extent.Size);
+                if (Extent.IsHeader)
+                {
+                    if (!Ok)
+                        return false;
+                }
+                else if (Ok)
+                {
+                    Module.Sections.TryAdd(BaseAddress + Extent.Rva, Extent.Section);
+                }
+            }
+
+            return true;
+        }
+
+        private bool MapPeImageFromLayoutCache(BinaryFile Library, ulong BaseAddress, ulong ImageSize, WinModule Module, List<PeImageExtent> Extents)
+        {
+            WinImageLayoutCache.View View = WinImageLayoutCache.TryOpen(Library, ImageSize, Extents);
+            if (View == null)
                 return false;
 
-            foreach (PortableBinarySection Section in Library.PE.Sections)
+            IntPtr Storage = _emulator.AdoptSharedStorage(View.Pointer, ImageSize, View);
+            if (Storage == IntPtr.Zero)
             {
-                if (Section.VirtualAddress == 0)
-                    continue;
+                View.Dispose();
+                return false;
+            }
 
-                ulong VirtualSpan = Section.VirtualSize != 0 ? Section.VirtualSize : Section.RawSize;
-                if (VirtualSpan == 0 || (ulong)Section.VirtualAddress >= ImageSize)
-                    continue;
+            ulong Mapped = MapWinMemoryRegion(BaseAddress, ImageSize, MemoryProtection.ReadWrite, SpecialProtections.None, AllocationType.Image, BaseAddress, HostBacking: Storage);
+            _emulator.ReleaseSharedStorage(Storage);
+            if (Mapped == 0)
+                return false;
 
-                ulong SectionSize = AlignToPageSize(VirtualSpan);
-                ulong MaxSectionSize = ImageSize - Section.VirtualAddress;
-                if (SectionSize > MaxSectionSize)
-                    SectionSize = MaxSectionSize;
-
-                ulong SectionAddress = BaseAddress + (ulong)Section.VirtualAddress;
-                ulong BytesToWrite = GetPeSectionCopySize(Library, Section, SectionSize);
-
-                bool Ok = BytesToWrite == 0 || WritePeFileRange(Library, Stream, SectionAddress, Section.RawOffset, BytesToWrite);
-                if (Ok)
-                    Module.Sections.TryAdd(SectionAddress, Section);
+            foreach (PeImageExtent Extent in Extents)
+            {
+                if (!Extent.IsHeader)
+                    Module.Sections.TryAdd(BaseAddress + Extent.Rva, Extent.Section);
             }
 
             return true;
@@ -1816,15 +1878,19 @@ namespace Brovan.Core.Emulation
             }
             else
             {
-                BaseAddress = MapWinMemoryRegion(BaseAddress, ImageSize, MemoryProtection.ReadWrite, SpecialProtections.None, AllocationType.Image, BaseAddress);
-                if (BaseAddress == 0)
-                    return null;
+                List<PeImageExtent> Extents = GetPeImageExtents(Library, ImageSize);
+                if (!MapPeImageFromLayoutCache(Library, BaseAddress, ImageSize, Module, Extents))
+                {
+                    BaseAddress = MapWinMemoryRegion(BaseAddress, ImageSize, MemoryProtection.ReadWrite, SpecialProtections.None, AllocationType.Image, BaseAddress);
+                    if (BaseAddress == 0)
+                        return null;
 
-                if (!WritePeImageHeadersAndSections(Library, BaseAddress, ImageSize, Module))
-                    return null;
+                    if (!WritePeImageHeadersAndSections(Library, BaseAddress, ImageSize, Module, Extents))
+                        return null;
+                }
             }
 
-            if (!string.IsNullOrEmpty(Library.Location) && File.Exists(Library.Location))
+            if (!string.IsNullOrEmpty(Library.Location))
             {
                 Module.Name = Path.GetFileName(Library.Location);
                 Module.Path = Library.Location;
@@ -2460,7 +2526,7 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        public ulong MapWinMemoryRegion(ulong Address, ulong Size, MemoryProtection Protection, SpecialProtections Special, AllocationType Flags, ulong AllocationBase = 0, uint AllocationProtect = 0, uint Protect = 0)
+        public ulong MapWinMemoryRegion(ulong Address, ulong Size, MemoryProtection Protection, SpecialProtections Special, AllocationType Flags, ulong AllocationBase = 0, uint AllocationProtect = 0, uint Protect = 0, IntPtr HostBacking = default)
         {
             ulong AlignedSize = AlignToPageSize(Size);
             if (Address != 0)
@@ -2472,7 +2538,11 @@ namespace Brovan.Core.Emulation
                     return 0;
                 }
 
-                if (_emulator.MapMemory(AlignedAddress, AlignedSize, GetGuardedHostProtection(Protection, Special)))
+                MemoryProtection HostProtection = GetGuardedHostProtection(Protection, Special);
+                bool Mapped = HostBacking != IntPtr.Zero
+                    ? _emulator.MapMemoryShared(AlignedAddress, AlignedSize, HostProtection, HostBacking)
+                    : _emulator.MapMemory(AlignedAddress, AlignedSize, HostProtection);
+                if (Mapped)
                 {
                     ConsumeFreedMemoryRange(AlignedAddress, AlignedSize);
 
@@ -2504,6 +2574,9 @@ namespace Brovan.Core.Emulation
 
                 return 0;
             }
+
+            if (HostBacking != IntPtr.Zero)
+                return 0;
 
             return MapWinUniqueAddress(Size, Protection, Special, Flags);
         }

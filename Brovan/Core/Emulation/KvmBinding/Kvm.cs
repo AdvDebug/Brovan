@@ -209,6 +209,7 @@ namespace Brovan.Core.Emulation
             public int LivePages;
             public int AliasPages;
             public bool Held;
+            public IDisposable Owner;
         }
 
         private struct InstalledSlot
@@ -379,6 +380,22 @@ namespace Brovan.Core.Emulation
             AddBackingAllocation(backing, new BackingAllocation { Size = size, Held = true });
             _error = KvmErrors.Ok;
             return backing;
+        }
+
+        public IntPtr AdoptSharedStorage(IntPtr hostPointer, ulong size, IDisposable owner)
+        {
+            if (DisposedCheck()) return IntPtr.Zero;
+
+            if (hostPointer == IntPtr.Zero || owner == null || size == 0 || (size & KvmConstants.PageMask) != 0
+                || ((ulong)hostPointer.ToInt64() & KvmConstants.PageMask) != 0 || FindBackingAllocation(hostPointer) != IntPtr.Zero)
+            {
+                _error = KvmErrors.InvalidArgument;
+                return IntPtr.Zero;
+            }
+
+            AddBackingAllocation(hostPointer, new BackingAllocation { Size = size, Held = true, Owner = owner });
+            _error = KvmErrors.Ok;
+            return hostPointer;
         }
 
         public void ReleaseSharedStorage(IntPtr storage)
@@ -1496,7 +1513,7 @@ namespace Brovan.Core.Emulation
                 _threadProcessors.Clear();
 
                 foreach (KeyValuePair<IntPtr, BackingAllocation> kv in _backingAllocations)
-                    FreeBackingMemory(kv.Key, kv.Value.Size);
+                    FreeAllocation(kv.Key, kv.Value);
                 _backingAllocations.Clear();
                 _backingStarts.Clear();
                 _mappedPages.Clear();
@@ -1757,12 +1774,20 @@ namespace Brovan.Core.Emulation
         {
             if (allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Held) return;
 
-            FreeBackingMemory(backing, allocation.Size);
+            FreeAllocation(backing, allocation);
             _backingAllocations.Remove(backing);
 
             int index = _backingStarts.BinarySearch(backing.ToInt64());
             if (index >= 0)
                 _backingStarts.RemoveAt(index);
+        }
+
+        private void FreeAllocation(IntPtr backing, BackingAllocation allocation)
+        {
+            if (allocation.Owner != null)
+                allocation.Owner.Dispose();
+            else
+                FreeBackingMemory(backing, allocation.Size);
         }
 
         private void AddBackingAllocation(IntPtr backing, BackingAllocation allocation)

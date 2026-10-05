@@ -31,6 +31,8 @@ namespace Brovan.Core.Settings
 
         public static long CodeCacheDirectoryBytes { get; private set; }
 
+        public static long ImageCacheDirectoryBytes { get; private set; }
+
         public static ulong PendingFreeBytes { get; private set; }
 
         public static uint PooledIoBytes { get; private set; }
@@ -60,6 +62,7 @@ namespace Brovan.Core.Settings
         {
             CodeBufferBytes = Megabytes(Pick(Off: 2048, Minimal: 1024, Medium: 512, High: 256, Aggressive: 128));
             CodeCacheDirectoryBytes = (long)Megabytes(Pick(Off: 512, Minimal: 384, Medium: 256, High: 128, Aggressive: 96));
+            ImageCacheDirectoryBytes = (long)Megabytes(Pick(Off: 2048, Minimal: 1536, Medium: 1024, High: 768, Aggressive: 512));
             PendingFreeBytes = Megabytes(Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8));
             PooledIoBytes = (uint)Megabytes(Pick(Off: 64, Minimal: 32, Medium: 16, High: 8, Aggressive: 4));
             SharedBufferBytes = (int)Kilobytes(Pick(Off: 256, Minimal: 192, Medium: 128, High: 64, Aggressive: 32));

@@ -43,6 +43,7 @@ namespace Brovan.Core.Emulation
         private readonly List<IntPtr> _pendingFrees = new List<IntPtr>();
         private readonly Dictionary<IntPtr, nuint> _bufferSizes = new Dictionary<IntPtr, nuint>();
         private readonly List<IntPtr> _heldBuffers = new List<IntPtr>();
+        private readonly Dictionary<IntPtr, IDisposable> _bufferOwners = new Dictionary<IntPtr, IDisposable>();
         private ulong _pendingFreeBytes;
         private readonly List<MappedRegion> _unmapSurvivors = new List<MappedRegion>();
         private ulong[] _regionStarts = Array.Empty<ulong>();
@@ -234,6 +235,27 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        public IntPtr AdoptSharedStorage(IntPtr hostPointer, ulong size, IDisposable owner)
+        {
+            lock (_mapsLock)
+            {
+                if (DisposedCheck())
+                    return IntPtr.Zero;
+
+                if (hostPointer == IntPtr.Zero || owner == null || size == 0 || _bufferSizes.ContainsKey(hostPointer) || FindBufferBase(hostPointer) != IntPtr.Zero)
+                {
+                    _error = UCErrors.UC_ERR_ARG;
+                    return IntPtr.Zero;
+                }
+
+                _bufferSizes[hostPointer] = (nuint)size;
+                _bufferOwners[hostPointer] = owner;
+                _heldBuffers.Add(hostPointer);
+                _error = UCErrors.UC_ERR_OK;
+                return hostPointer;
+            }
+        }
+
         public void ReleaseSharedStorage(IntPtr storage)
         {
             lock (_mapsLock)
@@ -268,7 +290,10 @@ namespace Brovan.Core.Emulation
                 return;
 
             _bufferSizes.Remove(buffer);
-            FreeBacking((byte*)buffer, Size);
+            if (_bufferOwners.Remove(buffer, out IDisposable Owner))
+                Owner.Dispose();
+            else
+                FreeBacking((byte*)buffer, Size);
         }
 
         public unsafe bool MapMemory(ulong address, ulong size, MemoryProtection protection)

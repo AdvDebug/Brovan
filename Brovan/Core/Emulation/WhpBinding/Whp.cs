@@ -202,6 +202,7 @@ namespace Brovan.Core.Emulation
             public int LivePages;
             public int AliasPages;
             public bool Held;
+            public IDisposable Owner;
         }
 
         private struct InstalledMap
@@ -353,6 +354,7 @@ namespace Brovan.Core.Emulation
             WhpMemoryPermission perm = TranslateProtection(protection);
             long backingAddr = hostPointer.ToInt64();
             IntPtr backing = FindBackingAllocation(hostPointer);
+            bool replaced = false;
 
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
@@ -363,7 +365,10 @@ namespace Brovan.Core.Emulation
                     allocation.AliasPages++;
 
                 if (_mappedPages.TryGetValue(guest, out MappedPage previous))
+                {
                     ReleaseBacking(previous);
+                    replaced = true;
+                }
 
                 SetMappedPage(guest, new MappedPage
                 {
@@ -375,7 +380,9 @@ namespace Brovan.Core.Emulation
                 EnsureVirtualMapping(guest);
             }
 
-            RebuildMappings();
+            // New pages install lazily, as in MapMemory. Replaced pages must go now, or a processor keeps using them.
+            if (replaced)
+                RebuildMappings();
             _error = WhpErrors.Ok;
             return true;
         }
@@ -399,6 +406,22 @@ namespace Brovan.Core.Emulation
             AddBackingAllocation(backing, new BackingAllocation { Size = size, Held = true });
             _error = WhpErrors.Ok;
             return backing;
+        }
+
+        public IntPtr AdoptSharedStorage(IntPtr hostPointer, ulong size, IDisposable owner)
+        {
+            if (DisposedCheck()) return IntPtr.Zero;
+
+            if (hostPointer == IntPtr.Zero || owner == null || size == 0 || (size & WhpConstants.PageMask) != 0
+                || ((ulong)hostPointer.ToInt64() & WhpConstants.PageMask) != 0 || FindBackingAllocation(hostPointer) != IntPtr.Zero)
+            {
+                _error = WhpErrors.InvalidArgument;
+                return IntPtr.Zero;
+            }
+
+            AddBackingAllocation(hostPointer, new BackingAllocation { Size = size, Held = true, Owner = owner });
+            _error = WhpErrors.Ok;
+            return hostPointer;
         }
 
         public void ReleaseSharedStorage(IntPtr storage)
@@ -1536,7 +1559,7 @@ namespace Brovan.Core.Emulation
                 }
 
                 foreach (KeyValuePair<IntPtr, BackingAllocation> kv in _backingAllocations)
-                    FreeBackingMemory(kv.Key, kv.Value.Size);
+                    FreeAllocation(kv.Key, kv.Value);
                 _backingAllocations.Clear();
                 _backingStarts.Clear();
                 _mappedPages.Clear();
@@ -1670,12 +1693,20 @@ namespace Brovan.Core.Emulation
         {
             if (allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Held) return;
 
-            FreeBackingMemory(backing, allocation.Size);
+            FreeAllocation(backing, allocation);
             _backingAllocations.Remove(backing);
 
             int index = _backingStarts.BinarySearch(backing.ToInt64());
             if (index >= 0)
                 _backingStarts.RemoveAt(index);
+        }
+
+        private void FreeAllocation(IntPtr backing, BackingAllocation allocation)
+        {
+            if (allocation.Owner != null)
+                allocation.Owner.Dispose();
+            else
+                FreeBackingMemory(backing, allocation.Size);
         }
 
         private void AddBackingAllocation(IntPtr backing, BackingAllocation allocation)
@@ -1685,6 +1716,13 @@ namespace Brovan.Core.Emulation
             int index = _backingStarts.BinarySearch(backing.ToInt64());
             if (index < 0)
                 _backingStarts.Insert(~index, backing.ToInt64());
+        }
+
+        // Adopted storage is a file view. A full populate reads the whole file in.
+        private bool IsAdoptedBacking(IntPtr hostPointer)
+        {
+            IntPtr backing = FindBackingAllocation(hostPointer);
+            return backing != IntPtr.Zero && _backingAllocations[backing].Owner != null;
         }
 
         private IntPtr FindBackingAllocation(IntPtr hostPointer)
@@ -2723,7 +2761,7 @@ namespace Brovan.Core.Emulation
             if (WhpNative.Failed(hr))
                 throw new WhpException($"WHvMapGpaRange failed (gpa=0x{gpa:X}, size=0x{size:X})", hr);
 
-            if (overLiveRange)
+            if (overLiveRange || IsAdoptedBacking(host))
                 PopulateResidentRange(gpa, size, host, flags);
             else
                 PopulateRange(gpa, size, flags);

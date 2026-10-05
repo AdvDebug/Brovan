@@ -126,6 +126,13 @@ namespace Brovan.Core.Emulation
         /// The storage lives until <see cref="ReleaseSharedStorage"/> is called and the last mapping is gone.
         /// </summary>
         IntPtr AllocateSharedStorage(ulong size);
+
+        /// <summary>
+        /// Uses host memory the caller mapped as shared storage. The backend disposes <paramref name="owner"/>
+        /// where it would free the memory. On failure the caller keeps the memory.
+        /// </summary>
+        IntPtr AdoptSharedStorage(IntPtr hostPointer, ulong size, IDisposable owner);
+
         void ReleaseSharedStorage(IntPtr storage);
 
         bool UnmapMemory(ulong address, ulong size);

@@ -899,6 +899,38 @@ namespace Brovan.Core.Helpers
         {
             return (Section.Characteristics & ElfSectionCharacteristics.ExecInstr) != 0;
         }
+
+        public const ulong FnvOffsetBasis = 0xcbf29ce484222325;
+        private const ulong FnvPrime = 0x100000001b3;
+
+        public static void FnvMixPath(ref ulong Hash, string Path)
+        {
+            string Normalized = GeneralHelper.IsWindows ? Path.ToLowerInvariant() : Path;
+
+            foreach (char Character in Normalized)
+            {
+                Hash ^= Character;
+                Hash *= FnvPrime;
+            }
+        }
+
+        public static void FnvMixNumber(ref ulong Hash, ulong Value)
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                Hash ^= (Value >> (i * 8)) & 0xFF;
+                Hash *= FnvPrime;
+            }
+        }
+
+        public static void FnvMixBytes(ref ulong Hash, ReadOnlySpan<byte> Data)
+        {
+            for (int i = 0; i < Data.Length; i++)
+            {
+                Hash ^= Data[i];
+                Hash *= FnvPrime;
+            }
+        }
     }
 
     public sealed unsafe class MappedMemoryBytes : IDisposable

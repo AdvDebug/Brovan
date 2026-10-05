@@ -19,6 +19,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static NTSTATUS Query(BinaryEmulator Instance, bool NetworkOpen)
         {
             string SyscallName = NetworkOpen ? nameof(NtQueryFullAttributesFile) : nameof(NtQueryAttributesFile);
+            using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(0);
             ulong FileInformationPtr = Instance.WinHelper.GetArg(1);
 
@@ -101,7 +102,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(HostPath))
                 return false;
 
-            Info = new FileInfo(HostPath);
+            Info = GeneralHelper.IO.GetHostInfo(HostPath);
             return GeneralHelper.IO.TryGetHostAttributes(Info, out Attributes);
         }
 

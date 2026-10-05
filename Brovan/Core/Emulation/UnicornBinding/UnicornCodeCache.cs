@@ -467,17 +467,17 @@ namespace Brovan.Core.Emulation
 
         private static string ComputeKey(string GuestImagePath, string HostImagePath)
         {
-            ulong Hash = 0xcbf29ce484222325;
+            ulong Hash = BinaryHelpers.FnvOffsetBasis;
 
             // GuestImagePath is in the guest namespace and usually does not exist on the
             // host, so the content has to be read through the path Brovan actually opened.
-            MixText(ref Hash, GuestImagePath ?? string.Empty);
+            BinaryHelpers.FnvMixPath(ref Hash, GuestImagePath ?? string.Empty);
             MixFile(ref Hash, HostImagePath);
             MixFile(ref Hash, Path.Combine(AppContext.BaseDirectory, GeneralHelper.IsWindows ? "unicorn.dll" : "libunicorn.so"));
-            MixNumber(ref Hash, (ulong)IntPtr.Size);
+            BinaryHelpers.FnvMixNumber(ref Hash, (ulong)IntPtr.Size);
 
             // A blob records the reservation it was written against, so each size keeps its own file.
-            MixNumber(ref Hash, MemoryBudget.CodeBufferBytes);
+            BinaryHelpers.FnvMixNumber(ref Hash, MemoryBudget.CodeBufferBytes);
 
             return Hash.ToString("x16", CultureInfo.InvariantCulture);
         }
@@ -486,13 +486,13 @@ namespace Brovan.Core.Emulation
         {
             if (string.IsNullOrEmpty(Path) || !File.Exists(Path))
             {
-                MixNumber(ref Hash, 0);
+                BinaryHelpers.FnvMixNumber(ref Hash, 0);
                 return;
             }
 
             FileInfo Info = new FileInfo(Path);
-            MixNumber(ref Hash, (ulong)Info.Length);
-            MixNumber(ref Hash, (ulong)Info.LastWriteTimeUtc.Ticks);
+            BinaryHelpers.FnvMixNumber(ref Hash, (ulong)Info.Length);
+            BinaryHelpers.FnvMixNumber(ref Hash, (ulong)Info.LastWriteTimeUtc.Ticks);
 
             // mtime alone has one-second resolution on some filesystems, so take a slice
             // of the content too.
@@ -501,34 +501,10 @@ namespace Brovan.Core.Emulation
                 byte[] Head = new byte[4096];
                 using FileStream Stream = File.OpenRead(Path);
                 int Read = Stream.Read(Head, 0, Head.Length);
-                for (int i = 0; i < Read; i++)
-                {
-                    Hash ^= Head[i];
-                    Hash *= 0x100000001b3;
-                }
+                BinaryHelpers.FnvMixBytes(ref Hash, Head.AsSpan(0, Read));
             }
             catch (IOException)
             {
-            }
-        }
-
-        private static void MixText(ref ulong Hash, string Text)
-        {
-            string Normalized = GeneralHelper.IsWindows ? Text.ToLowerInvariant() : Text;
-
-            foreach (char Character in Normalized)
-            {
-                Hash ^= Character;
-                Hash *= 0x100000001b3;
-            }
-        }
-
-        private static void MixNumber(ref ulong Hash, ulong Value)
-        {
-            for (int i = 0; i < 8; i++)
-            {
-                Hash ^= (Value >> (i * 8)) & 0xFF;
-                Hash *= 0x100000001b3;
             }
         }
     }

@@ -168,6 +168,9 @@ namespace Brovan
 
         [DllImport("shcore.dll")]
         public static extern int GetDpiForMonitor(IntPtr hMonitor, int dpiType, out uint dpiX, out uint dpiY);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern unsafe bool GetFileInformationByHandleEx(SafeFileHandle hFile, int FileInformationClass, void* lpFileInformation, uint dwBufferSize);
     }
 
     internal class NativeUnixImports
@@ -177,6 +180,12 @@ namespace Brovan
 
         [DllImport("libc", EntryPoint = "symlink", SetLastError = true, CharSet = CharSet.Ansi)]
         public static extern int Symlink(string oldpath, string newpath);
+
+        [DllImport("libc", EntryPoint = "statx", SetLastError = true, CharSet = CharSet.Ansi)]
+        public static extern unsafe int Statx(int dirfd, string pathname, int flags, uint mask, byte* statxbuf);
+
+        [DllImport("libc", EntryPoint = "stat", SetLastError = true, CharSet = CharSet.Ansi)]
+        public static extern unsafe int Stat(string pathname, byte* statbuf);
     }
 
     internal class GeneralHelper
@@ -2708,7 +2717,7 @@ namespace Brovan
                 string VirtualPath = ResolveVirtualHostPathInternal(WinPath, CreateDirectories, PreserveFinalLink);
                 if (!string.IsNullOrEmpty(VirtualPath))
                 {
-                    if (CreateDirectories || Path.Exists(VirtualPath))
+                    if (CreateDirectories || HostPathExists(VirtualPath))
                         return VirtualPath;
                 }
 
@@ -2717,7 +2726,7 @@ namespace Brovan
                 {
                     string Native = GetNativeFullPath(WinPath, CreateDirectories);
 
-                    if (!CreateDirectories && !string.IsNullOrEmpty(Native) && !Path.Exists(Native))
+                    if (!CreateDirectories && !string.IsNullOrEmpty(Native) && !HostPathExists(Native))
                     {
                         string Shipped = TryResolveFromWindowsLibs(WinPath);
                         if (!string.IsNullOrEmpty(Shipped))
@@ -3727,6 +3736,150 @@ namespace Brovan
             private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> SandboxLinkCache =
                 new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
 
+            // A probe scope caches host path queries. Open one only in a handler that changes nothing on the host.
+            [ThreadStatic] private static Dictionary<string, FileInfo> ProbeScopeEntries;
+            [ThreadStatic] private static int ProbeScopeDepth;
+
+            public readonly struct ProbeScope : IDisposable
+            {
+                public void Dispose()
+                {
+                    if (--ProbeScopeDepth == 0)
+                        ProbeScopeEntries.Clear();
+                }
+            }
+
+            public static ProbeScope BeginProbeScope()
+            {
+                ProbeScopeEntries ??= new Dictionary<string, FileInfo>(StringComparer.Ordinal);
+                ProbeScopeDepth++;
+                return default;
+            }
+
+            public static FileInfo GetHostInfo(string HostPath)
+            {
+                if (ProbeScopeDepth == 0)
+                    return new FileInfo(HostPath);
+
+                if (!ProbeScopeEntries.TryGetValue(HostPath, out FileInfo Info))
+                {
+                    Info = new FileInfo(HostPath);
+                    ProbeScopeEntries[HostPath] = Info;
+                }
+
+                return Info;
+            }
+
+            public static bool HostPathExists(string HostPath)
+            {
+                if (ProbeScopeDepth == 0 || string.IsNullOrEmpty(HostPath))
+                    return Path.Exists(HostPath);
+
+                try
+                {
+                    return TryGetHostAttributes(GetHostInfo(HostPath), out _);
+                }
+                catch (ArgumentException)
+                {
+                    return false;
+                }
+            }
+
+            public static void ProbeHostEntry(string HostPath, out bool IsFile, out bool IsDirectory)
+            {
+                if (ProbeScopeDepth == 0)
+                {
+                    IsFile = File.Exists(HostPath);
+                    IsDirectory = !IsFile && Directory.Exists(HostPath);
+                    return;
+                }
+
+                bool Exists;
+                FileAttributes Attributes;
+                try
+                {
+                    Exists = TryGetHostAttributes(GetHostInfo(HostPath), out Attributes);
+                }
+                catch (ArgumentException)
+                {
+                    Exists = false;
+                    Attributes = 0;
+                }
+
+                IsDirectory = Exists && (Attributes & FileAttributes.Directory) != 0;
+                IsFile = Exists && !IsDirectory;
+            }
+
+            // Copy and timestamp tools can set the write time, but not the change time or the file id.
+            public readonly record struct HostFileStamp(ulong Volume, ulong IdLow, ulong IdHigh, long ChangeTime, long WriteTime, long Size);
+
+            private static bool StatxMissing;
+
+            public static unsafe bool TryGetHostFileStamp(string HostPath, out HostFileStamp Stamp)
+            {
+                Stamp = default;
+                try
+                {
+                    if (IsWindows)
+                    {
+                        using SafeFileHandle Handle = File.OpenHandle(HostPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                        const int FileBasicInfo = 0, FileIdInfo = 18;
+                        long* Basic = stackalloc long[5];
+                        ulong* Id = stackalloc ulong[3];
+                        if (!NativeWinImports.GetFileInformationByHandleEx(Handle, FileBasicInfo, Basic, 40)
+                            || !NativeWinImports.GetFileInformationByHandleEx(Handle, FileIdInfo, Id, 24))
+                            return false;
+
+                        // FAT keeps no change time.
+                        if (Basic[3] == 0)
+                            return false;
+
+                        Stamp = new HostFileStamp(Id[0], Id[1], Id[2], Basic[3], Basic[2], RandomAccess.GetLength(Handle));
+                        return true;
+                    }
+
+                    byte* Buffer = stackalloc byte[256];
+                    if (!StatxMissing)
+                    {
+                        try
+                        {
+                            const int AtFdCwd = -100;
+                            const uint StatxBasicStats = 0x7FF, StatxNeeded = 0x3C0;
+                            if (NativeUnixImports.Statx(AtFdCwd, HostPath, 0, StatxBasicStats, Buffer) != 0
+                                || (*(uint*)Buffer & StatxNeeded) != StatxNeeded)
+                                return false;
+
+                            ulong Device = ((ulong)*(uint*)(Buffer + 136) << 32) | *(uint*)(Buffer + 140);
+                            Stamp = new HostFileStamp(Device, *(ulong*)(Buffer + 32), 0,
+                                *(long*)(Buffer + 96) * 1_000_000_000 + *(uint*)(Buffer + 104),
+                                *(long*)(Buffer + 112) * 1_000_000_000 + *(uint*)(Buffer + 120),
+                                *(long*)(Buffer + 40));
+                            return true;
+                        }
+                        catch (EntryPointNotFoundException)
+                        {
+                            // bionic before API 30 has no statx.
+                            StatxMissing = true;
+                        }
+                    }
+
+                    // x86_64 and arm64 place these stat fields at the same offsets.
+                    Architecture Arch = RuntimeInformation.ProcessArchitecture;
+                    if ((Arch != Architecture.X64 && Arch != Architecture.Arm64) || NativeUnixImports.Stat(HostPath, Buffer) != 0)
+                        return false;
+
+                    Stamp = new HostFileStamp(*(ulong*)Buffer, *(ulong*)(Buffer + 8), 0,
+                        *(long*)(Buffer + 104) * 1_000_000_000 + *(long*)(Buffer + 112),
+                        *(long*)(Buffer + 88) * 1_000_000_000 + *(long*)(Buffer + 96),
+                        *(long*)(Buffer + 48));
+                    return true;
+                }
+                catch (Exception Ex) when (Ex is IOException || Ex is UnauthorizedAccessException || Ex is EntryPointNotFoundException || Ex is DllNotFoundException)
+                {
+                    return false;
+                }
+            }
+
             public static bool TryGetHostAttributes(FileInfo Info, out FileAttributes Attributes)
             {
                 try
@@ -3821,7 +3974,7 @@ namespace Brovan
                         if (SandboxPlainComponents.ContainsKey(Current))
                             continue;
 
-                        if (!TryGetHostAttributes(new FileInfo(Current), out FileAttributes Attributes))
+                        if (!TryGetHostAttributes(GetHostInfo(Current), out FileAttributes Attributes))
                         {
                             // An unreadable entry can still hold a link below it.
                             Missing = (int)Attributes == -1;
@@ -4159,7 +4312,7 @@ namespace Brovan
                     return null;
 
                 string Full = GetSandboxedFullPath(Candidate, CreateDirectories: false);
-                if (!string.IsNullOrEmpty(Full) && Path.Exists(Full))
+                if (!string.IsNullOrEmpty(Full) && HostPathExists(Full))
                     return Full;
 
                 // Fall back to a case-insensitive leaf search.

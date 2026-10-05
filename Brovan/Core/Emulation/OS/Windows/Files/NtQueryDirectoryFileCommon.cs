@@ -11,6 +11,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static NTSTATUS Handle(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong IoStatusBlock, ulong FileInformation, uint Length, uint FileInformationClass, uint QueryFlags, ulong FileName)
         {
+            using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
             if (IoStatusBlock == 0 || FileInformation == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 

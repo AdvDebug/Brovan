@@ -39,6 +39,9 @@ namespace Brovan.Core.Emulation
             => Inner.MapMemoryShared(address, size, protection, hostPointer);
         public System.IntPtr AllocateSharedStorage(ulong size)
             => Inner.AllocateSharedStorage(size);
+
+        public System.IntPtr AdoptSharedStorage(System.IntPtr hostPointer, ulong size, System.IDisposable owner)
+            => Inner.AdoptSharedStorage(hostPointer, size, owner);
         public void ReleaseSharedStorage(System.IntPtr storage)
             => Inner.ReleaseSharedStorage(storage);
         public bool UnmapMemory(ulong address, ulong size)
