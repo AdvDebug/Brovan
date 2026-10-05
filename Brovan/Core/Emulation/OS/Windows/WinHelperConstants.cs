@@ -1126,6 +1126,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const ulong LocalServiceLogonId = 0x3E5;
         public const ulong InteractiveLogonId = 0x2F1B4;
         public const ulong InteractiveSourceId = 0x2F0C9;
+        public const uint InteractiveSessionId = 1;
+        public static readonly string InteractiveSessionDirectory = $"\\Sessions\\{InteractiveSessionId}";
 
         public TokenType Type;
         public uint SessionId;

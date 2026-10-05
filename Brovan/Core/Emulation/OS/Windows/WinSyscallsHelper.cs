@@ -2015,6 +2015,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinModule> MappedImageViews = new List<WinModule>();
         private readonly Dictionary<string, int> ImageViewCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal KuserSharedDataManager KuserSharedData;
+        internal RPC.Ports.BaseSrvNlsUserInfo NlsUserInfo;
         internal HandleManager HandleManager;
         private static string WinRegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
         public RegistryManager RegManager = new RegistryManager(WinRegPath);
@@ -2345,7 +2346,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const byte OemTranslationDefaultChar = (byte)'_';
         private const string NlsCodePageKey = "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Nls\\CodePage";
         private const uint Utf8CodePage = 65001;
-        private const int RegSz = 1;
+        internal const int RegSz = 1;
 
         // aiSysMet, then one block of DPI dependent metrics per DPI plateau.
         private const ulong UserServerInfoSystemMetricsOffset = 0x768;
@@ -2523,7 +2524,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "Registry", Path = "Registry", Status = ProtectionStatus.Full, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "smss.exe", Path = "C:\\Windows\\System32\\smss.exe", Status = ProtectionStatus.LightTCB, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "Memory Compression", Path = "MemCompression", Status = ProtectionStatus.Full, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
-                new WinProcess{ PID = PID, PPID = PPID, Name = FileName, Path = Emulator.GuestImagePath, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = Binary.Architecture, MainThreadId = InitialThreadId, PrimaryToken = new WinToken{SessionId = 1, IsElevated = false, IsRestricted = false, OwningProcessId = PID, OwningThreadId = 0, Type = TokenType.Primary } },
+                new WinProcess{ PID = PID, PPID = PPID, Name = FileName, Path = Emulator.GuestImagePath, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = Binary.Architecture, MainThreadId = InitialThreadId, PrimaryToken = new WinToken{SessionId = WinToken.InteractiveSessionId, IsElevated = false, IsRestricted = false, OwningProcessId = PID, OwningThreadId = 0, Type = TokenType.Primary } },
                 new WinProcess{ PID = ShellPID, PPID = GenerateRandomPID(), Name = "explorer.exe", Path = "C:\\Windows\\explorer.exe", Status = ProtectionStatus.None, RunningUser = User.Standard, Critical = false, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = FirefoxParent, PPID = ShellPID, Name = "firefox.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\firefox.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},
                 new WinProcess{ PID = GenerateRandomPID(), PPID = FirefoxParent, Name = "crashhelper.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\crashhelper.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},
@@ -2614,6 +2615,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 "\\Windows\\ApiPort",
                 "\\Windows\\SbApiPort",
+                RPC.Ports.CsrssPortHandler.SessionApiPortName,
                 "\\RPC Control\\ntsvcs",
                 "\\RPC Control\\lsarpc",
                 "\\RPC Control\\samr",
@@ -9837,6 +9839,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void CompleteRegistryNotifications(string ChangedPath, uint ChangeFilter)
         {
+            NlsUserInfo?.RegistryChanged(Emulator, ChangedPath, ChangeFilter);
+
             if (RegistryNotifications.Count == 0)
                 return;
 

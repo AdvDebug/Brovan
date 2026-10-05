@@ -6,7 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
     // DwmFlush returns after the next composition pass, at the next vertical blank.
     public static class DwmApiPortHandler
     {
-        public const string PortName = "\\Windows\\DwmApiPort";
+        public static readonly string PortName = CsrssPortHandler.SessionWindowsDirectory + "\\DwmApiPort";
 
         private const int OffsetRequest = 0x28;
         private const int OffsetResult = 0x2C;

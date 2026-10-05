@@ -1356,14 +1356,14 @@ namespace Brovan.Core.Emulation.Guests
                 { "ALLUSERSPROFILE", @"C:\ProgramData" },
                 { "PUBLIC", @"C:\Users\Public" },
                 { "ProgramData", @"C:\ProgramData" },
-                { "SYSTEMROOT", @"C:\WINDOWS" },
+                { "SYSTEMROOT", WindowsVersionInfo.SystemRoot },
                 { "CommonProgramFiles", @"C:\Program Files\Common Files" },
                 { "CommonProgramFiles(x86)", @"C:\Program Files (x86)\Common Files" },
                 { "CommonProgramW6432", @"C:\Program Files\Common Files" },
                 { "ProgramFiles", @"C:\Program Files" },
                 { "ProgramFiles(x86)", @"C:\Program Files (x86)" },
                 { "ProgramW6432", @"C:\Program Files" },
-                { "WINDIR", @"C:\WINDOWS" },
+                { "WINDIR", WindowsVersionInfo.SystemRoot },
                 { "USERNAME", Username },
                 { "USERPROFILE", UserProfile },
                 { "USERDOMAIN", PcName },
@@ -1371,9 +1371,9 @@ namespace Brovan.Core.Emulation.Guests
                 { "LOGONSERVER", @$"\\{PcName}" },
                 { "PROCESSOR_IDENTIFIER", "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel" },
                 { "PROCESSOR_LEVEL", "6" },
-                { "COMSPEC", @"C:\Windows\System32\cmd.exe" },
+                { "COMSPEC", @$"{WindowsVersionInfo.SystemRoot}\system32\cmd.exe" },
                 { "PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC" },
-                { "PATH", @"C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\" }
+                { "PATH", @$"{WindowsVersionInfo.SystemRoot}\system32;{WindowsVersionInfo.SystemRoot};{WindowsVersionInfo.SystemRoot}\System32\Wbem;{WindowsVersionInfo.SystemRoot}\System32\WindowsPowerShell\v1.0\;{WindowsVersionInfo.SystemRoot}\System32\OpenSSH\" }
             };
 
             if (Instance.WinHelper != null && Instance.WinHelper.Steam != null && Instance.WinHelper.Steam.Enabled)
@@ -1527,6 +1527,7 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(PEB + 0x120, WindowsVersionInfo.BuildNumberShort, 2);
                 Instance._emulator.WriteMemory(PEB + 0x122, (ushort)0, 2);
                 Instance._emulator.WriteMemory(PEB + 0x124, WindowsVersionInfo.PlatformIdWin32Nt, 4);
+                Instance._emulator.WriteMemory(PEB + 0x2C0, WinToken.InteractiveSessionId, 4);
                 Instance._emulator.WriteMemory(PEB + WinSxS.PebActivationContextData64, ProcessActivationContext, 8);
 
                 if (IsPeImage)
@@ -1627,6 +1628,7 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(PEB + 0xAC, WindowsVersionInfo.BuildNumberShort, 2);
                 Instance._emulator.WriteMemory(PEB + 0xAE, (ushort)0, 2);
                 Instance._emulator.WriteMemory(PEB + 0xB0, WindowsVersionInfo.PlatformIdWin32Nt, 4);
+                Instance._emulator.WriteMemory(PEB + 0x1D4, WinToken.InteractiveSessionId, 4);
                 Instance._emulator.WriteMemory(PEB + WinSxS.PebActivationContextData32, (uint)ProcessActivationContext);
 
                 Instance._emulator.WriteMemory(PEB + 0x64, WinHelper.ProcessorCount);
@@ -1681,6 +1683,7 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(NativePEB + 0x120, WindowsVersionInfo.BuildNumberShort, 2);
             Instance._emulator.WriteMemory(NativePEB + 0x122, (ushort)0, 2);
             Instance._emulator.WriteMemory(NativePEB + 0x124, WindowsVersionInfo.PlatformIdWin32Nt, 4);
+            Instance._emulator.WriteMemory(NativePEB + 0x2C0, WinToken.InteractiveSessionId, 4);
             Instance._emulator.WriteMemory(NativePEB + WinSxS.PebActivationContextData64, ProcessActivationContext, 8);
         }
 

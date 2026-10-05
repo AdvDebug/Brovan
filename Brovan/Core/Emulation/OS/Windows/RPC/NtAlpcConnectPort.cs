@@ -53,18 +53,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             // Ensure the SharedSection is initialised so callers that read
             // PEB->ReadOnlySharedMemoryBase immediately after connecting succeed.
-            foreach (WinSection Sec in Instance.WinHelper.WinSections)
-            {
-                if (Sec == null || Sec.Initialized) continue;
-                if (string.Equals(Sec.Name, "\\Windows\\SharedSection",
-                        StringComparison.OrdinalIgnoreCase) ||
-                    (!string.IsNullOrEmpty(Sec.Name) &&
-                      Sec.Name.EndsWith("\\Windows\\SharedSection",
-                          StringComparison.OrdinalIgnoreCase)))
-                {
-                    CsrssPortHandler.EnsureSharedSectionInitialized(Instance, Sec.BackingAddress);
-                }
-            }
+            WinSection SharedSection = NtMapViewOfSection.FindSharedSection(Instance);
+            if (SharedSection != null)
+                NtMapViewOfSection.EnsureSharedSectionInitialized(Instance, SharedSection);
 
             if ((Instance.Settings.Flags & LogFlags.General) != 0)
                 Instance.TriggerEventMessage(

@@ -25,7 +25,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DesiredAccess == AccessMask.None || TargetProcess.RunningUser != Instance.WinHelper.CurrentUser)
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
-            TargetProcess.PrimaryToken ??= new WinToken { Type = TokenType.Primary, SessionId = 1, OwningProcessId = TargetProcess.PID };
+            TargetProcess.PrimaryToken ??= new WinToken { Type = TokenType.Primary, SessionId = WinToken.InteractiveSessionId, OwningProcessId = TargetProcess.PID };
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(TargetProcess.PrimaryToken, MapDesiredTokenAccess(DesiredAccess));
             if (!Instance.WinHelper.WritePointer(TokenHandlePtr, Handle.Handle))

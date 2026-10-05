@@ -53,8 +53,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : NTSTATUS.STATUS_SECTION_PROTECTION;
         }
 
-        private static void InitializeWindowsSharedSection(BinaryEmulator Instance, ulong Base)
+        internal static WinSection FindSharedSection(BinaryEmulator Instance)
         {
+            return Instance.WinHelper.WinSections.FirstOrDefault(s => s != null && NtOpenSection.IsWindowsSharedSection(s.Name));
+        }
+
+        // NT: BASE_STATIC_SERVER_DATA. WOW64 kernel32 and kernelbase read the 64-bit layout.
+        internal static void EnsureSharedSectionInitialized(BinaryEmulator Instance, WinSection Section)
+        {
+            if (Section.Initialized)
+                return;
+
+            ulong Base = Section.BackingAddress;
             Instance._emulator.WriteMemory(Base + 0x8, 0x10UL, 8);
 
             ulong Descriptor = Base + 0x10;
@@ -63,78 +73,52 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance._emulator.WriteMemory(Descriptor + 0x0, 0UL, 8);
             Instance._emulator.WriteMemory(Descriptor + 0x8, BaseStaticServerData, 8);
 
-            // Zero a reasonable chunk so uninitialized padding doesn't leak random values.
-            Instance.WinHelper.WriteZeroMemory(BaseStaticServerData, 0xC00);
-
-            // Shared string heap inside the shared section.
             ulong HeapCursor = Base + 0x2000;
 
-            ulong WriteSharedString(string Value)
+            ulong AllocateShared(ulong Size)
             {
-                if (Value == null)
-                    Value = string.Empty;
-
-                int ByteCount = Encoding.Unicode.GetByteCount(Value) + 2;
-                Span<byte> Data = Instance.WinHelper.Shared.GetSpan((uint)ByteCount);
-                Encoding.Unicode.GetBytes(Value.AsSpan(), Data);
-                Data[ByteCount - 2] = 0;
-                Data[ByteCount - 1] = 0;
-
                 ulong Address = HeapCursor;
-                Instance._emulator.WriteMemory(Address, Data.Slice(0, ByteCount));
-                HeapCursor = BinaryEmulator.AlignUp(Address + (ulong)ByteCount, 0x10);
+                HeapCursor = BinaryEmulator.AlignUp(Address + Size, 0x10);
                 return Address;
             }
 
             void WriteUnicodeStringAbsolute(ulong UnicodeStringAddress, string Value)
             {
-                ulong Buffer = WriteSharedString(Value);
-                ushort Length = (ushort)Encoding.Unicode.GetByteCount(Value);
-                ushort MaximumLength = (ushort)(Length + 2);
+                int Length = Encoding.Unicode.GetByteCount(Value);
+                Span<byte> Data = Instance.WinHelper.Shared.GetSpan((uint)Length + 2);
+                Encoding.Unicode.GetBytes(Value.AsSpan(), Data);
+                Data[Length] = 0;
+                Data[Length + 1] = 0;
 
-                Instance._emulator.WriteMemory(UnicodeStringAddress + 0x0, Length, 2);
-                Instance._emulator.WriteMemory(UnicodeStringAddress + 0x2, MaximumLength, 2);
-                Instance._emulator.WriteMemory(UnicodeStringAddress + 0x4, 0u, 4);
+                ulong Buffer = AllocateShared((ulong)Length + 2);
+                Instance._emulator.WriteMemory(Buffer, Data.Slice(0, Length + 2));
+                Instance._emulator.WriteMemory(UnicodeStringAddress + 0x0, (ushort)Length, 2);
+                Instance._emulator.WriteMemory(UnicodeStringAddress + 0x2, (ushort)(Length + 2), 2);
                 Instance._emulator.WriteMemory(UnicodeStringAddress + 0x8, Buffer, 8);
             }
 
-            // Fill BASE_STATIC_SERVER_DATA fields referenced during early init.
-            WriteUnicodeStringAbsolute(BaseStaticServerData + 0x000, "C:\\Windows");
-            WriteUnicodeStringAbsolute(BaseStaticServerData + 0x010, "C:\\Windows\\System32");
-            WriteUnicodeStringAbsolute(BaseStaticServerData + 0x020, "\\Sessions\\1\\BaseNamedObjects");
+            WriteUnicodeStringAbsolute(BaseStaticServerData + 0x000, WindowsVersionInfo.SystemRoot);
+            WriteUnicodeStringAbsolute(BaseStaticServerData + 0x010, WindowsVersionInfo.SystemRoot + "\\system32");
+            WriteUnicodeStringAbsolute(BaseStaticServerData + 0x020, WinToken.InteractiveSessionDirectory + "\\BaseNamedObjects");
 
-            ulong ReadOnlyStaticServerData = Base + 0x3000;
-            Instance.WinHelper.WriteZeroMemory(ReadOnlyStaticServerData, 0x400);
-            WindowsVersionInfo.WriteSharedDataVersionInformation(Instance, ReadOnlyStaticServerData);
-            const string WindowsDirectory = "C:\\Windows";
-            int WindowsDirectoryByteCount = Encoding.Unicode.GetByteCount(WindowsDirectory) + 2;
-            Span<byte> WindowsDirectoryBytes = Instance.WinHelper.Shared.GetSpan((uint)WindowsDirectoryByteCount);
-            Encoding.Unicode.GetBytes(WindowsDirectory.AsSpan(), WindowsDirectoryBytes);
-            WindowsDirectoryBytes[WindowsDirectoryByteCount - 2] = 0;
-            WindowsDirectoryBytes[WindowsDirectoryByteCount - 1] = 0;
-            Instance._emulator.WriteMemory(ReadOnlyStaticServerData + 0x1E, WindowsDirectoryBytes.Slice(0, WindowsDirectoryByteCount));
+            // IniFileMapping. kernel32 dereferences it without a null check.
+            Instance._emulator.WriteMemory(BaseStaticServerData + 0x170, AllocateShared(0x20), 8);
 
-            // kernel32 dereferences IniFileMapping without a null check.
-            ulong IniFileMapping = BaseStaticServerData + 0xC00;
-            Instance.WinHelper.WriteZeroMemory(IniFileMapping, 0x20);
-            Instance._emulator.WriteMemory(BaseStaticServerData + 0x170, IniFileMapping, 8);
+            // TermsrvClientTimeZoneId. -1 means no RDP client zone.
+            Instance._emulator.WriteMemory(BaseStaticServerData + 0x9C8, uint.MaxValue);
 
-            // CSDNumber / RCNumber.
-            Instance._emulator.WriteMemory(BaseStaticServerData + 0x036, (ushort)0, 2);
-            Instance._emulator.WriteMemory(BaseStaticServerData + 0x038, (ushort)0, 2);
+            // LUIDDeviceMapsEnabled.
+            Instance._emulator.WriteMemory(BaseStaticServerData + 0x9CC, (byte)1, 1);
 
-            // DefaultSeparateVDM / IsWowTaskReady.
-            Instance._emulator.WriteMemory(BaseStaticServerData + 0x958, (byte)0, 1);
-            Instance._emulator.WriteMemory(BaseStaticServerData + 0x959, (byte)1, 1);
+            WriteUnicodeStringAbsolute(BaseStaticServerData + 0x9D8, WinToken.InteractiveSessionDirectory + "\\AppContainerNamedObjects");
 
-            // SysWOW64 directory
-            WriteUnicodeStringAbsolute(BaseStaticServerData + 0x960, "C:\\Windows\\SysWOW64");
-
-            // AppContainer and user objects directories
-            WriteUnicodeStringAbsolute(BaseStaticServerData + 0xB40, "\\AppContainerNamedObjects");
-            WriteUnicodeStringAbsolute(BaseStaticServerData + 0xB58, "\\Sessions\\1\\Windows\\WindowStations");
+            // csrss view address. kernel32 and kernelbase rebase the pointers in the block by it.
             Instance._emulator.WriteMemory(BaseStaticServerData + 0x9E8, BaseStaticServerData, 8);
-            Instance._emulator.WriteMemory(BaseStaticServerData + 0xB50, BaseStaticServerData, 8);
+
+            WriteUnicodeStringAbsolute(BaseStaticServerData + 0x9F0, WinToken.InteractiveSessionDirectory + "\\BaseNamedObjects");
+
+            RPC.Ports.BaseSrvNlsUserInfo.Logon(Instance, BaseStaticServerData);
+            Section.Initialized = true;
         }
 
         private static void ApplySharedSectionToPeb(BinaryEmulator Instance, ulong Base)
@@ -142,14 +126,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance.WinHelper.PointerSize == 8)
             {
                 Instance._emulator.WriteMemory(Instance.PEB + 0x88, Base, 8);
-                Instance._emulator.WriteMemory(Instance.PEB + 0x90, Base + 0x3000, 8);
                 Instance._emulator.WriteMemory(Instance.PEB + 0x98, Base + 0x10, 8);
                 Instance._emulator.WriteMemory(Instance.PEB + 0x380, Base, 8);
                 return;
             }
 
             Instance._emulator.WriteMemory(Instance.PEB + 0x4C, (uint)Base);
-            Instance._emulator.WriteMemory(Instance.PEB + 0x50, (uint)(Base + 0x3000));
             Instance._emulator.WriteMemory(Instance.PEB + 0x54, (uint)(Base + 0x10));
             Instance._emulator.WriteMemory(Instance.PEB + 0x248, Base, 8);
         }
@@ -158,7 +140,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             const ulong SharedSectionSize = 0x10000;
 
-            WinSection Section = Instance.WinHelper.WinSections.FirstOrDefault(s => s != null && !string.IsNullOrEmpty(s.Name) && s.Name.EndsWith("\\Windows\\SharedSection", StringComparison.OrdinalIgnoreCase));
+            WinSection Section = FindSharedSection(Instance);
 
             if (Section == null)
             {
@@ -171,12 +153,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return false;
             }
 
-            if (!Section.Initialized)
-            {
-                InitializeWindowsSharedSection(Instance, Section.BackingAddress);
-                Section.Initialized = true;
-            }
-
+            EnsureSharedSectionInitialized(Instance, Section);
             ApplySharedSectionToPeb(Instance, Section.BackingAddress);
 
             // The PEB keeps pointers into the shared section for the lifetime of the process, so it counts
@@ -225,20 +202,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((MapSectionAccess(Instance.WinHelper.HandleManager.GetPermissionsByHandle(SectionHandle)) & RequiredAccess) != RequiredAccess)
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
-            bool IsSharedSection = !string.IsNullOrEmpty(Section.Name) && (string.Equals(Section.Name, "\\Windows\\SharedSection", StringComparison.OrdinalIgnoreCase) || Section.Name.EndsWith("\\Windows\\SharedSection", StringComparison.OrdinalIgnoreCase));
-
-            if (IsSharedSection)
+            if (NtOpenSection.IsWindowsSharedSection(Section.Name))
             {
                 //Instance.StopReturn = true;
                 ulong Base = Section.BackingAddress;
                 ulong Size = Section.Size;
 
-                if (!Section.Initialized)
-                {
-                    InitializeWindowsSharedSection(Instance, Base);
-                    Section.Initialized = true;
-                }
-
+                EnsureSharedSectionInitialized(Instance, Section);
                 ApplySharedSectionToPeb(Instance, Base);
 
                 Instance.WinHelper.WritePointer(BaseAddressPtr, Base);

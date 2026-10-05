@@ -9,6 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtQuerySystemInformation : IWinSyscall
     {
         private const uint TimeZoneInformationLength = 172;
+        private const uint DynamicTimeZoneInformationLength = 0x1B0;
         private const uint PerformanceInformationLength = 0x178;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -78,16 +79,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                             }
 
                             long CurrentTime = Instance.GetEmulatedSystemTimeFileTimeUtc();
-                            DateTime CurrentUtc = EmulatedUtcNow(Instance);
-                            DateTime LocalNow = TimeZoneInfo.ConvertTimeFromUtc(CurrentUtc, TimeZoneInfo.Local);
-
-                            TimeSpan Offset = TimeZoneInfo.Local.GetUtcOffset(CurrentUtc);
-                            long TimeZoneBias = -Offset.Ticks;
+                            long TimeZoneBias = CurrentTimeZoneBias(Instance, out uint TimeZoneId);
 
                             long UPtime100ns = Instance.EmulatedTickCount64 * 10000;
                             long BootTime = CurrentTime - UPtime100ns;
-
-                            uint TimeZoneId = TimeZoneInfo.Local.IsDaylightSavingTime(LocalNow) ? 2u : 1u;
 
                             Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(FullSize);
                             Buffer.Clear();
@@ -107,16 +102,22 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     case SYSTEM_INFORMATION_CLASS.SystemTimeZoneInformation:
                     case SYSTEM_INFORMATION_CLASS.SystemCurrentTimeZoneInformation:
+                    case SYSTEM_INFORMATION_CLASS.SystemDynamicTimeZoneInformation:
                         {
-                            NTSTATUS LengthStatus = SetReturnLength(Instance, ReturnLengthPtr, TimeZoneInformationLength);
+                            bool Dynamic = SystemInformationClass == SYSTEM_INFORMATION_CLASS.SystemDynamicTimeZoneInformation;
+                            uint ZoneLength = Dynamic ? DynamicTimeZoneInformationLength : TimeZoneInformationLength;
+                            NTSTATUS LengthStatus = SetReturnLength(Instance, ReturnLengthPtr, ZoneLength);
                             if (LengthStatus != NTSTATUS.STATUS_SUCCESS)
                                 return LengthStatus;
 
-                            if (SystemInformationLength < TimeZoneInformationLength)
+                            if (SystemInformationLength < ZoneLength)
                                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
-                            Span<byte> Zone = Instance.WinHelper.Shared.GetSpan(TimeZoneInformationLength);
+                            Span<byte> Zone = Instance.WinHelper.Shared.GetSpan(ZoneLength);
                             WriteTimeZoneInformation(Instance, Zone);
+                            if (Dynamic)
+                                WriteZoneName(Zone.Slice((int)TimeZoneInformationLength, 256), TimeZoneKeyName(TimeZoneInfo.Local));
+
                             return Instance.WriteMemory(SystemInformationPtr, Zone) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
                         }
 
@@ -498,6 +499,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             return DateTime.FromFileTimeUtc(Math.Clamp(Instance.GetEmulatedSystemTimeFileTimeUtc(), 0, MaxFileTime));
         }
 
+        internal static long CurrentTimeZoneBias(BinaryEmulator Instance, out uint TimeZoneId)
+        {
+            DateTime CurrentUtc = EmulatedUtcNow(Instance);
+            DateTime LocalNow = TimeZoneInfo.ConvertTimeFromUtc(CurrentUtc, TimeZoneInfo.Local);
+            TimeZoneId = TimeZoneInfo.Local.IsDaylightSavingTime(LocalNow) ? 2u : 1u;
+            return -TimeZoneInfo.Local.GetUtcOffset(CurrentUtc).Ticks;
+        }
+
         // A floating TIME_FIELDS rule keeps the week in Day and the day of the week in Weekday.
         private static void WriteTimeZoneInformation(BinaryEmulator Instance, Span<byte> Zone)
         {
@@ -520,8 +529,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Rule == null || Rule.DaylightDelta == TimeSpan.Zero)
                 return;
 
-            WriteTransition(Zone.Slice(68, 16), Rule.DaylightTransitionEnd);
-            WriteTransition(Zone.Slice(152, 16), Rule.DaylightTransitionStart);
+            WriteTransition(Zone.Slice(68, 16), Rule.DaylightTransitionEnd, Rule.DateEnd.Year);
+            WriteTransition(Zone.Slice(152, 16), Rule.DaylightTransitionStart, Rule.DateStart.Year);
             BinaryPrimitives.WriteInt32LittleEndian(Zone.Slice(168, 4), -(int)Rule.DaylightDelta.TotalMinutes);
         }
 
@@ -530,12 +539,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(Name))
                 return;
 
-            Encoding.Unicode.GetBytes(Name.AsSpan(0, Math.Min(Name.Length, 31)), Target);
+            Encoding.Unicode.GetBytes(Name.AsSpan(0, Math.Min(Name.Length, Target.Length / 2 - 1)), Target);
         }
 
-        private static void WriteTransition(Span<byte> Fields, TimeZoneInfo.TransitionTime Transition)
+        private static string TimeZoneKeyName(TimeZoneInfo Zone)
+        {
+            if (!Zone.HasIanaId)
+                return Zone.Id;
+
+            return TimeZoneInfo.TryConvertIanaIdToWindowsId(Zone.Id, out string? WindowsId) ? WindowsId : string.Empty;
+        }
+
+        private static void WriteTransition(Span<byte> Fields, TimeZoneInfo.TransitionTime Transition, int Year)
         {
             DateTime Time = Transition.TimeOfDay;
+            if (Transition.IsFixedDateRule)
+                BinaryPrimitives.WriteInt16LittleEndian(Fields.Slice(0x00, 2), (short)Year);
             BinaryPrimitives.WriteInt16LittleEndian(Fields.Slice(0x02, 2), (short)Transition.Month);
             BinaryPrimitives.WriteInt16LittleEndian(Fields.Slice(0x04, 2), (short)(Transition.IsFixedDateRule ? Transition.Day : Transition.Week));
             BinaryPrimitives.WriteInt16LittleEndian(Fields.Slice(0x06, 2), (short)Time.Hour);

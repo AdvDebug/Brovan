@@ -55,7 +55,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return new WinToken
                 {
                     Type = TokenType.Primary,
-                    SessionId = 1,
+                    SessionId = WinToken.InteractiveSessionId,
                     IsElevated = false,
                     IsRestricted = false,
                     EffectiveOnly = false,

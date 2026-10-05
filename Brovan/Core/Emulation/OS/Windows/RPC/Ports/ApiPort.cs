@@ -1,6 +1,7 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
-using System.Text;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 {
@@ -28,6 +29,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint BASESRV_INDEX = 1;
         private const uint CONSRV_INDEX = 2;
         private const uint USERSRV_INDEX = 3;
+
+        internal static readonly string SessionWindowsDirectory = WinToken.InteractiveSessionDirectory + "\\Windows";
+        internal static readonly string SessionApiPortName = SessionWindowsDirectory + "\\ApiPort";
 
         private const byte DceRpcVersion = 5;
         private const byte DceRpcRequest = 0;
@@ -242,11 +246,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             TryReadClientConnectData(Reply, out uint ServerId, out ulong ConnectionInfo, out uint ConnectionInfoSize);
 
-            ulong Base = GetSharedSectionBase(Instance);
-            if (Base == 0)
+            WinSection Section = NtMapViewOfSection.FindSharedSection(Instance);
+            if (Section == null)
                 return;
 
-            EnsureSharedSectionInitialized(Instance, Base);
+            NtMapViewOfSection.EnsureSharedSectionInitialized(Instance, Section);
+            ulong Base = Section.BackingAddress;
 
             Span<byte> Data = stackalloc byte[0x18];
             WriteU64(Data, 0x00, Base);
@@ -388,18 +393,24 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 case 13: // BaseSrvGetProcessShutdownParam.
                     WriteShutdownParameters(Reply, Instance);
                     break;
-                case 14: // BaseSrvNlsSetUserInfo.
-                case 15: // BaseSrvNlsSetMultipleUserInfo.
-                case 17: // BaseSrvSetVDMCurDirs.
-                case 18: // BaseSrvGetVDMCurDirs.
-                case 19: // BaseSrvBatNotification.
-                case 20: // BaseSrvRegisterWowExec.
-                case 21: // BaseSrvSoundSentryNotification.
-                case 22: // BaseSrvRefreshIniFileMapping.
-                case 24: // BaseSrvSetTermsrvAppInstallMode.
-                case 25: // BaseSrvNlsUpdateCacheCount.
-                case 26: // BaseSrvSetTermsrvClientTimeZone.
-                case 29: // BaseSrvRegisterThread.
+                case 14: // BaseSrvSetVDMCurDirs.
+                case 15: // BaseSrvGetVDMCurDirs.
+                case 17: // BaseSrvRegisterWowExec.
+                case 18: // BaseSrvSoundSentryNotification.
+                case 19: // BaseSrvRefreshIniFileMapping.
+                case 20: // BaseSrvDefineDosDevice.
+                case 21: // BaseSrvSetTermsrvAppInstallMode.
+                case 22: // BaseSrvSetTermsrvClientTimeZone.
+                case 24: // BaseSrvDeadEntry.
+                case 25: // BaseSrvRegisterThread.
+                case 26: // BaseSrvDeferredCreateProcess.
+                case 29: // BaseSrvCreateProcess2.
+                    break;
+                case 27: // BaseSrvNlsGetUserInfo.
+                    WriteCsrStatus(Reply, HandleBaseSrvNlsGetUserInfo(Reply, Instance));
+                    break;
+                case 28: // BaseSrvNlsUpdateCacheCount.
+                    Instance.WinHelper.NlsUserInfo?.UpdateCacheCount(Instance);
                     break;
                 case 30: // BaseSrvCreateActivationContext.
                     if (!HandleBaseSrvCreateActivationContext(Reply, Instance))
@@ -461,6 +472,26 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             WriteU32(Reply, OffCsrDataStart + 0x00, Level);
             WriteU32(Reply, OffCsrDataStart + 0x04, Instance.WinHelper.WinProcesses.FirstOrDefault(Proc => Proc.PID == Instance.WinHelper.PID)?.ShutdownFlags ?? 0);
+        }
+
+        private static NTSTATUS HandleBaseSrvNlsGetUserInfo(byte[] Reply, BinaryEmulator Instance)
+        {
+            BaseSrvNlsUserInfo Server = Instance.WinHelper.NlsUserInfo;
+            if (Reply.Length < OffCsrDataStart + 0x0C || Server == null)
+                return NTSTATUS.STATUS_UNSUCCESSFUL;
+
+            ulong Buffer = ReadU64(Reply, OffCsrDataStart + 0x00);
+            uint Size = ReadU32(Reply, OffCsrDataStart + 0x08);
+
+            // NT: CsrValidateMessageBuffer.
+            if (Buffer == 0 || !Instance.IsRegionMapped(Buffer, BaseSrvNlsUserInfo.Size))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            NTSTATUS Status = Server.GetUserInfo(Instance, Size);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            return Instance.WriteMemory(Buffer, Server.UserInfo) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_PARAMETER;
         }
 
         private static bool HandleBaseSrvCreateActivationContext(byte[] Reply, BinaryEmulator Instance)
@@ -894,81 +925,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         }
 
-        private static ulong GetSharedSectionBase(BinaryEmulator Instance)
-        {
-            foreach (WinSection s in Instance.WinHelper.WinSections)
-            {
-                if (s == null) continue;
-                if (string.Equals(s.Name, "\\Windows\\SharedSection", StringComparison.OrdinalIgnoreCase) || (!string.IsNullOrEmpty(s.Name) && s.Name.EndsWith("\\Windows\\SharedSection", StringComparison.OrdinalIgnoreCase)))
-                    return s.BackingAddress;
-            }
-            return 0;
-        }
-
-        internal static void EnsureSharedSectionInitialized(BinaryEmulator Instance, ulong Base)
-        {
-            foreach (WinSection s in Instance.WinHelper.WinSections)
-            {
-                if (s == null || s.BackingAddress != Base) continue;
-                bool ok = string.Equals(s.Name, "\\Windows\\SharedSection", StringComparison.OrdinalIgnoreCase) || (!string.IsNullOrEmpty(s.Name) && s.Name.EndsWith("\\Windows\\SharedSection", StringComparison.OrdinalIgnoreCase));
-                if (!ok) continue;
-
-                if (s.Initialized)
-                    return;
-
-                ulong Static = Base + 0x1000;
-                Instance._emulator.WriteMemory(Base + 0x08, 0x10UL, 8);
-                Instance.WinHelper.WriteZeroMemory(Static, 0xC00);
-
-                WriteUStr(Instance, Static + 0x000, "C:\\Windows");
-                WriteUStr(Instance, Static + 0x010, "C:\\Windows\\System32");
-                WriteUStr(Instance, Static + 0x020, "\\Sessions\\1\\BaseNamedObjects");
-                WriteUStr(Instance, Static + 0x960, "C:\\Windows\\SysWOW64");
-                WriteUStr(Instance, Static + 0xB40, "\\AppContainerNamedObjects");
-                WriteUStr(Instance, Static + 0xB58, "\\Sessions\\1\\Windows\\WindowStations");
-
-                ulong ReadOnlyStaticServerData = Base + 0x3000;
-                Instance.WinHelper.WriteZeroMemory(ReadOnlyStaticServerData, 0x400);
-                WindowsVersionInfo.WriteSharedDataVersionInformation(Instance, ReadOnlyStaticServerData);
-                const string WindowsDirectory = "C:\\Windows";
-                int WindowsDirectoryByteCount = Encoding.Unicode.GetByteCount(WindowsDirectory) + 2;
-                Span<byte> WindowsDirectoryBytes = Instance.WinHelper.Shared.GetSpan((uint)WindowsDirectoryByteCount);
-                Encoding.Unicode.GetBytes(WindowsDirectory.AsSpan(), WindowsDirectoryBytes);
-                WindowsDirectoryBytes[WindowsDirectoryByteCount - 2] = 0;
-                WindowsDirectoryBytes[WindowsDirectoryByteCount - 1] = 0;
-                Instance._emulator.WriteMemory(ReadOnlyStaticServerData + 0x1E, WindowsDirectoryBytes.Slice(0, WindowsDirectoryByteCount));
-
-                Instance._emulator.WriteMemory(Static + 0x959, (byte)1, 1);
-                Instance._emulator.WriteMemory(Static + 0x9E8, Static, 8);
-                Instance._emulator.WriteMemory(Static + 0xB50, Static, 8);
-
-                s.Initialized = true;
-                return;
-            }
-        }
-
         private static bool IsCsrApiPort(string Name)
         {
             return string.Equals(Name, "\\Windows\\ApiPort", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(Name, "\\Windows\\SbApiPort", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static void WriteUStr(BinaryEmulator Instance, ulong addr, string val)
-        {
-            int ByteCount = Encoding.Unicode.GetByteCount(val) + 2;
-            Span<byte> Encoded = Instance.WinHelper.Shared.GetSpan((uint)ByteCount);
-            Encoding.Unicode.GetBytes(val.AsSpan(), Encoded);
-            Encoded[ByteCount - 2] = 0;
-            Encoded[ByteCount - 1] = 0;
-
-            ulong buf = Instance.MapUniqueAddress((ulong)ByteCount, MemoryProtection.ReadWrite);
-            if (buf == 0) return;
-
-            Instance._emulator.WriteMemory(buf, Encoded.Slice(0, ByteCount));
-            Instance._emulator.WriteMemory(addr + 0, (ushort)(ByteCount - 2), 2);
-            Instance._emulator.WriteMemory(addr + 2, (ushort)ByteCount, 2);
-            Instance._emulator.WriteMemory(addr + 4, 0u, 4);
-            Instance._emulator.WriteMemory(addr + 8, buf, 8);
+                   string.Equals(Name, "\\Windows\\SbApiPort", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(Name, SessionApiPortName, StringComparison.OrdinalIgnoreCase);
         }
 
         private static void PreparePortReply(byte[] Reply)
@@ -1044,6 +1005,365 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         {
             if (o < 0 || o + 8 > b.Length) return 0;
             return (ulong)b[o] | ((ulong)b[o + 1] << 8) | ((ulong)b[o + 2] << 16) | ((ulong)b[o + 3] << 24) | ((ulong)b[o + 4] << 32) | ((ulong)b[o + 5] << 40) | ((ulong)b[o + 6] << 48) | ((ulong)b[o + 7] << 56);
+        }
+    }
+
+    // basesrv NLS_USER_INFO. kernelbase copies it again when the update count changes.
+    internal sealed class BaseSrvNlsUserInfo
+    {
+        internal const uint Size = 0x67C;
+
+        private const ulong StaticServerDataOffset = 0x178;
+        private const int LogonIdOffset = 0x62C;
+        private const int UserSidOffset = 0x634;
+        private const int UpdateCountOffset = 0x678;
+        private const int CalendarTypeOffset = 0x4D8;
+
+        // REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET.
+        private const uint ChangeFilter = 0x5;
+
+        private const uint DbgMultiSessionSku = 0x100;
+        private const uint DbgMultiUsersInSessionSku = 0x200;
+
+        private const int MultipleQueryCount = 30;
+        private const uint MultipleQueryBufferLength = 0x3AC;
+        private const int PartialQueryDataLimit = 0xB6 - 12;
+
+        private const string CommonGlobUserSettingsKey = @"\Registry\Machine\System\CurrentControlSet\Control\CommonGlobUserSettings";
+        private const string ExplicitSettingsKey = "\U0001F30E\U0001F30F\U0001F30D";
+
+        // basesrv OverrideDetails. Size is in WCHARs, 0 for a number.
+        private static readonly (string Name, int Offset, int Size)[] Fields =
+        {
+            ("LocaleName", 0x000, 86), ("sList", 0x0AC, 5), ("sDecimal", 0x0B6, 5), ("sThousand", 0x0C0, 5),
+            ("sGrouping", 0x0CA, 11), ("sNativeDigits", 0x0E0, 12), ("sMonDecimalSep", 0x0F8, 5),
+            ("sMonThousandSep", 0x102, 5), ("sMonGrouping", 0x10C, 11), ("sPositiveSign", 0x122, 6),
+            ("sNegativeSign", 0x12E, 6), ("sTimeFormat", 0x13A, 81), ("sShortTime", 0x1DC, 81), ("s1159", 0x27E, 16),
+            ("s2359", 0x29E, 16), ("sShortDate", 0x2BE, 81), ("sYearMonth", 0x360, 81), ("sLongDate", 0x402, 81),
+            ("iCountry", 0x4A4, 0), ("iMeasure", 0x4A6, 0), ("iPaperSize", 0x4A8, 0), ("iDigits", 0x4AA, 0),
+            ("iLZero", 0x4AC, 0), ("iNegNumber", 0x4AE, 0), ("NumShape", 0x4B0, 0), ("iCurrDigits", 0x4B2, 0),
+            ("iCurrency", 0x4B4, 0), ("iNegCurr", 0x4B6, 0), ("iFirstDayOfWeek", 0x4B8, 0),
+            ("iFirstWeekOfYear", 0x4BA, 0), ("sCurrency", 0x4BC, 14), ("iCalendarType", CalendarTypeOffset, 0),
+        };
+
+        // basesrv CalendarNames.
+        private static readonly string[] CalendarNames =
+        {
+            "", "Gregorian", "", "Japanese", "Taiwan", "Korean", "Hijri", "Thai", "Hebrew", "", "", "", "",
+            "", "", "", "", "", "", "", "", "", "Persian", "UmAlQura",
+        };
+
+        private readonly byte[] Info = new byte[Size];
+        private readonly ulong Address;
+        private readonly string InternationalKeyPath;
+        private bool CacheDirty = true;
+
+        private BaseSrvNlsUserInfo(ulong Address, string InternationalKeyPath)
+        {
+            this.Address = Address;
+            this.InternationalKeyPath = InternationalKeyPath;
+        }
+
+        internal ReadOnlySpan<byte> UserInfo => Info;
+
+        private uint UpdateCount
+        {
+            get => BinaryPrimitives.ReadUInt32LittleEndian(Info.AsSpan(UpdateCountOffset, 4));
+            set => BinaryPrimitives.WriteUInt32LittleEndian(Info.AsSpan(UpdateCountOffset, 4), value);
+        }
+
+        // basesrv BaseSrvNlsLogon and the first BaseSrvNlsUpdateRegistryCache.
+        internal static void Logon(BinaryEmulator Instance, ulong StaticServerData)
+        {
+            ulong Address = StaticServerData + StaticServerDataOffset;
+            uint SkuFlags = Instance.WinHelper.KuserSharedData?.SharedDataFlags ?? 0;
+
+            // basesrv GetGlobalizationUserModelType.
+            bool MultiSession = (SkuFlags & DbgMultiSessionSku) != 0;
+
+            // This model keeps its settings in the state store, which is not emulated. Clients read the registry.
+            if (!MultiSession && (SkuFlags & DbgMultiUsersInSessionSku) != 0)
+            {
+                BaseSrvNlsUserInfo Unattached = new BaseSrvNlsUserInfo(Address, null);
+                Unattached.Publish(Instance);
+                Instance.WinHelper.NlsUserInfo = Unattached;
+                return;
+            }
+
+            string Root = MultiSession
+                ? @"\Registry\User\" + Instance.WinHelper.CurrentUserSid
+                : SingleUserModelRoot(Instance);
+            if (Root != null && Instance.WinHelper.ResolveRegistryKey(Root) == null)
+                Root = null;
+
+            BaseSrvNlsUserInfo Server = new BaseSrvNlsUserInfo(Address, Root == null ? null : Instance.WinHelper.NormalizeNtRegistryPath(Root + @"\Control Panel\International"));
+
+            BinaryPrimitives.WriteUInt64LittleEndian(Server.Info.AsSpan(LogonIdOffset, 8), WinToken.InteractiveLogonId);
+            byte[] Sid = NtQueryInformationToken.InteractiveUserSid();
+            Sid.CopyTo(Server.Info.AsSpan(UserSidOffset, Sid.Length));
+
+            if (Server.InternationalKeyPath != null)
+                Server.UpdateCount = 1;
+
+            Server.Publish(Instance);
+            Instance.WinHelper.NlsUserInfo = Server;
+        }
+
+        // OpenGlobalizationUserSettingsKey_ForSingleUserModel.
+        private static string SingleUserModelRoot(BinaryEmulator Instance)
+        {
+            WinRegKey Common = Instance.WinHelper.ResolveRegistryKey(CommonGlobUserSettingsKey);
+            if (Common == null)
+                return null;
+
+            if (!Instance.WinHelper.TryGetRegistryValue(Common, "RedirectedKey", out ValueNode Redirected) || Redirected.Type != WinSysHelper.RegSz)
+                return CommonGlobUserSettingsKey;
+
+            ReadOnlySpan<byte> Data = Redirected.Data;
+            int End = SimdStringHelpers.IndexOfUtf16Nul(Data);
+            string Target = SimdStringHelpers.TryDecodeUtf16LeString(Data.Slice(0, End >= 0 ? End : Data.Length & ~1));
+            return string.IsNullOrEmpty(Target) ? null : Target;
+        }
+
+        internal NTSTATUS GetUserInfo(BinaryEmulator Instance, uint RequestedSize)
+        {
+            if (RequestedSize != Size)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (CacheDirty)
+            {
+                CacheDirty = false;
+                if (InternationalKeyPath == null)
+                    return NTSTATUS.STATUS_UNSUCCESSFUL;
+
+                UpdateCount++;
+                ReadUserSettings(Instance);
+                Publish(Instance);
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal void UpdateCacheCount(BinaryEmulator Instance)
+        {
+            CacheDirty = true;
+            UpdateCount++;
+            if (!Instance._emulator.WriteMemory(Address + UpdateCountOffset, UpdateCount))
+                Utils.LogError($"[BaseSrv] Failed to publish the NLS update count at 0x{Address + UpdateCountOffset:X}.");
+        }
+
+        // basesrv BaseSrvNlsUpdateRegistryCache.
+        internal void RegistryChanged(BinaryEmulator Instance, string ChangedPath, uint ChangedFilter)
+        {
+            if (InternationalKeyPath == null || ChangedPath == null || (ChangedFilter & ChangeFilter) == 0)
+                return;
+
+            if (!ChangedPath.StartsWith(InternationalKeyPath, StringComparison.OrdinalIgnoreCase)
+                || (ChangedPath.Length != InternationalKeyPath.Length && ChangedPath[InternationalKeyPath.Length] != '\\'))
+                return;
+
+            UpdateCacheCount(Instance);
+        }
+
+        private void Publish(BinaryEmulator Instance)
+        {
+            if (!Instance.WriteMemory(Address, Info))
+                Utils.LogError($"[BaseSrv] Failed to publish NLS_USER_INFO at 0x{Address:X}.");
+        }
+
+        // basesrv NlsUpdateCacheInfo. A shorter string leaves the tail of the old one.
+        private void ReadUserSettings(BinaryEmulator Instance)
+        {
+            Span<byte> Data = Info;
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x628, 4), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x4DA, 4), 0xFFFF);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x4E4, 4), 0xFFFF);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x586, 4), 0xFFFF);
+
+            WinRegKey Key = Instance.WinHelper.ResolveRegistryKey(InternationalKeyPath);
+            ValueNode[] Values = new ValueNode[Fields.Length];
+            if (Key != null)
+            {
+                for (int i = 0; i < Fields.Length; i++)
+                    Instance.WinHelper.TryGetRegistryValue(Key, Fields[i].Name, out Values[i]);
+            }
+
+            // One NtQueryMultipleValueKey for the first 30 names. If it fails, a 0xB6-byte NtQueryValueKey per name.
+            bool MultipleQuery = Key != null;
+            uint Packed = 0;
+            for (int i = 0; i < MultipleQueryCount && MultipleQuery; i++)
+            {
+                uint Length = (uint)(Values[i]?.Data?.Length ?? 0);
+                MultipleQuery = Values[i] != null && Packed + Length <= MultipleQueryBufferLength;
+                Packed = (Packed + Length + 3) & ~3u;
+            }
+
+            for (int i = 0; i < Fields.Length; i++)
+            {
+                ValueNode Value = Values[i];
+                byte[] Bytes = Value?.Data ?? Array.Empty<byte>();
+                bool Present = Value != null && ((MultipleQuery && i < MultipleQueryCount) || Bytes.Length <= PartialQueryDataLimit);
+                StoreField(Data.Slice(Fields[i].Offset), Fields[i].Size, Present ? Value.Type : 0, Bytes);
+            }
+
+            if (Key != null)
+                ReadExplicitSettings(Instance, Data);
+        }
+
+        private static void StoreField(Span<byte> Field, int FieldSize, int Type, ReadOnlySpan<byte> Bytes)
+        {
+            if (Type != WinSysHelper.RegSz || Bytes.Length == 0 || (Bytes.Length & 1) != 0 || BinaryPrimitives.ReadUInt16LittleEndian(Bytes.Slice(Bytes.Length - 2)) != 0)
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(Field, 0xFFFF);
+                if (FieldSize != 0)
+                    BinaryPrimitives.WriteUInt16LittleEndian(Field.Slice(2), 0);
+                return;
+            }
+
+            int Count = Bytes.Length / 2 - 1;
+            if (FieldSize == 0)
+                BinaryPrimitives.WriteUInt16LittleEndian(Field, ParseNumber(Bytes, Count));
+            else if (!StoreCounted(Field, FieldSize - 1, Bytes, Count))
+                BinaryPrimitives.WriteUInt32LittleEndian(Field, 0xFFFF);
+        }
+
+        private static ushort ParseNumber(ReadOnlySpan<byte> Bytes, int Count)
+        {
+            if ((uint)(Count - 1) > 2)
+                return 0xFFFF;
+
+            ushort Number = 0;
+            for (int i = 0; i < Count; i++)
+            {
+                ushort Digit = (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(Bytes.Slice(i * 2, 2)) - '0');
+                if (Digit > 9)
+                    return 0xFFFF;
+                Number = (ushort)(Number * 10 + Digit);
+            }
+
+            return Number;
+        }
+
+        private static bool StoreCounted(Span<byte> Field, int Chars, ReadOnlySpan<byte> Text, int Count)
+        {
+            if (!CopyString(Field.Slice(2, Chars * 2), Chars, Text, Count))
+                return false;
+
+            BinaryPrimitives.WriteUInt16LittleEndian(Field, (ushort)Count);
+            return true;
+        }
+
+        // basesrv ReadSettingsCache.
+        private void ReadExplicitSettings(BinaryEmulator Instance, Span<byte> Data)
+        {
+            WinRegKey Explicit = Instance.WinHelper.ResolveRegistryKey(InternationalKeyPath + @"\" + ExplicitSettingsKey);
+            if (Explicit == null)
+                return;
+
+            if (TryQueryString(Instance, Explicit, "Currencies", out ReadOnlySpan<byte> Text, out int Length) && Length >= 3)
+                StoreCounted(Data.Slice(0x4DA), 4, Text, 3);
+
+            if (TryQueryString(Instance, Explicit, "Calendar", out Text, out Length) && Length >= 4)
+            {
+                ushort CalendarId = CalendarIdFromString(Text);
+                if (CalendarId != 0)
+                    BinaryPrimitives.WriteUInt16LittleEndian(Data.Slice(CalendarTypeOffset, 2), CalendarId);
+            }
+
+            ReadDateFormats(Instance, Data, Explicit.FullPath + @"\Gregorian", 0x4E4, 0x586);
+
+            ushort Calendar = BinaryPrimitives.ReadUInt16LittleEndian(Data.Slice(CalendarTypeOffset, 2));
+            if (Calendar < CalendarNames.Length && CalendarNames[Calendar].Length != 0)
+                ReadDateFormats(Instance, Data, Explicit.FullPath + @"\" + CalendarNames[Calendar], 0x2BE, 0x402);
+        }
+
+        private static void ReadDateFormats(BinaryEmulator Instance, Span<byte> Data, string KeyPath, int ShortDateOffset, int LongDateOffset)
+        {
+            WinRegKey Key = Instance.WinHelper.ResolveRegistryKey(KeyPath);
+            if (Key == null)
+                return;
+
+            if (TryQueryString(Instance, Key, "Short Date", out ReadOnlySpan<byte> Text, out int Length) && (uint)(Length - 2) <= 0x4D)
+                StoreCounted(Data.Slice(ShortDateOffset), 0x50, Text, Length);
+
+            if (TryQueryString(Instance, Key, "Long Date", out Text, out Length) && (uint)(Length - 3) <= 0x4C)
+                StoreCounted(Data.Slice(LongDateOffset), 0x50, Text, Length);
+        }
+
+        // basesrv QueryStringValue.
+        private static bool TryQueryString(BinaryEmulator Instance, WinRegKey Key, string Name, out ReadOnlySpan<byte> Text, out int Length)
+        {
+            Text = default;
+            Length = 0;
+
+            if (!Instance.WinHelper.TryGetRegistryValue(Key, Name, out ValueNode Value) || Value.Type != WinSysHelper.RegSz)
+                return false;
+
+            byte[] Bytes = Value.Data ?? Array.Empty<byte>();
+            if (Bytes.Length > PartialQueryDataLimit || (Bytes.Length & 1) != 0 || Bytes.Length <= 2)
+                return false;
+
+            Length = Bytes.Length / 2 - 1;
+            Text = Bytes;
+            return BinaryPrimitives.ReadUInt16LittleEndian(Text.Slice(Length * 2, 2)) == 0;
+        }
+
+        // ntdll wcsncpy_s.
+        private static bool CopyString(Span<byte> Destination, int DestinationChars, ReadOnlySpan<byte> Source, int Count)
+        {
+            if (Count == 0)
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(Destination, 0);
+                return true;
+            }
+
+            int Available = DestinationChars;
+            int Remaining = Count;
+            int Index = 0;
+            while (true)
+            {
+                ushort c = BinaryPrimitives.ReadUInt16LittleEndian(Source.Slice(Index * 2, 2));
+                BinaryPrimitives.WriteUInt16LittleEndian(Destination.Slice(Index * 2, 2), c);
+                Index++;
+                if (c == 0)
+                    return true;
+                if (--Available == 0)
+                    break;
+                if (--Remaining == 0)
+                {
+                    BinaryPrimitives.WriteUInt16LittleEndian(Destination.Slice(Index * 2, 2), 0);
+                    return true;
+                }
+            }
+
+            BinaryPrimitives.WriteUInt16LittleEndian(Destination, 0);
+            return false;
+        }
+
+        // basesrv CalendarIdFromString. ntdll _wcsicmp folds A to Z only.
+        private static ushort CalendarIdFromString(ReadOnlySpan<byte> Text)
+        {
+            for (ushort Id = 0; Id < CalendarNames.Length; Id++)
+            {
+                string Name = CalendarNames[Id];
+                int i = 0;
+                while (true)
+                {
+                    char Left = i < Name.Length ? Name[i] : '\0';
+                    char Right = (char)BinaryPrimitives.ReadUInt16LittleEndian(Text.Slice(i * 2, 2));
+                    if (Left >= 'A' && Left <= 'Z')
+                        Left = (char)(Left + 32);
+                    if (Right >= 'A' && Right <= 'Z')
+                        Right = (char)(Right + 32);
+                    if (Left != Right)
+                        break;
+                    if (Left == '\0')
+                        return Id;
+                    i++;
+                }
+            }
+
+            return 0;
         }
     }
 }

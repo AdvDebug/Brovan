@@ -131,7 +131,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static bool IsWindowsSharedSection(string FullName)
+        internal static bool IsWindowsSharedSection(string FullName)
         {
             if (string.IsNullOrEmpty(FullName))
                 return false;

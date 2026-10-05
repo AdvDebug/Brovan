@@ -388,18 +388,26 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int OffsetTickCountMultiplier = 0x004;
         private const int OffsetInterruptTime = 0x008;
         private const int OffsetSystemTime = 0x014;
+        private const int OffsetTimeZoneBias = 0x020;
         private const int OffsetNtSystemRoot = 0x030;
+        private const int OffsetTimeZoneId = 0x240;
         private const int OffsetNtBuildNumber = 0x260;
         private const int OffsetNtProductType = 0x264;
         private const int OffsetProductTypeIsValid = 0x268;
         private const int OffsetNtMajorVersion = 0x26C;
         private const int OffsetNtMinorVersion = 0x270;
         private const int OffsetProcessorFeatures = 0x274;
+        private const int OffsetSuiteMask = 0x2D0;
         private const int OffsetCyclesPerYield = 0x2D6;
+        private const int OffsetActiveConsoleId = 0x2D8;
+        private const int OffsetConsoleSessionForegroundProcessId = 0x338;
+        private const int OffsetUserModeGlobalLogger = 0x380;
+        private const int UserModeGlobalLoggerLength = 0x20;
         private const int OffsetXStateConfiguration = 0x3D8;
         private const int OffsetQpcFrequency = 0x300;
         private const int OffsetQpcBias = 0x3B8;
         private const int OffsetQpcData = 0x3C6;
+        private const int OffsetSharedDataFlags = 0x2F0;
 
         // QpcData bit 0 lets ntdll answer QueryPerformanceCounter in user mode, bit 1 sends it through the
         // hypervisor shared page rather than a bare RDTSC. The remaining bits pick a serialising fence and
@@ -432,6 +440,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <c>RtlpHypervisorSharedUserVa</c>, or zero when the guest has to use the syscall.
         /// </summary>
         public ulong HypervisorSharedPage { get; private set; }
+
+        public uint SharedDataFlags { get; private set; }
 
         private bool UsesSharedPage => Emulator._emulator.TimestampCounterIsEmulated || Emulator._emulator.TimestampCounterFrequency != 0;
 
@@ -506,6 +516,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             byte[] Page = BuildInitialPage();
             BaseInterruptTime = ReadKsystemTimeFromBuffer(Page, OffsetInterruptTime);
+            SharedDataFlags = BinaryPrimitives.ReadUInt32LittleEndian(Page.AsSpan(OffsetSharedDataFlags, 4));
             LastUpdateTimestamp = 0;
 
             RefreshedOnRead = Emulator._emulator.MapMmio(Emulator.KUSER_SHARED_DATA, PageSize, FillTimeFields, IgnoreWrite);
@@ -718,6 +729,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 // SystemTime
                 WriteInt64(OffsetSystemTime, Emulator.GetEmulatedSystemTimeFileTimeUtc());
 
+                long TimeZoneBias = NtQuerySystemInformation.CurrentTimeZoneBias(Emulator, out uint TimeZoneId);
+                WriteKsystemTimeToSpan(Page, OffsetTimeZoneBias, unchecked((ulong)TimeZoneBias));
+                WriteUInt32(OffsetTimeZoneId, TimeZoneId);
+
                 if (Emulator._binary.Architecture != BinaryArchitecture.x86)
                     WriteInt64(OffsetQpcFrequency, QpcFrequency);
 
@@ -754,13 +769,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(OffsetTickCountMultiplier, 4), TickCountMultiplier);
+            BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(OffsetSuiteMask, 4), WindowsVersionInfo.SuiteMask);
+
+            BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(OffsetActiveConsoleId, 4), WinToken.InteractiveSessionId);
+
+            // Host ETW loggers and host process id.
+            Array.Clear(Page, OffsetUserModeGlobalLogger, UserModeGlobalLoggerLength);
+            Array.Clear(Page, OffsetConsoleSessionForegroundProcessId, 8);
 
             Page[OffsetQpcData] = UsesSharedPage ? QpcBypassThroughSharedPage : (byte)0;
             Page[OffsetQpcData + 1] = 0;
 
             Array.Clear(Page, OffsetQpcBias, 8);
 
-            string SystemRoot = "C:\\Windows";
+            string SystemRoot = WindowsVersionInfo.SystemRoot;
             Array.Clear(Page, OffsetNtSystemRoot, Math.Min(Page.Length - OffsetNtSystemRoot, 520));
             Span<byte> SystemRootBytes = Page.AsSpan(OffsetNtSystemRoot, Encoding.Unicode.GetByteCount(SystemRoot) + 2);
             Encoding.Unicode.GetBytes(SystemRoot.AsSpan(), SystemRootBytes);

@@ -25,12 +25,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const string BuildLab = "26200.ge_release.260414-0000";
         public const string BuildLabEx = "26200.8246.amd64fre.ge_release.260414-0000";
 
-        public static void WriteSharedDataVersionInformation(BinaryEmulator Instance, ulong Address)
-        {
-            Instance._emulator.WriteMemory(Address + 0x00, 1u);
-            Instance._emulator.WriteMemory(Address + 0x10, ProductTypeWinNt);
-            Instance._emulator.WriteMemory(Address + 0x14, SuiteMask);
-        }
+        public const string SystemRoot = "C:\\WINDOWS";
 
         public static void WriteBuildVersionInformation(BinaryEmulator Instance, ulong Address)
         {

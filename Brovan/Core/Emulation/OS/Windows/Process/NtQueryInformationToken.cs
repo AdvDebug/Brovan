@@ -94,11 +94,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             static byte[] SidLocalSystem() => BuildSid(1, 5, 18);
             static byte[] SidIntegrity(uint Rid) => BuildSid(1, 16, Rid);
-            static byte[] SidFallbackUser() => BuildSid(1, 5, 21, 1000, 1000, 1000, 1001);
 
             WinProcess OwnerProcess = Instance.WinHelper.WinProcesses.FirstOrDefault(p => p.PID == (uint)Token.OwningProcessId);
 
-            byte[] UserSid = SidFallbackUser();
+            byte[] UserSid = InteractiveUserSid();
             if (Token.IsAnonymous)
             {
                 UserSid = BuildSid(1, 5, 7);
@@ -465,6 +464,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
         }
+
+        internal static byte[] InteractiveUserSid() => BuildSid(1, 5, 21, 1000, 1000, 1000, 1001);
 
         internal static byte[] BuildSid(byte Revision, ulong IdentifierAuthority, params uint[] SubAuthorities)
         {

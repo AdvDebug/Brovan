@@ -1795,6 +1795,7 @@ namespace Brovan.Core.Emulation
                     return ToDispatchTable(SyscallDictionary);
 
                 RegisterSyscall(0x2000, nameof(Wow64UserConnectToServer), false);
+                RegisterSyscall(0x300A, nameof(Wow64BasepNlsUpdateCacheCount), false);
                 RegisterSyscall(0x300B, nameof(Wow64BasepNlsGetUserInfo), false);
                 RegisterSyscall(0x300E, nameof(Wow64CsrBasepCreateProcess2), false);
                 RegisterSyscall(0x300F, nameof(Wow64BasepCreateActCtx), false);

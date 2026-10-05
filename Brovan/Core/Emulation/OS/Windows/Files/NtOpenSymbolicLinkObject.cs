@@ -49,16 +49,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static string ResolveSymbolicLinkTarget(BinaryEmulator Instance, ulong RootDirectory, string Name, string FullName)
         {
             if (RootDirectory == HandleManager.KNOWN_DLLS_DIRECTORY && Name.Equals("KnownDllPath", StringComparison.OrdinalIgnoreCase))
-                return @"C:\Windows\System32";
+                return WindowsVersionInfo.SystemRoot + "\\System32";
 
             if (RootDirectory == HandleManager.KNOWN_DLLS32_DIRECTORY && Name.Equals("KnownDllPath", StringComparison.OrdinalIgnoreCase))
-                return @"C:\Windows\SysWOW64";
+                return WindowsVersionInfo.SystemRoot + "\\SysWOW64";
 
-            if (FullName.Equals("\\SystemRoot", StringComparison.OrdinalIgnoreCase))
-                return "\\Device\\HarddiskVolume1\\Windows";
-
-            if (FullName.Equals("\\??\\SystemRoot", StringComparison.OrdinalIgnoreCase))
-                return "\\Device\\HarddiskVolume1\\Windows";
+            if (FullName.Equals("\\SystemRoot", StringComparison.OrdinalIgnoreCase) || FullName.Equals("\\??\\SystemRoot", StringComparison.OrdinalIgnoreCase))
+                return WinSysHelper.ToNtDevicePath(WindowsVersionInfo.SystemRoot);
 
             if (FullName.Equals("\\??\\C:", StringComparison.OrdinalIgnoreCase) || FullName.Equals("\\DosDevices\\C:", StringComparison.OrdinalIgnoreCase))
                 return "\\Device\\HarddiskVolume1";
