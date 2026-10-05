@@ -91,6 +91,7 @@ namespace Brovan.Core.Emulation
 
         public const ulong QuirkSlotZapAll = 1UL << 7;
 
+        public const ulong Cr4Pge = 1UL << 7;
         public const ulong Cr4Osxsave = 1UL << 18;
         public const ulong XcrX87 = 1UL << 0;
         public const ulong XcrSse = 1UL << 1;
@@ -104,7 +105,8 @@ namespace Brovan.Core.Emulation
 
         public const uint MsrTsc = 0x10;
 
-        public const uint MemSlotReadOnly = 0x00000001u;
+        // KVM_MEM_READONLY, linux/kvm.h
+        public const uint MemSlotReadOnly = 1u << 1;
 
         public const int ExitUnknown = 0;
         public const int ExitException = 1;

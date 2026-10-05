@@ -114,6 +114,10 @@ namespace Brovan.Core.Emulation
 
             public volatile bool StopRequested;
             public volatile bool Running;
+            public volatile bool InGuest;
+            public long TlbGeneration;
+            public bool TlbFlushPending;
+            public bool TlbFlushOnSyscallReturn;
             public int HostThreadId;
             public int HostTid;
             public bool SingleStepRequested;
@@ -123,8 +127,16 @@ namespace Brovan.Core.Emulation
             public long Binding;
         }
 
-        // The trap page holds hlt at 0 and sysretq at 8.
+        // Trap page: hlt at 0, sysretq at 8, CR3 reload and sysretq at 16.
         private const ulong SyscallReturnOffset = 8;
+        private const ulong FlushingSyscallReturnOffset = 16;
+
+        // mov r10, cr3 / mov cr3, r10 / xor r10d, r10d / sysretq. NT returns from a syscall with R10 zero.
+        private static readonly byte[] FlushingSyscallReturn =
+            { 0x41, 0x0F, 0x20, 0xDA, 0x41, 0x0F, 0x22, 0xDA, 0x45, 0x31, 0xD2, 0x48, 0x0F, 0x07 };
+        private const ulong FlushingSysretOffset = FlushingSyscallReturnOffset + 11;
+
+        private long _tlbGeneration;
 
         private readonly bool _guest64;
         private readonly ushort _userCodeSelector;
@@ -201,6 +213,7 @@ namespace Brovan.Core.Emulation
             public IntPtr OwnedBacking;
             public bool IsAlias;
             public KvmMemoryPermission Permissions;
+            public bool WriteRetained;
         }
 
         private sealed class BackingAllocation
@@ -352,7 +365,7 @@ namespace Brovan.Core.Emulation
                     IsAlias = true,
                     Permissions = perm,
                 });
-                EnsureVirtualMapping(guest);
+                EnsureVirtualMapping(guest, perm);
             }
 
             RebuildMappings();
@@ -454,7 +467,7 @@ namespace Brovan.Core.Emulation
                         Permissions = perm,
                     };
                     SetMappedPage(guest, page);
-                    EnsureVirtualMapping(guest);
+                    EnsureVirtualMapping(guest, perm);
                 }
 
                 RebuildMappings();
@@ -492,8 +505,9 @@ namespace Brovan.Core.Emulation
                 }
 
                 page.Permissions = perm;
+                page.WriteRetained = false;
                 MarkSpanDirty(guest, KvmConstants.PageSize);
-                EnsureVirtualMapping(guest);
+                EnsureVirtualMapping(guest, perm);
             }
 
             RebuildMappings();
@@ -568,18 +582,93 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return false;
 
             KvmMemoryPermission perm = TranslateProtection(protection);
+            bool writable = (perm & KvmMemoryPermission.Write) != 0;
+            bool writeRemoved = false;
+            bool writeAdded = false;
+
             for (ulong off = 0; off < size; off += KvmConstants.PageSize)
             {
-                if (_mappedPages.TryGetValue(address + off, out MappedPage page))
+                ulong guest = address + off;
+                if (!_mappedPages.TryGetValue(guest, out MappedPage page) || page.Permissions == perm)
+                    continue;
+
+                KvmMemoryPermission old = page.Permissions;
+                bool wasWritable = (old & KvmMemoryPermission.Write) != 0;
+
+                if (old == KvmMemoryPermission.None || perm == KvmMemoryPermission.None || (writable && !MapsWritable(page)))
+                    MarkSpanDirty(guest, KvmConstants.PageSize);
+
+                if (wasWritable)
+                    page.WriteRetained = true;
+                page.Permissions = perm;
+
+                if (wasWritable == writable)
+                    continue;
+
+                EnsureVirtualMapping(guest, perm);
+                if (old != KvmMemoryPermission.None && perm != KvmMemoryPermission.None)
                 {
-                    page.Permissions = perm;
-                    MarkSpanDirty(address + off, KvmConstants.PageSize);
+                    writeRemoved |= wasWritable;
+                    writeAdded |= writable;
                 }
             }
 
             RebuildMappings();
+
+            // Granting write needs no shootdown. A stale read-only entry costs one retried fault.
+            if (writeRemoved)
+                ShootDownGuestTlbs();
+            else if (writeAdded)
+                CurrentVp.TlbFlushOnSyscallReturn = true;
+
             _error = KvmErrors.Ok;
             return true;
+        }
+
+        // A memslot stays writable once write is granted and the guest PTE holds the current write bit.
+        // Removing write then needs no slot split, which deletes and refaults the slot.
+        private static bool MapsWritable(MappedPage page)
+            => (page.Permissions & KvmMemoryPermission.Write) != 0 || page.WriteRetained;
+
+        private static uint SlotFlags(MappedPage page)
+            => MapsWritable(page) ? 0 : KvmConstants.MemSlotReadOnly;
+
+        // NT flushes every processor before a protect that removes access returns.
+        private void ShootDownGuestTlbs()
+        {
+            Interlocked.Increment(ref _tlbGeneration);
+
+            VirtualProcessor[] processors = Volatile.Read(ref _processorSnapshot);
+            bool kicked = false;
+            for (int i = 0; i < processors.Length; i++)
+            {
+                if (!processors[i].InGuest)
+                    continue;
+
+                if (!kicked)
+                {
+                    EnsureKickSignal();
+                    kicked = true;
+                }
+                KickProcessor(processors[i]);
+            }
+
+            if (!kicked)
+                return;
+
+            for (int i = 0; i < processors.Length; i++)
+            {
+                SpinWait spin = default;
+                while (processors[i].InGuest)
+                    spin.SpinOnce(-1);
+            }
+        }
+
+        // KVM flushes the guest TLB on a CR4.PGE change, not on an unchanged CR3 write. No page is global.
+        private static void FlushGuestTlbOnEntry(ref LinuxKvmRun run)
+        {
+            run.Sregs.Cr4 ^= KvmConstants.Cr4Pge;
+            run.DirtyRegs |= KvmConstants.SyncSpecialRegisters;
         }
 
         public bool WriteMemory(ulong address, byte[] value, uint length = 0)
@@ -1036,11 +1125,22 @@ namespace Brovan.Core.Emulation
 
                     RefreshMmioBackedRegions();
 
-                    if (vp.InSyscallStub) PrepareSyscallReturn(vp, ref run);
+                    long tlbGeneration = Volatile.Read(ref _tlbGeneration);
+                    bool flushTlb = vp.TlbFlushPending || vp.TlbGeneration != tlbGeneration;
+
+                    if (vp.InSyscallStub) PrepareSyscallReturn(vp, ref run, flushTlb || vp.TlbFlushOnSyscallReturn);
+                    vp.TlbFlushOnSyscallReturn = false;
+
+                    if (flushTlb)
+                    {
+                        if (!vp.InSyscallStub) FlushGuestTlbOnEntry(ref run);
+                        vp.TlbFlushPending = false;
+                        vp.TlbGeneration = tlbGeneration;
+                    }
 
                     int rc = RunProcessor(vp, releaseRunLock, out int errno);
 
-                    if (vp.InSyscallStub) CompleteSyscallReturn(vp, ref run);
+                    if (vp.InSyscallStub) CompleteSyscallReturn(vp, ref run, flushTlb);
 
                     if (vp.MmioCompletionPending)
                     {
@@ -1125,6 +1225,7 @@ namespace Brovan.Core.Emulation
         {
             int rc;
             vp.Running = true;
+            vp.InGuest = true;
             if (releaseRunLock) Monitor.Exit(_runLock);
             try
             {
@@ -1133,6 +1234,7 @@ namespace Brovan.Core.Emulation
             }
             finally
             {
+                vp.InGuest = false;
                 if (releaseRunLock) Monitor.Enter(_runLock);
                 vp.Running = false;
             }
@@ -1548,15 +1650,6 @@ namespace Brovan.Core.Emulation
             if ((protection & MemoryProtection.Write) != 0) perm |= KvmMemoryPermission.Write;
             if ((protection & MemoryProtection.Execute) != 0) perm |= KvmMemoryPermission.Execute;
             return perm;
-        }
-
-        private static uint ToKvmMapFlags(KvmMemoryPermission permissions)
-        {
-            if (permissions == KvmMemoryPermission.None) return 0;
-            uint flags = 0;
-            if ((permissions & KvmMemoryPermission.Write) == 0)
-                flags |= KvmConstants.MemSlotReadOnly;
-            return flags;
         }
 
         private static bool ExceptionHasErrorCode(uint vector)
@@ -2210,6 +2303,8 @@ namespace Brovan.Core.Emulation
                     code[SyscallReturnOffset] = 0x48;
                     code[SyscallReturnOffset + 1] = 0x0F;
                     code[SyscallReturnOffset + 2] = 0x07;
+                    for (int i = 0; i < FlushingSyscallReturn.Length; i++)
+                        code[(int)FlushingSyscallReturnOffset + i] = FlushingSyscallReturn[i];
                 }
             }
         }
@@ -2330,13 +2425,13 @@ namespace Brovan.Core.Emulation
                 _pageTableViews[pageGpa] = page.HostPage;
 
                 if (mapIntoGuest)
-                    EnsureVirtualMapping(pageGpa);
+                    EnsureVirtualMapping(pageGpa, permissions);
             }
 
             return baseGpa;
         }
 
-        private void EnsureVirtualMapping(ulong guestAddress)
+        private void EnsureVirtualMapping(ulong guestAddress, KvmMemoryPermission permissions)
         {
             ulong pageBase = guestAddress & ~KvmConstants.PageMask;
             int pml4Index = (int)((pageBase >> 39) & 0x1FF);
@@ -2352,10 +2447,10 @@ namespace Brovan.Core.Emulation
             unsafe
             {
                 ulong* pt = (ulong*)ptPtr;
-                pt[ptIndex] = pageBase
-                    | KvmConstants.PageTableEntryPresent
-                    | KvmConstants.PageTableEntryWritable
-                    | KvmConstants.PageTableEntryUser;
+                ulong flags = KvmConstants.PageTableEntryPresent | KvmConstants.PageTableEntryUser;
+                if ((permissions & KvmMemoryPermission.Write) != 0)
+                    flags |= KvmConstants.PageTableEntryWritable;
+                Volatile.Write(ref pt[ptIndex], pageBase | flags);
             }
         }
 
@@ -2551,7 +2646,7 @@ namespace Brovan.Core.Emulation
                 }
                 else
                 {
-                    flags = ToKvmMapFlags(page.Permissions);
+                    flags = SlotFlags(page);
                 }
                 if (flags != slot.Flags) return false;
             }
@@ -2609,7 +2704,7 @@ namespace Brovan.Core.Emulation
                 }
 
                 long runHostBaseLong = page.HostPage.ToInt64();
-                uint runFlags = ToKvmMapFlags(page.Permissions);
+                uint runFlags = SlotFlags(page);
                 ulong runSize = KvmConstants.PageSize;
 
                 int j = i + 1;
@@ -2618,7 +2713,7 @@ namespace Brovan.Core.Emulation
                     if (sortedKeys[j] != runAddress + runSize) break;
                     if (anyKept && _keptSlotStarts.Contains(sortedKeys[j])) break;
                     if (!_mappedPages.TryGetValue(sortedKeys[j], out MappedPage next) || next == null) break;
-                    if (next.Permissions != page.Permissions) break;
+                    if (next.Permissions == KvmMemoryPermission.None || SlotFlags(next) != runFlags) break;
                     if (anyTrapped && _trappedPages.ContainsKey(sortedKeys[j])) break;
                     if (next.HostPage.ToInt64() != runHostBaseLong + (long)runSize) break;
                     runSize += KvmConstants.PageSize;
@@ -2748,14 +2843,14 @@ namespace Brovan.Core.Emulation
                 }
 
                 long runHostBaseLong = page.HostPage.ToInt64();
-                uint runFlags = ToKvmMapFlags(page.Permissions);
+                uint runFlags = SlotFlags(page);
                 ulong runSize = KvmConstants.PageSize;
 
                 while (address + runSize < spanEnd)
                 {
                     if (anyKept && _keptSlotStarts.Contains(address + runSize)) break;
                     if (!_mappedPages.TryGetValue(address + runSize, out MappedPage next) || next == null) break;
-                    if (next.Permissions != page.Permissions) break;
+                    if (next.Permissions == KvmMemoryPermission.None || SlotFlags(next) != runFlags) break;
                     if (next.HostPage == IntPtr.Zero) break;
                     if (anyTrapped && _trappedPages.ContainsKey(address + runSize)) break;
                     if (next.HostPage.ToInt64() != runHostBaseLong + (long)runSize) break;
@@ -3231,7 +3326,24 @@ namespace Brovan.Core.Emulation
         private bool HandleExceptionTrap(ulong stubRip)
         {
             ReadExceptionFrame(stubRip, restoreSregs: true, out uint vector, out ulong errorCode);
+            if (vector == 14 && IsStaleWriteFault(errorCode))
+                return true;
             return HandleException(vector, (uint)errorCode);
+        }
+
+        // A write fault can hit a stale read-only TLB entry after write is granted. The #PF already dropped it.
+        private bool IsStaleWriteFault(ulong errorCode)
+        {
+            const ulong PresentAndWrite = 0x3;
+            if ((errorCode & PresentAndWrite) != PresentAndWrite)
+                return false;
+
+            ulong page = ReadRegister(Registers.UC_X86_REG_CR2) & ~KvmConstants.PageMask;
+            if (!_mappedPages.TryGetValue(page, out MappedPage mapped) || (mapped.Permissions & KvmMemoryPermission.Write) == 0)
+                return false;
+
+            EnsureVirtualMapping(page, mapped.Permissions);
+            return true;
         }
 
         private void ReadExceptionFrame(ulong stubRip, bool restoreSregs, out uint vector, out ulong errorCode)
@@ -3261,8 +3373,9 @@ namespace Brovan.Core.Emulation
             ulong frameRsp = BitConverter.ToUInt64(frameBytes.Slice(24));
             ulong frameSs = BitConverter.ToUInt64(frameBytes.Slice(32));
 
-            // A fault on the trap page's sysretq belongs to the user address it was returning to.
-            if (_guest64 && frameRip == _syscallTrapPageGpa + SyscallReturnOffset)
+            // A fault on either sysretq of the trap page belongs to the user address it was returning to.
+            if (_guest64 && (frameRip == _syscallTrapPageGpa + SyscallReturnOffset
+                             || frameRip == _syscallTrapPageGpa + FlushingSysretOffset))
             {
                 frameRip = regs.Rcx;
                 frameRflags = regs.R11;
@@ -3371,7 +3484,7 @@ namespace Brovan.Core.Emulation
         }
 
         // sysretq takes RIP from RCX and RFLAGS from R11, which is what NT leaves in them.
-        private void PrepareSyscallReturn(VirtualProcessor vp, ref LinuxKvmRun run)
+        private void PrepareSyscallReturn(VirtualProcessor vp, ref LinuxKvmRun run, bool flushTlb)
         {
             if (vp.SingleStepRequested)
                 run.DirtyRegs |= KvmConstants.SyncSpecialRegisters;
@@ -3385,18 +3498,32 @@ namespace Brovan.Core.Emulation
             ref LinuxKvmRegisters regs = ref run.Regs;
             regs.Rcx = regs.Rip;
             regs.R11 = regs.Rflags;
-            regs.Rip = _syscallTrapPageGpa + SyscallReturnOffset;
+            regs.Rip = _syscallTrapPageGpa + (flushTlb ? FlushingSyscallReturnOffset : SyscallReturnOffset);
             run.DirtyRegs |= KvmConstants.SyncGeneralRegisters;
         }
 
-        // A run that ended before guest entry leaves RIP on the sysretq.
-        private void CompleteSyscallReturn(VirtualProcessor vp, ref LinuxKvmRun run)
+        // A run that ended before guest entry leaves RIP in the stub. Before the CR3 reload, the flush is still owed.
+        private void CompleteSyscallReturn(VirtualProcessor vp, ref LinuxKvmRun run, bool flushRequired)
         {
             ref LinuxKvmRegisters regs = ref run.Regs;
-            if (regs.Rip != _syscallTrapPageGpa + SyscallReturnOffset)
+            ulong flushingStub = _syscallTrapPageGpa + FlushingSyscallReturnOffset;
+            bool inFlushingStub = regs.Rip >= flushingStub && regs.Rip <= _syscallTrapPageGpa + FlushingSysretOffset;
+            if (regs.Rip != _syscallTrapPageGpa + SyscallReturnOffset && !inFlushingStub)
             {
                 vp.InSyscallStub = false;
                 return;
+            }
+
+            if (inFlushingStub)
+            {
+                if (regs.Rip < flushingStub + 8)
+                {
+                    if (flushRequired)
+                        vp.TlbFlushPending = true;
+                    else
+                        vp.TlbFlushOnSyscallReturn = true;
+                }
+                regs.R10 = 0;
             }
 
             regs.Rip = regs.Rcx;

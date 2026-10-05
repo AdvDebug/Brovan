@@ -1559,7 +1559,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     int Right = Math.Min(Rect.Right, Bitmap.Width);
                     for (int Row = Math.Max(Rect.Top, 0); Row < Math.Min(Rect.Bottom, Bitmap.Height) && Left < Right; Row++)
                     {
-                        if (!TryWriteBitmapRow(Instance, Bitmap, Row, Left, Right - Left, Pixels.Slice(Row * Bitmap.Width + Left, Right - Left)))
+                        if (!TryWriteBitmapRow(Instance, Bitmap, Row, Left, Right - Left, Pixels.Slice(Row * Bitmap.Width + Left, Right - Left), default))
                             return false;
                     }
                 }
@@ -2499,34 +2499,24 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int Bytes = Width * BytesPerPixel;
             ulong Address = BitmapRowAddress(Bitmap, Row) + (ulong)(X * BytesPerPixel);
 
+            Span<byte> Line = MemoryMarshal.AsBytes(Destination.Slice(0, Width));
+            if (!Instance.ReadMemory(Address, Line, (uint)Bytes))
+                return false;
+
             if (BytesPerPixel == 4)
-            {
-                Span<byte> Line = MemoryMarshal.AsBytes(Destination.Slice(0, Width));
-                return Instance.ReadMemory(Address, Line, (uint)Bytes);
-            }
-
-            byte[] Rented = ArrayPool<byte>.Shared.Rent(Bytes);
-            try
-            {
-                Span<byte> Line = Rented.AsSpan(0, Bytes);
-                if (!Instance.ReadMemory(Address, Line, (uint)Bytes))
-                    return false;
-
-                for (int Column = 0; Column < Width; Column++)
-                {
-                    int Offset = Column * 3;
-                    Destination[Column] = (uint)(Line[Offset] | (Line[Offset + 1] << 8) | (Line[Offset + 2] << 16));
-                }
-
                 return true;
-            }
-            finally
+
+            // Widen in place from the end. The packed bytes overlap the front of Destination.
+            for (int Column = Width - 1; Column >= 0; Column--)
             {
-                ArrayPool<byte>.Shared.Return(Rented);
+                int Offset = Column * 3;
+                Destination[Column] = (uint)(Line[Offset] | (Line[Offset + 1] << 8) | (Line[Offset + 2] << 16));
             }
+
+            return true;
         }
 
-        private static bool TryWriteBitmapRow(BinaryEmulator Instance, in Win32kBitmap Bitmap, int Row, int X, int Width, ReadOnlySpan<uint> Source)
+        private static bool TryWriteBitmapRow(BinaryEmulator Instance, in Win32kBitmap Bitmap, int Row, int X, int Width, ReadOnlySpan<uint> Source, Span<byte> Packed)
         {
             int BytesPerPixel = Bitmap.BitsPerPixel / 8;
             int Bytes = Width * BytesPerPixel;
@@ -2535,25 +2525,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (BytesPerPixel == 4)
                 return Instance.WriteMemory(Address, MemoryMarshal.AsBytes(Source.Slice(0, Width)));
 
-            byte[] Rented = ArrayPool<byte>.Shared.Rent(Bytes);
-            try
+            Span<byte> Line = Packed.Slice(0, Bytes);
+            for (int Column = 0; Column < Width; Column++)
             {
-                Span<byte> Line = Rented.AsSpan(0, Bytes);
-                for (int Column = 0; Column < Width; Column++)
-                {
-                    uint Pixel = Source[Column];
-                    int Offset = Column * 3;
-                    Line[Offset] = (byte)Pixel;
-                    Line[Offset + 1] = (byte)(Pixel >> 8);
-                    Line[Offset + 2] = (byte)(Pixel >> 16);
-                }
+                uint Pixel = Source[Column];
+                int Offset = Column * 3;
+                Line[Offset] = (byte)Pixel;
+                Line[Offset + 1] = (byte)(Pixel >> 8);
+                Line[Offset + 2] = (byte)(Pixel >> 16);
+            }
 
-                return Instance.WriteMemory(Address, Line);
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(Rented);
-            }
+            return Instance.WriteMemory(Address, Line);
         }
 
         internal static bool TryReadBitmapBlock(BinaryEmulator Instance, in Win32kBitmap Bitmap, int X, int Y, int Width, int Height, Span<uint> Destination)
@@ -2640,6 +2622,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             bool Unscaled = SourceWidth == Width;
 
             uint[] Rented = ArrayPool<uint>.Shared.Rent(Span);
+            byte[] Packed = Bitmap.BitsPerPixel == 24 ? ArrayPool<byte>.Shared.Rent(Span * 3) : null;
             try
             {
                 System.Span<uint> Line = Rented.AsSpan(0, Span);
@@ -2649,7 +2632,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Line.Fill(Copy ? Source[0] & 0x00FFFFFF : ApplyRop(Index, PatternPixel, Source[0], 0));
                     for (int Row = Top; Row < Bottom; Row++)
                     {
-                        if (!TryWriteBitmapRow(Instance, Bitmap, Row, Left, Span, Line))
+                        if (!TryWriteBitmapRow(Instance, Bitmap, Row, Left, Span, Line, Packed))
                             return false;
                     }
 
@@ -2671,7 +2654,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         Line[Column] = Copy ? Pixel & 0x00FFFFFF : ApplyRop(Index, PatternPixel, Pixel, ReadDestination ? Line[Column] : 0);
                     }
 
-                    if (!TryWriteBitmapRow(Instance, Bitmap, Row, Left, Span, Line))
+                    if (!TryWriteBitmapRow(Instance, Bitmap, Row, Left, Span, Line, Packed))
                         return false;
                 }
 
@@ -2680,6 +2663,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             finally
             {
                 ArrayPool<uint>.Shared.Return(Rented);
+                if (Packed != null)
+                    ArrayPool<byte>.Shared.Return(Packed);
             }
         }
 

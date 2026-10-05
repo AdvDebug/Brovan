@@ -86,11 +86,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
-            if (WarnWrite(FileObj.Path, out string WarnData))
-            {
-                if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
-                    Instance.TriggerEventMessage($"[!] The emulated program tried to write to {WarnData}", LogFlags.Suspicious);
-            }
+            if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0 && WarnWrite(FileObj.Path, out string WarnData))
+                Instance.TriggerEventMessage($"[!] The emulated program tried to write to {WarnData}", LogFlags.Suspicious);
 
             WindowsFileStream Stream = FileObj.GetFileStream(true);
             if (Stream == null)

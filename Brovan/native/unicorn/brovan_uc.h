@@ -364,5 +364,6 @@ void brov_arm_budget(struct uc_struct *uc, size_t count);
 uint32_t brov_budget_mode_wanted(struct uc_struct *uc);
 uint32_t brov_access_exit_check_elided(struct uc_struct *uc);
 uint64_t brov_tsc_now(struct uc_struct *uc);
+bool brov_mem_protect_unchanged(struct uc_struct *uc, uint64_t address, uint64_t size, uint32_t perms);
 
 #endif /* BROVAN_UC_H */

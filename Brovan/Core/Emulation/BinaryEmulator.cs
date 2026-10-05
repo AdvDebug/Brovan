@@ -952,26 +952,6 @@ namespace Brovan.Core.Emulation
                 TriggerEventMessage($"[DBG] {Message}", LogFlags.General);
         }
 
-        /// <summary>
-        /// Emits an internal emulator debug diagnostic when debug mode is enabled and the message is expensive to build.
-        /// </summary>
-        internal void TriggerDebugMessage(Func<string> MessageFactory)
-        {
-            if (!Debug || MessageFactory == null)
-                return;
-
-            try
-            {
-                if ((Settings.Flags & LogFlags.General) != 0)
-                    TriggerEventMessage($"[DBG] {MessageFactory()}", LogFlags.General);
-            }
-            catch (Exception ex)
-            {
-                if ((Settings.Flags & LogFlags.General) != 0)
-                    TriggerEventMessage($"[DBG] debug message failed: {ex.GetType().Name}: {ex.Message}", LogFlags.General);
-            }
-        }
-
         private const ulong PageSize = 0x1000;
 
         public static ulong AlignUp(ulong Value, ulong Align)
@@ -1517,11 +1497,13 @@ namespace Brovan.Core.Emulation
                     }
 
                     AddMemoryRegion(Region);
-                    TriggerDebugMessage(() => $"memory: mapped base=0x{AlignedAddress:X} size=0x{Size:X} aligned=0x{AlignedSize:X} prot={Protection}");
+                    if (Debug)
+                        TriggerDebugMessage($"memory: mapped base=0x{AlignedAddress:X} size=0x{Size:X} aligned=0x{AlignedSize:X} prot={Protection}");
                     return AlignedAddress;
                 }
 
-                TriggerDebugMessage(() => $"memory: map failed base=0x{AlignedAddress:X} size=0x{AlignedSize:X} prot={Protection} error={GetLastError()}");
+                if (Debug)
+                    TriggerDebugMessage($"memory: map failed base=0x{AlignedAddress:X} size=0x{AlignedSize:X} prot={Protection} error={GetLastError()}");
                 return 0;
             }
             else
@@ -1555,14 +1537,16 @@ namespace Brovan.Core.Emulation
                     }
 
                     AddMemoryRegion(Region);
-                    TriggerDebugMessage(() => $"memory: mapped unique base=0x{CurrentAddress:X} size=0x{Size:X} aligned=0x{AlignedSize:X} prot={Protection}");
+                    if (Debug)
+                        TriggerDebugMessage($"memory: mapped unique base=0x{CurrentAddress:X} size=0x{Size:X} aligned=0x{AlignedSize:X} prot={Protection}");
                     return CurrentAddress;
                 }
 
                 SearchFrom = CurrentAddress + AlignedSize;
             }
 
-            TriggerDebugMessage(() => $"memory: unique map failed size=0x{AlignedSize:X} prot={Protection}");
+            if (Debug)
+                TriggerDebugMessage($"memory: unique map failed size=0x{AlignedSize:X} prot={Protection}");
             return 0;
         }
 
@@ -1729,14 +1713,16 @@ namespace Brovan.Core.Emulation
         private void PrivilegedInstructionHandler()
         {
             SchedulerRefreshRequested = true;
-            TriggerDebugMessage(() => $"cpu: privileged instruction at 0x{ReadRegister(IPRegister):X}");
+            if (Debug)
+                TriggerDebugMessage($"cpu: privileged instruction at 0x{ReadRegister(IPRegister):X}");
             Guest.HandlePrivilegedInstruction(this);
         }
 
         private void InvalidInstructionHandler()
         {
             SchedulerRefreshRequested = true;
-            TriggerDebugMessage(() => $"cpu: invalid instruction at 0x{ReadRegister(IPRegister):X}");
+            if (Debug)
+                TriggerDebugMessage($"cpu: invalid instruction at 0x{ReadRegister(IPRegister):X}");
             Guest.HandleInvalidInstruction(this);
         }
 
@@ -1787,7 +1773,8 @@ namespace Brovan.Core.Emulation
         private void StopAfterSyntheticInstruction(ulong NextIp)
         {
             SchedulerRefreshRequested = true;
-            TriggerDebugMessage(() => $"cpu: synthetic instruction stop nextIp=0x{NextIp:X}");
+            if (Debug)
+                TriggerDebugMessage($"cpu: synthetic instruction stop nextIp=0x{NextIp:X}");
             WriteRegister(IPRegister, NextIp);
             _emulator.StopEmulation();
         }
@@ -3573,7 +3560,8 @@ namespace Brovan.Core.Emulation
         public bool StopEmulation()
         {
             SchedulerRefreshRequested = true;
-            TriggerDebugMessage(() => $"emu: stop requested threads={Threads.Count}");
+            if (Debug)
+                TriggerDebugMessage($"emu: stop requested threads={Threads.Count}");
             foreach (EmulatedThread EmuThread in Threads.Values)
             {
                 EmuThread.State = EmulatedThreadState.Terminated;

@@ -87,6 +87,10 @@ insert-in-body|qemu/accel/tcg/cputlb.c|static void notdirty_write(CPUState *cpu,
 # --- one host page mapped at several guest addresses shares its translated blocks
 insert-in-body|qemu/accel/tcg/cputlb.c|void tlb_protect_code(struct uc_struct *uc, ram_addr_t ram_addr)|    brov_alias_protect_code(uc, ram_addr);
 insert-before|uc.c|if (remove_exec) {|    uc->tcg_flush_tlb(uc); /* brov: a cached TLB entry may predate these perms */
+
+# --- a protect splits only regions whose permissions change, since regions never merge
+insert-before|uc.c|// Now we know entire region is mapped, so change permissions|    if (brov_mem_protect_unchanged(uc, address, size, perms)) { restore_jit_state(uc); return UC_ERR_OK; }
+replace-all|uc.c|if (!split_region(uc, mr, addr, len, false)) {|if (mr->perms != perms && !split_region(uc, mr, addr, len, false)) {
 replace-all|uc.c|if (count > 0 && uc->count_hook == 0) {|if (count > 0 && uc->count_hook == 0 && !uc->brov_budget_mode) {
 
 # --- no exit poll after every guest memory access, faults leave the helper ---

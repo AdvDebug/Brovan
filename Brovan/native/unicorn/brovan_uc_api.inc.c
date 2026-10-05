@@ -828,3 +828,22 @@ void brov_jmp_clear_all(struct uc_struct *uc)
         uc->brov_jmp_dirty = 0;
     }
 }
+
+bool brov_mem_protect_unchanged(struct uc_struct *uc, uint64_t address, uint64_t size, uint32_t perms)
+{
+    uint64_t addr = address;
+    uint64_t count = 0;
+
+    while (count < size) {
+        MemoryRegion *mr = uc->memory_mapping(uc, addr);
+        uint64_t len;
+
+        if (mr == NULL || mr->perms != perms) {
+            return false;
+        }
+        len = memory_region_len(uc, mr, addr, size - count);
+        count += len;
+        addr += len;
+    }
+    return true;
+}

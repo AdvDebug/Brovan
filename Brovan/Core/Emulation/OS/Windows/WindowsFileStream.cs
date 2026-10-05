@@ -397,9 +397,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Handle == null)
                     throw new FileNotFoundException(GuestPath);
 
-                if (position >= RandomAccess.GetLength(Handle))
-                    return 0;
-
                 return RandomAccess.Read(Handle, buffer, position);
             }
         }
