@@ -104,7 +104,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS HandleFilePipeInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation, uint Length, FILE_INFORMATION_CLASS InfoClass)
         {
-            if (File.Pipe == null)
+            bool HostStream = File.HostStream != HostStreamKind.None;
+            if (File.Pipe == null && !HostStream)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -117,7 +118,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
-            if (InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation)
+            if (HostStream && InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation)
+            {
+                Instance._emulator.WriteMemory(FileInformation + 0x00, GuestNamedPipe.FILE_PIPE_BYTE_STREAM_MODE);
+                Instance._emulator.WriteMemory(FileInformation + 0x04, GuestNamedPipe.FILE_PIPE_QUEUE_OPERATION);
+            }
+            else if (HostStream)
+            {
+                Span<byte> Local = stackalloc byte[(int)FilePipeLocalInformationSize];
+                GuestNamedPipe.WriteHostStreamLocalInformation(Local, File.HostStream);
+                Instance._emulator.WriteMemory(FileInformation, Local);
+            }
+            else if (InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation)
             {
                 Instance._emulator.WriteMemory(FileInformation + 0x00, File.Pipe.ReadMode);
                 Instance._emulator.WriteMemory(FileInformation + 0x04, File.Pipe.CompletionMode);

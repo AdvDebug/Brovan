@@ -3,6 +3,7 @@ using System.Linq;
 using System.Text;
 using Brovan;
 using Brovan.Core;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -10,7 +11,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtMapViewOfSection : IWinSyscall
     {
         private const ulong PageSize = 0x1000;
-        private const uint MemReplacePlaceholder = 0x4000;
+        private const uint MemReserve = 0x2000;
+        internal const uint MemReplacePlaceholder = 0x4000;
+        private const uint MemTopDown = 0x100000;
+        private const uint SecNoChange = 0x400000;
+        internal const uint NumaNodeMask = 0x7F;
 
         private static ulong AlignDown(ulong v, ulong a) => v & ~(a - 1);
 
@@ -52,6 +57,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             return ((Win32Protect & ~WinSysHelper.PageTargetsInvalid) & ~Allowed) == 0
                 ? NTSTATUS.STATUS_SUCCESS
                 : NTSTATUS.STATUS_SECTION_PROTECTION;
+        }
+
+        // NT: MEM_RESERVE needs a file-backed section, and a view that replaces a placeholder takes nothing else.
+        private static NTSTATUS CheckDataViewAllocationType(WinSection Section, uint AllocationType, bool ReplacePlaceholder)
+        {
+            uint Allowed = ReplacePlaceholder ? MemReserve : MemReserve | MemTopDown | SecNoChange | NumaNodeMask;
+            if ((AllocationType & ~Allowed) != 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if ((AllocationType & MemReserve) != 0 && string.IsNullOrEmpty(Section.Path))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         internal static WinSection FindSharedSection(BinaryEmulator Instance)
@@ -165,21 +183,25 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
             ulong SectionHandle = Instance.WinHelper.GetArg(0);
             ulong ProcessHandle = Instance.WinHelper.GetArg(1);
             ulong BaseAddressPtr = Instance.WinHelper.GetArg(2);
-            ulong ZeroBits = Instance.WinHelper.GetArg(3);
-            ulong CommitSizePtr = Instance.WinHelper.GetArg(4);
             ulong SectionOffsetPtr = Instance.WinHelper.GetArg(5);
             ulong ViewSizePtr = Instance.WinHelper.GetArg(6);
-            uint InheritDisposition = (uint)Instance.WinHelper.GetArg(7);
             uint AllocationType = (uint)Instance.WinHelper.GetArg(8);
             uint Win32Protect = (uint)Instance.WinHelper.GetArg(9);
 
             // NT: only NtMapViewOfSectionEx replaces a placeholder.
             if ((AllocationType & MemReplacePlaceholder) != 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            return MapView(Instance, SectionHandle, ProcessHandle, BaseAddressPtr, SectionOffsetPtr, ViewSizePtr, AllocationType, Win32Protect, 0, 0, false);
+        }
+
+        internal static NTSTATUS MapView(BinaryEmulator Instance, ulong SectionHandle, ulong ProcessHandle, ulong BaseAddressPtr, ulong SectionOffsetPtr,
+            ulong ViewSizePtr, uint AllocationType, uint Win32Protect, ulong ExtendedParametersPtr, uint ExtendedParameterCount, bool Extended)
+        {
+            using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
 
             // NT checks the protection before either handle.
             int ProtectionMask = WinSysHelper.MakeProtectionMask(Win32Protect & ~WinSysHelper.PageTargetsInvalid);
@@ -239,11 +261,31 @@ namespace Brovan.Core.Emulation.OS.Windows
                 SectionOffset = Instance._emulator.ReadMemoryULong(SectionOffsetPtr);
             }
 
+            NtAllocateVirtualMemory.AddressRequirements Window = NtAllocateVirtualMemory.AddressRequirements.None;
+            bool ReplacePlaceholder = false;
+            if (Extended)
+            {
+                NTSTATUS PlacementStatus = NtMapViewOfSectionEx.ReadPlacement(Instance, ExtendedParametersPtr, ExtendedParameterCount, AllocationType,
+                    RequestedBase, RequestedSize, out Window, out ReplacePlaceholder);
+                if (PlacementStatus != NTSTATUS.STATUS_SUCCESS)
+                    return PlacementStatus;
+
+                AllocationType &= ~MemReplacePlaceholder;
+            }
+
             ulong ReturnedBase = 0;
             ulong ReturnedSize = 0;
 
             if (Section.IsImage)
             {
+                // NT: a placeholder takes only a data view.
+                if (ReplacePlaceholder)
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                // The image loader picks its own base and takes no address window.
+                if (Window.Limited)
+                    return NTSTATUS.STATUS_NOT_SUPPORTED;
+
                 if ((Win32Protect & WinSysHelper.PageTargetsInvalid) != 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -327,8 +369,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            if ((SectionOffset & (WinSysHelper.AllocationGranularity - 1)) != 0 || (RequestedBase & (WinSysHelper.AllocationGranularity - 1)) != 0)
+            // NT: a view that replaces a placeholder may start on any page.
+            ulong Granularity = ReplacePlaceholder ? PageSize : WinSysHelper.AllocationGranularity;
+            if ((SectionOffset & (Granularity - 1)) != 0 || (RequestedBase & (Granularity - 1)) != 0)
                 return NTSTATUS.STATUS_MAPPED_ALIGNMENT;
+
+            NTSTATUS TypeStatus = CheckDataViewAllocationType(Section, AllocationType, ReplacePlaceholder);
+            if (TypeStatus != NTSTATUS.STATUS_SUCCESS)
+                return TypeStatus;
 
             NTSTATUS ProtectStatus = CheckDataViewProtection(Section.Protection, Win32Protect);
             if (ProtectStatus != NTSTATUS.STATUS_SUCCESS)
@@ -340,6 +388,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (SectionOffset >= Section.Size || RequestedSize > SectionEnd - SectionOffset)
                 return NTSTATUS.STATUS_INVALID_VIEW_SIZE;
 
+            if (ReplacePlaceholder && (RequestedBase == 0 || RequestedSize == 0))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
             ReturnedSize = RequestedSize != 0 ? BinaryEmulator.AlignUp(RequestedSize, PageSize) : SectionEnd - SectionOffset;
 
             ulong UserEnd = Instance.UserAddressEnd;
@@ -349,9 +400,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RequestedBase != 0 && ReturnedSize > UserEnd - RequestedBase)
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
-            NTSTATUS MapStatus = MapDataView(Instance, Section, SectionOffset, ReturnedSize, RequestedBase, Win32Protect, out ReturnedBase);
+            if (Window.Limited)
+            {
+                ulong Lowest = Window.Lowest != 0 ? Window.Lowest : NtAllocateVirtualMemory.LowSearchStart;
+                // HighestEndingAddress is inclusive, the search end is not.
+                if (!TryFindViewBase(Instance, SectionOffset, ReturnedSize, Lowest, Window.Highest + 1, out RequestedBase) || RequestedBase + ReturnedSize - 1 > Window.Highest)
+                    return NTSTATUS.STATUS_NO_MEMORY;
+            }
+
+            if (ReplacePlaceholder)
+            {
+                if (!Instance.TryFindMemoryRegionByBase(RequestedBase, out _, out MemoryRegion Placeholder) || !Placeholder.IsPlaceholder || Placeholder.Size != ReturnedSize)
+                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+                Instance.SplitPlaceholder(RequestedBase, RequestedBase + ReturnedSize, true);
+            }
+
+            NTSTATUS MapStatus = MapDataView(Instance, Section, SectionOffset, ReturnedSize, RequestedBase, Win32Protect, out ReturnedBase, ReplacePlaceholder);
             if (MapStatus != NTSTATUS.STATUS_SUCCESS)
+            {
+                if (ReplacePlaceholder && !Instance.ReservePlaceholder(RequestedBase, ReturnedSize))
+                    Utils.LogError($"[NtMapViewOfSectionEx] Placeholder at 0x{RequestedBase:X} size 0x{ReturnedSize:X} lost after a failed map.");
+
                 return MapStatus;
+            }
 
             if (!Instance.WinHelper.WritePointer(BaseAddressPtr, ReturnedBase))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -366,28 +438,29 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // A view congruent to its section offset modulo 2 MiB can use 2 MiB host pages.
-        private static bool TryFindViewBase(BinaryEmulator Instance, ulong SectionOffset, ulong ViewSize, out ulong ViewBase)
+        private static bool TryFindViewBase(BinaryEmulator Instance, ulong SectionOffset, ulong ViewSize, ulong Lowest, ulong Highest, out ulong ViewBase)
         {
             const ulong LargePage = 0x200000;
 
             if (ViewSize >= LargePage)
             {
                 ulong Skew = SectionOffset & (LargePage - 1);
-                if (Instance.TryFindFreeBaseAddress(ViewSize + Skew, LargePage, Instance.BaseAddress, Instance.MaxAddress, out ulong LargeBase))
+                if (Instance.TryFindFreeBaseAddress(ViewSize + Skew, LargePage, Lowest, Highest, out ulong LargeBase))
                 {
                     ViewBase = LargeBase + Skew;
                     return true;
                 }
             }
 
-            return Instance.TryFindFreeBaseAddress(ViewSize, WinSysHelper.AllocationGranularity, Instance.BaseAddress, Instance.MaxAddress, out ViewBase);
+            return Instance.TryFindFreeBaseAddress(ViewSize, WinSysHelper.AllocationGranularity, Lowest, Highest, out ViewBase);
         }
 
         // The caller aligns and bounds SectionOffset and ViewSize.
-        internal static NTSTATUS MapDataView(BinaryEmulator Instance, WinSection Section, ulong SectionOffset, ulong ViewSize, ulong RequestedBase, uint Win32Protect, out ulong ViewBase)
+        internal static NTSTATUS MapDataView(BinaryEmulator Instance, WinSection Section, ulong SectionOffset, ulong ViewSize, ulong RequestedBase, uint Win32Protect,
+            out ulong ViewBase, bool FromPlaceholder = false)
         {
             ViewBase = RequestedBase;
-            if (ViewBase == 0 && !TryFindViewBase(Instance, SectionOffset, ViewSize, out ViewBase))
+            if (ViewBase == 0 && !TryFindViewBase(Instance, SectionOffset, ViewSize, Instance.BaseAddress, Instance.MaxAddress, out ViewBase))
                 return NTSTATUS.STATUS_NO_MEMORY;
 
             uint AllocationProtect = Win32Protect != 0 ? Win32Protect : Section.Protection;
@@ -404,7 +477,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Section.BackingAddress == 0 && SectionOffset == 0 && ViewSize >= Section.Size)
                     Section.BackingAddress = ViewBase;
 
-                Section.AddView(SectionOffset, ViewBase, ViewSize, false, Instance.WinHelper.ConvertWinProtectToInternal(Section.Protection));
+                Section.AddView(SectionOffset, ViewBase, ViewSize, false, Instance.WinHelper.ConvertWinProtectToInternal(Section.Protection), FromPlaceholder);
             }
             else
             {
@@ -418,7 +491,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Mapped)
                     return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
-                Section.AddView(SectionOffset, ViewBase, ViewSize, true, ViewProtection);
+                Section.AddView(SectionOffset, ViewBase, ViewSize, true, ViewProtection, FromPlaceholder);
             }
 
             Instance.WinHelper.TrackSectionRange(ViewBase, ViewSize);

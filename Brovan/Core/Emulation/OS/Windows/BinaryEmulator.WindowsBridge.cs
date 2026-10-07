@@ -778,6 +778,9 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
+            if (State != null && State.SyncIoCancelled)
+                return true;
+
             if (State != null && State.HostWorkWaitActive)
                 return State.HostWork == null || State.HostWork.IsCompleted;
 

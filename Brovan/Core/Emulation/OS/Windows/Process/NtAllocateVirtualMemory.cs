@@ -26,7 +26,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint UnsupportedAllocationTypes = 0x00200000 | 0x00400000 | 0x00800000;
         private const uint MemLargePages = 0x20000000;
 
-        private const ulong LowSearchStart = 0x00100000UL;
+        internal const ulong LowSearchStart = 0x00100000UL;
 
         internal struct AddressRequirements
         {
@@ -295,7 +295,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     : Requirements.Limited || Instance.WinHelper.PointerSize != 8 ? LowSearchStart : 0x0000000100000000UL;
                 ulong Alignment = Math.Max(Requirements.Alignment, WinSysHelper.AllocationGranularity);
 
-                if (!Instance.TryFindFreeBaseAddress(RegionSize, Alignment, BinaryEmulator.AlignUp(Lowest, WinSysHelper.AllocationGranularity), Highest, out BaseAddress) ||
+                // HighestEndingAddress is inclusive, the search end is not.
+                if (!Instance.TryFindFreeBaseAddress(RegionSize, Alignment, BinaryEmulator.AlignUp(Lowest, WinSysHelper.AllocationGranularity), Highest + 1, out BaseAddress) ||
                     BaseAddress + RegionSize - 1 > Highest)
                 {
                     return Requirements.Limited ? NTSTATUS.STATUS_CONFLICTING_ADDRESSES : NTSTATUS.STATUS_NO_MEMORY;

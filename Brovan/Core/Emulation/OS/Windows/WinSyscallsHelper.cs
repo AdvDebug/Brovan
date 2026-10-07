@@ -257,18 +257,25 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// Parks the thread for one slice and resumes it on the syscall instruction, so the syscall runs
         /// again. Sleeping here instead would stop every other thread of the process.
         /// </summary>
-        public bool TryRetrySyscallAfterSlice(int SliceMilliseconds)
+        public bool TryRetrySyscallAfterSlice(int SliceMilliseconds, WinPendingIo? SyncIo = null)
         {
-            return TryParkForSyscallRetry(Emulator.CreateEmulatedDeadlineMilliseconds(SliceMilliseconds), null);
+            return TryParkForSyscallRetry(Emulator.CreateEmulatedDeadlineMilliseconds(SliceMilliseconds), null, SyncIo);
         }
 
         // Whatever completes HostWork must bump WakeSignal after it.
-        public bool TryRetrySyscallWhenDone(Task HostWork)
+        public bool TryRetrySyscallWhenDone(Task HostWork, WinPendingIo? SyncIo = null)
         {
-            return TryParkForSyscallRetry(-1, HostWork);
+            return TryParkForSyscallRetry(-1, HostWork, SyncIo);
         }
 
-        private bool TryParkForSyscallRetry(long Deadline, Task HostWork)
+        // I/O that NtCancelSynchronousIoFile can cancel.
+        internal WinPendingIo SynchronousIo(WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock)
+        {
+            WinEvent Event = EventHandle == 0 ? null : GetEventByHandle(EventHandle, AccessMask.GiveTemp);
+            return new WinPendingIo(File, Emulator.CurrentThreadId, Event, ApcRoutine, ApcContext, IoStatusBlock);
+        }
+
+        private bool TryParkForSyscallRetry(long Deadline, Task HostWork, WinPendingIo? SyncIo)
         {
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null)
@@ -282,6 +289,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.HostWorkWaitActive = HostWork != null;
             if (HostWork != null)
                 State.HostWork = HostWork;
+            State.ResetSyncIo();
+            State.SyncIo = SyncIo;
 
             Thread.WaitActive = true;
             Thread.WaitHandles = null;
@@ -303,7 +312,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// The deadline spans every park, so it is kept per thread and handle rather than per call.
         /// </summary>
-        public bool TryContinuePipeWait(ulong FileHandle, int TimeoutMilliseconds, int SliceMilliseconds)
+        public bool TryContinuePipeWait(ulong FileHandle, int TimeoutMilliseconds, int SliceMilliseconds, WinPendingIo? SyncIo = null)
         {
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null)
@@ -322,7 +331,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            if (TryRetrySyscallAfterSlice(SliceMilliseconds))
+            if (TryRetrySyscallAfterSlice(SliceMilliseconds, SyncIo))
                 return true;
 
             ClearPipeWait();
@@ -392,6 +401,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.RetrySyscallActive = false;
             State.RetrySyscallNumber = 0;
             State.HostWorkWaitActive = false;
+            State.ResetSyncIo();
             State.PipeWaitHandle = 0;
             State.PipeWaitDeadline = -1;
             State.IoRequest = null;
@@ -2166,9 +2176,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
         }
 
-        internal static WinFile CreateHostStreamFile(HostStreamKind Stream)
+        // Synchronous, as CreatePipe and a shell redirect open it.
+        private static WinFile CreateHostStreamFile(HostStreamKind Stream)
         {
-            return new WinFile() { Device = true, Path = "\\Device\\NamedPipe\\Brovan", HostStream = Stream };
+            return new WinFile() { Device = true, Path = "\\Device\\NamedPipe\\Brovan", HostStream = Stream, Mode = WinFile.FILE_SYNCHRONOUS_IO_NONALERT };
         }
         public uint CurrentPriority = 0x8; // Default priority (Normal), changes only if the program changed it explicitly.
         public uint DefaultHardErrorMode = 1; // Hard error reporting is on until the program turns it off.
@@ -3010,6 +3021,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Index >= 0 && Address < SectionRanges[Index].End;
         }
 
+        internal bool TryFindSectionView(ulong Address, out WinSectionView View)
+        {
+            for (int Index = 0; Index < WinSections.Count; Index++)
+            {
+                if (WinSections[Index]?.TryFindView(Address, out View) == true)
+                    return true;
+            }
+
+            View = default;
+            return false;
+        }
+
         public void MirrorCommitToSectionAliases(ulong Address, ulong Size)
         {
             for (int Index = 0; Index < WinSections.Count; Index++)
@@ -3649,6 +3672,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Thread.Context.RAX = State.RetrySyscallNumber;
                 State.RetrySyscallActive = false;
                 State.RetrySyscallNumber = 0;
+                State.ResetSyncIo();
             }
             else
             {

@@ -33,6 +33,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint PipeEndServer = 1;
 
         private const uint PipeConfigurationFullDuplex = 2;
+        private const uint PipeConfigurationInbound = 0;
+        private const uint HostStreamQuotaBytes = 4096;
 
         // FILE_PIPE_WAIT_FOR_BUFFER. Name follows the BOOLEAN on its own two byte alignment.
         private const int WaitNameLengthOffset = 8;
@@ -297,13 +299,67 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private NTSTATUS Peek(ref DeviceData Data)
+        private static bool HasPeekHeader(ref DeviceData Data)
         {
-            if (Data.OutputBuffer == null || Data.OutputLength < PeekHeaderBytes)
+            if (Data.OutputBuffer != null && Data.OutputLength >= PeekHeaderBytes)
+                return true;
+
+            Data.Information = 0;
+            return false;
+        }
+
+        // NT: NpPeek. A header-only buffer overflows while data is queued.
+        private static NTSTATUS EndPeek(ref DeviceData Data, uint State, int Available, uint Messages, uint MessageLength, int Copied, bool MessageCut)
+        {
+            Span<byte> Header = Data.OutputBuffer.AsSpan(0, PeekHeaderBytes);
+            BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x00), State);
+            BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x04), (uint)Available);
+            BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x08), Messages);
+            BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x0C), MessageLength);
+            Data.Information = (ulong)(PeekHeaderBytes + Copied);
+
+            if (Data.OutputLength == PeekHeaderBytes)
+                return Available != 0 ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_SUCCESS;
+
+            return MessageCut ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT: a peek waits behind a read of the same synchronous file.
+        internal static NTSTATUS PeekHostStream(ref DeviceData Data, BinaryEmulator Instance)
+        {
+            if (!HasPeekHeader(ref Data))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            Task NextChange = GeneralHelper.HostStreamInput.NextChange;
+            Span<byte> Output = Data.OutputBuffer.AsSpan(PeekHeaderBytes, (int)Data.OutputLength - PeekHeaderBytes);
+            int Copied = GeneralHelper.HostStreamInput.Peek(Output, out int Available, out bool Ended);
+            if (Ended)
             {
                 Data.Information = 0;
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+                return NTSTATUS.STATUS_PIPE_BROKEN;
             }
+
+            // A guest that polls with peeks must see data arrive.
+            if (Available == 0)
+            {
+                GeneralHelper.HostStreamInput.Request(Instance.WakeSignal);
+                return EndPeek(ref Data, PipeStateConnected, 0, 0, 0, 0, false);
+            }
+
+            if (!GeneralHelper.HostStreamInput.TryTakeWriterState(out bool Closed))
+            {
+                GeneralHelper.HostStreamInput.RequestWriterState(Instance.WakeSignal);
+                WinPendingIo Io = Instance.WinHelper.SynchronousIo(Data.File, Data.EventHandle, Data.ApcRoutine, Data.ApcContext, Data.IoStatusBlock);
+                return Instance.WinHelper.TryRetrySyscallWhenDone(NextChange, Io) ? NTSTATUS.STATUS_PENDING : NTSTATUS.STATUS_UNSUCCESSFUL;
+            }
+
+            return EndPeek(ref Data, Closed ? PipeStateClosing : PipeStateConnected, Available, 0, 0, Copied, false);
+        }
+
+        private NTSTATUS Peek(ref DeviceData Data)
+        {
+            if (!HasPeekHeader(ref Data))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             NTSTATUS Usable = UsableStatus(false);
             int Available = Channel == null ? 0 : Channel.InboundPayload;
@@ -324,14 +380,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             bool MessagePipe = PipeType == FILE_PIPE_MESSAGE_MODE;
             int Copied = Channel.Peek(Output.Slice(PeekHeaderBytes), MessagePipe, out uint MessageLength);
+            if (!MessagePipe)
+                return EndPeek(ref Data, State, Available, 0, 0, Copied, false);
 
-            BinaryPrimitives.WriteUInt32LittleEndian(Output.Slice(0x00), State);
-            BinaryPrimitives.WriteUInt32LittleEndian(Output.Slice(0x04), (uint)Available);
-            BinaryPrimitives.WriteUInt32LittleEndian(Output.Slice(0x08), Available == 0 ? 0u : 1u);
-            BinaryPrimitives.WriteUInt32LittleEndian(Output.Slice(0x0C), MessagePipe ? MessageLength : (uint)Copied);
-
-            Data.Information = (ulong)(PeekHeaderBytes + Copied);
-            return MessagePipe && Copied < MessageLength ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_SUCCESS;
+            return EndPeek(ref Data, State, Available, Available == 0 ? 0u : 1u, MessageLength, Copied, Copied < MessageLength);
         }
 
         internal void WriteLocalInformation(Span<byte> Destination)
@@ -350,6 +402,27 @@ namespace Brovan.Core.Emulation.OS.Windows
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x1C), (uint)WriteSpace);
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x20), State);
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x24), IsServer ? PipeEndServer : PipeEndClient);
+        }
+
+        // An inbound byte pipe, as CreatePipe makes it.
+        internal static void WriteHostStreamLocalInformation(Span<byte> Destination, HostStreamKind Kind)
+        {
+            int Available = 0;
+            bool Ended = false;
+            if (Kind == HostStreamKind.Input)
+                GeneralHelper.HostStreamInput.Peek(Span<byte>.Empty, out Available, out Ended);
+
+            Destination.Clear();
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x00), FILE_PIPE_BYTE_STREAM_MODE);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x04), PipeConfigurationInbound);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x08), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x0C), 1);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x10), HostStreamQuotaBytes);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x14), (uint)Available);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x18), HostStreamQuotaBytes);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x1C), HostStreamQuotaBytes);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x20), Ended ? PipeStateClosing : PipeStateConnected);
+            BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x24), Kind == HostStreamKind.Input ? PipeEndServer : PipeEndClient);
         }
 
         public void Dispose()
@@ -384,7 +457,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal bool HoldsWriteLock;
         internal ulong Information;
 
-        internal WinFile File => Io.File;
+        internal override WinFile File => Io.File;
 
         internal override string WaitLabel => $"pipe-io {Kind}";
 
@@ -612,13 +685,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
-        // NT gives a request that failed without pending no APC and no completion packet.
+        // NT gives a request that failed without pending no APC and no completion packet. Only a transceive still
+        // writes the IO_STATUS_BLOCK and the event.
         private static void Finish(BinaryEmulator Instance, PipeRequest Request, bool Pended)
         {
             ReleaseData(Request);
 
-            bool QueueCompletion = Pended || ((uint)Request.Status >> 30) != 3;
-            Instance.WinHelper.CompletePendingIo(in Request.Io, Request.Status, Request.Information, QueueCompletion, Pended);
+            bool Failed = ((uint)Request.Status >> 30) == 3;
+            if (!Pended && Failed && Request.Kind != PipeRequestKind.Transceive)
+                return;
+
+            Instance.WinHelper.CompletePendingIo(in Request.Io, Request.Status, Request.Information, Pended || !Failed, Pended);
 
             if (Pended)
                 Instance.WakeSignal.Bump();
@@ -664,7 +741,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             GuestPipeChannel Channel = Request.Pipe.Channel;
             if (Channel == null || !Channel.IsServer)
             {
-                End(Request, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
+                End(Request, NTSTATUS.STATUS_ILLEGAL_FUNCTION, 0);
                 return true;
             }
 

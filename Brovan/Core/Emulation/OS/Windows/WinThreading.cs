@@ -61,6 +61,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         // HostWork outlives the wait. The re-run consumes it.
         internal bool HostWorkWaitActive { get; set; }
         internal Task HostWork { get; set; }
+
+        // Kept across the retries of one syscall, which NT sees as one wait.
+        internal WinPendingIo? SyncIo { get; set; }
+        internal bool SyncIoCancelled { get; set; }
+        internal bool SyncIoBetweenRetries { get; set; }
+        internal ulong SyncIoRip { get; set; }
+        internal uint SyncIoSyscall { get; set; }
+
+        internal void ResetSyncIo()
+        {
+            SyncIo = null;
+            SyncIoCancelled = false;
+            SyncIoBetweenRetries = false;
+        }
         public ulong WaitResumeRIP { get; set; }
         public ulong WaitReturnRIP { get; set; }
         public bool WaitAlertable { get; set; }

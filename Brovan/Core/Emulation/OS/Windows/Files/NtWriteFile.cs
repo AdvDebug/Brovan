@@ -8,13 +8,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong Event = Instance.WinHelper.GetArg(1);
-            NTSTATUS Status = Write(Instance);
-            Instance.WinHelper.SignalIoEvent(Event, Status);
+            NTSTATUS Status = Write(Instance, out bool EventDone);
+            if (!EventDone)
+                Instance.WinHelper.SignalIoEvent(Event, Status);
             return Status;
         }
 
-        private static NTSTATUS Write(BinaryEmulator Instance)
+        private static NTSTATUS Write(BinaryEmulator Instance, out bool EventDone)
         {
+            EventDone = false;
 
             ulong FileHandle = Instance.WinHelper.GetArg(0);
             ulong EventHandle = Instance.WinHelper.GetArg(1);
@@ -32,24 +34,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (Length != 0)
-            {
-                if (BufferPtr == 0 || !Instance.IsRegionMapped(BufferPtr, Length))
-                {
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                }
-            }
-
+            // NT: handle before buffer, and neither failure touches the IO_STATUS_BLOCK or the event.
             WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             if (FileObj == null)
             {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                EventDone = true;
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
+            if (Length != 0 && (BufferPtr == 0 || !Instance.IsRegionMapped(BufferPtr, Length)))
+            {
+                EventDone = true;
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
+
             if (FileObj.Pipe != null)
+            {
+                EventDone = true;
                 return WritePipe(Instance, FileHandle, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
+            }
 
             Instance.WinHelper.ResetIoEvent(EventHandle);
 
@@ -151,22 +154,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        // NT: an access failure comes before the event reset, and no failure writes the IO_STATUS_BLOCK.
         private static NTSTATUS WritePipe(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
         {
-            Instance.WinHelper.ResetIoEvent(EventHandle);
-
             if (!HasWriteAccess(Instance, FileHandle))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
-            }
+
+            Instance.WinHelper.ResetIoEvent(EventHandle);
 
             bool MessagePipe = FileObj.Pipe.PipeType == GuestNamedPipe.FILE_PIPE_MESSAGE_MODE;
             if (Length > (MessagePipe ? (uint)GuestNamedPipe.MaxMessageBytes : int.MaxValue))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
-            }
 
             PipeRequest Request = Instance.WinHelper.PipeRequests.Create(Instance, PipeRequestKind.Write, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr);
             bool Readable = MessagePipe
@@ -174,10 +172,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : Length == 0 || Instance.IsMemoryRangeMapped(BufferPtr, Length);
 
             if (!Readable)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            }
 
             if (!MessagePipe)
             {

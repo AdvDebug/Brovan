@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -7,6 +8,12 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtCreateUserProcess : IWinSyscall
     {
         private const uint PsCreateSuccess = 6;
+        private const uint PsCreateInitWriteOutputOnExit = 0x1;
+
+        // NT: PspCreateUserProcess adds SYNCHRONIZE | FILE_EXECUTE to the creator's access.
+        private const uint ImageFileAccess = 0x100020;
+        private const uint ImageFileShareAccess = 0x5;
+        private const uint ImageFileOpenOptions = 0x60;
 
         private const ulong PsAttributeClientId = 3 | 0x10000;
         private const ulong PsAttributeImageName = 5 | 0x20000;
@@ -103,7 +110,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ThreadHandlePtr != 0 && Instance.IsRegionMapped(ThreadHandlePtr, (ulong)PointerSize))
                 Instance.WinHelper.WritePointer(ThreadHandlePtr, ThreadHandle);
 
-            WriteCreateInfoSuccess(Instance, CreateInfo, Is64, Process.Remote.PebAddress, Process.Remote.ProcessParameters);
+            ulong ImageFileHandle = OpenImageFileForCreator(Instance, CreateInfo, Is64, Process);
+            WriteCreateInfoSuccess(Instance, CreateInfo, Is64, ImageFileHandle, Process.Remote.PebAddress, Process.Remote.ProcessParameters);
             WriteClientIdAttribute(Instance, AttributeList, Process.PID, Thread.ThreadId);
             WriteImageInformationAttribute(Instance, AttributeList, Is64, ImageInformation);
 
@@ -130,10 +138,43 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Job.ProcessIds.Add(Child.PID);
         }
 
-        private static void WriteCreateInfoSuccess(BinaryEmulator Instance, ulong CreateInfo, bool Is64, ulong PebAddress, ulong ProcessParameters)
+        // NT: with WriteOutputOnExit the creator gets a handle to the image file.
+        private static ulong OpenImageFileForCreator(BinaryEmulator Instance, ulong CreateInfo, bool Is64, WinProcess Process)
+        {
+            if (CreateInfo == 0)
+                return 0;
+
+            Span<byte> InitState = stackalloc byte[8];
+            if (!Instance._emulator.ReadMemory(CreateInfo + (Is64 ? 0x10u : 0x08u), InitState))
+                return 0;
+
+            uint InitFlags = BinaryPrimitives.ReadUInt32LittleEndian(InitState);
+            uint AdditionalFileAccess = BinaryPrimitives.ReadUInt32LittleEndian(InitState.Slice(4));
+            if ((InitFlags & PsCreateInitWriteOutputOnExit) == 0)
+                return 0;
+
+            string Path = Instance.WinHelper.ResolveWindowsFilePath(Process.Path);
+            if (string.IsNullOrEmpty(Path))
+                return 0;
+
+            NTSTATUS Status = NtOpenFile.OpenPath(Instance, Path, (AccessMask)(AdditionalFileAccess | ImageFileAccess), ImageFileShareAccess, ImageFileOpenOptions, false, out ulong Handle);
+            if (Status != NTSTATUS.STATUS_SUCCESS && AdditionalFileAccess != 0)
+                Status = NtOpenFile.OpenPath(Instance, Path, (AccessMask)ImageFileAccess, ImageFileShareAccess, ImageFileOpenOptions, false, out Handle);
+
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+            {
+                Utils.LogError($"[NtCreateUserProcess] Image file {Path} of process {Process.PID} could not be opened for its creator: {Status}.");
+                return 0;
+            }
+
+            return Handle;
+        }
+
+        private static void WriteCreateInfoSuccess(BinaryEmulator Instance, ulong CreateInfo, bool Is64, ulong FileHandle, ulong PebAddress, ulong ProcessParameters)
         {
             uint StructSize = Is64 ? 0x58u : 0x48u;
             uint StateOffset = Is64 ? 0x08u : 0x04u;
+            int FileHandleOffset = (Is64 ? 0x18 : 0x0C) - (int)StateOffset;
             int ParametersOffset = (Is64 ? 0x28 : 0x18) - (int)StateOffset;
             int ParametersWow64Offset = (Is64 ? 0x30 : 0x20) - (int)StateOffset;
             int PebOffset = (Is64 ? 0x38 : 0x28) - (int)StateOffset;
@@ -146,6 +187,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             Buffer.Clear();
 
             BinaryPrimitives.WriteUInt32LittleEndian(Buffer, PsCreateSuccess);
+            if (Is64)
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(FileHandleOffset, 8), FileHandle);
+            else
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(FileHandleOffset, 4), (uint)FileHandle);
+
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(ParametersOffset, 8), ProcessParameters);
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(PebOffset, 8), PebAddress);
 

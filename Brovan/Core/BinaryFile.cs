@@ -1066,6 +1066,24 @@ namespace Brovan.Core
             return true;
         }
 
+        public bool TryReadImageBytes(uint Rva, Span<byte> Destination)
+        {
+            if (!TryFindPESectionByRvaFast(Rva, out PortableBinarySection Section))
+                return false;
+
+            ulong Delta = Rva - Section.VirtualAddress;
+            if (Delta + (ulong)Destination.Length > Section.RawSize)
+                return false;
+
+            ReadOnlySpan<byte> Bytes = DataSpan;
+            ulong FileOffset = Section.RawOffset + Delta;
+            if (FileOffset + (ulong)Destination.Length > (ulong)Bytes.Length)
+                return false;
+
+            Bytes.Slice((int)FileOffset, Destination.Length).CopyTo(Destination);
+            return true;
+        }
+
         private static readonly byte[][] X86FunctionSignatures = new[]
         {
             new byte[] { 0x55, 0x89, 0xE5 }, // push ebp; mov ebp, esp

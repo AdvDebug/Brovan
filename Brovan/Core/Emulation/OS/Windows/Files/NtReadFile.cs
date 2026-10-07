@@ -1,5 +1,4 @@
 using System;
-using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -11,13 +10,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong Event = Instance.WinHelper.GetArg(1);
-            NTSTATUS Status = Read(Instance);
-            Instance.WinHelper.SignalIoEvent(Event, Status);
+            NTSTATUS Status = Read(Instance, out bool EventDone);
+            if (!EventDone)
+                Instance.WinHelper.SignalIoEvent(Event, Status);
             return Status;
         }
 
-        private static NTSTATUS Read(BinaryEmulator Instance)
+        private static NTSTATUS Read(BinaryEmulator Instance, out bool EventDone)
         {
+            EventDone = false;
 
             ulong FileHandle = Instance.WinHelper.GetArg(0);
             ulong EventHandle = Instance.WinHelper.GetArg(1);
@@ -36,14 +37,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             WinFile PipeFile = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
+            EventDone = PipeFile != null && (PipeFile.Pipe != null || PipeFile.HostStream == HostStreamKind.Input);
             if (PipeFile?.Pipe != null)
                 return ReadPipe(Instance, FileHandle, PipeFile, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
 
             if (PipeFile?.ConsoleKind == ConsoleObjectKind.Input)
-                return ConsoleServer.ReadFile(Instance, IoStatusBlockPtr, BufferPtr, Length);
+            {
+                WinPendingIo Io = Instance.WinHelper.SynchronousIo(PipeFile, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr);
+                return ConsoleServer.ReadFile(Instance, in Io, BufferPtr, Length);
+            }
 
             if (PipeFile?.HostStream == HostStreamKind.Input)
-                return HandleStdIn(Instance, IoStatusBlockPtr, BufferPtr, Length);
+                return ReadHostStream(Instance, FileHandle, PipeFile, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
 
             if (Length == 0)
             {
@@ -160,21 +165,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        // NT: access and buffer failures leave the event and the IO_STATUS_BLOCK alone.
         private static NTSTATUS ReadPipe(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
         {
+            if (!HasReadAccess(Instance, FileHandle))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
             if (Length != 0 && !Instance.IsMemoryRangeMapped(BufferPtr, Length))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            }
 
             Instance.WinHelper.ResetIoEvent(EventHandle);
-
-            if (!HasReadAccess(Instance, FileHandle))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-            }
 
             PipeRequest Request = Instance.WinHelper.PipeRequests.Create(Instance, PipeRequestKind.Read, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr);
             Request.Buffer = BufferPtr;
@@ -182,59 +182,45 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance.WinHelper.PipeRequests.Submit(Instance, Request);
         }
 
-        private static NTSTATUS HandleStdIn(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
+        // NT: a zero-byte read still waits for data. A failure leaves the IO_STATUS_BLOCK alone and the event reset.
+        private static NTSTATUS ReadHostStream(BinaryEmulator Instance, ulong FileHandle, WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
         {
-            if (Length == 0)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+            if (!HasReadAccess(Instance, FileHandle))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
 
-            if (!Instance.IsRegionMapped(BufferPtr, Length))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+            if (Length != 0 && !Instance.IsMemoryRangeMapped(BufferPtr, Length))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            }
 
-            uint Capacity = Math.Min(Length, (uint)IoChunkBytes);
-            Span<byte> Data;
-            int ToWrite;
-            if (Console.IsInputRedirected)
+            Instance.WinHelper.ResetIoEvent(EventHandle);
+
+            Task NextChange = GeneralHelper.HostStreamInput.NextChange;
+            int Capacity = (int)Math.Min(Length, (uint)Brovan.Core.Settings.MemoryBudget.HostStreamInputBytes);
+            Span<byte> Data = Capacity == 0 ? Span<byte>.Empty : Instance.WinHelper.Shared.GetSpan((uint)Capacity).Slice(0, Capacity);
+
+            int Copied = GeneralHelper.HostStreamInput.Peek(Data, out int Available, out bool Ended);
+            if (Ended)
+                return NTSTATUS.STATUS_PIPE_BROKEN;
+
+            if (Available == 0)
             {
-                Data = Instance.WinHelper.Shared.GetSpan(Capacity);
-                ToWrite = GeneralHelper.ConsoleRead(Data.Slice(0, (int)Capacity));
+                GeneralHelper.HostStreamInput.Request(Instance.WakeSignal);
+                WinPendingIo Io = Instance.WinHelper.SynchronousIo(File, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr);
+                return Instance.WinHelper.TryRetrySyscallWhenDone(NextChange, Io) ? NTSTATUS.STATUS_PENDING : NTSTATUS.STATUS_UNSUCCESSFUL;
             }
-            else
+
+            if (Copied != 0)
             {
-                string Line = GeneralHelper.HostConsoleInput.ReadLine();
-                if (Line == null)
-                {
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
-                    return NTSTATUS.STATUS_END_OF_FILE;
-                }
+                if (!Instance._emulator.WriteMemory(BufferPtr, Data.Slice(0, Copied)))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                Line += "\r\n";
-                int CharCount = (int)Math.Min((uint)Line.Length, Capacity);
-                Data = Instance.WinHelper.Shared.GetSpan((uint)CharCount);
-                ToWrite = Encoding.ASCII.GetBytes(Line.AsSpan(0, CharCount), Data);
+                GeneralHelper.HostStreamInput.Skip(Copied);
             }
 
-            if (ToWrite != 0 && !Instance._emulator.WriteMemory(BufferPtr, Data.Slice(0, ToWrite)))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            }
-
-            if (ToWrite == 0)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
-                return NTSTATUS.STATUS_END_OF_FILE;
-            }
-
-            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)ToWrite);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Copied);
+            Instance.WinHelper.SignalIoEvent(EventHandle, NTSTATUS.STATUS_SUCCESS);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                Instance.TriggerEventMessage($"[+] NtReadFile: STDIN read {ToWrite} bytes", LogFlags.Syscall);
+                Instance.TriggerEventMessage($"[+] NtReadFile: STDIN read {Copied} bytes", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

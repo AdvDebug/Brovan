@@ -69,6 +69,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(Path))
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
+            NTSTATUS Status = OpenPath(Instance, Path, (AccessMask)(uint)DesiredAccess, ShareAccess, OpenOptions, Inherit, out ulong Handle);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            Instance.WinHelper.WritePointer(FileHandlePtr, Handle);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // Path is a resolved guest path.
+        internal static NTSTATUS OpenPath(BinaryEmulator Instance, string Path, AccessMask DesiredAccess, uint ShareAccess, uint OpenOptions, bool Inherit, out ulong Handle)
+        {
+            Handle = 0;
+
             bool IsDirectory = (OpenOptions & FILE_DIRECTORY_FILE) != 0 || Path.EndsWith("\\", StringComparison.Ordinal);
 
             if ((OpenOptions & FILE_NON_DIRECTORY_FILE) != 0 && IsDirectory)
@@ -90,17 +105,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool DeleteOnClose = (OpenOptions & NtCreateFile.FILE_DELETE_ON_CLOSE) != 0;
             if (DeleteOnClose)
             {
-                if (!NtCreateFile.HasDeleteAccess((AccessMask)DesiredAccess))
+                if (!NtCreateFile.HasDeleteAccess(DesiredAccess))
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                 if (Stream.IsReadOnly)
                     return NTSTATUS.STATUS_CANNOT_DELETE;
             }
 
-            if (!IsDirectory && NtCreateFile.RefusesWriteAccess(Stream, (AccessMask)DesiredAccess, FILE_OPEN))
+            if (!IsDirectory && NtCreateFile.RefusesWriteAccess(Stream, DesiredAccess, FILE_OPEN))
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
-            if (!Instance.WinHelper.ShareAccessAllows(Path, (AccessMask)DesiredAccess, ShareAccess))
+            if (!Instance.WinHelper.ShareAccessAllows(Path, DesiredAccess, ShareAccess))
                 return NTSTATUS.STATUS_SHARING_VIOLATION;
 
             WinFile FileObj = new WinFile
@@ -113,7 +128,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Handler = null,
                 FileStream = Stream,
                 DeletePending = DeleteOnClose,
-                GrantedAccess = (AccessMask)DesiredAccess,
+                GrantedAccess = DesiredAccess,
                 ShareAccess = ShareAccess,
                 Mode = NtCreateFile.ModeFromCreateOptions(OpenOptions)
             };
@@ -121,14 +136,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.WinFiles.Add(FileObj);
             Instance.WinHelper.RegisterOpenFile(FileObj);
 
-            WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, (AccessMask)DesiredAccess);
-            Instance.WinHelper.AddWinHandle(Handle);
+            WinHandle Added = Instance.WinHelper.HandleManager.AddHandle(FileObj, DesiredAccess);
+            Instance.WinHelper.AddWinHandle(Added);
             if (Inherit)
-                Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
+                Instance.WinHelper.HandleManager.SetHandleFlags(Added.Handle, ObjectHandleFlags.Inherit);
 
-            Instance.WinHelper.WritePointer(FileHandlePtr, Handle.Handle);
-            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 1);
-
+            Handle = Added.Handle;
             return NTSTATUS.STATUS_SUCCESS;
         }
 

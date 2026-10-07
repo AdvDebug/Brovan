@@ -2583,6 +2583,9 @@ namespace Brovan
                 if (WindowsState.IoRequest != null)
                     return WindowsState.IoRequest.WaitLabel;
 
+                if (WindowsState.SyncIo is WinPendingIo SyncIo)
+                    return $"sync-io iosb=0x{SyncIo.IoStatusBlock:X}{(WindowsState.SyncIoCancelled ? " cancelled" : "")}";
+
                 if (WindowsState.HostWorkWaitActive)
                     return $"host-work {(WindowsState.HostWork?.IsCompleted == true ? "done" : "running")}";
 

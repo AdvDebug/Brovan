@@ -62,6 +62,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal bool Completed;
         internal NTSTATUS Status;
 
+        internal abstract WinFile File { get; }
+
         internal abstract string WaitLabel { get; }
     }
 
@@ -272,6 +274,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_MEMORY_NOT_ALLOCATED = 0xC00000A0,
         STATUS_WORKING_SET_QUOTA = 0xC00000A1,
         STATUS_DEVICE_NOT_READY = 0xC00000A3,
+        STATUS_ILLEGAL_FUNCTION = 0xC00000AF,
         STATUS_CANT_TERMINATE_SELF = 0xC00000DB,
         STATUS_DEBUGGER_INACTIVE = 0xC0000354,
         STATUS_DATATYPE_MISALIGNMENT = 0x80000002,
@@ -1265,6 +1268,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint PPID;
         public string Name;
         public string Path;
+        public string HostImagePath;
         public ProtectionStatus Status;
         public User RunningUser;
         public bool Critical;
@@ -1694,6 +1698,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong Size;
         public bool IsAlias;
         public MemoryProtection Protection;
+        public bool FromPlaceholder;
     }
 
     public class WinSection : IHandleObject
@@ -1778,10 +1783,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             return BackingAddress != 0 ? BackingAddress + Offset : 0;
         }
 
-        public void AddView(ulong Offset, ulong Base, ulong Size, bool IsAlias, MemoryProtection Protection)
+        public void AddView(ulong Offset, ulong Base, ulong Size, bool IsAlias, MemoryProtection Protection, bool FromPlaceholder)
         {
             Views ??= new List<WinSectionView>();
-            Views.Add(new WinSectionView { Offset = Offset, Base = Base, Size = Size, IsAlias = IsAlias, Protection = Protection });
+            Views.Add(new WinSectionView { Offset = Offset, Base = Base, Size = Size, IsAlias = IsAlias, Protection = Protection, FromPlaceholder = FromPlaceholder });
 
             if (Base < ViewLow)
                 ViewLow = Base;

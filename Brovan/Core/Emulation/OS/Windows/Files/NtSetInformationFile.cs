@@ -50,7 +50,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (InfoClass == FILE_INFORMATION_CLASS.FileIoCompletionNotificationInformation)
                 return HandleIoCompletionNotification(Instance, FileObj, IoStatusBlock, FileInformation, Length);
 
-            if (FileObj.Pipe != null && InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation)
+            if ((FileObj.Pipe != null || FileObj.HostStream != HostStreamKind.None) && InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation)
                 return HandleFilePipeInformation(Instance, FileObj, IoStatusBlock, FileInformation, Length);
 
             if (FileObj.Device)
@@ -97,10 +97,27 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint ReadMode = Instance._emulator.ReadMemoryUInt(FileInformation + 0x00);
             uint CompletionMode = Instance._emulator.ReadMemoryUInt(FileInformation + 0x04);
 
-            if (ReadMode > GuestNamedPipe.FILE_PIPE_MESSAGE_MODE || CompletionMode > GuestNamedPipe.FILE_PIPE_COMPLETE_OPERATION)
+            uint PipeType = FileObj.Pipe?.PipeType ?? GuestNamedPipe.FILE_PIPE_BYTE_STREAM_MODE;
+
+            // NT: a byte pipe cannot be read in message mode.
+            if (ReadMode > GuestNamedPipe.FILE_PIPE_MESSAGE_MODE || CompletionMode > GuestNamedPipe.FILE_PIPE_COMPLETE_OPERATION ||
+                (ReadMode == GuestNamedPipe.FILE_PIPE_MESSAGE_MODE && PipeType == GuestNamedPipe.FILE_PIPE_BYTE_STREAM_MODE))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
+            }
+
+            if (FileObj.Pipe == null)
+            {
+                // Host stream I/O always waits, so the stream cannot stop blocking.
+                if (CompletionMode != GuestNamedPipe.FILE_PIPE_QUEUE_OPERATION)
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_NOT_SUPPORTED, 0);
+                    return NTSTATUS.STATUS_NOT_SUPPORTED;
+                }
+
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+                return NTSTATUS.STATUS_SUCCESS;
             }
 
             FileObj.Pipe.ReadMode = ReadMode;

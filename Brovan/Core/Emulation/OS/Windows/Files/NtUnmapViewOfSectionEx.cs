@@ -1,3 +1,4 @@
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -35,9 +36,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.IsCurrentProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            // No view here replaced a placeholder.
+            // NT: only a view that replaced a placeholder turns back into one, and only from its base.
             if ((Flags & MemPreservePlaceholder) != 0)
             {
+                if (Instance.WinHelper.TryFindSectionView(BaseAddress, out WinSectionView View) && View.FromPlaceholder && View.Base == BaseAddress)
+                    return UnmapToPlaceholder(Instance, View);
+
                 bool IsView = Instance.WinHelper.IsSectionViewAddress(BaseAddress) || Instance.WinHelper.FindMappedImageViewByAddress(BaseAddress) != null;
                 return IsView ? NTSTATUS.STATUS_CONFLICTING_ADDRESSES : NTSTATUS.STATUS_NOT_MAPPED_VIEW;
             }
@@ -53,6 +57,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             else
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] {SyscallName}: Base=0x{BaseAddress:X}, Flags=0x{Flags:X}.", LogFlags.Syscall);
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS UnmapToPlaceholder(BinaryEmulator Instance, WinSectionView View)
+        {
+            if (!Instance.WinHelper.UnmapViewOfSection(View.Base))
+                return NTSTATUS.STATUS_NOT_MAPPED_VIEW;
+
+            if (!Instance.ReservePlaceholder(View.Base, View.Size))
+            {
+                Utils.LogError($"[NtUnmapViewOfSectionEx] View at 0x{View.Base:X} size 0x{View.Size:X} was unmapped but its placeholder could not be restored.");
+                return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+            }
 
             return NTSTATUS.STATUS_SUCCESS;
         }

@@ -60,7 +60,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (FileObj.GetConflictingLock(Offset, Length, Key, ExclusiveLock) != null)
             {
-                if (!FailImmediately && Instance.WinHelper.TryRetrySyscallAfterSlice(LockRetrySliceMilliseconds))
+                WinPendingIo? SyncIo = FileObj.Synchronous ? Instance.WinHelper.SynchronousIo(FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr) : null;
+                if (!FailImmediately && Instance.WinHelper.TryRetrySyscallAfterSlice(LockRetrySliceMilliseconds, SyncIo))
                     return NTSTATUS.STATUS_PENDING;
 
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_LOCK_NOT_GRANTED, 0);

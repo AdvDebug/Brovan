@@ -410,7 +410,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Stream != HostStreamKind.Input && Stream != HostStreamKind.Output)
                         throw new FormatException($"unknown host stream kind {(byte)Stream}");
 
-                    File = WinSysHelper.CreateHostStreamFile(Stream);
+                    // Stands for this process's own stream, which may be a console here.
+                    File = WinSysHelper.CreateStandardHandleFile(Stream == HostStreamKind.Input ? ConsoleObjectKind.Input : ConsoleObjectKind.Output);
                     break;
                 }
 
@@ -665,6 +666,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 PPID = Instance.WinHelper.PID,
                 Name = Path.GetFileName(HostImage),
                 Path = ImagePath,
+                HostImagePath = HostImage,
                 Arch = ImageInformation.Machine == MachineAmd64 ? BinaryArchitecture.x64 : BinaryArchitecture.x86,
                 CreationTime = Instance.GetEmulatedSystemTimeFileTimeUtc(),
                 RunningUser = Instance.WinHelper.CurrentUser,

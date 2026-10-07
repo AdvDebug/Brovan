@@ -54,6 +54,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             12u  // ACTIVATION_CONTEXT_SECTION_WINRT_ACTIVATABLE_CLASSES.
         };
 
+        private const string AssemblyNamespace = "urn:schemas-microsoft-com:asm.v1";
+        private const string CompatibilityNamespace = "urn:schemas-microsoft-com:compatibility.v1";
+
+        // NT: SbSupportedOsList in kernel32 and sxs.
+        private static readonly (Guid Id, string Name, ushort Major, ushort Minor)[] SupportedOsList =
+        {
+            (new Guid("e2011457-1546-43c5-a5fe-008deee3d3f0"), "windows vista", 6, 0),
+            (new Guid("35138b9a-5d96-4fbd-8e2d-a2440225f93a"), "windows seven", 6, 1),
+            (new Guid("4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38"), "windows eight", 6, 2),
+            (new Guid("1f676c76-80e1-4239-95bb-83d0f6d0da78"), "windows blue", 6, 3),
+            (new Guid("8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a"), "windows threshold", 10, 0),
+        };
+
         private struct AssemblyIdentity
         {
             public string Name;
@@ -161,6 +174,134 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return Dependencies;
+        }
+
+        // NT: sxs reports the highest supportedOS and maxversiontested not above the running version.
+        // SupportedOs holds the major version in its low word, MaxVersionTested in its highest word.
+        internal static void ReadCompatibility(byte[] Manifest, out uint SupportedOs, out ulong MaxVersionTested)
+        {
+            SupportedOs = 0;
+            MaxVersionTested = 0;
+
+            uint RunningOs = (WindowsVersionInfo.MajorVersion << 16) | WindowsVersionInfo.MinorVersion;
+            ulong RunningVersion = ((ulong)WindowsVersionInfo.MajorVersion << 48) | ((ulong)WindowsVersionInfo.MinorVersion << 32) |
+                ((ulong)WindowsVersionInfo.BuildNumber << 16);
+            uint BestOs = 0;
+
+            XmlReaderSettings Settings = new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                IgnoreComments = true,
+                IgnoreWhitespace = true,
+                IgnoreProcessingInstructions = true,
+                XmlResolver = null,
+                CloseInput = true,
+            };
+
+            // NT: only assembly, compatibility and application lead to these elements.
+            Span<bool> OnPath = stackalloc bool[3];
+
+            try
+            {
+                using MemoryStream Stream = new MemoryStream(Manifest, 0, Manifest.Length, false);
+                using XmlReader Reader = XmlReader.Create(Stream, Settings);
+
+                while (Reader.Read())
+                {
+                    if (Reader.NodeType != XmlNodeType.Element)
+                        continue;
+
+                    int Depth = Reader.Depth;
+                    if (Depth < 3)
+                    {
+                        OnPath[Depth] = Depth switch
+                        {
+                            0 => Reader.LocalName == "assembly" && Reader.NamespaceURI == AssemblyNamespace,
+                            1 => OnPath[0] && Reader.LocalName == "compatibility" && Reader.NamespaceURI == CompatibilityNamespace,
+                            _ => OnPath[1] && Reader.LocalName == "application" && Reader.NamespaceURI == CompatibilityNamespace,
+                        };
+                        continue;
+                    }
+
+                    if (Depth != 3 || !OnPath[2] || Reader.NamespaceURI != CompatibilityNamespace)
+                        continue;
+
+                    string Id = Reader.GetAttribute("Id");
+                    if (Id == null)
+                        continue;
+
+                    if (Reader.LocalName == "supportedOS")
+                    {
+                        if (TryFindSupportedOs(Id, out uint Os) && Os <= RunningOs && Os > BestOs)
+                            BestOs = Os;
+                    }
+                    else if (Reader.LocalName == "maxversiontested")
+                    {
+                        if (TryParseVersionQword(Id, out ulong Tested) && Tested <= RunningVersion && Tested > MaxVersionTested)
+                            MaxVersionTested = Tested;
+                    }
+                }
+            }
+            catch (XmlException Ex)
+            {
+                Utils.LogError($"[WinSxS] Manifest compatibility section not read: {Ex.Message}");
+                MaxVersionTested = 0;
+                return;
+            }
+
+            SupportedOs = (BestOs >> 16) | ((BestOs & 0xFFFF) << 16);
+        }
+
+        // NT: an Id is a braced GUID or one of the names in SbSupportedOsList, compared without case.
+        private static bool TryFindSupportedOs(string Id, out uint Os)
+        {
+            bool IsGuid = Guid.TryParseExact(Id, "B", out Guid Parsed);
+
+            foreach ((Guid Guid, string Name, ushort Major, ushort Minor) in SupportedOsList)
+            {
+                if ((IsGuid && Guid == Parsed) || (!IsGuid && string.Equals(Id, Name, StringComparison.OrdinalIgnoreCase)))
+                {
+                    Os = ((uint)Major << 16) | Minor;
+                    return true;
+                }
+            }
+
+            Os = 0;
+            return false;
+        }
+
+        // NT: sxs VersionToQword.
+        private static bool TryParseVersionQword(string Text, out ulong Version)
+        {
+            Version = 0;
+            if (string.IsNullOrEmpty(Text))
+                return false;
+
+            string[] Parts = Text.Split('.');
+            if (Parts.Length > 4)
+                return false;
+
+            for (int Index = 0; Index < Parts.Length; Index++)
+            {
+                string Part = Parts[Index];
+                if (Part.Length == 0)
+                    return false;
+
+                uint Value = 0;
+                foreach (char Digit in Part)
+                {
+                    if (Digit < '0' || Digit > '9')
+                        return false;
+
+                    Value = Value * 10 + (uint)(Digit - '0');
+                    if (Value >= 0xFFFF)
+                        return false;
+                }
+
+                Version |= (ulong)Value << (16 * (3 - Index));
+            }
+
+            return true;
         }
 
         private static string GetSideBySideRoot()

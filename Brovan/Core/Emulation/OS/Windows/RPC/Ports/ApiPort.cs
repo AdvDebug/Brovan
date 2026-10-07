@@ -25,6 +25,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const int OffBaseSrvActCtxOutputPointer = OffCsrDataStart + 0xB8;
         private const int OffBaseSrvActCtxDataPointer = OffCsrDataStart + 0xC0;
         private const int MinimalActivationContextDataSize = 0x300;
+        private const int OffBaseSrvCreateProcessHandle = OffCsrDataStart + 0x00;
+        private const int OffBaseSrvCreateProcessSxsFlags = OffCsrDataStart + 0x38;
+        private const int OffBaseSrvCreateProcessSupportedOs = OffCsrDataStart + 0xDC;
+        private const int OffBaseSrvCreateProcessMaxVersionTested = OffCsrDataStart + 0xF0;
+
+        // NT: BASE_SXS_CREATEPROCESS_MSG flags that sxssrv tests.
+        private const uint SxsFromManifestPaths = 0x01;
+        private const uint SxsNoActivationContext = 0x20;
+        private const uint SxsFromImageFile = 0x40;
         private const int OffBaseSrvDefineDosDeviceFlags = OffCsrDataStart + 0x00;
         private const int OffBaseSrvDefineDosDeviceName = OffCsrDataStart + 0x08;
         private const int OffBaseSrvDefineDosDeviceTarget = OffCsrDataStart + 0x18;
@@ -413,7 +422,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 case 24: // BaseSrvDeadEntry.
                 case 25: // BaseSrvRegisterThread.
                 case 26: // BaseSrvDeferredCreateProcess.
+                    break;
                 case 29: // BaseSrvCreateProcess2.
+                    HandleBaseSrvCreateProcess2(Reply, Instance);
                     break;
                 case 20: // BaseSrvDefineDosDevice.
                     WriteCsrStatus(Reply, HandleBaseSrvDefineDosDevice(Reply, Instance));
@@ -641,6 +652,57 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             Directory.AddLink(Leaf, Buffer.Substring(0, TargetLength), Buffer.Substring(TargetLength));
             return Remove && !Matched ? NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND : NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT: kernel32 builds the child's SwitchBack context from the manifest compatibility in this reply.
+        private static void HandleBaseSrvCreateProcess2(byte[] Reply, BinaryEmulator Instance)
+        {
+            if (Reply.Length < OffBaseSrvCreateProcessMaxVersionTested + 8)
+                return;
+
+            ulong ProcessHandle = ReadU64(Reply, OffBaseSrvCreateProcessHandle);
+            uint SxsFlags = ReadU32(Reply, OffBaseSrvCreateProcessSxsFlags);
+            if (!TryReadChildCompatibility(Instance, ProcessHandle, SxsFlags, out uint SupportedOs, out ulong MaxVersionTested))
+                return;
+
+            WriteU32(Reply, OffBaseSrvCreateProcessSupportedOs, SupportedOs);
+            WriteU64(Reply, OffBaseSrvCreateProcessMaxVersionTested, MaxVersionTested);
+        }
+
+        internal static bool TryReadChildCompatibility(BinaryEmulator Instance, ulong ProcessHandle, uint SxsFlags, out uint SupportedOs, out ulong MaxVersionTested)
+        {
+            SupportedOs = 0;
+            MaxVersionTested = 0;
+
+            if ((SxsFlags & SxsNoActivationContext) != 0 || (SxsFlags & (SxsFromManifestPaths | SxsFromImageFile)) == 0)
+                return false;
+
+            WinProcess Process = Instance.WinHelper.HandleManager.GetObjectByHandle<WinProcess>(ProcessHandle);
+            if (string.IsNullOrEmpty(Process?.HostImagePath))
+                return false;
+
+            byte[] Manifest;
+            BinaryFile Image = null;
+            try
+            {
+                Image = Instance.LoadBinary(Process.HostImagePath);
+                Manifest = Win32k.Win32kDpi.ReadImageManifest(Image, Process.HostImagePath);
+            }
+            catch (Exception Ex) when (Ex is IOException || Ex is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[CsrssPortHandler] Manifest of {Process.HostImagePath} not read: {Ex.Message}");
+                return false;
+            }
+            finally
+            {
+                Image?.Dispose();
+            }
+
+            if (Manifest == null)
+                return false;
+
+            WinSxS.ReadCompatibility(Manifest, out SupportedOs, out MaxVersionTested);
+            return true;
         }
 
         private static bool HandleBaseSrvCreateActivationContext(byte[] Reply, BinaryEmulator Instance)

@@ -171,6 +171,9 @@ namespace Brovan
 
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern unsafe bool GetFileInformationByHandleEx(SafeFileHandle hFile, int FileInformationClass, void* lpFileInformation, uint dwBufferSize);
+
+        [DllImport("ntdll.dll")]
+        public static extern unsafe int NtQueryInformationFile(IntPtr FileHandle, ulong* IoStatusBlock, void* FileInformation, uint Length, int FileInformationClass);
     }
 
     internal class NativeUnixImports
@@ -186,6 +189,17 @@ namespace Brovan
 
         [DllImport("libc", EntryPoint = "stat", SetLastError = true, CharSet = CharSet.Ansi)]
         public static extern unsafe int Stat(string pathname, byte* statbuf);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct PollFd
+        {
+            public int Descriptor;
+            public short Events;
+            public short ReturnedEvents;
+        }
+
+        [DllImport("libc", EntryPoint = "poll", SetLastError = true)]
+        public static extern unsafe int Poll(PollFd* Entries, nuint Count, int TimeoutMilliseconds);
     }
 
     internal class GeneralHelper
@@ -1223,30 +1237,193 @@ namespace Brovan
 
         private static Stream Stdout = null;
         private static Stream Stderr = null;
-        private static Stream Stdin = null;
         private static readonly ConsoleFilter StdoutFilter = new ConsoleFilter();
         private static readonly ConsoleFilter StderrFilter = new ConsoleFilter();
 
-        /// <summary>
-        /// Reads raw bytes from the host standard input stream. Used when the host stdin is redirected and the
-        /// guest expects pipe semantics rather than line-edited console input.
-        /// </summary>
-        /// <returns>The number of bytes read, or zero at end of input.</returns>
-        public static int ConsoleRead(Span<byte> Destination)
+        // Reads only on demand, so a child that inherits host stdin sees every byte this process did not ask for.
+        public static class HostStreamInput
         {
-            if (Destination.Length == 0)
-                return 0;
+            private const int StdInputHandle = -10;
+            private const int FilePipeLocalInformation = 24;
+            private const int FilePipeLocalInformationBytes = 0x28;
+            private const int NamedPipeStateOffset = 0x20;
+            private const uint FilePipeClosingState = 4;
+            private const short PollIn = 0x1;
+            private const short PollHangUp = 0x10;
 
-            if (Stdin == null)
-                Stdin = Console.OpenStandardInput();
+            private static readonly object Gate = new object();
+            private static readonly SemaphoreSlim Demand = new SemaphoreSlim(0);
+            private static TaskCompletionSource ChangeSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            private static WakeSignal Wake;
+            private static Thread Reader;
+            private static byte[] Buffer;
+            private static int Offset;
+            private static int Count;
+            private static bool HostEnded;
+            private static bool ReadQueued;
+            private static bool QueryQueued;
+            private static bool StateFresh;
+            private static bool WriterClosed;
 
-            try
+            // Read before checking the state, so a change before the park still completes it.
+            public static Task NextChange => Volatile.Read(ref ChangeSignal).Task;
+
+            public static int Peek(Span<byte> Destination, out int Available, out bool Ended)
             {
-                return Stdin.Read(Destination);
+                lock (Gate)
+                {
+                    Available = Count;
+                    Ended = HostEnded && Count == 0;
+                    int Copied = Math.Min(Destination.Length, Count);
+                    if (Copied != 0)
+                        Buffer.AsSpan(Offset, Copied).CopyTo(Destination);
+
+                    return Copied;
+                }
             }
-            catch (IOException)
+
+            public static void Skip(int Bytes)
             {
-                return 0;
+                lock (Gate)
+                {
+                    Bytes = Math.Min(Bytes, Count);
+                    Offset += Bytes;
+                    Count -= Bytes;
+                }
+            }
+
+            public static void Request(WakeSignal Signal)
+            {
+                Volatile.Write(ref Wake, Signal);
+                lock (Gate)
+                {
+                    if (Count != 0 || HostEnded || ReadQueued)
+                        return;
+
+                    ReadQueued = true;
+                    StartReader();
+                }
+
+                Demand.Release();
+            }
+
+            public static bool TryTakeWriterState(out bool Closed)
+            {
+                lock (Gate)
+                {
+                    Closed = WriterClosed;
+                    if (!WriterClosed && !StateFresh)
+                        return false;
+
+                    StateFresh = false;
+                    return true;
+                }
+            }
+
+            // NT: the query waits behind a synchronous read of the same file, so the reader thread runs it between reads.
+            public static void RequestWriterState(WakeSignal Signal)
+            {
+                Volatile.Write(ref Wake, Signal);
+                lock (Gate)
+                {
+                    if (Count == 0 || HostEnded || QueryQueued)
+                        return;
+
+                    QueryQueued = true;
+                    StartReader();
+                }
+
+                Demand.Release();
+            }
+
+            private static void StartReader()
+            {
+                if (Reader != null)
+                    return;
+
+                Buffer = new byte[Brovan.Core.Settings.MemoryBudget.HostStreamInputBytes];
+                Reader = new Thread(ReadHost) { IsBackground = true, Name = "Brovan stdin reader" };
+                Reader.Start();
+            }
+
+            private static void SignalChange()
+            {
+                TaskCompletionSource Previous = Interlocked.Exchange(ref ChangeSignal, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+                Previous.TrySetResult();
+                Volatile.Read(ref Wake)?.Bump();
+            }
+
+            private static unsafe bool IsHostWriterClosed()
+            {
+                if (IsWindows)
+                {
+                    byte* Information = stackalloc byte[FilePipeLocalInformationBytes];
+                    ulong* IoStatus = stackalloc ulong[2];
+                    IntPtr Handle = NativeWinImports.GetStdHandle(StdInputHandle);
+                    int Status = NativeWinImports.NtQueryInformationFile(Handle, IoStatus, Information, FilePipeLocalInformationBytes, FilePipeLocalInformation);
+                    return Status >= 0 && *(uint*)(Information + NamedPipeStateOffset) == FilePipeClosingState;
+                }
+
+                NativeUnixImports.PollFd Entry = new NativeUnixImports.PollFd { Descriptor = 0, Events = PollIn };
+                return NativeUnixImports.Poll(&Entry, 1, 0) > 0 && (Entry.ReturnedEvents & PollHangUp) != 0;
+            }
+
+            private static void ReadHost()
+            {
+                Stream Input = null;
+                bool Live = true;
+                while (Live)
+                {
+                    Demand.Wait();
+
+                    bool Query, Read;
+                    lock (Gate)
+                    {
+                        Query = QueryQueued;
+                        Read = ReadQueued;
+                    }
+
+                    if (Query)
+                    {
+                        bool Closed = IsHostWriterClosed();
+                        lock (Gate)
+                        {
+                            QueryQueued = false;
+                            StateFresh = true;
+                            WriterClosed |= Closed;
+                        }
+
+                        SignalChange();
+                    }
+
+                    if (!Read)
+                        continue;
+
+                    int Got;
+                    try
+                    {
+                        Input ??= Console.OpenStandardInput();
+                        Got = Input.Read(Buffer, 0, Buffer.Length);
+                    }
+                    catch (IOException Ex)
+                    {
+                        LogError($"Host standard input stopped: {Ex.Message}");
+                        Got = 0;
+                    }
+
+                    Live = Got > 0;
+                    lock (Gate)
+                    {
+                        ReadQueued = false;
+                        Offset = 0;
+                        Count = Live ? Got : 0;
+                        HostEnded = !Live;
+                        StateFresh = false;
+                        WriterClosed |= !Live;
+                    }
+
+                    SignalChange();
+                }
             }
         }
 

@@ -967,7 +967,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS HandleIssueUserIo(ref DeviceData Data, BinaryEmulator Instance)
         {
-            UserIoRequest Request = new UserIoRequest(Instance, Data.InputBuffer, Data.InputLength);
+            UserIoRequest Request = new UserIoRequest(Instance, in Data);
             if (!Request.Valid)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -1262,7 +1262,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ConsoleReadResult Result = State.Read(Instance, Output, Unicode, ProcessControlZ,
                     Initial != null ? Initial.AsSpan(0, InitialCount) : ReadOnlySpan<char>.Empty, WakeupMask, out int Written, out uint EndKeyState);
                 if (Result == ConsoleReadResult.NeedInput || Result == ConsoleReadResult.Yield)
-                    return ParkRead(Instance, Result, NextInput);
+                {
+                    WinPendingIo Io = Request.SyncIo(Instance);
+                    return ParkRead(Instance, Result, NextInput, in Io);
+                }
 
                 if (Written != 0 && !Instance.WriteMemory(Address, Output.Slice(0, Written)))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -1279,11 +1282,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // conhost: an ANSI ReadConsole where a line that starts with Ctrl+Z is end of file.
-        internal static NTSTATUS ReadFile(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
+        internal static NTSTATUS ReadFile(BinaryEmulator Instance, in WinPendingIo Io, ulong BufferPtr, uint Length)
         {
             if (Length == 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, Io.IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
@@ -1294,15 +1297,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             Span<byte> Output = Instance.WinHelper.Shared.GetSpan(Math.Min(Length, MaxReadBytes));
             ConsoleReadResult Result = State.Read(Instance, Output, false, true, ReadOnlySpan<char>.Empty, 0, out int Written, out _);
             if (Result == ConsoleReadResult.NeedInput || Result == ConsoleReadResult.Yield)
-                return ParkRead(Instance, Result, NextInput);
+                return ParkRead(Instance, Result, NextInput, in Io);
 
             if (Written != 0 && !Instance.WriteMemory(BufferPtr, Output.Slice(0, Written)))
             {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                Instance.WinHelper.WriteIoStatusBlock(Instance, Io.IoStatusBlock, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Written);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, Io.IoStatusBlock, NTSTATUS.STATUS_SUCCESS, (ulong)Written);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -1329,7 +1332,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (State.InputExhausted)
                         return NTSTATUS.STATUS_END_OF_FILE;
 
-                    return ParkUntilInput(Instance, NextInput);
+                    WinPendingIo Io = Request.SyncIo(Instance);
+                    return ParkUntilInput(Instance, NextInput, in Io);
                 }
 
                 GeneralHelper.HostConsoleInput.Request(false, NextInput);
@@ -1406,18 +1410,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HostEncoding.GetChars(Single, Decoded) != 0 ? Decoded[0] : '\0';
         }
 
-        private static NTSTATUS ParkUntilInput(BinaryEmulator Instance, Task NextInput)
+        private static NTSTATUS ParkUntilInput(BinaryEmulator Instance, Task NextInput, in WinPendingIo Io)
         {
             GeneralHelper.HostConsoleInput.Request(true, NextInput);
-            return Instance.WinHelper.TryRetrySyscallWhenDone(NextInput) ? NTSTATUS.STATUS_PENDING : NTSTATUS.STATUS_UNSUCCESSFUL;
+            return Instance.WinHelper.TryRetrySyscallWhenDone(NextInput, Io) ? NTSTATUS.STATUS_PENDING : NTSTATUS.STATUS_UNSUCCESSFUL;
         }
 
-        private static NTSTATUS ParkRead(BinaryEmulator Instance, ConsoleReadResult Result, Task NextInput)
+        private static NTSTATUS ParkRead(BinaryEmulator Instance, ConsoleReadResult Result, Task NextInput, in WinPendingIo Io)
         {
             if (Result == ConsoleReadResult.NeedInput)
-                return ParkUntilInput(Instance, NextInput);
+                return ParkUntilInput(Instance, NextInput, in Io);
 
-            return Instance.WinHelper.TryRetrySyscallAfterSlice(1) ? NTSTATUS.STATUS_PENDING : NTSTATUS.STATUS_UNSUCCESSFUL;
+            return Instance.WinHelper.TryRetrySyscallAfterSlice(1, Io) ? NTSTATUS.STATUS_PENDING : NTSTATUS.STATUS_UNSUCCESSFUL;
         }
 
         internal static void EchoText(BinaryEmulator Instance, StringBuilder Text)
@@ -1612,20 +1616,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             private const int Stride = 0x10;
 
             private readonly ReadOnlySpan<byte> Raw;
+            private readonly DeviceData Origin;
 
             public readonly ulong Client;
             public readonly uint InputCount;
             public readonly uint OutputCount;
             public readonly bool Valid;
 
-            public UserIoRequest(BinaryEmulator Instance, byte[] Buffer, uint Length)
+            public UserIoRequest(BinaryEmulator Instance, in DeviceData Data)
             {
                 Client = 0;
                 InputCount = 0;
                 OutputCount = 0;
                 Valid = false;
                 Raw = default;
+                Origin = Data;
 
+                byte[] Buffer = Data.InputBuffer;
+                uint Length = Data.InputLength;
                 if (Buffer == null || Length < TableOffset || Buffer.Length < Length)
                     return;
 
@@ -1644,6 +1652,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Raw = Header;
                 Valid = true;
             }
+
+            public WinPendingIo SyncIo(BinaryEmulator Instance) =>
+                new WinPendingIo(in Origin, Instance.CurrentThreadId, Instance.WinHelper.GetEventByHandle(Origin.EventHandle, AccessMask.GiveTemp));
 
             public bool TryGetBuffer(uint Index, out uint Size, out ulong Address)
             {

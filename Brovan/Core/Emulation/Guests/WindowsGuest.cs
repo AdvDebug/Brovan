@@ -447,8 +447,26 @@ namespace Brovan.Core.Emulation.Guests
             if (Thread.Context == null)
                 Thread.Context = new CpuContext();
 
-            Thread.Context.RIP = State.WaitResumeRIP;
-            Thread.Context.RAX = State.RetrySyscallNumber;
+            bool Cancelled = State.SyncIoCancelled;
+            Thread.Context.RIP = Cancelled ? State.WaitResumeRIP + 2 : State.WaitResumeRIP;
+            Thread.Context.RAX = Cancelled ? (ulong)(uint)NTSTATUS.STATUS_CANCELLED : State.RetrySyscallNumber;
+
+            if (Cancelled)
+            {
+                State.PipeWaitHandle = 0;
+                State.PipeWaitDeadline = -1;
+            }
+
+            if (Cancelled || State.SyncIo == null)
+            {
+                State.ResetSyncIo();
+            }
+            else
+            {
+                State.SyncIoBetweenRetries = true;
+                State.SyncIoRip = State.WaitResumeRIP;
+                State.SyncIoSyscall = State.RetrySyscallNumber;
+            }
 
             State.RetrySyscallActive = false;
             State.RetrySyscallNumber = 0;
@@ -705,6 +723,23 @@ namespace Brovan.Core.Emulation.Guests
 
         private const uint Win32kServiceBase = 0x1000;
 
+        // Any other syscall means the thread left the I/O.
+        private bool TryEndCancelledRetry(BinaryEmulator Instance, uint Syscall, ulong Rip)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Instance.CurrentThread);
+            if (State == null || !State.SyncIoBetweenRetries)
+                return false;
+
+            bool Cancelled = State.SyncIoCancelled && State.SyncIoRip == Rip && State.SyncIoSyscall == Syscall;
+            State.ResetSyncIo();
+            if (!Cancelled)
+                return false;
+
+            Instance.WinHelper.ClearPipeWait();
+            SetLastWinErrorRegister(Instance, NTSTATUS.STATUS_CANCELLED);
+            return true;
+        }
+
         public bool TryHandleSyscall(BinaryEmulator Instance)
         {
             WinHelper?.LdrTracker?.SyncFromSyscall();
@@ -722,6 +757,15 @@ namespace Brovan.Core.Emulation.Guests
                 WinSyscallEntry Entry = WinSyscallTable.Lookup(Syscall);
                 string HandlerName = Entry.Name;
                 bool IsImplemented = Entry.Handler != null;
+
+                if (TryEndCancelledRetry(Instance, Syscall, Rip))
+                {
+                    Instance.Settings.SyscallNotificationCallback?.Invoke(Instance.ReadRegister(Instance.IPRegister), Syscall, HandlerName, (ulong)(uint)NTSTATUS.STATUS_CANCELLED);
+                    if (CaptureSyscallHistory)
+                        Instance.Syscalls.RecordSyscall(GuestOsKind.Windows, Abi, Syscall, HandlerName, HistoryArgs, (ulong)(uint)NTSTATUS.STATUS_CANCELLED, Rip, IsImplemented);
+
+                    return true;
+                }
 
                 SyscallRule Rule = null;
                 if (Instance.Syscalls.HasRules)

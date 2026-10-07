@@ -519,7 +519,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             BrovanSocket? Accepted = TryAccept(out EndPoint? Remote);
             if (Accepted == null)
             {
-                if (Instance.WinHelper.TryContinuePipeWait(Data.FileHandle, int.MaxValue, PollRetrySliceMs))
+                WinPendingIo? SyncIo = Data.File.Synchronous ? new WinPendingIo(in Data, Instance.CurrentThreadId, Instance.WinHelper.GetEventByHandle(Data.EventHandle, AccessMask.GiveTemp)) : null;
+                if (Instance.WinHelper.TryContinuePipeWait(Data.FileHandle, int.MaxValue, PollRetrySliceMs, SyncIo))
                     return NTSTATUS.STATUS_PENDING;
 
                 // STATUS_TIMEOUT is a success status.
@@ -1770,6 +1771,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 this.Deadline = Deadline;
             }
 
+            internal override WinFile File => Io.File;
+
             internal override string WaitLabel => "afd-poll";
 
             internal bool Names(AfdDevice Endpoint)
@@ -1804,6 +1807,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 this.Sent = Sent;
             }
 
+            internal override WinFile File => Io.File;
+
             internal override string WaitLabel => Send ? "afd-send" : "afd-receive";
         }
 
@@ -1835,6 +1840,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             internal AfdDevice WaitsOn => Accepted ? Target : Listener;
+
+            internal override WinFile File => Io.File;
 
             internal override string WaitLabel => Accepted ? "afd-accept-receive" : "afd-accept";
         }
