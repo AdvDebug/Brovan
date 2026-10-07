@@ -1,4 +1,5 @@
 using System;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -30,9 +31,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Decommit == Release || (FreeType & ~(MemDecommit | MemRelease | MemCoalescePlaceholders | MemPreservePlaceholder)) != 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER_4;
 
-            // NT's answer for these flags on a region that is not a placeholder.
-            if ((FreeType & (MemCoalescePlaceholders | MemPreservePlaceholder)) != 0)
-                return Decommit ? NTSTATUS.STATUS_INVALID_PARAMETER_4 : NTSTATUS.STATUS_INVALID_PARAMETER_3;
+            uint PlaceholderFlags = FreeType & (MemCoalescePlaceholders | MemPreservePlaceholder);
+            if (PlaceholderFlags != 0 && Decommit)
+                return NTSTATUS.STATUS_INVALID_PARAMETER_4;
+
+            if (PlaceholderFlags == (MemCoalescePlaceholders | MemPreservePlaceholder))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
             if (Status != NTSTATUS.STATUS_SUCCESS)
@@ -65,6 +69,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static NTSTATUS Free(BinaryEmulator Instance, ref ulong BaseAddress, ref ulong RegionSize, uint FreeType)
         {
             bool Release = (FreeType & MemRelease) != 0;
+            bool Coalesce = (FreeType & MemCoalescePlaceholders) != 0;
+            bool Preserve = (FreeType & MemPreservePlaceholder) != 0;
+
+            if ((Coalesce || Preserve) && RegionSize == 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER_3;
 
             if (BaseAddress == 0)
                 return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
@@ -72,17 +81,32 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (BaseAddress > ulong.MaxValue - RegionSize)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
+            ulong Start = BaseAddress & ~(PageSize - 1);
+
+            if (Coalesce)
+            {
+                ulong CoalesceEnd = BinaryEmulator.AlignUp(BaseAddress + RegionSize, PageSize);
+                if (CoalesceEnd <= Start || !Instance.CoalescePlaceholders(Start, CoalesceEnd))
+                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+                BaseAddress = Start;
+                RegionSize = CoalesceEnd - Start;
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
             // NT: fails inside any view, SEC_RESERVE included.
             if (Instance.WinHelper.IsSectionViewAddress(BaseAddress))
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+                return NTSTATUS.STATUS_UNABLE_TO_DELETE_SECTION;
 
-            ulong Start = BaseAddress & ~(PageSize - 1);
             if (!Instance.TryFindMemoryRegion(Start, out MemoryRegion Region))
             {
                 if (Release && (Instance.Settings.Flags & LogFlags.Issues) != 0 && Instance.IsRegionFreed(BaseAddress, true))
                     Instance.TriggerEventMessage($"[!!] Double-Free detected for the allocated memory that have the base address 0x{BaseAddress:X}.", LogFlags.Issues);
                 return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
             }
+
+            if (!Release && Region.IsPlaceholder)
+                return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
             ulong AllocationBase = Region.AllocationBase != 0 ? Region.AllocationBase : Region.BaseAddress;
             ulong AllocationSize = AllocationEnd(Instance, AllocationBase) - AllocationBase;
@@ -101,10 +125,37 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Secured != NTSTATUS.STATUS_SUCCESS)
                 return Secured;
 
-            if (Release)
+            bool WholeAllocation = Start == AllocationBase && End - Start == AllocationSize;
+
+            if (Preserve)
+            {
+                if (Region.IsPlaceholder)
+                {
+                    if (WholeAllocation)
+                        return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+                    if (!Instance.SplitPlaceholder(Start, End, false))
+                        return NTSTATUS.STATUS_UNABLE_TO_FREE_VM;
+                }
+                else if (!Region.FromPlaceholder)
+                {
+                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+                }
+                else if (!Instance.ConvertToPlaceholder(Start, End))
+                {
+                    Utils.LogError($"[NtFreeVirtualMemory] Could not turn 0x{Start:X}-0x{End:X} back into a placeholder.");
+                    return NTSTATUS.STATUS_UNABLE_TO_FREE_VM;
+                }
+            }
+            else if (Release && Region.IsPlaceholder)
+            {
+                if (!Instance.SplitPlaceholder(Start, End, true))
+                    return NTSTATUS.STATUS_UNABLE_TO_FREE_VM;
+            }
+            else if (Release)
             {
                 // The region list cannot split an allocation.
-                if (Start != AllocationBase || End - Start != AllocationSize)
+                if (!WholeAllocation)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                 if (!Instance.ReleaseMemory(AllocationBase) && !Instance.UnmapMemoryRegion(AllocationBase))

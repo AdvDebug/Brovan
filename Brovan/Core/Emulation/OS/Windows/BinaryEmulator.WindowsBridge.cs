@@ -1206,6 +1206,8 @@ namespace Brovan.Core.Emulation
                    Left.IsCommitted == Right.IsCommitted &&
                    Left.IsReset == Right.IsReset &&
                    Left.IsSecured == Right.IsSecured &&
+                   Left.IsPlaceholder == Right.IsPlaceholder &&
+                   Left.FromPlaceholder == Right.FromPlaceholder &&
                    Left.Protections == Right.Protections &&
                    Left.InitialProtections == Right.InitialProtections &&
                    Left.SpecialProtections == Right.SpecialProtections &&
@@ -1957,6 +1959,157 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        private static MemoryRegion MakePlaceholderRegion(ulong BaseAddress, ulong Size)
+        {
+            const uint PAGE_NOACCESS = 0x01;
+
+            return new MemoryRegion
+            {
+                BaseAddress = BaseAddress,
+                Size = Size,
+                RequestedSize = Size,
+                AllocationBase = BaseAddress,
+                AllocationProtect = PAGE_NOACCESS,
+                Protect = PAGE_NOACCESS,
+                IsReserved = true,
+                IsCommitted = false,
+                IsPlaceholder = true,
+                InitialProtections = MemoryProtection.None,
+                Protections = MemoryProtection.None,
+                SpecialProtections = SpecialProtections.None,
+                Flags = AllocationType.Reserved
+            };
+        }
+
+        public bool ReservePlaceholder(ulong BaseAddress, ulong Size)
+        {
+            Size = AlignUp(Size, PageSize);
+
+            if (WinHelper == null || IsRegionInUse(BaseAddress, Size))
+                return false;
+
+            ConsumeFreedMemoryRange(BaseAddress, Size);
+            AddMemoryRegion(MakePlaceholderRegion(BaseAddress, Size));
+            return true;
+        }
+
+        public bool ReplacePlaceholder(ulong BaseAddress, ulong Size, uint Protect)
+        {
+            if (WinHelper == null || !TryFindMemoryRegionByBase(BaseAddress, out int Index, out MemoryRegion Region) ||
+                !Region.IsPlaceholder || Region.Size != Size)
+                return false;
+
+            Region.IsPlaceholder = false;
+            Region.FromPlaceholder = true;
+            Region.AllocationProtect = Protect;
+            Region.Protect = Protect;
+            Region.InitialProtections = WinHelper.ConvertWinProtectToInternal(Protect);
+            _memory[Index] = Region;
+            return true;
+        }
+
+        public bool SplitPlaceholder(ulong Start, ulong End, bool Release)
+        {
+            if (!TryFindMemoryRegionIndex(Start, out int Index))
+                return false;
+
+            MemoryRegion Region = _memory[Index];
+            ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
+            if (!Region.IsPlaceholder || End <= Start || End > RegionEnd)
+                return false;
+
+            RemoveMemoryRegionAt(Index);
+
+            if (Region.BaseAddress < Start)
+                AddMemoryRegion(MakePlaceholderRegion(Region.BaseAddress, Start - Region.BaseAddress));
+
+            if (Release)
+                AddFreedRegion(Start, End - Start);
+            else
+                AddMemoryRegion(MakePlaceholderRegion(Start, End - Start));
+
+            if (End < RegionEnd)
+                AddMemoryRegion(MakePlaceholderRegion(End, RegionEnd - End));
+
+            return true;
+        }
+
+        public bool CoalescePlaceholders(ulong Start, ulong End)
+        {
+            if (!TryFindMemoryRegionByBase(Start, out int First, out MemoryRegion Region) || !Region.IsPlaceholder)
+                return false;
+
+            int Last = First;
+            ulong Cursor = GetRangeEnd(Region.BaseAddress, Region.Size);
+
+            while (Cursor < End)
+            {
+                if (++Last >= _memory.Count)
+                    return false;
+
+                MemoryRegion Next = _memory[Last];
+                if (!Next.IsPlaceholder || Next.BaseAddress != Cursor)
+                    return false;
+
+                Cursor = GetRangeEnd(Next.BaseAddress, Next.Size);
+            }
+
+            if (Cursor != End || Last == First)
+                return false;
+
+            _memory.RemoveRange(First + 1, Last - First);
+            _memory[First] = MakePlaceholderRegion(Start, End - Start);
+            return true;
+        }
+
+        public bool ConvertToPlaceholder(ulong Start, ulong End)
+        {
+            if (!TryFindMemoryRegion(Start, out MemoryRegion Anchor) || !Anchor.FromPlaceholder)
+                return false;
+
+            ulong AllocationBase = Anchor.AllocationBase;
+            if (!DecommitMemory(Start, End - Start))
+                return false;
+
+            FindWinRegionWindow(Start, End, out int First, out int Last);
+            if (Last == First)
+                return false;
+
+            MemoryRegion Head = _memory[First];
+            MemoryRegion Tail = _memory[Last - 1];
+            ulong TailEnd = GetRangeEnd(Tail.BaseAddress, Tail.Size);
+
+            _memory.RemoveRange(First, Last - First);
+
+            int Insert = First;
+            if (Head.BaseAddress < Start)
+            {
+                Head.Size = Start - Head.BaseAddress;
+                Head.RequestedSize = Head.Size;
+                _memory.Insert(Insert++, Head);
+            }
+
+            _memory.Insert(Insert++, MakePlaceholderRegion(Start, End - Start));
+
+            if (TailEnd > End)
+            {
+                Tail.BaseAddress = End;
+                Tail.Size = TailEnd - End;
+                Tail.RequestedSize = Tail.Size;
+                _memory.Insert(Insert, Tail);
+            }
+
+            // NT: what is left above End is an allocation of its own.
+            for (int i = Insert; i < _memory.Count && _memory[i].AllocationBase == AllocationBase; i++)
+            {
+                MemoryRegion Above = _memory[i];
+                Above.AllocationBase = End;
+                _memory[i] = Above;
+            }
+
+            return true;
+        }
+
         public bool MapSecuredPage(ulong BaseAddress, bool HostMapped)
         {
             const uint PAGE_READONLY = 0x02;
@@ -2268,6 +2421,7 @@ namespace Brovan.Core.Emulation
                     IsReserved = true,
                     IsCommitted = false,
                     IsReset = Region.IsReset,
+                    FromPlaceholder = Region.FromPlaceholder,
                     InitialProtections = AllocationProt,
                     Protections = MemoryProtection.None,
                     SpecialProtections = SpecialProtections.None,
@@ -2286,6 +2440,7 @@ namespace Brovan.Core.Emulation
                 IsReserved = true,
                 IsCommitted = true,
                 IsReset = Region.IsReset,
+                FromPlaceholder = Region.FromPlaceholder,
                 InitialProtections = AllocationProt,
                 Protections = NewProt,
                 SpecialProtections = Special,
@@ -2305,6 +2460,7 @@ namespace Brovan.Core.Emulation
                     IsReserved = true,
                     IsCommitted = false,
                     IsReset = Region.IsReset,
+                    FromPlaceholder = Region.FromPlaceholder,
                     InitialProtections = AllocationProt,
                     Protections = MemoryProtection.None,
                     SpecialProtections = SpecialProtections.None,
@@ -2331,7 +2487,7 @@ namespace Brovan.Core.Emulation
 
             for (ulong Cursor = BaseAddress; Cursor < End;)
             {
-                if (!TryFindMemoryRegion(Cursor, out MemoryRegion Part) || !Part.IsReserved)
+                if (!TryFindMemoryRegion(Cursor, out MemoryRegion Part) || !Part.IsReserved || Part.IsPlaceholder)
                     return false;
 
                 // TryFindMemoryRegion can hand back a region that ends at or before the address. without
@@ -2469,6 +2625,7 @@ namespace Brovan.Core.Emulation
                         IsReserved = true,
                         IsCommitted = false,
                         IsReset = Region.IsReset,
+                        FromPlaceholder = Region.FromPlaceholder,
                         InitialProtections = AllocationProt,
                         Protections = MemoryProtection.None,
                         SpecialProtections = SpecialProtections.None,

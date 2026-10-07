@@ -79,6 +79,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsMemoryRangeMapped(AlignedBase, AlignedSize))
                 return Instance.TryFindMemoryRegion(AlignedBase, out _) ? NTSTATUS.STATUS_CONFLICTING_ADDRESSES : NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 
+            if (!Instance.IsRegionCommitted(AlignedBase, AlignedSize))
+                return NTSTATUS.STATUS_NOT_COMMITTED;
+
             if (!Instance.TryFindMemoryRegion(BaseAddress, out MemoryRegion OldRegion))
                 return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
 

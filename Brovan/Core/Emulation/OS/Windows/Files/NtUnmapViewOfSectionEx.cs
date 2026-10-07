@@ -4,6 +4,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtUnmapViewOfSectionEx : IWinSyscall
     {
+        private const uint MemUnmapWithTransientBoost = 0x1;
+        private const uint MemPreservePlaceholder = 0x2;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
@@ -26,8 +29,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS UnmapView(BinaryEmulator Instance, ulong ProcessHandle, ulong BaseAddress, uint Flags, string SyscallName)
         {
+            if ((Flags & ~(MemUnmapWithTransientBoost | MemPreservePlaceholder)) != 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER_3;
+
             if (!Instance.WinHelper.IsCurrentProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            // No view here replaced a placeholder.
+            if ((Flags & MemPreservePlaceholder) != 0)
+            {
+                bool IsView = Instance.WinHelper.IsSectionViewAddress(BaseAddress) || Instance.WinHelper.FindMappedImageViewByAddress(BaseAddress) != null;
+                return IsView ? NTSTATUS.STATUS_CONFLICTING_ADDRESSES : NTSTATUS.STATUS_NOT_MAPPED_VIEW;
+            }
 
             if (BaseAddress == 0 || !Instance.WinHelper.UnmapViewOfSection(BaseAddress))
                 return NTSTATUS.STATUS_NOT_MAPPED_VIEW;

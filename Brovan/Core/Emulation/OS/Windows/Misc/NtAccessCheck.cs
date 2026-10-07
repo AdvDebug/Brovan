@@ -9,7 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint GenericExecute = 0x20000000;
         private const uint GenericAll = 0x10000000;
 
-        private static uint ApplyGenericMapping(uint DesiredAccess, uint MapRead, uint MapWrite, uint MapExecute, uint MapAll)
+        internal static uint ApplyGenericMapping(uint DesiredAccess, uint MapRead, uint MapWrite, uint MapExecute, uint MapAll)
         {
             uint Mapped = DesiredAccess;
 

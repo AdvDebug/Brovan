@@ -10,6 +10,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtMapViewOfSection : IWinSyscall
     {
         private const ulong PageSize = 0x1000;
+        private const uint MemReplacePlaceholder = 0x4000;
 
         private static ulong AlignDown(ulong v, ulong a) => v & ~(a - 1);
 
@@ -175,6 +176,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint InheritDisposition = (uint)Instance.WinHelper.GetArg(7);
             uint AllocationType = (uint)Instance.WinHelper.GetArg(8);
             uint Win32Protect = (uint)Instance.WinHelper.GetArg(9);
+
+            // NT: only NtMapViewOfSectionEx replaces a placeholder.
+            if ((AllocationType & MemReplacePlaceholder) != 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             // NT checks the protection before either handle.
             int ProtectionMask = WinSysHelper.MakeProtectionMask(Win32Protect & ~WinSysHelper.PageTargetsInvalid);

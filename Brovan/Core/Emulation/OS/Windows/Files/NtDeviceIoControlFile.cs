@@ -80,6 +80,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Data.ApcContext = ApcContext;
             Data.IoStatusBlock = IoStatusBlockPtr;
             Data.UserBuffer = OutputBufferPtr;
+            Data.InputPointer = InputBufferPtr;
 
             byte[] RentedInput = null;
             if (InputBufferPtr != 0 && InputBufferLength != 0)
@@ -160,7 +161,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             // NT queues no APC or packet for a request that fails without pending.
             if (Status != NTSTATUS.STATUS_PENDING && ((uint)Status >> 30) != 3)
-                Instance.WinHelper.QueueIoCompletion(File, Instance.CurrentThread, ApcRoutine, ApcContext, IoStatusBlockPtr, Status, Information);
+                Instance.WinHelper.QueueIoCompletion(File, Instance.CurrentThread, ApcRoutine, ApcContext, IoStatusBlockPtr, Status, Information, false);
 
             return Status;
         }

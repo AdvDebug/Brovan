@@ -618,7 +618,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ReleaseData(Request);
 
             bool QueueCompletion = Pended || ((uint)Request.Status >> 30) != 3;
-            Instance.WinHelper.CompletePendingIo(in Request.Io, Request.Status, Request.Information, QueueCompletion);
+            Instance.WinHelper.CompletePendingIo(in Request.Io, Request.Status, Request.Information, QueueCompletion, Pended);
 
             if (Pended)
                 Instance.WakeSignal.Bump();

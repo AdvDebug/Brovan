@@ -36,7 +36,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.ReadPointer(BaseAddressPtr) != 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            return NtAllocateVirtualMemory.AllocateCommon(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, AllocationType, Protect, Requirements, (uint)Instance.WinHelper.PointerSize);
+            return NtAllocateVirtualMemory.AllocateCommon(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, AllocationType, Protect, Requirements, (uint)Instance.WinHelper.PointerSize, true);
         }
 
         // MEM_EXTENDED_PARAMETER is 16 bytes on both architectures. NUMA node and attribute flags only tune placement.

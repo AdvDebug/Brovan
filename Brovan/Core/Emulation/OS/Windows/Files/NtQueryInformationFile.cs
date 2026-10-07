@@ -16,6 +16,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint FilePipeLocalInformationSize = 0x28;
         private const uint FileModeInformationSize = 0x04;
         private const uint FileAlignmentInformationSize = 0x04;
+        private const uint FileIoCompletionNotificationInformationSize = 0x04;
         private const uint FileNetworkOpenInformationSize = 0x38;
         private const uint FileAttributeTagInformationSize = 0x08;
         private const uint FileIdInformationSize = 0x18;
@@ -70,6 +71,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileModeInformationSize, File.Mode);
                 case FILE_INFORMATION_CLASS.FileAlignmentInformation:
                     return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileAlignmentInformationSize, 0);
+                case FILE_INFORMATION_CLASS.FileIoCompletionNotificationInformation:
+                    return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileIoCompletionNotificationInformationSize, File.CompletionNotificationModes);
                 case FILE_INFORMATION_CLASS.FileAllInformation:
                     return HandleFileAllInformation(Instance, FileHandle, File, IoStatusBlock, FileInformation, Length);
                 case FILE_INFORMATION_CLASS.FileNetworkOpenInformation:

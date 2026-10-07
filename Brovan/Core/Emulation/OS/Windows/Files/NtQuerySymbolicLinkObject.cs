@@ -1,7 +1,5 @@
-using System.Reflection;
-using System.Diagnostics.CodeAnalysis;
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
-using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -13,70 +11,64 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong LinkHandle = Instance.WinHelper.GetArg(0);
             ulong LinkTargetPtr = Instance.WinHelper.GetArg(1);
-            uint ReturnedLengthPtr = (uint)Instance.WinHelper.GetArg(2);
-
-            if (LinkHandle == 0 || LinkTargetPtr == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            ulong ReturnedLengthPtr = Instance.WinHelper.GetArg(2);
 
             bool Is64 = Instance.WinHelper.PointerSize == 8;
-            uint UsSize = Is64 ? 16u : 8u;
-            if (!Instance.IsRegionMapped(LinkTargetPtr, UsSize))
+            if (Is64 && (LinkTargetPtr & 1) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
+
+            Span<byte> Raw = stackalloc byte[16];
+            Span<byte> LinkTarget = Raw.Slice(0, Is64 ? 16 : 8);
+            if (!Instance.ReadMemory(LinkTargetPtr, LinkTarget))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (ReturnedLengthPtr != 0)
+            ushort OutMaximumLength = BinaryPrimitives.ReadUInt16LittleEndian(LinkTarget.Slice(2));
+            ulong OutBuffer = Is64 ? BinaryPrimitives.ReadUInt64LittleEndian(LinkTarget.Slice(8)) : BinaryPrimitives.ReadUInt32LittleEndian(LinkTarget.Slice(4));
+
+            if (OutMaximumLength != 0 && !Instance.IsRegionMapped(OutBuffer, OutMaximumLength))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (ReturnedLengthPtr != 0 && !Instance.IsRegionMapped(ReturnedLengthPtr, 4))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            WinSymbolicLink Link = Instance.WinHelper.HandleManager.GetObjectByHandle<WinSymbolicLink>(LinkHandle);
+            if (Link == null)
+                return Instance.WinHelper.IsObjectHandle(LinkHandle) ? NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH : NTSTATUS.STATUS_INVALID_HANDLE;
+
+            if ((Instance.WinHelper.HandleManager.GetPermissionsByHandle(LinkHandle) & AccessMask.SymbolicLinkQuery) == 0)
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            string Stored = Link.TargetBuffer;
+            int MaximumBytes = Math.Min(Stored.Length * 2, 0xFFFE);
+            int LengthBytes = Math.Min(Link.Target.Length * 2, MaximumBytes);
+
+            // NT: ReturnedLength asks for the whole MaximumLength buffer.
+            int CopyBytes = ReturnedLengthPtr != 0 ? MaximumBytes : LengthBytes;
+            Span<byte> Value = stackalloc byte[4];
+            if (CopyBytes > OutMaximumLength)
             {
-                if (!Instance.IsRegionMapped(ReturnedLengthPtr, 4))
+                BinaryPrimitives.WriteUInt32LittleEndian(Value, (uint)MaximumBytes);
+                if (ReturnedLengthPtr != 0 && !Instance.WriteMemory(ReturnedLengthPtr, Value))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
             }
 
-            IHandleObject Obj = Instance.WinHelper.HandleManager.GetObjectByHandle(LinkHandle);
-            if (Obj == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            string Target = TryGetTargetString(Obj);
-            if (Target == null)
-                return NTSTATUS.STATUS_NOT_SUPPORTED;
-            
-            ushort OutMaximumLength = Instance._emulator.ReadMemoryUShort(LinkTargetPtr + 2);
-            ulong OutBuffer = Is64
-                ? Instance._emulator.ReadMemoryULong(LinkTargetPtr + 8)
-                : Instance._emulator.ReadMemoryUInt(LinkTargetPtr + 4);
-
-            if (OutMaximumLength == 0)
-                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
-
-            if (OutBuffer == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!Instance.IsRegionMapped(OutBuffer, OutMaximumLength))
+            if (CopyBytes != 0 && !Instance.WriteMemory(OutBuffer, MemoryMarshal.AsBytes(Stored.AsSpan(0, CopyBytes / 2))))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            uint RequiredBytes = (uint)(Target.Length * 2);
+            BinaryPrimitives.WriteUInt16LittleEndian(Value, (ushort)LengthBytes);
+            if (!Instance.WriteMemory(LinkTargetPtr, Value.Slice(0, 2)))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (ReturnedLengthPtr != 0)
-                Instance._emulator.WriteMemory(ReturnedLengthPtr, RequiredBytes);
-
-            Instance._emulator.WriteMemory(LinkTargetPtr + 0, (ushort)Math.Min(RequiredBytes, 0xFFFF), 2);
-
-            if (OutMaximumLength < RequiredBytes)
-                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
-
-            Instance._emulator.WriteMemory(OutBuffer, Target, Encoding.Unicode);
-
-            if (OutMaximumLength >= RequiredBytes + 2)
-                Instance._emulator.WriteMemory(OutBuffer + RequiredBytes, (ushort)0, 2);
+            BinaryPrimitives.WriteUInt32LittleEndian(Value, (uint)MaximumBytes);
+            if (ReturnedLengthPtr != 0 && !Instance.WriteMemory(ReturnedLengthPtr, Value))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                Instance.TriggerEventMessage($"[+] NtQuerySymbolicLinkObject: Handle=0x{LinkHandle:X}, Target=\"{Target}\" (Len={RequiredBytes}).", LogFlags.Syscall);
+                Instance.TriggerEventMessage($"[+] NtQuerySymbolicLinkObject: Handle=0x{LinkHandle:X}, Target=\"{Link.Target}\" (Len={LengthBytes}, Max={MaximumBytes}).", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private static string TryGetTargetString(IHandleObject Obj)
-        {
-            if (Obj is WinSymbolicLink Link)
-                return Link.Target;
-            return null;
         }
     }
 }

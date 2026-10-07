@@ -24,6 +24,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong ApcContext;
         public ulong IoStatusBlock;
         public ulong UserBuffer;
+        public ulong InputPointer;
     }
 
     public readonly struct WinPendingIo
@@ -210,6 +211,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_CONFLICTING_ADDRESSES = 0xC0000018,
         STATUS_NOT_MAPPED_VIEW = 0xC0000019,
         STATUS_UNABLE_TO_FREE_VM = 0xC000001A,
+        STATUS_UNABLE_TO_DELETE_SECTION = 0xC000001B,
         STATUS_ILLEGAL_INSTRUCTION = 0xC000001D,
         STATUS_INVALID_LOCK_SEQUENCE = 0xC000001E,
         STATUS_INVALID_VIEW_SIZE = 0xC000001F,
@@ -225,6 +227,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_NOT_LOCKED = 0xC000002A,
         STATUS_PARITY_ERROR = 0xC000002B,
         STATUS_UNABLE_TO_DECOMMIT_VM = 0xC000002C,
+        STATUS_NOT_COMMITTED = 0xC000002D,
         STATUS_INVALID_PORT_ATTRIBUTES = 0xC000002E,
         STATUS_PORT_MESSAGE_TOO_LONG = 0xC000002F,
         STATUS_INVALID_PARAMETER_MIX = 0xC0000030,
@@ -279,6 +282,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_NO_MORE_ENTRIES = 0x8000001A,
         STATUS_NOT_SUPPORTED = 0xC00000BB,
         STATUS_DUPLICATE_NAME = 0xC00000BD,
+        STATUS_TOO_MANY_NAMES = 0xC00000CD,
         STATUS_DUPLICATE_OBJECTID = 0xC000022A,
         STATUS_APP_INIT_FAILURE = 0xC0000145,
         STATUS_MAPPED_ALIGNMENT = 0xC0000220,
@@ -440,6 +444,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         FileNetworkOpenInformation = 34,
         FileAttributeTagInformation = 35,
         FileIdBothDirectoryInformation = 37,
+        FileIoCompletionNotificationInformation = 41,
         FileIdFullDirectoryInformation = 38,
         FileNormalizedNameInformation = 48,
         FileIsRemoteDeviceInformation = 51,
@@ -1083,6 +1088,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         SectionMapExecute = 0x0008,
         SectionExtendSize = 0x0010,
         SectionAllAccess = StandardRightsRequired | SectionQuery | SectionMapWrite | SectionMapRead | SectionMapExecute | SectionExtendSize,
+        DirectoryQuery = 0x0001,
+        DirectoryTraverse = 0x0002,
+        DirectoryCreateObject = 0x0004,
+        DirectoryCreateSubdirectory = 0x0008,
+        DirectoryAllAccess = StandardRightsRequired | DirectoryQuery | DirectoryTraverse | DirectoryCreateObject | DirectoryCreateSubdirectory,
+        SymbolicLinkQuery = 0x0001,
+        SymbolicLinkAllAccess = StandardRightsRequired | SymbolicLinkQuery,
 
         /// <summary>
         /// Tells the handle manager to give the handle temporarily
@@ -1368,6 +1380,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public ulong CompletionHandle;
         public ulong CompletionKey;
+
+        // NT: FileIoCompletionNotificationInformation only adds bits.
+        public uint CompletionNotificationModes;
 
         public ConsoleObjectKind ConsoleKind;
         public HostStreamKind HostStream;
@@ -2270,10 +2285,138 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public string FullName;
         public string Target;
+        // NT: the rest of the MaximumLength buffer, where DefineDosDevice stacks earlier targets.
+        public string TargetTail = "\0";
 
         public string ObjectId => FullName;
 
         public HandleType ObjectType => HandleType.FileHandle;
+
+        public string TargetBuffer => Target + TargetTail;
+    }
+
+    public sealed class WinObjectDirectory : IHandleObject
+    {
+        private const uint BucketCount = 37;
+
+        public readonly string Path;
+        // NT: a LUID device map falls back to \GLOBAL??.
+        public readonly WinObjectDirectory Shadow;
+        public readonly AccessMask UserAccess;
+        public readonly AccessMask EntryUserAccess;
+
+        private readonly List<Entry> Entries = new List<Entry>();
+
+        public WinObjectDirectory(string Path, WinObjectDirectory Shadow, AccessMask UserAccess, AccessMask EntryUserAccess)
+        {
+            this.Path = Path;
+            this.Shadow = Shadow;
+            this.UserAccess = UserAccess;
+            this.EntryUserAccess = EntryUserAccess;
+        }
+
+        public string ObjectId => Path;
+        public HandleType ObjectType => HandleType.DirectoryHandle;
+        public int Count => Entries.Count;
+
+        public WinSymbolicLink Find(string Name)
+        {
+            foreach (Entry Item in Entries)
+            {
+                if (string.Equals(Item.Name, Name, StringComparison.OrdinalIgnoreCase))
+                    return Item.Link;
+            }
+
+            return null;
+        }
+
+        public WinSymbolicLink AddLink(string Name, string Target, string TargetTail = "\0")
+        {
+            WinSymbolicLink Link = new WinSymbolicLink { FullName = Path + "\\" + Name, Target = Target, TargetTail = TargetTail };
+
+            // NT inserts at the head of the hash chain and enumerates the chains in bucket order.
+            uint Bucket = GetBucket(Name);
+            int Index = 0;
+            while (Index < Entries.Count && Entries[Index].Bucket < Bucket)
+                Index++;
+
+            Entries.Insert(Index, new Entry(Name, Bucket, Link));
+            return Link;
+        }
+
+        public bool Remove(WinSymbolicLink Link)
+        {
+            for (int Index = 0; Index < Entries.Count; Index++)
+            {
+                if (ReferenceEquals(Entries[Index].Link, Link))
+                {
+                    Entries.RemoveAt(Index);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public string GetEntry(int Index, out WinSymbolicLink Link)
+        {
+            Link = Entries[Index].Link;
+            return Entries[Index].Name;
+        }
+
+        // NT: ObpLookupDirectoryEntry.
+        private static uint GetBucket(string Name)
+        {
+            int Position = 0;
+            int Remaining = Name.Length;
+            uint Hash = 0;
+
+            if (Remaining >= 4)
+            {
+                ulong Wide = 0;
+                while (Remaining >= 4)
+                {
+                    ulong Chunk = Name[Position] | ((ulong)Name[Position + 1] << 16) | ((ulong)Name[Position + 2] << 32) | ((ulong)Name[Position + 3] << 48);
+                    if ((Chunk & 0xFF80FF80FF80FF80UL) != 0)
+                        Chunk = UpcaseChar(Name[Position]) | ((ulong)UpcaseChar(Name[Position + 1]) << 16) | ((ulong)UpcaseChar(Name[Position + 2]) << 32) | ((ulong)UpcaseChar(Name[Position + 3]) << 48);
+                    else
+                        Chunk &= 0xFFDFFFDFFFDFFFDFUL;
+
+                    Wide = Chunk + (Wide >> 1) + 3 * Wide;
+                    Position += 4;
+                    Remaining -= 4;
+                }
+
+                Hash = (uint)Wide + (uint)(Wide >> 32);
+            }
+
+            while (Remaining-- > 0)
+                Hash = UpcaseChar(Name[Position++]) + (Hash >> 1) + 3 * Hash;
+
+            return Hash % BucketCount;
+        }
+
+        private static uint UpcaseChar(char Value)
+        {
+            if (Value < 'a')
+                return Value;
+
+            return Value <= 'z' ? (uint)(Value - 32) : char.ToUpperInvariant(Value);
+        }
+
+        private readonly struct Entry
+        {
+            public readonly string Name;
+            public readonly uint Bucket;
+            public readonly WinSymbolicLink Link;
+
+            public Entry(string Name, uint Bucket, WinSymbolicLink Link)
+            {
+                this.Name = Name;
+                this.Bucket = Bucket;
+                this.Link = Link;
+            }
+        }
     }
 
     public sealed class WinPrivateNamespace : IHandleObject

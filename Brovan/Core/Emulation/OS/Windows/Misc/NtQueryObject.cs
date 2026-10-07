@@ -101,8 +101,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint RequiredSize = GetNameInformationSize(Name, Is64);
             WriteReturnLength(Instance, ReturnLength, RequiredSize);
 
+            // NT: ObQueryNameString, except files answer through IopQueryName.
             if (ObjectInformationLength < RequiredSize || ObjectInformation == 0)
-                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+                return HandleObject is WinFile ? NTSTATUS.STATUS_BUFFER_TOO_SMALL : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
             if (!Instance.IsRegionMapped(ObjectInformation, RequiredSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -224,9 +225,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Handle == HandleManager.KNOWN_DLLS_DIRECTORY || Handle == HandleManager.KNOWN_DLLS32_DIRECTORY || Handle == HandleManager.BASE_NAMED_OBJECTS_DIRECTORY || Handle == HandleManager.RPC_CONTROL_DIRECTORY)
                 return "Directory";
 
+            return GetTypeName(HandleObject);
+        }
+
+        internal static string GetTypeName(IHandleObject HandleObject)
+        {
             if (HandleObject is WinSymbolicLink)
                 return "SymbolicLink";
-            if (HandleObject is WinPrivateNamespace)
+            if (HandleObject is WinPrivateNamespace || HandleObject is WinObjectDirectory)
                 return "Directory";
             if (HandleObject is WinProcess)
                 return "Process";
@@ -279,6 +285,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (HandleObject is WinSymbolicLink Link)
                 return Link.FullName ?? string.Empty;
+            if (HandleObject is WinObjectDirectory Directory)
+                return Directory.Path;
             if (HandleObject is WinFile File)
                 return BuildFileObjectName(File);
             if (HandleObject is WinSection Section)

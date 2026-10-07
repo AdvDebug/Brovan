@@ -25,7 +25,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Requirements.Highest = Highest;
 
             // BaseAddress and RegionSize are 64-bit here whatever the guest width is.
-            return NtAllocateVirtualMemory.AllocateCommon(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, AllocationType, Protect, Requirements, 8);
+            return NtAllocateVirtualMemory.AllocateCommon(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, AllocationType, Protect, Requirements, 8, false);
         }
     }
 }

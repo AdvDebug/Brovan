@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Text;
 using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
@@ -24,6 +25,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const int OffBaseSrvActCtxOutputPointer = OffCsrDataStart + 0xB8;
         private const int OffBaseSrvActCtxDataPointer = OffCsrDataStart + 0xC0;
         private const int MinimalActivationContextDataSize = 0x300;
+        private const int OffBaseSrvDefineDosDeviceFlags = OffCsrDataStart + 0x00;
+        private const int OffBaseSrvDefineDosDeviceName = OffCsrDataStart + 0x08;
+        private const int OffBaseSrvDefineDosDeviceTarget = OffCsrDataStart + 0x18;
+
+        private const uint DddRemoveDefinition = 0x2;
+        private const uint DddExactMatchOnRemove = 0x4;
+        private const uint DddNoBroadcastSystem = 0x8;
+        private const uint DddLuidBroadcastDrive = 0x10;
+        private const int DefineDosDeviceBufferChars = 0x1000;
 
         private const uint CSRSRV_INDEX = 0;
         private const uint BASESRV_INDEX = 1;
@@ -398,13 +408,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 case 17: // BaseSrvRegisterWowExec.
                 case 18: // BaseSrvSoundSentryNotification.
                 case 19: // BaseSrvRefreshIniFileMapping.
-                case 20: // BaseSrvDefineDosDevice.
                 case 21: // BaseSrvSetTermsrvAppInstallMode.
                 case 22: // BaseSrvSetTermsrvClientTimeZone.
                 case 24: // BaseSrvDeadEntry.
                 case 25: // BaseSrvRegisterThread.
                 case 26: // BaseSrvDeferredCreateProcess.
                 case 29: // BaseSrvCreateProcess2.
+                    break;
+                case 20: // BaseSrvDefineDosDevice.
+                    WriteCsrStatus(Reply, HandleBaseSrvDefineDosDevice(Reply, Instance));
                     break;
                 case 27: // BaseSrvNlsGetUserInfo.
                     WriteCsrStatus(Reply, HandleBaseSrvNlsGetUserInfo(Reply, Instance));
@@ -492,6 +504,143 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return Status;
 
             return Instance.WriteMemory(Buffer, Server.UserInfo) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_PARAMETER;
+        }
+
+        private static NTSTATUS HandleBaseSrvDefineDosDevice(byte[] Reply, BinaryEmulator Instance)
+        {
+            if (Reply.Length < OffBaseSrvDefineDosDeviceTarget + 0x10)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (!TryReadCapturedString(Reply, OffBaseSrvDefineDosDeviceName, Instance, out string DeviceName) ||
+                !TryReadCapturedString(Reply, OffBaseSrvDefineDosDeviceTarget, Instance, out string TargetPath))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            return DefineDosDevice(Instance, ReadU32(Reply, OffBaseSrvDefineDosDeviceFlags), DeviceName, TargetPath);
+        }
+
+        // NT: CsrValidateMessageBuffer.
+        private static bool TryReadCapturedString(byte[] Reply, int Offset, BinaryEmulator Instance, out string Value)
+        {
+            UNICODE_STRING64 Captured = new UNICODE_STRING64
+            {
+                Length = ReadU16(Reply, Offset),
+                MaximumLength = ReadU16(Reply, Offset + 2),
+                Buffer = ReadU64(Reply, Offset + 8)
+            };
+
+            Value = string.Empty;
+            if ((Captured.MaximumLength & 1) != 0 || (Captured.MaximumLength != 0 && !Instance.IsRegionMapped(Captured.Buffer, Captured.MaximumLength)))
+                return false;
+
+            return Instance.WinHelper.TryReadUnicodeString64(Captured, out Value, out _);
+        }
+
+        // basesrv BaseSrvDefineDosDevice with LUID device maps. Earlier targets stack behind the new one in the link buffer.
+        internal static NTSTATUS DefineDosDevice(BinaryEmulator Instance, uint Flags, string DeviceName, string TargetPath)
+        {
+            bool Remove = (Flags & DddRemoveDefinition) != 0;
+            bool IsDriveLetter = (Flags & DddNoBroadcastSystem) == 0 && WinSysHelper.TryGetDriveLetter(DeviceName, out _);
+            if ((Flags & DddLuidBroadcastDrive) != 0 && !IsDriveLetter)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            // basesrv: \??\<name> and the targets share one 4096 character buffer.
+            string LinkName = "\\??\\" + DeviceName;
+            if (LinkName.Length > DefineDosDeviceBufferChars - 1)
+                LinkName = LinkName.Substring(0, DefineDosDeviceBufferChars - 1);
+            int Room = DefineDosDeviceBufferChars - 1 - LinkName.Length;
+
+            WinSysHelper.DosDeviceLookup Lookup = Instance.WinHelper.LookupDosDeviceName(ref LinkName, true, out IHandleObject Found, out WinObjectDirectory Directory, out string Leaf, out NTSTATUS Status);
+            if (Lookup == WinSysHelper.DosDeviceLookup.Outside)
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            WinSymbolicLink Existing = null;
+            if (Lookup == WinSysHelper.DosDeviceLookup.Found)
+            {
+                Existing = Found as WinSymbolicLink;
+                if (Existing == null || Directory == null)
+                    Status = NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+                else if (!WinSysHelper.TryGrantObjectAccess(AccessMask.SymbolicLinkQuery | AccessMask.Delete, false, Directory.EntryUserAccess, out _))
+                    Status = NTSTATUS.STATUS_ACCESS_DENIED;
+            }
+
+            if ((Flags & DddLuidBroadcastDrive) != 0)
+                return Remove && Status == NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND ? NTSTATUS.STATUS_SUCCESS : Status;
+
+            if (Status == NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND)
+            {
+                if (Remove)
+                    return TargetPath.Length == 0 ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+            else if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            int TargetEnd = TargetPath.IndexOf('\0');
+            string NewTarget = TargetEnd < 0 ? TargetPath : TargetPath.Substring(0, TargetEnd);
+            if (NewTarget.Length + 1 >= Room)
+                return NTSTATUS.STATUS_TOO_MANY_NAMES;
+
+            int ListRoom = Room - 1 - NewTarget.Length;
+            string List = string.Empty;
+            if (Existing != null)
+            {
+                string Old = Existing.TargetBuffer;
+                if (Old.Length == ListRoom)
+                    return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                if (Old.Length > ListRoom)
+                    return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+
+                if (Old.Length >= 2 && Old[^1] == '\0' && Old[^2] == '\0')
+                    List = Old;
+                else if (Old.Length == 0 || Old[^1] != '\0')
+                {
+                    if (Old.Length + 1 >= ListRoom)
+                        return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                    List = Old + "\0\0";
+                }
+                else
+                    List = Old + "\0";
+            }
+
+            if (!WinSysHelper.TryGrantObjectAccess(AccessMask.DirectoryCreateObject, true, Directory.UserAccess, out _))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            if (Existing != null)
+                Directory.Remove(Existing);
+
+            string Buffer;
+            bool Matched = false;
+            if (!Remove)
+                Buffer = Existing == null ? NewTarget + "\0" : NewTarget + "\0" + List;
+            else
+            {
+                StringBuilder Kept = new StringBuilder(List.Length);
+                int Position = 0;
+                while (Position < List.Length && List[Position] != '\0')
+                {
+                    int End = List.IndexOf('\0', Position);
+                    string Entry = List.Substring(Position, End - Position);
+                    Position = End + 1;
+
+                    if (!Matched && ((Flags & DddExactMatchOnRemove) != 0
+                        ? string.Equals(Entry, NewTarget, StringComparison.OrdinalIgnoreCase)
+                        : Entry.StartsWith(NewTarget, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        Matched = true;
+                        continue;
+                    }
+
+                    Kept.Append(Entry).Append('\0');
+                }
+
+                Buffer = Kept.Append('\0').ToString();
+            }
+
+            int TargetLength = Buffer.IndexOf('\0');
+            if (TargetLength == 0)
+                return NTSTATUS.STATUS_SUCCESS;
+
+            Directory.AddLink(Leaf, Buffer.Substring(0, TargetLength), Buffer.Substring(TargetLength));
+            return Remove && !Matched ? NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND : NTSTATUS.STATUS_SUCCESS;
         }
 
         private static bool HandleBaseSrvCreateActivationContext(byte[] Reply, BinaryEmulator Instance)

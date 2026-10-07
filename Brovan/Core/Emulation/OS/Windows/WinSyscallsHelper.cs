@@ -51,6 +51,27 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static string NormalizePipePath(string Path) => NormalizeDevicePath(Path, null);
 
         private const string DosDevicesPrefix = "\\DosDevices\\";
+        private const string GlobalDosDevicesPath = "\\GLOBAL??";
+
+        private static readonly (string Name, string Target)[] GlobalDosDeviceLinks =
+        {
+            ("C:", WindowsStorageDeviceSupport.VolumeDeviceName),
+            ("PhysicalDrive0", WindowsStorageDeviceSupport.PhysicalDiskDeviceName),
+            ("PIPE", GuestNamedPipe.DeviceName),
+            ("MAILSLOT", "\\Device\\MailSlot"),
+            ("UNC", "\\Device\\Mup"),
+            ("NUL", "\\Device\\Null"),
+            ("CON", "\\Device\\ConDrv\\Console"),
+            ("CONIN$", "\\Device\\ConDrv\\CurrentIn"),
+            ("CONOUT$", "\\Device\\ConDrv\\CurrentOut"),
+            ("MountPointManager", "\\Device\\MountPointManager"),
+            ("Nsi", "\\Device\\Nsi"),
+            ("WMIDataDevice", "\\Device\\WMIDataDevice"),
+            ("BrovVulk", "\\Device\\BrovVulk"),
+            ("BrovSteam", "\\Device\\BrovSteam"),
+            ("GLOBALROOT", string.Empty),
+            ("Global", GlobalDosDevicesPath),
+        };
 
         private static string NormalizeDevicePath(string Path, string VolumeGuid)
         {
@@ -517,7 +538,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <param name="QueueCompletion">False for a request that failed without pending, which gets no APC or packet.</param>
-        public void CompletePendingIo(in WinPendingIo Io, NTSTATUS Status, ulong Information, bool QueueCompletion = true)
+        /// <param name="Pended">False for a request that finished inside the call that issued it.</param>
+        public void CompletePendingIo(in WinPendingIo Io, NTSTATUS Status, ulong Information, bool QueueCompletion = true, bool Pended = true)
         {
             if (IsPendingIoLive(in Io))
                 WriteIoStatusBlock(Emulator, Io.IoStatusBlock, Status, Information);
@@ -529,7 +551,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             Emulator.Threads.TryGetValue((uint)Io.ThreadId, out EmulatedThread? Thread);
-            QueueIoCompletion(Io.File, Thread, Io.ApcRoutine, Io.ApcContext, Io.IoStatusBlock, Status, Information);
+            QueueIoCompletion(Io.File, Thread, Io.ApcRoutine, Io.ApcContext, Io.IoStatusBlock, Status, Information, Pended);
         }
 
         // NT cancels a thread's I/O when the thread exits, except I/O that completes to a port.
@@ -542,13 +564,22 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Thread.State != EmulatedThreadState.Terminated;
         }
 
+        internal const uint FILE_SKIP_COMPLETION_PORT_ON_SUCCESS = 0x1;
+
+        // NT: IopCompleteRequest still queues a warning status.
+        private static bool SkipsCompletionPort(WinFile File, NTSTATUS Status) =>
+            File != null && (File.CompletionNotificationModes & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) != 0 && ((uint)Status >> 30) != 2;
+
         public static bool CompletesToPort(in WinPendingIo Io) =>
             Io.ApcRoutine == 0 && Io.ApcContext != 0 && Io.File != null && Io.File.CompletionHandle != 0;
 
-        public void QueueIoCompletion(WinFile File, EmulatedThread? Thread, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock, NTSTATUS Status, ulong Information)
+        public void QueueIoCompletion(WinFile File, EmulatedThread? Thread, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock, NTSTATUS Status, ulong Information, bool Pended)
         {
             if (ApcRoutine == 0)
             {
+                if (!Pended && SkipsCompletionPort(File, Status))
+                    return;
+
                 QueueFileCompletion(Emulator, File, ApcContext, Status, Information);
                 return;
             }
@@ -1151,7 +1182,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RootDirectory == HandleManager.RPC_CONTROL_DIRECTORY)
                 return "\\RPC Control";
 
-            return HandleManager.GetObjectByHandle<WinPrivateNamespace>(RootDirectory)?.Path;
+            return HandleManager.GetObjectByHandle<WinPrivateNamespace>(RootDirectory)?.Path ??
+                HandleManager.GetObjectByHandle<WinObjectDirectory>(RootDirectory)?.Path;
         }
 
         /// <summary>
@@ -1192,6 +1224,204 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return false;
+        }
+
+        internal enum DosDeviceLookup
+        {
+            Outside,
+            Found,
+            Failed
+        }
+
+        private const int MaxDosDeviceReparse = 32;
+
+        // Follows links under \??, \GLOBAL?? and \DosDevices as the object manager does. OpenLink returns a last-component
+        // link instead of following it. Outside leaves the resolved path in FullName. Failed sets Parent and LeafName.
+        internal DosDeviceLookup LookupDosDeviceName(ref string FullName, bool OpenLink, out IHandleObject Object, out WinObjectDirectory Parent, out string LeafName, out NTSTATUS Status)
+        {
+            Object = null;
+            Parent = null;
+            LeafName = null;
+            Status = NTSTATUS.STATUS_SUCCESS;
+
+            string Path = FullName;
+            for (int Reparse = 0; Reparse <= MaxDosDeviceReparse; Reparse++)
+            {
+                WinObjectDirectory Directory;
+                string Remaining;
+                if (TryStripObjectRoot(Path, "\\??", out Remaining))
+                    Directory = DosDevices;
+                else if (TryStripObjectRoot(Path, GlobalDosDevicesPath, out Remaining))
+                    Directory = GlobalDosDevices;
+                else if (TryStripObjectRoot(Path, DosDevices.Path, out Remaining))
+                    Directory = DosDevices;
+                else if (TryStripObjectRoot(Path, DosDevicesRootLink.FullName, out Remaining))
+                {
+                    if (Remaining.Length == 0 && OpenLink)
+                    {
+                        Object = DosDevicesRootLink;
+                        return DosDeviceLookup.Found;
+                    }
+
+                    Path = DosDevicesRootLink.Target + Remaining;
+                    continue;
+                }
+                else if (Reparse == 0)
+                    return DosDeviceLookup.Outside;
+                else if (Path.Length == 0)
+                {
+                    Status = NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+                    return DosDeviceLookup.Failed;
+                }
+                else if (Path[0] != '\\')
+                {
+                    Status = NTSTATUS.STATUS_OBJECT_PATH_SYNTAX_BAD;
+                    return DosDeviceLookup.Failed;
+                }
+                else if (Path.StartsWith("\\Device\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    Status = NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+                    return DosDeviceLookup.Failed;
+                }
+                else
+                {
+                    FullName = Path;
+                    return DosDeviceLookup.Outside;
+                }
+
+                if (Remaining.Length == 0)
+                {
+                    Object = Directory;
+                    return DosDeviceLookup.Found;
+                }
+
+                int Start = 0;
+                while (Start < Remaining.Length && Remaining[Start] == '\\')
+                    Start++;
+
+                if (Start == Remaining.Length)
+                {
+                    Status = NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+                    return DosDeviceLookup.Failed;
+                }
+
+                int End = Remaining.IndexOf('\\', Start);
+                if (End < 0)
+                    End = Remaining.Length;
+
+                string Component = Remaining.Substring(Start, End - Start);
+                Remaining = Remaining.Substring(End);
+
+                WinObjectDirectory Holder = Directory;
+                WinSymbolicLink Link = Directory.Find(Component);
+                if (Link == null && Directory.Shadow != null)
+                {
+                    Holder = Directory.Shadow;
+                    Link = Holder.Find(Component);
+                }
+
+                if (Link == null)
+                {
+                    Parent = Directory;
+                    LeafName = Component;
+                    Status = Remaining.Length == 0 ? NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND : NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
+                    return DosDeviceLookup.Failed;
+                }
+
+                if (Remaining.Length == 0 && OpenLink)
+                {
+                    Object = Link;
+                    Parent = Holder;
+                    LeafName = Component;
+                    return DosDeviceLookup.Found;
+                }
+
+                Path = Link.Target + Remaining;
+            }
+
+            Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+            return DosDeviceLookup.Failed;
+        }
+
+        internal bool IsObjectHandle(ulong Handle)
+        {
+            return HandleManager.HandleExists(Handle) || HandleManager.IsCurrentProcessPseudoHandle(Handle) ||
+                HandleManager.IsCurrentThreadPseudoHandle(Handle) || GetKnownObjectDirectoryPath(Handle) != null;
+        }
+
+        private static bool TryStripObjectRoot(string Path, string Root, out string Remaining)
+        {
+            Remaining = null;
+            if (!Path.StartsWith(Root, StringComparison.OrdinalIgnoreCase) || (Path.Length > Root.Length && Path[Root.Length] != '\\'))
+                return false;
+
+            Remaining = Path.Substring(Root.Length);
+            return true;
+        }
+
+        internal static bool TryGrantObjectAccess(AccessMask DesiredAccess, bool IsDirectory, AccessMask Grantable, out AccessMask Granted)
+        {
+            uint Requested = (uint)DesiredAccess & ~(uint)AccessMask.MaximumAllowed;
+            uint Mapped = IsDirectory
+                ? NtAccessCheck.ApplyGenericMapping(Requested,
+                    (uint)(AccessMask.ReadControl | AccessMask.DirectoryQuery | AccessMask.DirectoryTraverse),
+                    (uint)(AccessMask.ReadControl | AccessMask.DirectoryCreateObject | AccessMask.DirectoryCreateSubdirectory),
+                    (uint)(AccessMask.ReadControl | AccessMask.DirectoryQuery | AccessMask.DirectoryTraverse),
+                    (uint)AccessMask.DirectoryAllAccess)
+                : NtAccessCheck.ApplyGenericMapping(Requested,
+                    (uint)(AccessMask.ReadControl | AccessMask.SymbolicLinkQuery),
+                    (uint)AccessMask.ReadControl,
+                    (uint)(AccessMask.ReadControl | AccessMask.SymbolicLinkQuery),
+                    (uint)AccessMask.SymbolicLinkAllAccess);
+
+            if ((DesiredAccess & AccessMask.MaximumAllowed) != 0)
+                Mapped |= (uint)Grantable;
+
+            Granted = (AccessMask)Mapped;
+            return (Mapped & ~(uint)Grantable) == 0;
+        }
+
+        internal uint AddDosDeviceDrives(uint DriveMap, Span<byte> DriveTypes)
+        {
+            for (int Index = 0; Index < DosDevices.Count; Index++)
+            {
+                string Name = DosDevices.GetEntry(Index, out WinSymbolicLink Link);
+                if (!TryGetDriveLetter(Name, out int Letter))
+                    continue;
+
+                DriveMap |= 1u << Letter;
+                DriveTypes[Letter] = GetDosDriveType(Link.Target);
+            }
+
+            return DriveMap;
+        }
+
+        internal static bool TryGetDriveLetter(string Name, out int Letter)
+        {
+            Letter = Name.Length == 2 && Name[1] == ':' ? char.ToUpperInvariant(Name[0]) - 'A' : -1;
+            return (uint)Letter < 26;
+        }
+
+        // NT: ObpCreateSymbolicLinkName. DOSDEVICE_DRIVE_CALCULATE for a DOS path target.
+        private static byte GetDosDriveType(string Target)
+        {
+            const byte DriveUnknown = 0;
+            const byte DriveCalculate = 1;
+            const byte DriveFixed = 3;
+            const byte DriveRemote = 4;
+
+            if (IsDevicePath(Target, WindowsStorageDeviceSupport.VolumeDeviceName) || IsDevicePath(Target, WindowsStorageDeviceSupport.PhysicalDiskDeviceName))
+                return DriveFixed;
+
+            if (IsDevicePath(Target, "\\Device\\Mup"))
+                return DriveRemote;
+
+            return Target.StartsWith("\\Device\\", StringComparison.OrdinalIgnoreCase) ? DriveUnknown : DriveCalculate;
+        }
+
+        private static bool IsDevicePath(string Path, string Device)
+        {
+            return TryStripObjectRoot(Path, Device, out _);
         }
 
         /// <summary>
@@ -2036,6 +2266,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal string SyntheticVolumeGuidSymbolicLink { get; private set; }
         internal string SyntheticVolumeWin32GuidPath { get; private set; }
         internal byte[] SyntheticMountDevUniqueId { get; private set; }
+        internal readonly WinObjectDirectory GlobalDosDevices;
+        // \?? of the interactive logon.
+        internal readonly WinObjectDirectory DosDevices;
+        private readonly WinSymbolicLink DosDevicesRootLink = new WinSymbolicLink { FullName = "\\DosDevices", Target = "\\??" };
         private BinaryEmulator Emulator;
 
         private uint CachedDriveMap;
@@ -2460,6 +2694,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             SyntheticVolumeGuidSymbolicLink = $"\\??\\Volume{{{SyntheticVolumeGuid}}}";
             SyntheticVolumeWin32GuidPath = $"\\\\?\\Volume{{{SyntheticVolumeGuid}}}\\";
             SyntheticMountDevUniqueId = Guid.Parse(SyntheticVolumeGuid).ToByteArray();
+
+            GlobalDosDevices = new WinObjectDirectory(GlobalDosDevicesPath, null, AccessMask.ReadControl | AccessMask.DirectoryQuery | AccessMask.DirectoryTraverse, AccessMask.ReadControl | AccessMask.SymbolicLinkQuery);
+            foreach ((string Name, string Target) in GlobalDosDeviceLinks)
+                GlobalDosDevices.AddLink(Name, Target);
+            GlobalDosDevices.AddLink($"Volume{{{SyntheticVolumeGuid}}}", WindowsStorageDeviceSupport.VolumeDeviceName);
+
+            DosDevices = new WinObjectDirectory($"\\Sessions\\0\\DosDevices\\{(uint)(WinToken.InteractiveLogonId >> 32):x8}-{(uint)WinToken.InteractiveLogonId:x8}", GlobalDosDevices, AccessMask.DirectoryAllAccess, AccessMask.SymbolicLinkAllAccess);
+            DosDevices.AddLink("Global", "\\Global??");
 
             // Before any handle of this process, so every inherited one keeps its value.
             ulong[] InheritedStd = ProcessInheritance.Apply(Emulator, this);

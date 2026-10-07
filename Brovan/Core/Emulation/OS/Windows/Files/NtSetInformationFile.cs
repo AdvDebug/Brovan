@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -8,6 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint FileBasicInformationSize = 0x28;
         private const uint FilePositionInformationSize = 0x08;
         private const uint FilePipeInformationSize = 0x08;
+        private const uint FileIoCompletionNotificationInformationSize = 0x04;
         private const uint FileModeInformationSize = 0x04;
         private const uint FileAllocationInformationSize = 0x08;
         private const uint FileEndOfFileInformationSize = 0x08;
@@ -44,6 +46,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (InfoClass == FILE_INFORMATION_CLASS.FileCompletionInformation)
                 return HandleFileCompletionInformation(Instance, FileObj, IoStatusBlock, FileInformation, Length);
+
+            if (InfoClass == FILE_INFORMATION_CLASS.FileIoCompletionNotificationInformation)
+                return HandleIoCompletionNotification(Instance, FileObj, IoStatusBlock, FileInformation, Length);
 
             if (FileObj.Pipe != null && InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation)
                 return HandleFilePipeInformation(Instance, FileObj, IoStatusBlock, FileInformation, Length);
@@ -125,6 +130,27 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             FileObj.CompletionHandle = Port;
             FileObj.CompletionKey = Key;
+
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT: asynchronous handles only. Bits above the three FILE_SKIP_* flags are ignored.
+        private static NTSTATUS HandleIoCompletionNotification(BinaryEmulator Instance, WinFile FileObj, ulong IoStatusBlock, ulong FileInformation, uint Length)
+        {
+            const uint KnownModes = 0x7;
+
+            if (Length < FileIoCompletionNotificationInformationSize)
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+            Span<byte> Modes = stackalloc byte[4];
+            if (!Instance.ReadMemory(FileInformation, Modes))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (FileObj.Synchronous)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            FileObj.CompletionNotificationModes |= BinaryPrimitives.ReadUInt32LittleEndian(Modes) & KnownModes;
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
             return NTSTATUS.STATUS_SUCCESS;

@@ -201,6 +201,10 @@ namespace Brovan.Core.Emulation
         // NT: secured VAD.
         public bool IsSecured;
 
+        // NT: placeholder VAD, and an allocation that replaced one.
+        public bool IsPlaceholder;
+        public bool FromPlaceholder;
+
         /// <summary>
         /// Initial memory protections when the region was allocated.
         /// </summary>
@@ -1795,6 +1799,7 @@ namespace Brovan.Core.Emulation
                     return ToDispatchTable(SyscallDictionary);
 
                 RegisterSyscall(0x2000, nameof(Wow64UserConnectToServer), false);
+                RegisterSyscall(0x3001, nameof(Wow64CsrBasepDefineDosDevice), false);
                 RegisterSyscall(0x300A, nameof(Wow64BasepNlsUpdateCacheCount), false);
                 RegisterSyscall(0x300B, nameof(Wow64BasepNlsGetUserInfo), false);
                 RegisterSyscall(0x300E, nameof(Wow64CsrBasepCreateProcess2), false);

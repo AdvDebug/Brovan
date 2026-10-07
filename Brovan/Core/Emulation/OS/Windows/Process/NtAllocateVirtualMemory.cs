@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Buffers.Binary;
 using System.Numerics;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -10,15 +11,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong PageSize = 0x1000;
         private const uint MemCommit = 0x00001000;
         private const uint MemReserve = 0x00002000;
+        private const uint MemReplacePlaceholder = 0x00004000;
+        private const uint MemReservePlaceholder = 0x00040000;
         private const uint MemReset = 0x00080000;
+        private const uint MemTopDown = 0x00100000;
         private const uint MemResetUndo = 0x01000000;
+        private const uint PageNoAccess = 0x01;
 
         // MEM_COMMIT, MEM_RESERVE, MEM_REPLACE_PLACEHOLDER, MEM_RESERVE_PLACEHOLDER, MEM_RESET, MEM_TOP_DOWN,
         // MEM_WRITE_WATCH, MEM_PHYSICAL, MEM_ROTATE, MEM_RESET_UNDO and MEM_LARGE_PAGES.
         private const uint KnownAllocationTypes = 0x21FC4000 | MemCommit | MemReserve;
 
-        // MEM_REPLACE_PLACEHOLDER, MEM_RESERVE_PLACEHOLDER, MEM_WRITE_WATCH, MEM_PHYSICAL, MEM_ROTATE.
-        private const uint UnsupportedAllocationTypes = 0x00004000 | 0x00040000 | 0x00200000 | 0x00400000 | 0x00800000;
+        // MEM_WRITE_WATCH, MEM_PHYSICAL, MEM_ROTATE.
+        private const uint UnsupportedAllocationTypes = 0x00200000 | 0x00400000 | 0x00800000;
         private const uint MemLargePages = 0x20000000;
 
         private const ulong LowSearchStart = 0x00100000UL;
@@ -70,6 +75,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Instance.TryFindMemoryRegionIndex(Current, out int Index) || !Instance.TryFindMemoryRegion(Current, out MemoryRegion Region))
                 {
                     Status = NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+                    return false;
+                }
+
+                if (Region.IsPlaceholder)
+                {
+                    Status = NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
                     return false;
                 }
 
@@ -145,10 +156,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             AddressRequirements Requirements = AddressRequirements.None;
             Requirements.Highest = Highest;
 
-            return AllocateCommon(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, AllocationType, Protect, Requirements, (uint)Instance.WinHelper.PointerSize);
+            return AllocateCommon(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, AllocationType, Protect, Requirements, (uint)Instance.WinHelper.PointerSize, false);
         }
 
-        internal static NTSTATUS AllocateCommon(BinaryEmulator Instance, ulong ProcessHandle, ulong BaseAddressPtr, ulong RegionSizePtr, uint AllocationType, uint Protect, AddressRequirements Requirements, uint OutputWidth)
+        // NT: placeholders need NtAllocateVirtualMemoryEx and MEM_RESERVE. A new one is bare PAGE_NOACCESS.
+        private static bool IsValidPlaceholderRequest(uint AllocationType, uint Protect, bool Extended)
+        {
+            if ((AllocationType & (MemReservePlaceholder | MemReplacePlaceholder)) == 0)
+                return true;
+
+            if (!Extended || (AllocationType & MemReserve) == 0)
+                return false;
+
+            if ((AllocationType & MemReservePlaceholder) != 0)
+                return (AllocationType & ~(MemReserve | MemReservePlaceholder | MemTopDown)) == 0 && Protect == PageNoAccess;
+
+            return true;
+        }
+
+        internal static NTSTATUS AllocateCommon(BinaryEmulator Instance, ulong ProcessHandle, ulong BaseAddressPtr, ulong RegionSizePtr, uint AllocationType, uint Protect, AddressRequirements Requirements, uint OutputWidth, bool Extended)
         {
             if (BaseAddressPtr == 0 || RegionSizePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -160,6 +186,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong RegionSize = Instance.WinHelper.ReadPointer(RegionSizePtr, OutputWidth);
 
             if (RegionSize == 0 || AllocationType == 0 || (AllocationType & ~KnownAllocationTypes) != 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (!IsValidPlaceholderRequest(AllocationType, Protect, Extended))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             if ((AllocationType & UnsupportedAllocationTypes) != 0)
@@ -250,6 +279,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RegionSize == 0 || BaseAddress > ulong.MaxValue - RegionSize)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
+            if ((AllocationType & MemReplacePlaceholder) != 0)
+                return ReplacePlaceholder(Instance, ref BaseAddress, ref RegionSize, Commit, Protect);
+
             if (!Reserve && Commit && BaseAddress == 0)
                 Reserve = true;
 
@@ -279,7 +311,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (BaseAddress > Instance.MaxAddress || RegionSize - 1 > Instance.MaxAddress - BaseAddress)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Reserve && !Instance.TryFindMemoryRegion(BaseAddress, out _))
+            if (!Reserve && (!Instance.TryFindMemoryRegion(BaseAddress, out MemoryRegion Target) || Target.IsPlaceholder))
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
             if (!Reserve)
@@ -289,8 +321,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return Secured;
             }
 
-            if (Reserve && !Instance.ReserveMemory(BaseAddress, RegionSize, Protect))
-                return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+            if (Reserve)
+            {
+                bool Reserved = (AllocationType & MemReservePlaceholder) != 0
+                    ? Instance.ReservePlaceholder(BaseAddress, RegionSize)
+                    : Instance.ReserveMemory(BaseAddress, RegionSize, Protect);
+
+                if (!Reserved)
+                    return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+            }
 
             if (Commit && !Instance.CommitMemory(BaseAddress, RegionSize, Protect))
             {
@@ -304,6 +343,35 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Failure;
             }
 
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT: the range must be exactly one placeholder, which can start on any page.
+        private static NTSTATUS ReplacePlaceholder(BinaryEmulator Instance, ref ulong BaseAddress, ref ulong RegionSize, bool Commit, uint Protect)
+        {
+            if (BaseAddress == 0)
+                return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+            ulong Start = BaseAddress & ~(PageSize - 1);
+            ulong End = BinaryEmulator.AlignUp(BaseAddress + RegionSize, PageSize);
+            if (End <= Start || End - 1 > Instance.MaxAddress)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (!Instance.ReplacePlaceholder(Start, End - Start, Protect))
+                return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
+
+            if (Commit && !Instance.CommitMemory(Start, End - Start, Protect))
+            {
+                NTSTATUS Failure = Instance.GetLastError() == BackendError.OutOfMemory ? NTSTATUS.STATUS_COMMITMENT_LIMIT : NTSTATUS.STATUS_NO_MEMORY;
+
+                if (!Instance.ConvertToPlaceholder(Start, End))
+                    Utils.LogError($"[NtAllocateVirtualMemory] Could not restore the placeholder at 0x{Start:X} after a failed commit.");
+
+                return Failure;
+            }
+
+            BaseAddress = Start;
+            RegionSize = End - Start;
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

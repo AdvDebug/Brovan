@@ -1488,7 +1488,6 @@ namespace Brovan.Core.Emulation
         {
             if (callback == null) return IntPtr.Zero;
             if (DisposedCheck()) return IntPtr.Zero;
-            if (NoHooks) { _error = WhpErrors.Ok; return IntPtr.Zero; }
 
             InterruptHookEntry entry = new InterruptHookEntry { Callback = callback };
             _interruptHooks.Add(entry);

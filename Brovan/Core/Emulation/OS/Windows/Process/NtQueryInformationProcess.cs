@@ -358,13 +358,15 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             Span<byte> Buffer = GetSharedWriteBuffer(Instance, StructSize);
                             Buffer.Clear();
-                            WriteUInt32(Buffer, 0, Map);
 
                             for (int Index = 0; Index < 26; Index++)
                             {
                                 if ((Map & (1u << Index)) != 0)
                                     Buffer[4 + Index] = DriveFixed;
                             }
+
+                            Map = Instance.WinHelper.AddDosDeviceDrives(Map, Buffer.Slice(4, 26));
+                            WriteUInt32(Buffer, 0, Map);
 
                             if (!Instance.WriteMemory(OutBufferPtr, Buffer))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
