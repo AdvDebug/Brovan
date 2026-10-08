@@ -34,6 +34,7 @@ namespace Brovan.Core.Emulation
         private readonly Dictionary<ulong, MappedPage> _mappedPages = new();
         private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
         private readonly List<long> _backingStarts = new();
+        private readonly List<IntPtr> _releasedBackings = new();
         private ulong _backingBytes;
         private readonly Dictionary<ulong, bool> _trappedPages = new();
         private readonly Dictionary<ulong, IntPtr> _pageTableViews = new();
@@ -388,7 +389,10 @@ namespace Brovan.Core.Emulation
 
             // New pages install lazily, as in MapMemory. Replaced pages must go now, or a processor keeps using them.
             if (replaced)
+            {
                 RebuildMappings();
+                FreeReleasedBackings();
+            }
             _error = WhpErrors.Ok;
             return true;
         }
@@ -560,6 +564,7 @@ namespace Brovan.Core.Emulation
                 RefreshTrappedPages();
             else
                 RebuildMappings();
+            FreeReleasedBackings();
             _error = WhpErrors.Ok;
             return true;
         }
@@ -1759,12 +1764,28 @@ namespace Brovan.Core.Emulation
             else
                 allocation.LivePages--;
 
-            FreeIfUnreferenced(page.OwnedBacking, allocation);
+            if (!IsReferenced(allocation))
+                _releasedBackings.Add(page.OwnedBacking);
+        }
+
+        private static bool IsReferenced(BackingAllocation allocation)
+            => allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Held;
+
+        // Only after the rebuild unmaps the pages. Until then other processors can reach the backing.
+        private void FreeReleasedBackings()
+        {
+            for (int i = 0; i < _releasedBackings.Count; i++)
+            {
+                if (_backingAllocations.TryGetValue(_releasedBackings[i], out BackingAllocation allocation))
+                    FreeIfUnreferenced(_releasedBackings[i], allocation);
+            }
+
+            _releasedBackings.Clear();
         }
 
         private void FreeIfUnreferenced(IntPtr backing, BackingAllocation allocation)
         {
-            if (allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Held) return;
+            if (IsReferenced(allocation)) return;
 
             FreeAllocation(backing, allocation);
             _backingAllocations.Remove(backing);
@@ -2703,18 +2724,25 @@ namespace Brovan.Core.Emulation
 
         private void RebuildMappingsIncremental(ulong spanStart, ulong spanEnd)
         {
-            int firstIndex = FirstActiveMapIndexAtOrBefore(spanStart);
-            for (int i = firstIndex; i < _activeMapStarts.Count; i++)
+            if (_activeMaps.Count + MapHeadroom < MaxGpaRanges)
             {
-                ulong start = _activeMapStarts[i];
-                if (start >= spanEnd) break;
+                SplitActiveMapAt(spanStart);
+                SplitActiveMapAt(spanEnd);
+            }
+            else
+            {
+                for (int i = FirstActiveMapIndexAtOrBefore(spanStart); i < _activeMapStarts.Count; i++)
+                {
+                    ulong start = _activeMapStarts[i];
+                    if (start >= spanEnd) break;
 
-                InstalledMap active = _activeMaps[start];
-                ulong end = start + active.Size;
-                if (end <= spanStart) continue;
+                    InstalledMap active = _activeMaps[start];
+                    ulong end = start + active.Size;
+                    if (end <= spanStart) continue;
 
-                if (start < spanStart) spanStart = start;
-                if (end > spanEnd) spanEnd = end;
+                    if (start < spanStart) spanStart = start;
+                    if (end > spanEnd) spanEnd = end;
+                }
             }
 
             _desiredMaps.Clear();
@@ -2723,7 +2751,7 @@ namespace Brovan.Core.Emulation
 
             _staleMapKeys.Clear();
             _inPlaceMaps.Clear();
-            firstIndex = FirstActiveMapIndexAtOrBefore(spanStart);
+            int firstIndex = FirstActiveMapIndexAtOrBefore(spanStart);
             for (int i = firstIndex; i < _activeMapStarts.Count; i++)
             {
                 ulong start = _activeMapStarts[i];
@@ -2766,6 +2794,27 @@ namespace Brovan.Core.Emulation
                 MapGpaRange(kv.Key, kv.Value.Size, kv.Value.Host, kv.Value.Flags);
                 AddActiveMap(kv.Key, kv.Value);
             }
+        }
+
+        // WHP can unmap part of a mapped range. Pages outside the span are clean.
+        private void SplitActiveMapAt(ulong address)
+        {
+            if (_activeMapStarts.Count == 0) return;
+
+            ulong start = _activeMapStarts[FirstActiveMapIndexAtOrBefore(address)];
+            if (start >= address) return;
+
+            InstalledMap map = _activeMaps[start];
+            ulong head = address - start;
+            if (head >= map.Size) return;
+
+            _activeMaps[start] = new InstalledMap { Size = head, Host = map.Host, Flags = map.Flags };
+            AddActiveMap(address, new InstalledMap
+            {
+                Size = map.Size - head,
+                Host = new IntPtr(map.Host.ToInt64() + (long)head),
+                Flags = map.Flags,
+            });
         }
 
         private void BuildDesiredMapsForSpan(ulong spanStart, ulong spanEnd)

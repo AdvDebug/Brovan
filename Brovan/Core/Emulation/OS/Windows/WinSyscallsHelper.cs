@@ -4148,7 +4148,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (int Index = WinModules.Count - 1; Index >= 0; Index--)
             {
                 WinModule Module = WinModules[Index];
-                if (Module == null || Module.MappedBase == 0 || Module.SizeOfImage == 0)
+                if (Module == null || !Module.Initialized || Module.MappedBase == 0 || Module.SizeOfImage == 0)
                     continue;
 
                 ulong End = Module.MappedBase + Module.SizeOfImage;

@@ -19,6 +19,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const string AudioClientRpcPort = "\\RPC Control\\AudioClientRpc";
 
         private const uint ProcGetPnpState = 0;
+        private const uint ProcGetTsAudioProtocol = 5;
         private const uint ProcGetDefaultAudioEndpoint = 25;
         private const int PnpStateSize = 8;
         private const uint ProcGetMixFormat = 0;
@@ -127,7 +128,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         };
 
         private const uint RpcSProcnumOutOfRange = 1745;
+        private const uint RpcXBadStubData = 1783;
         private const uint ErrorNotFound = 1168;
+        private const int EAccessDenied = unchecked((int)0x80070005);
+
+        private const uint CallerSession = uint.MaxValue;
+        private const uint TsAudioProtocolLocal = 0;
+        private const uint TsAudioProtocolUnknown = 0xFFFF;
 
         private const uint DeviceStateActive = 1;
         private const string MMDevicesKey = "\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio";
@@ -189,6 +196,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 case ProcGetPnpState:
                     return GetPnpState(Message, Instance);
 
+                case ProcGetTsAudioProtocol:
+                    return GetTsAudioProtocol(Message, Instance);
+
                 case ProcGetDefaultAudioEndpoint:
                     return GetDefaultAudioEndpoint(Message, Instance);
 
@@ -210,6 +220,55 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return LrpcPacket.BuildResponse(Message, Writer.ToArray());
         }
 
+        // AudioSrvPolicyManager!TS_SessionGetAudioProtocol
+        private static byte[] GetTsAudioProtocol(in LrpcMessage Message, BinaryEmulator Instance)
+        {
+            Ndr20Reader Reader = new Ndr20Reader(Message.StubData);
+            if (!Reader.TryReadUInt32(out uint SessionId))
+                return LrpcPacket.BuildFault(Message, RpcXBadStubData);
+
+            uint CallerSessionId = GetCallerSessionId(Instance);
+            if (SessionId == CallerSession)
+                SessionId = CallerSessionId;
+
+            uint Protocol = TsAudioProtocolUnknown;
+            int Result = 0;
+
+            if (CallerSessionId != 0 && SessionId != CallerSessionId)
+                Result = EAccessDenied;
+            else if (SessionId == 0 || SessionId == WinToken.InteractiveSessionId)
+                Protocol = TsAudioProtocolLocal;
+
+            Log(Instance, $"session {SessionId} audio protocol 0x{Protocol:X}, hr 0x{Result:X8}.");
+
+            Ndr20Writer Writer = new Ndr20Writer(16);
+            Writer.WriteUInt32(Protocol);
+            Writer.WriteUInt32(0);
+            Writer.WriteInt32(Result);
+            return LrpcPacket.BuildResponse(Message, Writer.ToArray());
+        }
+
+        private static uint GetCallerSessionId(BinaryEmulator Instance)
+        {
+            WinToken Token = null;
+
+            if (Instance.CurrentThreadId >= 0 && Instance.Threads.TryGetValue((uint)Instance.CurrentThreadId, out EmulatedThread Thread))
+                Token = WinEmulatedThread.TryGetState(Thread)?.ImpersonationToken;
+
+            if (Token == null)
+            {
+                foreach (WinProcess Process in Instance.WinHelper.WinProcesses)
+                {
+                    if (Process.PID == Instance.WinHelper.PID)
+                    {
+                        Token = Process.PrimaryToken;
+                        break;
+                    }
+                }
+            }
+
+            return Token?.SessionId ?? WinToken.InteractiveSessionId;
+        }
 
         private static byte[] DispatchAudioClient(in LrpcMessage Message, PortReply Reply, BinaryEmulator Instance)
         {
