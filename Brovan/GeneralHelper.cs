@@ -174,6 +174,9 @@ namespace Brovan
 
         [DllImport("ntdll.dll")]
         public static extern unsafe int NtQueryInformationFile(IntPtr FileHandle, ulong* IoStatusBlock, void* FileInformation, uint Length, int FileInformationClass);
+
+        [DllImport("ntdll.dll")]
+        public static extern unsafe int NtQueryInformationFile(SafeFileHandle FileHandle, ulong* IoStatusBlock, void* FileInformation, uint Length, int FileInformationClass);
     }
 
     internal class NativeUnixImports
@@ -650,11 +653,8 @@ namespace Brovan
             return Builder.ToString();
         }
 
-        /// <summary>
-        /// Restarts the current process with CFG disabled.
-        /// </summary>
         /// <param name="KeepAlive">Keeps the parent alive/waiting till the process finishes.</param>
-        /// <returns>returns true if the process was restarted, otherwise false.</returns>
+        /// <returns>false when the restart fails. On success the current process exits and the call does not return.</returns>
         public static bool RestartProcessWithCfgDisabled(bool KeepAlive)
         {
             if (!IsWindows)
@@ -1785,9 +1785,6 @@ namespace Brovan
             }
         }
 
-        /// <summary>
-        /// Writes guest-controlled console output to the host standard output stream using the configured safety policy.
-        /// </summary>
         public static void ConsoleWrite(byte[] Data, GuestConsoleOutputMode Mode)
         {
             if (Data == null)
@@ -1796,9 +1793,6 @@ namespace Brovan
             ConsoleWrite(Data.AsSpan(), Mode);
         }
 
-        /// <summary>
-        /// Writes guest-controlled console output to the host standard output or error stream using the configured safety policy.
-        /// </summary>
         public static void ConsoleWrite(ReadOnlySpan<byte> Data, GuestConsoleOutputMode Mode, bool StandardError = false)
         {
             if (StandardError)
@@ -1812,9 +1806,6 @@ namespace Brovan
             ConsoleWrite(Data, Stdout, StdoutFilter, Mode);
         }
 
-        /// <summary>
-        /// Cross-platform IO helper used to translate emulated paths into host paths.
-        /// </summary>
         public static class IO
         {
             private static readonly object WindowsLibsIndexLock = new();
@@ -1855,12 +1846,8 @@ namespace Brovan
             private const int MAXIMUM_REPARSE_DATA_BUFFER_SIZE = 16 * 1024;
             private const int MaximumSymlinkHops = 40;
 
-            /// <summary>
-            /// Initializes the default sandbox drive mappings and allowed IO roots.
-            /// </summary>
             static IO()
             {
-                // Keep the emulator sandboxed by default.
                 EnsureDriveMapping('C', Path.Combine(VirtualFileSystemRoot, "C"));
                 EnsureDriveMapping('E', Path.Combine(VirtualFileSystemRoot, "E"));
                 EnsureLinuxMountMapping("/", LinuxVirtualFileSystemRoot);
@@ -1879,11 +1866,6 @@ namespace Brovan
                 RefreshAllowedRoots();
             }
 
-            /// <summary>
-            /// Creates a small Linux root filesystem skeleton for programs that inspect common system files.
-            /// Existing files are left untouched.
-            /// </summary>
-            /// <param name="Root">host directory mapped to the emulated Linux root.</param>
             private static void EnsureLinuxBaseFilesystem(string Root)
             {
                 if (string.IsNullOrWhiteSpace(Root))
@@ -2010,11 +1992,6 @@ namespace Brovan
                     "https 443/tcp\n");
             }
 
-            /// <summary>
-            /// Creates a Linux VFS directory if it is missing.
-            /// </summary>
-            /// <param name="Root">host directory mapped to the emulated Linux root.</param>
-            /// <param name="RelativePath">linux-style relative directory path.</param>
             private static void CreateLinuxDirectoryIfMissing(string Root, string RelativePath)
             {
                 string HostPath = CombineLinuxRelativePath(Root, RelativePath);
@@ -2024,12 +2001,6 @@ namespace Brovan
                 Directory.CreateDirectory(HostPath);
             }
 
-            /// <summary>
-            /// Writes a Linux VFS text file when no file is already present.
-            /// </summary>
-            /// <param name="Root">host directory mapped to the emulated Linux root.</param>
-            /// <param name="RelativePath">linux-style relative file path.</param>
-            /// <param name="Content">file content to write.</param>
             private static void WriteLinuxTextFileIfMissing(string Root, string RelativePath, string Content)
             {
                 string HostPath = CombineLinuxRelativePath(Root, RelativePath);
@@ -2243,12 +2214,7 @@ namespace Brovan
                 }
             }
 
-            /// <summary>
-            /// Creates a symlink that keeps the guest target string.
-            /// </summary>
-            /// <param name="LinkPath">host path of the link.</param>
             /// <param name="TargetPath">guest target string to store in the link.</param>
-            /// <returns>returns true when the link was created.</returns>
             private static bool CreateSymbolicLinkPortable(string LinkPath, string TargetPath)
             {
                 try
@@ -2292,12 +2258,7 @@ namespace Brovan
                 return false;
             }
 
-            /// <summary>
-            /// Reads the target string kept by a host symlink.
-            /// </summary>
-            /// <param name="HostPath">host path to read.</param>
             /// <param name="Target">receives the stored target, which stays relative when the link is relative.</param>
-            /// <returns>returns true when the path is a symlink.</returns>
             public static bool TryReadHostSymlinkTarget(string HostPath, out string Target)
             {
                 Target = null;
@@ -2590,11 +2551,6 @@ namespace Brovan
                 }
             }
 
-            /// <summary>
-            /// Creates a deterministic machine-id for the Linux VFS root.
-            /// </summary>
-            /// <param name="Root">host directory mapped to the emulated Linux root.</param>
-            /// <returns>returns a 32-character lowercase hexadecimal machine-id.</returns>
             private static string CreateStableMachineId(string Root)
             {
                 byte[] Hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(Root)));
@@ -2606,20 +2562,12 @@ namespace Brovan
                 return Builder.ToString();
             }
 
-            /// <summary>
-            /// Sets a host directory mapping for an emulated drive letter.
-            /// </summary>
-            /// <param name="DriveLetter">drive letter to map (for example 'C').</param>
-            /// <param name="HostRoot">host directory root for the drive.</param>
             public static void SetDriveMapping(char DriveLetter, string HostRoot)
             {
                 EnsureDriveMapping(DriveLetter, HostRoot);
                 RefreshAllowedRoots();
             }
 
-            /// <summary>
-            /// Reports the drive letters the emulated Windows filesystem can reach, bit 0 for A:.
-            /// </summary>
             public static uint GetWindowsDriveMap()
             {
                 uint Map = 1u << ('C' - 'A');
@@ -2667,23 +2615,12 @@ namespace Brovan
                 return Map;
             }
 
-            /// <summary>
-            /// Sets a host directory mapping for an emulated linux mount point.
-            /// </summary>
-            /// <param name="MountPoint">linux mount point to map (for example "/" or "/tmp").</param>
-            /// <param name="HostRoot">host directory root for the mount point.</param>
             public static void SetLinuxMountMapping(string MountPoint, string HostRoot)
             {
                 EnsureLinuxMountMapping(MountPoint, HostRoot);
                 RefreshAllowedRoots();
             }
 
-            /// <summary>
-            /// Sets a host directory mapping for an emulated windows directory.
-            /// </summary>
-            /// <param name="GuestDirectory">absolute emulated windows directory to map (for example "C:\Users\User\Game").</param>
-            /// <param name="HostRoot">host directory root for the emulated directory.</param>
-            /// <returns>returns true when the mapping was registered.</returns>
             public static bool SetWindowsMountMapping(string GuestDirectory, string HostRoot)
             {
                 if (!EnsureWindowsMountMapping(GuestDirectory, HostRoot))
@@ -2693,13 +2630,7 @@ namespace Brovan
                 return true;
             }
 
-            /// <summary>
-            /// Mounts the host directory that holds an emulated windows program so the guest reaches it through a
-            /// windows path instead of a host path.
-            /// </summary>
-            /// <param name="HostImagePath">host path of the program image.</param>
-            /// <param name="GuestParentDirectory">emulated windows directory the program directory is mounted under.</param>
-            /// <returns>returns the emulated windows path of the program image.</returns>
+            /// <returns>the emulated windows path of the program image, or HostImagePath unchanged when nothing is mounted.</returns>
             /// <remarks>
             /// A host that is already a windows machine hands out paths the guest can use as-is, so nothing is mounted there.
             /// </remarks>
@@ -2733,10 +2664,6 @@ namespace Brovan
                 return GuestDirectory + "\\" + Path.GetFileName(HostImagePath);
             }
 
-            /// <summary>
-            /// Translates a host path into the emulated windows path it is reachable through.
-            /// </summary>
-            /// <param name="HostPath">host path to translate.</param>
             /// <returns>returns the emulated windows path, or null when the host path is not mounted.</returns>
             public static string ToGuestWindowsPath(string HostPath)
             {
@@ -2781,11 +2708,6 @@ namespace Brovan
                 return null;
             }
 
-            /// <summary>
-            /// Returns the file name of an emulated windows path.
-            /// </summary>
-            /// <param name="WinPath">emulated windows path.</param>
-            /// <returns>returns the trailing path component.</returns>
             /// <remarks>
             /// <see cref="Path.GetFileName(string)"/> only splits on the host separator, so it returns the whole
             /// backslash path unchanged on a linux host.
@@ -2799,10 +2721,6 @@ namespace Brovan
                 return Separator >= 0 ? WinPath.Substring(Separator + 1) : WinPath;
             }
 
-            /// <summary>
-            /// Returns the directory of an emulated windows path.
-            /// </summary>
-            /// <param name="WinPath">emulated windows path.</param>
             /// <returns>returns the directory portion, or null when the path has none.</returns>
             /// <remarks>
             /// <see cref="Path.GetDirectoryName(string)"/> only splits on the host separator, so it returns an empty
@@ -2823,14 +2741,6 @@ namespace Brovan
                 return Separator == 0 ? "\\" : WinPath.Substring(0, Separator);
             }
 
-            /// <summary>
-            /// Resolves an emulated path into an absolute host path that can be used for real IO.
-            /// </summary>
-            /// <param name="EmulatedPath">emulated path to resolve.</param>
-            /// <param name="Format">binary format of the emulated process (used to apply platform rules).</param>
-            /// <param name="CreateDirectories">whether to create parent directories for the resolved path.</param>
-            /// <param name="PreserveFinalLink">whether to preserve the final filesystem link so the caller can inspect it.</param>
-            /// <param name="NativeSystemView">whether to read the native System32 view instead of the WOW64 one.</param>
             /// <returns>returns the resolved host path, or null if the path is not allowed or cannot be resolved.</returns>
             /// <remarks>
             /// This method shouldn't be called when resolving for writes, for resolving writes use <see cref="ResolveVirtualHostPath"/> instead.
@@ -2847,7 +2757,6 @@ namespace Brovan
                 if (Format == BinaryFormat.ELF)
                     return ResolveLinuxHostPath(Raw, CreateDirectories, PreserveFinalLink);
 
-                // Non-Windows binaries keep normal host semantics.
                 if (Format != BinaryFormat.PE)
                     return GetNativeFullPath(Raw, CreateDirectories);
 
@@ -2898,12 +2807,11 @@ namespace Brovan
                         return VirtualPath;
                 }
 
-                // This resolve function is not called for writes, so this is secure when reading or checking files/directories.
                 if (IsWindows)
                 {
                     string Native = GetNativeFullPath(WinPath, CreateDirectories);
 
-                    if (!CreateDirectories && !string.IsNullOrEmpty(Native) && !HostPathExists(Native))
+                    if (!CreateDirectories && !string.IsNullOrEmpty(Native) && HasShippedLocation(WinPath) && !HostPathExists(Native))
                     {
                         string Shipped = TryResolveFromWindowsLibs(WinPath);
                         if (!string.IsNullOrEmpty(Shipped))
@@ -2920,12 +2828,6 @@ namespace Brovan
                 return VirtualPath;
             }
 
-            /// <summary>
-            /// Resolves an emulated path directly into the virtual filesystem.
-            /// </summary>
-            /// <param name="EmulatedPath">emulated path to resolve.</param>
-            /// <param name="Format">binary format of the emulated process.</param>
-            /// <param name="CreateDirectories">whether to create parent directories for the resolved path.</param>
             /// <returns>returns the resolved virtual path, or null if the path cannot be mapped into the sandbox.</returns>
             public static string ResolveVirtualHostPath(string EmulatedPath, BinaryFormat Format, bool CreateDirectories = false)
             {
@@ -3099,9 +3001,6 @@ namespace Brovan
                 IgnoreInaccessible = true,
             };
 
-            /// <summary>
-            /// Rewrites the components of a host path to the casing the host filesystem actually uses.
-            /// </summary>
             private static string ResolveExistingHostCase(string HostPath)
             {
                 if (IsWindows || string.IsNullOrEmpty(HostPath))
@@ -3341,12 +3240,6 @@ namespace Brovan
                 return Sanitized.Length == 0 ? "Program" : Sanitized;
             }
 
-            /// <summary>
-            /// Canonicalizes an absolute DOS-style Windows path by collapsing "." and ".." segments.
-            /// The result always stays anchored to the original drive root.
-            /// </summary>
-            /// <param name="WinPath">absolute windows path to canonicalize.</param>
-            /// <returns>returns the canonical absolute windows path, or null if the path is invalid.</returns>
             private static string CanonicalizeWindowsAbsolutePath(string WinPath)
             {
                 if (string.IsNullOrWhiteSpace(WinPath))
@@ -3387,12 +3280,6 @@ namespace Brovan
                 return Drive + ":\\" + string.Join("\\", Parts);
             }
 
-            /// <summary>
-            /// Reads a file from the emulated filesystem.
-            /// </summary>
-            /// <param name="Path">path to read.</param>
-            /// <param name="Format">binary format of the emulated process.</param>
-            /// <returns>returns the file bytes, or null if the file doesn't exist or cannot be accessed.</returns>
             public static byte[] ReadFile(string Path, BinaryFormat Format)
             {
                 string HostPath = ResolveHostPath(Path, Format);
@@ -3423,12 +3310,6 @@ namespace Brovan
                 return Directory.Exists(HostPath);
             }
 
-            /// <summary>
-            /// Creates a directory inside the emulated virtual filesystem.
-            /// </summary>
-            /// <param name="Path">directory path to create.</param>
-            /// <param name="Format">binary format of the emulated process.</param>
-            /// <returns>returns true if the directory exists or was created successfully, otherwise false.</returns>
             public static bool CreateDirectory(string Path, BinaryFormat Format)
             {
                 string HostPath = ResolveVirtualHostPath(Path, Format, CreateDirectories: true);
@@ -3446,12 +3327,6 @@ namespace Brovan
                 }
             }
 
-            /// <summary>
-            /// Gets the file size in bytes for a path in the emulated filesystem.
-            /// </summary>
-            /// <param name="Path">file path to query.</param>
-            /// <param name="Format">binary format of the emulated process.</param>
-            /// <returns>returns the file length in bytes, or 0 if the file doesn't exist or cannot be accessed.</returns>
             public static long GetFileLength(string Path, BinaryFormat Format)
             {
                 string HostPath = ResolveHostPath(Path, Format);
@@ -3488,11 +3363,6 @@ namespace Brovan
                 }
             }
 
-            /// <summary>
-            /// Ensures an emulated drive letter has a host root mapping (creates the directory if possible).
-            /// </summary>
-            /// <param name="DriveLetter">drive letter to map.</param>
-            /// <param name="HostRoot">host directory root for the drive.</param>
             private static void EnsureDriveMapping(char DriveLetter, string HostRoot)
             {
                 DriveLetter = char.ToUpperInvariant(DriveLetter);
@@ -3716,8 +3586,6 @@ namespace Brovan
             /// <summary>
             /// Maps an absolute linux path to its host path through the mount table, without resolving links.
             /// </summary>
-            /// <param name="LinuxPath">absolute emulated linux path.</param>
-            /// <returns>returns the host path, or null when the path is not absolute.</returns>
             private static string MapLinuxPathToHostPath(string LinuxPath)
             {
                 if (string.IsNullOrWhiteSpace(LinuxPath) || !LinuxPath.StartsWith("/", StringComparison.Ordinal))
@@ -3769,11 +3637,6 @@ namespace Brovan
                 return Result;
             }
 
-            /// <summary>
-            /// Gets the host root directory for an emulated drive letter (creates a default mapping on demand).
-            /// </summary>
-            /// <param name="DriveLetter">drive letter to resolve.</param>
-            /// <returns>returns the host root directory for the drive.</returns>
             private static string GetDriveRoot(char DriveLetter)
             {
                 DriveLetter = char.ToUpperInvariant(DriveLetter);
@@ -3784,17 +3647,13 @@ namespace Brovan
                         return Root;
                 }
 
-                // Create a default mapping on demand. The new root has to reach AllowedRoots straight away or
-                // every write through it is sandboxed out
+                // The new root must reach AllowedRoots at once, or every write through it is sandboxed out.
                 string DefaultRoot = Path.Combine(VirtualFileSystemRoot, DriveLetter.ToString());
                 EnsureDriveMapping(DriveLetter, DefaultRoot);
                 RefreshAllowedRoots();
                 return DefaultRoot;
             }
 
-            /// <summary>
-            /// Rebuilds the allowed root list used to keep emulated IO sandboxed.
-            /// </summary>
             private static void RefreshAllowedRoots()
             {
                 lock (DriveMapLock)
@@ -3812,7 +3671,6 @@ namespace Brovan
                         }
                         catch
                         {
-                            // ignore
                         }
                     }
 
@@ -3827,7 +3685,6 @@ namespace Brovan
                         }
                         catch
                         {
-                            // ignore
                         }
                     }
 
@@ -3842,7 +3699,6 @@ namespace Brovan
                         }
                         catch
                         {
-                            // ignore
                         }
                     }
 
@@ -3852,18 +3708,10 @@ namespace Brovan
                     }
                     catch
                     {
-                        // ignore
                     }
                 }
             }
 
-            /// <summary>
-            /// Returns a full path only if it stays within the allowed sandbox roots.
-            /// </summary>
-            /// <param name="CandidatePath">candidate path to normalize and validate.</param>
-            /// <param name="CreateDirectories">whether to create parent directories.</param>
-            /// <param name="PreserveFinalLink">whether to keep the final path component unresolved.</param>
-            /// <returns>returns the sandboxed full path, or null if it escapes the sandbox.</returns>
             private static string GetSandboxedFullPath(string CandidatePath, bool CreateDirectories, bool PreserveFinalLink = false)
             {
                 if (string.IsNullOrWhiteSpace(CandidatePath))
@@ -3962,29 +3810,146 @@ namespace Brovan
                 }
             }
 
-            public static void ProbeHostEntry(string HostPath, out bool IsFile, out bool IsDirectory)
+            public static void ProbeHostEntry(string HostPath, out bool IsFile, out bool IsDirectory, out FileAttributes Attributes)
             {
-                if (ProbeScopeDepth == 0)
-                {
-                    IsFile = File.Exists(HostPath);
-                    IsDirectory = !IsFile && Directory.Exists(HostPath);
-                    return;
-                }
-
                 bool Exists;
-                FileAttributes Attributes;
                 try
                 {
                     Exists = TryGetHostAttributes(GetHostInfo(HostPath), out Attributes);
                 }
-                catch (ArgumentException)
+                catch (Exception Ex) when (Ex is ArgumentException || Ex is IOException)
                 {
                     Exists = false;
                     Attributes = 0;
                 }
 
+                if (!Exists)
+                    Attributes = 0;
+
                 IsDirectory = Exists && (Attributes & FileAttributes.Directory) != 0;
                 IsFile = Exists && !IsDirectory;
+            }
+
+            private static readonly System.Collections.Concurrent.ConcurrentQueue<SafeFileHandle> PendingCloses = new();
+            private static readonly object PendingCloseLock = new();
+            private static readonly AutoResetEvent PendingCloseSignal = new(false);
+            private static int CloserStarted;
+
+            /// <summary>
+            /// Closes a host handle on a background thread, because nothing the guest sees waits for it.
+            /// <see cref="FlushPendingCloses"/> runs before anything renames or removes a host entry.
+            /// </summary>
+            public static void CloseHandleLater(SafeFileHandle Handle)
+            {
+                if (Handle == null)
+                    return;
+
+                PendingCloses.Enqueue(Handle);
+                if (Interlocked.Exchange(ref CloserStarted, 1) == 0)
+                    new Thread(CloseQueuedHandles) { IsBackground = true, Name = "HostHandleCloser" }.Start();
+
+                PendingCloseSignal.Set();
+            }
+
+            /// <summary>
+            /// Closes every queued host handle before it returns. A file system without POSIX delete keeps a removed
+            /// name until its last handle closes.
+            /// </summary>
+            public static void FlushPendingCloses()
+            {
+                lock (PendingCloseLock)
+                {
+                    while (PendingCloses.TryDequeue(out SafeFileHandle Handle))
+                        Handle.Dispose();
+                }
+            }
+
+            private static void CloseQueuedHandles()
+            {
+                while (true)
+                {
+                    PendingCloseSignal.WaitOne();
+                    while (true)
+                    {
+                        lock (PendingCloseLock)
+                        {
+                            if (!PendingCloses.TryDequeue(out SafeFileHandle Handle))
+                                break;
+
+                            Handle.Dispose();
+                        }
+                    }
+                }
+            }
+
+            public enum HostEntryKind
+            {
+                Unknown,
+                // The parent directory exists.
+                Missing,
+                // A directory on the way is missing.
+                MissingPath,
+                File,
+                Directory
+            }
+
+            private const int MaxPlainHostPath = 248;
+
+            /// <summary>
+            /// Opens a host entry once to learn what it is, and returns the handle for a file or a directory. Unknown
+            /// means the host cannot answer this way and the caller probes by path instead.
+            /// </summary>
+            public static unsafe HostEntryKind TryOpenHostEntry(string HostPath, bool ReadData, out SafeFileHandle Handle, out FileAttributes Attributes)
+            {
+                Handle = null;
+                Attributes = 0;
+
+                // A longer path needs the \\?\ form, which the path probes add for themselves.
+                if (!IsWindows || string.IsNullOrEmpty(HostPath) || HostPath.Length >= MaxPlainHostPath)
+                    return HostEntryKind.Unknown;
+
+                const uint FileReadAttributes = 0x80;
+                const uint Synchronize = 0x100000;
+                const uint GenericRead = 0x80000000;
+                const uint FileFlagBackupSemantics = 0x02000000;
+                const uint FileFlagOpenReparsePoint = 0x00200000;
+                const int ErrorFileNotFound = 2;
+                const int ErrorPathNotFound = 3;
+                const int FileBasicInfo = 0;
+
+                SafeFileHandle Opened = NativeWinImports.CreateFileW(HostPath, ReadData ? GenericRead : FileReadAttributes | Synchronize,
+                    FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
+                if (Opened.IsInvalid)
+                {
+                    int Error = Marshal.GetLastPInvokeError();
+                    Opened.Dispose();
+                    return Error switch
+                    {
+                        ErrorFileNotFound => HostEntryKind.Missing,
+                        ErrorPathNotFound => HostEntryKind.MissingPath,
+                        _ => HostEntryKind.Unknown
+                    };
+                }
+
+                long* Basic = stackalloc long[5];
+                if (!NativeWinImports.GetFileInformationByHandleEx(Opened, FileBasicInfo, Basic, 40))
+                {
+                    Opened.Dispose();
+                    return HostEntryKind.Unknown;
+                }
+
+                Attributes = (FileAttributes)(uint)Basic[4];
+
+                // A link is the sandbox walk's to resolve.
+                if ((Attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    Opened.Dispose();
+                    Attributes = 0;
+                    return HostEntryKind.Unknown;
+                }
+
+                Handle = Opened;
+                return (Attributes & FileAttributes.Directory) != 0 ? HostEntryKind.Directory : HostEntryKind.File;
             }
 
             // Copy and timestamp tools can set the write time, but not the change time or the file id.
@@ -4052,6 +4017,55 @@ namespace Brovan
                     return true;
                 }
                 catch (Exception Ex) when (Ex is IOException || Ex is UnauthorizedAccessException || Ex is EntryPointNotFoundException || Ex is DllNotFoundException)
+                {
+                    return false;
+                }
+            }
+
+            /// <summary>
+            /// Reads the attributes, the FILETIME timestamps and the length of an open host file or directory.
+            /// </summary>
+            public static unsafe bool TryGetHandleMetadata(SafeFileHandle Handle, out FileAttributes Attributes, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long Length)
+            {
+                Attributes = 0;
+                CreationTime = 0;
+                LastAccessTime = 0;
+                LastWriteTime = 0;
+                Length = 0;
+
+                if (IsWindows)
+                {
+                    // File.Get*(SafeFileHandle) each go through GetFileInformationByHandle, which also queries the
+                    // volume. One FileNetworkOpenInformation query answers all of it.
+                    const int FileNetworkOpenInformation = 34;
+                    ulong* IoStatus = stackalloc ulong[2];
+                    long* NetworkOpen = stackalloc long[7];
+                    if (NativeWinImports.NtQueryInformationFile(Handle, IoStatus, NetworkOpen, 56, FileNetworkOpenInformation) < 0)
+                        return false;
+
+                    CreationTime = NetworkOpen[0];
+                    LastAccessTime = NetworkOpen[1];
+                    LastWriteTime = NetworkOpen[2];
+                    Length = NetworkOpen[5];
+                    Attributes = (FileAttributes)(uint)NetworkOpen[6];
+                    return true;
+                }
+
+                try
+                {
+                    FileAttributes HandleAttributes = File.GetAttributes(Handle);
+                    long Creation = File.GetCreationTimeUtc(Handle).ToFileTimeUtc();
+                    long LastAccess = File.GetLastAccessTimeUtc(Handle).ToFileTimeUtc();
+                    long LastWrite = File.GetLastWriteTimeUtc(Handle).ToFileTimeUtc();
+                    long FileLength = (HandleAttributes & FileAttributes.Directory) != 0 ? 0 : RandomAccess.GetLength(Handle);
+                    Attributes = HandleAttributes;
+                    CreationTime = Creation;
+                    LastAccessTime = LastAccess;
+                    LastWriteTime = LastWrite;
+                    Length = FileLength;
+                    return true;
+                }
+                catch (Exception Ex) when (Ex is IOException || Ex is UnauthorizedAccessException)
                 {
                     return false;
                 }
@@ -4198,12 +4212,6 @@ namespace Brovan
                 }
             }
 
-            /// <summary>
-            /// Turns the target string of a symlink into the host path it points at.
-            /// </summary>
-            /// <param name="LinkPath">host path of the link.</param>
-            /// <param name="LinkTarget">target string stored in the link.</param>
-            /// <returns>returns the host path of the target, or null when the target is unusable.</returns>
             private static string CombineHostLinkTarget(string LinkPath, string LinkTarget)
             {
                 if (string.IsNullOrWhiteSpace(LinkPath) || string.IsNullOrWhiteSpace(LinkTarget))
@@ -4236,13 +4244,6 @@ namespace Brovan
                 }
             }
 
-            /// <summary>
-            /// Checks that a link target stays inside the sandbox.
-            /// </summary>
-            /// <param name="LinkPath">host path of the link.</param>
-            /// <param name="TargetPath">host path the link resolves to.</param>
-            /// <param name="EnforceAllowedRoots">whether the target has to stay inside an allowed root.</param>
-            /// <returns>returns true when the target may be used.</returns>
             private static bool IsAcceptedLinkTarget(string LinkPath, string TargetPath, bool EnforceAllowedRoots)
             {
                 if (EnforceAllowedRoots && !IsUnderAllowedRoots(TargetPath))
@@ -4348,7 +4349,6 @@ namespace Brovan
                     }
                     catch
                     {
-                        // ignore
                     }
                 }
 
@@ -4390,12 +4390,6 @@ namespace Brovan
                 return false;
             }
 
-            /// <summary>
-            /// Combines a host root directory with a Windows-style relative path.
-            /// </summary>
-            /// <param name="Root">host root directory.</param>
-            /// <param name="WindowsRelative">windows-style relative path using backslashes.</param>
-            /// <returns>returns the combined host path.</returns>
             private static string CombineWindowsRelativePath(string Root, string WindowsRelative)
             {
                 if (string.IsNullOrWhiteSpace(Root))
@@ -4413,11 +4407,6 @@ namespace Brovan
                 return Result;
             }
 
-            /// <summary>
-            /// returns whether the provided string looks like an absolute Windows path or UNC path.
-            /// </summary>
-            /// <param name="WinPath">path to check.</param>
-            /// <returns>returns true if it looks absolute, otherwise false.</returns>
             private static bool LooksLikeAbsoluteWindowsPath(string WinPath)
             {
                 if (string.IsNullOrEmpty(WinPath))
@@ -4435,21 +4424,25 @@ namespace Brovan
                 return false;
             }
 
-            /// <summary>
-            /// Attempts to translate a Windows System32/SysWOW64/KnownDlls path into the shipped WindowsLibs directory.
-            /// </summary>
-            /// <param name="WinPath">windows-style path to resolve.</param>
-            /// <returns>returns the resolved host path inside WindowsLibs, or null if no mapping applies.</returns>
+            private const string System32Prefix = "C:\\Windows\\System32\\";
+            private const string SysWow64Prefix = "C:\\Windows\\SysWOW64\\";
+
+            private static bool HasShippedLocation(string Normalized)
+            {
+                return Normalized.StartsWith(System32Prefix, StringComparison.OrdinalIgnoreCase)
+                    || Normalized.StartsWith(SysWow64Prefix, StringComparison.OrdinalIgnoreCase)
+                    || Normalized.StartsWith("\\KnownDlls\\", StringComparison.OrdinalIgnoreCase)
+                    || Normalized.StartsWith("\\KnownDlls32\\", StringComparison.OrdinalIgnoreCase);
+            }
+
             private static string TryResolveFromWindowsLibs(string WinPath)
             {
                 if (string.IsNullOrWhiteSpace(WinPath))
                     return null;
 
-                // Common shipped locations.
-                const string System32Prefix = "C:\\Windows\\System32\\";
-                const string SysWow64Prefix = "C:\\Windows\\SysWOW64\\";
-
                 string Normalized = WinPath.Replace('/', '\\');
+                if (!HasShippedLocation(Normalized))
+                    return null;
 
                 if (Normalized.StartsWith(System32Prefix, StringComparison.OrdinalIgnoreCase))
                 {
@@ -4463,7 +4456,6 @@ namespace Brovan
                     return TryResolveFromWindowsLibsRelative(Path.Combine(WindowsLibsPath, "SysWOW64"), Rel);
                 }
 
-                // Some callers pass "\\KnownDlls\\xxx.dll" or similar, which ultimately maps to System32.
                 if (Normalized.StartsWith("\\KnownDlls\\", StringComparison.OrdinalIgnoreCase) || Normalized.StartsWith("\\KnownDlls32\\", StringComparison.OrdinalIgnoreCase))
                 {
                     string Leaf = Path.GetFileName(Normalized);
@@ -4473,12 +4465,6 @@ namespace Brovan
                 return null;
             }
 
-            /// <summary>
-            /// Attempts to resolve a relative path inside WindowsLibs (falls back to a case-insensitive leaf search).
-            /// </summary>
-            /// <param name="BaseDir">base directory inside WindowsLibs.</param>
-            /// <param name="WindowsRelative">windows-style relative path.</param>
-            /// <returns>returns the resolved host path, or null if it cannot be found.</returns>
             private static string TryResolveFromWindowsLibsRelative(string BaseDir, string WindowsRelative)
             {
                 if (string.IsNullOrWhiteSpace(BaseDir) || string.IsNullOrWhiteSpace(WindowsRelative))
@@ -4492,16 +4478,10 @@ namespace Brovan
                 if (!string.IsNullOrEmpty(Full) && HostPathExists(Full))
                     return Full;
 
-                // Fall back to a case-insensitive leaf search.
                 string Leaf = Path.GetFileName(WindowsRelative);
                 return TryResolveFromWindowsLibsByLeaf(Leaf);
             }
 
-            /// <summary>
-            /// Looks up a file by name inside WindowsLibs (case-insensitive).
-            /// </summary>
-            /// <param name="Leaf">file name to search for.</param>
-            /// <returns>returns the resolved host path, or null if not found.</returns>
             private static string TryResolveFromWindowsLibsByLeaf(string Leaf)
             {
                 if (string.IsNullOrWhiteSpace(Leaf))
@@ -4518,9 +4498,6 @@ namespace Brovan
                 return null;
             }
 
-            /// <summary>
-            /// Builds the WindowsLibs leaf index on demand for fast case-insensitive resolution.
-            /// </summary>
             private static void EnsureWindowsLibsIndex()
             {
                 lock (WindowsLibsIndexLock)
@@ -4541,7 +4518,6 @@ namespace Brovan
                             if (string.IsNullOrEmpty(Leaf))
                                 continue;
 
-                            // Keep first hit to avoid churn when duplicates exist.
                             if (!WindowsLibsFileIndex.ContainsKey(Leaf))
                             {
                                 string Full = GetSandboxedFullPath(FilePath, CreateDirectories: false);
@@ -4559,9 +4535,6 @@ namespace Brovan
         }
     }
 
-    /// <summary>
-    /// Generators for other platforms.
-    /// </summary>
     public class CrossGenerator
     {
         public static byte[] GenerateMap()
@@ -4573,7 +4546,6 @@ namespace Brovan
 
             ApiSetOverrideMap ??= new Dictionary<ApiSetOverrideKey, string>();
 
-            // Aggregate everything per contract so offsets/counts are easy to compute later.
             Dictionary<string, ApiSetContractBuild> ContractTable = new(StringComparer.OrdinalIgnoreCase);
 
             foreach (KeyValuePair<string, string> Pair in ApiSetMap)
@@ -4608,7 +4580,6 @@ namespace Brovan
 
             int ContractCount = Contracts.Count;
 
-            // Values are stored in one packed array, so count them up front.
             int TotalValueCount = 0;
             for (int Index = 0; Index < ContractCount; Index++)
             {
@@ -4650,7 +4621,6 @@ namespace Brovan
                 return Result;
             }
 
-            // populate the pool first so all offsets are known before writing structs
             for (int Index = 0; Index < ContractCount; Index++)
             {
                 AddString(Contracts[Index].ContractName);

@@ -92,32 +92,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             Path = Path.Replace('/', '\\').TrimEnd('\0');
 
             WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
-            bool DirectoryExists = IsDriveRootPath(Path) || Stream.ExistsAsDirectory;
-
-            // With neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE the caller takes whatever is there,
-            // which is how SetFileAttributes opens a directory
-            IsDirectory = IsDirectory || (DirectoryExists && (OpenOptions & FILE_NON_DIRECTORY_FILE) == 0);
-
-            bool Exists = IsDirectory ? DirectoryExists : Stream.ExistsAsFile;
-            if (!Exists)
-                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
-
-            bool DeleteOnClose = (OpenOptions & NtCreateFile.FILE_DELETE_ON_CLOSE) != 0;
-            if (DeleteOnClose)
+            Stream.OpenForLookup(NtCreateFile.WantsReadData(DesiredAccess));
+            NTSTATUS Status = CheckExistingPath(Instance, Stream, Path, DesiredAccess, ShareAccess, OpenOptions, ref IsDirectory);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
             {
-                if (!NtCreateFile.HasDeleteAccess(DesiredAccess))
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-                if (Stream.IsReadOnly)
-                    return NTSTATUS.STATUS_CANNOT_DELETE;
+                Stream.Dispose();
+                return Status;
             }
 
-            if (!IsDirectory && NtCreateFile.RefusesWriteAccess(Stream, DesiredAccess, FILE_OPEN))
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-
-            if (!Instance.WinHelper.ShareAccessAllows(Path, DesiredAccess, ShareAccess))
-                return NTSTATUS.STATUS_SHARING_VIOLATION;
-
+            bool DeleteOnClose = (OpenOptions & NtCreateFile.FILE_DELETE_ON_CLOSE) != 0;
             WinFile FileObj = new WinFile
             {
                 Path = Path,
@@ -142,6 +125,36 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.HandleManager.SetHandleFlags(Added.Handle, ObjectHandleFlags.Inherit);
 
             Handle = Added.Handle;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS CheckExistingPath(BinaryEmulator Instance, WindowsFileStream Stream, string Path, AccessMask DesiredAccess, uint ShareAccess, uint OpenOptions, ref bool IsDirectory)
+        {
+            bool DirectoryExists = IsDriveRootPath(Path) || Stream.ExistsAsDirectory;
+
+            // With neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE the caller takes whatever is there,
+            // which is how SetFileAttributes opens a directory
+            IsDirectory = IsDirectory || (DirectoryExists && (OpenOptions & FILE_NON_DIRECTORY_FILE) == 0);
+
+            bool Exists = IsDirectory ? DirectoryExists : Stream.ExistsAsFile;
+            if (!Exists)
+                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+
+            if ((OpenOptions & NtCreateFile.FILE_DELETE_ON_CLOSE) != 0)
+            {
+                if (!NtCreateFile.HasDeleteAccess(DesiredAccess))
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                if (Stream.IsReadOnly)
+                    return NTSTATUS.STATUS_CANNOT_DELETE;
+            }
+
+            if (!IsDirectory && NtCreateFile.RefusesWriteAccess(Stream, DesiredAccess, FILE_OPEN))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            if (!Instance.WinHelper.ShareAccessAllows(Path, DesiredAccess, ShareAccess))
+                return NTSTATUS.STATUS_SHARING_VIOLATION;
+
             return NTSTATUS.STATUS_SUCCESS;
         }
 

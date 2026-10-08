@@ -26,6 +26,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 || !Instance.IsRegionMapped(IoStatusBlockPtr, PointerSize * 2))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+            long? Timeout = null;
+            if (!Thread.WaitActive && !Instance.WinHelper.TryReadTimeout(TimeoutPtr, out Timeout))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
             NTSTATUS HandleStatus = Instance.WinHelper.ResolveIoCompletionHandle(IoCompletionHandle, out WinIoCompletion Completion);
             if (HandleStatus != NTSTATUS.STATUS_SUCCESS)
                 return HandleStatus;
@@ -71,7 +75,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                long NewDeadline = Instance.WinHelper.ParseRelativeDeadlineMs(TimeoutPtr);
+                long NewDeadline = Instance.WinHelper.ParseRelativeDeadlineMs(Timeout);
                 if (NewDeadline == Instance.EmulatedTickCount64)
                     return NTSTATUS.STATUS_TIMEOUT;
 

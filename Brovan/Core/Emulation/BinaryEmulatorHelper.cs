@@ -21,18 +21,9 @@ namespace Brovan.Core.Emulation
     /// </summary>
     public interface IWinSyscall
     {
-        /// <summary>
-        /// Handler for Windows syscalls.
-        /// </summary>
-        /// <param name="Instance">The emulator's instance.</param>
-        /// <returns>returns the status of the operation done by the syscall.</returns>
         /// <remarks>
-        /// <para>
-        /// Uses the convention for x64 as follows to emulate syscalls: parameters by order is R10 (moved from RCX), RDX, R8, R9 and the rest is on the stack.
-        /// </para>
-        /// <para>
-        /// Uses the convention for x86 as follows to emulate syscalls: all parameters are on the stack while keeping in mind to skip the return address (e.g. ESP+4).
-        /// </para>
+        /// x64 arguments are R10 (moved from RCX), RDX, R8, R9, then the stack. x86 arguments are on the
+        /// stack after two return addresses (ESP+8), or after one (ESP+4) on a direct blob startup.
         /// </remarks>
         public NTSTATUS Handle(BinaryEmulator Instance);
     }

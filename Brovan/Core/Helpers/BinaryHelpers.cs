@@ -466,9 +466,6 @@ namespace Brovan.Core.Helpers
             /// </summary>
             public ulong Address;
 
-            /// <summary>
-            /// End of the virtual address of the function.
-            /// </summary>
             public ulong EndAddress;
 
             /// <summary>
@@ -476,73 +473,40 @@ namespace Brovan.Core.Helpers
             /// </summary>
             public uint Offset;
 
-            /// <summary>
-            /// The offset that indicates the end of the function.
-            /// </summary>
             public uint EndOffset;
 
             /// <summary>
-            /// The code of the function (only gets set if analyzing the binary, not parsing).
+            /// Set only when the binary is analyzed, not when it is parsed.
             /// </summary>
             public X86Instruction[] Code;
 
             /// <summary>
-            /// The disassembled code of the function (only gets set if analyzing the binary, not parsing).
+            /// Set only when the binary is analyzed, not when it is parsed.
             /// </summary>
             public string DisassembledCode;
 
-            /// <summary>
-            /// Discovered local stack variables (may be empty if stack analysis not performed).
-            /// </summary>
             public StackVariable[] Locals;
 
-            /// <summary>
-            /// Discovered stack-passed arguments (heuristic; for x64 only stack spill / >4th args appear here).
-            /// </summary>
             public StackVariable[] Arguments;
 
-            /// <summary>
-            /// Discovered register-based arguments (x64: rcx, rdx, r8, r9) or fastcall/thiscall candidates on x86.
-            /// </summary>
             public StackVariable[] RegisterArguments;
         }
 
-        /// <summary>
-        /// Represents a stack variable (local or argument) discovered by analysis.
-        /// </summary>
         public struct StackVariable
         {
-            /// <summary>
-            /// Variable name (auto-generated, e.g., local_20h, arg_18h).
-            /// </summary>
             public string Name;
 
-            /// <summary>
-            /// Stack offset relative to frame pointer (rbp/ebp). Locals are negative, arguments positive.
-            /// </summary>
             public int Offset;
 
-            /// <summary>
-            /// Inferred size in bytes (from access width hints). 0 if unknown.
-            /// </summary>
             public int Size;
         }
 
         public struct AnalyzationSettings
         {
-            /// <summary>
-            /// Resolve IAT/Import stubs.
-            /// </summary>
             public bool ResolveStubs;
 
-            /// <summary>
-            /// Resolve push + ret as a jmp.
-            /// </summary>
             public bool ResolvePushRet;
 
-            /// <summary>
-            /// When true, only transform push+ret thunks if no stack pointer modifications or other instructions (besides NOPs) occur between them and the operand is a simple reg/imm/mem not referencing rsp/esp.
-            /// </summary>
             public bool StrictPushRetValidation;
 
             public bool AnalyzeStack;
@@ -583,9 +547,6 @@ namespace Brovan.Core.Helpers
             
             public uint FileOffset;
             
-            /// <summary>
-            /// The IL code size of the method.
-            /// </summary>
             public uint CodeSize;
             
             public ushort Flags;
@@ -654,9 +615,6 @@ namespace Brovan.Core.Helpers
             /// </summary>
             public string FunctionName;
 
-            /// <summary>
-            /// The virtual address of the PLT entry.
-            /// </summary>
             public uint VirtualAddress;
 
             /// <summary>
@@ -683,9 +641,6 @@ namespace Brovan.Core.Helpers
             /// </summary>
             public ulong ImportAddressRVA;
 
-            /// <summary>
-            /// The RVA of the import lookup table entry.
-            /// </summary>
             public uint ImportLookupRVA;
 
             /// <summary>
@@ -695,9 +650,6 @@ namespace Brovan.Core.Helpers
 
             public bool IsOrdinal;
 
-            /// <summary>
-            /// The ordinal value if imported by ordinal.
-            /// </summary>
             public ushort Ordinal;
         }
 
@@ -743,9 +695,6 @@ namespace Brovan.Core.Helpers
 
             public IMAGE_FILE_HEADER FileHeader;
 
-            /// <summary>
-            /// Import functions for the PE File (IAT).
-            /// </summary>
             public Dictionary<ulong, PEImportFunction> ImportFunctions = new();
 
             public DotNetStatus DotNetStatus;
@@ -783,21 +732,15 @@ namespace Brovan.Core.Helpers
             public Dictionary<ulong, ELFImportFunction> ImportFunctions = new();
         }
 
-        /// <summary>
-        /// Binary search result.
-        /// </summary>
         public struct BinarySearch
         {
             public byte[] Match;
 
             /// <summary>
-            /// The virtual address of the matching bytes where it is found.
+            /// Virtual address of the match, or the file offset for SearchSection.All.
             /// </summary>
             public ulong Address;
 
-            /// <summary>
-            /// The offset of the matching bytes where it is found.
-            /// </summary>
             public uint Offset;
         }
 
@@ -809,13 +752,6 @@ namespace Brovan.Core.Helpers
             Corrupted = 3,
         }
 
-        /// <summary>
-        /// Read a null-terminated string inside the binary file in an offset.
-        /// </summary>
-        /// <param name="Data">Binary file.</param>
-        /// <param name="Offset">Offset to read from.</param>
-        /// <returns>Reads a null-terminated string from the binary in a specific offset.</returns>
-        /// <exception cref="IndexOutOfRangeException"></exception>
         public static string ReadNullTerminatedString(byte[] Data, int Offset)
         {
             if (Offset > Data.Length)
@@ -826,13 +762,6 @@ namespace Brovan.Core.Helpers
             return End < 0 ? string.Empty : Encoding.ASCII.GetString(Data, Offset, End - Offset);
         }
 
-        /// <summary>
-        /// Read a null-terminated string inside the binary file at an offset.
-        /// </summary>
-        /// <param name="Data">Binary file data.</param>
-        /// <param name="Offset">Offset to read from.</param>
-        /// <returns>Reads a null-terminated ASCII string.</returns>
-        /// <exception cref="IndexOutOfRangeException"></exception>
         public static string ReadNullTerminatedString(ReadOnlySpan<byte> Data, int Offset)
         {
             if ((uint)Offset >= (uint)Data.Length)

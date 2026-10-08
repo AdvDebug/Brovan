@@ -668,7 +668,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Request.DataPooled = false;
         }
 
-        // A message goes into the ring whole, so its bytes are taken when it is issued.
+        // A message is copied whole when it is issued, even when it enters the ring in pieces.
         internal static bool TryTakeData(BinaryEmulator Instance, PipeRequest Request, ulong Source, int Length)
         {
             Request.DataLength = Length;

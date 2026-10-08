@@ -231,7 +231,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (NtOpenSection.IsWindowsSharedSection(Section.Name))
             {
-                //Instance.StopReturn = true;
                 ulong Base = Section.BackingAddress;
                 ulong Size = Section.Size;
 

@@ -1,18 +1,17 @@
 /* Appended to qemu/softmmu/memory.c.
  *
- * Adding a region re-rendered the whole memory topology and rebuilt its dispatch
- * tree, so mapping guest memory cost O(live regions) and a guest that holds many
- * mappings paid it on every commit. A region that lands in a gap of the current
- * view can instead be inserted into that view, with only its own section added to
- * the dispatch.
+ * The general path re-renders the whole memory topology and rebuilds its
+ * dispatch tree, which costs O(live regions) on every commit. A region that lands
+ * in a gap of the current view is inserted into that view instead, with only its
+ * own section added to the dispatch.
  *
  * Anything the insert cannot reason about locally - an overlap, a container, a
  * view rooted below the system region - returns false and takes the general path,
  * which still re-renders.
  *
- * The commit listeners are not called on this path. That is safe because the only
- * one registered caches fv->dispatch, which this mutates in place rather than
- * replacing, and does a TLB flush that this issues itself before returning.
+ * The commit listeners are not called on this path. The only one registered
+ * caches fv->dispatch, which this mutates in place rather than replacing, and does
+ * a TLB flush that this issues itself before returning.
  *
  * brov_dispatch_compact keeps the one view this mutates out of the compactor: a
  * compacted radix tree cannot take an incremental insert. Every other dispatch,

@@ -19,7 +19,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             uint Bytes = (uint)Entries * 4;
             bool Reading = Function == PaletteGetEntries || Function == PaletteGetSystemEntries || Function == PaletteGetColorTable;
 
-            // The display never runs a palette, so the colours an app reads back are the identity ones.
+            // The display never runs a palette. A read returns zeroed entries.
             if (Reading && EntriesPtr != 0 && Bytes != 0)
             {
                 if (!Instance.IsRegionMapped(EntriesPtr, Bytes) || !Instance.WinHelper.WriteZeroMemory(EntriesPtr, Bytes))

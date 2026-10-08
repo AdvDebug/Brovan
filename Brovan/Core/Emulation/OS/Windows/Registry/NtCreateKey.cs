@@ -31,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            if (!Instance.WinHelper.TryResolveRegistryObjectPath(ObjectAttributesPtr, NTSTATUS.STATUS_INVALID_PARAMETER, NTSTATUS.STATUS_INVALID_PARAMETER, NTSTATUS.STATUS_INVALID_PARAMETER, out string KeyPath, out NTSTATUS Status))
+            if (!Instance.WinHelper.TryResolveRegistryObjectPath(ObjectAttributesPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, NTSTATUS.STATUS_INVALID_PARAMETER, NTSTATUS.STATUS_INVALID_PARAMETER, out string KeyPath, out NTSTATUS Status))
             {
                 return Status;
             }

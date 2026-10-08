@@ -34,7 +34,7 @@ namespace Brovan.Core.Emulation
         UC_ERR_RESOURCE,
         UC_ERR_EXCEPTION,
         UC_ERR_OVERFLOW,
-        UC_ERR_CFG // manually added (this is bad i know)
+        UC_ERR_CFG // Binding-only. Unicorn has no such code.
     }
 
     /// <summary>

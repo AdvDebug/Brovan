@@ -15,14 +15,8 @@ namespace Brovan.Core.Emulation
     [Flags]
     public enum LogFlags
     {
-        /// <summary>
-        /// General logs such as libraries being mapped, etc.
-        /// </summary>
         General = 1 << 0,
 
-        /// <summary>
-        /// Log emulation issues (invalid read, writes, etc).
-        /// </summary>
         Issues = 1 << 1,
 
         Syscall = 1 << 2,
@@ -58,9 +52,6 @@ namespace Brovan.Core.Emulation
     {
         None,
 
-        /// <summary>
-        /// Only allow loopback endpoints and explicitly allowed addresses.
-        /// </summary>
         Loopback,
 
         Full
@@ -87,9 +78,6 @@ namespace Brovan.Core.Emulation
             return new NetworkAccessPolicy(NetworkAccessMode.Full);
         }
 
-        /// <summary>
-        /// Creates a policy that blocks all endpoints unless addresses are explicitly added.
-        /// </summary>
         public static NetworkAccessPolicy None()
         {
             return new NetworkAccessPolicy(NetworkAccessMode.None);
@@ -157,7 +145,7 @@ namespace Brovan.Core.Emulation
         public bool EmulateNetworking;
 
         /// <summary>
-        /// Host-backed guest networking policy. When null, <see cref="EmulateNetworking"/> is used for compatibility.
+        /// When null, <see cref="EmulateNetworking"/> is used for compatibility.
         /// </summary>
         public NetworkAccessPolicy NetworkPolicy;
 
@@ -166,9 +154,6 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public bool FakeUnimplementedSyscalls;
 
-        /// <summary>
-        /// Log flags (have the <see cref="LogFlags.General"/> by default).
-        /// </summary>
         public LogFlags Flags;
 
         /// <summary>
@@ -176,29 +161,20 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public bool StartSuspended;
 
-        /// <summary>
-        /// Split the stack to support individual function emulation (on by default).
-        /// </summary>
         public bool SplitStack;
 
-        /// <summary>
-        /// Handle invalid memory operations by the emulator, if there's no handler the execution will silently fail (on by default).
-        /// </summary>
         public bool HandleInvalidOperations;
 
         /// <summary>
-        /// Specifies a callback used to decide whether invalid memory or instruction operations should stop emulation.
+        /// Specifies a callback used to decide whether invalid memory operations should stop emulation.
         /// </summary>
         public InvalidOperationHandler InvalidOperationsCallback;
 
         /// <summary>
-        /// Specifies a function that can get a notification when a syscall is executed. when this is set, the syscall handler itself won't emit event messages.
+        /// When set, the syscall handler does not emit its own event messages.
         /// </summary>
         public SyscallNotificationDelegate SyscallNotificationCallback;
 
-        /// <summary>
-        /// Logs event handler. can be set up after the binary initialization.
-        /// </summary>
         public MessageHandler OnMessageHandler;
 
         /// <summary>
@@ -213,22 +189,16 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public string[] ProgramArguments;
 
-        /// <summary>
-        /// Console output mode used for guest writes to standard output and standard error.
-        /// </summary>
         public GuestConsoleOutputMode ConsoleOutputMode;
 
-        /// <summary>
-        /// Enables internal emulator debug diagnostics.
-        /// </summary>
         public bool Debug;
 
         /// <summary>
-        /// Sets a unicorn flag to tell the binding to not add any hooks (except instructions hooks like syscalls).
+        /// Tells the binding to add only instruction hooks, such as syscalls, and the hooks for invalid memory,
+        /// invalid instructions and interrupts.
         /// </summary>
         public bool NoHooks;
 
-        /// <summary>Backend implementation to use. Defaults to Unicorn.</summary>
         public EmulationBackendKind BackendKind;
 
         /// <summary>Runs guest threads on several host threads at once. Hypervisor backends only.</summary>
@@ -257,9 +227,6 @@ namespace Brovan.Core.Emulation
 #pragma warning restore
         }
 
-        /// <summary>
-        /// Gets the effective network policy for this settings instance.
-        /// </summary>
         public NetworkAccessPolicy GetNetworkPolicy()
         {
             if (NetworkPolicy != null)
@@ -332,9 +299,6 @@ namespace Brovan.Core.Emulation
         private bool Disposed = false;
         public bool IsDisposed { get { return Disposed; } }
 
-        /// <summary>
-        /// Enables internal emulator debug diagnostics.
-        /// </summary>
         public bool Debug { get; set; }
 
         public string RawProgramArguments { get; }
@@ -353,7 +317,7 @@ namespace Brovan.Core.Emulation
         public bool IsArmGuest => BackendArch == Arch.ARM;
         public bool IsX64Guest => BackendArch == Arch.X86 && BackendMode == Mode.MODE_64;
         public bool IsArchX86Guest => BackendArch == Arch.X86;
-        public readonly ulong BaseAddress = 0x10000000UL; // Base Start
+        public readonly ulong BaseAddress = 0x10000000UL;
 
         public ulong MaxAddress
         {
@@ -372,9 +336,6 @@ namespace Brovan.Core.Emulation
 
         // MaxAddress is inclusive on x64 and exclusive on x86.
         public ulong UserAddressEnd => AlignUp(MaxAddress, PageSize);
-        /// <summary>
-        /// How long the scheduler blocks in one go when no guest thread can run.
-        /// </summary>
         private const int IdleWaitSliceMs = 5;
 
         // Held by every host thread that touches emulator state. A hypervisor backend releases it only for
@@ -433,7 +394,7 @@ namespace Brovan.Core.Emulation
                 Monitor.Pulse(KernelLock);
         }
 
-        // Timed wakes have no producer, so one thread wakes an idle worker at the idle cadence.
+        // Timed wakes have no producer, so one thread wakes an idle worker every SweepIntervalMs.
         private void SweepLoop()
         {
             while (!SchedulerExiting)
@@ -575,9 +536,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Returns the current deterministic guest system time as a Windows file time.
-        /// </summary>
         internal long GetEmulatedSystemTimeFileTimeUtc()
         {
             if (EmulatedTickCount64 > (long.MaxValue - EmulatedSystemTimeBaseFileTimeUtc) / 10000)
@@ -586,9 +544,6 @@ namespace Brovan.Core.Emulation
             return EmulatedSystemTimeBaseFileTimeUtc + (EmulatedTickCount64 * 10000);
         }
 
-        /// <summary>
-        /// Creates a deadline using the deterministic guest tick count.
-        /// </summary>
         internal long CreateEmulatedDeadlineMilliseconds(long Milliseconds)
         {
             if (Milliseconds <= 0)
@@ -600,9 +555,6 @@ namespace Brovan.Core.Emulation
             return EmulatedTickCount64 + Milliseconds;
         }
 
-        /// <summary>
-        /// Returns true when a deterministic guest deadline has elapsed.
-        /// </summary>
         internal bool IsEmulatedDeadlineExpired(long Deadline)
         {
             return Deadline != -1 && Deadline != long.MaxValue && EmulatedTickCount64 >= Deadline;
@@ -645,9 +597,6 @@ namespace Brovan.Core.Emulation
             _emulator.ConfigureEmulatedTimestampCounter(HostStart, System.Diagnostics.Stopwatch.Frequency, QpcFrequency, TscTicksPerQpcTick, SkewCounts);
         }
 
-        /// <summary>
-        /// Advances guest time for a wait that was not served in real time.
-        /// </summary>
         internal void AdvanceEmulatedTimeMilliseconds(long Milliseconds)
         {
             if (Milliseconds <= 0)
@@ -943,9 +892,6 @@ namespace Brovan.Core.Emulation
             catch (Exception ex) { OnMessage?.Invoke($"[event] msg factory failed: {ex.GetType().Name}: {ex.Message}", FlagType); }
         }
 
-        /// <summary>
-        /// Emits an internal emulator debug diagnostic when debug mode is enabled.
-        /// </summary>
         internal void TriggerDebugMessage(string Message)
         {
             if (Debug && (Settings.Flags & LogFlags.General) != 0)
@@ -959,9 +905,6 @@ namespace Brovan.Core.Emulation
             return (Value + Align - 1) & ~(Align - 1);
         }
 
-        /// <summary>
-        /// Returns true if the two [Base, Base+Size) ranges overlap.
-        /// </summary>
         private static bool RegionsOverlap(ulong ABase, ulong ASize, ulong BBase, ulong BSize)
         {
             ulong AEnd = GetRangeEnd(ABase, ASize);
@@ -969,9 +912,6 @@ namespace Brovan.Core.Emulation
             return ABase < BEnd && AEnd > BBase;
         }
 
-        /// <summary>
-        /// Removes the specified mapped range from the freed-region list.
-        /// </summary>
         private void ConsumeFreedMemoryRange(ulong Address, ulong Size)
         {
             if (Size == 0 || _freedmemory.Count == 0)
@@ -1029,9 +969,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Adds a mapped memory region, keeping the list ordered by base address.
-        /// </summary>
         internal void AddMemoryRegion(MemoryRegion Region)
         {
             int idx = _memory.BinarySearch(Region, _memoryRegionBaseComparer);
@@ -1071,9 +1008,6 @@ namespace Brovan.Core.Emulation
             return _memory.RemoveAll(Match);
         }
 
-        /// <summary>
-        /// Replaces a mapped memory region by index, restoring base-address order when it moved.
-        /// </summary>
         internal void SetMemoryRegion(int Index, MemoryRegion Region)
         {
             if (Index < 0 || Index >= _memory.Count)
@@ -1098,9 +1032,6 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        /// <summary>
-        /// Returns true if an address belongs to a mapped memory region and returns its main memory-list index.
-        /// </summary>
         internal bool TryFindMemoryRegionIndex(ulong Address, out int Index)
         {
             Index = -1;
@@ -1282,10 +1213,6 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        /// <summary>
-        /// Enumerates mapped memory regions in base-address order. <see cref="_memory"/> is kept sorted
-        /// by every mutator, so this is a plain walk.
-        /// </summary>
         internal IEnumerable<MemoryRegion> EnumerateMemoryRegionsByBase()
         {
             for (int i = 0; i < _memory.Count; i++)
@@ -1342,8 +1269,7 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Returns true if any existing region overlaps the requested address range.
-        /// This is an "address space in use" check (reserve collision semantics), not a commit check.
+        /// True when any region overlaps the range. Reserved-only regions count, so this is not a commit check.
         /// </summary>
         public bool IsRegionInUse(ulong Address, ulong Size)
         {
@@ -1465,14 +1391,8 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        /// <summary>
-        /// Map a memory region for emulation.
-        /// if Address is 0, automatically finds a free memory region.
-        /// </summary>
         /// <param name="Address">Address to map memory at, or 0 for auto-allocation.</param>
-        /// <param name="Size">Size of memory region.</param>
-        /// <param name="Protection">Memory protection flags.</param>
-        /// <returns>Returns the mapped address if succeeded, otherwise 0.</returns>
+        /// <returns>The page-aligned base of the mapping, or 0 on failure.</returns>
         public ulong MapMemoryRegion(ulong Address, ulong Size, MemoryProtection Protection)
         {
             ulong AlignedSize = AlignToPageSize(Size);
@@ -1551,11 +1471,8 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Checks if the specified memory region overlaps any mapped regions.
+        /// True when any byte of the range is in a region. It does not prove that the whole range is mapped.
         /// </summary>
-        /// <param name="Address">Start address of the region.</param>
-        /// <param name="Size">Size of the region.</param>
-        /// <returns>returns true if overlapping, otherwise false.</returns>
         public bool IsRegionMapped(ulong Address, ulong Size)
         {
             return TryFindOverlappingMemoryRegion(Address, Size, out _);
@@ -1566,12 +1483,7 @@ namespace Brovan.Core.Emulation
             return _emulator.GetHostPointer(Address, Size);
         }
 
-        /// <summary>
-        /// Checks if the specified memory region is freed.
-        /// </summary>
-        /// <param name="BaseAddress">Base address of the region.</param>
-        /// <param name="WholeMemory">Indicates that the whole region of that base address should be scanned.</param>
-        /// <returns>returns true if freed, otherwise false.</returns>
+        /// <param name="WholeMemory">True matches an address inside a freed range, false only the start of one.</param>
         public bool IsRegionFreed(ulong BaseAddress, bool WholeMemory)
         {
             if (_freedmemory.Count == 0)
@@ -1605,12 +1517,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Unmaps a memory region.
-        /// </summary>
-        /// <param name="Address">Base Address to unmap.</param>
-        /// <param name="UnmapImage">Unmap the region even if it belongs to an Image.</param>
-        /// <returns>returns true if successfully unmapped, otherwise false.</returns>
         public bool UnmapMemoryRegion(ulong Address, bool UnmapImage = false)
         {
             if (Address == 0)
@@ -1689,11 +1595,6 @@ namespace Brovan.Core.Emulation
                 _freedmemory.RemoveRange(firstTouch + 1, lastTouch - firstTouch - 1);
         }
 
-        /// <summary>
-        /// Get a suitable base address with a specific size. (won't map)
-        /// </summary>
-        /// <param name="Size">Size of the address to get.</param>
-        /// <returns>Returns the suitable base address to be used.</returns>
         public ulong GetSuitableBaseAddress(ulong Size, ulong Alignment)
         {
             ulong AlignedSize = AlignToPageSize(Size);
@@ -1747,10 +1648,9 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Makes the thread the running thread just woke runnable. A wake only unblocks the target, and real
-        /// hardware runs it on another core at once. A waker whose slice can be capped keeps running, since it
-        /// usually wakes several threads or blocks within microseconds; otherwise its slice ends here rather
-        /// than holding the target for the rest of the quantum.
+        /// Makes a thread that the running thread woke runnable. Real hardware runs the woken thread on another
+        /// core at once. A waker whose slice can be capped keeps running, because it usually wakes more threads
+        /// or blocks soon. Otherwise its slice ends here, so the woken thread does not wait for the full quantum.
         /// </summary>
         internal void YieldSliceAfterWake(EmulatedThread WokenThread)
         {
@@ -2353,8 +2253,8 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Releases the threads held back by <see cref="BinaryEmulatorSettings.StartSuspended"/>, which is what
-        /// the creator asking to resume the initial thread means for a process spawned suspended.
+        /// Releases the threads that <see cref="BinaryEmulatorSettings.StartSuspended"/> holds. For a process
+        /// created suspended, this is what a resume of its initial thread means.
         /// </summary>
         public void ResumeSuspendedStart()
         {
@@ -2386,9 +2286,6 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        /// <summary>
-        /// Marks an emulated thread as terminated.
-        /// </summary>
         public bool TryTerminateThread(uint ThreadId, int ExitCode = 0)
         {
             if (!Threads.TryGetValue(ThreadId, out EmulatedThread Thread) || Thread == null || Thread.State == EmulatedThreadState.Terminated)
@@ -2738,10 +2635,9 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        // Guest wait deadlines run on host wall time, so emulator overhead keeps short sleepers permanently
-        // expired: they re-enter the boosted queues on every dispatch and strict priority order then never
-        // reaches a lower queue at all. Bounding how often a level may be skipped turns that livelock into a
-        // share of the dispatches.
+        // Guest wait deadlines run on host wall time. Emulator overhead keeps short sleepers always expired, so
+        // they enter the boosted queues again on every dispatch and strict priority order never reaches a lower
+        // queue. A limit on how often a level is skipped gives the lower queues a share of the dispatches.
         private const int MlfqStarvationSkipLimit = 24;
 
         private int PickMlfqLevel(Queue<int>[] ReadyQueues, int Levels)
@@ -3007,7 +2903,6 @@ namespace Brovan.Core.Emulation
                         KnownThreadOrderCount = ThreadOrder.Count;
                     }
 
-                    // Comparing against the epoch the last scan observed, rather than a per-slice difference
                     if (Self.WakeupScanRequired || SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch || HasFinishedHostIo())
                     {
                         if (Debug)
@@ -3187,7 +3082,7 @@ namespace Brovan.Core.Emulation
                 }
 
                 // A guest whose threads all block early never accumulates instructions, so the fallback sweep is
-                // bounded by wall time. The slice count is only a belt against a clock that stops moving.
+                // bounded by wall time. The slice count is a second bound that does not depend on the clock.
                 SlicesSinceFullWakeupScan++;
                 if (!TimedWaitRescanDue)
                 {
@@ -3221,7 +3116,6 @@ namespace Brovan.Core.Emulation
                     ImmaBeEmulatedOOO.State = EmulatedThreadState.Ready;
                 }
 
-                // Feedback: threads that block quickly get boosted, CPU-bound threads get demoted.
                 if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting)
                     ImmaBeEmulatedOOO.DynamicBoost = ClampInt(ImmaBeEmulatedOOO.DynamicBoost + 2, -16, 16);
                 else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Exception)
@@ -3299,9 +3193,6 @@ namespace Brovan.Core.Emulation
             };
         }
 
-        /// <summary>
-        /// Handles invalid memory operations and pass the exception to user-mode.
-        /// </summary>
         private bool InvalidMemoryHandler(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
         {
             if (Type == BackendMemoryAccessType.FetchUnmapped && Address == 0)
@@ -3426,11 +3317,6 @@ namespace Brovan.Core.Emulation
             _emulator.PersistCodeCache();
         }
 
-        /// <summary>
-        /// Align size to 4KB page boundary.
-        /// </summary>
-        /// <param name="Size">Size to align.</param>
-        /// <returns>Aligned size.</returns>
         public ulong AlignToPageSize(ulong Size)
         {
             return (Size + 0xFFF) & ~0xFFFUL;
@@ -3503,21 +3389,9 @@ namespace Brovan.Core.Emulation
 
         public bool WriteMemory(ulong Address, byte[] Data) => _emulator.WriteMemory(Address, Data);
 
-        /// <summary>
-        /// Write data to emulated memory without allocating a temporary byte array.
-        /// </summary>
-        /// <param name="Address">Address to write to.</param>
-        /// <param name="Data">Data to write.</param>
-        /// <returns>True if successful, false otherwise.</returns>
         public bool WriteMemory(ulong Address, ReadOnlySpan<byte> Data) => _emulator.WriteMemory(Address, Data);
 
-        /// <summary>
-        /// Read data from emulated memory into an existing buffer.
-        /// </summary>
-        /// <param name="Address">Address to read from.</param>
-        /// <param name="Data">Destination buffer.</param>
         /// <param name="Size">Number of bytes to read, or zero to read the full span.</param>
-        /// <returns>True if successful, false otherwise.</returns>
         public bool ReadMemory(ulong Address, Span<byte> Data, uint Size = 0) => _emulator.ReadMemory(Address, Data, Size);
 
         public byte[] ReadMemory(ulong Address, uint Size) => _emulator.ReadMemory(Address, Size);
@@ -3526,14 +3400,8 @@ namespace Brovan.Core.Emulation
 
         public uint ReadMemoryUInt(ulong Address) => _emulator.ReadMemoryUInt(Address);
 
-        /// <summary>
-        /// Start emulation.
-        /// </summary>
-        /// <param name="StartAddress">Beginning of emulation.</param>
-        /// <param name="EndAddress">End of emulation.</param>
-        /// <param name="Timeout">Timeout in milliseconds. A value of 0 disables the timeout.</param>
-        /// <param name="Count">Instruction count limit. A value of 0 disables the instruction limit.</param>
-        /// <returns>returns true if the emulation completed without problems, otherwise false.</returns>
+        /// <param name="Timeout">Timeout in microseconds, or 0 for none. Only the Unicorn backend applies it.</param>
+        /// <param name="Count">Instruction count limit, or 0 for none.</param>
         public bool StartEmulation(ulong StartAddress, ulong EndAddress, uint Timeout = 0, uint Count = 0, bool LogErrors = true)
         {
             if (Disposed)
@@ -3676,9 +3544,8 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Take a lazy snapshot of the current emulator state in which all registers are saved but only parts of the memory that are written will be restored.
+        /// Saves the general registers and flags. Each memory region is copied on its first write after this call.
         /// </summary>
-        /// <returns>return the <see cref="EmulatorSnapshot"/> class which contains the full information about the emulator's state.</returns>
         public EmulatorSnapshot TakeLazySnapshot()
         {
             if (Disposed || !IsX86Guest)
@@ -3753,15 +3620,9 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Emulate a specific function in the binary.
-        /// </summary>
-        /// <param name="FunctionName">Name of the function to emulate.</param>
-        /// <param name="Arguments">Arguments to pass to the function.</param>
-        /// <param name="Timeout">Timeout in milliseconds. A value of 0 disables the timeout.</param>
-        /// <param name="Count">Instruction count limit. A value of 0 disables the instruction limit.</param>
-        /// <param name="Snapshot">Snapshot to return to it's state after emulation.</param>
-        /// <returns>returns true if emulation succeeded, false otherwise.</returns>
+        /// <param name="Timeout">Timeout in microseconds, or 0 for none. Only the Unicorn backend applies it.</param>
+        /// <param name="Count">Instruction count limit, or 0 for none.</param>
+        /// <param name="Snapshot">State restored after the run.</param>
         public bool EmulateFunction(string FunctionName, ulong[] Arguments = null!, uint Timeout = 0, uint Count = 0, EmulatorSnapshot Snapshot = null, bool LogErrors = true)
         {
             if (Disposed)
@@ -3787,15 +3648,9 @@ namespace Brovan.Core.Emulation
             return Result;
         }
 
-        /// <summary>
-        /// Emulate a specific function in the binary.
-        /// </summary>
-        /// <param name="Function">Function to emulate.</param>
-        /// <param name="Arguments">Arguments to pass to the function.</param>
-        /// <param name="Timeout">Timeout in milliseconds. A value of 0 disables the timeout.</param>
-        /// <param name="Count">Instruction count limit. A value of 0 disables the instruction limit.</param>
-        /// <param name="Snapshot">Snapshot to return to it's state after emulation.</param>
-        /// <returns>returns true if emulation succeeded, false otherwise.</returns>
+        /// <param name="Timeout">Timeout in microseconds, or 0 for none. Only the Unicorn backend applies it.</param>
+        /// <param name="Count">Instruction count limit, or 0 for none.</param>
+        /// <param name="Snapshot">State restored after the run.</param>
         public bool EmulateFunction(BinaryFunction Function, ulong[] Arguments = null!, uint Timeout = 0, uint Count = 0, EmulatorSnapshot Snapshot = null, bool LogErrors = true)
         {
             if (Disposed)
@@ -3858,7 +3713,6 @@ namespace Brovan.Core.Emulation
             }
             else
             {
-                // Cdecl calling convention (args pushed on stack in reverse order)
                 ulong ESP = _emulator.ReadRegister(Registers.UC_X86_REG_ESP);
                 for (int i = Arguments.Length - 1; i >= 0; i--)
                 {
@@ -3871,19 +3725,11 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Code address allocated by <see cref="ExecuteCode(byte[], bool)"/> which is used to write code to it then execute.
+        /// Code region that <see cref="ExecuteCode(byte[], bool)"/> maps on first use and reuses.
         /// </summary>
         public ulong CodeAddress = 0;
 
-        /// <summary>
-        /// Execute assembly code.
-        /// </summary>
-        /// <param name="Code">Code to be executed</param>
-        /// <param name="StartEmulation">Indicates whether to run the code immediately or install it as the current instruction pointer. When false, a return address is pushed so execution resumes at the original instruction pointer.</param>
-        /// <returns>returns true if successful, otherwise false.</returns>
-        /// <remarks>
-        /// this method is mainly used to test for some bugs.
-        /// </remarks>
+        /// <param name="StartEmulation">True runs the code now. False makes it the next instruction and pushes a return address to the current instruction pointer.</param>
         public bool ExecuteCode(byte[] Code, bool StartEmulation)
         {
             if (Disposed)
@@ -3891,7 +3737,6 @@ namespace Brovan.Core.Emulation
             if (Code == null || Code.Length == 0)
                 throw new NullReferenceException(nameof(Code));
 
-            // Reserve a reusable 2 MB code region for injected test snippets.
             ulong Size = 2 * 1024 * 1024;
             if (CodeAddress == 0)
                 CodeAddress = MapUniqueAddress(Size, MemoryProtection.All);
@@ -3904,12 +3749,10 @@ namespace Brovan.Core.Emulation
             }
             else
             {
-                // Append a RET instruction so execution returns to the saved instruction pointer.
                 byte[] NewCode = new byte[Code.Length + 1];
                 Buffer.BlockCopy(Code, 0, NewCode, 0, Code.Length);
                 NewCode[NewCode.Length - 1] = 0xC3;
 
-                // Push the current instruction pointer as the return address.
                 if (_binary.Architecture == BinaryArchitecture.x64)
                 {
                     ulong RSP = ReadRegister(Registers.UC_X86_REG_RSP);
@@ -3959,7 +3802,5 @@ namespace Brovan.Core.Emulation
                 GC.SuppressFinalize(this);
             }
         }
-
-        //~BinaryEmulator() => Dispose();
     }
 }

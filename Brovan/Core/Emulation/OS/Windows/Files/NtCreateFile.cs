@@ -222,53 +222,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
-            WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
-            bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
-            bool FileExists = Stream.ExistsAsFile;
-
-            // With neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE the caller takes whatever is
-            // there. CreateFile(FILE_FLAG_BACKUP_SEMANTICS) directory handle exactly that way
-            IsDirectory = IsDirectory || (DirectoryExists && (CreateOptions & FILE_NON_DIRECTORY_FILE) == 0);
-
-            if (IsDirectory && FileExists)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_NOT_A_DIRECTORY, 0);
-                return NTSTATUS.STATUS_NOT_A_DIRECTORY;
-            }
-
-            if (!IsDirectory && DirectoryExists)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
-                return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
-            }
-
-            if (DeleteOnClose && Stream.IsReadOnly)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_CANNOT_DELETE, 0);
-                return NTSTATUS.STATUS_CANNOT_DELETE;
-            }
-
-            if (!IsDirectory && RefusesWriteAccess(Stream, Permissions, CreateDisposition))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-            }
-
-            if (!Instance.WinHelper.ShareAccessAllows(Path, Permissions, ShareAccess))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SHARING_VIOLATION, 0);
-                return NTSTATUS.STATUS_SHARING_VIOLATION;
-            }
-
-            NTSTATUS Status = PreparePathForDisposition(Path, IsDirectory, IsDirectory ? DirectoryExists : FileExists, CreateDisposition, out uint Information);
+            NTSTATUS Status = LookUpRegularPath(Instance, Path, Permissions, CreateDisposition, CreateOptions, ShareAccess, ref IsDirectory, out WindowsFileStream Stream, out bool Exists, out bool ParentExists);
+            uint Information = FILE_OPENED_INFORMATION;
+            if (Status == NTSTATUS.STATUS_SUCCESS)
+                Status = PreparePathForDisposition(Stream, IsDirectory, Exists, ParentExists, CreateDisposition, out Information);
 
             if (Status != NTSTATUS.STATUS_SUCCESS)
             {
+                Stream.Dispose();
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
                 return Status;
             }
 
-            bool FinalExists = IsDirectory ? Stream.ExistsAsDirectory : Stream.ExistsAsFile;
+            bool FinalExists = Information != FILE_OPENED_INFORMATION || (IsDirectory ? Stream.ExistsAsDirectory : Stream.ExistsAsFile);
 
             WinFile FileObj = new WinFile
             {
@@ -323,51 +289,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
-            WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
-            bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
-            bool FileExists = Stream.ExistsAsFile;
-
-            IsDirectory = IsDirectory || (DirectoryExists && (CreateOptions & FILE_NON_DIRECTORY_FILE) == 0);
-
-            if (IsDirectory && FileExists)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_NOT_A_DIRECTORY, 0);
-                return NTSTATUS.STATUS_NOT_A_DIRECTORY;
-            }
-
-            if (!IsDirectory && DirectoryExists)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_IS_A_DIRECTORY, 0);
-                return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
-            }
-
-            if (DeleteOnClose && Stream.IsReadOnly)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_CANNOT_DELETE, 0);
-                return NTSTATUS.STATUS_CANNOT_DELETE;
-            }
-
-            if (!IsDirectory && RefusesWriteAccess(Stream, Permissions, CreateDisposition))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-            }
-
-            if (!Instance.WinHelper.ShareAccessAllows(Path, Permissions, ShareAccess))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SHARING_VIOLATION, 0);
-                return NTSTATUS.STATUS_SHARING_VIOLATION;
-            }
-
-            NTSTATUS Status = PreparePathForDisposition(Path, IsDirectory, IsDirectory ? DirectoryExists : FileExists, CreateDisposition, out uint Information);
+            NTSTATUS Status = LookUpRegularPath(Instance, Path, Permissions, CreateDisposition, CreateOptions, ShareAccess, ref IsDirectory, out WindowsFileStream Stream, out bool Exists, out bool ParentExists);
+            uint Information = FILE_OPENED_INFORMATION;
+            if (Status == NTSTATUS.STATUS_SUCCESS)
+                Status = PreparePathForDisposition(Stream, IsDirectory, Exists, ParentExists, CreateDisposition, out Information);
 
             if (Status != NTSTATUS.STATUS_SUCCESS)
             {
+                Stream.Dispose();
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
                 return Status;
             }
 
-            bool FinalExists = IsDirectory ? Stream.ExistsAsDirectory : Stream.ExistsAsFile;
+            bool FinalExists = Information != FILE_OPENED_INFORMATION || (IsDirectory ? Stream.ExistsAsDirectory : Stream.ExistsAsFile);
 
             WinFile FileObj = new WinFile
             {
@@ -398,11 +332,46 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS PreparePathForDisposition(string Path, bool IsDirectory, bool Exists, uint CreateDisposition, out uint Information)
+        // Runs in one probe scope, so nothing here may create or change a host entry.
+        private static NTSTATUS LookUpRegularPath(BinaryEmulator Instance, string Path, AccessMask Permissions, uint CreateDisposition, uint CreateOptions, uint ShareAccess, ref bool IsDirectory, out WindowsFileStream Stream, out bool Exists, out bool ParentExists)
+        {
+            using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
+
+            Stream = WindowsFileStream.FromGuestPath(Path);
+            Stream.OpenForLookup(WantsReadData(Permissions));
+            bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
+            bool FileExists = Stream.ExistsAsFile;
+
+            // With neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE the caller takes whatever is
+            // there. CreateFile(FILE_FLAG_BACKUP_SEMANTICS) directory handle exactly that way
+            IsDirectory = IsDirectory || (DirectoryExists && (CreateOptions & FILE_NON_DIRECTORY_FILE) == 0);
+            Exists = IsDirectory ? DirectoryExists : FileExists;
+            ParentExists = true;
+
+            if (IsDirectory && FileExists)
+                return NTSTATUS.STATUS_NOT_A_DIRECTORY;
+
+            if (!IsDirectory && DirectoryExists)
+                return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
+
+            if ((CreateOptions & FILE_DELETE_ON_CLOSE) != 0 && Stream.IsReadOnly)
+                return NTSTATUS.STATUS_CANNOT_DELETE;
+
+            if (!IsDirectory && RefusesWriteAccess(Stream, Permissions, CreateDisposition))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            if (!Instance.WinHelper.ShareAccessAllows(Path, Permissions, ShareAccess))
+                return NTSTATUS.STATUS_SHARING_VIOLATION;
+
+            ParentExists = Exists || (Stream.KnownParentExists ?? ParentDirectoryExists(Path));
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS PreparePathForDisposition(WindowsFileStream Stream, bool IsDirectory, bool Exists, bool ParentExists, uint CreateDisposition, out uint Information)
         {
             Information = FILE_OPENED_INFORMATION;
 
-            if (!Exists && !ParentDirectoryExists(Path))
+            if (!ParentExists)
                 return NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
 
             if (IsDirectory)
@@ -420,7 +389,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (Exists)
                             return NTSTATUS.STATUS_OBJECT_NAME_COLLISION;
 
-                        if (!CreateDirectory(Path))
+                        if (!CreateDirectory(Stream))
                             return NTSTATUS.STATUS_ACCESS_DENIED;
 
                         Information = FILE_CREATED_INFORMATION;
@@ -429,7 +398,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case FILE_OPEN_IF:
                         if (!Exists)
                         {
-                            if (!CreateDirectory(Path))
+                            if (!CreateDirectory(Stream))
                                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
                             Information = FILE_CREATED_INFORMATION;
@@ -452,7 +421,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             switch (CreateDisposition)
             {
                 case FILE_SUPERSEDE:
-                    if (!CreateOrTruncateFile(Path))
+                    if (!CreateOrTruncateFile(Stream))
                         return NTSTATUS.STATUS_ACCESS_DENIED;
 
                     Information = FILE_SUPERSEDED_INFORMATION;
@@ -469,7 +438,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Exists)
                         return NTSTATUS.STATUS_OBJECT_NAME_COLLISION;
 
-                    if (!CreateOrTruncateFile(Path))
+                    if (!CreateOrTruncateFile(Stream))
                         return NTSTATUS.STATUS_ACCESS_DENIED;
 
                     Information = FILE_CREATED_INFORMATION;
@@ -478,7 +447,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FILE_OPEN_IF:
                     if (!Exists)
                     {
-                        if (!CreateOrTruncateFile(Path))
+                        if (!CreateOrTruncateFile(Stream))
                             return NTSTATUS.STATUS_ACCESS_DENIED;
 
                         Information = FILE_CREATED_INFORMATION;
@@ -492,14 +461,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Exists)
                         return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
-                    if (!CreateOrTruncateFile(Path))
+                    if (!CreateOrTruncateFile(Stream))
                         return NTSTATUS.STATUS_ACCESS_DENIED;
 
                     Information = FILE_OVERWRITTEN_INFORMATION;
                     return NTSTATUS.STATUS_SUCCESS;
 
                 case FILE_OVERWRITE_IF:
-                    if (!CreateOrTruncateFile(Path))
+                    if (!CreateOrTruncateFile(Stream))
                         return NTSTATUS.STATUS_ACCESS_DENIED;
 
                     Information = Exists ? FILE_OVERWRITTEN_INFORMATION : FILE_CREATED_INFORMATION;
@@ -526,6 +495,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Stream != null && Stream.IsReadOnly;
         }
 
+        internal static bool WantsReadData(AccessMask Permissions)
+        {
+            return (Permissions & AccessMask.FileReadData) == AccessMask.FileReadData
+                || (Permissions & AccessMask.GenericRead) == AccessMask.GenericRead
+                || (Permissions & AccessMask.GenericAll) == AccessMask.GenericAll
+                || (Permissions & AccessMask.FileAllAccess) == AccessMask.FileAllAccess
+                || (Permissions & AccessMask.MaximumAllowed) != 0;
+        }
+
         /// <summary>
         /// Reports whether the granted access allows FILE_DELETE_ON_CLOSE, which NT accepts only with DELETE.
         /// </summary>
@@ -543,11 +521,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             return (Permissions & AccessMask.Delete) == AccessMask.Delete;
         }
 
-        private static bool CreateOrTruncateFile(string Path)
+        private static bool CreateOrTruncateFile(WindowsFileStream Stream)
         {
             try
             {
-                using WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path, true);
                 Stream.Truncate();
                 return true;
             }
@@ -557,11 +534,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static bool CreateDirectory(string Path)
+        private static bool CreateDirectory(WindowsFileStream Stream)
         {
             try
             {
-                using WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path, true);
                 Stream.CreateDirectory();
                 return true;
             }

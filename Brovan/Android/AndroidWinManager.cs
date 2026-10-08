@@ -48,16 +48,15 @@ namespace Brovan.Android
 
             // The guest asks for its window as soon as it starts, but the Surface only exists once the app's
             // SurfaceView has been laid out. Handing back a window with no ANativeWindow would let the guest
-            // build a Vulkan surface on a null handle, so block until the app attaches one.
+            // build a Vulkan surface on a null handle, so block until the app has attached one at least once.
             if (!AndroidHost.WaitForSurface())
                 throw new PlatformNotSupportedException("No Android surface was attached; the host app must call brovan_set_surface before running a guest that draws.");
 
             AndroidHost.WindowTitle = options.Title ?? string.Empty;
             _window = new AndroidWindow(options);
 
-            // Host events delivered before the guest had a window drained into nothing. The surface size in
-            // particular is published only on change, so without this the guest never hears it and a guest
-            // that waits for its first size event never starts presenting.
+            // Replay the size and focus the guest missed before its window existed. The surface size is
+            // published only on change, and a guest can wait for its first size event before it presents.
             _publishedWidth = 0;
             _publishedHeight = 0;
             AndroidInput.ReplayFocus();

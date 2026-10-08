@@ -188,9 +188,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return true;
         }
 
-        /// <summary>
-        /// Resolves the window a usage's raw input goes to, and whether that usage still gets legacy messages.
-        /// </summary>
         private static bool TryResolveUsage(RawInputState State, ushort Usage, out ulong Target, out bool NoLegacy)
         {
             Target = 0;
@@ -232,8 +229,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
 
         /// <summary>
-        /// Turns one host input event into raw input for whoever registered for it. Returns whether the legacy
-        /// window message still has to be posted.
+        /// Returns whether the legacy window message still has to be posted.
         /// </summary>
         internal static bool DeliverHostEvent(BinaryEmulator Instance, ulong Foreground, uint Message, ulong WParam, ulong LParam)
         {
@@ -265,9 +261,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
         }
 
-        /// <summary>
-        /// Reports travel the host read off the mouse itself.
-        /// </summary>
         internal static void DeliverHostRawMouse(BinaryEmulator Instance, ulong Foreground, int DeltaX, int DeltaY)
         {
             RawInputState State = GetState(Instance);
@@ -345,7 +338,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
 
         /// <summary>
-        /// A wheel notch carries no pointer position, so it leaves the tracked position alone.
+        /// A wheel notch is not pointer travel, so it leaves the tracked position alone.
         /// </summary>
         private static bool DeliverWheel(BinaryEmulator Instance, ulong Foreground, uint Message, ulong WParam)
         {
@@ -384,7 +377,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static void Post(BinaryEmulator Instance, RawInputState State, ulong Hwnd, ref RawRecord Record)
         {
-            // A guest slower than the host input rate outruns the ring. Only motion is folded or dropped,
+            // A guest slower than the host input rate outruns the ring. Motion is folded or dropped first,
             // because a lost button or key release leaves the guest holding a key that is up.
             uint Backlog = State.NextHandle - 1 - State.LastDeliveredHandle;
             bool Motion = Record.Type == RimTypeMouse && Record.ButtonFlags == 0;
@@ -475,13 +468,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static uint ReadData(BinaryEmulator Instance, ulong Handle, uint Command, ulong DataPtr, ulong SizePtr, uint HeaderSizeArg)
         {
             uint Header = HeaderSize(Instance);
-            if (HeaderSizeArg != Header || SizePtr == 0 || !Instance.IsRegionMapped(SizePtr, 4))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                return uint.MaxValue;
-            }
-
-            if (Command != RID_INPUT && Command != RID_HEADER)
+            if (HeaderSizeArg != Header)
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
                 return uint.MaxValue;
@@ -493,27 +480,33 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return uint.MaxValue;
             }
 
+            if (Command != RID_INPUT && Command != RID_HEADER)
+            {
+                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
+                return uint.MaxValue;
+            }
+
             uint TotalSize = Header + PayloadSize(Record.Type);
             uint Required = Command == RID_HEADER ? Header : TotalSize;
 
             if (DataPtr == 0)
             {
-                Instance._emulator.WriteMemory(SizePtr, Required, 4);
+                if (!Instance.WinHelper.WriteUInt32(SizePtr, Required))
+                    return FailNoAccess(Instance);
+
                 Instance.SetLastWinError(0);
                 return 0;
             }
 
-            uint Capacity = Instance.ReadMemoryUInt(SizePtr);
+            if (!Instance.WinHelper.TryReadUInt32(SizePtr, out uint Capacity))
+                return FailNoAccess(Instance);
+
             if (Capacity < Required)
             {
-                Instance._emulator.WriteMemory(SizePtr, Required, 4);
-                Instance.SetLastWinError(Win32kHelper.ERROR_INSUFFICIENT_BUFFER);
-                return uint.MaxValue;
-            }
+                if (!Instance.WinHelper.WriteUInt32(SizePtr, Required))
+                    return FailNoAccess(Instance);
 
-            if (!Instance.IsRegionMapped(DataPtr, Required))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
+                Instance.SetLastWinError(Win32kHelper.ERROR_INSUFFICIENT_BUFFER);
                 return uint.MaxValue;
             }
 
@@ -525,14 +518,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 WritePayload(Buffer.Slice((int)Header), Record);
 
             if (!Instance.WriteMemory(DataPtr, Buffer))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                return uint.MaxValue;
-            }
+                return FailNoAccess(Instance);
 
             Instance.SetLastWinError(0);
             PublishPending(Instance);
             return Required;
+        }
+
+        // win32k catches the fault on a guest pointer and passes it to SetLastNtError.
+        private static uint FailNoAccess(BinaryEmulator Instance)
+        {
+            Instance.SetLastWinError(Win32kHelper.ERROR_NOACCESS);
+            return uint.MaxValue;
         }
 
         internal static bool HasPendingRecords(BinaryEmulator Instance)
@@ -550,26 +547,32 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static uint ReadBuffer(BinaryEmulator Instance, ulong DataPtr, ulong SizePtr, uint HeaderSizeArg)
         {
             uint Header = HeaderSize(Instance);
-            if (HeaderSizeArg != Header || SizePtr == 0 || !Instance.IsRegionMapped(SizePtr, 4))
+            if (HeaderSizeArg != Header)
             {
                 Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
                 return uint.MaxValue;
             }
 
+            if (!Instance.WinHelper.TryReadUInt32(SizePtr, out uint GuestCapacity))
+                return FailNoAccess(Instance);
+
             RawInputState State = GetState(Instance);
 
             // NEXTRAWINPUTBLOCK steps over each record by its aligned size.
             uint Alignment = Instance.WinHelper.PointerSize == 8 ? 8u : 4u;
+            uint LargestStep = Align(Header + PayloadSize(RimTypeMouse), Alignment);
 
             if (DataPtr == 0)
             {
-                uint Largest = Header + PayloadSize(RimTypeMouse);
-                Instance._emulator.WriteMemory(SizePtr, Align(Largest, Alignment), 4);
+                if (!Instance.WinHelper.WriteUInt32(SizePtr, LargestStep))
+                    return FailNoAccess(Instance);
+
                 Instance.SetLastWinError(0);
                 return 0;
             }
 
-            uint Capacity = Instance.ReadMemoryUInt(SizePtr);
+            // At most RecordSlots records are live, so the ring never fills more than this.
+            uint Capacity = Math.Min(GuestCapacity, (uint)RecordSlots * LargestStep);
             uint Used = 0;
             uint Count = 0;
             uint Consumed = State.LastDeliveredHandle;
@@ -608,11 +611,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return 0;
             }
 
-            if (!Instance.IsRegionMapped(DataPtr, Used) || !Instance.WriteMemory(DataPtr, Buffer.Slice(0, (int)Used)))
-            {
-                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
-                return uint.MaxValue;
-            }
+            if (!Instance.WriteMemory(DataPtr, Buffer.Slice(0, (int)Used)))
+                return FailNoAccess(Instance);
 
             State.LastDeliveredHandle = Consumed;
 

@@ -30,7 +30,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     }
 
     /// <summary>
-    /// Shared x64 CONTEXT helpers for native thread-context syscalls.
+    /// Shared x64 and x86 CONTEXT helpers for native thread-context syscalls.
     /// </summary>
     internal static class WindowsThreadContext64
     {
@@ -73,7 +73,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static bool XStateEnabled(BinaryEmulator Instance)
             => Instance.WinHelper.PointerSize == 8 && Instance._emulator.SupportsAvx;
 
-        // No x87 register stack is kept, so FltSave carries the control words, MXCSR and XMM0-15.
+        // FltSave carries FCW, MXCSR and XMM0-15 over an empty x87 stack.
         internal static void FillFltSave(Span<byte> Area, ulong[] Xmm, ulong MxCsr, ulong Fpcw)
         {
             Area.Slice(0, FltSaveSize).Clear();
@@ -351,13 +351,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        /// <summary>
-        /// Writes the selected portions of an x64 CONTEXT record from an emulated thread.
-        /// </summary>
-        /// <param name="Instance">The emulator instance.</param>
-        /// <param name="Thread">The source thread.</param>
-        /// <param name="ContextPtr">The destination CONTEXT pointer.</param>
-        /// <param name="Flags">The selected CONTEXT flags.</param>
         internal static void WriteContext(BinaryEmulator Instance, EmulatedThread Thread, ulong ContextPtr, uint Flags)
         {
             bool IsCurrentThread = Thread != null && Instance.CurrentThread != null && Thread.ThreadId == Instance.CurrentThread.ThreadId;
@@ -425,13 +418,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteContextVectorState(Instance, Thread, ContextPtr, Flags);
         }
 
-        /// <summary>
-        /// Applies the selected portions of an x64 CONTEXT record to an emulated thread.
-        /// </summary>
-        /// <param name="Instance">The emulator instance.</param>
-        /// <param name="Thread">The destination thread.</param>
-        /// <param name="ContextPtr">The source CONTEXT pointer.</param>
-        /// <param name="Flags">The selected CONTEXT flags.</param>
         internal static void ApplyContext(BinaryEmulator Instance, EmulatedThread Thread, ulong ContextPtr, uint Flags)
         {
             if (Thread.Context == null)

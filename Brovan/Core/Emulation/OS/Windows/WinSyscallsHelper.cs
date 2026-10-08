@@ -129,14 +129,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Path.Length == 3 && char.IsLetter(Path[0]) && Path[1] == ':' && Path[2] == '\\';
         }
 
-        /// <summary>
-        /// Attempts to create a Windows device endpoint by resolving the device path through the generated device registry.
-        /// </summary>
-        /// <param name="Path">The normalized or raw NT device path.</param>
-        /// <param name="EaBuffer">The extended attributes buffer supplied to NtCreateFile, if any.</param>
-        /// <param name="InternalPath">The internal path to assign to the opened device handle.</param>
-        /// <param name="Handler">The device I/O handler for the opened endpoint.</param>
-        /// <param name="Status">The status returned by the matched device factory.</param>
         /// <returns>True if the path matched a registered device.</returns>
         public bool TryCreateDevice(string Path, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler, out NTSTATUS Status)
         {
@@ -169,12 +161,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        /// <summary>
-        /// Checks whether the supplied process handle targets the current emulated process and grants the requested access.
-        /// </summary>
-        /// <param name="ProcessHandle">The process handle or current-process pseudo handle.</param>
-        /// <param name="RequiredAccess">The access mask required for the operation.</param>
-        /// <returns>True if the handle references the current process and has the requested access.</returns>
         public bool IsCurrentProcessHandle(ulong ProcessHandle, AccessMask RequiredAccess)
         {
             if (HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle) || ProcessHandle == uint.MaxValue)
@@ -195,12 +181,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal const ulong AllocationGranularity = 0x10000;
 
-        /// <summary>
-        /// Returns the address of the syscall instruction that is currently being handled.
-        /// </summary>
-        /// <param name="Thread">The current emulated thread.</param>
-        /// <param name="PreferThreadLastRip">Use the last executed RIP when it is available.</param>
-        /// <returns>The syscall instruction address.</returns>
         public ulong GetSyscallRip(EmulatedThread Thread, bool PreferThreadLastRip)
         {
             if (PreferThreadLastRip && Thread != null && Thread.LastRIP != 0)
@@ -211,17 +191,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Emulator.IsX86Guest ? Ip - Int2EInstructionLength : Ip;
         }
 
-        /// <summary>
-        /// Converts a Windows timeout pointer into an emulated deadline in milliseconds.
-        /// </summary>
-        /// <param name="TimeoutPtr">Pointer to a LARGE_INTEGER timeout value, or zero for an infinite wait.</param>
-        /// <returns>The emulated deadline, the current tick for an immediate timeout, or -1 for an infinite wait.</returns>
-        public long ParseRelativeDeadlineMs(ulong TimeoutPtr)
+        /// <returns>False when the timeout cannot be read. A null timeout is an infinite wait.</returns>
+        public bool TryReadTimeout(ulong TimeoutPtr, out long? Timeout)
         {
+            Timeout = null;
             if (TimeoutPtr == 0)
+                return true;
+
+            if (!TryReadUInt64(TimeoutPtr, out ulong Value))
+                return false;
+
+            Timeout = unchecked((long)Value);
+            return true;
+        }
+
+        /// <returns>The emulated deadline, the current tick for an immediate timeout, or -1 for an infinite wait.</returns>
+        public long ParseRelativeDeadlineMs(long? CapturedTimeout)
+        {
+            if (CapturedTimeout is not long Timeout)
                 return -1;
 
-            long Timeout = unchecked((long)Emulator._emulator.ReadMemoryULong(TimeoutPtr));
             if (Timeout == 0)
                 return Emulator.EmulatedTickCount64;
 
@@ -373,11 +362,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.StopEmulation();
         }
 
-        /// <summary>
-        /// Clears the blocked wait state for an emulated thread.
-        /// </summary>
-        /// <param name="Thread">The emulated thread.</param>
-        /// <param name="ClearAlertByThreadId">Also clears NtWaitForAlertByThreadId-specific state.</param>
         public void ClearWaitState(EmulatedThread Thread, bool ClearAlertByThreadId = false)
         {
             if (Thread == null)
@@ -471,9 +455,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator.Threads.Remove(Thread.ThreadId);
         }
 
-        /// <summary>
-        /// Clears wait, worker-factory, and exception state for a thread that is exiting.
-        /// </summary>
         public void ClearTerminationState(EmulatedThread Thread, bool ClearAlertByThreadId = false)
         {
             if (Thread == null)
@@ -514,12 +495,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Writes an IO_STATUS_BLOCK to emulated memory using the guest pointer width.
         /// </summary>
-        /// <param name="IoStatusBlockPtr">Address of the IO_STATUS_BLOCK.</param>
-        /// <param name="Status">The operation status.</param>
-        /// <param name="Information">The operation information value.</param>
-        public void WriteIoStatusBlock(ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
+        public bool WriteIoStatusBlock(ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
         {
-            WriteIoStatusBlock(Emulator, IoStatusBlockPtr, Status, Information);
+            return WriteIoStatusBlock(Emulator, IoStatusBlockPtr, Status, Information);
         }
 
         /// <summary>
@@ -622,28 +600,23 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Ev.Signaled = true;
         }
 
-        public void WriteIoStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
+        // NT probes the block when the request starts and ignores a fault when it completes.
+        public bool WriteIoStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
         {
             if (PointerSize == 8)
             {
                 Span<byte> Buffer64 = stackalloc byte[0x10];
                 BinaryPrimitives.WriteUInt64LittleEndian(Buffer64.Slice(0x00, 8), (uint)Status);
                 BinaryPrimitives.WriteUInt64LittleEndian(Buffer64.Slice(0x08, 8), Information);
-                Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer64);
-                return;
+                return Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer64);
             }
 
             Span<byte> Buffer32 = stackalloc byte[0x08];
             BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x00, 4), (uint)Status);
             BinaryPrimitives.WriteUInt32LittleEndian(Buffer32.Slice(0x04, 4), (uint)Information);
-            Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer32);
+            return Instance._emulator.WriteMemory(IoStatusBlockPtr, Buffer32);
         }
 
-        /// <summary>
-        /// Reads guest memory into the reusable Windows syscall scratch buffer.
-        /// </summary>
-        /// <param name="Address">The guest address to read.</param>
-        /// <param name="Size">The number of bytes to read.</param>
         /// <returns>A span over the shared scratch buffer, or an empty span if the read failed.</returns>
         public Span<byte> ReadMemorySpan(ulong Address, uint Size)
         {
@@ -657,9 +630,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Writes zero bytes from the reusable Windows syscall scratch buffer.
         /// </summary>
-        /// <param name="Address">The guest address to write.</param>
-        /// <param name="Size">The number of zero bytes to write.</param>
-        /// <returns>True if the write succeeded.</returns>
         public bool WriteZeroMemory(ulong Address, uint Size)
         {
             if (Size == 0)
@@ -670,12 +640,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Emulator._emulator.WriteMemory(Address, Buffer, Size);
         }
 
-        /// <summary>
-        /// Writes one byte without allocating a temporary byte array.
-        /// </summary>
-        /// <param name="Address">The guest address to write.</param>
-        /// <param name="Value">The byte value to write.</param>
-        /// <returns>True if the write succeeded.</returns>
         public bool WriteByte(ulong Address, byte Value)
         {
             Span<byte> Buffer = stackalloc byte[1];
@@ -683,9 +647,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Emulator._emulator.WriteMemory(Address, Buffer);
         }
 
-        /// <summary>
-        /// Writes a little-endian 32-bit integer without allocating a temporary byte array.
-        /// </summary>
         public bool WriteUInt32(ulong Address, uint Value)
         {
             Span<byte> Buffer = stackalloc byte[sizeof(uint)];
@@ -693,14 +654,27 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Emulator._emulator.WriteMemory(Address, Buffer);
         }
 
-        /// <summary>
-        /// Writes a little-endian 64-bit integer without allocating a temporary byte array.
-        /// </summary>
         public bool WriteUInt64(ulong Address, ulong Value)
         {
             Span<byte> Buffer = stackalloc byte[sizeof(ulong)];
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer, Value);
             return Emulator._emulator.WriteMemory(Address, Buffer);
+        }
+
+        public bool TryReadUInt32(ulong Address, out uint Value)
+        {
+            Span<byte> Buffer = stackalloc byte[sizeof(uint)];
+            bool Read = Emulator._emulator.ReadMemory(Address, Buffer);
+            Value = Read ? BinaryPrimitives.ReadUInt32LittleEndian(Buffer) : 0;
+            return Read;
+        }
+
+        public bool TryReadUInt64(ulong Address, out ulong Value)
+        {
+            Span<byte> Buffer = stackalloc byte[sizeof(ulong)];
+            bool Read = Emulator._emulator.ReadMemory(Address, Buffer);
+            Value = Read ? BinaryPrimitives.ReadUInt64LittleEndian(Buffer) : 0;
+            return Read;
         }
 
         public int PointerSize => Emulator._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
@@ -763,14 +737,37 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            if (!Emulator.IsMemoryRangeMapped(Buffer, Length))
+            if (!TryReadUnicodeBuffer(Buffer, Length, out Name))
             {
                 Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
                 return false;
             }
 
-            Name = Emulator._emulator.ReadMemoryString(Buffer, Length, Encoding.Unicode).TrimEnd('\0');
             return true;
+        }
+
+        private bool TryReadUnicodeBuffer(ulong Buffer, ushort Length, out string Value)
+        {
+            Value = string.Empty;
+            if (Length == 0)
+                return true;
+
+            byte[] Rented = ArrayPool<byte>.Shared.Rent(Length);
+            try
+            {
+                Span<byte> Data = Rented.AsSpan(0, Length);
+                if (!Emulator._emulator.ReadMemory(Buffer, Data))
+                    return false;
+
+                ReadOnlySpan<char> Units = MemoryMarshal.Cast<byte, char>(Data.Slice(0, Length & ~1));
+                int Terminator = Units.IndexOf('\0');
+                Value = new string(Terminator >= 0 ? Units.Slice(0, Terminator) : Units);
+                return true;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Rented);
+            }
         }
 
         internal const uint OBJ_INHERIT = 0x2;
@@ -888,9 +885,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Address;
         }
 
-        /// <summary>
-        /// Reads a 32-bit UNICODE_STRING from guest memory and returns the status the caller should propagate on failure.
-        /// </summary>
         public bool TryReadUnicodeString32(uint UnicodeStringPtr, out string Value, out NTSTATUS Status)
         {
             Value = string.Empty;
@@ -899,13 +893,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (UnicodeStringPtr == 0)
             {
                 Status = NTSTATUS.STATUS_INVALID_PARAMETER;
-                return false;
-            }
-
-            uint UnicodeStringSize = (uint)Unsafe.SizeOf<UNICODE_STRING>();
-            if (!Emulator.IsRegionMapped(UnicodeStringPtr, UnicodeStringSize))
-            {
-                Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
                 return false;
             }
 
@@ -918,9 +905,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return TryReadUnicodeString32(UnicodeString, out Value, out Status);
         }
 
-        /// <summary>
-        /// Reads a parsed 32-bit UNICODE_STRING from guest memory and returns the status the caller should propagate on failure.
-        /// </summary>
         public bool TryReadUnicodeString32(UNICODE_STRING UnicodeString, out string Value, out NTSTATUS Status)
         {
             Value = string.Empty;
@@ -947,19 +931,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            if (!Emulator.IsRegionMapped(UnicodeString.Buffer, UnicodeString.Length))
+            if (!TryReadUnicodeBuffer(UnicodeString.Buffer, UnicodeString.Length, out Value))
             {
                 Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
                 return false;
             }
 
-            Value = Emulator._emulator.ReadMemoryString(UnicodeString.Buffer, UnicodeString.Length, Encoding.Unicode).TrimEnd('\0');
             return true;
         }
 
-        /// <summary>
-        /// Reads a 64-bit UNICODE_STRING from guest memory and returns the status the caller should propagate on failure.
-        /// </summary>
         public bool TryReadUnicodeString64(ulong UnicodeStringPtr, out string Value, out NTSTATUS Status)
         {
             Value = string.Empty;
@@ -968,13 +948,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (UnicodeStringPtr == 0)
             {
                 Status = NTSTATUS.STATUS_INVALID_PARAMETER;
-                return false;
-            }
-
-            uint UnicodeStringSize = (uint)Unsafe.SizeOf<UNICODE_STRING64>();
-            if (!Emulator.IsRegionMapped(UnicodeStringPtr, UnicodeStringSize))
-            {
-                Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
                 return false;
             }
 
@@ -987,9 +960,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return TryReadUnicodeString64(UnicodeString, out Value, out Status);
         }
 
-        /// <summary>
-        /// Reads a parsed 64-bit UNICODE_STRING from guest memory and returns the status the caller should propagate on failure.
-        /// </summary>
         public bool TryReadUnicodeString64(UNICODE_STRING64 UnicodeString, out string Value, out NTSTATUS Status)
         {
             Value = string.Empty;
@@ -1016,13 +986,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            if (!Emulator.IsRegionMapped(UnicodeString.Buffer, UnicodeString.Length))
+            if (!TryReadUnicodeBuffer(UnicodeString.Buffer, UnicodeString.Length, out Value))
             {
                 Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
                 return false;
             }
 
-            Value = Emulator._emulator.ReadMemoryString(UnicodeString.Buffer, UnicodeString.Length, Encoding.Unicode).TrimEnd('\0');
             return true;
         }
 
@@ -1070,9 +1039,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Module.CanonicalImagePath = CanonicalPath;
         }
 
-        /// <summary>
-        /// Reads a 64-bit OBJECT_ATTRIBUTES value and resolves its object name against known NT object-directory handles.
-        /// </summary>
         public bool TryReadObjectAttributesName64(ulong ObjectAttributesPtr, out OBJECT_ATTRIBUTES64 Attributes, out string Name, out string FullName, out NTSTATUS Status)
         {
             Attributes = default;
@@ -1083,13 +1049,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ObjectAttributesPtr == 0)
             {
                 Status = NTSTATUS.STATUS_INVALID_PARAMETER;
-                return false;
-            }
-
-            uint ObjectAttributesSize = (uint)Unsafe.SizeOf<OBJECT_ATTRIBUTES64>();
-            if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
-            {
-                Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
                 return false;
             }
 
@@ -1115,9 +1074,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        /// <summary>
-        /// Reads a 32-bit OBJECT_ATTRIBUTES value and resolves its object name against known NT object-directory handles.
-        /// </summary>
         public bool TryReadObjectAttributesName32(uint ObjectAttributesPtr, out uint RootDirectory, out uint ObjectName, out string Name, out string FullName, out NTSTATUS Status)
         {
             RootDirectory = 0;
@@ -1132,14 +1088,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributes32Size))
+            Span<byte> Raw = stackalloc byte[(int)ObjectAttributes32Size];
+            if (!Emulator.ReadMemory(ObjectAttributesPtr, Raw))
             {
                 Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
                 return false;
             }
 
-            RootDirectory = Emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x04);
-            ObjectName = Emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x08);
+            RootDirectory = BinaryPrimitives.ReadUInt32LittleEndian(Raw.Slice(0x04));
+            ObjectName = BinaryPrimitives.ReadUInt32LittleEndian(Raw.Slice(0x08));
 
             if (ObjectName == 0)
             {
@@ -1157,9 +1114,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        /// <summary>
-        /// Resolves a possibly relative NT object name against one of Brovan's synthetic object-directory handles.
-        /// </summary>
         public string ResolveObjectNameWithRootDirectory(ulong RootDirectory, string Name)
         {
             if (!string.IsNullOrEmpty(Name) && Name.StartsWith("\\", StringComparison.Ordinal))
@@ -1175,9 +1129,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return RootPath.TrimEnd('\\') + "\\" + Name.TrimStart('\\');
         }
 
-        /// <summary>
-        /// Returns the NT object-manager path that a directory handle stands for.
-        /// </summary>
         public string GetKnownObjectDirectoryPath(ulong RootDirectory)
         {
             if (RootDirectory == HandleManager.KNOWN_DLLS_DIRECTORY)
@@ -1196,9 +1147,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 HandleManager.GetObjectByHandle<WinObjectDirectory>(RootDirectory)?.Path;
         }
 
-        /// <summary>
-        /// Gets the synthetic handle for a supported NT object-manager directory path.
-        /// </summary>
         public bool TryGetKnownObjectDirectoryHandle(string ObjectName, out ulong Handle)
         {
             Handle = 0;
@@ -1435,7 +1383,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Resolves a 64-bit registry OBJECT_ATTRIBUTES value to a full NT registry path.
+        /// Resolves a registry OBJECT_ATTRIBUTES value to a full NT registry path.
         /// </summary>
         public bool TryResolveRegistryObjectPath(ulong ObjectAttributesPtr, NTSTATUS MemoryFailureStatus, NTSTATUS EmptyPathStatus, NTSTATUS InvalidRootStatus, out string KeyPath, out NTSTATUS Status)
         {
@@ -1449,13 +1397,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             bool Is64 = PointerSize == 8;
-            uint ObjectAttributesSize = Is64 ? (uint)Unsafe.SizeOf<OBJECT_ATTRIBUTES64>() : ObjectAttributes32Size;
-            if (!Emulator.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
-            {
-                Status = MemoryFailureStatus;
-                return false;
-            }
-
             ulong RootDirectory;
             ulong ObjectNamePtr;
             if (Is64)
@@ -1471,8 +1412,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                RootDirectory = Emulator._emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x04);
-                ObjectNamePtr = Emulator._emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x08);
+                Span<byte> Raw = stackalloc byte[(int)ObjectAttributes32Size];
+                if (!Emulator.ReadMemory(ObjectAttributesPtr, Raw))
+                {
+                    Status = MemoryFailureStatus;
+                    return false;
+                }
+
+                RootDirectory = BinaryPrimitives.ReadUInt32LittleEndian(Raw.Slice(0x04));
+                ObjectNamePtr = BinaryPrimitives.ReadUInt32LittleEndian(Raw.Slice(0x08));
             }
 
             if (ObjectNamePtr == 0)
@@ -1877,7 +1825,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return UInt ? Emulator._emulator.ReadMemoryUInt(StackArgAddress) : Emulator._emulator.ReadMemoryULong(StackArgAddress);
             }
 
-            // Fallback (no cache)
             if (Index == 0) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R10);
             if (Index == 1) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RDX);
             if (Index == 2) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R8);
@@ -2102,7 +2049,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Per-processor idle, kernel and user times since guest boot; the host process's own CPU time
+        /// Per-processor idle, kernel and user times since guest boot. The host process's own CPU time
         /// stands in for the whole system's busy time.
         /// </summary>
         public void GetProcessorTimes(out long IdleTime, out long KernelTime, out long UserTime)
@@ -2123,7 +2070,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly TimeSpan HostUserTimeAtBoot;
         private readonly TimeSpan HostKernelTimeAtBoot;
 
-        // Current Process
         public uint PID = 0;
         public uint PPID = 0;
         public uint InitialThreadId;
@@ -2249,7 +2195,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private WinProcess OwnProcess;
         public List<WinFile> WinFiles = new List<WinFile>();
 
-        // WinFiles only ever grows, so share checks and byte range locks cannot be answered from it.
         private readonly Dictionary<string, List<WinFile>> OpenFilesByPath = new Dictionary<string, List<WinFile>>(StringComparer.OrdinalIgnoreCase);
         public List<WinMutex> WinMutexes = new List<WinMutex>();
         public List<WinModule> WinModules = new List<WinModule>();
@@ -2307,7 +2252,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal bool X86GateArgs = true;
 
-        // Batch register array for GetArg64
         private static readonly int[] WinX64SyscallArgRegs = new int[]
         {
             (int)Registers.UC_X86_REG_R10,
@@ -2320,9 +2264,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly ulong[] _winX64SyscallArgValues = new ulong[5];
 
         /// <summary>
-        /// Caches the 5 registers (R10, RDX, R8, R9, RSP) in a single batch read.
-        /// Called once before the syscall handler
-        /// runs; GetArg64 then reads from the cache.
+        /// Runs once before each syscall handler and caches what GetArg reads.
         /// </summary>
         public void BeginSyscall()
         {
@@ -2340,7 +2282,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong[] Vals = _winX64SyscallArgValues;
             if (!Emulator._emulator.ReadRegisterBatch(WinX64SyscallArgRegs, Vals, 5))
             {
-                // Fallback: individual reads
                 Vals[0] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R10);
                 Vals[1] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RDX);
                 Vals[2] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R8);
@@ -2364,9 +2305,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             GeneralHelper.IO.Wow64FileRedirect = Teb == 0 || Emulator.ReadMemoryUInt(Teb + TebWow64FsRedirectSlotOffset) == 0;
         }
 
-        /// <summary>
-        /// Called after the syscall handler returns (in a finally block).
-        /// </summary>
         public void EndSyscall()
         {
             _argCacheValid = false;
@@ -2690,9 +2628,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<string, LinkedListNode<(string Input, string Normalized)>> _normalizedPathCache = new(StringComparer.Ordinal);
         private readonly LinkedList<(string Input, string Normalized)> _normalizedPathOrder = new();
 
-        /// <summary>
-        /// Initialize the environment for the helper (Processes, Console, etc).
-        /// </summary>
         public WinSysHelper(BinaryEmulator Emulator)
         {
             Shared = new WindowsSharedBuffer();
@@ -2764,7 +2699,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 STD_OUT ??= HandleManager.AddHandle(new WinFile(), AccessMask.FileWriteData);
                 STD_ERR ??= STD_OUT;
             }
-            // Generate some processes for the emulated program to work with
             uint WininitPID = GenerateRandomPID();
             uint ServicesPID = GenerateRandomPID();
             uint WinlogonPID = GenerateRandomPID();
@@ -3184,10 +3118,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinSections.Remove(Section);
         }
 
-        /// <summary>
-        /// Invoke KiUserExceptionDispatcher with the specified exception.
-        /// </summary>
-        /// <param name="Exception">NTSTATUS exception code.</param>
         /// <param name="ExceptionInformation">Optional exception parameters (up to 15).</param>
         public void InvokeException(NTSTATUS Exception, ExceptionInformation ExceptionInformation = null)
         {
@@ -3279,7 +3209,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (Disp >= 0x400 && Disp <= 0x600 && (Disp % 0x10) == 0)
                             return Disp;
                     }
-                    // add rcx, imm32 (typically have the size according to ntdll analysis in IDA to multiple versions)
+                    // add rcx, imm32
                     else if (Code[i] == 0x48 && Code[i + 1] == 0x81 && Code[i + 2] == 0xC1)
                     {
                         uint Disp = BinaryPrimitives.ReadUInt32LittleEndian(Code.Slice(i + 3, 4));
@@ -3580,12 +3510,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return CanDispatchUserApc(Thread, false);
         }
 
-        /// <summary>
-        /// Determines whether or not the thread is in a state where it can dispatch a user APC.
-        /// </summary>
-        /// <param name="Thread">Thread to check.</param>
         /// <param name="ForceAlert">true to emulate NtTestAlert/NtContinue(TestAlert) draining the user APC queue.</param>
-        /// <returns>returns true if the thread can dispatch an APC, otherwise false.</returns>
         public bool CanDispatchUserApc(EmulatedThread Thread, bool ForceAlert)
         {
             return GetDispatchableUserApcIndex(Thread, ForceAlert) >= 0;
@@ -3621,11 +3546,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(Offset, 4), Value);
         }
 
-        /// <summary>
-        /// returns KiUserApcDispatcher.
-        /// </summary>
-        /// <param name="Thread">Thread to set the ApcFunc for.</param>
-        /// <returns>returns the Dispatcher address.</returns>
         public ulong GetUserApcDispatcher(EmulatedThread Thread)
         {
             if (Thread == null)
@@ -3712,12 +3632,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return DispatchNextUserApc(Thread, false);
         }
 
-        /// <summary>
-        /// Dispatches the next user APC for a thread.
-        /// </summary>
-        /// <param name="Thread">Thread to dispatch the APC on.</param>
         /// <param name="ForceAlert">true to drain a normal user APC without requiring an alertable wait.</param>
-        /// <returns>returns true if an APC was dispatched, otherwise false.</returns>
         public bool DispatchNextUserApc(EmulatedThread Thread, bool ForceAlert)
         {
             if (Emulator == null || Emulator._binary == null)
@@ -3964,11 +3879,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        /// <summary>
-        /// Canonicalizes an image path for section identity checks.
-        /// </summary>
         /// <param name="Path">Guest or host path for the image.</param>
-        /// <returns>A stable, case-insensitive identity string for the image.</returns>
         public string CanonicalizeImagePath(string Path)
         {
             string Value = NormalizeWindowsImagePath(Path);
@@ -4170,10 +4081,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Slash >= 0 ? Path.Substring(Slash + 1) : Path;
         }
 
-        /// <summary>
-        /// Records a mapped image view and returns that image's mapping ordinal for its canonical path.
-        /// </summary>
-        /// <param name="Module">Mapped image view.</param>
         /// <param name="IsSectionView">Whether the image was mapped by NtMapViewOfSection rather than initial emulator loading.</param>
         /// <returns>One-based mapping ordinal for this canonical image path.</returns>
         public int RegisterMappedImageView(WinModule Module, bool IsSectionView)
@@ -4200,10 +4107,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Ordinal;
         }
 
-        /// <summary>
-        /// Removes a mapped image view from section-view identity tracking.
-        /// </summary>
-        /// <param name="Module">Mapped image view to remove.</param>
         public void UnregisterMappedImageView(WinModule Module)
         {
             if (Module == null)
@@ -4229,11 +4132,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        /// <summary>
-        /// Finds the image view that contains a guest address.
-        /// </summary>
-        /// <param name="Address">Guest virtual address.</param>
-        /// <returns>The matching mapped image view, or null when the address does not belong to a tracked image.</returns>
         public WinModule FindMappedImageViewByAddress(ulong Address)
         {
             for (int Index = MappedImageViews.Count - 1; Index >= 0; Index--)
@@ -4346,7 +4244,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Reads one entry of the kernel callback table user32 publishes in the PEB.
         /// </summary>
-        /// <param name="Index">Index of the entry.</param>
         /// <returns>The callback address, or zero while the table is not published.</returns>
         public ulong GetKernelCallbackEntry(uint Index)
         {
@@ -5009,7 +4906,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// Adopts a live guest process of the session into this instance's process list, so a handle can be
         /// opened to a sibling that runs in its own emulator instance.
         /// </summary>
-        /// <param name="ProcessId">Guest process id of the sibling.</param>
         /// <returns>Null when the id is not a live member of the session.</returns>
         internal WinProcess TryAdoptSessionProcess(uint ProcessId)
         {
@@ -5061,8 +4957,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Drops the session siblings that have exited. Their slots are already gone, so nothing else would
-        /// take them out of this instance's process list.
+        /// Drops the adopted session siblings that have exited. Nothing else takes them out of this instance's
+        /// process list.
         /// </summary>
         private void ReapAdoptedSessionProcesses()
         {
@@ -6498,9 +6394,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Emulator._emulator.WriteMemory(Address, Updated, 4);
         }
 
-        /// <summary>
-        /// Ensures the current thread has the minimal user32 client desktop fields needed for handle validation.
-        /// </summary>
         public void EnsureUserClientThreadInfo(EmulatedThread Thread, ulong ThreadInfo)
         {
             if (Thread == null)
@@ -6728,9 +6621,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public long GetDisplayRefreshPeriod() => KuserSharedDataManager.QpcFrequency / Math.Max(GetPrimaryDisplayFrequency(), 1u);
 
-        /// <summary>
-        /// Returns the first emulated tick at or after the next vertical blank.
-        /// </summary>
         public long GetNextVerticalBlankTick()
         {
             const long CountsPerTick = KuserSharedDataManager.QpcFrequency / 1000;
@@ -7978,13 +7868,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return 0;
         }
 
-        /// <summary>
-        /// Retained as a presentation boundary for future renderers. Window state is tracked in WinWindows and TopLevelWindows only.
-        /// </summary>
-        public void CompositeDesktop()
-        {
-        }
-
         public void HideDesktopWindow()
         {
             if (DesktopDisplay is not GuiThreadManager guiManager)
@@ -8029,9 +7912,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 GuiManager.EnqueueSetCursorClip(Hwnd, Enabled, ClientLeft, ClientTop, ClientRight, ClientBottom);
         }
 
-        /// <summary>
-        /// Shows or hides the host pointer, for guests that draw their own or want none.
-        /// </summary>
         public void SetHostCursorVisible(bool Visible)
         {
             if (DesktopDisplay is GuiThreadManager GuiManager)
@@ -8722,6 +8602,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Section.ReleaseFileStream();
                 }
             }
+
+            GeneralHelper.IO.FlushPendingCloses();
         }
 
         private const uint FILE_SHARE_READ = 0x00000001;
@@ -8849,71 +8731,54 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
-        public bool IsValidFileLockRange(ulong Offset, ulong Length)
+        // The documented way to lock a whole file is a length of -1, so only the offset is signed.
+        public bool IsValidFileLockRange(long Offset, ulong Length)
         {
-            if (Length == 0)
+            if (Offset < 0 || Length == 0)
                 return false;
 
-            ulong End = Offset + Length - 1;
-            return !(End < Offset);
+            ulong End = (ulong)Offset + Length - 1;
+            return !(End < (ulong)Offset);
         }
 
-        /// <summary>
-        /// Reads and validates a Windows file lock byte range from emulated memory.
-        /// </summary>
-        /// <param name="ByteOffsetPtr">Pointer to the lock offset.</param>
-        /// <param name="LengthPtr">Pointer to the lock length.</param>
-        /// <param name="Offset">Receives the lock offset.</param>
-        /// <param name="Length">Receives the lock length.</param>
-        /// <param name="Status">Receives the validation status.</param>
-        /// <returns>True if the lock range was read and is valid.</returns>
-        public bool TryReadFileLockRange(ulong ByteOffsetPtr, ulong LengthPtr, out ulong Offset, out ulong Length, out NTSTATUS Status)
+        // NT: NtLockFile and NtUnlockFile capture the range before the event reset, and the file system checks it.
+        public NTSTATUS ReadFileLockRange(ulong ByteOffsetPtr, ulong LengthPtr, out long Offset, out ulong Length)
         {
             Offset = 0;
             Length = 0;
-            Status = NTSTATUS.STATUS_SUCCESS;
 
-            if (!Emulator.IsRegionMapped(ByteOffsetPtr, 8) || !Emulator.IsRegionMapped(LengthPtr, 8))
-            {
-                Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
-                return false;
-            }
+            if ((ByteOffsetPtr & 3) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
 
-            long SignedOffset = unchecked((long)Emulator._emulator.ReadMemoryULong(ByteOffsetPtr));
-            if (SignedOffset < 0)
-            {
-                Status = NTSTATUS.STATUS_INVALID_LOCK_RANGE;
-                return false;
-            }
+            if (!TryReadUInt64(ByteOffsetPtr, out ulong RawOffset))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            // The documented way to lock a whole file is a length of -1, so only the offset is signed.
-            Offset = (ulong)SignedOffset;
-            Length = Emulator._emulator.ReadMemoryULong(LengthPtr);
+            if ((LengthPtr & 3) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
 
-            if (!IsValidFileLockRange(Offset, Length))
-            {
-                Status = NTSTATUS.STATUS_INVALID_LOCK_RANGE;
-                return false;
-            }
+            if (!TryReadUInt64(LengthPtr, out Length))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            return true;
+            Offset = unchecked((long)RawOffset);
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
-        /// <summary>
-        /// Reads an optional Windows file byte offset from emulated memory.
-        /// </summary>
-        /// <param name="ByteOffsetPtr">Pointer to a LARGE_INTEGER byte offset, or zero to use the current file position.</param>
-        /// <param name="CurrentPosition">The current file position.</param>
-        /// <returns>The requested file offset, or the current file position if no valid pointer was supplied.</returns>
-        public long GetEffectiveFileOffset(ulong ByteOffsetPtr, long CurrentPosition)
+        // NT: IopReadFile and IopWriteFile capture the offset before the event reset, and IopExceptionFilter
+        // reports a misaligned one as STATUS_DATATYPE_MISALIGNMENT_ERROR.
+        public NTSTATUS ReadFileByteOffset(ulong ByteOffsetPtr, long CurrentPosition, out long Offset)
         {
+            Offset = CurrentPosition;
             if (ByteOffsetPtr == 0)
-                return CurrentPosition;
+                return NTSTATUS.STATUS_SUCCESS;
 
-            if (!Emulator.IsRegionMapped(ByteOffsetPtr, 8))
-                return CurrentPosition;
+            if ((ByteOffsetPtr & 3) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT_ERROR;
 
-            return unchecked((long)Emulator._emulator.ReadMemoryULong(ByteOffsetPtr));
+            if (!TryReadUInt64(ByteOffsetPtr, out ulong RawOffset))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            Offset = unchecked((long)RawOffset);
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         public WinHandle CreateMutexHandle(string? Name, AccessMask Permissions)
@@ -9423,9 +9288,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             SetSyntheticRegistryString(PropertyBag, "ThisPCPolicy", 1, "Show");
         }
 
-        /// <summary>
-        /// We don't support CoreMessagingRegistrar right now, so this is a workaround.
-        /// </summary>
+        // Activating these classes needs CoreMessagingRegistrar, which is not emulated, so their keys read as absent.
         private const string UnclaimedActivatableClassNamespace = "\\WindowsRuntime\\ActivatableClassId\\Windows.Gaming.Input.";
 
         private bool IsRegistryPathDeleted(string NtPath)
@@ -10627,7 +10490,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             if (Entry.Object != null && !HandleManager.HasHandleToObject(Entry.Object))
+            {
                 RemoveNamedObject(Entry.Object);
+                if (Entry.Object is WinFile ClosedFile)
+                    WinFiles.Remove(ClosedFile);
+            }
 
             if (ClosingSyncObject is WinJob ClosingJob && (ClosingJob.LimitFlags & NtTerminateJobObject.JobLimitKillOnJobClose) != 0 && !HandleManager.HasHandleToObject(ClosingJob))
                 NtTerminateJobObject.TerminateMembers(Emulator, ClosingJob, 0, true);
@@ -10667,43 +10534,37 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static void ClearReadOnlyAttribute(string HostPath)
-        {
-            try
-            {
-                FileAttributes Attributes = File.GetAttributes(HostPath);
-                if ((Attributes & FileAttributes.ReadOnly) != 0)
-                    File.SetAttributes(HostPath, Attributes & ~FileAttributes.ReadOnly);
-            }
-            catch
-            {
-            }
-        }
-
         private void ApplyDeleteOnClose(WinFile Target)
         {
             try
             {
+                WindowsFileStream TargetStream = Target.FileStream;
                 ReleaseFileStreams(Target.Path, Target.Directory);
                 string VirtualPath = GeneralHelper.IO.ResolveVirtualHostPath(Target.Path, BinaryFormat.PE);
                 if (string.IsNullOrEmpty(VirtualPath))
                     return;
 
-                if (Target.Directory)
-                {
-                    if (Directory.Exists(VirtualPath))
-                    {
-                        ClearReadOnlyAttribute(VirtualPath);
-                        Directory.Delete(VirtualPath, false);
-                    }
-                }
-                else if (File.Exists(VirtualPath))
-                {
-                    ClearReadOnlyAttribute(VirtualPath);
-                    File.Delete(VirtualPath);
-                }
+                bool Exists;
+                FileAttributes Attributes;
+                if (TargetStream != null && string.Equals(TargetStream.WriteHostPath, VirtualPath, StringComparison.Ordinal)
+                    && TargetStream.TryGetCurrentWriteProbe(out bool ProbedFile, out bool ProbedDirectory, out Attributes))
+                    Exists = ProbedFile || ProbedDirectory;
+                else
+                    Exists = GeneralHelper.IO.TryGetHostAttributes(new FileInfo(VirtualPath), out Attributes);
 
-                WindowsFileStream.InvalidateGuestPathCache();
+                if (!Exists || ((Attributes & FileAttributes.Directory) != 0) != Target.Directory)
+                    return;
+
+                if ((Attributes & FileAttributes.ReadOnly) != 0)
+                    File.SetAttributes(VirtualPath, Attributes & ~FileAttributes.ReadOnly);
+
+                if (Target.Directory)
+                    Directory.Delete(VirtualPath, false);
+                else
+                    File.Delete(VirtualPath);
+
+                WindowsFileStream.InvalidateRemovedEntry(Attributes);
+
                 if ((Emulator.Settings.Flags & LogFlags.Syscall) != 0)
                     Emulator.TriggerEventMessage($"[+] delete-on-close removed \"{Target.Path}\".", LogFlags.Syscall);
             }

@@ -278,6 +278,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_CANT_TERMINATE_SELF = 0xC00000DB,
         STATUS_DEBUGGER_INACTIVE = 0xC0000354,
         STATUS_DATATYPE_MISALIGNMENT = 0x80000002,
+        STATUS_DATATYPE_MISALIGNMENT_ERROR = 0xC00002C5,
         STATUS_BREAKPOINT = 0x80000003,
         STATUS_SINGLE_STEP = 0x80000004,
         STATUS_BUFFER_OVERFLOW = 0x80000005,
@@ -1100,7 +1101,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         SymbolicLinkAllAccess = StandardRightsRequired | SymbolicLinkQuery,
 
         /// <summary>
-        /// Tells the handle manager to give the handle temporarily
+        /// Access check sentinel. As the required access it skips the check. Granted to a handle, it allows
+        /// every access.
         /// </summary>
         GiveTemp = 0x12341234,
     }
@@ -1379,8 +1381,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinLockFile> Locks = new List<WinLockFile>();
 
         /// <summary>
-        /// Completion port bound with FileCompletionInformation. Every finished request on this handle queues a
-        /// packet carrying <see cref="CompletionKey"/>, which is how overlapped I/O is collected.
+        /// Completion port bound with FileCompletionInformation. A request with an APC context and no APC routine
+        /// queues a packet carrying <see cref="CompletionKey"/> when it finishes.
         /// </summary>
         public ulong CompletionHandle;
         public ulong CompletionKey;

@@ -33,7 +33,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Span<uint> Block = Pixels.AsSpan(0, Count);
                 if (!Win32kHelper.TryReadDcBlock(Instance, SourceDc, SourceX, SourceY, Width, Height, Block))
                 {
-                    // A rop with no source term draws from the pattern alone.
+                    // A rop with no source term needs no source DC.
                     if (Win32kHelper.RopUsesSource(Rop))
                     {
                         Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_HANDLE);

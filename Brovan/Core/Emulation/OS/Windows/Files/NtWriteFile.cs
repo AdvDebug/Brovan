@@ -48,6 +48,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
+            NTSTATUS OffsetStatus = Instance.WinHelper.ReadFileByteOffset(ByteOffsetPtr, FileObj.Position, out long RequestedOffset);
+            if (OffsetStatus != NTSTATUS.STATUS_SUCCESS)
+            {
+                EventDone = true;
+                return OffsetStatus;
+            }
+
             if (FileObj.Pipe != null)
             {
                 EventDone = true;
@@ -100,7 +107,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             bool AppendOnly = IsAppendOnlyHandle(Instance, FileHandle);
-            long Offset = AppendOnly ? Stream.Length : Instance.WinHelper.GetEffectiveFileOffset(ByteOffsetPtr, FileObj.Position);
+            long Offset = AppendOnly ? Stream.Length : RequestedOffset;
             if (Offset < 0)
                 Offset = 0;
 

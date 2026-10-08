@@ -8,9 +8,6 @@ using Brovan.Core;
 
 namespace Brovan.Analysis
 {
-    /// <summary>
-    /// Simple representation of a decoded x86 instruction.
-    /// </summary>
     public struct X86Instruction
     {
         public ulong Address;
@@ -20,18 +17,12 @@ namespace Brovan.Analysis
         public uint BytesLength;
     }
 
-    /// <summary>
-    /// Architecture mode for disassembly.
-    /// </summary>
     public enum X86DisassembleMode
     {
         Bit32,
         Bit64
     }
 
-    /// <summary>
-    /// Speed mode for disassembling.
-    /// </summary>
     public enum X86DisassemblerFormat
     {
         NasmFormat,
@@ -128,11 +119,6 @@ namespace Brovan.Analysis
             Function.EndAddress = Function.Address + DecodedSize;
         }
 
-        /// <summary>
-        /// Calculate the entropy for the specified data.
-        /// </summary>
-        /// <param name="Data">Data to calculate it's entropy.</param>
-        /// <returns>return the data's entropy.</returns>
         public static double CalculateEntropy(ReadOnlySpan<byte> Data)
         {
             if (Data.Length == 0)
@@ -160,11 +146,6 @@ namespace Brovan.Analysis
             return Entropy;
         }
 
-        /// <summary>
-        /// Check whether the binary is likely packed or not (entropy based).
-        /// </summary>
-        /// <param name="Binary">Binary to check.</param>
-        /// <returns>returns true if packed, otherwise false.</returns>
         public static bool IsBinaryPacked(BinaryFile Binary)
         {
             ReadOnlySpan<byte> Data = Binary.GetBinaryData();
@@ -238,33 +219,15 @@ namespace Brovan.Analysis
             return false;
         }
 
-        /// <summary>
-        /// Section search options.
-        /// </summary>
         public enum SearchSection
         {
-            /// <summary>
-            /// Search for the pattern anywhere in the file.
-            /// </summary>
             All = 0,
 
-            /// <summary>
-            /// Search for the pattern inside the code (.text for example) section.
-            /// </summary>
             CodeSection = 1,
 
-            /// <summary>
-            /// Search for the pattern inside the data section.
-            /// </summary>
             DataSection = 2
         }
 
-        /// <summary>
-        /// Searches for all occurrences of a byte pattern within a binary array.
-        /// </summary>
-        /// <param name="Binary">The source binary array to search within.</param>
-        /// <param name="Pattern">The byte pattern to search for.</param>
-        /// <returns>A List of integers containing all indexes where the pattern was found.</returns>
         public static List<int> IndexOf(byte[] Binary, byte[] Pattern)
         {
             if (Binary == null)
@@ -305,54 +268,26 @@ namespace Brovan.Analysis
             return Matches;
         }
 
-        /// <summary>
-        /// Check if the PE Section is executable.
-        /// </summary>
-        /// <param name="Characteristics">Characteristics of the Section.</param>
-        /// <returns>returns true if the section is a code section, otherwise false.</returns>
         public static bool IsCodeSection(SectionCharacteristics Characteristics)
         {
             return (Characteristics & SectionCharacteristics.ContainsCode) != 0 || ((Characteristics & SectionCharacteristics.MemExecute) != 0 && (Characteristics & SectionCharacteristics.MemRead) != 0);
         }
 
-        /// <summary>
-        /// Check if the PE Section is the data section.
-        /// </summary>
-        /// <param name="Characteristics">Characteristics of the Section.</param>
-        /// <returns>returns true if the section is a data section, otherwise false.</returns>
         public static bool IsDataSection(SectionCharacteristics Characteristics)
         {
             return (Characteristics & SectionCharacteristics.ContainsInitializedData) != 0 || (Characteristics & SectionCharacteristics.ContainsUninitializedData) != 0;
         }
 
-        /// <summary>
-        /// Checks if the ELF Section is an executable section.
-        /// </summary>
-        /// <param name="Characteristics">Characteristics of the Section.</param>
-        /// <returns>returns true if the section is a code section, otherwise false.</returns>
         public static bool IsCodeSection(ElfSectionCharacteristics Characteristics)
         {
             return (Characteristics & ElfSectionCharacteristics.ExecInstr) != 0 && (Characteristics & ElfSectionCharacteristics.Alloc) != 0;
         }
 
-        /// <summary>
-        /// Checks if an ELF Section is a data section.
-        /// </summary>
-        /// <param name="Characteristics">Characteristics of the Section.</param>
-        /// <returns>returns true if the section is a data section, otherwise false.</returns>
         public static bool IsDataSection(ElfSectionCharacteristics Characteristics)
         {
             return (Characteristics & ElfSectionCharacteristics.Alloc) != 0 && (Characteristics & ElfSectionCharacteristics.ExecInstr) == 0;
         }
 
-        /// <summary>
-        /// Search for a pattern in a PE Section.
-        /// </summary>
-        /// <param name="Data">The Binary Data.</param>
-        /// <param name="Pattern">The Pattern to search for.</param>
-        /// <param name="Section">The Section to search in.</param>
-        /// <param name="Results">The Result in which the Binary Search will be stored.</param>
-        /// <param name="ImageBase">The Image Base of the Binary.</param>
         public static void SearchInSection(byte[] Data, byte[] Pattern, PortableBinarySection Section, List<BinarySearch> Results, ulong ImageBase)
         {
             byte[] SectionData = new byte[Section.RawSize];
@@ -370,13 +305,6 @@ namespace Brovan.Analysis
             }
         }
 
-        /// <summary>
-        /// Search for a pattern in an ELF Section.
-        /// </summary>
-        /// <param name="Data">The ELF Binary Data.</param>
-        /// <param name="Pattern">The Pattern to search for.</param>
-        /// <param name="Section">The ELF Section to search in.</param>
-        /// <param name="Results">The Result in which the Binary Search will be stored.</param>
         public static void SearchInSection(byte[] Data, byte[] Pattern, ElfBinarySection Section, List<BinarySearch> Results)
         {
             byte[] SectionData = new byte[Section.RawSize];
@@ -394,13 +322,6 @@ namespace Brovan.Analysis
             }
         }
 
-        /// <summary>
-        /// Search for a pattern in the Binary file.
-        /// </summary>
-        /// <param name="Binary">The Binary Data.</param>
-        /// <param name="Search">The Search option.</param>
-        /// <param name="Pattern">The Pattern to search for.</param>
-        /// <returns>returns BinarySearch struct array containing all the patterns with their information.</returns>
         public static BinarySearch[] SearchPatterns(BinaryFile Binary, SearchSection Search, byte[] Pattern)
         {
             List<BinarySearch> Results = new List<BinarySearch>();
@@ -465,12 +386,7 @@ namespace Brovan.Analysis
             return Results.ToArray();
         }
 
-        /// <summary>
-        /// Get an address from a jmp/call.
-        /// </summary>
-        /// <param name="Instruction">Instruction to extract the address from.</param>
-        /// <param name="Binary">The binary that contains the instruction.</param>
-        /// <returns>returns the target address, if fails it returns 0.</returns>
+        /// <returns>The branch target, or the pointer slot address for FF 15 and FF 25. 0 on failure.</returns>
         public static ulong GetAddressFromOperand(X86Instruction Instruction, BinaryFile Binary)
         {
             if (Instruction.Bytes.Length == 0 || Binary == null)
@@ -563,12 +479,7 @@ namespace Brovan.Analysis
             return 0;
         }
 
-        /// <summary>
-        /// Get a function name from an operand (call/jmp).
-        /// </summary>
-        /// <param name="Instruction">Instruction to extract the function from.</param>
-        /// <param name="Binary">The binary that contains the instruction.</param>
-        /// <returns>The resolved function name, an unresolved placeholder, or "fun_unknown" on failure.</returns>
+        /// <returns>The resolved function name. Otherwise the operand text when Emu is true, or a "fun_" placeholder.</returns>
         public static string GetFunctionFromOperand(X86Instruction Instruction, BinaryFile Binary, bool Emu)
         {
             if (Binary == null && Emu)
@@ -578,19 +489,16 @@ namespace Brovan.Analysis
 
             ulong TargetAddress = GetAddressFromOperand(Instruction, Binary);
 
-            // Try to resolve the function name
             if (TargetAddress != 0)
             {
                 Dictionary<ulong, string> FunctionMap = Binary.GetFunctionsMap(true, true, true);
                 if (FunctionMap != null)
                 {
-                    // Try with current address
                     if (FunctionMap.TryGetValue(TargetAddress, out string FunctionName))
                     {
                         return FunctionName;
                     }
 
-                    // Try without ImageBase for PE files
                     if (Binary.FileFormat == BinaryFormat.PE)
                     {
                         uint AddressWithoutBase = (uint)(TargetAddress - Binary.PE.ImageBase);

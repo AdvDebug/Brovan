@@ -3426,8 +3426,8 @@ namespace Brovan.Core.Emulation
         }
 
         // XMM is deliberately not folded into this call. Reading XMM makes WHP extract the full FP
-        // state, which costs far more than the call it would save: a GP load runs on every VM exit,
-        // an XMM read only on a context switch. Merging the two here measured 1.7s -> 16.8s.
+        // state, which costs far more than the call it would save. A GP load runs on every VM exit,
+        // an XMM read only on a context switch.
         private unsafe void LoadRegisters(VirtualProcessor vp)
         {
             Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpRegNames.Length];

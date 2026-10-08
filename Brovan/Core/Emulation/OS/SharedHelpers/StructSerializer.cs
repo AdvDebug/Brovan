@@ -197,8 +197,6 @@ namespace Brovan.Core.Emulation.OS
             return Cache[T] = new TypeDesc(T);
         }
 
-        // --- Generated-serializer dispatch ---
-
         internal delegate bool ParseStructAddrDelegate<T>(BinaryEmulator Emulator, ulong Address, out T Value);
         internal delegate bool ParseStructBytesDelegate<T>(BinaryEmulator Emulator, byte[] Raw, out T Value);
 
@@ -222,14 +220,6 @@ namespace Brovan.Core.Emulation.OS
             DirectSizeEmulator[typeof(T)] = SizeEmulator;
         }
 
-        // --- Public API ---
-
-        /// <summary>
-        /// Get a struct size.
-        /// </summary>
-        /// <typeparam name="T">Struct</typeparam>
-        /// <param name="Emulator">The emulator instance to determine architecture.</param>
-        /// <returns>return the size.</returns>
         public static uint GetStructSize<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator) where T : struct
         {
             if (DirectSizeEmulator.TryGetValue(typeof(T), out Delegate Fast))
@@ -239,12 +229,6 @@ namespace Brovan.Core.Emulation.OS
             return (uint)GetStructSize(typeof(T), Is64);
         }
 
-        /// <summary>
-        /// Get a struct size.
-        /// </summary>
-        /// <typeparam name="T">Struct</typeparam>
-        /// <param name="Is64">An indicator whether the architecture is x64.</param>
-        /// <returns>return the size.</returns>
         public static int GetStructSize<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(bool Is64) where T : struct
         {
             if (DirectSizeBool.TryGetValue(typeof(T), out Delegate Fast))
@@ -265,13 +249,6 @@ namespace Brovan.Core.Emulation.OS
                 Bw.Write((byte)0);
         }
 
-        /// <summary>
-        /// Serializes <paramref name="Value"/> into emulated memory at <paramref name="Address"/>.
-        /// </summary>
-        /// <param name="Emulator">The emulator instance to write into.</param>
-        /// <param name="Address">The emulated address to write the struct to.</param>
-        /// <param name="Value">The struct value to serialize.</param>
-        /// <returns>Returns <see cref="WriteStructResult.Ok"/> on success, otherwise a failure result describing the error.</returns>
         public static WriteStructResult WriteStruct<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator, ulong Address, T Value) where T : struct
         {
             if (DirectWrite.TryGetValue(typeof(T), out Delegate Fast))
@@ -307,9 +284,6 @@ namespace Brovan.Core.Emulation.OS
             byte[] SlowBuf = ArrayPool<byte>.Shared.Rent(SlowSize);
             try
             {
-                // MemoryStream backed by the rented buffer: no internal growth,
-                // no ToArray() needed. publiclyVisible:false so GetBuffer() is
-                // not callable (we use AsSpan instead).
                 using MemoryStream Ms = new(SlowBuf, 0, SlowSize, writable: true, publiclyVisible: false);
                 using BinaryWriter Bw = new(Ms, Encoding.Unicode, leaveOpen: true);
 
@@ -329,13 +303,6 @@ namespace Brovan.Core.Emulation.OS
             finally { ArrayPool<byte>.Shared.Return(SlowBuf); }
         }
 
-        /// <summary>
-        /// Deserializes a struct of type <typeparamref name="T"/> from emulated memory at <paramref name="Address"/>.
-        /// </summary>
-        /// <param name="Emulator">The emulator instance to read from.</param>
-        /// <param name="Address">The emulated address to read the struct from.</param>
-        /// <param name="Value">The deserialized struct value on success.</param>
-        /// <returns>Returns true if successful, otherwise false.</returns>
         public static bool ParseStruct<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)] T>(BinaryEmulator Emulator, ulong Address, out T Value) where T : struct
         {
             if (DirectParseAddr.TryGetValue(typeof(T), out Delegate Fast))
@@ -378,13 +345,6 @@ namespace Brovan.Core.Emulation.OS
             return true;
         }
 
-        /// <summary>
-        /// Deserializes a struct of type <typeparamref name="T"/> from a byte array directly./>.
-        /// </summary>
-        /// <param name="Emulator">The emulator instance to read from.</param>
-        /// <param name="Data">The data to deserialize the struct.</param>
-        /// <param name="Value">The deserialized struct value on success.</param>
-        /// <returns>Returns true if successful, otherwise false.</returns>
         /// <remarks>
         /// This is mostly used in the fuzzing, this is never used in the emulator itself.
         /// </remarks>
@@ -409,8 +369,6 @@ namespace Brovan.Core.Emulation.OS
             Value = (T)Boxed;
             return true;
         }
-
-        // --- Private workers ---
 
         [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "Non-blittable struct path -- hot-path structs are blittable and do not reach here.")]
         [UnconditionalSuppressMessage("AOT", "IL3050", Justification = "Non-blittable struct path -- hot-path structs are blittable and do not reach here.")]
@@ -850,16 +808,7 @@ namespace Brovan.Core.Emulation.OS
             return true;
         }
 
-        /// <summary>
-        /// Read a null-terminated string from the emulated memory in chunks.
-        /// </summary>
-        /// <param name="Emulator">Emulator instance.</param>
-        /// <param name="Address">Address to start reading from.</param>
-        /// <param name="Enc">Encoding to use when converting the bytes to string.</param>
-        /// <returns>returns the string if successful, otherwise false.</returns>
-        /// <remarks>
-        /// This function expects the memory inside the emulated program to be null-terminated.
-        /// </remarks>
+        /// <returns>Null when no terminator can be read within <c>MaxReadSize</c> bytes.</returns>
         private static string ReadNullTerminatedString(BinaryEmulator Emulator, ulong Address, Encoding Enc)
         {
             const uint MaxReadSize = 1024;

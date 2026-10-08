@@ -48,7 +48,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong RecordSize = Wide ? 0x20u : 0x10u;
             if (!Instance.IsMemoryRangeMapped(InformationPtr, Count * RecordSize)
                 || !Instance.IsMemoryRangeMapped(EntriesRemovedPtr, 4)
-                || (TimeoutPtr != 0 && !Instance.IsMemoryRangeMapped(TimeoutPtr, 8)))
+                || !Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? Timeout))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             NTSTATUS HandleStatus = Instance.WinHelper.ResolveIoCompletionHandle(IoCompletionHandle, out WinIoCompletion Completion);
@@ -91,7 +91,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(TimeoutPtr);
+                long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(Timeout);
                 if (Deadline == Instance.EmulatedTickCount64)
                     return ReturnEmpty(Instance, EntriesRemovedPtr, NTSTATUS.STATUS_TIMEOUT);
 

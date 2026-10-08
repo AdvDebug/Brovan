@@ -47,6 +47,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread.WaitActive)
                 return ContinueWait(Instance, Thread);
 
+            if (!Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? Timeout))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
             IHandleObject Obj = Instance.WinHelper.HandleManager.GetObjectByHandle(Handle);
             if (Obj == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
@@ -57,7 +60,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance.TryAcquireWaitHandle(Handle, Thread, out NTSTATUS AcquiredStatus))
                 return AcquiredStatus;
 
-            long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(TimeoutPtr);
+            long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(Timeout);
             if (Deadline == Instance.EmulatedTickCount64)
                 return NTSTATUS.STATUS_TIMEOUT;
 

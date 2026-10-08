@@ -248,9 +248,8 @@ namespace Brovan.Android
         {
             Guard(() =>
             {
-                // LogError buffers and only flushes every N writes; the CLI gets away with it because the
-                // process exits, but an app process keeps the buffer alive forever and error_log.log stays
-                // empty exactly when something has gone wrong.
+                // Utils.LogError flushes only after a number of writes and at process exit. An app process
+                // does not exit, so error_log.log can stay empty after a failure.
                 Utils.FlushLog();
                 CommandReader.Instance.Post(Marshal.PtrToStringUTF8((IntPtr)command));
             }, nameof(SendCommand));

@@ -101,6 +101,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Count == 0 || Count > 64)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
+            if (!Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? Timeout))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
             if (HandlesPtr == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
@@ -126,7 +129,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (TryGetSatisfiedIndex(Instance, Thread, Handles, WaitAll, out int Index, out NTSTATUS WaitStatus))
                 return WaitStatus;
 
-            long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(TimeoutPtr);
+            long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(Timeout);
             if (Deadline == Instance.EmulatedTickCount64)
                 return NTSTATUS.STATUS_TIMEOUT;
 

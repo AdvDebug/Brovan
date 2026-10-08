@@ -3,7 +3,7 @@ using System;
 namespace Brovan.Core.Helpers.WindowsImage
 {
     /// <summary>
-    /// XPRESS Huffman chunk decoder, the format WIM uses for its fastest compression level and the same one
+    /// XPRESS Huffman chunk decoder, the format WIM uses for its fastest compression level.
     /// </summary>
     internal sealed class XpressDecompressor
     {

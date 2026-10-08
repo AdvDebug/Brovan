@@ -147,9 +147,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 IsBackground = true,
                 Name = "BrovanGuiThread",
 
-                // Guest CPU threads run flat out on every core, and this is the only thread that turns host
-                // input into guest messages or pushes a frame to the screen. At Normal it gets scheduled
-                // behind them and the whole presentation path inherits their quantum as latency.
+                // Guest CPU threads run flat out on every core, and this is the only thread that takes host
+                // input or pushes a frame to the screen. At Normal it gets scheduled behind them and the whole
+                // presentation path inherits their quantum as latency.
                 Priority = ThreadPriority.AboveNormal,
             };
             _guiThread.Start();

@@ -599,9 +599,6 @@ namespace Brovan.Core.Emulation.OS.Linux
             return false;
         }
 
-        /// <summary>
-        /// Builds synthesized directory entries for a special Linux path.
-        /// </summary>
         internal bool TryEnumerateDirectory(LinuxSyscallsHelper Helper, string PathValue, out List<LinuxDirectoryEntry> DirectoryEntries)
         {
             DirectoryEntries = null;
@@ -826,9 +823,6 @@ namespace Brovan.Core.Emulation.OS.Linux
             return false;
         }
 
-        /// <summary>
-        /// Adds file descriptor symlink entries to a synthesized directory listing.
-        /// </summary>
         private static void AddDescriptorEntries(LinuxSyscallsHelper Helper, List<LinuxDirectoryEntry> DirectoryEntries)
         {
             foreach (ulong Descriptor in Helper.DescriptorTable.EnumerateDescriptors())
@@ -838,18 +832,12 @@ namespace Brovan.Core.Emulation.OS.Linux
             }
         }
 
-        /// <summary>
-        /// Adds synthesized sysfs power_supply file entries.
-        /// </summary>
         private static void AddPowerSupplyEntries(List<LinuxDirectoryEntry> DirectoryEntries, string BasePath, params string[] Names)
         {
             foreach (string Name in Names)
                 AddEntry(DirectoryEntries, BasePath + "/" + Name, Name, LinuxDirectoryEntryType.RegularFile);
         }
 
-        /// <summary>
-        /// Adds a synthesized special-path directory entry with a stable inode value.
-        /// </summary>
         private static void AddEntry(List<LinuxDirectoryEntry> DirectoryEntries, string PathValue, string Name, LinuxDirectoryEntryType Type)
         {
             DirectoryEntries.Add(new LinuxDirectoryEntry

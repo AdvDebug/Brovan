@@ -335,9 +335,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const int UserConnectSharedInfoSize = 0x238;
         public const int UserConnectTotalSize = UserConnectHeaderSize + UserConnectSharedInfoSize;
 
-        /// <summary>
-        /// Fills a USERCONNECT reply for the user server
-        /// </summary>
         public static bool TryBuildUserConnect(BinaryEmulator Instance, ulong ConnectionInfo, uint ConnectionInfoSize, Span<byte> Data)
         {
             if (Data.Length < UserConnectTotalSize)
@@ -386,10 +383,10 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             switch (ApiIndex)
             {
-                case 1: // CsrIdentifyAlertableThread-style notification.
+                case 1:
                     ZeroCsrData(Reply, 0x10);
                     break;
-                case 2: // CsrSetPriorityClass-style request.
+                case 2:
                 case 3:
                     break;
                 default:
@@ -1068,13 +1065,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return addr;
         }
 
-        /// <summary>
-        /// Builds one ACTIVATION_CONTEXT_DATA block.
-        /// </summary>
         /// <remarks>
-        /// Every created context owns its own block. ntdll unmaps
-        /// the block when it releases the context, and a shared one leaves the other contexts pointing at
-        /// freed address space.
+        /// Every created context owns its own block. ntdll unmaps the block when it releases the context,
+        /// so a shared block leaves the other contexts pointing at freed address space.
         /// </remarks>
         public static ulong AllocActivationContextData(BinaryEmulator Instance)
         {

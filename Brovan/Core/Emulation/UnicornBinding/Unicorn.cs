@@ -15,9 +15,6 @@ using System.Buffers;
 
 namespace Brovan.Core.Emulation
 {
-    /// <summary>
-    /// Unicorn exception class.
-    /// </summary>
     public class UnicornException : SystemException
     {
         public UnicornException(string message) : base(message)
@@ -31,9 +28,6 @@ namespace Brovan.Core.Emulation
         }
     }
 
-    /// <summary>
-    /// Unicorn emulator class which provides a semi high-level binding to interact with the unicorn library.
-    /// </summary>
     public class Unicorn : IDisposable
     {
         private IntPtr _uc;
@@ -75,15 +69,8 @@ namespace Brovan.Core.Emulation
         public bool Disposed => Volatile.Read(ref _disposed) == 1;
         private bool Disposing => Volatile.Read(ref _disposing) == 1;
 
-        /// <summary>
-        /// Indicates whether disposed-object access should throw instead of returning failure.
-        /// </summary>
         public static bool ThrowDisposed = true;
 
-        /// <summary>
-        /// Check if Control Flow Guard is enabled in the process.
-        /// </summary>
-        /// <returns>True if CFG is enabled; otherwise, false.</returns>
         public static bool IsCFGEnabled()
         {
             if (!GeneralHelper.IsWindows)
@@ -101,18 +88,11 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        /// <summary>
-        /// Initialize the unicorn emulator.
-        /// </summary>
-        /// <param name="arch">Architecture to be used.</param>
-        /// <param name="mode">Mode to be used.</param>
-        /// <exception cref="UnicornException"></exception>
         public Unicorn(Arch arch, Mode mode)
         {
             _error = uc_open(arch, mode, out _uc);
 
-            // some heavily  samples can generate an unusually large number of translation blocks and stress Unicorn's TCG code buffer
-            // causing a crash. this is a hack to mitigate it.
+            // A full TCG code buffer flushes every translated block. The engine clamps this size to its maximum.
             SetTcgBufferSize(uint.MaxValue);
 
             if (_error != UCErrors.UC_ERR_OK)
@@ -127,11 +107,6 @@ namespace Brovan.Core.Emulation
             this.mode = mode;
         }
 
-        /// <summary>
-        /// Initialize the unicorn emulator with an already available instance.
-        /// </summary>
-        /// <param name="instance">Instance to be used.</param>
-        /// <exception cref="UnicornException"></exception>
         public Unicorn(IntPtr instance)
         {
             if (instance == IntPtr.Zero)
@@ -146,10 +121,6 @@ namespace Brovan.Core.Emulation
             _uc = instance;
         }
 
-        /// <summary>
-        /// Get the emulator's last error.
-        /// </summary>
-        /// <returns>returns the emulator's last error.</returns>
         public UCErrors GetLastError()
         {
             return _error;
@@ -327,12 +298,6 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        /// <summary>
-        /// Unmap an emulated memory.
-        /// </summary>
-        /// <param name="address">Address of the mapped memory.</param>
-        /// <param name="size">Size of the mapped memory.</param>
-        /// <returns>returns true if successfully unmapped, otherwise false.</returns>
         public unsafe bool UnmapMemory(ulong address, ulong size)
         {
             lock (_mapsLock)
@@ -464,13 +429,7 @@ namespace Brovan.Core.Emulation
                 uc_emu_stop(_uc);
         }
 
-        /// <summary>
-        /// Write to an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address in the emulated memory.</param>
-        /// <param name="value">Value to write to the emulated memory address.</param>
         /// <param name="length">Number of bytes to write. A value of 0 writes the full byte array.</param>
-        /// <returns>True if the write succeeded; otherwise, false.</returns>
         public unsafe bool WriteMemory(ulong address, byte[] value, uint length = 0)
         {
             if (value == null)
@@ -631,13 +590,7 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Write to an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address in the emulated memory.</param>
-        /// <param name="value">Value to write to the emulated memory address.</param>
         /// <param name="length">Number of bytes to write. A value of 0 writes the full value.</param>
-        /// <returns>True if the write succeeded; otherwise, false.</returns>
         public bool WriteMemory(ulong address, ulong value, uint length = 0)
         {
             return WriteScalar(address, value, sizeof(ulong), length);
@@ -671,13 +624,6 @@ namespace Brovan.Core.Emulation
             return WriteMemory(Address, Buffer.Slice(0, (int)WriteLen));
         }
 
-        /// <summary>
-        /// Write a string to an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address in the emulated memory.</param>
-        /// <param name="value">Value to write to the emulated memory address.</param>
-        /// <param name="length">Unused for this overload.</param>
-        /// <returns>True if the write succeeded; otherwise, false.</returns>
         public bool WriteMemory(ulong address, string value, Encoding EncodingType)
         {
             if (DisposedCheck())
@@ -686,25 +632,13 @@ namespace Brovan.Core.Emulation
             return WriteMemory(address, StringValue);
         }
 
-        /// <summary>
-        /// Write to an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address in the emulated memory.</param>
-        /// <param name="value">Value to write to the emulated memory address.</param>
         /// <param name="length">Number of bytes to write. A value of 0 writes the full value.</param>
-        /// <returns>True if the write succeeded; otherwise, false.</returns>
         public bool WriteMemory(ulong address, uint value, uint length = 0)
         {
             return WriteScalar(address, value, sizeof(uint), length);
         }
 
-        /// <summary>
-        /// Write to an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address in the emulated memory.</param>
         /// <param name="value">Byte value to repeat across the target memory range.</param>
-        /// <param name="length">Number of bytes to write.</param>
-        /// <returns>True if the write succeeded; otherwise, false.</returns>
         public bool WriteMemoryByte(ulong address, byte value, uint length = 0)
         {
             if (DisposedCheck())
@@ -731,36 +665,18 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        /// <summary>
-        /// Write to an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address in the emulated memory.</param>
-        /// <param name="value">Value to write to the emulated memory address.</param>
         /// <param name="length">Number of bytes to write. A value of 0 writes the full value.</param>
-        /// <returns>True if the write succeeded; otherwise, false.</returns>
         public bool WriteMemory(ulong address, int value, uint length = 0)
         {
             return WriteScalar(address, unchecked((uint)value), sizeof(int), length);
         }
 
-        /// <summary>
-        /// Write to an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address in the emulated memory.</param>
-        /// <param name="value">Value to write to the emulated memory address.</param>
         /// <param name="length">Number of bytes to write. A value of 0 writes the full value.</param>
-        /// <returns>True if the write succeeded; otherwise, false.</returns>
         public bool WriteMemory(ulong address, ushort value, uint length = 0)
         {
             return WriteScalar(address, value, sizeof(ushort), length);
         }
 
-        /// <summary>
-        /// Read a byte array from an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address to read from.</param>
-        /// <param name="length">Length of the data to read.</param>
-        /// <returns>returns a byte array containing the data.</returns>
         public unsafe byte[] ReadMemory(ulong address, ulong length)
         {
             if (DisposedCheck())
@@ -779,12 +695,6 @@ namespace Brovan.Core.Emulation
             return value;
         }
 
-        /// <summary>
-        /// Read a byte array from an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address to read from.</param>
-        /// <param name="length">Length of the data to read.</param>
-        /// <returns>returns a byte array containing the data.</returns>
         public unsafe byte[] ReadMemory(ulong address, uint length)
         {
             if (DisposedCheck())
@@ -847,11 +757,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Read a ulong from an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address to read from.</param>
-        /// <returns>returns a ulong of the data.</returns>
         public unsafe ulong ReadMemoryULong(ulong address)
         {
             if (TryGetHostPointer(address, sizeof(ulong), out byte* ptr, out long offset))
@@ -866,11 +771,6 @@ namespace Brovan.Core.Emulation
             return value;
         }
 
-        /// <summary>
-        /// Read a uint from an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address to read from.</param>
-        /// <returns>returns a ulong of the data.</returns>
         public unsafe uint ReadMemoryUInt(ulong address)
         {
             if (TryGetHostPointer(address, sizeof(uint), out byte* ptr, out long offset))
@@ -885,11 +785,6 @@ namespace Brovan.Core.Emulation
             return value;
         }
 
-        /// <summary>
-        /// Read a ushort from an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address to read from.</param>
-        /// <returns>returns a ushort of the data.</returns>
         public unsafe ushort ReadMemoryUShort(ulong address)
         {
             if (TryGetHostPointer(address, sizeof(ushort), out byte* ptr, out long offset))
@@ -904,13 +799,7 @@ namespace Brovan.Core.Emulation
             return value;
         }
 
-        /// <summary>
-        /// Reads a string from an emulated memory address.
-        /// </summary>
-        /// <param name="address">Address to read from.</param>
-        /// <param name="length">Maximum length of the string to read.</param>
-        /// <param name="encoding">Encoding type.</param>
-        /// <returns>Returns a string of the data, or <see cref="string.Empty"/> if reading failed.</returns>
+        /// <param name="length">Maximum length in bytes, not characters.</param>
         public unsafe string ReadMemoryString(ulong address, int length, Encoding encoding)
         {
             if (DisposedCheck())
@@ -960,12 +849,6 @@ namespace Brovan.Core.Emulation
             return encoding.GetString(Bytes.Slice(0, BytesRead));
         }
 
-        /// <summary>
-        /// Write to a register.
-        /// </summary>
-        /// <param name="register">Register to write to.</param>
-        /// <param name="value">value to write to the register.</param>
-        /// <returns>returns true if successful, otherwise false.</returns>
         public bool WriteRegister(Registers register, ulong value)
         {
             return WriteRegister((int)register, value);
@@ -1004,12 +887,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Write to a register.
-        /// </summary>
-        /// <param name="register">Register to write to.</param>
-        /// <param name="value">value to write to the register.</param>
-        /// <returns>returns true if successful, otherwise false.</returns>
         public bool WriteRegister32(Registers register, uint value)
         {
             if (DisposedCheck())
@@ -1026,12 +903,6 @@ namespace Brovan.Core.Emulation
             return _error == UCErrors.UC_ERR_OK;
         }
 
-        /// <summary>
-        /// Write to a register.
-        /// </summary>
-        /// <param name="register">Register to write to.</param>
-        /// <param name="value">value to write to the register.</param>
-        /// <returns>returns true if successful, otherwise false.</returns>
         public bool WriteRegisterByte(Registers register, byte value)
         {
             if (DisposedCheck())
@@ -1048,12 +919,6 @@ namespace Brovan.Core.Emulation
             return _error == UCErrors.UC_ERR_OK;
         }
 
-        /// <summary>
-        /// Write to a register.
-        /// </summary>
-        /// <param name="register">Register to write to.</param>
-        /// <param name="value">value to write to the register.</param>
-        /// <returns>returns true if successful, otherwise false.</returns>
         public bool WriteRegisterByte(Registers register, byte[] value)
         {
             if (DisposedCheck())
@@ -1062,21 +927,11 @@ namespace Brovan.Core.Emulation
             return _error == UCErrors.UC_ERR_OK;
         }
 
-        /// <summary>
-        /// Read from a register.
-        /// </summary>
-        /// <param name="register">Register to read from.</param>
-        /// <returns>returns the value of the register.</returns>
         public ulong ReadRegister(Registers register)
         {
             return ReadRegister((int)register);
         }
 
-        /// <summary>
-        /// Read raw register.
-        /// </summary>
-        /// <param name="Register">Register to read.</param>
-        /// <returns>returns the value of the register.</returns>
         public unsafe ulong ReadRegister(int Register)
         {
             if (DisposedCheck())
@@ -1097,11 +952,6 @@ namespace Brovan.Core.Emulation
             return Value;
         }
 
-        /// <summary>
-        /// Read from a register.
-        /// </summary>
-        /// <param name="register">Register to read from.</param>
-        /// <returns>returns the value of the register.</returns>
         public uint ReadRegister32(Registers register)
         {
             if (DisposedCheck())
@@ -1112,11 +962,6 @@ namespace Brovan.Core.Emulation
             return value;
         }
 
-        /// <summary>
-        /// Read raw register.
-        /// </summary>
-        /// <param name="Register">Register to read.</param>
-        /// <returns>returns the value of the register.</returns>
         public uint ReadRegister32(int Register)
         {
             if (DisposedCheck())
@@ -1127,11 +972,6 @@ namespace Brovan.Core.Emulation
             return Value;
         }
 
-        /// <summary>
-        /// Read from a register.
-        /// </summary>
-        /// <param name="register">Register to read from.</param>
-        /// <returns>returns the value of the register.</returns>
         public byte ReadRegisterByte(Registers register)
         {
             if (DisposedCheck())
@@ -1152,9 +992,6 @@ namespace Brovan.Core.Emulation
             return Value;
         }
 
-        /// <summary>
-        /// Reads several registers in a single native call.
-        /// </summary>
         public unsafe bool ReadRegisterBatch(int[] Registers, ulong[] Values, int Count)
         {
             if (DisposedCheck())
@@ -1201,9 +1038,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Writes several registers in a single native call.
-        /// </summary>
         public unsafe bool WriteRegisterBatch(int[] Registers, ulong[] Values, int Count)
         {
             if (DisposedCheck())
@@ -1376,10 +1210,6 @@ namespace Brovan.Core.Emulation
             return _error == UCErrors.UC_ERR_OK;
         }
 
-        /// <summary>
-        /// Get the CPU Flags.
-        /// </summary>
-        /// <returns>returns the CPU Flags.</returns>
         public CPUFlags GetCPUFlags()
         {
             if (mode == Mode.MODE_64)
@@ -1392,11 +1222,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Set the CPU Flags.
-        /// </summary>
-        /// <param name="Flags">Flags to set.</param>
-        /// <returns>returns true if successful, otherwise false.</returns>
         public bool SetCPUFlags(CPUFlags Flags)
         {
             if (mode == Mode.MODE_64)
@@ -1409,13 +1234,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Set a new memory protection for an already mapped memory.
-        /// </summary>
-        /// <param name="Address">Address of the mapped memory.</param>
-        /// <param name="Size">Size of the mapped memory.</param>
-        /// <param name="Protection">New protection(s) for the mapped memory.</param>
-        /// <returns>returns true if successful, otherwise false.</returns>
         public bool SetMemoryProtection(ulong Address, ulong Size, MemoryProtection Protection)
         {
             if (DisposedCheck())
@@ -1425,14 +1243,8 @@ namespace Brovan.Core.Emulation
             return _error == UCErrors.UC_ERR_OK;
         }
 
-        /// <summary>
-        /// Start Emulation.
-        /// </summary>
-        /// <param name="start">Beginning of emulation.</param>
-        /// <param name="end">End of emulation.</param>
-        /// <param name="timeout">Timeout in milliseconds. A value of 0 disables the timeout.</param>
-        /// <param name="count">Instruction count limit. A value of 0 disables the instruction limit.</param>
-        /// <returns>True if emulation completed without errors; otherwise, false.</returns>
+        /// <param name="timeout">Timeout in microseconds, or 0 for none.</param>
+        /// <param name="count">Instruction count limit, or 0 for none.</param>
         public bool Emulate(ulong start, ulong end, uint timeout = 0, uint count = 0)
         {
             if (DisposedCheck())
@@ -1466,10 +1278,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Stop emulation.
-        /// </summary>
-        /// <returns>returns true if successfully stopped emulation, otherwise false.</returns>
         public bool StopEmulation()
         {
             if (DisposedCheck())
@@ -1479,12 +1287,6 @@ namespace Brovan.Core.Emulation
             return _error == UCErrors.UC_ERR_OK;
         }
 
-        /// <summary>
-        /// Add an instruction hook.
-        /// </summary>
-        /// <param name="Instruction">Instruction to hook.</param>
-        /// <param name="ReturnHook">The hook to return to.</param>
-        /// <returns>returns true if successful, otherwise false.</returns>
         public bool AddHook(INSTHooks Instruction, IntPtr ReturnHook)
         {
             if (DisposedCheck())
@@ -1505,22 +1307,12 @@ namespace Brovan.Core.Emulation
             Hooks.UC_HOOK_MEM_READ_PROT | Hooks.UC_HOOK_MEM_WRITE_PROT | Hooks.UC_HOOK_MEM_FETCH_PROT |
             Hooks.UC_HOOK_INSN_INVALID | Hooks.UC_HOOK_INTR;
 
-        /// <summary>
-        /// Make sure that the hook is a whitelisted hook when <see cref="NoHooks"/> are enabled.
-        /// </summary>
-        /// <returns>returns true if the hook is whitelisted, otherwise false.</returns>
         private static bool IsWhitelistedHookType(Hooks hook)
         {
             return (hook & RequiredHookTypes) != 0;
         }
 
-        /// <summary>
-        /// Adds a hook.
-        /// </summary>
-        /// <param name="Begin">The beginning of the address to hook.</param>
-        /// <param name="End">The end of the address to hook (if less than the Begin parameter, then it's applied to all addresses).</param>
-        /// <param name="ReturnHook">The hook to return to.</param>
-        /// <returns>returns true if successful, otherwise false.</returns>
+        /// <param name="End">A value below <paramref name="Begin"/> hooks all addresses.</param>
         public bool AddHook(ulong Begin, ulong End, Hooks HookType, IntPtr ReturnHook)
         {
             if (NoHooks && !IsWhitelistedHookType(HookType)) return true;
@@ -1537,14 +1329,7 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        /// <summary>
-        /// Adds a hook and returns the hook handle.
-        /// </summary>
-        /// <param name="Begin">The beginning of the address to hook.</param>
-        /// <param name="End">The end of the address to hook (if less than the Begin parameter, then it's applied to all addresses).</param>
-        /// <param name="HookType">Hook type.</param>
-        /// <param name="ReturnHook">Hook callback pointer.</param>
-        /// <returns>Hook handle or <see cref="IntPtr.Zero"/> on failure.</returns>
+        /// <param name="End">A value below <paramref name="Begin"/> hooks all addresses.</param>
         public IntPtr AddHookWithHandle(ulong Begin, ulong End, Hooks HookType, IntPtr ReturnHook)
         {
             if (NoHooks && !IsWhitelistedHookType(HookType)) return IntPtr.Zero;
@@ -1562,11 +1347,6 @@ namespace Brovan.Core.Emulation
             return IntPtr.Zero;
         }
 
-        /// <summary>
-        /// Remove a hook.
-        /// </summary>
-        /// <param name="Hook">The hook to remove.</param>
-        /// <returns>returns true if successful, otherwise false.</returns>
         public bool RemoveHook(IntPtr Hook)
         {
             if (DisposedCheck())
@@ -1581,10 +1361,6 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        /// <summary>
-        /// Remove all registered hooks.
-        /// </summary>
-        /// <returns>returns true if **ALL** registered hooks was successfully removed, otherwise false.</returns>
         public bool RemoveHooks()
         {
             if (DisposedCheck())
@@ -1673,13 +1449,12 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Reserve the address range that the TCG code buffer, the slot table and the
-        /// uc struct live in. Must be called before any <see cref="Unicorn"/> instance
-        /// is created: the reservation is what makes a saved code cache reloadable.
+        /// Reserves the address range for the TCG code buffer, the slot table and the uc struct.
+        /// Call it before the first <see cref="Unicorn"/> instance is created. A saved code cache
+        /// reloads only into this reservation.
         /// </summary>
         /// <param name="ReserveBase">Base recorded by a previous run, or 0 to let the OS choose.</param>
         /// <param name="ReserveSize">Total bytes to reserve, including the header region.</param>
-        /// <param name="EnableCache">Whether saving and loading are wanted this run.</param>
         /// <param name="StrictAudit">Also flag pointers into the interior of tracked objects.</param>
         public static bool ConfigureCodeCache(ulong ReserveBase, ulong ReserveSize, bool EnableCache, bool StrictAudit = false)
         {
@@ -1696,9 +1471,6 @@ namespace Brovan.Core.Emulation
             return brov_configure(ref Config) == UCErrors.UC_ERR_OK;
         }
 
-        /// <summary>
-        /// Get the base and size of the address reservation actually obtained.
-        /// </summary>
         public static bool GetCodeCacheReservation(out ulong ReservationBase, out ulong ReservationSize)
         {
             return brov_reservation_info(out ReservationBase, out ReservationSize) == UCErrors.UC_ERR_OK;
@@ -1774,8 +1546,7 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Serialize the TCG code cache. Returns false when it cannot be saved;
-        /// <see cref="GetCodeCacheReason"/> says why.
+        /// Returns false when the cache cannot be saved. <see cref="GetCodeCacheReason"/> says why.
         /// </summary>
         public unsafe bool SaveCodeCacheTo(Stream Destination)
         {
@@ -1808,9 +1579,8 @@ namespace Brovan.Core.Emulation
         }
 
         /// <summary>
-        /// Restore a previously saved TCG code cache. The guest image must already be
-        /// mapped: every restored block is verified against the guest bytes it was
-        /// translated from.
+        /// Each restored block is checked against the guest bytes it was translated from. A block
+        /// whose pages are not mapped yet waits for <see cref="ResolveCodeCache"/>.
         /// </summary>
         public bool LoadCodeCache(IntPtr Blob, long Length)
         {
@@ -1852,10 +1622,10 @@ namespace Brovan.Core.Emulation
         /// <remarks>
         /// Only registers Unicorn stores verbatim get an entry, and only those it would
         /// have written with a plain store get <see cref="DirectWritable"/>. EFLAGS is
-        /// absent because its condition codes are computed lazily, the program counter is
-        /// read-only here because writing it also raises quit_request and flushes
-        /// translated blocks, and nothing is exposed in 16- or 32-bit mode where the same
-        /// storage is reached under different truncation rules.
+        /// absent because its condition codes are computed lazily. The program counter is
+        /// read-only because writing it also raises quit_request and flushes translated
+        /// blocks. Nothing is exposed in 16- or 32-bit mode, where the same storage has
+        /// different truncation rules.
         /// </remarks>
         private const int DirectRegisterCount = 512;
         private const byte DirectProbed = 0x1;
@@ -1912,10 +1682,6 @@ namespace Brovan.Core.Emulation
             return (Known & Access) != 0 ? (ulong*)_directRegisters[Register] : null;
         }
 
-        /// <summary>
-        /// Get the current emulator context.
-        /// </summary>
-        /// <returns>returns a pointer to the context, if it failed it will return <see cref="IntPtr.Zero"/>.</returns>
         public IntPtr GetCurrentContext()
         {
             if (DisposedCheck())
@@ -1928,10 +1694,6 @@ namespace Brovan.Core.Emulation
             return Context;
         }
 
-        /// <summary>
-        /// Set the current emulator context.
-        /// </summary>
-        /// <returns>returns true if successful, otherwise false.</returns>
         public bool SetCurrentContext(IntPtr Context)
         {
             if (DisposedCheck())

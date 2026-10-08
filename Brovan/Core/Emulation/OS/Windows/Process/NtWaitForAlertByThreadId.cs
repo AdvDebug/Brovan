@@ -19,12 +19,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             public long Deadline { get; }
         }
 
-        private static AlertWaitTimeout ParseTimeout(BinaryEmulator Instance, ulong TimeoutPtr)
+        private static AlertWaitTimeout ParseTimeout(BinaryEmulator Instance, long? Timeout)
         {
-            if (TimeoutPtr == 0)
+            if (Timeout == null)
                 return new AlertWaitTimeout(true, false, -1);
 
-            long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(TimeoutPtr);
+            long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(Timeout);
             if (Deadline == Instance.EmulatedTickCount64)
                 return new AlertWaitTimeout(false, true, -1);
 
@@ -82,13 +82,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread.WaitActive)
                 return ContinueWait(Instance, Thread);
 
+            if (!Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? CapturedTimeout))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
             if (State.AlertByThreadIdPending)
             {
                 State.AlertByThreadIdPending = false;
                 return NTSTATUS.STATUS_ALERTED;
             }
 
-            AlertWaitTimeout Timeout = ParseTimeout(Instance, TimeoutPtr);
+            AlertWaitTimeout Timeout = ParseTimeout(Instance, CapturedTimeout);
             if (Timeout.PollOnly)
             {
                 Instance._emulator.StopEmulation();

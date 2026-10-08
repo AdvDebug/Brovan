@@ -2,18 +2,16 @@
  *
  * notdirty_write() decides whether a guest store may be promoted back onto the
  * inline TLB fast path. Until that happens every store to the page goes through
- * store_helper, which is a C call - measured 6.3x the cost of the equivalent
- * load, and the single largest cost in the emulator for ordinary guest code.
+ * store_helper, which is a C call.
  *
  * See brovan_mem_hooks.inc.h for why the fault-only hook types must not count
  * towards "a hook needs to see this store".
  *
  * A promoted entry outlives the decision that produced it, so uc_mem_protect()
- * now flushes the TLB. Only a change in *writability* reaches tcg_commit's
- * flush (via memory_region_set_readonly), so dropping and restoring EXEC on a
- * page that stayed writable used to leave a promoted entry in place, and the
- * next store of new instructions skipped TB invalidation - caught by the
- * exec-off/on case in the SMC test.
+ * flushes the TLB. Only a change in writability reaches tcg_commit's flush (via
+ * memory_region_set_readonly). Without that flush, a page that drops and
+ * restores EXEC while it stays writable keeps its promoted entry, and the next
+ * store of new instructions skips TB invalidation.
  */
 #ifndef BROVAN_NOTDIRTY_H
 #define BROVAN_NOTDIRTY_H
@@ -40,8 +38,7 @@ static inline bool brov_notdirty_allowed(CPUState *cpu, vaddr mem_vaddr,
      * The region's own permission is the test, not tlbe->addr_code. Brovan runs
      * the guest with paging off, and target/i386 hands tlb_fill
      * PAGE_READ|PAGE_WRITE|PAGE_EXEC for every page in that mode, so addr_code
-     * is never -1 and that gate rejected the entire address space. which is
-     * what kept every guest store on store_helper. The region permission is also
+     * is never -1 and would reject every page. The region permission is also
      * the condition guarding the tb_invalidate_phys_page_fast call above, and no
      * TB can exist for a region that is not executable, because an instruction
      * fetch from one faults. */

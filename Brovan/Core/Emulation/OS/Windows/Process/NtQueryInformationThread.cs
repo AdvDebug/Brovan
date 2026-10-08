@@ -298,9 +298,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        /// <summary>
-        /// Resolves a native thread handle, including both 32-bit and 64-bit current-thread pseudo handles.
-        /// </summary>
         private static EmulatedThread ResolveThreadFromHandle(BinaryEmulator Instance, ulong ThreadHandle)
         {
             if (HandleManager.IsCurrentThreadPseudoHandle(ThreadHandle))
@@ -309,9 +306,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(ThreadHandle);
         }
 
-        /// <summary>
-        /// Checks whether another process thread is still alive for ThreadAmILastThread.
-        /// </summary>
         private static bool HasOtherLiveThread(BinaryEmulator Instance, EmulatedThread CurrentThread)
         {
             foreach (EmulatedThread Thread in Instance.Threads.Values)

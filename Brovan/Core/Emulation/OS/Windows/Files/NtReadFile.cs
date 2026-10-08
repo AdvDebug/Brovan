@@ -38,6 +38,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinFile PipeFile = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             EventDone = PipeFile != null && (PipeFile.Pipe != null || PipeFile.HostStream == HostStreamKind.Input);
+
+            long Offset = 0;
+            if (PipeFile != null)
+            {
+                NTSTATUS OffsetStatus = Instance.WinHelper.ReadFileByteOffset(ByteOffsetPtr, PipeFile.Position, out Offset);
+                if (OffsetStatus != NTSTATUS.STATUS_SUCCESS)
+                {
+                    EventDone = true;
+                    return OffsetStatus;
+                }
+            }
+
             if (PipeFile?.Pipe != null)
                 return ReadPipe(Instance, FileHandle, PipeFile, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
 
@@ -108,25 +120,27 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
-            long Offset = Instance.WinHelper.GetEffectiveFileOffset(ByteOffsetPtr, FileObj.Position);
             if (Offset < 0)
                 Offset = 0;
 
-            long FileLength = Stream.Length;
-            if (Offset >= FileLength)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
-                return NTSTATUS.STATUS_END_OF_FILE;
-            }
+            int ToRead = Length > int.MaxValue ? int.MaxValue : (int)Length;
 
-            int Available = checked((int)Math.Min(int.MaxValue, FileLength - Offset));
-            int Requested = Length > int.MaxValue ? int.MaxValue : (int)Length;
-            int ToRead = Math.Min(Requested, Available);
-
-            if (ToRead != 0 && FileObj.HasConflictingIoLock((ulong)Offset, (ulong)ToRead, false))
+            // A read that runs past the end comes back short, so only the lock check needs the length first.
+            if (FileObj.Locks.Count != 0)
             {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_LOCK_CONFLICT, 0);
-                return NTSTATUS.STATUS_FILE_LOCK_CONFLICT;
+                long FileLength = Stream.Length;
+                if (Offset >= FileLength)
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
+                    return NTSTATUS.STATUS_END_OF_FILE;
+                }
+
+                ToRead = (int)Math.Min(ToRead, FileLength - Offset);
+                if (FileObj.HasConflictingIoLock((ulong)Offset, (ulong)ToRead, false))
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_LOCK_CONFLICT, 0);
+                    return NTSTATUS.STATUS_FILE_LOCK_CONFLICT;
+                }
             }
 
             // Bounded chunks keep a guest-sized read from growing the shared scratch buffer to the file size.
@@ -143,7 +157,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     Instance._emulator.WriteMemory(BufferPtr + (ulong)Done, Slice.Slice(0, Got));
                     Done += Got;
+                    if (Got < ChunkSize)
+                        break;
                 }
+            }
+            catch (FileNotFoundException)
+            {
+                // A file that went away under the stream reads as ended.
             }
             catch
             {
@@ -152,6 +172,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                     return NTSTATUS.STATUS_ACCESS_DENIED;
                 }
+            }
+
+            if (Done == 0)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
+                return NTSTATUS.STATUS_END_OF_FILE;
             }
 
             if (ByteOffsetPtr == 0)

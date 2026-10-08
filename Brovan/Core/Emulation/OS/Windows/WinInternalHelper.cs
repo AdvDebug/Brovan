@@ -416,7 +416,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int OffsetSystemCallX86 = 0x300;
         private const int OffsetSystemCallX64 = 0x308;
 
-        // 62 is what my desktop machine currently publishes
         private const ushort DefaultCyclesPerYield = 62;
 
         internal const long QpcFrequency = 10_000_000;

@@ -2011,9 +2011,6 @@ namespace Brovan.Core.Emulation.OS.Linux
             CurrentProcess.Arguments = ProcessArguments ?? Array.Empty<string>();
         }
 
-        /// <summary>
-        /// Returns the synthetic system uptime exposed to the Linux guest.
-        /// </summary>
         public void SyncEmulatedClock(BinaryEmulator Instance)
         {
             if (Instance == null)

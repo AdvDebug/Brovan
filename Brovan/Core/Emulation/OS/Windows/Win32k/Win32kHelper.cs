@@ -3034,7 +3034,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Hwnd != 0 && Instance.WinHelper.GetWindow(Hwnd) == null)
                 return false;
 
-            // A window never holds more than one WM_PAINT.
+            // Outside a broadcast, a window holds at most one posted WM_PAINT.
             if (Message == WM_PAINT && IsQueued(State, Hwnd, WM_PAINT))
                 return true;
 
@@ -3248,7 +3248,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Index++;
             }
 
-            // NT hands out WM_PAINT only when the queue is empty, and keeps doing so until validation.
+            // NT hands out WM_PAINT only when the queue is empty.
             if ((WakeMask & QS_PAINT) != 0 && MessageInFilter(WM_PAINT, MinMessage, MaxMessage))
             {
                 WinWindow Dirty = FindDirtyWindow(Instance, HwndFilter, ThreadId);
@@ -4843,8 +4843,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
 
         /// <summary>
-        /// Screen position of the pointer, tracked from the client-relative coordinates the host window manager
-        /// reports for the foreground window.
+        /// Screen position of the pointer, from the host cursor where the host reports it, or else tracked from
+        /// the client-relative coordinates the host window manager reports for the foreground window.
         /// </summary>
         internal static void GetCursorPosition(BinaryEmulator Instance, out int X, out int Y)
         {

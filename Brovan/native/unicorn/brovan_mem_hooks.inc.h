@@ -5,16 +5,12 @@
  * what upgrades a write TLB entry from TLB_NOTDIRTY to the inline fast path,
  * and tb_gen_code() consults it to undo that for pages that become code.
  *
- * It counted the fault-only hook types too. Those fire only from tlb_fill()
- * after an access has already missed or failed its permission check, which
- * cannot happen on a page that has a valid writable TLB entry - so they never
- * needed the slow path. Brovan registers exactly those two (they are how a
- * guest access violation is reported), which meant every store in every guest
- * program stayed on store_helper permanently: measured 6.3x slower than the
- * equivalent load, and the largest single cost in the emulator.
+ * The fault-only hook types do not count. They fire only from tlb_fill() after
+ * an access has missed or failed its permission check, which cannot happen on a
+ * page that has a valid writable TLB entry.
  *
- * Both callers must agree, so the narrowing lives here rather than at one call
- * site: tb_gen_code() has to restore dirty tracking for exactly the pages
+ * Both callers must agree, so the rule lives here rather than at one call site.
+ * tb_gen_code() has to restore dirty tracking for exactly the pages
  * notdirty_write() would have made fast, or self-modifying code stops being
  * detected.
  */

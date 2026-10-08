@@ -16,7 +16,8 @@
 #endif
 
 /* TARGET_PAGE_SIZE is a runtime value on some targets, so this cannot be sized
- * from it. A TB never covers more than one page. */
+ * from it. A TB can cross into a second page. One that does not fit here is not
+ * saved. */
 #define BROV_MAX_TB_SRC 16384
 
 #define BROV_TB_DROPPED 0
@@ -235,8 +236,6 @@ static gboolean brov_collect_tb(gpointer key, gpointer value, gpointer data)
     list->tbs[list->count++] = tb;
     return FALSE;
 }
-
-/* ---- relocation audit -------------------------------------------------- */
 
 /* Any host pointer baked into generated code that is neither pinned in the
  * reservation nor routed through the slot table would point at the wrong object
@@ -527,8 +526,6 @@ static int brov_audit_impl(struct uc_struct *uc, brov_audit_result_t *out)
     return UC_ERR_OK;
 }
 
-/* ---- save -------------------------------------------------------------- */
-
 static int brov_save_impl(struct uc_struct *uc, void **blob_out, size_t *len_out)
 {
     TCGContext *s = uc->tcg_ctx;
@@ -684,8 +681,6 @@ static int brov_save_impl(struct uc_struct *uc, void **blob_out, size_t *len_out
     *len_out = total;
     return UC_ERR_OK;
 }
-
-/* ---- load -------------------------------------------------------------- */
 
 /* page_addr[] and hash hold ram-block offsets from the run that generated the
  * block. Nothing guarantees the guest lands in the same ram offsets this time,
@@ -1109,8 +1104,6 @@ static int brov_resolve_impl(struct uc_struct *uc, uint32_t *resolved, uint32_t 
     }
     return UC_ERR_OK;
 }
-
-/* ---- info / flush / registers ------------------------------------------ */
 
 static int brov_info_impl(struct uc_struct *uc, brov_cc_info_t *out)
 {

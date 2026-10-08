@@ -181,7 +181,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                         uint Value = Instance._emulator.ReadMemoryUInt(ThreadInformationPtr);
-                        //Thread.BreakOnTermination = Value != 0;
                         return NTSTATUS.STATUS_SUCCESS;
                     }
 

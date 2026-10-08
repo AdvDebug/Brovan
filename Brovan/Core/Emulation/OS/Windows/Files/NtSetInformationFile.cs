@@ -552,14 +552,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return true;
                 }
 
-                if (!string.IsNullOrEmpty(SourceVirtual) && File.Exists(SourceVirtual))
+                if (!string.IsNullOrEmpty(SourceVirtual)
+                    && GeneralHelper.IO.TryGetHostAttributes(new FileInfo(SourceVirtual), out FileAttributes SourceAttributes)
+                    && (SourceAttributes & FileAttributes.Directory) == 0)
                 {
                     string Parent = Path.GetDirectoryName(TargetVirtual);
                     if (!string.IsNullOrEmpty(Parent))
                         Directory.CreateDirectory(Parent);
 
                     File.Move(SourceVirtual, TargetVirtual);
-                    WindowsFileStream.InvalidateGuestPathCache();
+                    WindowsFileStream.InvalidateRemovedEntry(SourceAttributes);
                     return true;
                 }
 
@@ -596,10 +598,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return true;
                 }
 
-                if (File.Exists(VirtualPath))
+                if (GeneralHelper.IO.TryGetHostAttributes(new FileInfo(VirtualPath), out FileAttributes Attributes)
+                    && (Attributes & FileAttributes.Directory) == 0)
                 {
                     File.Delete(VirtualPath);
-                    WindowsFileStream.InvalidateGuestPathCache();
+                    WindowsFileStream.InvalidateRemovedEntry(Attributes);
                 }
 
                 return true;

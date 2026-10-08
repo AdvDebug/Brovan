@@ -14,10 +14,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong LengthPtr = Instance.WinHelper.GetArg(3);
             uint Key = (uint)Instance.WinHelper.GetArg(4);
 
-            if (IoStatusBlockPtr == 0 || ByteOffsetPtr == 0 || LengthPtr == 0)
+            if (IoStatusBlockPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)) || !Instance.IsRegionMapped(ByteOffsetPtr, 8) || !Instance.IsRegionMapped(LengthPtr, 8))
+            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
@@ -26,6 +26,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
+
+            NTSTATUS CaptureStatus = Instance.WinHelper.ReadFileLockRange(ByteOffsetPtr, LengthPtr, out long Offset, out ulong Length);
+            if (CaptureStatus != NTSTATUS.STATUS_SUCCESS)
+                return CaptureStatus;
 
             if (FileObj.Device)
             {
@@ -39,13 +43,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
-            if (!Instance.WinHelper.TryReadFileLockRange(ByteOffsetPtr, LengthPtr, out ulong Offset, out ulong Length, out NTSTATUS RangeStatus))
+            if (!Instance.WinHelper.IsValidFileLockRange(Offset, Length))
             {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, RangeStatus, 0);
-                return RangeStatus;
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_LOCK_RANGE, 0);
+                return NTSTATUS.STATUS_INVALID_LOCK_RANGE;
             }
 
-            if (!FileObj.RemoveLock(Offset, Length, Key))
+            if (!FileObj.RemoveLock((ulong)Offset, Length, Key))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_RANGE_NOT_LOCKED, 0);
                 return NTSTATUS.STATUS_RANGE_NOT_LOCKED;

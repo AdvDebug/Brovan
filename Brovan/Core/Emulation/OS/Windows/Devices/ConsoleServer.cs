@@ -1004,9 +1004,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        /// <summary>
-        /// Resolves the console object an API call acts on.
-        /// </summary>
         private static WinFile ResolveTarget(BinaryEmulator Instance, ulong Client, WinFile Issued)
         {
             if (Client == 0)

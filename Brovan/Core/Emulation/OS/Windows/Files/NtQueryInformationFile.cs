@@ -473,26 +473,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IsDirectory && (Attributes & FileAttributes.Directory) == 0)
                 Attributes |= FileAttributes.Directory;
 
-            Instance._emulator.WriteMemory(FileInformation + 0x00, (ulong)CreationTime, 8);
-            Instance._emulator.WriteMemory(FileInformation + 0x08, (ulong)LastAccessTime, 8);
-            Instance._emulator.WriteMemory(FileInformation + 0x10, (ulong)LastWriteTime, 8);
-            Instance._emulator.WriteMemory(FileInformation + 0x18, (ulong)ChangeTime, 8);
-            Instance._emulator.WriteMemory(FileInformation + 0x20, (uint)Attributes, 4);
-            Instance._emulator.WriteMemory(FileInformation + 0x24, 0u, 4);
-            Instance._emulator.WriteMemory(FileInformation + 0x28, AllocationSize, 8);
-            Instance._emulator.WriteMemory(FileInformation + 0x30, EndOfFile, 8);
-            Instance._emulator.WriteMemory(FileInformation + 0x38, 1u, 4);
-            Instance.WinHelper.WriteByte(FileInformation + 0x3C, 0x00);
-            Instance.WinHelper.WriteByte(FileInformation + 0x3D, IsDirectory ? (byte)0x01 : (byte)0x00);
-            Instance._emulator.WriteMemory(FileInformation + 0x3E, 0u, 2);
-            Instance._emulator.WriteMemory(FileInformation + 0x40, WinFile.MakeFileId(File.Path), 8);
-            Instance._emulator.WriteMemory(FileInformation + 0x48, 0u, 4);
             AccessMask Permissions = Instance.WinHelper.HandleManager.GetPermissionsByHandle(FileHandle);
-            Instance._emulator.WriteMemory(FileInformation + 0x4C, (uint)Permissions, 4);
-            Instance._emulator.WriteMemory(FileInformation + 0x50, 0UL, 8);
-            Instance._emulator.WriteMemory(FileInformation + 0x58, 0u, 4);
-            Instance._emulator.WriteMemory(FileInformation + 0x5C, 0u, 4);
-            Instance._emulator.WriteMemory(FileInformation + 0x60, (uint)NameByteLength, 4);
+
+            Span<byte> Fixed = stackalloc byte[(int)FileAllInformationNameOffset];
+            Fixed.Clear();
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Fixed.Slice(0x00), CreationTime);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Fixed.Slice(0x08), LastAccessTime);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Fixed.Slice(0x10), LastWriteTime);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Fixed.Slice(0x18), ChangeTime);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x20), (uint)Attributes);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Fixed.Slice(0x28), AllocationSize);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Fixed.Slice(0x30), EndOfFile);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x38), 1u);
+            Fixed[0x3D] = IsDirectory ? (byte)0x01 : (byte)0x00;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Fixed.Slice(0x40), WinFile.MakeFileId(File.Path));
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x4C), (uint)Permissions);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x60), (uint)NameByteLength);
+            Instance._emulator.WriteMemory(FileInformation, Fixed);
 
             uint WritableNameBytes = Length > FileAllInformationNameOffset ? Length - FileAllInformationNameOffset : 0;
             uint NameBytesToWrite = Math.Min((uint)NameByteLength, WritableNameBytes);
@@ -544,7 +541,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             WindowsFileStream Stream = File.GetFileStream();
-            string HostPath = Stream?.EffectiveReadHostPath;
+            if (Stream == null)
+                return;
+
+            if (Stream.TryGetHandleMetadata(out Attributes, out CreationTime, out LastAccessTime, out LastWriteTime, out long HandleLength))
+            {
+                ChangeTime = LastWriteTime;
+                if ((Attributes & FileAttributes.Directory) != 0)
+                {
+                    IsDirectory = true;
+                    return;
+                }
+
+                EndOfFile = (ulong)Math.Max(HandleLength, 0);
+                AllocationSize = AlignUp(EndOfFile, 0x1000);
+                if (Attributes == 0)
+                    Attributes = FileAttributes.Normal;
+                return;
+            }
+
+            string HostPath = Stream.EffectiveReadHostPath;
             if (string.IsNullOrEmpty(HostPath))
                 return;
 

@@ -14,63 +14,31 @@ using System.Collections.Concurrent;
 
 namespace Brovan.Core
 {
-    /// <summary>
-    /// BinaryFile class which parses PE, ELF, and .NET binaries.
-    /// </summary>
     public class BinaryFile : IDisposable
     {
         private const uint ComImageFlagsILOnly = 0x1;
 
-        // public variables (results of analysis)
-
-        /// <summary>
-        /// Binary format.
-        /// </summary>
         public BinaryFormat FileFormat;
 
-        /// <summary>
-        /// Binary size.
-        /// </summary>
         public int BinarySize = 0;
 
-        /// <summary>
-        /// Binary Architecture.
-        /// </summary>
         public BinaryArchitecture Architecture;
 
-        /// <summary>
-        /// Entry point of the binary.
-        /// </summary>
         public uint EntryPoint = 0;
 
-        /// <summary>
-        /// Binary location.
-        /// </summary>
         public string Location = string.Empty;
 
-        /// <summary>
-        /// Structure to be used for PE files.
-        /// </summary>
         public PortableExecutable PE { get; private set; }
 
-        /// <summary>
-        /// Structure to be used for .NET files.
-        /// </summary>
         public DotNet DotNet { get; private set; }
 
-        /// <summary>
-        /// Structure to be used for ELF files.
-        /// </summary>
         public ELF ELF { get; private set; }
 
         /// <summary>
-        /// Functions that exist in the binary (doesn't get filled if the binary is a .NET Binary).
+        /// Empty for a .NET binary and for a PE binary parsed in quick mode.
         /// </summary>
         public BinaryFunction[] Functions { get; private set; } = Array.Empty<BinaryFunction>();
 
-        /// <summary>
-        /// Exported functions from the binary.
-        /// </summary>
         public BinaryFunction[] ExportFunctions { get; private set; } = Array.Empty<BinaryFunction>();
 
         private MappedMemoryBytes Data;
@@ -82,9 +50,6 @@ namespace Brovan.Core
         private readonly SectionLookupCache<PortableBinarySection> PeSectionCache = new SectionLookupCache<PortableBinarySection>(GetPeSectionVa, GetPeSectionSize);
         private readonly SectionLookupCache<ElfBinarySection> ElfSectionCache = new SectionLookupCache<ElfBinarySection>(GetElfSectionVa, GetElfSectionSize);
 
-        /// <summary>
-        /// Executable Formats Magic Number.
-        /// </summary>
         private static readonly Dictionary<BinaryFormat, byte[]> BinaryMagicNumbers = new()
         {
             { BinaryFormat.PE, new byte[] { 0x4D, 0x5A } },
@@ -93,15 +58,6 @@ namespace Brovan.Core
 
         private IcedX86Disassembler Disassembler;
 
-        /// <summary>
-        /// Reads an unmanaged structure from a byte array.
-        /// </summary>
-        /// <typeparam name="T">Unmanaged struct.</typeparam>
-        /// <param name="Data">Data to get the struct from.</param>
-        /// <param name="Offset">Offset of the struct.</param>
-        /// <returns>The structure read from the supplied data.</returns>
-        /// <exception cref="ArgumentNullException"></exception>
-        /// <exception cref="ArgumentOutOfRangeException"></exception>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public T ReadStruct<T>(byte[] Data, int Offset) where T : unmanaged
         {
@@ -125,15 +81,6 @@ namespace Brovan.Core
             }
         }
 
-        /// <summary>
-        /// Reads an unmanaged structure from a byte span.
-        /// </summary>
-        /// <typeparam name="T">Unmanaged struct.</typeparam>
-        /// <param name="Data">Data to get the struct from.</param>
-        /// <param name="Offset">Offset of the struct.</param>
-        /// <returns>The structure read from the supplied data.</returns>
-        /// <exception cref="ArgumentNullException"></exception>
-        /// <exception cref="ArgumentOutOfRangeException"></exception>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public T ReadStruct<T>(ReadOnlySpan<byte> Data, int Offset) where T : unmanaged
         {
@@ -157,11 +104,6 @@ namespace Brovan.Core
             }
         }
 
-        /// <summary>
-        /// Read Executable Section Name.
-        /// </summary>
-        /// <param name="NameBytes">Name in bytes.</param>
-        /// <returns>The section name as a string.</returns>
         private static string ReadSectionName(ReadOnlySpan<byte> NameBytes)
         {
             int NameLength = NameBytes.IndexOf((byte)0);
@@ -169,18 +111,11 @@ namespace Brovan.Core
             return Encoding.ASCII.GetString(NameBytes.Slice(0, NameLength));
         }
 
-        /// <summary>
-        /// Gets the Binary Data.
-        /// </summary>
-        /// <returns>returns a byte array containing the whole Binary.</returns>
         public ReadOnlySpan<byte> GetBinaryData()
         {
             return DataSpan;
         }
 
-        /// <summary>
-        /// Disposes and nulls the mapped binary data.
-        /// </summary>
         public void DisposeBinaryData()
         {
             MappedMemoryBytes Old = Data;
@@ -192,11 +127,6 @@ namespace Brovan.Core
             Old.Dispose();
         }
 
-        /// <summary>
-        /// Reads a single byte from an offset.
-        /// </summary>
-        /// <param name="Offset">Offset of the data.</param>
-        /// <returns>returns a byte from the chosen offset.</returns>
         public byte ReadOffset(int Offset)
         {
             if (Offset < 0 || Offset >= Data.Length)
@@ -204,27 +134,11 @@ namespace Brovan.Core
             return Data[Offset];
         }
 
-        /// <summary>
-        /// Parses, analyzes, and sets values for the Binary File based on it's format.
-        /// </summary>
-        /// <param name="Data">Binary file data.</param>
-        /// <exception cref="IndexOutOfRangeException"></exception>
-        /// <exception cref="ArgumentOutOfRangeException"></exception>
-        /// <exception cref="ArgumentNullException"></exception>
-        /// <exception cref="OverflowException"></exception>
         public void ParseBinary(byte[] Data)
         {
             ParseBinary((ReadOnlySpan<byte>)Data);
         }
 
-        /// <summary>
-        /// Parses, analyzes, and sets values for the Binary File based on it's format.
-        /// </summary>
-        /// <param name="Data">Binary file data.</param>
-        /// <exception cref="IndexOutOfRangeException"></exception>
-        /// <exception cref="ArgumentOutOfRangeException"></exception>
-        /// <exception cref="ArgumentNullException"></exception>
-        /// <exception cref="OverflowException"></exception>
         private void ParseBinary(ReadOnlySpan<byte> Data)
         {
             bool FormatFound = false;
@@ -261,10 +175,8 @@ namespace Brovan.Core
 
             if (FileFormat == BinaryFormat.PE)
             {
-                // Read PE Dos Header
                 IMAGE_DOS_HEADER DosHeader = ReadStruct<IMAGE_DOS_HEADER>(Data, 0);
 
-                // Check for magic number again, to be sure.
                 if (DosHeader.e_magic != 0x5A4D)
                 {
                     FileFormat = BinaryFormat.Unknown;
@@ -273,8 +185,7 @@ namespace Brovan.Core
 
                 uint PESignature = ReadStruct<uint>(Data, DosHeader.e_lfanew);
 
-                // do a check to ensure it's a valid PE file.
-                if (PESignature != 0x00004550) // (check for "PE\0\0" which should be available for valid PE binaries)
+                if (PESignature != 0x00004550) // "PE\0\0"
                 {
                     FileFormat = BinaryFormat.Unknown;
                     return;
@@ -284,7 +195,6 @@ namespace Brovan.Core
                 PE.FileHeader = FileHeader;
                 bool Is64Bit = false;
 
-                // Determine binary type.
                 switch (FileHeader.Machine)
                 {
                     case 0x014C:
@@ -351,12 +261,10 @@ namespace Brovan.Core
                     PE.OptionalHeader32 = OptionalHeader;
                 }
 
-                // Get the offset of the PE sections.
                 int SectionOffset = (DosHeader.e_lfanew + 4) + (Unsafe.SizeOf<IMAGE_FILE_HEADER>() + FileHeader.SizeOfOptionalHeader);
 
                 PE.Sections = new PortableBinarySection[FileHeader.NumberOfSections];
 
-                // Get PE Sections.
                 for (int i = 0; i < FileHeader.NumberOfSections; i++)
                 {
                     if (SectionOffset + Unsafe.SizeOf<IMAGE_SECTION_HEADER>() > Data.Length)
@@ -403,7 +311,6 @@ namespace Brovan.Core
             }
             else if (FileFormat == BinaryFormat.ELF)
             {
-                // Determine Architecture first which is located at the offset (0x4)
                 byte ElfClass = Data[4];
                 bool Is64Bit = ElfClass == 2;
                 if (Is64Bit)
@@ -430,7 +337,6 @@ namespace Brovan.Core
 
                     int SectionCount = ElfHeader.e_shnum;
 
-                    // Set ELF Information.
                     EntryPoint = (uint)ElfHeader.e_entry;
                     ELF.Type = ElfHeader.e_type;
                     ELF.Version = ElfHeader.e_version;
@@ -443,7 +349,6 @@ namespace Brovan.Core
                     ELF.SectionNameIndex = ElfHeader.e_shstrndx;
                     ELF.Sections = new ElfBinarySection[SectionCount];
 
-                    // Read the sections and set it's information.
                     ELF64_SECTION_HEADER StringTableHeader = ReadStruct<ELF64_SECTION_HEADER>(Data, (int)(ElfHeader.e_shoff + ((ulong)ElfHeader.e_shstrndx * (ulong)ElfHeader.e_shentsize)));
                     if (StringTableHeader.sh_size > (ulong)Array.MaxLength || StringTableHeader.sh_size < 0)
                         throw new ArgumentOutOfRangeException(nameof(StringTableHeader.sh_size), "sh_size is out-of-range for a byte array.");
@@ -509,7 +414,6 @@ namespace Brovan.Core
 
                     int SectionCount = ElfHeader.e_shnum;
 
-                    // Set ELF Information.
                     EntryPoint = ElfHeader.e_entry;
                     ELF.Type = ElfHeader.e_type;
                     ELF.Version = ElfHeader.e_version;
@@ -522,7 +426,6 @@ namespace Brovan.Core
                     ELF.SectionNameIndex = ElfHeader.e_shstrndx;
                     ELF.Sections = new ElfBinarySection[SectionCount];
 
-                    // Read the sections and set it's information.
                     ELF32_SECTION_HEADER StringTableHeader = ReadStruct<ELF32_SECTION_HEADER>(Data, (int)(ElfHeader.e_shoff + (ElfHeader.e_shstrndx * ElfHeader.e_shentsize)));
                     if (StringTableHeader.sh_size > Array.MaxLength || StringTableHeader.sh_size < 0)
                         throw new OverflowException("sh_size is out-of-range for a byte array.");
@@ -569,22 +472,14 @@ namespace Brovan.Core
 
                 BuildELFSectionLookupCache();
 
-                // Parse functions and imports
                 ParseELFFunctions();
                 ParseELFImports(Is64Bit);
             }
             BinarySize = Data.Length;
         }
 
-        /// <summary>
-        /// Parse and extract function names from the PE export directory and code sections.
-        /// </summary>
-        /// <param name="DosHeader">DOS Header of the PE file.</param>
-        /// <param name="FileHeader">File Header of the PE file.</param>
-        /// <param name="Is64Bit">Indicates if the PE is 64-bit.</param>
         private void ParsePEFunctions(IMAGE_DOS_HEADER DosHeader, IMAGE_FILE_HEADER FileHeader, bool Is64Bit)
         {
-            // Parse .pdata section for runtime function information
             var PDataSection = PE.Sections.FirstOrDefault(s => s.SectionName == ".pdata");
             if (PDataSection.SectionName != null)
             {
@@ -647,10 +542,8 @@ namespace Brovan.Core
                 }
             }
 
-            // Parse remaining functions using signature scanning
             ParsePEFunctions();
 
-            // Add entry point as before
             if (Is64Bit)
             {
                 IMAGE_OPTIONAL_HEADER64 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER64>(DataSpan, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
@@ -706,12 +599,10 @@ namespace Brovan.Core
                 IMAGE_OPTIONAL_HEADER32 OptionalHeader = ReadStruct<IMAGE_OPTIONAL_HEADER32>(DataSpan, DosHeader.e_lfanew + 4 + Unsafe.SizeOf<IMAGE_FILE_HEADER>());
                 uint EntryRva = OptionalHeader.AddressOfEntryPoint;
 
-                // Find the section containing the entry point
                 if (TryFindPESectionByRvaFast(EntryRva, out PortableBinarySection EntrySection))
                 {
                     if (EntrySection.SectionName != null)
                     {
-                        // Calculate file offset
                         if (TryRvaToFileOffset(EntryRva, out uint EntryOffset))
                         {
                             if (!Functions.Any(f => f.Offset == EntryOffset))
@@ -731,12 +622,6 @@ namespace Brovan.Core
             }
         }
 
-        /// <summary>
-        /// Try to locate the PE section that contains the specified file offset by scanning section raw ranges.
-        /// </summary>
-        /// <param name="FileOffset">The file offset to resolve.</param>
-        /// <param name="Section">Receives the containing section when found.</param>
-        /// <returns>returns true if the file offset maps to a section, otherwise false.</returns>
         private bool TryFindPESectionByFileOffset(uint FileOffset, out PortableBinarySection Section)
         {
             Section = default;
@@ -761,11 +646,6 @@ namespace Brovan.Core
             return false;
         }
 
-        /// <summary>
-        /// Determine the end offset of a function starting at the specified file offset by scanning forward for common epilogues or padding.
-        /// </summary>
-        /// <param name="StartOffset">The file offset where the function begins.</param>
-        /// <returns>The file offset where the function is considered to end.</returns>
         private uint GetFunctionEndOffset(uint StartOffset)
         {
             if (StartOffset >= (uint)Data.Length)
@@ -794,7 +674,6 @@ namespace Brovan.Core
                 if (EndSearch + 16 > (uint)Data.Length)
                     break;
 
-                // Disassemble a chunk of code at the current position
                 DataSpan.Slice((int)EndSearch, 16).CopyTo(ChunkData);
 
                 X86Instruction[] Instructions = Disassembler.Disassemble(ChunkData, EndSearch);
@@ -802,14 +681,12 @@ namespace Brovan.Core
                 if (Instructions.Length < 1)
                     continue;
 
-                // Check for common epilogues
                 if (IsEpilogue(Instructions))
                 {
                     EndOffset = EndSearch + (uint)Instructions[Instructions.Length - 1].Bytes.Length;
                     break;
                 }
 
-                // Check for proper INT3 padding
                 if (IsInt3Padding(Instructions))
                 {
                     bool IsInt3Sequence = true;
@@ -856,7 +733,6 @@ namespace Brovan.Core
                 if (A1 <= A0)
                     continue;
 
-                // Overlap test
                 if (StartOffset < A1 && EndOffset > A0)
                     return true;
             }
@@ -994,10 +870,6 @@ namespace Brovan.Core
             }
         }
 
-        /// <summary>
-        /// Builds internal lookup structures for PE sections, enabling fast resolution of RVAs to sections and file offsets.
-        /// Must be called after Sections inside <see cref="PE"/> is populated.
-        /// </summary>
         private void BuildPESectionLookupCache()
         {
             if (PE.Sections == null || PE.Sections.Length == 0)
@@ -1006,9 +878,6 @@ namespace Brovan.Core
             PeSectionCache.Build(PE.Sections);
         }
 
-        /// <summary>
-        /// Builds internal lookup structures for ELF sections, enabling fast resolution of VAs to sections.
-        /// </summary>
         private void BuildELFSectionLookupCache()
         {
             if (ELF.Sections == null || ELF.Sections.Length == 0)
@@ -1017,42 +886,21 @@ namespace Brovan.Core
             ElfSectionCache.Build(ELF.Sections);
         }
 
-        /// <summary>
-        /// Try to locate the PE section that contains the specified RVA using a binary search over sorted section ranges.
-        /// </summary>
-        /// <param name="Rva">The RVA to resolve.</param>
-        /// <param name="Section">Receives the containing section when found.</param>
-        /// <returns>returns true if the RVA maps to a section, otherwise false.</returns>
         private bool TryFindPESectionByRva(uint Rva, out PortableBinarySection Section)
         {
             return PeSectionCache.TryFindByVa(Rva, out Section);
         }
 
-        /// <summary>
-        /// Try to locate the PE section that contains the specified RVA using a small cache for sequential access.
-        /// </summary>
-        /// <param name="Rva">The RVA to resolve.</param>
-        /// <param name="Section">Receives the containing section when found.</param>
-        /// <returns>returns true if the RVA maps to a section, otherwise false.</returns>
         private bool TryFindPESectionByRvaFast(uint Rva, out PortableBinarySection Section)
         {
             return PeSectionCache.TryFindByVa(Rva, out Section);
         }
 
-        /// <summary>
-        /// Try to locate the ELF section that contains the specified virtual address using a small cache for sequential access.
-        /// </summary>
         private bool TryFindELFSectionByVaFast(ulong VirtualAddress, out ElfBinarySection Section)
         {
             return ElfSectionCache.TryFindByVa(VirtualAddress, out Section);
         }
 
-        /// <summary>
-        /// Convert an RVA to a file offset using cached section lookup.
-        /// </summary>
-        /// <param name="Rva">The RVA to convert.</param>
-        /// <param name="FileOffset">Receives the file offset when conversion succeeds.</param>
-        /// <returns>True if the RVA could be converted; otherwise, false.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool TryRvaToFileOffset(uint Rva, out uint FileOffset)
         {
@@ -1118,9 +966,6 @@ namespace Brovan.Core
         private static readonly SearchValues<byte> X86FunctionSignatureFirstByteSearchValues = SearchValues.Create(X86FunctionSignatureFirstBytes);
         private static readonly SearchValues<byte> X64FunctionSignatureFirstByteSearchValues = SearchValues.Create(X64FunctionSignatureFirstBytes);
 
-        /// <summary>
-        /// Group function signatures by their first byte so we only test plausible candidates.
-        /// </summary>
         private static Dictionary<byte, byte[][]> BuildFunctionSignatureLookup(byte[][] Signatures)
         {
             Dictionary<byte, List<byte[]>> GroupedSignatures = new Dictionary<byte, List<byte[]>>();
@@ -1147,9 +992,6 @@ namespace Brovan.Core
             return Lookup;
         }
 
-        /// <summary>
-        /// Find the next offset whose first byte matches one of the known function signatures.
-        /// </summary>
         private static int FindNextFunctionSignatureCandidate(ReadOnlySpan<byte> SectionData, int StartOffset, SearchValues<byte> CandidateFirstBytes)
         {
             if ((uint)StartOffset >= (uint)SectionData.Length)
@@ -1169,9 +1011,6 @@ namespace Brovan.Core
             };
         }
 
-        /// <summary>
-        /// Parse and identify non-exported functions by scanning code sections for common function prologues.
-        /// </summary>
         private void ParsePEFunctions()
         {
             FrozenSet<uint> ExistingOffsets = Functions.Select(f => f.Offset).ToFrozenSet();
@@ -1384,21 +1223,11 @@ namespace Brovan.Core
             Functions = FinalFunctions.ToArray();
         }
 
-        /// <summary>
-        /// Check whether the instruction represents a one-byte INT3 padding instruction.
-        /// </summary>
-        /// <param name="Inst">The instruction to examine.</param>
-        /// <returns>returns true if the instruction is a one-byte INT3, otherwise false.</returns>
         private bool IsInt3Padding(X86Instruction Inst)
         {
             return Inst.Mnemonic == "int3" && Inst.Bytes.Length == 1 && Inst.Bytes.Span[0] == 0xCC;
         }
 
-        /// <summary>
-        /// Check whether the first instruction in the sequence represents INT3 padding.
-        /// </summary>
-        /// <param name="Instructions">Decoded instructions to examine.</param>
-        /// <returns>returns true if the first instruction is a one-byte INT3, otherwise false.</returns>
         private bool IsInt3Padding(X86Instruction[] Instructions)
         {
             if (Instructions == null || Instructions.Length == 0)
@@ -1407,9 +1236,6 @@ namespace Brovan.Core
             return IsInt3Padding(Instructions[0]);
         }
 
-        /// <summary>
-        /// Check whether the instruction represents a stack-frame teardown move.
-        /// </summary>
         private bool IsMovSpBp(X86Instruction Inst)
         {
             string Op = Inst.Operand;
@@ -1419,11 +1245,6 @@ namespace Brovan.Core
             return Op == "esp, ebp" || Op == "rsp, rbp";
         }
 
-        /// <summary>
-        /// Check whether the provided instruction sequence matches a function epilogue pattern.
-        /// </summary>
-        /// <param name="Instructions">Decoded instructions to examine.</param>
-        /// <returns>returns true if an epilogue pattern is detected, otherwise false.</returns>
         private bool IsEpilogue(X86Instruction[] Instructions)
         {
             if (Instructions == null || Instructions.Length == 0)
@@ -1493,15 +1314,6 @@ namespace Brovan.Core
             return false;
         }
 
-        /// <summary>
-        /// Try to calculate a table entry file offset while checking for malformed export table bounds.
-        /// </summary>
-        /// <param name="BaseOffset">File offset of the table.</param>
-        /// <param name="Index">Entry index inside the table.</param>
-        /// <param name="EntrySize">Entry size in bytes.</param>
-        /// <param name="DataLength">Binary data length.</param>
-        /// <param name="Offset">Receives the calculated file offset.</param>
-        /// <returns>returns true if the table entry is fully inside the binary data.</returns>
         private static bool TryGetExportTableEntryOffset(uint BaseOffset, uint Index, uint EntrySize, int DataLength, out int Offset)
         {
             Offset = 0;
@@ -1514,11 +1326,6 @@ namespace Brovan.Core
             return true;
         }
 
-        /// <summary>
-        /// Parse and extract function names from the PE export directory.
-        /// </summary>
-        /// <param name="Is64Bit">Indicates if the PE is 64-bit.</param>
-        /// <exception cref="IndexOutOfRangeException"></exception>
         private void ParsePEExportFunctions(bool Is64Bit)
         {
             ReadOnlySpan<byte> BinaryData = DataSpan;
@@ -1670,9 +1477,6 @@ namespace Brovan.Core
             }
         }
 
-        /// <summary>
-        /// Parse and read .NET Binary information.
-        /// </summary>
         private unsafe void ParseDotNetFunctions()
         {
             List<DotNetFunction> DotNetFunctionList = new List<DotNetFunction>();
@@ -1683,7 +1487,6 @@ namespace Brovan.Core
             MetadataReader MetadataReader = null;
             try
             {
-                // Gonna use PEReader (no manual parsing for now)
                 PEReader PEReader = new PEReader(Data.BasePtr, Data.Length, false);
                 MetadataReader = PEReader.GetMetadataReader();
                 foreach (TypeDefinitionHandle TypeHandle in MetadataReader.TypeDefinitions)
@@ -1753,7 +1556,6 @@ namespace Brovan.Core
                                 {
                                     StandaloneSignature LocalSignature = MetadataReader.GetStandaloneSignature(MethodBody.LocalSignature);
 
-                                    // Get the signature blob reader to read the local variables count
                                     BlobReader LocalSignatureReader = MetadataReader.GetBlobReader(LocalSignature.Signature);
                                     SignatureHeader SigHeader = LocalSignatureReader.ReadSignatureHeader();
                                     if (SigHeader.Kind == SignatureKind.LocalVariables)
@@ -1849,7 +1651,6 @@ namespace Brovan.Core
                         DeclaringType = ParentHandle.ToString();
                     }
 
-                    // Read method signature blob
                     bool IsInstance = false;
                     BlobReader SignatureReader = MetadataReader.GetBlobReader(MemberRef.Signature);
                     SignatureHeader SignatureHeader = SignatureReader.ReadSignatureHeader();
@@ -1879,10 +1680,6 @@ namespace Brovan.Core
             DotNet.MetaReader = MetadataReader;
         }
 
-        /// <summary>
-        /// Parse the PE import directory to extract imported functions.
-        /// </summary>
-        /// <param name="Is64Bit">Indicates if the PE is 64-bit.</param>
         private void ParsePEImports(bool Is64Bit)
         {
             uint ImportTableRva = Is64Bit
@@ -1911,11 +1708,9 @@ namespace Brovan.Core
 
                 IMAGE_IMPORT_DESCRIPTOR ImportDescriptor = ReadStruct<IMAGE_IMPORT_DESCRIPTOR>(DataSpan, (int)ImportTableOffset);
 
-                // Check for end of import descriptors (null entry)
                 if (ImportDescriptor.Name == 0 && ImportDescriptor.FirstThunk == 0 && ImportDescriptor.OriginalFirstThunk == 0)
                     break;
 
-                // Get DLL name
                 if (!TryRvaToFileOffset(ImportDescriptor.Name, out uint NameOffset))
                 {
                     ImportTableOffset += DescriptorSize;
@@ -2051,11 +1846,6 @@ namespace Brovan.Core
             }
         }
 
-        /// <summary>
-        /// Scan forward from a function start offset and attempt to locate a termination boundary using epilogue patterns or INT3 padding.
-        /// </summary>
-        /// <param name="StartOffset">The file offset where the function begins.</param>
-        /// <returns>The file offset where the function is considered to end.</returns>
         private uint FindFunctionEnd(uint StartOffset)
         {
             uint EndOffset = StartOffset;
@@ -2119,9 +1909,6 @@ namespace Brovan.Core
             return EndOffset;
         }
 
-        /// <summary>
-        /// Parse the ELF function names from the symbol table.
-        /// </summary>
         private void ParseELFFunctions()
         {
             List<BinaryFunction> FunctionList = new List<BinaryFunction>();
@@ -2220,14 +2007,9 @@ namespace Brovan.Core
             Functions = Result;
         }
 
-        /// <summary>
-        /// Parse the ELF import jumps from the PLT and GOT sections.
-        /// </summary>
-        /// <param name="Is64Bit">Indicates if the ELF is 64-bit.</param>
         private void ParseELFImports(bool Is64Bit)
         {
 
-            // Find .plt, .got.plt, and .rela.plt or .rel.plt sections
             var PltSection = ELF.Sections.FirstOrDefault(s => s.SectionName == ".plt");
             var GotPltSection = ELF.Sections.FirstOrDefault(s => s.SectionName == ".got.plt");
             var RelaPltSection = ELF.Sections.FirstOrDefault(s =>
@@ -2240,7 +2022,6 @@ namespace Brovan.Core
                 DynStrSection.SectionName == null)
                 return;
 
-            // Read dynamic string table
             if (DynStrSection.RawOffset > Data.Length || DynStrSection.RawSize < 0)
                 throw new IndexOutOfRangeException("Invalid .dynstr data.");
 
@@ -2258,8 +2039,7 @@ namespace Brovan.Core
 
             ReadOnlySpan<byte> DynStr = DataSpan.Slice(RawOffset, BytesToCopy);
 
-            // Create a map of symbol index to name
-            int SymbolSize = Is64Bit ? 24 : 16; // if 64-bit arch, set to 24 (Elf64_Sym) and if not then use 16 (Elf32_Sym)
+            int SymbolSize = Is64Bit ? 24 : 16; // Elf64_Sym, Elf32_Sym
             int SymbolCount = (int)(DynSymSection.RawSize / SymbolSize);
             Dictionary<uint, string> SymbolNames = new Dictionary<uint, string>(SymbolCount);
 
@@ -2295,7 +2075,6 @@ namespace Brovan.Core
                 }
             }
 
-            // Parse relocation entries
             int RelSize = Is64Bit ? 24 : 8;
             int RelCount = (int)(RelaPltSection.RawSize / RelSize);
 
@@ -2333,10 +2112,6 @@ namespace Brovan.Core
             }
         }
 
-        /// <summary>
-        /// Get Functions Map which contains the function offset with its name.
-        /// </summary>
-        /// <returns>Returns a dictionary containing the offset and function name.</returns>
         public Dictionary<ulong, string> GetFunctionsMap(bool IncludeImports, bool IncludeExports, bool ImageBaseIncluded)
         {
             if (this.FileFormat == BinaryFormat.PE)
@@ -2410,17 +2185,6 @@ namespace Brovan.Core
         }
 
 
-        /// <summary>
-        /// Checks whether the binary has obvious structural corruption.
-        /// </summary>
-        /// <returns>The binary corruption status, or <see cref="BinaryCorruptionStatus.Unknown"/> when the binary format could not be determined.</returns>
-        /// <remarks>
-        /// <para>
-        /// </para>
-        /// <para>
-        /// Run this after loading a binary so later components can assume the core binary metadata is usable.
-        /// </para>
-        /// </remarks>
         public BinaryCorruptionStatus IsCorruptedBinary(out string Reason)
         {
             Reason = null;
@@ -2544,19 +2308,12 @@ namespace Brovan.Core
             }
             catch
             {
-                // most likely corrupted if it reaches here
                 return BinaryCorruptionStatus.Corrupted;
             }
 
             return BinaryCorruptionStatus.Unknown;
         }
 
-        /// <summary>
-        /// Get the format of a binary.
-        /// </summary>
-        /// <param name="Data">Data of the binary.</param>
-        /// <returns>returns the binary format.</returns>
-        /// <remarks>Primarily used to be a lightweight alternative to full parsing to inspect binaries quickly.</remarks>
         public static BinaryFormat GetBinaryFormat(byte[] Data)
         {
             foreach (var BinaryMagicNumber in BinaryMagicNumbers)
@@ -2583,13 +2340,6 @@ namespace Brovan.Core
             return BinaryFormat.Unknown;
         }
 
-        /// <summary>
-        /// Get the architecture of a binary.
-        /// </summary>
-        /// <param name="Data">Data of the binary.</param>
-        /// <param name="Format">The format of the binary.</param>
-        /// <returns>returns the binary format.</returns>
-        /// <remarks>Primarily used to be a lightweight alternative to full parsing to inspect binaries quickly.</remarks>
         public static BinaryArchitecture GetBinaryArch(byte[] Data, BinaryFormat Format)
         {
             if (Format != BinaryFormat.Unknown)
@@ -2629,24 +2379,11 @@ namespace Brovan.Core
             return BinaryArchitecture.Unknown;
         }
 
-        /// <summary>
-        /// Clone the current BinaryFile class with all it's information.
-        /// </summary>
-        /// <returns>returns a cloned copy of the BinaryFile class.</returns>
         public BinaryFile Clone()
         {
             return new BinaryFile(this);
         }
 
-        /// <summary>
-        /// Initialize the Binary File instance with a file path.
-        /// </summary>
-        /// <param name="BinaryPath">The Path of the Binary to be parsed.</param>
-        /// <exception cref="FileNotFoundException"></exception>
-        /// <exception cref="ArgumentOutOfRangeException"></exception>
-        /// <exception cref="IndexOutOfRangeException"></exception>
-        /// <exception cref="ArgumentNullException"></exception>
-        /// <exception cref="OverflowException"></exception>
         public BinaryFile(string BinaryPath, bool Quick)
         {
             PE = new PortableExecutable();
@@ -2660,10 +2397,6 @@ namespace Brovan.Core
             this.Location = Path.GetFullPath(BinaryPath);
         }
 
-        /// <summary>
-        /// Copy constructor for BinaryFile, used by Clone().
-        /// </summary>
-        /// <param name="Copy">The original BinaryFile to clone.</param>
         private BinaryFile(BinaryFile Copy)
         {
             if (Copy == null)
@@ -2866,10 +2599,6 @@ namespace Brovan.Core
             this.IsDisposed = false;
         }
 
-        /// <summary>
-        /// Clear a byte array after checking for it's availability.
-        /// </summary>
-        /// <param name="array">Array to clear.</param>
         private void ClearArray(Array array)
         {
             if (array != null)
@@ -2879,15 +2608,11 @@ namespace Brovan.Core
             }
         }
 
-        /// <summary>
-        /// Dispose resources in the class (PE/ELF/DotNet information, exports, imports, etc).
-        /// </summary>
         public void Dispose()
         {
             if (IsDisposed)
                 return;
 
-            // Dispose collected binary information
             ELF.ImportFunctions?.Clear();
             PE.ImportFunctions?.Clear();
             ClearArray(Functions);
@@ -2901,7 +2626,6 @@ namespace Brovan.Core
             ClearArray(DotNet.DotNetMembers);
             DisposeBinaryData();
 
-            // Set objects to null
             PE = null;
             ELF = null;
             DotNet = null;

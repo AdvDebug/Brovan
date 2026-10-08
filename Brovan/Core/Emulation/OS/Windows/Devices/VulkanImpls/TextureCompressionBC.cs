@@ -7,8 +7,9 @@ using Brovan.Core.Helpers;
 namespace Brovan.Core.Emulation.OS.Windows
 {
     /// <summary>
-    /// Stands in for textureCompressionBC. A BCn image becomes an uncompressed image of the same extent, and
-    /// each buffer-to-image copy into it becomes a compute dispatch that decodes the blocks into that image.
+    /// Stands in for textureCompressionBC. A BCn image becomes an uncompressed image of the same extent, or an
+    /// ETC2 image for BC1 to BC3 where the device takes it. Each buffer-to-image copy into it becomes a compute
+    /// dispatch that decodes the blocks into that image, or encodes them as ETC2 for a copy into it.
     /// </summary>
     internal static unsafe class TextureCompressionBC
     {
@@ -1018,8 +1019,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return view;
         }
 
-        // The bump pointer is put back by ResetCommandBuffer, so a range stays untouched from the moment
-        // it is recorded until the command buffer is reset, which cannot happen while it is executing.
         private static bool Reserve(GenState st, DeviceRecord device, DecodeState decode, ulong bytes, uint alignment,
             out IntPtr buffer, out ulong offset)
         {

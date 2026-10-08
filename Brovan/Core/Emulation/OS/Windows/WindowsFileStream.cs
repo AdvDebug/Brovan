@@ -19,6 +19,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private SafeFileHandle CachedHandle;
         private string CachedHandlePath;
         private bool CachedHandleWritable;
+        private bool CachedHandleReadable;
 
         // The VFS write copy only appears when this layer materializes it, so both host probes are memoized
         // per stream and dropped whenever anything reshapes the sandbox.
@@ -27,8 +28,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private int ReadProbeVersion = -1;
         private bool WriteProbeIsFile;
         private bool WriteProbeIsDirectory;
+        private FileAttributes WriteProbeAttributes;
         private bool ReadProbeIsFile;
         private bool ReadProbeIsDirectory;
+        private FileAttributes ReadProbeAttributes;
+
+        private int LookupVersion = -1;
+        private GeneralHelper.IO.HostEntryKind WriteLookupKind;
+        private GeneralHelper.IO.HostEntryKind ReadLookupKind;
 
         public string GuestPath { get; }
         public string ReadHostPath { get; }
@@ -57,6 +64,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        /// <summary>
+        /// Reads the metadata through the host handle this stream already holds for its effective file or
+        /// directory. Returns false when there is no such handle, and nothing is opened for it.
+        /// </summary>
+        public bool TryGetHandleMetadata(out FileAttributes Attributes, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long Length)
+        {
+            lock (HandleLock)
+            {
+                if (CachedHandle == null || !string.Equals(CachedHandlePath, EffectiveReadHostPath, StringComparison.Ordinal))
+                {
+                    Attributes = 0;
+                    CreationTime = 0;
+                    LastAccessTime = 0;
+                    LastWriteTime = 0;
+                    Length = 0;
+                    return false;
+                }
+
+                return GeneralHelper.IO.TryGetHandleMetadata(CachedHandle, out Attributes, out CreationTime, out LastAccessTime, out LastWriteTime, out Length);
+            }
+        }
+
         public override long Position
         {
             get => PositionValue;
@@ -79,10 +108,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 WriteProbeIsFile = false;
                 WriteProbeIsDirectory = false;
+                WriteProbeAttributes = 0;
             }
             else
             {
-                GeneralHelper.IO.ProbeHostEntry(WriteHostPath, out WriteProbeIsFile, out WriteProbeIsDirectory);
+                GeneralHelper.IO.ProbeHostEntry(WriteHostPath, out WriteProbeIsFile, out WriteProbeIsDirectory, out WriteProbeAttributes);
             }
 
             WriteProbeVersion = Version;
@@ -98,10 +128,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 ReadProbeIsFile = false;
                 ReadProbeIsDirectory = false;
+                ReadProbeAttributes = 0;
             }
             else
             {
-                GeneralHelper.IO.ProbeHostEntry(ReadHostPath, out ReadProbeIsFile, out ReadProbeIsDirectory);
+                GeneralHelper.IO.ProbeHostEntry(ReadHostPath, out ReadProbeIsFile, out ReadProbeIsDirectory, out ReadProbeAttributes);
             }
 
             ReadProbeVersion = Version;
@@ -139,18 +170,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             get
             {
-                string HostPath = EffectiveReadHostPath;
-                if (string.IsNullOrWhiteSpace(HostPath))
-                    return false;
+                ProbeWriteStore();
+                if (WriteProbeIsFile || WriteProbeIsDirectory)
+                    return (WriteProbeAttributes & FileAttributes.ReadOnly) != 0;
 
-                try
-                {
-                    return (File.GetAttributes(HostPath) & FileAttributes.ReadOnly) != 0;
-                }
-                catch
-                {
-                    return false;
-                }
+                ProbeReadStore();
+                return (ReadProbeAttributes & FileAttributes.ReadOnly) != 0;
             }
         }
 
@@ -204,6 +229,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 FileAttributes Current = File.GetAttributes(WriteHostPath);
                 File.SetAttributes(WriteHostPath, (Current & ~SettableAttributes) | Wanted);
+                DropStoreProbes();
                 return true;
             }
             catch
@@ -317,6 +343,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             Interlocked.Increment(ref VfsProbeVersion);
             GeneralHelper.IO.InvalidateSandboxLinkCache();
         }
+
+        /// <summary>
+        /// Invalidates what a removed or renamed host entry can change. The guest cannot create a host link, so a
+        /// plain file that goes away changes no link walk and the sandbox caches stay.
+        /// </summary>
+        public static void InvalidateRemovedEntry(FileAttributes Attributes)
+        {
+            if ((Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            {
+                InvalidateGuestPathCache();
+                return;
+            }
+
+            GuestPathCache.Clear();
+            Interlocked.Increment(ref VfsProbeVersion);
+        }
+
         public static WindowsFileStream FromGuestPath(string GuestPath, bool CreateWriteDirectories = false, bool NativeSystemView = false)
         {
             bool Cacheable = !CreateWriteDirectories && !NativeSystemView && GuestPath != null;
@@ -325,7 +368,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             string ReadHostPath = GeneralHelper.IO.ResolveHostPath(GuestPath, BinaryFormat.PE, false, false, NativeSystemView);
             string WriteHostPath = GeneralHelper.IO.ResolveVirtualHostPath(GuestPath, BinaryFormat.PE, CreateWriteDirectories);
             if (Cacheable && ReadHostPath != null && WriteHostPath != null)
+            {
+                if (GuestPathCache.Count >= Brovan.Core.Settings.MemoryBudget.SandboxPathCacheEntries)
+                    GuestPathCache.Clear();
+
                 GuestPathCache[GuestPath] = (ReadHostPath, WriteHostPath);
+            }
             return new WindowsFileStream(GuestPath, ReadHostPath, WriteHostPath);
         }
 
@@ -473,10 +521,28 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void Truncate()
         {
-            EnsureWriteParentExists();
+            if (!WriteParentKnownToExist)
+                EnsureWriteParentExists();
 
-            using (FileStream Stream = new FileStream(WriteHostPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
-                Stream.SetLength(0);
+            lock (HandleLock)
+            {
+                CloseCachedHandle();
+                SafeFileHandle Handle = File.OpenHandle(WriteHostPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, ShareMode);
+                try
+                {
+                    RandomAccess.SetLength(Handle, 0);
+                }
+                catch
+                {
+                    Handle.Dispose();
+                    throw;
+                }
+
+                CachedHandle = Handle;
+                CachedHandlePath = WriteHostPath;
+                CachedHandleWritable = true;
+                CachedHandleReadable = true;
+            }
 
             PositionValue = 0;
             DropStoreProbes();
@@ -513,16 +579,26 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return null;
             }
 
-            if (CachedHandle != null && string.Equals(CachedHandlePath, HostPath, StringComparison.Ordinal))
+            if (CachedHandle != null && CachedHandleReadable && string.Equals(CachedHandlePath, HostPath, StringComparison.Ordinal))
                 return CachedHandle;
 
             CloseCachedHandle();
-            if (!File.Exists(HostPath))
+            if (!ExistsAsFile)
                 return null;
 
-            CachedHandle = File.OpenHandle(HostPath, FileMode.Open, FileAccess.Read, ShareMode);
+            try
+            {
+                CachedHandle = File.OpenHandle(HostPath, FileMode.Open, FileAccess.Read, ShareMode);
+            }
+            catch (Exception Ex) when (Ex is FileNotFoundException || Ex is DirectoryNotFoundException)
+            {
+                // The probe is memoized, and another host process can remove the file after it.
+                return null;
+            }
+
             CachedHandlePath = HostPath;
             CachedHandleWritable = false;
+            CachedHandleReadable = true;
             return CachedHandle;
         }
 
@@ -536,22 +612,132 @@ namespace Brovan.Core.Emulation.OS.Windows
             CachedHandle = File.OpenHandle(WriteHostPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, ShareMode);
             CachedHandlePath = WriteHostPath;
             CachedHandleWritable = true;
+            CachedHandleReadable = true;
             return CachedHandle;
         }
 
-        private void CloseCachedHandle()
+        /// <summary>
+        /// Settles both store probes with one host open, as NT does with the open itself, and keeps the handle for
+        /// the queries and reads that follow. Hosts that cannot answer this way leave the probes to run by path.
+        /// </summary>
+        public void OpenForLookup(bool ReadData)
         {
-            CachedHandle?.Dispose();
+            lock (HandleLock)
+            {
+                int Version = Volatile.Read(ref VfsProbeVersion);
+                WriteLookupKind = GeneralHelper.IO.HostEntryKind.Unknown;
+                ReadLookupKind = GeneralHelper.IO.HostEntryKind.Unknown;
+                LookupVersion = Version;
+
+                if (!TryOpenStore(WriteHostPath, ReadData, out GeneralHelper.IO.HostEntryKind Kind, out bool IsFile, out bool IsDirectory, out FileAttributes Attributes))
+                    return;
+
+                WriteLookupKind = Kind;
+                WriteProbeIsFile = IsFile;
+                WriteProbeIsDirectory = IsDirectory;
+                WriteProbeAttributes = Attributes;
+                WriteProbeVersion = Version;
+                if (IsFile || IsDirectory)
+                    return;
+
+                if (!string.Equals(ReadHostPath, WriteHostPath, StringComparison.Ordinal)
+                    && !TryOpenStore(ReadHostPath, ReadData, out Kind, out IsFile, out IsDirectory, out Attributes))
+                    return;
+
+                ReadLookupKind = Kind;
+                ReadProbeIsFile = IsFile;
+                ReadProbeIsDirectory = IsDirectory;
+                ReadProbeAttributes = Attributes;
+                ReadProbeVersion = Version;
+            }
+        }
+
+        /// <summary>
+        /// Whether the guest path's parent directory exists, as the lookup open found it in either store. Null
+        /// when that open could not tell.
+        /// </summary>
+        public bool? KnownParentExists
+        {
+            get
+            {
+                if (LookupVersion != Volatile.Read(ref VfsProbeVersion))
+                    return null;
+
+                if (WriteLookupKind == GeneralHelper.IO.HostEntryKind.Missing)
+                    return true;
+
+                if (WriteLookupKind != GeneralHelper.IO.HostEntryKind.MissingPath)
+                    return null;
+
+                return ReadLookupKind switch
+                {
+                    GeneralHelper.IO.HostEntryKind.Missing => true,
+                    GeneralHelper.IO.HostEntryKind.MissingPath => false,
+                    _ => null
+                };
+            }
+        }
+
+        private bool WriteParentKnownToExist =>
+            LookupVersion == Volatile.Read(ref VfsProbeVersion)
+            && (WriteLookupKind == GeneralHelper.IO.HostEntryKind.Missing || WriteLookupKind == GeneralHelper.IO.HostEntryKind.File);
+
+        /// <summary>
+        /// Returns the memoized probe of the VFS write copy while nothing has reshaped the sandbox since.
+        /// </summary>
+        public bool TryGetCurrentWriteProbe(out bool IsFile, out bool IsDirectory, out FileAttributes Attributes)
+        {
+            IsFile = WriteProbeIsFile;
+            IsDirectory = WriteProbeIsDirectory;
+            Attributes = WriteProbeAttributes;
+            return WriteProbeVersion == Volatile.Read(ref VfsProbeVersion);
+        }
+
+        private bool TryOpenStore(string HostPath, bool ReadData, out GeneralHelper.IO.HostEntryKind Kind, out bool IsFile, out bool IsDirectory, out FileAttributes Attributes)
+        {
+            IsFile = false;
+            IsDirectory = false;
+            Attributes = 0;
+            Kind = GeneralHelper.IO.HostEntryKind.Unknown;
+            if (string.IsNullOrWhiteSpace(HostPath))
+                return true;
+
+            Kind = GeneralHelper.IO.TryOpenHostEntry(HostPath, ReadData, out SafeFileHandle Handle, out Attributes);
+            if (Kind == GeneralHelper.IO.HostEntryKind.Unknown)
+                return false;
+
+            IsFile = Kind == GeneralHelper.IO.HostEntryKind.File;
+            IsDirectory = Kind == GeneralHelper.IO.HostEntryKind.Directory;
+            if (Handle != null)
+            {
+                CloseCachedHandle();
+                CachedHandle = Handle;
+                CachedHandlePath = HostPath;
+                CachedHandleWritable = false;
+                CachedHandleReadable = ReadData && IsFile;
+            }
+
+            return true;
+        }
+
+        private void CloseCachedHandle(bool Later = false)
+        {
+            if (Later)
+                GeneralHelper.IO.CloseHandleLater(CachedHandle);
+            else
+                CachedHandle?.Dispose();
+
             CachedHandle = null;
             CachedHandlePath = null;
             CachedHandleWritable = false;
+            CachedHandleReadable = false;
         }
 
         protected override void Dispose(bool disposing)
         {
             lock (HandleLock)
             {
-                CloseCachedHandle();
+                CloseCachedHandle(true);
             }
 
             base.Dispose(disposing);

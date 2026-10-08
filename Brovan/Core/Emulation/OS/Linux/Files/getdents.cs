@@ -13,17 +13,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         private const int LinuxDirent64NameOffset = 19;
         private readonly bool _use64;
 
-        /// <summary>
-        /// Initializes a directory entry syscall handler for the legacy or 64-bit Linux dirent layout.
-        /// </summary>
         public Getdents(bool Use64 = false)
         {
             _use64 = Use64;
         }
 
-        /// <summary>
-        /// Handles getdents/getdents64 by serializing directory entries into the guest buffer.
-        /// </summary>
         public void Handle(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context)
         {
             ulong fd = Context.Arg0;
@@ -113,9 +107,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             Helper.SetReturnValue(Instance, Context, BytesWritten);
         }
 
-        /// <summary>
-        /// Builds a stable directory entry list for a host-backed or special Linux directory.
-        /// </summary>
         private LinuxErrno TryGetDirectoryEntries(LinuxSyscallsHelper Helper, FileObject FileDesc, out List<LinuxDirectoryEntry> Entries)
         {
             Entries = new List<LinuxDirectoryEntry>();
@@ -178,9 +169,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             }
         }
 
-        /// <summary>
-        /// Converts a host filesystem entry into a Linux dirent type.
-        /// </summary>
         private static LinuxDirectoryEntryType GetHostEntryType(string PathValue)
         {
             try
@@ -200,9 +188,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             }
         }
 
-        /// <summary>
-        /// Adds a synthesized directory entry with a stable inode value.
-        /// </summary>
         private static void AddDirectoryEntry(List<LinuxDirectoryEntry> Entries, string PathValue, string Name, LinuxDirectoryEntryType Type)
         {
             Entries.Add(new LinuxDirectoryEntry
@@ -213,9 +198,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             });
         }
 
-        /// <summary>
-        /// Gets the normalized Linux parent path for a directory entry.
-        /// </summary>
         private static string GetParentPath(string PathValue)
         {
             if (string.IsNullOrEmpty(PathValue) || PathValue == "/")
@@ -228,9 +210,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             return PathValue.Substring(0, Slash);
         }
 
-        /// <summary>
-        /// Gets the aligned dirent record length for the active ABI.
-        /// </summary>
         private int GetRecordLength(SyscallAbi Abi, string Name)
         {
             int NameLength = Encoding.UTF8.GetByteCount(Name ?? string.Empty);
@@ -242,9 +221,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             return AlignUp(NameOffset + NameLength + 2, WordSize);
         }
 
-        /// <summary>
-        /// Writes one Linux dirent record into a host buffer.
-        /// </summary>
         private void WriteRecord(Span<byte> Buffer, int Offset, SyscallAbi Abi, LinuxDirectoryEntry Entry, ulong NextOffset, int RecordLength)
         {
             string Name = Entry.Name ?? string.Empty;
@@ -279,33 +255,21 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             Buffer[Offset + RecordLength - 1] = (byte)Entry.Type;
         }
 
-        /// <summary>
-        /// Aligns a value up to the specified power-of-two boundary.
-        /// </summary>
         private static int AlignUp(int Value, int Alignment)
         {
             return (Value + Alignment - 1) & ~(Alignment - 1);
         }
 
-        /// <summary>
-        /// Writes a little-endian unsigned 16-bit value into a host buffer.
-        /// </summary>
         private static void WriteUInt16(Span<byte> Buffer, int Offset, ushort Value)
         {
             BinaryPrimitives.WriteUInt16LittleEndian(Buffer.Slice(Offset, 2), Value);
         }
 
-        /// <summary>
-        /// Writes a little-endian unsigned 32-bit value into a host buffer.
-        /// </summary>
         private static void WriteUInt32(Span<byte> Buffer, int Offset, uint Value)
         {
             BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(Offset, 4), Value);
         }
 
-        /// <summary>
-        /// Writes a little-endian unsigned 64-bit value into a host buffer.
-        /// </summary>
         private static void WriteUInt64(Span<byte> Buffer, int Offset, ulong Value)
         {
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(Offset, 8), Value);

@@ -1534,9 +1534,6 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        /// <summary>
-        /// Applies multiple page-protection changes while rebuilding memory-region metadata once.
-        /// </summary>
         private bool ApplyWinProtectionRanges(List<(ulong Address, ulong Size, MemoryProtection Protection, uint WinProtect)> Ranges)
         {
             if (Ranges.Count == 0)
@@ -1702,12 +1699,9 @@ namespace Brovan.Core.Emulation
         /// <summary>
         /// Writes PE headers and section raw data into an already mapped image without forcing a full managed image copy.
         /// </summary>
-        /// <param name="Library">PE image metadata and backing data.</param>
-        /// <param name="BaseAddress">Mapped image base.</param>
-        /// <param name="ImageSize">Mapped image size.</param>
-        /// <param name="Module">Module metadata to populate with mapped sections.</param>
         /// <param name="Extents">Output of <see cref="GetPeImageExtents"/>.</param>
-        /// <returns>True if the image bytes were written successfully; otherwise false.</returns>
+        /// <returns>False when the headers cannot be written. A section that cannot be written is left out of
+        /// <paramref name="Module"/>.</returns>
         internal bool WritePeImageHeadersAndSections(BinaryFile Library, ulong BaseAddress, ulong ImageSize, WinModule Module, List<PeImageExtent> Extents)
         {
             using FileStream? Stream = OpenBinaryReadStream(Library);
