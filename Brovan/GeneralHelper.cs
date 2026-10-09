@@ -3924,6 +3924,30 @@ namespace Brovan
 
             private const int MaxPlainHostPath = 248;
 
+            // \\?\ skips Win32 path normalization.
+            private static bool TryGetExtendedHostPath(string HostPath, out string Extended)
+            {
+                string Full;
+                try
+                {
+                    Full = Path.GetFullPath(HostPath);
+                }
+                catch (ArgumentException)
+                {
+                    Extended = null;
+                    return false;
+                }
+
+                if (Full.StartsWith(@"\\?\", StringComparison.Ordinal) || Full.StartsWith(@"\\.\", StringComparison.Ordinal))
+                    Extended = Full;
+                else if (Full.StartsWith(@"\\", StringComparison.Ordinal))
+                    Extended = @"\\?\UNC\" + Full.Substring(2);
+                else
+                    Extended = @"\\?\" + Full;
+
+                return true;
+            }
+
             /// <summary>
             /// Opens a host entry once to learn what it is, and returns the handle for a file or a directory. Unknown
             /// means the host cannot answer this way and the caller probes by path instead.
@@ -3933,8 +3957,10 @@ namespace Brovan
                 Handle = null;
                 Attributes = 0;
 
-                // A longer path needs the \\?\ form, which the path probes add for themselves.
-                if (!IsWindows || string.IsNullOrEmpty(HostPath) || HostPath.Length >= MaxPlainHostPath)
+                if (!IsWindows || string.IsNullOrEmpty(HostPath))
+                    return HostEntryKind.Unknown;
+
+                if (HostPath.Length >= MaxPlainHostPath && !TryGetExtendedHostPath(HostPath, out HostPath))
                     return HostEntryKind.Unknown;
 
                 const uint FileReadAttributes = 0x80;
@@ -4029,7 +4055,6 @@ namespace Brovan
                         }
                         catch (EntryPointNotFoundException)
                         {
-                            // bionic before API 30 has no statx.
                             StatxMissing = true;
                         }
                     }
@@ -4082,11 +4107,20 @@ namespace Brovan
 
                 try
                 {
+                    // .NET's ReadOnly and Hidden rules depend on the caller and the name.
                     FileAttributes HandleAttributes = File.GetAttributes(Handle);
-                    long Creation = File.GetCreationTimeUtc(Handle).ToFileTimeUtc();
-                    long LastAccess = File.GetLastAccessTimeUtc(Handle).ToFileTimeUtc();
-                    long LastWrite = File.GetLastWriteTimeUtc(Handle).ToFileTimeUtc();
-                    long FileLength = (HandleAttributes & FileAttributes.Directory) != 0 ? 0 : RandomAccess.GetLength(Handle);
+                    if (!TryGetHandleTimes(Handle, out long Creation, out long LastAccess, out long LastWrite, out long FileLength))
+                    {
+                        Creation = File.GetCreationTimeUtc(Handle).ToFileTimeUtc();
+                        LastAccess = File.GetLastAccessTimeUtc(Handle).ToFileTimeUtc();
+                        LastWrite = File.GetLastWriteTimeUtc(Handle).ToFileTimeUtc();
+                        FileLength = (HandleAttributes & FileAttributes.Directory) != 0 ? 0 : RandomAccess.GetLength(Handle);
+                    }
+                    else if ((HandleAttributes & FileAttributes.Directory) != 0)
+                    {
+                        FileLength = 0;
+                    }
+
                     Attributes = HandleAttributes;
                     CreationTime = Creation;
                     LastAccessTime = LastAccess;
@@ -4098,6 +4132,72 @@ namespace Brovan
                 {
                     return false;
                 }
+            }
+
+            private static readonly long MaxFileTime = DateTime.MaxValue.ToFileTimeUtc();
+
+            // .NET throws for a time out of FILETIME range.
+            private static unsafe bool TryReadStatxTime(byte* Timestamp, out long FileTime)
+            {
+                const long UnixEpochFileTime = 116444736000000000;
+                const long MaxSeconds = 253402300799;
+
+                long Seconds = *(long*)Timestamp;
+                FileTime = 0;
+                if (Seconds < -11644473600 || Seconds > MaxSeconds)
+                    return false;
+
+                FileTime = Seconds * 10_000_000 + *(uint*)(Timestamp + 8) / 100 + UnixEpochFileTime;
+                return FileTime >= 0 && FileTime <= MaxFileTime;
+            }
+
+            // .NET's rule: the creation time is the older of ctime and mtime, not the birth time.
+            private static unsafe bool TryGetHandleTimes(SafeFileHandle Handle, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long Length)
+            {
+                const int AtEmptyPath = 0x1000;
+                const uint StatxBasicStats = 0x7FF, StatxNeeded = 0x2E0;
+                const int ENOSYS = 38;
+
+                CreationTime = 0;
+                LastAccessTime = 0;
+                LastWriteTime = 0;
+                Length = 0;
+                if (StatxMissing)
+                    return false;
+
+                byte* Buffer = stackalloc byte[256];
+                bool Added = false;
+                try
+                {
+                    Handle.DangerousAddRef(ref Added);
+                    if (NativeUnixImports.Statx((int)Handle.DangerousGetHandle(), string.Empty, AtEmptyPath, StatxBasicStats, Buffer) != 0)
+                    {
+                        if (Marshal.GetLastPInvokeError() == ENOSYS)
+                            StatxMissing = true;
+
+                        return false;
+                    }
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    StatxMissing = true;
+                    return false;
+                }
+                finally
+                {
+                    if (Added)
+                        Handle.DangerousRelease();
+                }
+
+                if ((*(uint*)Buffer & StatxNeeded) != StatxNeeded
+                    || !TryReadStatxTime(Buffer + 64, out LastAccessTime)
+                    || !TryReadStatxTime(Buffer + 96, out long ChangeTime)
+                    || !TryReadStatxTime(Buffer + 112, out LastWriteTime))
+                    return false;
+
+                CreationTime = Math.Min(ChangeTime, LastWriteTime);
+                Length = *(long*)(Buffer + 40);
+                return true;
             }
 
             public static bool TryGetHostAttributes(FileInfo Info, out FileAttributes Attributes)

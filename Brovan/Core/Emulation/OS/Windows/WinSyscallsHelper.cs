@@ -577,6 +577,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 NtQueueApcThread.Queue(Emulator, Thread, 0, ApcRoutine, ApcContext, IoStatusBlock, 0);
         }
 
+        // NT queues no APC or packet for a request that fails without pending.
+        public void QueueImmediateCompletion(WinFile File, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock, NTSTATUS Status, ulong Information)
+        {
+            if (File == null || Status == NTSTATUS.STATUS_PENDING || ((uint)Status >> 30) == 3)
+                return;
+
+            QueueIoCompletion(File, Emulator.CurrentThread, ApcRoutine, ApcContext, IoStatusBlock, Status, Information, false);
+        }
+
         // The I/O manager clears the event before the driver sees the request.
         public void ResetIoEvent(ulong EventHandle)
         {

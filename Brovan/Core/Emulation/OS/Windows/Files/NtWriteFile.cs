@@ -64,7 +64,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.ResetIoEvent(EventHandle);
 
             if (FileObj.ConsoleKind == ConsoleObjectKind.Output || FileObj.HostStream == HostStreamKind.Output)
-                return HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
+            {
+                NTSTATUS OutputStatus = HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
+                Instance.WinHelper.QueueImmediateCompletion(FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, OutputStatus, Length);
+                return OutputStatus;
+            }
 
             if (FileObj.Device)
             {
@@ -77,6 +81,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                     Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Length);
+                    Instance.WinHelper.QueueImmediateCompletion(FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Length);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
@@ -154,6 +159,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             FileObj.Position = Offset + Done;
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Done);
+            Instance.WinHelper.QueueImmediateCompletion(FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Done);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtWriteFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Wrote=0x{Done:X}.", LogFlags.Syscall);

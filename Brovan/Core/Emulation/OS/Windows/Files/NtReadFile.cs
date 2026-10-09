@@ -65,12 +65,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Length == 0)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
+                Instance.WinHelper.QueueImmediateCompletion(PipeFile, ApcRoutine, ApcContext, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (!Instance.IsRegionMapped(BufferPtr, Length))
+            // NT: probed before the event reset. A fault leaves the IO_STATUS_BLOCK alone.
+            if (!Instance.IsMemoryRangeMapped(BufferPtr, Length))
             {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                EventDone = true;
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
@@ -155,7 +157,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Got <= 0)
                         break;
 
-                    Instance._emulator.WriteMemory(BufferPtr + (ulong)Done, Slice.Slice(0, Got));
+                    if (!Instance._emulator.WriteMemory(BufferPtr + (ulong)Done, Slice.Slice(0, Got)))
+                    {
+                        if (Done == 0)
+                        {
+                            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        }
+
+                        break;
+                    }
+
                     Done += Got;
                     if (Got < ChunkSize)
                         break;
@@ -184,6 +196,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 FileObj.Position = Offset + Done;
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Done);
+            Instance.WinHelper.QueueImmediateCompletion(FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Done);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtReadFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Read=0x{Done:X}.", LogFlags.Syscall);
@@ -244,6 +257,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Copied);
             Instance.WinHelper.SignalIoEvent(EventHandle, NTSTATUS.STATUS_SUCCESS);
+            Instance.WinHelper.QueueImmediateCompletion(File, ApcRoutine, ApcContext, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Copied);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtReadFile: STDIN read {Copied} bytes", LogFlags.Syscall);

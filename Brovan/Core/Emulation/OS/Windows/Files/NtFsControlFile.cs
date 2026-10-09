@@ -58,6 +58,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!Listen)
             {
+                // NT: NPFS probes the reply buffer first.
+                if (OutputBufferLength != 0 && !Instance.IsMemoryRangeMapped(OutputBufferPtr, OutputBufferLength))
+                    return FailTransceive(Instance, Request, NTSTATUS.STATUS_ACCESS_VIOLATION);
+
                 if (InputBufferLength > GuestNamedPipe.MaxMessageBytes)
                     return FailTransceive(Instance, Request, NTSTATUS.STATUS_INVALID_PARAMETER);
 
@@ -86,16 +90,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(IoStatusBlockPtr, Is64Bit ? 0x10UL : 0x08UL))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+            if (!NtDeviceIoControlFile.ProbeControlBuffers(Instance, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
             // NT: these fail before the event or the IO_STATUS_BLOCK is touched.
             WinFile File = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
             if (File == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            if (InputBufferPtr != 0 && InputBufferLength != 0 && !Instance.IsRegionMapped(InputBufferPtr, InputBufferLength))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            if (OutputBufferPtr != 0 && OutputBufferLength != 0 && !Instance.IsRegionMapped(OutputBufferPtr, OutputBufferLength))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (!HasControlAccess(Instance, FileHandle, FsControlCode))
                 return NTSTATUS.STATUS_ACCESS_DENIED;
@@ -106,20 +107,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 (FsControlCode == GuestNamedPipe.FSCTL_PIPE_LISTEN || FsControlCode == GuestNamedPipe.FSCTL_PIPE_TRANSCEIVE))
                 return QueuePipeControl(Instance, File, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, Is64Bit);
 
+            NTSTATUS Status = NtDeviceIoControlFile.CheckControlBuffers(Instance, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
             DeviceData Data = new DeviceData();
-
-            if (InputBufferPtr != 0 && InputBufferLength != 0)
-            {
-                Data.InputBuffer = Instance.ReadMemory(InputBufferPtr, InputBufferLength);
-                Data.InputLength = InputBufferLength;
-            }
-
-            if (OutputBufferPtr != 0 && OutputBufferLength != 0)
-            {
-                Data.OutputBuffer = Instance.ReadMemory(OutputBufferPtr, OutputBufferLength);
-                Data.OutputLength = OutputBufferLength;
-            }
-
             Data.File = File;
             Data.FileHandle = FileHandle;
             Data.EventHandle = EventHandle;
@@ -127,49 +119,59 @@ namespace Brovan.Core.Emulation.OS.Windows
             Data.ApcContext = ApcContext;
             Data.IoStatusBlock = IoStatusBlockPtr;
 
-            NTSTATUS Status;
+            byte[] RentedInput = null;
+            byte[] RentedOutput = null;
             try
             {
-                // FSCTL and IOCTL are separate namespaces, and a device handler answers the IOCTL one.
-                if (File.Pipe != null)
-                    Status = File.Pipe.HandleControl(FsControlCode, ref Data, Instance);
-                else if (File.HostStream == HostStreamKind.Input && FsControlCode == GuestNamedPipe.FSCTL_PIPE_PEEK)
-                    Status = GuestNamedPipe.PeekHostStream(ref Data, Instance);
-                else
-                    Status = WindowsStorageDeviceSupport.HandleFsControl(FsControlCode, ref Data, File);
-            }
-            catch
-            {
-                Status = NTSTATUS.STATUS_UNSUCCESSFUL;
-            }
+                Status = NtDeviceIoControlFile.CaptureControlBuffers(Instance, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, ref Data, out RentedInput, out RentedOutput);
+                if (Data.OutputBuffer != null)
+                    Data.OutputLength = OutputBufferLength;
 
-            if (File.HostStream != HostStreamKind.None && Status == NTSTATUS.STATUS_PENDING)
-                return Status;
+                if (Status == NTSTATUS.STATUS_SUCCESS)
+                {
+                    try
+                    {
+                        // FSCTL and IOCTL are separate namespaces, and a device handler answers the IOCTL one.
+                        if (File.Pipe != null)
+                            Status = File.Pipe.HandleControl(FsControlCode, ref Data, Instance);
+                        else if (File.HostStream == HostStreamKind.Input && FsControlCode == GuestNamedPipe.FSCTL_PIPE_PEEK)
+                            Status = GuestNamedPipe.PeekHostStream(ref Data, Instance);
+                        else
+                            Status = WindowsStorageDeviceSupport.HandleFsControl(FsControlCode, ref Data, File);
+                    }
+                    catch
+                    {
+                        Status = NTSTATUS.STATUS_UNSUCCESSFUL;
+                    }
+                }
 
-            // Only FSCTL_PIPE_WAIT returns pending here.
-            if (File.Pipe != null && Status == NTSTATUS.STATUS_PENDING)
-            {
-                int TimeoutMilliseconds = GuestNamedPipe.ReadWaitTimeoutMilliseconds(Data.InputBuffer, Data.InputLength);
-                WinPendingIo? SyncIo = File.Synchronous ? Instance.WinHelper.SynchronousIo(File, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr) : null;
-                if (Instance.WinHelper.TryContinuePipeWait(FileHandle, TimeoutMilliseconds, GuestNamedPipe.PollSliceMilliseconds, SyncIo))
-                    return NTSTATUS.STATUS_PENDING;
+                if (File.HostStream != HostStreamKind.None && Status == NTSTATUS.STATUS_PENDING)
+                    return Status;
 
-                Status = NTSTATUS.STATUS_IO_TIMEOUT;
+                // Only FSCTL_PIPE_WAIT returns pending here.
+                if (File.Pipe != null && Status == NTSTATUS.STATUS_PENDING)
+                {
+                    int TimeoutMilliseconds = GuestNamedPipe.ReadWaitTimeoutMilliseconds(Data.InputBuffer, Data.InputLength);
+                    WinPendingIo? SyncIo = File.Synchronous ? Instance.WinHelper.SynchronousIo(File, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr) : null;
+                    if (Instance.WinHelper.TryContinuePipeWait(FileHandle, TimeoutMilliseconds, GuestNamedPipe.PollSliceMilliseconds, SyncIo))
+                        return NTSTATUS.STATUS_PENDING;
+
+                    Status = NTSTATUS.STATUS_IO_TIMEOUT;
+                }
+                else if (File.Pipe != null)
+                {
+                    Instance.WinHelper.ClearPipeWait();
+                }
+
+                if (!NtDeviceIoControlFile.WriteBackControlOutput(Instance, Status, OutputBufferPtr, OutputBufferLength, in Data))
+                    Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
-            else if (File.Pipe != null)
+            finally
             {
-                Instance.WinHelper.ClearPipeWait();
+                NtDeviceIoControlFile.ReleaseControlBuffers(RentedInput, RentedOutput);
             }
 
             ulong Information = Data.Information;
-
-            if (((uint)Status >> 30) != 3 && OutputBufferPtr != 0 && OutputBufferLength != 0 && Data.OutputBuffer != null)
-            {
-                uint ToWrite = (uint)Math.Min(Information, Math.Min(OutputBufferLength, (uint)Data.OutputBuffer.Length));
-                if (ToWrite != 0)
-                    Instance.WriteMemory(OutputBufferPtr, Data.OutputBuffer.AsSpan(0, (int)ToWrite));
-            }
-
             WriteIoStatus(Instance, IoStatusBlockPtr, Status, Information, Is64Bit);
 
             if (EventHandle != 0 && Status != NTSTATUS.STATUS_PENDING)
@@ -179,6 +181,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Ev.Signaled = true;
             }
 
+            Instance.WinHelper.QueueImmediateCompletion(File, ApcRoutine, ApcContext, IoStatusBlockPtr, Status, Information);
             return Status;
         }
 

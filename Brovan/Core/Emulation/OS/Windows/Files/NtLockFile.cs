@@ -70,18 +70,27 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_LOCK_NOT_GRANTED, 0);
                 SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_LOCK_NOT_GRANTED);
+                PostFastLockPacket(Instance, FileObj, ApcContext, NTSTATUS.STATUS_LOCK_NOT_GRANTED);
                 return NTSTATUS.STATUS_LOCK_NOT_GRANTED;
             }
 
             FileObj.AddLock((ulong)Offset, Length, Key, ExclusiveLock);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
             SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_SUCCESS);
+            PostFastLockPacket(Instance, FileObj, ApcContext, NTSTATUS.STATUS_SUCCESS);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtLockFile: File=0x{FileHandle:X}, Offset=0x{Offset:X}, Length=0x{Length:X}, Key=0x{Key:X}, Exclusive={ExclusiveLock}.", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+
+        // NT: the fast lock path posts a failure too, and queues no APC.
+        private static void PostFastLockPacket(BinaryEmulator Instance, WinFile File, ulong ApcContext, NTSTATUS Status)
+        {
+            if ((File.CompletionNotificationModes & WinSysHelper.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) == 0)
+                Instance.WinHelper.QueueFileCompletion(Instance, File, ApcContext, Status, 0);
+        }
 
         private static void SignalEvent(BinaryEmulator Instance, ulong EventHandle, NTSTATUS Status)
         {

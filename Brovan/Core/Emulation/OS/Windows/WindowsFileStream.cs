@@ -395,6 +395,34 @@ namespace Brovan.Core.Emulation.OS.Windows
             PositionValue = Data.Length;
         }
 
+        public void CopyFrom(WindowsFileStream Source)
+        {
+            if (!Source.ExistsAsFile)
+            {
+                WriteAllBytes(Array.Empty<byte>());
+                return;
+            }
+
+            string SourcePath = Source.GetReadableFilePath();
+            EnsureWriteParentExists();
+
+            try
+            {
+                File.Copy(SourcePath, WriteHostPath, true);
+            }
+            catch
+            {
+                if (File.Exists(WriteHostPath))
+                    File.Delete(WriteHostPath);
+
+                throw;
+            }
+            finally
+            {
+                DropStoreProbes();
+            }
+        }
+
         public bool TryReadAllBytes(out byte[] Data)
         {
             try
@@ -411,11 +439,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public override void Flush()
         {
-            if (string.IsNullOrWhiteSpace(WriteHostPath) || !File.Exists(WriteHostPath))
+            if (string.IsNullOrWhiteSpace(WriteHostPath))
                 return;
 
-            using FileStream Stream = new FileStream(WriteHostPath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
-            Stream.Flush(true);
+            lock (HandleLock)
+            {
+                if (!HoldsWriteHandle)
+                {
+                    if (!File.Exists(WriteHostPath))
+                        return;
+
+                    AcquireWriteHandle();
+                }
+
+                RandomAccess.FlushToDisk(CachedHandle);
+            }
         }
 
         public override int Read(byte[] buffer, int offset, int count)
@@ -511,9 +549,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (value < 0)
                 throw new ArgumentOutOfRangeException(nameof(value));
 
-            EnsureWriteStore(true);
-            using FileStream Stream = new FileStream(WriteHostPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
-            Stream.SetLength(value);
+            lock (HandleLock)
+            {
+                RandomAccess.SetLength(AcquireWriteHandle(), value);
+            }
 
             if (PositionValue > value)
                 PositionValue = value;
@@ -602,9 +641,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return CachedHandle;
         }
 
+        private bool HoldsWriteHandle =>
+            CachedHandle != null && CachedHandleWritable && string.Equals(CachedHandlePath, WriteHostPath, StringComparison.Ordinal);
+
         private SafeFileHandle AcquireWriteHandle()
         {
-            if (CachedHandle != null && CachedHandleWritable && string.Equals(CachedHandlePath, WriteHostPath, StringComparison.Ordinal))
+            if (HoldsWriteHandle)
                 return CachedHandle;
 
             EnsureWriteStore(true);

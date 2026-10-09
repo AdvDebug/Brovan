@@ -539,16 +539,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 if (DirectoryMove)
                 {
-                    if (!string.IsNullOrEmpty(SourceVirtual) && Directory.Exists(SourceVirtual))
-                    {
-                        string Parent = Path.GetDirectoryName(TargetVirtual);
-                        if (!string.IsNullOrEmpty(Parent))
-                            Directory.CreateDirectory(Parent);
+                    // The read layer cannot drop an entry, so a directory only there cannot move.
+                    if (string.IsNullOrEmpty(SourceVirtual) || !Directory.Exists(SourceVirtual))
+                        return false;
 
-                        Directory.Move(SourceVirtual, TargetVirtual);
-                        return true;
-                    }
+                    string Parent = Path.GetDirectoryName(TargetVirtual);
+                    if (!string.IsNullOrEmpty(Parent))
+                        Directory.CreateDirectory(Parent);
 
+                    Directory.Move(SourceVirtual, TargetVirtual);
+                    WindowsFileStream.InvalidateGuestPathCache();
                     return true;
                 }
 
@@ -567,8 +567,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 using WindowsFileStream SourceStream = WindowsFileStream.FromGuestPath(SourcePath);
                 using WindowsFileStream TargetStream = WindowsFileStream.FromGuestPath(TargetPath, true);
-                byte[] Data = SourceStream.ExistsAsFile ? SourceStream.ReadAllBytes() : Array.Empty<byte>();
-                TargetStream.WriteAllBytes(Data);
+                TargetStream.CopyFrom(SourceStream);
 
                 DeleteExistingVirtualPath(SourcePath, false);
                 return true;

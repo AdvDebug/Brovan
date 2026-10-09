@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.IO.Enumeration;
 using System.Text;
 
@@ -9,13 +10,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint SL_RETURN_SINGLE_ENTRY = 0x02;
         private const uint SL_NO_CURSOR_UPDATE = 0x10;
 
-        public static NTSTATUS Handle(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong IoStatusBlock, ulong FileInformation, uint Length, uint FileInformationClass, uint QueryFlags, ulong FileName)
+        public static NTSTATUS Handle(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock, ulong FileInformation, uint Length, uint FileInformationClass, uint QueryFlags, ulong FileName)
         {
             using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
             if (IoStatusBlock == 0 || FileInformation == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.IsRegionMapped(IoStatusBlock, 0x10) || !Instance.IsRegionMapped(FileInformation, Length))
+            if (!Instance.IsRegionMapped(IoStatusBlock, 0x10) || !Instance.IsMemoryRangeMapped(FileInformation, Length))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             ulong ClassHeaderSize = GetHeaderSize(FileInformationClass);
@@ -41,13 +42,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.ResetIoEvent(EventHandle);
 
-            string HostPath = GeneralHelper.IO.ResolveHostPath(DirectoryHandle.Path, Helpers.BinaryHelpers.BinaryFormat.PE);
-            if (string.IsNullOrEmpty(HostPath) || !Directory.Exists(HostPath))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-            }
-
             string Mask = ReadUnicodeString64(Instance, FileName);
             if (Mask == null)
                 Mask = string.Empty;
@@ -62,6 +56,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool FirstQueryOfScan = false;
             if (DirectoryHandle.DirectoryEntries == null || RestartScan || MaskChanged)
             {
+                string HostPath = GeneralHelper.IO.ResolveHostPath(DirectoryHandle.Path, Helpers.BinaryHelpers.BinaryFormat.PE);
+                if (string.IsNullOrEmpty(HostPath) || !Directory.Exists(HostPath))
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
+                    return NTSTATUS.STATUS_INVALID_HANDLE;
+                }
+
                 string EffectiveMask = MaskProvided ? Mask : (DirectoryHandle.DirectoryMask ?? string.Empty);
                 DirectoryHandle.DirectoryEntries = ScanDirectory(HostPath, GeneralHelper.IO.ResolveNativeHostPath(DirectoryHandle.Path), EffectiveMask, DirectoryHandle.Path);
                 DirectoryHandle.DirectoryIndex = 0;
@@ -76,6 +77,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 // An empty first query is STATUS_NO_SUCH_FILE, which FindFirstFile maps to ERROR_FILE_NOT_FOUND.
                 NTSTATUS EmptyStatus = FirstQueryOfScan ? NTSTATUS.STATUS_NO_SUCH_FILE : NTSTATUS.STATUS_NO_MORE_FILES;
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, EmptyStatus, 0);
+                Instance.WinHelper.QueueImmediateCompletion(DirectoryHandle, ApcRoutine, ApcContext, IoStatusBlock, EmptyStatus, 0);
                 return EmptyStatus;
             }
 
@@ -83,16 +85,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             int CurrentIndex = DirectoryHandle.DirectoryIndex;
             ulong RequiredLength = 0;
             ulong PreviousEntryOffset = ulong.MaxValue;
+            Span<byte> NextEntryOffset = stackalloc byte[4];
 
             while (CurrentIndex < DirectoryHandle.DirectoryEntries.Count)
             {
                 ulong NewOffset = AlignUp(CurrentOffset, 8);
                 WinDirectoryEntry Entry = DirectoryHandle.DirectoryEntries[CurrentIndex];
                 string EntryName = Entry.Name ?? string.Empty;
-                byte[] FileNameBytes = EntryName.Length == 0 ? Array.Empty<byte>() : Encoding.Unicode.GetBytes(EntryName);
+                int NameBytes = Encoding.Unicode.GetByteCount(EntryName);
 
                 ulong HeaderSize = GetHeaderSize(FileInformationClass);
-                ulong EntrySize = HeaderSize + (ulong)FileNameBytes.Length;
+                ulong EntrySize = HeaderSize + (ulong)NameBytes;
                 ulong EndOffset = NewOffset + EntrySize;
                 RequiredLength = EndOffset;
 
@@ -101,16 +104,27 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (CurrentOffset == 0)
                     {
                         Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_BUFFER_OVERFLOW, RequiredLength);
+                        Instance.WinHelper.QueueImmediateCompletion(DirectoryHandle, ApcRoutine, ApcContext, IoStatusBlock, NTSTATUS.STATUS_BUFFER_OVERFLOW, RequiredLength);
                         return NTSTATUS.STATUS_BUFFER_OVERFLOW;
                     }
 
                     break;
                 }
 
-                if (PreviousEntryOffset != ulong.MaxValue)
-                    Instance._emulator.WriteMemory(FileInformation + PreviousEntryOffset, (uint)(NewOffset - PreviousEntryOffset), 4);
+                Span<byte> Record = Instance.WinHelper.Shared.GetSpan(EntrySize).Slice(0, (int)EntrySize);
+                Record.Clear();
+                FormatEntry(Record, FileInformationClass, Entry, (uint)CurrentIndex, NameBytes);
+                Encoding.Unicode.GetBytes(EntryName, Record.Slice((int)HeaderSize));
 
-                WriteEntry(Instance, FileInformation + NewOffset, FileInformationClass, Entry, FileNameBytes, (uint)CurrentIndex);
+                if (PreviousEntryOffset != ulong.MaxValue)
+                    BinaryPrimitives.WriteUInt32LittleEndian(NextEntryOffset, (uint)(NewOffset - PreviousEntryOffset));
+
+                if (!Instance._emulator.WriteMemory(FileInformation + NewOffset, Record) ||
+                    (PreviousEntryOffset != ulong.MaxValue && !Instance._emulator.WriteMemory(FileInformation + PreviousEntryOffset, NextEntryOffset)))
+                {
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                }
 
                 PreviousEntryOffset = NewOffset;
                 CurrentOffset = EndOffset;
@@ -130,6 +144,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Status = NTSTATUS.STATUS_SUCCESS;
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, Status, Information);
+            Instance.WinHelper.QueueImmediateCompletion(DirectoryHandle, ApcRoutine, ApcContext, IoStatusBlock, Status, Information);
             return Status;
         }
 
@@ -154,89 +169,29 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static void WriteEntry(BinaryEmulator Instance, ulong Address, uint FileInformationClass, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
+        private static void FormatEntry(Span<byte> Record, uint FileInformationClass, WinDirectoryEntry Entry, uint FileIndex, int NameBytes)
         {
-            switch ((FILE_INFORMATION_CLASS)FileInformationClass)
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(0x04), FileIndex);
+
+            if ((FILE_INFORMATION_CLASS)FileInformationClass == FILE_INFORMATION_CLASS.FileNamesInformation)
             {
-                case FILE_INFORMATION_CLASS.FileDirectoryInformation:
-                    WriteFileDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
-                    return;
-                case FILE_INFORMATION_CLASS.FileFullDirectoryInformation:
-                    WriteFileFullDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
-                    return;
-                case FILE_INFORMATION_CLASS.FileBothDirectoryInformation:
-                    WriteFileBothDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
-                    return;
-                case FILE_INFORMATION_CLASS.FileNamesInformation:
-                    WriteFileNamesInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
-                    return;
-                case FILE_INFORMATION_CLASS.FileIdFullDirectoryInformation:
-                    WriteFileIdFullDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
-                    return;
-                case FILE_INFORMATION_CLASS.FileIdBothDirectoryInformation:
-                    WriteFileIdBothDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
-                    return;
-                default:
-                    throw new NotSupportedException();
+                BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(0x08), (uint)NameBytes);
+                return;
             }
-        }
 
-        private static void WriteFileDirectoryInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
-        {
-            Span<byte> Buf = stackalloc byte[0x40];
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x00, 4), 0u);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x04, 4), FileIndex);
-            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Buf.Slice(0x08, 8), Entry.CreationTime);
-            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Buf.Slice(0x10, 8), Entry.LastAccessTime);
-            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Buf.Slice(0x18, 8), Entry.LastWriteTime);
-            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Buf.Slice(0x20, 8), Entry.ChangeTime);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0x28, 8), Entry.EndOfFile);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0x30, 8), Entry.AllocationSize);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x38, 4), Entry.FileAttributes);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x3C, 4), (uint)FileNameBytes.Length);
-            Instance._emulator.WriteMemory(Address, Buf);
-            if (FileNameBytes.Length != 0)
-                Instance._emulator.WriteMemory(Address + 0x40, FileNameBytes);
-        }
+            BinaryPrimitives.WriteInt64LittleEndian(Record.Slice(0x08), Entry.CreationTime);
+            BinaryPrimitives.WriteInt64LittleEndian(Record.Slice(0x10), Entry.LastAccessTime);
+            BinaryPrimitives.WriteInt64LittleEndian(Record.Slice(0x18), Entry.LastWriteTime);
+            BinaryPrimitives.WriteInt64LittleEndian(Record.Slice(0x20), Entry.ChangeTime);
+            BinaryPrimitives.WriteUInt64LittleEndian(Record.Slice(0x28), Entry.EndOfFile);
+            BinaryPrimitives.WriteUInt64LittleEndian(Record.Slice(0x30), Entry.AllocationSize);
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(0x38), Entry.FileAttributes);
+            BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(0x3C), (uint)NameBytes);
 
-        private static void WriteFileFullDirectoryInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
-        {
-            WriteFileDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
-            Instance._emulator.WriteMemory(Address + 0x40, 0u, 4);
-            if (FileNameBytes.Length != 0)
-                Instance._emulator.WriteMemory(Address + 0x44, FileNameBytes, (uint)FileNameBytes.Length);
-        }
-
-        private static void WriteFileBothDirectoryInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
-        {
-            WriteFileFullDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
-            Instance.WinHelper.WriteByte(Address + 0x44, 0x00);
-            Instance.WinHelper.WriteByte(Address + 0x45, 0x00);
-            Instance.WinHelper.WriteZeroMemory(Address + 0x46, 0x18);
-            if (FileNameBytes.Length != 0)
-                Instance._emulator.WriteMemory(Address + 0x5E, FileNameBytes, (uint)FileNameBytes.Length);
-        }
-
-        private static void WriteFileIdFullDirectoryInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
-        {
-            WriteFileDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
-            Instance._emulator.WriteMemory(Address + 0x40, 0u, 4);
-            Instance._emulator.WriteMemory(Address + 0x44, 0u, 4);
-            Instance._emulator.WriteMemory(Address + 0x48, Entry.FileId, 8);
-            if (FileNameBytes.Length != 0)
-                Instance._emulator.WriteMemory(Address + 0x50, FileNameBytes, (uint)FileNameBytes.Length);
-        }
-
-        private static void WriteFileIdBothDirectoryInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
-        {
-            WriteFileDirectoryInformation(Instance, Address, Entry, FileNameBytes, FileIndex);
-            Instance._emulator.WriteMemory(Address + 0x40, 0u, 4);
-            Instance.WinHelper.WriteByte(Address + 0x44, 0x00);
-            Instance.WinHelper.WriteByte(Address + 0x45, 0x00);
-            Instance.WinHelper.WriteZeroMemory(Address + 0x46, 0x1A);
-            Instance._emulator.WriteMemory(Address + 0x60, Entry.FileId, 8);
-            if (FileNameBytes.Length != 0)
-                Instance._emulator.WriteMemory(Address + 0x68, FileNameBytes, (uint)FileNameBytes.Length);
+            if ((FILE_INFORMATION_CLASS)FileInformationClass == FILE_INFORMATION_CLASS.FileIdFullDirectoryInformation)
+                BinaryPrimitives.WriteUInt64LittleEndian(Record.Slice(0x48), Entry.FileId);
+            else if ((FILE_INFORMATION_CLASS)FileInformationClass == FILE_INFORMATION_CLASS.FileIdBothDirectoryInformation)
+                BinaryPrimitives.WriteUInt64LittleEndian(Record.Slice(0x60), Entry.FileId);
         }
 
         private static string CombineGuestPath(string DirectoryPath, string Name)
@@ -247,17 +202,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return DirectoryPath.EndsWith("\\", StringComparison.Ordinal)
                 ? DirectoryPath + Name
                 : DirectoryPath + "\\" + Name;
-        }
-
-        private static void WriteFileNamesInformation(BinaryEmulator Instance, ulong Address, WinDirectoryEntry Entry, ReadOnlySpan<byte> FileNameBytes, uint FileIndex)
-        {
-            Span<byte> Buf = stackalloc byte[0x0C];
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x00, 4), 0u);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x04, 4), FileIndex);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x08, 4), (uint)FileNameBytes.Length);
-            Instance._emulator.WriteMemory(Address, Buf);
-            if (FileNameBytes.Length != 0)
-                Instance._emulator.WriteMemory(Address + 0x0C, FileNameBytes);
         }
 
         private static List<WinDirectoryEntry> ScanDirectory(string HostPath, string NativePath, string Mask, string GuestPath)

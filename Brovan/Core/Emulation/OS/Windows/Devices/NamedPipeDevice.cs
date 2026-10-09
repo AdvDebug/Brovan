@@ -64,6 +64,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal uint CompletionMode { get; set; }
 
+        internal ulong InboundClaim;
+        internal ulong OutboundClaim;
+
         internal uint PipeType => Channel == null ? FILE_PIPE_BYTE_STREAM_MODE : Channel.PipeType;
 
         internal uint MaximumInstances => Channel == null ? 1 : Channel.MaximumInstances;
@@ -476,6 +479,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private readonly List<PipeRequest> Pending = new List<PipeRequest>();
         private uint NextToken;
+        private ulong Pass;
 
         internal int Count => Pending.Count;
 
@@ -503,7 +507,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         // NT waits inside the call on a synchronous file, so the calling thread parks until the request ends.
         internal NTSTATUS Submit(BinaryEmulator Instance, PipeRequest Request)
         {
-            bool Queued = IsBlockedByEarlier(Request, Pending.Count);
+            ulong Stamp = ++Pass;
+            for (int i = 0; i < Pending.Count; i++)
+                Claim(Pending[i], Stamp);
+
+            bool Queued = IsClaimed(Request, Stamp);
             if (!Queued && TryProgress(Instance, Request))
             {
                 Finish(Instance, Request, false);
@@ -545,6 +553,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Pending.Count == 0)
                 return;
 
+            ulong Stamp = ++Pass;
             for (int i = 0; i < Pending.Count; i++)
             {
                 PipeRequest Request = Pending[i];
@@ -557,11 +566,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
                 }
 
-                if (IsBlockedByEarlier(Request, i))
+                if (IsClaimed(Request, Stamp))
                     continue;
 
                 if (!TryProgress(Instance, Request))
+                {
+                    Claim(Request, Stamp);
                     continue;
+                }
 
                 Pending.RemoveAt(i--);
                 Finish(Instance, Request, true);
@@ -569,20 +581,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT queues the requests on one end and direction in order.
-        private bool IsBlockedByEarlier(PipeRequest Request, int Index)
+        private static void Claim(PipeRequest Request, ulong Stamp)
         {
-            for (int i = 0; i < Index; i++)
-            {
-                PipeRequest Earlier = Pending[i];
-                if (!ReferenceEquals(Earlier.Pipe, Request.Pipe))
-                    continue;
+            if (Request.UsesInbound)
+                Request.Pipe.InboundClaim = Stamp;
 
-                if ((Earlier.UsesInbound && Request.UsesInbound) || (Earlier.UsesOutbound && Request.UsesOutbound))
-                    return true;
-            }
-
-            return false;
+            if (Request.UsesOutbound)
+                Request.Pipe.OutboundClaim = Stamp;
         }
+
+        private static bool IsClaimed(PipeRequest Request, ulong Stamp) =>
+            (Request.UsesInbound && Request.Pipe.InboundClaim == Stamp) || (Request.UsesOutbound && Request.Pipe.OutboundClaim == Stamp);
 
         // A zero IoStatusBlock matches every request on the file, and a negative thread id matches every thread.
         internal int Cancel(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, int ThreadId)
