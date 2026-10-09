@@ -24,12 +24,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(ObjectName) && AttributesRoot == 0)
                 return NTSTATUS.STATUS_OBJECT_PATH_SYNTAX_BAD;
 
-            switch (Instance.WinHelper.LookupDosDeviceName(ref FullName, false, out IHandleObject Found, out _, out _, out NTSTATUS LookupStatus))
+            switch (Instance.WinHelper.LookupObjectDirectoryName(ref FullName, false, true, out IHandleObject Found, out _, out _, out NTSTATUS LookupStatus))
             {
-                case WinSysHelper.DosDeviceLookup.Failed:
+                case WinSysHelper.ObjectDirectoryLookup.Failed:
                     return LookupStatus;
-                case WinSysHelper.DosDeviceLookup.Found:
-                    return OpenDosDevicesDirectory(Instance, DirectoryHandlePtr, DesiredAccess, Found);
+                case WinSysHelper.ObjectDirectoryLookup.Found:
+                    return OpenModelledDirectory(Instance, DirectoryHandlePtr, DesiredAccess, Found);
             }
 
             if (!Instance.WinHelper.TryGetKnownObjectDirectoryHandle(FullName, out ulong OutHandle))
@@ -48,12 +48,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS OpenDosDevicesDirectory(BinaryEmulator Instance, ulong DirectoryHandlePtr, AccessMask DesiredAccess, IHandleObject Found)
+        private static NTSTATUS OpenModelledDirectory(BinaryEmulator Instance, ulong DirectoryHandlePtr, AccessMask DesiredAccess, IHandleObject Found)
         {
             if (Found is not WinObjectDirectory Directory)
                 return NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
 
-            if (!WinSysHelper.TryGrantObjectAccess(DesiredAccess, true, Directory.UserAccess, out AccessMask Granted))
+            if (!WinSysHelper.TryGrantObjectAccess(DesiredAccess, WinSysHelper.ObjectAccessKind.Directory, Instance.WinHelper.GetGrantableAccess(Directory), out AccessMask Granted))
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
             WinHandle Handle = Instance.WinHelper.OpenObjectHandle(Directory, Granted);

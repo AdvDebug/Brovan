@@ -271,6 +271,7 @@ static inline uint64_t brov_jmp_key(uint64_t pc, unsigned id)
     brov_alias_range *brov_aliases;                                            \
     uint32_t brov_alias_count;                                                 \
     uint32_t brov_alias_cap;                                                   \
+    bool brov_protect_batch;                                                   \
     struct brov_ops brov;
 
 #define BROVAN_TCG_FIELDS                                                      \

@@ -65,7 +65,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 };
             }
 
-            return new WinToken
+            WinToken Clone = new WinToken
             {
                 Type = TokenType.Primary,
                 SessionId = Source.SessionId,
@@ -76,6 +76,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 OwningProcessId = NewOwningProcessId,
                 OwningThreadId = 0
             };
+            Clone.CopyIdentityFrom(Source);
+            return Clone;
         }
 
         private static void ApplySectionIdentity(WinProcess Process, WinSection Section)

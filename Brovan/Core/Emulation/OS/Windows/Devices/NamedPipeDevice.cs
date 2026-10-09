@@ -56,6 +56,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal bool IsRoot { get; }
 
+        internal bool IsDirectory => Channel == null;
+
         internal bool IsServer => Channel != null && Channel.IsServer;
 
         internal uint ReadMode { get; set; }
@@ -72,10 +74,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal bool BlockingMode => CompletionMode != FILE_PIPE_COMPLETE_OPERATION;
 
-        private GuestNamedPipe(string GuestPath)
+        private GuestNamedPipe(string GuestPath, bool IsRoot)
         {
             this.GuestPath = GuestPath;
-            IsRoot = true;
+            this.IsRoot = IsRoot;
         }
 
         private GuestNamedPipe(string GuestPath, GuestPipeChannel Channel, uint ReadMode, uint CompletionMode)
@@ -86,7 +88,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             this.CompletionMode = CompletionMode;
         }
 
-        internal static GuestNamedPipe CreateRoot(string GuestPath) => new GuestNamedPipe(GuestPath);
+        internal static GuestNamedPipe CreateRoot(string GuestPath) => new GuestNamedPipe(GuestPath, true);
+
+        // NT: no name opens relative to an npfs prefix.
+        internal static GuestNamedPipe CreatePrefix(string GuestPath) => new GuestNamedPipe(GuestPath, false);
 
         // NT gives an anonymous pipe no name. The backing file still needs a unique one.
         internal static string NextAnonymousPath()
@@ -165,7 +170,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Root.IsRoot)
             {
                 if (!string.IsNullOrEmpty(Name))
-                    GuestPath = DeviceName + "\\" + Name.TrimStart('\\');
+                    GuestPath = Instance.WinHelper.TranslatePipeAlias(DeviceName + "\\" + Name.TrimStart('\\'));
                 return true;
             }
 
@@ -205,7 +210,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal NTSTATUS UsableStatus(bool Writing)
         {
-            if (IsRoot || Channel == null)
+            if (IsDirectory)
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
 
             if (Channel.Disconnected)
@@ -229,7 +234,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             switch (ControlCode)
             {
                 case FSCTL_PIPE_WAIT:
-                    return Wait(ref Data);
+                    return Wait(ref Data, Instance);
 
                 case FSCTL_PIPE_DISCONNECT:
                     return Disconnect(Instance, Data.File);
@@ -248,12 +253,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// STATUS_PENDING while no instance is listening.
         /// </summary>
-        private NTSTATUS Wait(ref DeviceData Data)
+        private NTSTATUS Wait(ref DeviceData Data, BinaryEmulator Instance)
         {
             if (!TryReadWaitName(Data.InputBuffer, Data.InputLength, out string Name))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            return GuestPipeChannel.ServerExists(DeviceName + "\\" + Name)
+            return GuestPipeChannel.ServerExists(Instance.WinHelper.TranslatePipeAlias(DeviceName + "\\" + Name))
                 ? NTSTATUS.STATUS_SUCCESS
                 : NTSTATUS.STATUS_PENDING;
         }

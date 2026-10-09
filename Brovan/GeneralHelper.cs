@@ -2258,6 +2258,35 @@ namespace Brovan
                 return false;
             }
 
+            public static bool TryReadHostFile(string HostPath, int MaxBytes, out byte[] Data)
+            {
+                Data = null;
+                try
+                {
+                    if (!File.Exists(HostPath))
+                        return false;
+
+                    using FileStream Stream = File.OpenRead(HostPath);
+                    if (Stream.Length == 0 || Stream.Length > MaxBytes)
+                        return false;
+
+                    byte[] Buffer = new byte[Stream.Length];
+                    if (Stream.ReadAtLeast(Buffer, Buffer.Length, false) != Buffer.Length)
+                        return false;
+
+                    Data = Buffer;
+                    return true;
+                }
+                catch (IOException)
+                {
+                    return false;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    return false;
+                }
+            }
+
             /// <param name="Target">receives the stored target, which stays relative when the link is relative.</param>
             public static bool TryReadHostSymlinkTarget(string HostPath, out string Target)
             {

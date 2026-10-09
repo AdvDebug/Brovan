@@ -311,27 +311,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (string.IsNullOrEmpty(ImagePath))
                 return null;
 
-            try
-            {
-                string Path = ImagePath + ".manifest";
-                if (!File.Exists(Path))
-                    return null;
-
-                using FileStream Stream = File.OpenRead(Path);
-                if (Stream.Length == 0 || Stream.Length > MaxManifestBytes)
-                    return null;
-
-                byte[] Buffer = new byte[Stream.Length];
-                return Stream.ReadAtLeast(Buffer, Buffer.Length, false) == Buffer.Length ? Buffer : null;
-            }
-            catch (IOException)
-            {
-                return null;
-            }
-            catch (UnauthorizedAccessException)
-            {
-                return null;
-            }
+            return GeneralHelper.IO.TryReadHostFile(ImagePath + ".manifest", MaxManifestBytes, out byte[] Manifest) ? Manifest : null;
         }
 
         private static byte[] ReadEmbeddedManifest<TImage>(TImage Image, uint DirectoryRva) where TImage : struct, IImageReader
@@ -405,18 +385,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             string DpiAwareValue = null;
             string GdiScalingValue = null;
 
-            XmlReaderSettings Settings = new XmlReaderSettings
-            {
-                DtdProcessing = DtdProcessing.Prohibit,
-                IgnoreComments = true,
-                IgnoreWhitespace = true,
-                IgnoreProcessingInstructions = true,
-                XmlResolver = null,
-                CloseInput = true,
-            };
-
-            using MemoryStream Stream = new MemoryStream(Manifest, 0, Manifest.Length, false);
-            using XmlReader Reader = XmlReader.Create(Stream, Settings);
+            using XmlReader Reader = WinSxS.CreateManifestReader(Manifest);
 
             while (!Reader.EOF)
             {

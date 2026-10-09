@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Reflection.Metadata.Ecma335;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -55,6 +56,25 @@ namespace Brovan.Core.Emulation
             public IntPtr BufferBase;
             public bool Aliased;
         }
+
+        private struct WatchedPage
+        {
+            public MemoryProtection Protection;
+            public bool Written;
+            public bool Untouched;
+
+            // NT: an untouched page has no valid PTE, and a clean page has no write bit.
+            public readonly MemoryProtection Effective =>
+                Untouched ? MemoryProtection.None : Written ? Protection : Protection & ~MemoryProtection.Write;
+        }
+
+        private const ulong WatchPageSize = 0x1000;
+
+        // Paging is off, so a clean watched page is mapped without write and its first write faults.
+        private readonly Dictionary<ulong, WatchedPage> _watchedPages = new Dictionary<ulong, WatchedPage>();
+        private ulong _watchLow = ulong.MaxValue;
+        private ulong _watchHigh;
+        private int _untouchedPages;
 
         private readonly object _memoryLock = new object();
         private readonly object _registerLock = new object();
@@ -310,6 +330,8 @@ namespace Brovan.Core.Emulation
                 {
                     FlushTlb();
                     TrimMappedRegions(address, size);
+                    if (_watchedPages.Count != 0)
+                        ForgetWatchedPages(address, size);
                     return true;
                 }
             }
@@ -442,7 +464,7 @@ namespace Brovan.Core.Emulation
             if (writeLen == 0)
                 return false;
 
-            if (TryGetHostPointer(address, (int)writeLen, out byte* dst, out long offset))
+            if (TryGetHostPointer(address, (int)writeLen, true, out byte* dst, out long offset))
             {
                 _error = UCErrors.UC_ERR_OK;
                 fixed (byte* src = value)
@@ -470,7 +492,10 @@ namespace Brovan.Core.Emulation
                         handle = GCHandle.Alloc(value, GCHandleType.Pinned);
                         IntPtr ptr = handle.AddrOfPinnedObject();
                         _error = uc_mem_write_ptr(_uc, address, ptr, new UIntPtr(writeLen));
-                        return _error == UCErrors.UC_ERR_OK;
+                        if (_error != UCErrors.UC_ERR_OK)
+                            return false;
+                        if (_watchedPages.Count != 0) RecordHostAccess(address, writeLen, true);
+                        return true;
                     }
                     finally
                     {
@@ -503,7 +528,7 @@ namespace Brovan.Core.Emulation
             if (Length == 0)
                 return true;
 
-            if (TryGetHostPointer(Address, Length, out byte* dst, out long dstOffset))
+            if (TryGetHostPointer(Address, Length, true, out byte* dst, out long dstOffset))
             {
                 _error = UCErrors.UC_ERR_OK;
                 fixed (byte* src = Value)
@@ -531,7 +556,10 @@ namespace Brovan.Core.Emulation
                         IntPtr Ptr = IntPtr.Add(BasePtr, Offset);
 
                         _error = uc_mem_write_ptr(_uc, Address, Ptr, new UIntPtr((uint)Length));
-                        return _error == UCErrors.UC_ERR_OK;
+                        if (_error != UCErrors.UC_ERR_OK)
+                            return false;
+                        if (_watchedPages.Count != 0) RecordHostAccess(Address, (ulong)Length, true);
+                        return true;
                     }
                     finally
                     {
@@ -555,7 +583,7 @@ namespace Brovan.Core.Emulation
             if (writeLen == 0)
                 return false;
 
-            if (TryGetHostPointer(address, (int)writeLen, out byte* dst, out long offset))
+            if (TryGetHostPointer(address, (int)writeLen, true, out byte* dst, out long offset))
             {
                 _error = UCErrors.UC_ERR_OK;
                 fixed (byte* src = value)
@@ -580,7 +608,10 @@ namespace Brovan.Core.Emulation
                     fixed (byte* ptr = value)
                     {
                         _error = uc_mem_write_ptr(_uc, address, (IntPtr)ptr, new UIntPtr(writeLen));
-                        return _error == UCErrors.UC_ERR_OK;
+                        if (_error != UCErrors.UC_ERR_OK)
+                            return false;
+                        if (_watchedPages.Count != 0) RecordHostAccess(address, writeLen, true);
+                        return true;
                     }
                 }
             }
@@ -600,7 +631,7 @@ namespace Brovan.Core.Emulation
         {
             uint WriteLen = Length == 0 || Length > ValueBytes ? ValueBytes : Length;
 
-            if (TryGetHostPointer(Address, (int)WriteLen, out byte* Destination, out long Offset))
+            if (TryGetHostPointer(Address, (int)WriteLen, true, out byte* Destination, out long Offset))
             {
                 byte* Target = Destination + Offset;
                 _error = UCErrors.UC_ERR_OK;
@@ -684,13 +715,14 @@ namespace Brovan.Core.Emulation
             if (length > int.MaxValue)
                 return null;
             byte[] value = new byte[length];
-            if (TryGetHostPointer(address, (int)length, out byte* src, out long offset))
+            if (TryGetHostPointer(address, (int)length, false, out byte* src, out long offset))
             {
                 _error = UCErrors.UC_ERR_OK;
                 if (length > 0)
                     Unsafe.CopyBlockUnaligned(ref value[0], ref Unsafe.AsRef<byte>(src + offset), (uint)length);
                 return value;
             }
+            if (_untouchedPages != 0) RecordHostAccess(address, length, false);
             _error = uc_mem_read(_uc, address, value, new UIntPtr(length));
             return value;
         }
@@ -702,13 +734,14 @@ namespace Brovan.Core.Emulation
             if (length > int.MaxValue)
                 return null;
             byte[] value = new byte[length];
-            if (TryGetHostPointer(address, (int)length, out byte* src, out long offset))
+            if (TryGetHostPointer(address, (int)length, false, out byte* src, out long offset))
             {
                 _error = UCErrors.UC_ERR_OK;
                 if (length > 0)
                     Unsafe.CopyBlockUnaligned(ref value[0], ref Unsafe.AsRef<byte>(src + offset), length);
                 return value;
             }
+            if (_untouchedPages != 0) RecordHostAccess(address, length, false);
             _error = uc_mem_read(_uc, address, value, length);
             return value;
         }
@@ -722,7 +755,7 @@ namespace Brovan.Core.Emulation
             if (ReadLen == 0)
                 return false;
 
-            if (TryGetHostPointer(address, (int)ReadLen, out byte* src, out long offset))
+            if (TryGetHostPointer(address, (int)ReadLen, false, out byte* src, out long offset))
             {
                 _error = UCErrors.UC_ERR_OK;
                 fixed (byte* dst = value)
@@ -746,6 +779,7 @@ namespace Brovan.Core.Emulation
 
                     fixed (byte* Ptr = value)
                     {
+                        if (_untouchedPages != 0) RecordHostAccess(address, ReadLen, false);
                         _error = uc_mem_read_ptr(_uc, address, (IntPtr)Ptr, new UIntPtr(ReadLen));
                         return _error == UCErrors.UC_ERR_OK;
                     }
@@ -759,7 +793,7 @@ namespace Brovan.Core.Emulation
 
         public unsafe ulong ReadMemoryULong(ulong address)
         {
-            if (TryGetHostPointer(address, sizeof(ulong), out byte* ptr, out long offset))
+            if (TryGetHostPointer(address, sizeof(ulong), false, out byte* ptr, out long offset))
             {
                 _error = UCErrors.UC_ERR_OK;
                 return *(ulong*)(ptr + offset);
@@ -767,13 +801,14 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck())
                 return 0;
             ulong value = 0;
+            if (_untouchedPages != 0) RecordHostAccess(address, sizeof(ulong), false);
             _error = uc_mem_read(_uc, address, out value, sizeof(ulong));
             return value;
         }
 
         public unsafe uint ReadMemoryUInt(ulong address)
         {
-            if (TryGetHostPointer(address, sizeof(uint), out byte* ptr, out long offset))
+            if (TryGetHostPointer(address, sizeof(uint), false, out byte* ptr, out long offset))
             {
                 _error = UCErrors.UC_ERR_OK;
                 return *(uint*)(ptr + offset);
@@ -781,13 +816,14 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck())
                 return 0;
             uint value = 0;
+            if (_untouchedPages != 0) RecordHostAccess(address, sizeof(uint), false);
             _error = uc_mem_read(_uc, address, out value, sizeof(uint));
             return value;
         }
 
         public unsafe ushort ReadMemoryUShort(ulong address)
         {
-            if (TryGetHostPointer(address, sizeof(ushort), out byte* ptr, out long offset))
+            if (TryGetHostPointer(address, sizeof(ushort), false, out byte* ptr, out long offset))
             {
                 _error = UCErrors.UC_ERR_OK;
                 return *(ushort*)(ptr + offset);
@@ -795,6 +831,7 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck())
                 return 0;
             ushort value = 0;
+            if (_untouchedPages != 0) RecordHostAccess(address, sizeof(ushort), false);
             _error = uc_mem_read(_uc, address, out value, sizeof(ushort));
             return value;
         }
@@ -808,7 +845,7 @@ namespace Brovan.Core.Emulation
             if (address == 0 || length <= 0)
                 return string.Empty;
 
-            if (TryGetHostPointer(address, length, out byte* src, out long offset))
+            if (TryGetHostPointer(address, length, false, out byte* src, out long offset))
             {
                 _error = UCErrors.UC_ERR_OK;
                 return DecodeMemoryString(new ReadOnlySpan<byte>(src + offset, length), encoding);
@@ -817,6 +854,7 @@ namespace Brovan.Core.Emulation
             byte[] Buffer = ArrayPool<byte>.Shared.Rent(length);
             try
             {
+                if (_untouchedPages != 0) RecordHostAccess(address, (ulong)length, false);
                 _error = uc_mem_read(_uc, address, Buffer, (uint)length);
                 if (_error != UCErrors.UC_ERR_OK)
                     return string.Empty;
@@ -1239,8 +1277,253 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck())
                 return false;
 
+            if (_watchedPages.Count != 0 && Address < _watchHigh && Address + Size > _watchLow)
+            {
+                lock (_mapsLock)
+                    return ProtectWatchedRange(Address, Size, Protection);
+            }
+
             _error = uc_mem_protect(_uc, Address, Size, Protection);
             return _error == UCErrors.UC_ERR_OK;
+        }
+
+        private bool ProtectWatchedRange(ulong Address, ulong Size, MemoryProtection Protection)
+        {
+            ulong End = Address + Size;
+            ulong Last = Math.Min(End, _watchHigh);
+            ulong RunStart = Address;
+            MemoryProtection RunProtection = Protection;
+
+            for (ulong Page = Math.Max(Address, _watchLow); Page < Last; Page += WatchPageSize)
+            {
+                MemoryProtection Effective = Protection;
+                ref WatchedPage Watch = ref CollectionsMarshal.GetValueRefOrNullRef(_watchedPages, Page);
+                if (!Unsafe.IsNullRef(ref Watch))
+                {
+                    Watch.Protection = Protection;
+                    Effective = Watch.Effective;
+                }
+
+                if (Effective == RunProtection)
+                    continue;
+
+                if (!ProtectRun(RunStart, Page - RunStart, RunProtection))
+                    return false;
+
+                RunStart = Page;
+                RunProtection = Effective;
+            }
+
+            return ProtectRun(RunStart, End - RunStart, RunProtection);
+        }
+
+        private bool ProtectRun(ulong Address, ulong Size, MemoryProtection Protection)
+        {
+            if (Size == 0)
+                return true;
+
+            _error = uc_mem_protect(_uc, Address, Size, Protection);
+            return _error == UCErrors.UC_ERR_OK;
+        }
+
+        public bool WatchWrites(ulong Address, ulong Size, MemoryProtection Protection)
+        {
+            if ((Address & (WatchPageSize - 1)) != 0 || (Size & (WatchPageSize - 1)) != 0 || Size == 0)
+            {
+                _error = UCErrors.UC_ERR_ARG;
+                return false;
+            }
+
+            lock (_mapsLock)
+            {
+                if (DisposedCheck())
+                    return false;
+
+                if (!IsRangeMapped(Address, Size))
+                {
+                    _error = UCErrors.UC_ERR_NOMEM;
+                    return false;
+                }
+
+                ulong End = Address + Size;
+                ulong RunStart = End;
+                _watchLow = Math.Min(_watchLow, Address);
+                _watchHigh = Math.Max(_watchHigh, End);
+
+                for (ulong Page = Address; Page < End; Page += WatchPageSize)
+                {
+                    if (_watchedPages.TryAdd(Page, new WatchedPage { Protection = Protection, Untouched = true }))
+                    {
+                        _untouchedPages++;
+                        if (RunStart == End)
+                            RunStart = Page;
+                        continue;
+                    }
+
+                    if (RunStart != End && Protection != MemoryProtection.None && !ProtectRun(RunStart, Page - RunStart, MemoryProtection.None))
+                        return false;
+                    RunStart = End;
+                }
+
+                return RunStart == End || Protection == MemoryProtection.None || ProtectRun(RunStart, End - RunStart, MemoryProtection.None);
+            }
+        }
+
+        public bool QueryWrites(ulong Address, ulong PageCount, Span<ulong> Written)
+        {
+            if ((Address & (WatchPageSize - 1)) != 0 || PageCount > (ulong)Written.Length * 64)
+            {
+                _error = UCErrors.UC_ERR_ARG;
+                return false;
+            }
+
+            Written.Slice(0, (int)((PageCount + 63) / 64)).Clear();
+
+            lock (_mapsLock)
+            {
+                if (_watchedPages.Count == 0)
+                    return true;
+
+                for (ulong Index = 0; Index < PageCount; Index++)
+                {
+                    if (_watchedPages.TryGetValue(Address + Index * WatchPageSize, out WatchedPage Watch) && Watch.Written)
+                        Written[(int)(Index >> 6)] |= 1UL << (int)(Index & 63);
+                }
+            }
+
+            return true;
+        }
+
+        public bool ResetWrites(ulong Address, ulong PageCount, ReadOnlySpan<ulong> Pages)
+        {
+            if ((Address & (WatchPageSize - 1)) != 0 || PageCount > (ulong)Pages.Length * 64)
+            {
+                _error = UCErrors.UC_ERR_ARG;
+                return false;
+            }
+
+            lock (_mapsLock)
+            {
+                if (DisposedCheck())
+                    return false;
+
+                ulong RunStart = 0;
+                ulong RunEnd = 0;
+                MemoryProtection RunProtection = MemoryProtection.None;
+
+                int Words = (int)((PageCount + 63) / 64);
+                for (int Word = 0; Word < Words; Word++)
+                {
+                    for (ulong Bits = Pages[Word]; Bits != 0; Bits &= Bits - 1)
+                    {
+                        ulong Index = (ulong)Word * 64 + (ulong)BitOperations.TrailingZeroCount(Bits);
+                        if (Index >= PageCount)
+                            break;
+
+                        ulong Page = Address + Index * WatchPageSize;
+                        ref WatchedPage Watch = ref CollectionsMarshal.GetValueRefOrNullRef(_watchedPages, Page);
+                        if (Unsafe.IsNullRef(ref Watch) || !Watch.Written)
+                            continue;
+
+                        Watch.Written = false;
+                        if (Watch.Effective == Watch.Protection)
+                            continue;
+
+                        if (Page == RunEnd && Watch.Effective == RunProtection)
+                        {
+                            RunEnd += WatchPageSize;
+                            continue;
+                        }
+
+                        if (!ProtectRun(RunStart, RunEnd - RunStart, RunProtection))
+                            return false;
+
+                        RunStart = Page;
+                        RunEnd = Page + WatchPageSize;
+                        RunProtection = Watch.Effective;
+                    }
+                }
+
+                return ProtectRun(RunStart, RunEnd - RunStart, RunProtection);
+            }
+        }
+
+        public bool TryCompleteWatchedAccess(ulong Address, BackendMemoryAccessType Type)
+        {
+            if (_watchedPages.Count == 0)
+                return false;
+
+            MemoryProtection Needed = Type switch
+            {
+                BackendMemoryAccessType.WriteProtected => MemoryProtection.Write,
+                BackendMemoryAccessType.FetchProtected => MemoryProtection.Execute,
+                _ => MemoryProtection.Read,
+            };
+
+            lock (_mapsLock)
+            {
+                ulong Page = Address & ~(WatchPageSize - 1);
+                ref WatchedPage Watch = ref CollectionsMarshal.GetValueRefOrNullRef(_watchedPages, Page);
+                if (Unsafe.IsNullRef(ref Watch) || (Watch.Protection & Needed) == 0)
+                    return false;
+
+                TouchWatchedPage(ref Watch);
+                if (Needed == MemoryProtection.Write)
+                    Watch.Written = true;
+
+                return ProtectRun(Page, WatchPageSize, Watch.Effective);
+            }
+        }
+
+        // NT: the first access of a writable untouched page counts as a write.
+        private void TouchWatchedPage(ref WatchedPage Watch)
+        {
+            if (!Watch.Untouched)
+                return;
+
+            Watch.Untouched = false;
+            _untouchedPages--;
+            if ((Watch.Protection & MemoryProtection.Write) != 0)
+                Watch.Written = true;
+        }
+
+        // Only the record changes. The page keeps faulting until the guest accesses it once.
+        private void RecordHostAccess(ulong Address, ulong Length, bool Write)
+        {
+            ulong End = Address + Length;
+            if (Length == 0 || Address >= _watchHigh || End <= _watchLow)
+                return;
+
+            lock (_mapsLock)
+            {
+                for (ulong Page = Address & ~(WatchPageSize - 1); Page < End; Page += WatchPageSize)
+                {
+                    ref WatchedPage Watch = ref CollectionsMarshal.GetValueRefOrNullRef(_watchedPages, Page);
+                    if (Unsafe.IsNullRef(ref Watch))
+                        continue;
+
+                    if (Watch.Protection != MemoryProtection.None)
+                        TouchWatchedPage(ref Watch);
+                    if (Write)
+                        Watch.Written = true;
+                }
+            }
+        }
+
+        private void ForgetWatchedPages(ulong Address, ulong Size)
+        {
+            ulong End = Math.Min(Address + Size, _watchHigh);
+            for (ulong Page = Math.Max(Address, _watchLow); Page < End; Page += WatchPageSize)
+            {
+                if (_watchedPages.Remove(Page, out WatchedPage Removed) && Removed.Untouched)
+                    _untouchedPages--;
+            }
+
+            if (_watchedPages.Count == 0)
+            {
+                _watchLow = ulong.MaxValue;
+                _watchHigh = 0;
+            }
         }
 
         /// <param name="timeout">Timeout in microseconds, or 0 for none.</param>
@@ -1747,11 +2030,11 @@ namespace Brovan.Core.Emulation
         public unsafe IntPtr GetHostPointer(ulong address, ulong size)
         {
             if (size == 0 || size > int.MaxValue) return IntPtr.Zero;
-            if (!TryGetHostPointer(address, (int)size, out byte* ptr, out long offset)) return IntPtr.Zero;
+            if (!TryGetHostPointer(address, (int)size, false, out byte* ptr, out long offset)) return IntPtr.Zero;
             return (IntPtr)(ptr + offset);
         }
 
-        private unsafe bool TryGetHostPointer(ulong address, int accessSize, out byte* ptr, out long offset)
+        private unsafe bool TryGetHostPointer(ulong address, int accessSize, bool write, out byte* ptr, out long offset)
         {
             if (!TryFindMappedRegion(address, out MappedRegion found))
             {
@@ -1776,6 +2059,7 @@ namespace Brovan.Core.Emulation
 
             ptr = (byte*)found.Ptr;
             offset = (long)(address - found.Address);
+            if (write ? _watchedPages.Count != 0 : _untouchedPages != 0) RecordHostAccess(address, (ulong)accessSize, write);
             return true;
         }
 

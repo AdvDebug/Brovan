@@ -77,6 +77,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        internal static bool IsAccessible(BinaryEmulator Instance, ulong Address, ulong Length, bool Write)
+            => Address + Length >= Address && AccessibleLength(Instance, Address, Length, Write) == Length;
+
         internal static ulong AccessibleLength(BinaryEmulator Instance, ulong Address, ulong Length, bool Write)
         {
             MemoryProtection Needed = Write ? MemoryProtection.Write : MemoryProtection.Read | MemoryProtection.Execute;

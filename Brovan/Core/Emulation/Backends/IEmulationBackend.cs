@@ -139,6 +139,24 @@ namespace Brovan.Core.Emulation
         bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection);
 
         /// <summary>
+        /// Records guest and host writes to the mapped pages of the range. The first access of a new page counts
+        /// as a write when its protection allows writes. Watching a page again keeps its record, unmapping ends it.
+        /// </summary>
+        bool WatchWrites(ulong address, ulong size, MemoryProtection protection) => false;
+
+        /// <summary>
+        /// Sets bit i of <paramref name="written"/> when page i is watched and written since its watch or reset,
+        /// and clears the other bits.
+        /// </summary>
+        bool QueryWrites(ulong address, ulong pageCount, Span<ulong> written) => false;
+
+        /// <summary>
+        /// Marks the pages whose bit is set in <paramref name="pages"/> as not written. Later writes on any
+        /// processor are recorded.
+        /// </summary>
+        bool ResetWrites(ulong address, ulong pageCount, ReadOnlySpan<ulong> pages) => false;
+
+        /// <summary>
         /// Discards any cached translation of the range. Only a translating backend has work to do here.
         /// </summary>
         bool InvalidateCodeRange(ulong address, ulong size) => true;

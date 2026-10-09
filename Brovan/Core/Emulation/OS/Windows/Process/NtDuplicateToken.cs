@@ -1,4 +1,3 @@
-using System.Linq;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -51,6 +50,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 OwningThreadId = SourceToken.OwningThreadId,
                 ModifiedId = SourceToken.ModifiedId
             };
+            NewToken.CopyIdentityFrom(SourceToken);
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(NewToken, NewAccess);
             Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ConvertObjectHandleAttributes(HandleAttributes));
@@ -69,38 +69,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool TryResolveToken(BinaryEmulator Instance, ulong TokenHandle, out WinToken Token, out AccessMask Access)
         {
-            Token = null;
             Access = AccessMask.None;
+            if (NtQueryInformationToken.ResolveToken(Instance, TokenHandle, out Token) != NTSTATUS.STATUS_SUCCESS)
+                return false;
 
             long SignedHandle = HandleManager.ToSignedHandle(TokenHandle);
-
-            if (SignedHandle == -4 || SignedHandle == -5 || SignedHandle == -6)
-            {
-                WinProcess CurrentProcess = Instance.WinHelper.WinProcesses.FirstOrDefault(Process => Process.PID == Instance.WinHelper.PID);
-                WinToken ProcessToken = CurrentProcess?.PrimaryToken;
-
-                EmulatedThread CurrentThread = Instance.Threads.Values.FirstOrDefault(Thread => Thread.ThreadId == Instance.CurrentThreadId);
-                WinToken ThreadToken = WinEmulatedThread.TryGetState(CurrentThread)?.ImpersonationToken;
-
-                if (SignedHandle == -4)
-                    Token = ProcessToken;
-                else if (SignedHandle == -5)
-                    Token = ThreadToken;
-                else
-                    Token = ThreadToken ?? ProcessToken;
-
-                Access = AccessMask.TokenAllAccess;
-                return Token != null;
-            }
-
-            if (!Instance.WinHelper.HandleManager.HandleExists(TokenHandle, HandleType.TokenHandle))
-                return false;
-
-            Token = Instance.WinHelper.HandleManager.GetObjectByHandle<WinToken>(TokenHandle);
-            if (Token == null)
-                return false;
-
-            Access = Instance.WinHelper.HandleManager.GetPermissionsByHandle(TokenHandle);
+            Access = SignedHandle == -4 || SignedHandle == -5 || SignedHandle == -6
+                ? AccessMask.TokenAllAccess
+                : Instance.WinHelper.HandleManager.GetPermissionsByHandle(TokenHandle);
             return true;
         }
 

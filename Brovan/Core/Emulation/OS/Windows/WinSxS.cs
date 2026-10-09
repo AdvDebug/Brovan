@@ -41,6 +41,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const ulong PebActivationContextData64 = 0x2F8;
         internal const ulong PebActivationContextData32 = 0x1F8;
 
+        private static readonly XmlReaderSettings ManifestReaderSettings = new XmlReaderSettings
+        {
+            DtdProcessing = DtdProcessing.Prohibit,
+            IgnoreComments = true,
+            IgnoreWhitespace = true,
+            IgnoreProcessingInstructions = true,
+            XmlResolver = null,
+            CloseInput = true,
+        };
+
+        internal static XmlReader CreateManifestReader(byte[] Manifest)
+            => XmlReader.Create(new MemoryStream(Manifest, 0, Manifest.Length, false), ManifestReaderSettings);
+
         private static readonly uint[] SectionIds =
         {
             2u,  // ACTIVATION_CONTEXT_SECTION_DLL_REDIRECTION.
@@ -119,20 +132,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             List<AssemblyIdentity> Dependencies = new();
 
-            XmlReaderSettings Settings = new XmlReaderSettings
-            {
-                DtdProcessing = DtdProcessing.Prohibit,
-                IgnoreComments = true,
-                IgnoreWhitespace = true,
-                IgnoreProcessingInstructions = true,
-                XmlResolver = null,
-                CloseInput = true,
-            };
-
             try
             {
-                using MemoryStream Stream = new MemoryStream(Manifest, 0, Manifest.Length, false);
-                using XmlReader Reader = XmlReader.Create(Stream, Settings);
+                using XmlReader Reader = CreateManifestReader(Manifest);
 
                 bool InDependency = false;
 
@@ -188,23 +190,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ((ulong)WindowsVersionInfo.BuildNumber << 16);
             uint BestOs = 0;
 
-            XmlReaderSettings Settings = new XmlReaderSettings
-            {
-                DtdProcessing = DtdProcessing.Prohibit,
-                IgnoreComments = true,
-                IgnoreWhitespace = true,
-                IgnoreProcessingInstructions = true,
-                XmlResolver = null,
-                CloseInput = true,
-            };
-
             // NT: only assembly, compatibility and application lead to these elements.
             Span<bool> OnPath = stackalloc bool[3];
 
             try
             {
-                using MemoryStream Stream = new MemoryStream(Manifest, 0, Manifest.Length, false);
-                using XmlReader Reader = XmlReader.Create(Stream, Settings);
+                using XmlReader Reader = CreateManifestReader(Manifest);
 
                 while (Reader.Read())
                 {

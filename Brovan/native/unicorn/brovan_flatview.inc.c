@@ -95,24 +95,14 @@ static void brov_dispatch_compact(FlatView *fv)
     address_space_dispatch_compact(fv->dispatch);
 }
 
-static bool brov_flatview_add(MemoryRegion *mr)
+static FlatView *brov_system_view(MemoryRegion *mr)
 {
-    struct uc_struct *uc;
+    struct uc_struct *uc = mr->uc;
     AddressSpace *as;
     FlatView *fv;
-    FlatRange fr;
-    AddrRange r;
-    MemoryRegionSection mrs;
-    unsigned lo, hi, pos;
 
-    if (!mr || !mr->uc) {
-        return false;
-    }
-
-    uc = mr->uc;
-
-    if (!uc->memory_region_update_pending || !uc->system_memory || !uc->flat_views) {
-        return false;
+    if (!uc->system_memory || !uc->flat_views) {
+        return NULL;
     }
 
     /* RAM only: an MMIO region reaches the dispatch through the subpage path and is
@@ -120,25 +110,29 @@ static bool brov_flatview_add(MemoryRegion *mr)
     if (!mr->ram || !mr->enabled || !mr->terminates ||
         mr->container != uc->system_memory || uc->system_memory->addr != 0 ||
         uc->system_memory->readonly || !QTAILQ_EMPTY(&mr->subregions)) {
-        return false;
+        return NULL;
     }
 
     as = memory_region_to_address_space(mr);
     if (!as || as->root != uc->system_memory ||
         memory_region_get_flatview_root(as->root) != uc->system_memory) {
-        return false;
+        return NULL;
     }
 
     fv = address_space_to_flatview(as);
     if (!fv || fv->root != uc->system_memory ||
         g_hash_table_lookup(uc->flat_views, uc->system_memory) != fv) {
-        return false;
+        return NULL;
     }
 
-    r = addrrange_make(int128_make64(mr->addr), mr->size);
+    return fv;
+}
 
-    lo = 0;
-    hi = fv->nr;
+static unsigned brov_range_pos(FlatView *fv, AddrRange r)
+{
+    unsigned lo = 0;
+    unsigned hi = fv->nr;
+
     while (lo < hi) {
         unsigned mid = lo + ((hi - lo) >> 1);
 
@@ -148,7 +142,30 @@ static bool brov_flatview_add(MemoryRegion *mr)
             hi = mid;
         }
     }
-    pos = lo;
+    return lo;
+}
+
+static bool brov_flatview_add(MemoryRegion *mr)
+{
+    struct uc_struct *uc;
+    FlatView *fv;
+    FlatRange fr;
+    AddrRange r;
+    MemoryRegionSection mrs;
+    unsigned pos;
+
+    if (!mr || !mr->uc || !mr->uc->memory_region_update_pending) {
+        return false;
+    }
+
+    uc = mr->uc;
+    fv = brov_system_view(mr);
+    if (!fv) {
+        return false;
+    }
+
+    r = addrrange_make(int128_make64(mr->addr), mr->size);
+    pos = brov_range_pos(fv, r);
 
     if (pos < fv->nr && addrrange_intersects(fv->ranges[pos].addr, r)) {
         return false;
@@ -171,6 +188,62 @@ static bool brov_flatview_add(MemoryRegion *mr)
     }
 
     uc->memory_region_update_pending = false;
+    return true;
+}
+
+/* A readonly flip changes the range, the region and its dispatch section in place
+ * instead of rebuilding the dispatch. uc_mem_protect flushes the TLB once after its loop. */
+static bool brov_set_readonly_in_place(MemoryRegion *mr, bool readonly)
+{
+    struct uc_struct *uc;
+    FlatView *fv;
+    MemoryRegionSection *section;
+    AddrRange r;
+    hwaddr xlat, plen;
+    unsigned pos;
+    int prot = 0;
+    static int disabled = -1;
+
+    if (disabled < 0) {
+        disabled = getenv("BROVAN_NO_READONLY_IN_PLACE") != NULL;
+    }
+    if (disabled || !mr || !mr->uc || mr->readonly == readonly) {
+        return false;
+    }
+
+    uc = mr->uc;
+    if (!uc->cpu || !uc->cpu->cpu_ases || (mr->addr & uc->target_page_align) != 0 ||
+        (int128_getlo(mr->size) & uc->target_page_align) != 0) {
+        return false;
+    }
+
+    fv = brov_system_view(mr);
+    if (!fv) {
+        return false;
+    }
+
+    r = addrrange_make(int128_make64(mr->addr), mr->size);
+    pos = brov_range_pos(fv, r);
+    if (pos >= fv->nr || fv->ranges[pos].mr != mr || fv->ranges[pos].offset_in_region != 0 ||
+        !addrrange_equal(fv->ranges[pos].addr, r)) {
+        return false;
+    }
+
+    plen = uc->target_page_size;
+    section = address_space_translate_for_iotlb(uc->cpu, 0, mr->addr, &xlat, &plen,
+                                                MEMTXATTRS_UNSPECIFIED, &prot);
+    if (section->mr != mr || section->offset_within_address_space != mr->addr ||
+        section->offset_within_region != 0 || !int128_eq(section->size, mr->size)) {
+        return false;
+    }
+
+    mr->readonly = readonly;
+    fv->ranges[pos].readonly = readonly;
+    section->readonly = readonly;
+
+    if (!uc->brov_protect_batch) {
+        tlb_flush(uc->cpu);
+    }
     return true;
 }
 

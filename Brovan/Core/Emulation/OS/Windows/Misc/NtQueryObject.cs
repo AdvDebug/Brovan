@@ -193,13 +193,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
             }
 
-            if (Handle == HandleManager.BASE_NAMED_OBJECTS_DIRECTORY)
-            {
-                TypeName = "Directory";
-                Name = "\\Sessions\\1\\BaseNamedObjects";
-                return true;
-            }
-
             if (Handle == HandleManager.RPC_CONTROL_DIRECTORY)
             {
                 TypeName = "Directory";
@@ -222,7 +215,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return "Process";
             if (HandleManager.IsCurrentThreadPseudoHandle(Handle))
                 return "Thread";
-            if (Handle == HandleManager.KNOWN_DLLS_DIRECTORY || Handle == HandleManager.KNOWN_DLLS32_DIRECTORY || Handle == HandleManager.BASE_NAMED_OBJECTS_DIRECTORY || Handle == HandleManager.RPC_CONTROL_DIRECTORY)
+            if (Handle == HandleManager.KNOWN_DLLS_DIRECTORY || Handle == HandleManager.KNOWN_DLLS32_DIRECTORY || Handle == HandleManager.RPC_CONTROL_DIRECTORY)
                 return "Directory";
 
             return GetTypeName(HandleObject);
@@ -278,8 +271,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return "\\KnownDlls";
             if (Handle == HandleManager.KNOWN_DLLS32_DIRECTORY)
                 return "\\KnownDlls32";
-            if (Handle == HandleManager.BASE_NAMED_OBJECTS_DIRECTORY)
-                return "\\Sessions\\1\\BaseNamedObjects";
             if (Handle == HandleManager.RPC_CONTROL_DIRECTORY)
                 return "\\RPC Control";
 

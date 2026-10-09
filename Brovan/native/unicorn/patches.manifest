@@ -98,6 +98,9 @@ insert-in-body|qemu/accel/tcg/cputlb.c|void tlb_reset_dirty_by_vaddr(CPUState *c
 replace-all|qemu/accel/tcg/cputlb.c|cpu_exit(uc->cpu);|brov_fault_exit(uc, retaddr);
 insert-in-body|qemu/tcg/tcg-op.c|void check_exit_request(TCGContext *tcg_ctx)|    if (brov_access_exit_check_elided(tcg_ctx->uc)) { return; }
 
+# --- a read of a region without UC_PROT_READ always reaches the perms check --
+replace-all|qemu/accel/tcg/cputlb.c|tn.addr_read = address;|tn.addr_read = brov_tlb_read_address(section->mr, address);
+
 # --- block lookups, a bigger jump cache and the ram offset from the TLB entry
 replace-all|qemu/include/hw/core/cpu.h|#define TB_JMP_CACHE_BITS 12|#define TB_JMP_CACHE_BITS 15
 replace-all|qemu/accel/tcg/cputlb.c|return qemu_ram_addr_from_host_nofail(env->uc, p);|return (tb_page_addr_t)addr + env_tlb(env)->d[mmu_idx].iotlb[index].addr; /* brov: the entry already carries the ram offset */
@@ -208,6 +211,13 @@ insert-in-body|qemu/exec.c|static uint16_t phys_section_add(struct uc_struct *uc
 replace-all|qemu/softmmu/memory.c|address_space_dispatch_compact(view->dispatch);|brov_dispatch_compact(view);
 replace-all|qemu/softmmu/memory.c|address_space_dispatch_compact(dst->dispatch);|brov_dispatch_compact(dst);
 replace-all|qemu/softmmu/memory.c|address_space_dispatch_compact(fv->dispatch);|brov_dispatch_compact(fv);
+
+# --- a readonly flip changes its range and dispatch section in place --------
+insert-after|qemu/softmmu/memory.c|static bool brov_render_flat(FlatView *view, MemoryRegion *root);|static bool brov_set_readonly_in_place(MemoryRegion *mr, bool readonly);
+insert-in-body|qemu/softmmu/memory.c|void memory_region_set_readonly(MemoryRegion *mr, bool readonly)|    if (brov_set_readonly_in_place(mr, readonly)) { return; }
+replace-all|uc.c|uc->readonly_mem(mr, (perms & UC_PROT_WRITE) == 0);|uc->brov_protect_batch = true; uc->readonly_mem(mr, (perms & UC_PROT_WRITE) == 0); uc->brov_protect_batch = false;
+insert-after|uc.c|if (mr->perms != perms && !split_region(uc, mr, addr, len, false)) {|                uc->tcg_flush_tlb(uc); /* brov: readonly flips before a failed split deferred their flush */
+insert-after|uc.c|if (!split_mmio_region(uc, mr, addr, len, false)) {|                uc->tcg_flush_tlb(uc); /* brov: readonly flips before a failed mmio split deferred their flush */
 
 # --- a RAMBlock no larger than the smallest one belongs at the tail ----------
 insert-after|qemu/exec.c|#include "uc_priv.h"|#include "brovan_ramblock.inc.h"

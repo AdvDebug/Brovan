@@ -8,6 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint Wow64BasicInformationSize = 0x2C;
         private const uint Wow64NativeMaximumUserModeAddress = 0xFFFEFFFF;
         internal const ulong NativeMaximumUserModeAddress = 0x7FFFFFFEFFFFUL;
+        internal const ulong NativeUserProbeAddress = NativeMaximumUserModeAddress + 1;
         private const ulong NativeMinimumUserModeAddress = 0x10000UL;
         private const ushort NativeProcessorArchitectureAmd64 = 9;
 

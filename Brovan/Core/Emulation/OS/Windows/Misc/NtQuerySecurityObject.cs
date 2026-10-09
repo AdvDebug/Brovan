@@ -59,7 +59,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                    Handle == uint.MaxValue ||
                    Handle == HandleManager.KNOWN_DLLS_DIRECTORY ||
                    Handle == HandleManager.KNOWN_DLLS32_DIRECTORY ||
-                   Handle == HandleManager.BASE_NAMED_OBJECTS_DIRECTORY ||
                    Handle == HandleManager.RPC_CONTROL_DIRECTORY ||
                    Instance.WinHelper.HandleExists(Handle);
         }

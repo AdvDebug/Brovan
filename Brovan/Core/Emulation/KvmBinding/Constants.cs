@@ -137,6 +137,8 @@ namespace Brovan.Core.Emulation
         public const ulong PageTableEntryPresent = 1UL << 0;
         public const ulong PageTableEntryWritable = 1UL << 1;
         public const ulong PageTableEntryUser = 1UL << 2;
+        public const ulong PageTableEntryAccessed = 1UL << 5;
+        public const ulong PageTableEntryDirty = 1UL << 6;
         public const ulong PageTableEntryAddressMask = 0x000FFFFFFFFFF000UL;
 
         public const ushort KernelCodeSelector = 0x08;

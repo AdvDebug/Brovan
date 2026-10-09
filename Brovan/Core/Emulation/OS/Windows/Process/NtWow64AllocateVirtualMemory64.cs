@@ -18,14 +18,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Target.PID == Instance.WinHelper.PID)
                 return NTSTATUS.STATUS_NOT_IMPLEMENTED;
 
-            if (!NtAllocateVirtualMemory.TryGetZeroBitsLimit(ZeroBits, out ulong Highest))
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            NtAllocateVirtualMemory.AddressRequirements Requirements = NtAllocateVirtualMemory.AddressRequirements.None;
-            Requirements.Highest = Highest;
-
             // BaseAddress and RegionSize are 64-bit here whatever the guest width is.
-            return NtAllocateVirtualMemory.AllocateCommon(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, AllocationType, Protect, Requirements, 8, false);
+            return NtAllocateVirtualMemory.AllocateCommon(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, AllocationType, Protect, ZeroBits,
+                NtAllocateVirtualMemory.AddressRequirements.None, 8, false);
         }
     }
 }

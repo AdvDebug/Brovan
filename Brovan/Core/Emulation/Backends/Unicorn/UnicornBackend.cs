@@ -32,11 +32,15 @@ namespace Brovan.Core.Emulation
 
         public bool TimestampCounterIsEmulated => true;
 
+        // x86 has no execute-only pages.
+        private MemoryProtection ToHostProtection(MemoryProtection protection)
+            => Arch == Arch.X86 && (protection & MemoryProtection.Execute) != 0 ? protection | MemoryProtection.Read : protection;
+
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
-            => Inner.MapMemory(address, size, protection);
+            => Inner.MapMemory(address, size, ToHostProtection(protection));
 
         public bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, System.IntPtr hostPointer)
-            => Inner.MapMemoryShared(address, size, protection, hostPointer);
+            => Inner.MapMemoryShared(address, size, ToHostProtection(protection), hostPointer);
         public System.IntPtr AllocateSharedStorage(ulong size)
             => Inner.AllocateSharedStorage(size);
 
@@ -47,7 +51,13 @@ namespace Brovan.Core.Emulation
         public bool UnmapMemory(ulong address, ulong size)
             => Inner.UnmapMemory(address, size);
         public bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection)
-            => Inner.SetMemoryProtection(address, size, protection);
+            => Inner.SetMemoryProtection(address, size, ToHostProtection(protection));
+        public bool WatchWrites(ulong address, ulong size, MemoryProtection protection)
+            => Inner.WatchWrites(address, size, ToHostProtection(protection));
+        public bool QueryWrites(ulong address, ulong pageCount, Span<ulong> written)
+            => Inner.QueryWrites(address, pageCount, written);
+        public bool ResetWrites(ulong address, ulong pageCount, ReadOnlySpan<ulong> pages)
+            => Inner.ResetWrites(address, pageCount, pages);
         public bool InvalidateCodeRange(ulong address, ulong size)
             => Inner.InvalidateCodeRange(address, size);
 
@@ -197,11 +207,29 @@ namespace Brovan.Core.Emulation
         public IntPtr AddMemoryHook(ulong begin, ulong end, BackendHookType hookType, MemoryHookCallback callback)
         {
             if (callback == null) return IntPtr.Zero;
+            if ((hookType & BackendHookType.MemoryProtected) != 0)
+                callback = CompleteWatchedAccesses(callback);
             var thunk = new MemoryThunk(callback);
             IntPtr handle = Inner.AddHookWithHandle(begin, end, TranslateHookType(hookType), thunk.NativePtr);
             if (handle == IntPtr.Zero) return IntPtr.Zero;
             _liveThunks[handle] = thunk;
             return handle;
+        }
+
+        // Unicorn: a store the callback lets through reuses the stale TLB entry and is lost. Stop and run the
+        // instruction again.
+        private MemoryHookCallback CompleteWatchedAccesses(MemoryHookCallback callback)
+        {
+            return (type, address, size, value) =>
+            {
+                bool protectedAccess = type == BackendMemoryAccessType.ReadProtected || type == BackendMemoryAccessType.WriteProtected ||
+                    type == BackendMemoryAccessType.FetchProtected;
+                if (!protectedAccess || !Inner.TryCompleteWatchedAccess(address, type))
+                    return callback(type, address, size, value);
+
+                Inner.StopEmulation();
+                return false;
+            };
         }
 
         public IntPtr AddCodeHook(ulong begin, ulong end, CodeHookCallback callback)

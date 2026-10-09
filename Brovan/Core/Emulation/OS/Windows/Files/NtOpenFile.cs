@@ -54,6 +54,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             if (!NtCreateFile.IsRootRelativeName(FullName, AttributesRoot) &&
+                NtCreateFile.TryOpenPipeDirectory(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, Normalized, FILE_OPEN, OpenOptions, Inherit, out NTSTATUS DirectoryStatus))
+                return DirectoryStatus;
+
+            if (!NtCreateFile.IsRootRelativeName(FullName, AttributesRoot) &&
                 Instance.WinHelper.TryCreateDevice(Normalized, Array.Empty<byte>(), out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus))
             {
                 if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)

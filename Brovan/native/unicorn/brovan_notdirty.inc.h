@@ -117,6 +117,13 @@ static inline bool brov_tlb_flush_is_noop(CPUState *cpu)
     return !disabled && env_tlb((CPUArchState *)cpu->env_ptr)->c.dirty == 0;
 }
 
+/* Paging is off, so tlb_fill gives PAGE_READ even to a region without UC_PROT_READ.
+ * An invalid read entry sends those reads to the perms check in load_helper. */
+static inline target_ulong brov_tlb_read_address(MemoryRegion *mr, target_ulong address)
+{
+    return (mr->perms & UC_PROT_READ) != 0 ? address : address | TLB_INVALID_MASK;
+}
+
 /* A memory hook that declines an access leaves the loop from inside the helper,
  * with the PC back on the faulting instruction. A hook-free run emits no
  * check_exit_request after an access, so exit_request alone would not stop it.

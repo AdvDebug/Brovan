@@ -557,17 +557,17 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 LinkName = LinkName.Substring(0, DefineDosDeviceBufferChars - 1);
             int Room = DefineDosDeviceBufferChars - 1 - LinkName.Length;
 
-            WinSysHelper.DosDeviceLookup Lookup = Instance.WinHelper.LookupDosDeviceName(ref LinkName, true, out IHandleObject Found, out WinObjectDirectory Directory, out string Leaf, out NTSTATUS Status);
-            if (Lookup == WinSysHelper.DosDeviceLookup.Outside)
+            WinSysHelper.ObjectDirectoryLookup Lookup = Instance.WinHelper.LookupObjectDirectoryName(ref LinkName, true, true, out IHandleObject Found, out WinObjectDirectory Directory, out string Leaf, out NTSTATUS Status);
+            if (Lookup == WinSysHelper.ObjectDirectoryLookup.Outside)
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
             WinSymbolicLink Existing = null;
-            if (Lookup == WinSysHelper.DosDeviceLookup.Found)
+            if (Lookup == WinSysHelper.ObjectDirectoryLookup.Found)
             {
                 Existing = Found as WinSymbolicLink;
                 if (Existing == null || Directory == null)
                     Status = NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
-                else if (!WinSysHelper.TryGrantObjectAccess(AccessMask.SymbolicLinkQuery | AccessMask.Delete, false, Directory.EntryUserAccess, out _))
+                else if (!WinSysHelper.TryGrantObjectAccess(AccessMask.SymbolicLinkQuery | AccessMask.Delete, WinSysHelper.ObjectAccessKind.SymbolicLink, Directory.EntryUserAccess, out _))
                     Status = NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
@@ -609,11 +609,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     List = Old + "\0";
             }
 
-            if (!WinSysHelper.TryGrantObjectAccess(AccessMask.DirectoryCreateObject, true, Directory.UserAccess, out _))
+            if (!WinSysHelper.TryGrantObjectAccess(AccessMask.DirectoryCreateObject, WinSysHelper.ObjectAccessKind.Directory, Instance.WinHelper.GetGrantableAccess(Directory), out _))
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
             if (Existing != null)
-                Directory.Remove(Existing);
+                Directory.Remove(Leaf, Existing);
 
             string Buffer;
             bool Matched = false;

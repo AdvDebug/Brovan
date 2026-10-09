@@ -1209,6 +1209,7 @@ namespace Brovan.Core.Emulation
                    Left.IsCommitted == Right.IsCommitted &&
                    Left.IsReset == Right.IsReset &&
                    Left.IsSecured == Right.IsSecured &&
+                   Left.IsWriteWatch == Right.IsWriteWatch &&
                    Left.IsPlaceholder == Right.IsPlaceholder &&
                    Left.FromPlaceholder == Right.FromPlaceholder &&
                    Left.Protections == Right.Protections &&
@@ -1351,6 +1352,10 @@ namespace Brovan.Core.Emulation
             ulong PageBase = Address & ~(PageSize - 1);
             if (!_emulator.SetMemoryProtection(PageBase, PageSize, GuardedRegion.Protections))
                 return false;
+
+            // NT: write watch counts the guard fault as the first access.
+            Span<byte> Touched = stackalloc byte[1];
+            _emulator.ReadMemory(Address, Touched);
 
             ulong PageEnd = PageBase + PageSize;
             FindWinRegionWindow(PageBase, PageEnd, out int First, out int Last);
@@ -1924,7 +1929,7 @@ namespace Brovan.Core.Emulation
             return Module;
         }
 
-        public bool ReserveMemory(ulong BaseAddress, ulong Size, uint Protect)
+        public bool ReserveMemory(ulong BaseAddress, ulong Size, uint Protect, bool WriteWatch = false)
         {
             Size = AlignUp(Size, PageSize);
 
@@ -1947,6 +1952,7 @@ namespace Brovan.Core.Emulation
                 Protect = Protect,
                 IsReserved = true,
                 IsCommitted = false,
+                IsWriteWatch = WriteWatch,
                 InitialProtections = AllocationProt,
                 Protections = MemoryProtection.None,
                 SpecialProtections = SpecialProtections.None,
@@ -1990,7 +1996,7 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        public bool ReplacePlaceholder(ulong BaseAddress, ulong Size, uint Protect)
+        public bool ReplacePlaceholder(ulong BaseAddress, ulong Size, uint Protect, bool WriteWatch)
         {
             if (WinHelper == null || !TryFindMemoryRegionByBase(BaseAddress, out int Index, out MemoryRegion Region) ||
                 !Region.IsPlaceholder || Region.Size != Size)
@@ -1998,6 +2004,7 @@ namespace Brovan.Core.Emulation
 
             Region.IsPlaceholder = false;
             Region.FromPlaceholder = true;
+            Region.IsWriteWatch = WriteWatch;
             Region.AllocationProtect = Protect;
             Region.Protect = Protect;
             Region.InitialProtections = WinHelper.ConvertWinProtectToInternal(Protect);
@@ -2392,7 +2399,7 @@ namespace Brovan.Core.Emulation
 
             MemoryProtection NewProt = WinHelper.ConvertWinProtectToInternal(Protect);
             SpecialProtections Special = (Protect & 0x100) != 0 ? SpecialProtections.Guard : SpecialProtections.None;
-            if (!_emulator.MapMemory(BaseAddress, Size, GetGuardedHostProtection(NewProt, Special)))
+            if (!MapCommittedPages(BaseAddress, Size, GetGuardedHostProtection(NewProt, Special), Region.IsWriteWatch))
             {
                 Utils.LogError($"[CommitMemory] Host backing allocation failed for 0x{Size:X} bytes at 0x{BaseAddress:X}.");
                 return false;
@@ -2418,6 +2425,7 @@ namespace Brovan.Core.Emulation
                     IsReserved = true,
                     IsCommitted = false,
                     IsReset = Region.IsReset,
+                    IsWriteWatch = Region.IsWriteWatch,
                     FromPlaceholder = Region.FromPlaceholder,
                     InitialProtections = AllocationProt,
                     Protections = MemoryProtection.None,
@@ -2437,6 +2445,7 @@ namespace Brovan.Core.Emulation
                 IsReserved = true,
                 IsCommitted = true,
                 IsReset = Region.IsReset,
+                IsWriteWatch = Region.IsWriteWatch,
                 FromPlaceholder = Region.FromPlaceholder,
                 InitialProtections = AllocationProt,
                 Protections = NewProt,
@@ -2457,6 +2466,7 @@ namespace Brovan.Core.Emulation
                     IsReserved = true,
                     IsCommitted = false,
                     IsReset = Region.IsReset,
+                    IsWriteWatch = Region.IsWriteWatch,
                     FromPlaceholder = Region.FromPlaceholder,
                     InitialProtections = AllocationProt,
                     Protections = MemoryProtection.None,
@@ -2526,7 +2536,7 @@ namespace Brovan.Core.Emulation
 
                     ulong PartEnd = Math.Min(GetRangeEnd(Part.BaseAddress, Part.Size), End);
 
-                    if (!Part.IsCommitted && !_emulator.MapMemory(Cursor, PartEnd - Cursor, GetGuardedHostProtection(NewProt, Special)))
+                    if (!Part.IsCommitted && !MapCommittedPages(Cursor, PartEnd - Cursor, GetGuardedHostProtection(NewProt, Special), Part.IsWriteWatch))
                         return false;
 
                     Cursor = PartEnd;
@@ -2556,6 +2566,75 @@ namespace Brovan.Core.Emulation
             }
 
             MergeAllWinRegions();
+        }
+
+        private bool MapCommittedPages(ulong BaseAddress, ulong Size, MemoryProtection Protection, bool WriteWatch)
+        {
+            if (!_emulator.MapMemory(BaseAddress, Size, Protection))
+                return false;
+
+            if (!WriteWatch || _emulator.WatchWrites(BaseAddress, Size, Protection))
+                return true;
+
+            Utils.LogError($"[CommitMemory] Could not watch writes to 0x{Size:X} bytes at 0x{BaseAddress:X}: {_emulator.GetLastError()}.");
+            _emulator.UnmapMemory(BaseAddress, Size);
+            return false;
+        }
+
+        internal const ulong WriteWatchChunkPages = 32768;
+
+        internal bool IsWriteWatchRange(ulong Start, ulong Last)
+        {
+            if (!TryFindMemoryRegionIndex(Start, out int Index) || !_memory[Index].IsWriteWatch)
+                return false;
+
+            ulong AllocationBase = _memory[Index].AllocationBase;
+            for (; Index < _memory.Count && _memory[Index].AllocationBase == AllocationBase; Index++)
+            {
+                if (GetRangeEnd(_memory[Index].BaseAddress, _memory[Index].Size) > Last)
+                    return true;
+            }
+
+            return false;
+        }
+
+        internal bool ResetWrittenPages(ulong Start, ulong End)
+        {
+            Span<ulong> Pages = stackalloc ulong[(int)(WriteWatchChunkPages / 64)];
+            Pages.Fill(ulong.MaxValue);
+            bool Reset = true;
+
+            for (ulong Cursor = Start; TryGetNextWriteWatchChunk(ref Cursor, End, out ulong Chunk, out ulong Count);)
+            {
+                if (_emulator.ResetWrites(Chunk, Count, Pages))
+                    continue;
+
+                Utils.LogError($"[WriteWatch] Could not reset 0x{Count:X} pages at 0x{Chunk:X}: {_emulator.GetLastError()}.");
+                Reset = false;
+            }
+
+            return Reset;
+        }
+
+        internal bool TryGetNextWriteWatchChunk(ref ulong Cursor, ulong End, out ulong Chunk, out ulong Pages)
+        {
+            while (Cursor < End && TryFindMemoryRegion(Cursor, out MemoryRegion Region))
+            {
+                ulong RunEnd = Math.Min(GetRangeEnd(Region.BaseAddress, Region.Size), End);
+                if (Region.IsCommitted && Region.IsWriteWatch)
+                {
+                    Chunk = Cursor;
+                    Cursor = Math.Min(RunEnd, Cursor + WriteWatchChunkPages * PageSize);
+                    Pages = (Cursor - Chunk) / PageSize;
+                    return true;
+                }
+
+                Cursor = RunEnd;
+            }
+
+            Chunk = 0;
+            Pages = 0;
+            return false;
         }
 
         public bool DecommitMemory(ulong BaseAddress, ulong Size)
@@ -2622,6 +2701,7 @@ namespace Brovan.Core.Emulation
                         IsReserved = true,
                         IsCommitted = false,
                         IsReset = Region.IsReset,
+                        IsWriteWatch = Region.IsWriteWatch,
                         FromPlaceholder = Region.FromPlaceholder,
                         InitialProtections = AllocationProt,
                         Protections = MemoryProtection.None,

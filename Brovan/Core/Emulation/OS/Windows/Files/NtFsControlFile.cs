@@ -102,7 +102,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.ResetIoEvent(EventHandle);
 
-            if (File.Pipe != null && !File.Pipe.IsRoot &&
+            if (File.Pipe != null && !File.Pipe.IsDirectory &&
                 (FsControlCode == GuestNamedPipe.FSCTL_PIPE_LISTEN || FsControlCode == GuestNamedPipe.FSCTL_PIPE_TRANSCEIVE))
                 return QueuePipeControl(Instance, File, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, Is64Bit);
 

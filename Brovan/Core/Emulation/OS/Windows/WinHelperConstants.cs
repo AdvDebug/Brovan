@@ -251,8 +251,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_SECTION_PROTECTION = 0xC000004E,
         STATUS_PRIVILEGE_NOT_HELD = 0xC0000061,
         STATUS_FREE_VM_NOT_AT_BASE = 0xC000009F,
+        STATUS_INVALID_PARAMETER_1 = 0xC00000EF,
+        STATUS_INVALID_PARAMETER_2 = 0xC00000F0,
         STATUS_INVALID_PARAMETER_3 = 0xC00000F1,
         STATUS_INVALID_PARAMETER_4 = 0xC00000F2,
+        STATUS_INVALID_PARAMETER_5 = 0xC00000F3,
+        STATUS_INVALID_PARAMETER_6 = 0xC00000F4,
         STATUS_BAD_WORKING_SET_LIMIT = 0xC000004C,
         STATUS_INSUFFICIENT_RESOURCES = 0xC000009A,
         STATUS_INVALID_IMAGE_FORMAT = 0xC000007B,
@@ -1157,14 +1161,47 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong OwningThreadId;
         public ulong TokenId;
         public ulong ModifiedId;
+        public byte[] AppContainerSid;
+        public uint AppContainerNumber;
+        public byte[][] CapabilitySids = Array.Empty<byte[]>();
+        public WinTokenSecurityAttribute[] SecurityAttributes = Array.Empty<WinTokenSecurityAttribute>();
         public string ObjectId => "Token";
         public HandleType ObjectType => HandleType.TokenHandle;
+
+        public bool IsAppContainer => AppContainerSid != null;
 
         public WinToken()
         {
             TokenId = NtAllocateLocallyUniqueId.Allocate();
             ModifiedId = TokenId;
         }
+
+        public void CopyIdentityFrom(WinToken Source)
+        {
+            AppContainerSid = Source.AppContainerSid;
+            AppContainerNumber = Source.AppContainerNumber;
+            CapabilitySids = Source.CapabilitySids;
+            SecurityAttributes = Source.SecurityAttributes;
+        }
+    }
+
+    public sealed class WinTokenSecurityAttribute
+    {
+        // NT: TOKEN_SECURITY_ATTRIBUTE_TYPE_*.
+        public const ushort TypeUInt64 = 2;
+        public const ushort TypeString = 3;
+
+        public const string SysAppIdName = "WIN://SYSAPPID";
+        public const string PackageClaimsName = "WIN://PKG";
+        public const string PackageHostIdName = "WIN://PKGHOSTID";
+
+        public string Name;
+        public ushort ValueType;
+        public uint Flags;
+        public ulong[] UInt64Values = Array.Empty<ulong>();
+        public string[] StringValues = Array.Empty<string>();
+
+        public int ValueCount => ValueType == TypeString ? StringValues.Length : UInt64Values.Length;
     }
 
     public class WinHandle
@@ -2307,18 +2344,24 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint BucketCount = 37;
 
         public readonly string Path;
-        // NT: a LUID device map falls back to \GLOBAL??.
+        // NT: an open that misses here goes on in the shadow. ShadowPath can name one Brovan does not model.
         public readonly WinObjectDirectory Shadow;
+        public readonly string ShadowPath;
         public readonly AccessMask UserAccess;
+        public readonly AccessMask AppContainerAccess;
         public readonly AccessMask EntryUserAccess;
 
         private readonly List<Entry> Entries = new List<Entry>();
+        private readonly Dictionary<string, List<IHandleObject>> EntriesByName = new Dictionary<string, List<IHandleObject>>(StringComparer.OrdinalIgnoreCase);
+        private readonly int[] BucketCounts = new int[BucketCount];
 
-        public WinObjectDirectory(string Path, WinObjectDirectory Shadow, AccessMask UserAccess, AccessMask EntryUserAccess)
+        public WinObjectDirectory(string Path, AccessMask UserAccess, AccessMask AppContainerAccess, AccessMask EntryUserAccess, WinObjectDirectory Shadow = null, string ShadowPath = null)
         {
             this.Path = Path;
             this.Shadow = Shadow;
+            this.ShadowPath = Shadow?.Path ?? ShadowPath;
             this.UserAccess = UserAccess;
+            this.AppContainerAccess = AppContainerAccess;
             this.EntryUserAccess = EntryUserAccess;
         }
 
@@ -2326,48 +2369,75 @@ namespace Brovan.Core.Emulation.OS.Windows
         public HandleType ObjectType => HandleType.DirectoryHandle;
         public int Count => Entries.Count;
 
-        public WinSymbolicLink Find(string Name)
+        public IHandleObject Find(string Name)
         {
-            foreach (Entry Item in Entries)
-            {
-                if (string.Equals(Item.Name, Name, StringComparison.OrdinalIgnoreCase))
-                    return Item.Link;
-            }
-
-            return null;
+            return EntriesByName.TryGetValue(Name, out List<IHandleObject> Same) ? Same[0] : null;
         }
 
         public WinSymbolicLink AddLink(string Name, string Target, string TargetTail = "\0")
         {
             WinSymbolicLink Link = new WinSymbolicLink { FullName = Path + "\\" + Name, Target = Target, TargetTail = TargetTail };
-
-            // NT inserts at the head of the hash chain and enumerates the chains in bucket order.
-            uint Bucket = GetBucket(Name);
-            int Index = 0;
-            while (Index < Entries.Count && Entries[Index].Bucket < Bucket)
-                Index++;
-
-            Entries.Insert(Index, new Entry(Name, Bucket, Link));
+            Add(Name, Link);
             return Link;
         }
 
-        public bool Remove(WinSymbolicLink Link)
+        public WinObjectDirectory AddDirectory(string Name, AccessMask UserAccess, AccessMask AppContainerAccess, AccessMask EntryUserAccess, WinObjectDirectory Shadow = null, string ShadowPath = null)
         {
-            for (int Index = 0; Index < Entries.Count; Index++)
+            WinObjectDirectory Directory = new WinObjectDirectory(Path + "\\" + Name, UserAccess, AppContainerAccess, EntryUserAccess, Shadow, ShadowPath);
+            Add(Name, Directory);
+            return Directory;
+        }
+
+        public void Add(string Name, IHandleObject Object)
+        {
+            // NT inserts at the head of the hash chain and enumerates the chains in bucket order.
+            uint Bucket = GetBucket(Name);
+            Entries.Insert(GetBucketStart(Bucket), new Entry(Name, Object));
+            BucketCounts[Bucket]++;
+
+            if (!EntriesByName.TryGetValue(Name, out List<IHandleObject> Same))
             {
-                if (ReferenceEquals(Entries[Index].Link, Link))
-                {
-                    Entries.RemoveAt(Index);
-                    return true;
-                }
+                Same = new List<IHandleObject>(1);
+                EntriesByName[Name] = Same;
+            }
+
+            Same.Insert(0, Object);
+        }
+
+        public bool Remove(string Name, IHandleObject Object)
+        {
+            uint Bucket = GetBucket(Name);
+            int Start = GetBucketStart(Bucket);
+            for (int Index = Start; Index < Start + BucketCounts[Bucket]; Index++)
+            {
+                if (!ReferenceEquals(Entries[Index].Object, Object))
+                    continue;
+
+                Entries.RemoveAt(Index);
+                BucketCounts[Bucket]--;
+
+                List<IHandleObject> Same = EntriesByName[Name];
+                Same.Remove(Object);
+                if (Same.Count == 0)
+                    EntriesByName.Remove(Name);
+                return true;
             }
 
             return false;
         }
 
-        public string GetEntry(int Index, out WinSymbolicLink Link)
+        private int GetBucketStart(uint Bucket)
         {
-            Link = Entries[Index].Link;
+            int Start = 0;
+            for (uint Index = 0; Index < Bucket; Index++)
+                Start += BucketCounts[Index];
+
+            return Start;
+        }
+
+        public string GetEntry(int Index, out IHandleObject Object)
+        {
+            Object = Entries[Index].Object;
             return Entries[Index].Name;
         }
 
@@ -2414,14 +2484,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly struct Entry
         {
             public readonly string Name;
-            public readonly uint Bucket;
-            public readonly WinSymbolicLink Link;
+            public readonly IHandleObject Object;
 
-            public Entry(string Name, uint Bucket, WinSymbolicLink Link)
+            public Entry(string Name, IHandleObject Object)
             {
                 this.Name = Name;
-                this.Bucket = Bucket;
-                this.Link = Link;
+                this.Object = Object;
             }
         }
     }

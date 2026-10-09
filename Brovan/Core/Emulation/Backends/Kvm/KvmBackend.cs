@@ -51,6 +51,15 @@ namespace Brovan.Core.Emulation
         public bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection)
             => Inner.SetMemoryProtection(address, size, protection);
 
+        public bool WatchWrites(ulong address, ulong size, MemoryProtection protection)
+            => Inner.WatchWrites(address, size);
+
+        public bool QueryWrites(ulong address, ulong pageCount, Span<ulong> written)
+            => Inner.QueryWrites(address, pageCount, written);
+
+        public bool ResetWrites(ulong address, ulong pageCount, ReadOnlySpan<ulong> pages)
+            => Inner.ResetWrites(address, pageCount, pages);
+
         public bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write)
             => Inner.MapMmio(address, size, read, write);
 

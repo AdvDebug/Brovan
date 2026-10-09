@@ -60,10 +60,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong Strings = (Count + 1) * EntrySize64;
                 for (uint Index = 0; Index < Count; Index++)
                 {
-                    string Name = Directory.GetEntry((int)(Start + Index), out WinSymbolicLink Link);
+                    string Name = Directory.GetEntry((int)(Start + Index), out IHandleObject Item);
                     Span<byte> Entry = Output.Slice((int)(Index * EntrySize64), (int)EntrySize64);
                     Strings = WriteString64(Output, Entry, Strings, BufferPtr, Name);
-                    Strings = WriteString64(Output, Entry.Slice(16), Strings, BufferPtr, NtQueryObject.GetTypeName(Link));
+                    Strings = WriteString64(Output, Entry.Slice(16), Strings, BufferPtr, NtQueryObject.GetTypeName(Item));
                 }
             }
 
@@ -113,8 +113,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint Fit = 0;
             for (uint Index = 0; Index < Count; Index++)
             {
-                string Name = Directory.GetEntry((int)(Start + Index), out WinSymbolicLink Link);
-                uint Size = (uint)(Name.Length + NtQueryObject.GetTypeName(Link).Length) * 2 + EntrySize32 + 4;
+                string Name = Directory.GetEntry((int)(Start + Index), out IHandleObject Item);
+                uint Size = (uint)(Name.Length + NtQueryObject.GetTypeName(Item).Length) * 2 + EntrySize32 + 4;
                 Total += Size;
                 if (Total <= Length)
                 {
@@ -141,10 +141,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong Strings = (Fit + 1) * EntrySize32;
             for (uint Index = 0; Index < Fit; Index++)
             {
-                string Name = Directory.GetEntry((int)(Start + Index), out WinSymbolicLink Link);
+                string Name = Directory.GetEntry((int)(Start + Index), out IHandleObject Item);
                 Span<byte> Entry = Output.Slice((int)(Index * EntrySize32), (int)EntrySize32);
                 Strings = WriteString32(Output, Entry, Strings, BufferPtr, Name);
-                Strings = WriteString32(Output, Entry.Slice(8), Strings, BufferPtr, NtQueryObject.GetTypeName(Link));
+                Strings = WriteString32(Output, Entry.Slice(8), Strings, BufferPtr, NtQueryObject.GetTypeName(Item));
             }
 
             if (!Instance.WriteMemory(BufferPtr, Output))
@@ -193,8 +193,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             for (uint Index = Start; Index < (uint)Directory.Count; Index++)
             {
-                string Name = Directory.GetEntry((int)Index, out WinSymbolicLink Link);
-                ulong Size = Required + EntrySize64 + 4 + (ulong)(Name.Length + NtQueryObject.GetTypeName(Link).Length) * 2;
+                string Name = Directory.GetEntry((int)Index, out IHandleObject Item);
+                ulong Size = Required + EntrySize64 + 4 + (ulong)(Name.Length + NtQueryObject.GetTypeName(Item).Length) * 2;
                 if (Size > Capacity)
                 {
                     Next = Index;

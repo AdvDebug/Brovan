@@ -7,6 +7,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtQueryInformationToken : IWinSyscall
     {
+        private const uint SeGroupEnabled = 0x4;
         private const uint SeGroupIntegrityEnabled = 0x20;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -45,46 +46,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            WinToken Token = null;
-
-            long TokenHandleSigned = HandleManager.ToSignedHandle(TokenHandle);
-
-            if (TokenHandleSigned == -4 || TokenHandleSigned == -5 || TokenHandleSigned == -6)
-            {
-                WinProcess CurrentProcess = Instance.WinHelper.WinProcesses.FirstOrDefault(p => p.PID == Instance.WinHelper.PID);
-                WinToken ProcessToken = CurrentProcess?.PrimaryToken;
-
-                EmulatedThread CurrentThread = Instance.Threads.Values.FirstOrDefault(t => t.ThreadId == Instance.CurrentThreadId);
-                WinToken ThreadToken = WinEmulatedThread.TryGetState(CurrentThread)?.ImpersonationToken;
-
-                if (TokenHandleSigned == -4)
-                {
-                    Token = ProcessToken;
-                }
-                else if (TokenHandleSigned == -5)
-                {
-                    if (ThreadToken == null)
-                        return NTSTATUS.STATUS_NO_TOKEN;
-
-                    Token = ThreadToken;
-                }
-                else if (TokenHandleSigned == -6)
-                {
-                    Token = ThreadToken ?? ProcessToken;
-                }
-
-                if (Token == null)
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-            }
-            else
-            {
-                if (!Instance.WinHelper.HandleManager.HandleExists(TokenHandle, HandleType.TokenHandle))
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-
-                Token = Instance.WinHelper.HandleManager.GetObjectByHandle<WinToken>(TokenHandle);
-                if (Token == null)
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-            }
+            NTSTATUS ResolveStatus = ResolveToken(Instance, TokenHandle, out WinToken Token);
+            if (ResolveStatus != NTSTATUS.STATUS_SUCCESS)
+                return ResolveStatus;
 
             void WriteReturnLength(uint Length)
             {
@@ -111,6 +75,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint IntegrityRid = 0x2000;
             if (Token.IsAnonymous)
                 IntegrityRid = 0;
+            else if (Token.IsAppContainer)
+                IntegrityRid = 0x1000;
             else if (OwnerProcess != null)
             {
                 if (OwnerProcess.RunningUser == User.System || OwnerProcess.RunningUser == User.LocalService || OwnerProcess.RunningUser == User.WindowManager)
@@ -223,19 +189,51 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            NTSTATUS WriteSecurityAttributesInfo()
+            NTSTATUS WriteSecurityAttributesInfo(WinTokenSecurityAttribute[] Attributes)
             {
-                uint RequiredSize = 8 + PointerSize;
+                uint RequiredSize = NtQuerySecurityAttributesToken.GetAttributesInformationSize(Attributes, Is64);
                 WriteReturnLength(RequiredSize);
 
                 if (TokenInformationLength < RequiredSize)
                     return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
                 Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
-                Buffer.Clear();
-                BinaryPrimitives.WriteUInt16LittleEndian(Buffer, 1);
+                NtQuerySecurityAttributesToken.WriteAttributesInformation(Buffer.Slice(0, (int)RequiredSize), TokenInformation, Attributes, Is64);
 
-                if (!Instance.WriteMemory(TokenInformation, Buffer))
+                if (!Instance.WriteMemory(TokenInformation, Buffer.Slice(0, (int)RequiredSize)))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            // TOKEN_GROUPS, with the SIDs after the array.
+            NTSTATUS WriteSidGroupsInfo(byte[][] Sids)
+            {
+                uint EntrySize = PointerSize * 2;
+                uint ArrayOffset = PointerSize;
+                uint SidOffset = ArrayOffset + EntrySize * (uint)Sids.Length;
+                uint RequiredSize = SidOffset;
+                foreach (byte[] Sid in Sids)
+                    RequiredSize += (uint)Sid.Length;
+
+                WriteReturnLength(RequiredSize);
+                if (TokenInformationLength < RequiredSize)
+                    return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+
+                Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
+                Buffer.Slice(0, (int)RequiredSize).Clear();
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer, (uint)Sids.Length);
+
+                for (int Index = 0; Index < Sids.Length; Index++)
+                {
+                    int Entry = (int)(ArrayOffset + EntrySize * (uint)Index);
+                    WritePointer(Buffer, Entry, TokenInformation + SidOffset);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(Entry + (int)PointerSize, 4), SeGroupEnabled);
+                    Sids[Index].AsSpan().CopyTo(Buffer.Slice((int)SidOffset));
+                    SidOffset += (uint)Sids[Index].Length;
+                }
+
+                if (!Instance.WriteMemory(TokenInformation, Buffer.Slice(0, (int)RequiredSize)))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 return NTSTATUS.STATUS_SUCCESS;
@@ -243,9 +241,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             switch ((TOKEN_INFORMATION_CLASS)TokenInformationClass)
             {
+                case TOKEN_INFORMATION_CLASS.TokenCapabilities:
+                    return WriteSidGroupsInfo(Token.CapabilitySids);
+
+                case TOKEN_INFORMATION_CLASS.TokenAppContainerSid:
+                    return Token.IsAppContainer ? WriteSidPointerInfo(Token.AppContainerSid) : WritePointerOnlyInfo();
+
+                case TOKEN_INFORMATION_CLASS.TokenAppContainerNumber:
+                    return WriteUInt32Info(Token.AppContainerNumber);
+
                 case TOKEN_INFORMATION_CLASS.TokenGroups:
                 case TOKEN_INFORMATION_CLASS.TokenRestrictedSids:
-                case TOKEN_INFORMATION_CLASS.TokenCapabilities:
                 case TOKEN_INFORMATION_CLASS.TokenDeviceGroups:
                 case TOKEN_INFORMATION_CLASS.TokenRestrictedDeviceGroups:
                 case TOKEN_INFORMATION_CLASS.TokenLogonSid:
@@ -257,7 +263,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return WriteSidPointerInfo(UserSid);
 
                 case TOKEN_INFORMATION_CLASS.TokenDefaultDacl:
-                case TOKEN_INFORMATION_CLASS.TokenAppContainerSid:
                 case TOKEN_INFORMATION_CLASS.TokenProcessTrustLevel:
                     return WritePointerOnlyInfo();
 
@@ -304,7 +309,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case TOKEN_INFORMATION_CLASS.TokenVirtualizationAllowed:
                 case TOKEN_INFORMATION_CLASS.TokenVirtualizationEnabled:
                 case TOKEN_INFORMATION_CLASS.TokenUIAccess:
-                case TOKEN_INFORMATION_CLASS.TokenAppContainerNumber:
                 case TOKEN_INFORMATION_CLASS.TokenIsRestricted:
                 case TOKEN_INFORMATION_CLASS.TokenSandBoxInert:
                 case TOKEN_INFORMATION_CLASS.TokenChildProcessFlags:
@@ -316,13 +320,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case TOKEN_INFORMATION_CLASS.TokenMandatoryPolicy:
                     return WriteUInt32Info(3);
 
+                case TOKEN_INFORMATION_CLASS.TokenSecurityAttributes:
+                    return WriteSecurityAttributesInfo(Token.SecurityAttributes);
+
                 case TOKEN_INFORMATION_CLASS.TokenUserClaimAttributes:
                 case TOKEN_INFORMATION_CLASS.TokenDeviceClaimAttributes:
                 case TOKEN_INFORMATION_CLASS.TokenRestrictedUserClaimAttributes:
                 case TOKEN_INFORMATION_CLASS.TokenRestrictedDeviceClaimAttributes:
-                case TOKEN_INFORMATION_CLASS.TokenSecurityAttributes:
                 case TOKEN_INFORMATION_CLASS.TokenSingletonAttributes:
-                    return WriteSecurityAttributesInfo();
+                    return WriteSecurityAttributesInfo(Array.Empty<WinTokenSecurityAttribute>());
 
                 case TOKEN_INFORMATION_CLASS.TokenType:
                     {
@@ -360,20 +366,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                 case TOKEN_INFORMATION_CLASS.TokenIsAppContainer:
-                    {
-                        uint RequiredSize = 4;
-                        WriteReturnLength(RequiredSize);
-
-                        if (TokenInformationLength < RequiredSize)
-                            return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
-
-                        uint Value = 0;
-
-                        if (!Instance._emulator.WriteMemory(TokenInformation, Value))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                        return NTSTATUS.STATUS_SUCCESS;
-                    }
+                    return WriteUInt32Info(Token.IsAppContainer ? 1u : 0u);
 
                 case TOKEN_INFORMATION_CLASS.TokenSessionId:
                     {
@@ -463,6 +456,28 @@ namespace Brovan.Core.Emulation.OS.Windows
                 default:
                     return NTSTATUS.STATUS_INVALID_INFO_CLASS;
             }
+        }
+
+        internal static NTSTATUS ResolveToken(BinaryEmulator Instance, ulong TokenHandle, out WinToken Token)
+        {
+            Token = null;
+            long TokenHandleSigned = HandleManager.ToSignedHandle(TokenHandle);
+
+            if (TokenHandleSigned == -4 || TokenHandleSigned == -5 || TokenHandleSigned == -6)
+            {
+                WinToken ThreadToken = TokenHandleSigned == -4 ? null : WinEmulatedThread.TryGetState(Instance.CurrentThread)?.ImpersonationToken;
+                if (TokenHandleSigned == -5 && ThreadToken == null)
+                    return NTSTATUS.STATUS_NO_TOKEN;
+
+                Token = ThreadToken ?? Instance.WinHelper.OwnProcess?.PrimaryToken;
+                return Token == null ? NTSTATUS.STATUS_INVALID_HANDLE : NTSTATUS.STATUS_SUCCESS;
+            }
+
+            if (!Instance.WinHelper.HandleManager.HandleExists(TokenHandle, HandleType.TokenHandle))
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            Token = Instance.WinHelper.HandleManager.GetObjectByHandle<WinToken>(TokenHandle);
+            return Token == null ? NTSTATUS.STATUS_INVALID_HANDLE : NTSTATUS.STATUS_SUCCESS;
         }
 
         internal static byte[] InteractiveUserSid() => BuildSid(1, 5, 21, 1000, 1000, 1000, 1001);

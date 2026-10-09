@@ -192,6 +192,8 @@ namespace Brovan.Core.Emulation
         // NT: secured VAD.
         public bool IsSecured;
 
+        public bool IsWriteWatch;
+
         // NT: placeholder VAD, and an allocation that replaced one.
         public bool IsPlaceholder;
         public bool FromPlaceholder;

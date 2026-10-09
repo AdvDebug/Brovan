@@ -93,6 +93,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             if (!IsRootRelativeName(RawPath, RootDirectoryHandle) &&
+                TryOpenPipeDirectory(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, Normalized, CreateDisposition, CreateOptions, Inherit, out NTSTATUS DirectoryStatus))
+                return DirectoryStatus;
+
+            if (!IsRootRelativeName(RawPath, RootDirectoryHandle) &&
                 Instance.WinHelper.TryCreateDevice(Normalized, Ea, out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus))
             {
                 if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
@@ -175,6 +179,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, VolumeDevicePath, null);
             }
+
+            if (!IsRootRelativeName(RawPath, RootDirectoryHandle) &&
+                TryOpenPipeDirectory(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, Normalized, CreateDisposition, CreateOptions, Inherit, out NTSTATUS DirectoryStatus))
+                return DirectoryStatus;
 
             if (!IsRootRelativeName(RawPath, RootDirectoryHandle) &&
                 Instance.WinHelper.TryCreateDevice(Normalized, Ea, out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus))
@@ -641,6 +649,38 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Status = CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, Permissions, GuestPath, Client.HandleControl, Client, CreateOptions, Inherit);
+            return true;
+        }
+
+        // NT: npfs NpFsdCreate. FileAppendData is FILE_ADD_SUBDIRECTORY, and the handle is named after the device.
+        internal static bool TryOpenPipeDirectory(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask DesiredAccess, string Path, uint CreateDisposition, uint CreateOptions, bool Inherit, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_SUCCESS;
+            if (Path == null || !Path.Contains(Instance.WinHelper.AppContainerNamedObjects.Path, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string DevicePath = WinSysHelper.NormalizePipePath(Path);
+            if (!Instance.WinHelper.TryGetPipeDirectoryAccess(DevicePath, out AccessMask Grantable))
+                return false;
+
+            AccessMask Granted = AccessMask.None;
+            if ((CreateOptions & FILE_DIRECTORY_FILE) == 0 || CreateDisposition < FILE_OPEN || CreateDisposition > FILE_OPEN_IF)
+                Status = NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+            else if (CreateDisposition != FILE_OPEN && (Grantable & AccessMask.FileAppendData) == 0)
+                Status = NTSTATUS.STATUS_ACCESS_DENIED;
+            else if (CreateDisposition == FILE_CREATE)
+                Status = NTSTATUS.STATUS_OBJECT_NAME_COLLISION;
+            else if (!WinSysHelper.TryGrantObjectAccess(DesiredAccess, WinSysHelper.ObjectAccessKind.File, Grantable, out Granted))
+                Status = NTSTATUS.STATUS_ACCESS_DENIED;
+
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
+                return true;
+            }
+
+            GuestNamedPipe Prefix = GuestNamedPipe.CreatePrefix(DevicePath);
+            Status = CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, Granted, GuestNamedPipe.DeviceName, Prefix.HandleControl, Prefix, CreateOptions, Inherit);
             return true;
         }
 

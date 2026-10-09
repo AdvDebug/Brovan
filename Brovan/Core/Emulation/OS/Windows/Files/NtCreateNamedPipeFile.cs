@@ -60,6 +60,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!GuestNamedPipe.IsPipePath(GuestPath) || GuestPath.Length <= GuestNamedPipe.DeviceName.Length)
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
+            GuestPath = Instance.WinHelper.TranslatePipeAlias(GuestPath);
+
             NTSTATUS Status = GuestNamedPipe.TryCreateServer(GuestPath, NamedPipeType, ReadMode, CompletionMode, MaximumInstances, InboundQuota, OutboundQuota, out GuestNamedPipe Pipe);
             if (Status != NTSTATUS.STATUS_SUCCESS)
             {

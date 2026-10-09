@@ -32,6 +32,7 @@ namespace Brovan.Core.Emulation.Guests
         public ulong ProcessParams { get; internal set; }
         public ulong ApiSetMap { get; internal set; }
         public ulong ProcessActivationContext { get; internal set; }
+        public AppxProcessIdentity PackageIdentity { get; private set; }
         public ulong WowSyscallGate { get; internal set; }
         public ulong GuestGdt { get; internal set; }
 
@@ -50,6 +51,12 @@ namespace Brovan.Core.Emulation.Guests
         private const byte GdtDataAccess = 0x93;
         private const byte GdtGranularityDefault = 0xC;
         private const byte GdtGranularityLongMode = 0xA;
+
+        // NT: PEB BitField.
+        private const byte PebIsPackagedProcess = 0x10;
+        private const byte PebIsAppContainer = 0x20;
+        private const ulong ProcessParametersPackageDependencyData64 = 0x400;
+        private const uint FirstLowBoxNumber = 1;
 
         private const uint Wow64InfoOffset = 0x490;
         private const uint Wow64TlsWow64InfoOffset = 0xE10 + 10 * 4;
@@ -1513,6 +1520,35 @@ namespace Brovan.Core.Emulation.Guests
                 });
         }
 
+        private AppxProcessIdentity CreatePackageIdentity(BinaryEmulator Instance)
+        {
+            AppxProcessIdentity Identity = AppxPackageModel.TryCreate(Instance, WinHelper, Instance.GuestImagePath);
+            if (Identity == null)
+                return null;
+
+            if (Instance._binary.Architecture != BinaryArchitecture.x64)
+            {
+                Utils.LogError($"[-] AppX: package identity for x86 images is not implemented, {Identity.Package.FullName} runs without it.");
+                return null;
+            }
+
+            WinToken Token = WinHelper.OwnProcess?.PrimaryToken;
+            if (Token == null)
+                return null;
+
+            Token.SecurityAttributes = Identity.SecurityAttributes;
+            if (Identity.IsAppContainer)
+            {
+                Token.AppContainerSid = Identity.AppContainerSid;
+                Token.AppContainerNumber = FirstLowBoxNumber;
+                Token.CapabilitySids = Identity.CapabilitySids;
+                WinHelper.CreateAppContainerNamedObjects(AppxPackageModel.FormatSid(Identity.AppContainerSid));
+            }
+
+            AppxPackageModel.PublishRegistration(Instance, WinHelper, Identity);
+            return Identity;
+        }
+
         private static string ResolveStartupDirectory(BinaryEmulator Instance, string ImagePath)
         {
             string Directory = GeneralHelper.IO.ToGuestWindowsPath(Instance.WorkingDirectory);
@@ -1542,6 +1578,9 @@ namespace Brovan.Core.Emulation.Guests
             Win32kDpi.SeedFromImage(Instance, MainModule);
             JoinGuestSession(Instance, MainModule);
 
+            if (IsPeImage)
+                PackageIdentity = CreatePackageIdentity(Instance);
+
             ulong PageSize = 0x2000;
             PEB = Instance.MapUniqueAddress(PageSize, MemoryProtection.ReadWrite);
             ProcessActivationContext = WinSxS.BuildProcessActivationContext(Instance, MainModule);
@@ -1559,6 +1598,8 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(PEB + 0x0, (byte)0, 1);
                 Instance._emulator.WriteMemory(PEB + 0x1, (byte)0, 1);
                 Instance._emulator.WriteMemory(PEB + 0x2, (byte)0, 1);
+                if (PackageIdentity != null)
+                    Instance._emulator.WriteMemory(PEB + 0x3, (byte)(PebIsPackagedProcess | (PackageIdentity.IsAppContainer ? PebIsAppContainer : 0)), 1);
                 Instance._emulator.WriteMemory(PEB + 0x8, 0xFFFFFFFFFFFFFFFFUL, 8);
                 Instance._emulator.WriteMemory(PEB + 0x10, MainModule.MappedBase, 8);
                 Instance._emulator.WriteMemory(PEB + 0x18, 0UL, 8);
@@ -1600,8 +1641,9 @@ namespace Brovan.Core.Emulation.Guests
                     static byte[] Wz(string s) => Encoding.Unicode.GetBytes(s + "\0");
 
                     byte[] EnvBlock = BuildEnvironment(Instance, out ulong envSize);
+                    string DllPath = PackageIdentity?.LoaderSearchPath ?? string.Empty;
                     ulong HeaderSize = 0x450;
-                    ulong TotalSize = HeaderSize + (ulong)Wz(CurrentDir).Length + (ulong)Wz(ImagePath).Length + (ulong)Wz(CommandLine).Length + (ulong)Wz(WindowTitle).Length + (ulong)Wz(DesktopInfo).Length + envSize;
+                    ulong TotalSize = HeaderSize + (ulong)Wz(CurrentDir).Length + (ulong)Wz(DllPath).Length + (ulong)Wz(ImagePath).Length + (ulong)Wz(CommandLine).Length + (ulong)Wz(WindowTitle).Length + (ulong)Wz(DesktopInfo).Length + envSize;
                     TotalSize = BinaryEmulator.AlignUp(TotalSize, 0x10);
 
                     ProcessParams = Instance.MapUniqueAddress(TotalSize, MemoryProtection.ReadWrite);
@@ -1639,6 +1681,8 @@ namespace Brovan.Core.Emulation.Guests
                         Instance._emulator.WriteMemory(ProcessParams + 0x28, WinHelper.STD_OUT?.Handle ?? 0, 8);
                         Instance._emulator.WriteMemory(ProcessParams + 0x30, WinHelper.STD_ERR?.Handle ?? 0, 8);
                     }
+                    if (DllPath.Length != 0)
+                        WriteInlineUnicodeString(0x50, DllPath);
                     WriteInlineUnicodeString(0x60, ImagePath);
                     WriteInlineUnicodeString(0x70, CommandLine);
                     ulong EnvPtr = Cursor;
@@ -1646,6 +1690,13 @@ namespace Brovan.Core.Emulation.Guests
                     Instance._emulator.WriteMemory(ProcessParams + 0x80, EnvPtr, 8);
                     Instance._emulator.WriteMemory(ProcessParams + 0x3F0, envSize, 8);
                     Instance._emulator.WriteMemory(ProcessParams + 0x3F8, 0UL, 8);
+                    if (PackageIdentity != null)
+                    {
+                        ulong DependencyData = WinHelper.MapUnnamedSectionView(PackageIdentity.DependencyMiniRepository, MemoryProtection.Read);
+                        if (DependencyData == 0)
+                            Utils.LogError("[-] AppX: the dependency mini repository could not be mapped.");
+                        Instance._emulator.WriteMemory(ProcessParams + ProcessParametersPackageDependencyData64, DependencyData, 8);
+                    }
                     Cursor += envSize;
                     Cursor = BinaryEmulator.AlignUp(Cursor, 2);
                     WriteInlineUnicodeString(0xB0, WindowTitle);

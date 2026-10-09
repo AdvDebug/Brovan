@@ -52,6 +52,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const string DosDevicesPrefix = "\\DosDevices\\";
         private const string GlobalDosDevicesPath = "\\GLOBAL??";
+        private const string GlobalNamedObjectsPath = "\\BaseNamedObjects";
 
         private static readonly (string Name, string Target)[] GlobalDosDeviceLinks =
         {
@@ -143,7 +144,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Pipe = null;
             Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
-            string DevicePath = NormalizeDevicePath(Path, SyntheticVolumeGuid);
+            string DevicePath = TranslatePipeAlias(NormalizeDevicePath(Path, SyntheticVolumeGuid));
             if (!DeviceRegistry.Value.TryGetValue(DevicePath, out IWinDevice Device))
             {
                 // Each pipe is a separate object under one device, so the registry cannot hold the name.
@@ -1116,17 +1117,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public string ResolveObjectNameWithRootDirectory(ulong RootDirectory, string Name)
         {
+            string FullName;
             if (!string.IsNullOrEmpty(Name) && Name.StartsWith("\\", StringComparison.Ordinal))
-                return Name;
+                FullName = Name;
+            else
+            {
+                string RootPath = GetKnownObjectDirectoryPath(RootDirectory);
+                if (string.IsNullOrEmpty(RootPath))
+                    return null;
 
-            string RootPath = GetKnownObjectDirectoryPath(RootDirectory);
-            if (string.IsNullOrEmpty(RootPath))
-                return null;
+                FullName = string.IsNullOrEmpty(Name) ? RootPath : RootPath.TrimEnd('\\') + "\\" + Name.TrimStart('\\');
+            }
 
-            if (string.IsNullOrEmpty(Name))
-                return RootPath;
-
-            return RootPath.TrimEnd('\\') + "\\" + Name.TrimStart('\\');
+            return TryGetNamedObjectDirectory(FullName, out WinObjectDirectory Parent, out string LeafName, out _)
+                ? Parent.Path + "\\" + LeafName
+                : FullName;
         }
 
         public string GetKnownObjectDirectoryPath(ulong RootDirectory)
@@ -1136,9 +1141,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (RootDirectory == HandleManager.KNOWN_DLLS32_DIRECTORY)
                 return "\\KnownDlls32";
-
-            if (RootDirectory == HandleManager.BASE_NAMED_OBJECTS_DIRECTORY)
-                return "\\Sessions\\1\\BaseNamedObjects";
 
             if (RootDirectory == HandleManager.RPC_CONTROL_DIRECTORY)
                 return "\\RPC Control";
@@ -1168,13 +1170,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
             }
 
-            if (Normalized.Equals("\\Sessions\\1\\BaseNamedObjects", StringComparison.OrdinalIgnoreCase) ||
-                Normalized.Equals("\\BaseNamedObjects", StringComparison.OrdinalIgnoreCase))
-            {
-                Handle = HandleManager.BASE_NAMED_OBJECTS_DIRECTORY;
-                return true;
-            }
-
             if (Normalized.Equals("\\RPC Control", StringComparison.OrdinalIgnoreCase))
             {
                 Handle = HandleManager.RPC_CONTROL_DIRECTORY;
@@ -1184,18 +1179,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
-        internal enum DosDeviceLookup
+        internal enum ObjectDirectoryLookup
         {
             Outside,
             Found,
             Failed
         }
 
-        private const int MaxDosDeviceReparse = 32;
+        private const int MaxObjectDirectoryReparse = 32;
 
-        // Follows links under \??, \GLOBAL?? and \DosDevices as the object manager does. OpenLink returns a last-component
-        // link instead of following it. Outside leaves the resolved path in FullName. Failed sets Parent and LeafName.
-        internal DosDeviceLookup LookupDosDeviceName(ref string FullName, bool OpenLink, out IHandleObject Object, out WinObjectDirectory Parent, out string LeafName, out NTSTATUS Status)
+        // OpenLink returns a last-component link instead of following it. Outside leaves the resolved path in
+        // FullName. Found, and Failed on the last component, set Parent and LeafName.
+        internal ObjectDirectoryLookup LookupObjectDirectoryName(ref string FullName, bool OpenLink, bool Open, out IHandleObject Object, out WinObjectDirectory Parent, out string LeafName, out NTSTATUS Status)
         {
             Object = null;
             Parent = null;
@@ -1203,7 +1198,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Status = NTSTATUS.STATUS_SUCCESS;
 
             string Path = FullName;
-            for (int Reparse = 0; Reparse <= MaxDosDeviceReparse; Reparse++)
+            for (int Reparse = 0; Reparse <= MaxObjectDirectoryReparse; Reparse++)
             {
                 WinObjectDirectory Directory;
                 string Remaining;
@@ -1213,92 +1208,201 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Directory = GlobalDosDevices;
                 else if (TryStripObjectRoot(Path, DosDevices.Path, out Remaining))
                     Directory = DosDevices;
+                else if (TryStripNamedObjectRoot(Path, out WinObjectDirectory NamedObjectRoot, out Remaining))
+                    Directory = NamedObjectRoot;
                 else if (TryStripObjectRoot(Path, DosDevicesRootLink.FullName, out Remaining))
                 {
                     if (Remaining.Length == 0 && OpenLink)
                     {
                         Object = DosDevicesRootLink;
-                        return DosDeviceLookup.Found;
+                        return ObjectDirectoryLookup.Found;
                     }
 
                     Path = DosDevicesRootLink.Target + Remaining;
                     continue;
                 }
                 else if (Reparse == 0)
-                    return DosDeviceLookup.Outside;
+                    return ObjectDirectoryLookup.Outside;
                 else if (Path.Length == 0)
                 {
                     Status = NTSTATUS.STATUS_OBJECT_NAME_INVALID;
-                    return DosDeviceLookup.Failed;
+                    return ObjectDirectoryLookup.Failed;
                 }
                 else if (Path[0] != '\\')
                 {
                     Status = NTSTATUS.STATUS_OBJECT_PATH_SYNTAX_BAD;
-                    return DosDeviceLookup.Failed;
+                    return ObjectDirectoryLookup.Failed;
                 }
                 else if (Path.StartsWith("\\Device\\", StringComparison.OrdinalIgnoreCase))
                 {
                     Status = NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
-                    return DosDeviceLookup.Failed;
+                    return ObjectDirectoryLookup.Failed;
                 }
                 else
                 {
                     FullName = Path;
-                    return DosDeviceLookup.Outside;
+                    return ObjectDirectoryLookup.Outside;
                 }
 
-                if (Remaining.Length == 0)
+                while (true)
                 {
-                    Object = Directory;
-                    return DosDeviceLookup.Found;
+                    if (Remaining.Length == 0)
+                    {
+                        Object = Directory;
+                        return ObjectDirectoryLookup.Found;
+                    }
+
+                    int Start = 0;
+                    while (Start < Remaining.Length && Remaining[Start] == '\\')
+                        Start++;
+
+                    if (Start == Remaining.Length)
+                    {
+                        Status = NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+                        return ObjectDirectoryLookup.Failed;
+                    }
+
+                    int End = Remaining.IndexOf('\\', Start);
+                    if (End < 0)
+                        End = Remaining.Length;
+
+                    string Component = Remaining.Substring(Start, End - Start);
+                    Remaining = Remaining.Substring(End);
+
+                    WinObjectDirectory Holder = Directory;
+                    IHandleObject Entry = Directory.Find(Component);
+                    if (Entry == null && Open && Directory.Shadow != null)
+                    {
+                        Holder = Directory.Shadow;
+                        Entry = Holder.Find(Component);
+                    }
+
+                    if (Entry == null)
+                    {
+                        Parent = Directory;
+                        LeafName = Component;
+                        Status = Remaining.Length == 0 ? NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND : NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
+                        return ObjectDirectoryLookup.Failed;
+                    }
+
+                    if (Entry is WinSymbolicLink Link && (Remaining.Length != 0 || !OpenLink))
+                    {
+                        Path = Link.Target + Remaining;
+                        break;
+                    }
+
+                    if (Remaining.Length == 0)
+                    {
+                        Object = Entry;
+                        Parent = Holder;
+                        LeafName = Component;
+                        return ObjectDirectoryLookup.Found;
+                    }
+
+                    if (Entry is not WinObjectDirectory Subdirectory)
+                    {
+                        Status = NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+                        return ObjectDirectoryLookup.Failed;
+                    }
+
+                    Directory = Subdirectory;
                 }
-
-                int Start = 0;
-                while (Start < Remaining.Length && Remaining[Start] == '\\')
-                    Start++;
-
-                if (Start == Remaining.Length)
-                {
-                    Status = NTSTATUS.STATUS_OBJECT_NAME_INVALID;
-                    return DosDeviceLookup.Failed;
-                }
-
-                int End = Remaining.IndexOf('\\', Start);
-                if (End < 0)
-                    End = Remaining.Length;
-
-                string Component = Remaining.Substring(Start, End - Start);
-                Remaining = Remaining.Substring(End);
-
-                WinObjectDirectory Holder = Directory;
-                WinSymbolicLink Link = Directory.Find(Component);
-                if (Link == null && Directory.Shadow != null)
-                {
-                    Holder = Directory.Shadow;
-                    Link = Holder.Find(Component);
-                }
-
-                if (Link == null)
-                {
-                    Parent = Directory;
-                    LeafName = Component;
-                    Status = Remaining.Length == 0 ? NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND : NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
-                    return DosDeviceLookup.Failed;
-                }
-
-                if (Remaining.Length == 0 && OpenLink)
-                {
-                    Object = Link;
-                    Parent = Holder;
-                    LeafName = Component;
-                    return DosDeviceLookup.Found;
-                }
-
-                Path = Link.Target + Remaining;
             }
 
             Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
-            return DosDeviceLookup.Failed;
+            return ObjectDirectoryLookup.Failed;
+        }
+
+        private bool TryStripNamedObjectRoot(string Path, out WinObjectDirectory Root, out string Remaining)
+        {
+            foreach (WinObjectDirectory Candidate in NamedObjectRoots)
+            {
+                if (TryStripObjectRoot(Path, Candidate.Path, out Remaining))
+                {
+                    Root = Candidate;
+                    return true;
+                }
+            }
+
+            Root = null;
+            Remaining = null;
+            return false;
+        }
+
+        private bool TryGetNamedObjectDirectory(string? FullName, out WinObjectDirectory Parent, out string LeafName, out IHandleObject? Existing)
+        {
+            Parent = null;
+            LeafName = null;
+            Existing = null;
+
+            if (FullName == null || !TryStripNamedObjectRoot(FullName, out _, out _))
+                return false;
+
+            ObjectDirectoryLookup Lookup = LookupObjectDirectoryName(ref FullName, true, false, out Existing, out Parent, out LeafName, out NTSTATUS Status);
+            return Parent != null && (Lookup == ObjectDirectoryLookup.Found || Status == NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND);
+        }
+
+        private static void AddNamedObjectLinks(WinObjectDirectory Directory, string AppContainerNamedObjects, string SessionLinks)
+        {
+            Directory.AddLink("Local", Directory.Path);
+            Directory.AddLink("Session", SessionLinks);
+            Directory.AddLink("Global", GlobalNamedObjectsPath);
+            Directory.AddLink("AppContainerNamedObjects", AppContainerNamedObjects);
+        }
+
+        // NT: kernelbase BasepCreateAppContainerObjectDirectories.
+        internal void CreateAppContainerNamedObjects(string AppContainerSid)
+        {
+            WinObjectDirectory Own = AppContainerNamedObjects.AddDirectory(AppContainerSid, AccessMask.DirectoryAllAccess, AccessMask.DirectoryAllAccess, AccessMask.SymbolicLinkAllAccess, SessionNamedObjects);
+            Own.AddDirectory("RPC Control", AccessMask.DirectoryAllAccess, AccessMask.DirectoryAllAccess, AccessMask.None, ShadowPath: "\\RPC Control");
+            Own.AddDirectory("Global", AccessMask.DirectoryAllAccess, AccessMask.DirectoryAllAccess, AccessMask.None, GlobalNamedObjects);
+            Own.AddLink("Local", Own.Path);
+            Own.AddLink("Session", Own.Path);
+            AppContainerDirectory = Own;
+        }
+
+        internal AccessMask GetGrantableAccess(WinObjectDirectory Directory)
+        {
+            return IsAppContainerProcess() ? Directory.AppContainerAccess : Directory.UserAccess;
+        }
+
+        private bool IsAppContainerProcess() => OwnProcess?.PrimaryToken?.IsAppContainer == true;
+
+        // NT: npfs NpTranslateContainerLocalAlias.
+        internal string TranslatePipeAlias(string GuestPath)
+        {
+            const string LocalAlias = "LOCAL\\";
+            int Start = GuestNamedPipe.DeviceName.Length + 1;
+            if (AppContainerDirectory == null || !GuestNamedPipe.IsPipePath(GuestPath) || GuestPath.Length <= Start + LocalAlias.Length ||
+                string.Compare(GuestPath, Start, LocalAlias, 0, LocalAlias.Length, StringComparison.OrdinalIgnoreCase) != 0)
+                return GuestPath;
+
+            return GuestNamedPipe.DeviceName + AppContainerDirectory.Path + "\\" + GuestPath.Substring(Start + LocalAlias.Length);
+        }
+
+        // NT: DACLs of the AppContainer npfs prefixes.
+        internal bool TryGetPipeDirectoryAccess(string DevicePath, out AccessMask Grantable)
+        {
+            const AccessMask PipeDirectoryAccess = AccessMask.StandardRightsRequired | AccessMask.Synchronize | AccessMask.FileWriteData | AccessMask.FileAppendData;
+            Grantable = AccessMask.None;
+
+            if (!GuestNamedPipe.IsPipePath(DevicePath))
+                return false;
+
+            string Name = DevicePath.Substring(GuestNamedPipe.DeviceName.Length);
+            if (string.Equals(Name, AppContainerNamedObjects.Path, StringComparison.OrdinalIgnoreCase))
+            {
+                Grantable = IsAppContainerProcess() ? AccessMask.None : PipeDirectoryAccess;
+                return true;
+            }
+
+            if (AppContainerDirectory != null && string.Equals(Name, AppContainerDirectory.Path, StringComparison.OrdinalIgnoreCase))
+            {
+                Grantable = PipeDirectoryAccess;
+                return true;
+            }
+
+            return false;
         }
 
         internal bool IsObjectHandle(ulong Handle)
@@ -1317,23 +1421,44 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        internal static bool TryGrantObjectAccess(AccessMask DesiredAccess, bool IsDirectory, AccessMask Grantable, out AccessMask Granted)
+        internal enum ObjectAccessKind
+        {
+            Directory,
+            SymbolicLink,
+            File
+        }
+
+        internal static bool TryGrantObjectAccess(AccessMask DesiredAccess, ObjectAccessKind Kind, AccessMask Grantable, out AccessMask Granted)
         {
             uint Requested = (uint)DesiredAccess & ~(uint)AccessMask.MaximumAllowed;
-            uint Mapped = IsDirectory
-                ? NtAccessCheck.ApplyGenericMapping(Requested,
+            uint Mapped = Kind switch
+            {
+                ObjectAccessKind.Directory => NtAccessCheck.ApplyGenericMapping(Requested,
                     (uint)(AccessMask.ReadControl | AccessMask.DirectoryQuery | AccessMask.DirectoryTraverse),
                     (uint)(AccessMask.ReadControl | AccessMask.DirectoryCreateObject | AccessMask.DirectoryCreateSubdirectory),
                     (uint)(AccessMask.ReadControl | AccessMask.DirectoryQuery | AccessMask.DirectoryTraverse),
-                    (uint)AccessMask.DirectoryAllAccess)
-                : NtAccessCheck.ApplyGenericMapping(Requested,
+                    (uint)AccessMask.DirectoryAllAccess),
+                ObjectAccessKind.SymbolicLink => NtAccessCheck.ApplyGenericMapping(Requested,
                     (uint)(AccessMask.ReadControl | AccessMask.SymbolicLinkQuery),
                     (uint)AccessMask.ReadControl,
                     (uint)(AccessMask.ReadControl | AccessMask.SymbolicLinkQuery),
-                    (uint)AccessMask.SymbolicLinkAllAccess);
+                    (uint)AccessMask.SymbolicLinkAllAccess),
+                _ => NtAccessCheck.ApplyGenericMapping(Requested,
+                    (uint)(AccessMask.ReadControl | AccessMask.Synchronize | AccessMask.FileReadData | AccessMask.FileReadAttributes | AccessMask.FileReadEA),
+                    (uint)(AccessMask.ReadControl | AccessMask.Synchronize | AccessMask.FileWriteData | AccessMask.FileWriteAttributes | AccessMask.FileWriteEA | AccessMask.FileAppendData),
+                    (uint)(AccessMask.ReadControl | AccessMask.Synchronize | AccessMask.FileReadAttributes | AccessMask.FileExecute),
+                    (uint)AccessMask.FileAllAccess)
+            };
 
             if ((DesiredAccess & AccessMask.MaximumAllowed) != 0)
+            {
                 Mapped |= (uint)Grantable;
+                if (Mapped == 0)
+                {
+                    Granted = AccessMask.None;
+                    return false;
+                }
+            }
 
             Granted = (AccessMask)Mapped;
             return (Mapped & ~(uint)Grantable) == 0;
@@ -1343,8 +1468,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             for (int Index = 0; Index < DosDevices.Count; Index++)
             {
-                string Name = DosDevices.GetEntry(Index, out WinSymbolicLink Link);
-                if (!TryGetDriveLetter(Name, out int Letter))
+                string Name = DosDevices.GetEntry(Index, out IHandleObject Entry);
+                if (Entry is not WinSymbolicLink Link || !TryGetDriveLetter(Name, out int Letter))
                     continue;
 
                 DriveMap |= 1u << Letter;
@@ -2192,7 +2317,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public List<WinHandle> WinHandles = new List<WinHandle>();
         public List<WinProcess> WinProcesses = new List<WinProcess>();
-        private WinProcess OwnProcess;
+        internal WinProcess OwnProcess { get; private set; }
         public List<WinFile> WinFiles = new List<WinFile>();
 
         private readonly Dictionary<string, List<WinFile>> OpenFilesByPath = new Dictionary<string, List<WinFile>>(StringComparer.OrdinalIgnoreCase);
@@ -2226,6 +2351,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         // \?? of the interactive logon.
         internal readonly WinObjectDirectory DosDevices;
         private readonly WinSymbolicLink DosDevicesRootLink = new WinSymbolicLink { FullName = "\\DosDevices", Target = "\\??" };
+        // Also the named object directory of session 0.
+        internal readonly WinObjectDirectory GlobalNamedObjects;
+        internal readonly WinObjectDirectory SessionNamedObjects;
+        internal readonly WinObjectDirectory AppContainerNamedObjects;
+        internal WinObjectDirectory AppContainerDirectory { get; private set; }
+        private readonly WinObjectDirectory[] NamedObjectRoots;
         private BinaryEmulator Emulator;
 
         private uint CachedDriveMap;
@@ -2337,6 +2468,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Spellings.Add(Object);
+
+            if (TryGetNamedObjectDirectory(Object.ObjectId, out WinObjectDirectory Parent, out string LeafName, out _))
+                Parent.Add(LeafName, Object);
         }
 
         private void RemoveNamedObject(IHandleObject Object)
@@ -2346,6 +2480,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Spellings.Count == 0)
                 NamedObjects.Remove(Object.ObjectId);
+
+            if (TryGetNamedObjectDirectory(Object.ObjectId, out WinObjectDirectory Parent, out string LeafName, out _))
+                Parent.Remove(LeafName, Object);
         }
 
         public IHandleObject? FindNamedObject(string? FullName, bool IgnoreCase)
@@ -2367,7 +2504,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Existing = null;
             Status = NTSTATUS.STATUS_SUCCESS;
 
-            IHandleObject? Found = FindNamedObject(FullName, TypeIgnoresCase || (Attributes & OBJ_CASE_INSENSITIVE) != 0);
+            IHandleObject? Found = FindNamedObject(FullName, TypeIgnoresCase || (Attributes & OBJ_CASE_INSENSITIVE) != 0) ?? FindDirectoryOrLink(FullName);
             if (Found == null)
                 return true;
 
@@ -2392,7 +2529,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Found = null;
 
-            IHandleObject? Named = FindNamedObject(FullName, TypeIgnoresCase || (Attributes & OBJ_CASE_INSENSITIVE) != 0);
+            bool IgnoreCase = TypeIgnoresCase || (Attributes & OBJ_CASE_INSENSITIVE) != 0;
+            IHandleObject? Named = FindNamedObject(FullName, IgnoreCase) ?? FindNamedObject(GetShadowObjectName(FullName), IgnoreCase);
             if (Named == null)
             {
                 Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
@@ -2408,6 +2546,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             Found = Typed;
             Status = NTSTATUS.STATUS_SUCCESS;
             return true;
+        }
+
+        private IHandleObject? FindDirectoryOrLink(string? FullName)
+        {
+            return TryGetNamedObjectDirectory(FullName, out _, out _, out IHandleObject? Existing) && Existing is WinSymbolicLink or WinObjectDirectory
+                ? Existing
+                : null;
+        }
+
+        // NT: ObpLookupObjectName goes on in the shadow directory only when it does not insert an object.
+        private string? GetShadowObjectName(string FullName)
+        {
+            if (!TryGetNamedObjectDirectory(FullName, out WinObjectDirectory Parent, out string LeafName, out IHandleObject? Existing) || Existing != null || Parent.ShadowPath == null)
+                return null;
+
+            return Parent.ShadowPath + "\\" + LeafName;
         }
 
         public WinHandle OpenObjectHandle(IHandleObject Object, AccessMask Permissions)
@@ -2529,7 +2683,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const byte OemTranslationDefaultChar = (byte)'_';
         private const string NlsCodePageKey = "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Nls\\CodePage";
         private const uint Utf8CodePage = 65001;
+        internal const int RegNone = 0;
         internal const int RegSz = 1;
+        internal const int RegDword = 4;
+        internal const int RegQword = 11;
 
         // aiSysMet, then one block of DPI dependent metrics per DPI plateau.
         private const ulong UserServerInfoSystemMetricsOffset = 0x768;
@@ -2641,13 +2798,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             SyntheticVolumeWin32GuidPath = $"\\\\?\\Volume{{{SyntheticVolumeGuid}}}\\";
             SyntheticMountDevUniqueId = Guid.Parse(SyntheticVolumeGuid).ToByteArray();
 
-            GlobalDosDevices = new WinObjectDirectory(GlobalDosDevicesPath, null, AccessMask.ReadControl | AccessMask.DirectoryQuery | AccessMask.DirectoryTraverse, AccessMask.ReadControl | AccessMask.SymbolicLinkQuery);
+            GlobalDosDevices = new WinObjectDirectory(GlobalDosDevicesPath, AccessMask.ReadControl | AccessMask.DirectoryQuery | AccessMask.DirectoryTraverse, AccessMask.None, AccessMask.ReadControl | AccessMask.SymbolicLinkQuery);
             foreach ((string Name, string Target) in GlobalDosDeviceLinks)
                 GlobalDosDevices.AddLink(Name, Target);
             GlobalDosDevices.AddLink($"Volume{{{SyntheticVolumeGuid}}}", WindowsStorageDeviceSupport.VolumeDeviceName);
 
-            DosDevices = new WinObjectDirectory($"\\Sessions\\0\\DosDevices\\{(uint)(WinToken.InteractiveLogonId >> 32):x8}-{(uint)WinToken.InteractiveLogonId:x8}", GlobalDosDevices, AccessMask.DirectoryAllAccess, AccessMask.SymbolicLinkAllAccess);
+            DosDevices = new WinObjectDirectory($"\\Sessions\\0\\DosDevices\\{(uint)(WinToken.InteractiveLogonId >> 32):x8}-{(uint)WinToken.InteractiveLogonId:x8}", AccessMask.DirectoryAllAccess, AccessMask.None, AccessMask.SymbolicLinkAllAccess, GlobalDosDevices);
             DosDevices.AddLink("Global", "\\Global??");
+
+            string Session = WinToken.InteractiveSessionDirectory;
+            AccessMask LinkQuery = AccessMask.ReadControl | AccessMask.SymbolicLinkQuery;
+            AccessMask QueryTraverse = AccessMask.DirectoryQuery | AccessMask.DirectoryTraverse;
+            AccessMask GlobalAccess = AccessMask.ReadControl | QueryTraverse | AccessMask.DirectoryCreateObject | AccessMask.DirectoryCreateSubdirectory;
+            GlobalNamedObjects = new WinObjectDirectory(GlobalNamedObjectsPath, GlobalAccess, AccessMask.None, LinkQuery);
+            SessionNamedObjects = new WinObjectDirectory(Session + "\\BaseNamedObjects", AccessMask.DirectoryAllAccess, AccessMask.None, AccessMask.SymbolicLinkQuery);
+            WinObjectDirectory SessionLinks = new WinObjectDirectory("\\Sessions\\BNOLINKS", AccessMask.ReadControl | QueryTraverse, AccessMask.None, LinkQuery);
+            AppContainerNamedObjects = new WinObjectDirectory(Session + "\\AppContainerNamedObjects", AccessMask.DirectoryAllAccess, QueryTraverse, AccessMask.None);
+
+            AddNamedObjectLinks(GlobalNamedObjects, "\\Sessions\\0\\AppContainerNamedObjects", SessionLinks.Path);
+            AddNamedObjectLinks(SessionNamedObjects, AppContainerNamedObjects.Path, SessionLinks.Path);
+            GlobalNamedObjects.AddDirectory("Restricted", GlobalAccess, AccessMask.None, LinkQuery).AddLink("Global", GlobalNamedObjects.Path);
+            SessionNamedObjects.AddDirectory("Restricted", QueryTraverse, AccessMask.None, AccessMask.SymbolicLinkQuery).AddLink("Global", GlobalNamedObjects.Path);
+            SessionLinks.AddLink("0", GlobalNamedObjects.Path);
+            SessionLinks.AddLink(WinToken.InteractiveSessionId.ToString(), SessionNamedObjects.Path);
+            NamedObjectRoots = new[] { GlobalNamedObjects, SessionNamedObjects, SessionLinks, AppContainerNamedObjects };
 
             // Before any handle of this process, so every inherited one keeps its value.
             ulong[] InheritedStd = ProcessInheritance.Apply(Emulator, this);
@@ -2862,7 +3036,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             // services.exe signals this once the SCM is up. A caller that does not find it creates its own
             // and waits for a service controller that never arrives. winmm's audio path fast fails on that
-            CreateEventHandle("\\Sessions\\1\\BaseNamedObjects\\Global\\SvcctrlStartEvent_A3752DX", 0, true, AccessMask.EventAllAccess);
+            CreateEventHandle(GlobalNamedObjectsPath + "\\SvcctrlStartEvent_A3752DX", 0, true, AccessMask.EventAllAccess);
         }
 
         public enum ExceptionType
@@ -10240,6 +10414,25 @@ namespace Brovan.Core.Emulation.OS.Windows
                 AddNamedObject(Sec);
 
             return OpenObjectHandle(Sec, Permissions);
+        }
+
+        // The section has no handle, so unmapping the view frees it.
+        public ulong MapUnnamedSectionView(byte[] Data, MemoryProtection Protection)
+        {
+            ulong Base = Emulator.MapUniqueAddress((ulong)Data.Length, Protection);
+            if (Base == 0)
+                return 0;
+
+            if (!Emulator._emulator.WriteMemory(Base, Data))
+            {
+                Emulator.UnmapMemoryRegion(Base);
+                return 0;
+            }
+
+            WinSection Section = CreateSection(null, (ulong)Data.Length, (uint)ConvertInternalToWinProtect(Protection), 0, null, Base, IntPtr.Zero);
+            Section.MappedViewCount = 1;
+            Section.BackingViewCount = 1;
+            return Base;
         }
 
         private WinSection CreateSection(string? Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, IntPtr Storage)

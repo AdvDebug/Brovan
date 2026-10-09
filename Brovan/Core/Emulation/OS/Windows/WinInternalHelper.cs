@@ -109,7 +109,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public static readonly ulong KNOWN_DLLS_DIRECTORY = 0x1111;
         public static readonly ulong KNOWN_DLLS32_DIRECTORY = 0x1112;
-        public static readonly ulong BASE_NAMED_OBJECTS_DIRECTORY = 0x1113;
         public static readonly ulong RPC_CONTROL_DIRECTORY = 0x1114;
         public static readonly ulong CurrentProcess = ulong.MaxValue;
         public static readonly ulong CurrentThread = 0xFFFFFFFFFFFFFFFE;
@@ -188,7 +187,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             return Handle == KNOWN_DLLS_DIRECTORY ||
                 Handle == KNOWN_DLLS32_DIRECTORY ||
-                Handle == BASE_NAMED_OBJECTS_DIRECTORY ||
                 Handle == RPC_CONTROL_DIRECTORY ||
                 Handle == CurrentProcess ||
                 Handle == CurrentThread ||

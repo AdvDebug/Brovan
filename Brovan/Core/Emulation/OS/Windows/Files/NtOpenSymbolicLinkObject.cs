@@ -26,11 +26,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinSymbolicLink LinkObj;
             AccessMask Grantable = AccessMask.ReadControl | AccessMask.SymbolicLinkQuery;
-            switch (Instance.WinHelper.LookupDosDeviceName(ref FullName, true, out IHandleObject Found, out WinObjectDirectory Parent, out _, out NTSTATUS LookupStatus))
+            switch (Instance.WinHelper.LookupObjectDirectoryName(ref FullName, true, true, out IHandleObject Found, out WinObjectDirectory Parent, out _, out NTSTATUS LookupStatus))
             {
-                case WinSysHelper.DosDeviceLookup.Failed:
+                case WinSysHelper.ObjectDirectoryLookup.Failed:
                     return LookupStatus;
-                case WinSysHelper.DosDeviceLookup.Found:
+                case WinSysHelper.ObjectDirectoryLookup.Found:
                     if (Found is not WinSymbolicLink FoundLink)
                         return NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
 
@@ -52,7 +52,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     break;
             }
 
-            if (!WinSysHelper.TryGrantObjectAccess(DesiredAccess, false, Grantable, out AccessMask Granted))
+            if (!WinSysHelper.TryGrantObjectAccess(DesiredAccess, WinSysHelper.ObjectAccessKind.SymbolicLink, Grantable, out AccessMask Granted))
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
             WinHandle Handle = Instance.WinHelper.OpenObjectHandle(LinkObj, Granted);

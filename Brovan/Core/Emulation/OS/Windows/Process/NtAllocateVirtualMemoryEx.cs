@@ -31,12 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
-            // Address requirements only steer an allocation whose address the system picks.
-            if (Requirements.Limited && BaseAddressPtr != 0 && Instance.IsRegionMapped(BaseAddressPtr, (uint)Instance.WinHelper.PointerSize) &&
-                Instance.WinHelper.ReadPointer(BaseAddressPtr) != 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            return NtAllocateVirtualMemory.AllocateCommon(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, AllocationType, Protect, Requirements, (uint)Instance.WinHelper.PointerSize, true);
+            return NtAllocateVirtualMemory.AllocateCommon(Instance, ProcessHandle, BaseAddressPtr, RegionSizePtr, AllocationType, Protect, 0, Requirements, (uint)Instance.WinHelper.PointerSize, true);
         }
 
         // MEM_EXTENDED_PARAMETER is 16 bytes on both architectures. NUMA node and attribute flags only tune placement.
