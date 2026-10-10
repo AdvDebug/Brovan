@@ -830,7 +830,17 @@ namespace Brovan.Core.Emulation
         private void ShootDownGuestTlbs()
         {
             Interlocked.Increment(ref _tlbGeneration);
+            EvictProcessors();
+        }
 
+        public void HoldProcessorsOutOfGuest()
+        {
+            if (DisposedCheck()) return;
+            EvictProcessors();
+        }
+
+        private void EvictProcessors()
+        {
             VirtualProcessor[] processors = Volatile.Read(ref _processorSnapshot);
             bool kicked = false;
             for (int i = 0; i < processors.Length; i++)

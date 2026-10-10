@@ -27,6 +27,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const byte KindDevice = 3;
         private const byte KindConsole = 4;
         private const byte KindHostStream = 5;
+        private const byte KindSection = 6;
+
+        private const uint SecImage = 0x01000000;
 
         internal const uint StdHandleRequestDuplicate = 1;
         internal const uint StdHandleAlwaysDuplicate = 2;
@@ -194,6 +197,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach (KeyValuePair<ulong, HandleEntry> Pair in Chosen)
             {
+                if (Pair.Value.Object is WinSection Section)
+                {
+                    if (Instance.WinHelper.TryShareSectionStorage(Section) && TryWriteSection(Writer, Pair.Key, Pair.Value, Section))
+                        Count++;
+                    else if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                        Instance.TriggerEventMessage($"[-] Section handle 0x{Pair.Key:X} has no storage another process can map.", LogFlags.Issues);
+
+                    continue;
+                }
+
                 if (Pair.Value.Object is not WinFile File)
                 {
                     if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
@@ -277,6 +290,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             Writer.Write(File.ShareAccess);
             Writer.Write(File.Mode);
             Writer.Write(File.SharedPosition.CellPath);
+            return true;
+        }
+
+        private static bool TryWriteSection(BinaryWriter Writer, ulong Handle, HandleEntry Entry, WinSection Section)
+        {
+            if (Section.SharedMemoryPath == null)
+                return false;
+
+            WriteHeader(Writer, Handle, Entry, KindSection);
+            Writer.Write(Section.SharedMemoryPath);
+            Writer.Write(Section.Size);
+            Writer.Write(Section.Protection);
+            Writer.Write(Section.Attributes);
+            Writer.Write(Section.Path ?? string.Empty);
             return true;
         }
 
@@ -462,6 +489,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     break;
                 }
 
+                case KindSection:
+                    ApplySection(Emulator, Helper, Reader, Handle, Access, Flags);
+                    return;
+
                 default:
                     throw new FormatException($"unknown handle kind {Kind}");
             }
@@ -479,6 +510,31 @@ namespace Brovan.Core.Emulation.OS.Windows
             Helper.WinFiles.Add(File);
             Helper.RegisterOpenFile(File);
             Helper.AddWinHandle(Added);
+        }
+
+        private static void ApplySection(BinaryEmulator Emulator, WinSysHelper Helper, BinaryReader Reader, ulong Handle, AccessMask Access, ObjectHandleFlags Flags)
+        {
+            string MemoryPath = Reader.ReadString();
+            ulong Size = Reader.ReadUInt64();
+            uint Protection = Reader.ReadUInt32();
+            uint Attributes = Reader.ReadUInt32();
+            string FilePath = Reader.ReadString();
+
+            if (Size == 0 || Size > uint.MaxValue || (Attributes & SecImage) != 0)
+                throw new FormatException($"section handle 0x{Handle:X} with size 0x{Size:X} and attributes 0x{Attributes:X}");
+
+            ulong StorageSize = Emulator.AlignToPageSize(Size);
+            GuestSharedMemory Memory = GuestSharedMemory.Open(MemoryPath, StorageSize);
+            string Location = Memory?.Location;
+            IntPtr Storage = Helper.AdoptSessionMemory(Memory, StorageSize);
+            if (Storage == IntPtr.Zero)
+            {
+                Utils.LogError($"[ProcessInheritance] Section handle 0x{Handle:X} ({MemoryPath}) could not be mapped.");
+                return;
+            }
+
+            if (!Helper.AddInheritedSection(Handle, Access, Flags, Size, Protection, Attributes, FilePath, Storage, Location))
+                Utils.LogError($"[ProcessInheritance] Handle value 0x{Handle:X} is not usable here.");
         }
 
         // The record comes from another process, so it may only name pipes in this session.
@@ -693,7 +749,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             string HostDirectory = Path.GetDirectoryName(HostExecutable);
             if (string.IsNullOrEmpty(HostDirectory)) return null;
 
-            StringComparison Comparison = OperatingSystem.IsWindows()
+            StringComparison Comparison = GeneralHelper.IsWindows
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
 

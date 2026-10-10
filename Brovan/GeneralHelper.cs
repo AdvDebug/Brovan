@@ -203,12 +203,15 @@ namespace Brovan
 
         [DllImport("libc", EntryPoint = "poll", SetLastError = true)]
         public static extern unsafe int Poll(PollFd* Entries, nuint Count, int TimeoutMilliseconds);
+
+        [DllImport("libc", EntryPoint = "memfd_create", SetLastError = true, CharSet = CharSet.Ansi)]
+        public static extern int MemfdCreate(string name, uint flags);
     }
 
     internal class GeneralHelper
     {
         [SupportedOSPlatformGuard("windows")]
-        public static bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        public static readonly bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
         // Windows sleeps in units of the system timer, 15.6 ms by default, so a wait of a few milliseconds
         // overshoots several times over. The request is per process on Windows 10 2004 and later.

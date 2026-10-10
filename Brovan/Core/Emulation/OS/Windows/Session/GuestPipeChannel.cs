@@ -579,23 +579,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static string InstancePath(string GuestName, int Instance)
             => Path.Combine(PipeDirectory, NameHash(GuestName).ToString("x16") + "." + Instance.ToString() + ".pipe");
 
-        private static void EnsureDirectory()
-        {
-            string Directory = PipeDirectory;
-            System.IO.Directory.CreateDirectory(Directory);
-
-            if (!OperatingSystem.IsWindows())
-            {
-                try
-                {
-                    File.SetUnixFileMode(Directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-                }
-                catch (Exception Error)
-                {
-                    Utils.LogError($"[GuestPipeChannel] Cannot restrict the pipe directory: {Error.Message}");
-                }
-            }
-        }
+        private static void EnsureDirectory() => GuestSession.CreatePrivateDirectory(PipeDirectory);
 
         private static bool TryMap(string Path, FileMode Mode, long Length, out FileStream Stream,
             out MemoryMappedFile Map, out MemoryMappedViewAccessor View, out byte* Base)

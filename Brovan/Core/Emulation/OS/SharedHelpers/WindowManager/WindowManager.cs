@@ -348,7 +348,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static int _workBottom;
         private static IntPtr _pointerDisplay;
 
-        public static bool VirtualizesUnawareWindows => OperatingSystem.IsWindows();
+        public static bool VirtualizesUnawareWindows => GeneralHelper.IsWindows;
 
         /// <summary>
         /// Adopts the DPI awareness the host window was created with. Awareness is per thread on Windows, and a
@@ -359,7 +359,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         /// </summary>
         public static IntPtr EnterWindowDpiContext(DpiAwareness Awareness)
         {
-            if (!OperatingSystem.IsWindows())
+            if (!GeneralHelper.IsWindows)
                 return IntPtr.Zero;
 
             IntPtr Context = Awareness switch
@@ -381,7 +381,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         public static void LeaveWindowDpiContext(IntPtr Previous)
         {
-            if (!OperatingSystem.IsWindows() || Previous == IntPtr.Zero)
+            if (!GeneralHelper.IsWindows || Previous == IntPtr.Zero)
                 return;
 
             try
@@ -454,7 +454,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (OperatingSystem.IsLinux())
                 return TryQueryX11Pointer(out x, out y);
 
-            if (!OperatingSystem.IsWindows())
+            if (!GeneralHelper.IsWindows)
                 return false;
 
             // GetPhysicalCursorPos is DPI virtualized too. Only a per-monitor aware thread gets physical pixels.
@@ -541,7 +541,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     return;
                 }
 
-                if (!OperatingSystem.IsWindows())
+                if (!GeneralHelper.IsWindows)
                     return;
 
                 IntPtr previous = IntPtr.Zero;
@@ -1118,7 +1118,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             if (Brovan.Android.AndroidHost.IsActive)
                 factory = () => new Brovan.Android.AndroidWinManager();
-            else if (OperatingSystem.IsWindows())
+            else if (GeneralHelper.IsWindows)
                 factory = () => new WindowsWinManager();
             else if (OperatingSystem.IsLinux())
                 factory = () => new LinuxWinManager();

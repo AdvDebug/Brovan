@@ -270,6 +270,11 @@ namespace Brovan.Core.Emulation
         {
         }
 
+        /// <summary>No processor is in the guest on return, until the caller releases the run lock.</summary>
+        void HoldProcessorsOutOfGuest()
+        {
+        }
+
         /// <summary>
         /// Answers RDTSC inside the backend from the emulator's clock. False when the backend has no such path.
         /// </summary>

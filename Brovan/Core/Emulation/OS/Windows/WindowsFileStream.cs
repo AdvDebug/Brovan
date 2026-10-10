@@ -838,11 +838,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 string FullA = Path.GetFullPath(A);
                 string FullB = Path.GetFullPath(B);
-                return string.Equals(FullA, FullB, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+                return string.Equals(FullA, FullB, GeneralHelper.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
             }
             catch
             {
-                return string.Equals(A, B, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+                return string.Equals(A, B, GeneralHelper.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
             }
         }
     }

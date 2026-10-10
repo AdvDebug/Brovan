@@ -52,7 +52,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     return new Android.AndroidAudioSink(Format);
                 }
 
-                if (OperatingSystem.IsWindows())
+                if (GeneralHelper.IsWindows)
                 {
                     Backend = "waveOut";
                     return new WindowsAudioSink(Format);

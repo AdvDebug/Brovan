@@ -34,9 +34,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.TryLookupNameForCreate(FullName, ObjectAttributes, out WinSection? Existing, out NameStatus))
                 return NameStatus;
 
+            bool Inherit = (ObjectAttributes & WinSysHelper.OBJ_INHERIT) != 0;
+
             if (Existing != null)
             {
                 WinHandle ExistingHandle = Instance.WinHelper.OpenObjectHandle(Existing, (AccessMask)(uint)DesiredAccess);
+                if (Inherit)
+                    Instance.WinHelper.HandleManager.SetHandleFlags(ExistingHandle.Handle, ObjectHandleFlags.Inherit);
+
                 if (!Instance.WinHelper.WritePointer(SectionHandlePtr, ExistingHandle.Handle))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
@@ -95,9 +100,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_NO_MEMORY;
 
             IntPtr Storage = IntPtr.Zero;
+            string SharedMemoryPath = null;
             if (!IsImage && !IsReserveOnly)
             {
-                Storage = Instance._emulator.AllocateSharedStorage(Instance.AlignToPageSize(Size));
+                ulong StorageSize = Instance.AlignToPageSize(Size);
+
+                // Cheaper than moving the pages and every view at the spawn.
+                if (Inherit)
+                    Storage = Instance.WinHelper.AllocateSessionStorage(StorageSize, out SharedMemoryPath);
+
+                if (Storage == IntPtr.Zero)
+                    Storage = Instance._emulator.AllocateSharedStorage(StorageSize);
+
                 if (Storage == IntPtr.Zero)
                     return NTSTATUS.STATUS_COMMITMENT_LIMIT;
 
@@ -108,7 +122,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            WinHandle Handle = Instance.WinHelper.CreateSectionHandle(FullName, Size, SectionPageProtection, AllocationAttributes, Path, 0, (AccessMask)(uint)DesiredAccess, Storage);
+            WinHandle Handle = Instance.WinHelper.CreateSectionHandle(FullName, Size, SectionPageProtection, AllocationAttributes, Path, 0, (AccessMask)(uint)DesiredAccess, Storage, SharedMemoryPath);
+            if (Inherit)
+                Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
 
             if (!Instance.WinHelper.WritePointer(SectionHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

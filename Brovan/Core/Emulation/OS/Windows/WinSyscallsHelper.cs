@@ -6824,7 +6824,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             try
             {
-                if (OperatingSystem.IsWindows())
+                if (GeneralHelper.IsWindows)
                 {
                     Span<byte> DevMode = stackalloc byte[DevModeSize];
                     DevMode.Clear();
@@ -9275,6 +9275,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             SetSyntheticRegistryString(CommonShellFolders, "Common Startup", 1, "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup");
             SetSyntheticRegistryString(CommonUserShellFolders, "Common Templates", 2, "%ProgramData%\\Microsoft\\Windows\\Templates");
             SetSyntheticRegistryString(CommonShellFolders, "Common Templates", 1, "C:\\ProgramData\\Microsoft\\Windows\\Templates");
+
+            WindowsFileStream.InvalidateGuestPathCache();
         }
 
         private void InitializeSyntheticSteamRegistry()
@@ -9406,7 +9408,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             try
             {
                 Directory.CreateDirectory(HostPath);
-                WindowsFileStream.InvalidateGuestPathCache();
             }
             catch (Exception Error)
             {
@@ -10416,13 +10417,95 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HandleManager.GetObjectByHandle<WinSemaphore>(Handle);
         }
 
-        public WinHandle CreateSectionHandle(string? Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, AccessMask Permissions, IntPtr Storage = default)
+        public WinHandle CreateSectionHandle(string? Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, AccessMask Permissions, IntPtr Storage = default, string SharedMemoryPath = null)
         {
-            WinSection Sec = CreateSection(Name, Size, Protection, Attributes, Path, BackingAddress, Storage);
+            WinSection Sec = CreateSection(Name, Size, Protection, Attributes, Path, BackingAddress, Storage, SharedMemoryPath);
             if (!string.IsNullOrEmpty(Name))
                 AddNamedObject(Sec);
 
             return OpenObjectHandle(Sec, Permissions);
+        }
+
+        internal IntPtr AllocateSessionStorage(ulong Size, out string Location)
+        {
+            GuestSharedMemory Memory = GuestSharedMemory.Create(Size);
+            Location = Memory?.Location;
+            IntPtr Storage = AdoptSessionMemory(Memory, Size);
+            if (Storage == IntPtr.Zero)
+                Location = null;
+
+            return Storage;
+        }
+
+        // Owns Memory, even when the backend refuses it.
+        internal IntPtr AdoptSessionMemory(GuestSharedMemory Memory, ulong Size)
+        {
+            if (Memory == null)
+                return IntPtr.Zero;
+
+            IntPtr Storage = Emulator._emulator.AdoptSharedStorage(Memory.Pointer, Size, Memory);
+            if (Storage == IntPtr.Zero)
+                Memory.Dispose();
+
+            return Storage;
+        }
+
+        // Moves Storage, so host code must not keep a pointer into it.
+        internal unsafe bool TryShareSectionStorage(WinSection Section)
+        {
+            if (Section.SharedMemoryPath != null)
+                return true;
+
+            if (Section.Storage == IntPtr.Zero || Section.BackingAddress != 0 || Section.IsImage)
+                return false;
+
+            ulong StorageSize = Emulator.AlignToPageSize(Section.Size);
+            IntPtr Shared = AllocateSessionStorage(StorageSize, out string Location);
+            if (Shared == IntPtr.Zero)
+                return false;
+
+            Emulator._emulator.HoldProcessorsOutOfGuest();
+            Buffer.MemoryCopy((void*)Section.Storage, (void*)Shared, StorageSize, StorageSize);
+
+            List<WinSectionView> Views = Section.Views;
+            int Moved = 0;
+            while (Views != null && Moved < Views.Count && Emulator.RebackRangeWithHostMemory(Views[Moved].Base, Views[Moved].Size, Shared + (nint)Views[Moved].Offset))
+                Moved++;
+
+            if (Views != null && Moved < Views.Count)
+            {
+                // The failed view goes back too.
+                for (int Index = 0; Index <= Moved; Index++)
+                {
+                    WinSectionView View = Views[Index];
+                    if (!Emulator.RebackRangeWithHostMemory(View.Base, View.Size, Section.Storage + (nint)View.Offset))
+                        Utils.LogError($"[WinSysHelper] The view at 0x{View.Base:X} lost its section storage.");
+                }
+
+                Emulator._emulator.ReleaseSharedStorage(Shared);
+                Utils.LogError($"[WinSysHelper] The view at 0x{Views[Moved].Base:X} could not move to shared memory.");
+                return false;
+            }
+
+            Emulator._emulator.ReleaseSharedStorage(Section.Storage);
+            Section.Storage = Shared;
+            Section.SharedMemoryPath = Location;
+            return true;
+        }
+
+        // NT: an inherited handle keeps its value from the creator.
+        internal bool AddInheritedSection(ulong Handle, AccessMask Permissions, ObjectHandleFlags Flags, ulong Size, uint Protection, uint Attributes, string Path, IntPtr Storage, string SharedMemoryPath)
+        {
+            WinSection Section = CreateSection(null, Size, Protection, Attributes, string.IsNullOrEmpty(Path) ? null : Path, 0, Storage, SharedMemoryPath);
+            WinHandle Added = HandleManager.AddHandleAt(Handle, Section, Permissions, Flags);
+            if (Added == null)
+            {
+                ReleaseSectionIfUnreferenced(Section);
+                return false;
+            }
+
+            AddWinHandle(Added);
+            return true;
         }
 
         // The section has no handle, so unmapping the view frees it.
@@ -10444,7 +10527,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Base;
         }
 
-        private WinSection CreateSection(string? Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, IntPtr Storage)
+        private WinSection CreateSection(string? Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, IntPtr Storage, string SharedMemoryPath = null)
         {
             if (string.IsNullOrEmpty(Name))
                 Name = GenerateAnonymousObjectName("Section_");
@@ -10458,7 +10541,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Path = Path,
                 FileStream = string.IsNullOrEmpty(Path) ? null : WindowsFileStream.FromGuestPath(Path),
                 BackingAddress = BackingAddress,
-                Storage = Storage
+                Storage = Storage,
+                SharedMemoryPath = SharedMemoryPath
             };
 
             if (Sec.IsImage && !string.IsNullOrEmpty(Path))

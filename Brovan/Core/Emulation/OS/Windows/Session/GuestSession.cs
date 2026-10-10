@@ -1,6 +1,9 @@
 using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using Brovan.Core.Helpers;
+using Microsoft.Win32.SafeHandles;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -88,6 +91,23 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// Kept next to the emulator rather than in the temporary directory so the files are the user's to delete.
         /// </summary>
         internal static string Directory => _directory ??= Path.Combine(AppContext.BaseDirectory, DirectoryName, SessionId);
+
+        internal static void CreatePrivateDirectory(string Location)
+        {
+            System.IO.Directory.CreateDirectory(Location);
+
+            if (!GeneralHelper.IsWindows)
+            {
+                try
+                {
+                    File.SetUnixFileMode(Location, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                }
+                catch (Exception Error)
+                {
+                    Utils.LogError($"[GuestSession] Cannot restrict {Location}: {Error.Message}");
+                }
+            }
+        }
 
         // A creator that hands the launch to the system never learns a process id, so it picks this instead
         // and the child publishes it.
@@ -383,6 +403,28 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 using SessionLock Lock = Acquire();
                 return Lock.Held && TryFindLiveSlotLocked(GuestProcessId, out Slot);
+            }
+        }
+
+        internal static bool IsLiveMemberHost(uint HostProcessId)
+        {
+            lock (Sync)
+            {
+                if (!TryOpen())
+                    return false;
+
+                using SessionLock Lock = Acquire();
+                if (!Lock.Held)
+                    return false;
+
+                for (int Index = 0; Index < SlotCount; Index++)
+                {
+                    int Offset = SlotOffset(Index);
+                    if (_view.ReadUInt32(Offset + StateOffset) == SlotLive && _view.ReadUInt32(Offset + HostProcessIdOffset) == HostProcessId)
+                        return IsHostAlive(HostProcessId);
+                }
+
+                return false;
             }
         }
 
@@ -1075,6 +1117,330 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Utils.LogError($"[SharedFilePosition] Cannot remove {CellPath}: {Error.Message}");
             }
+        }
+    }
+
+    // On Android a session file backs the memory, so the header page counts its holders.
+    internal sealed unsafe class GuestSharedMemory : IDisposable
+    {
+        private const uint Magic = 0x4D535642;
+        private const int MagicOffset = 0x00;
+        private const int SizeOffset = 0x08;
+        private const int HoldersOffset = 0x10;
+        private const int HolderSlots = 64;
+        private const string SectionDirectoryName = "sections";
+        private const string SectionExtension = ".section";
+        private const uint MfdCloexec = 0x1;
+
+        private static readonly long HeaderBytes = Math.Max(Environment.SystemPageSize, 0x1000);
+
+        private FileStream Stream;
+        private MemoryMappedFile Map;
+        private MemoryMappedViewAccessor View;
+        private byte* Base;
+        private int Slot = -1;
+        private readonly bool InSessionFile;
+
+        // A mapping name on Windows, a /proc descriptor path on Linux, a session file on Android.
+        internal string Location { get; }
+
+        internal IntPtr Pointer => (IntPtr)(Base + HeaderBytes);
+
+        private GuestSharedMemory(string Location, FileStream Stream, MemoryMappedFile Map, MemoryMappedViewAccessor View, byte* Base, bool InSessionFile)
+        {
+            this.Location = Location;
+            this.Stream = Stream;
+            this.Map = Map;
+            this.View = View;
+            this.Base = Base;
+            this.InSessionFile = InSessionFile;
+        }
+
+        private static string SectionDirectory => Path.Combine(GuestSession.Directory, SectionDirectoryName);
+
+        private static string MappingNamePrefix => $"Local\\brovan-{GuestSession.SessionId}-";
+
+        private static bool IsValidSize(ulong Size) => Size != 0 && Size <= (ulong)(long.MaxValue - HeaderBytes);
+
+        internal static GuestSharedMemory Create(ulong Size)
+        {
+            if (!IsValidSize(Size))
+                return null;
+
+            long Length = HeaderBytes + (long)Size;
+            GuestSharedMemory Memory;
+            if (GeneralHelper.IsWindows)
+                Memory = CreateNamedMapping(Length);
+            else if (Brovan.Android.AndroidHost.IsActive)
+                Memory = CreateSessionFile(Length);
+            else
+                Memory = CreateAnonymousFile(Length);
+
+            if (Memory == null)
+                return null;
+
+            *(ulong*)(Memory.Base + SizeOffset) = Size;
+            Volatile.Write(ref *(uint*)(Memory.Base + MagicOffset), Magic);
+            if (!Memory.InSessionFile || Memory.TryRegister())
+                return Memory;
+
+            Memory.Dispose();
+            return null;
+        }
+
+        // The location comes from another process, so it may only name memory of this session.
+        internal static GuestSharedMemory Open(string Location, ulong Size)
+        {
+            if (string.IsNullOrEmpty(Location) || !IsValidSize(Size))
+                return null;
+
+            long Length = HeaderBytes + (long)Size;
+            GuestSharedMemory Memory;
+            if (GeneralHelper.IsWindows)
+                Memory = OpenNamedMapping(Location, Length);
+            else if (Brovan.Android.AndroidHost.IsActive)
+                Memory = OpenSessionFile(Location, Length);
+            else
+                Memory = OpenAnonymousFile(Location, Length);
+
+            if (Memory == null)
+                return null;
+
+            if (Volatile.Read(ref *(uint*)(Memory.Base + MagicOffset)) != Magic || *(ulong*)(Memory.Base + SizeOffset) != Size
+                || (Memory.InSessionFile && !Memory.TryRegister()))
+            {
+                Memory.Dispose();
+                return null;
+            }
+
+            return Memory;
+        }
+
+        [SupportedOSPlatform("windows")]
+        private static GuestSharedMemory CreateNamedMapping(long Length)
+        {
+            string Name = MappingNamePrefix + Guid.NewGuid().ToString("N");
+            try
+            {
+                return Wrap(Name, null, MemoryMappedFile.CreateNew(Name, Length, MemoryMappedFileAccess.ReadWrite), Length, false);
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[GuestSharedMemory] Cannot create mapping {Name}: {Error.Message}");
+                return null;
+            }
+        }
+
+        [SupportedOSPlatform("windows")]
+        private static GuestSharedMemory OpenNamedMapping(string Name, long Length)
+        {
+            string Prefix = MappingNamePrefix;
+            if (!Name.StartsWith(Prefix, StringComparison.Ordinal) || Name.Length != Prefix.Length + 32 || !Guid.TryParseExact(Name.AsSpan(Prefix.Length), "N", out _))
+                return null;
+
+            try
+            {
+                return Wrap(Name, null, MemoryMappedFile.OpenExisting(Name, MemoryMappedFileRights.ReadWrite), Length, false);
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[GuestSharedMemory] Cannot open mapping {Name}: {Error.Message}");
+                return null;
+            }
+        }
+
+        private static GuestSharedMemory CreateAnonymousFile(long Length)
+        {
+            int Descriptor;
+            try
+            {
+                Descriptor = NativeUnixImports.MemfdCreate("brovan-section", MfdCloexec);
+            }
+            catch (EntryPointNotFoundException Error)
+            {
+                Utils.LogError($"[GuestSharedMemory] The host C library has no memfd_create: {Error.Message}");
+                return null;
+            }
+
+            if (Descriptor < 0)
+            {
+                Utils.LogError($"[GuestSharedMemory] memfd_create failed with errno {Marshal.GetLastWin32Error()}.");
+                return null;
+            }
+
+            SafeFileHandle Handle = new SafeFileHandle((IntPtr)Descriptor, true);
+            FileStream FileStream = null;
+            try
+            {
+                FileStream = new FileStream(Handle, FileAccess.ReadWrite);
+                FileStream.SetLength(Length);
+                MemoryMappedFile Mapping = MemoryMappedFile.CreateFromFile(FileStream, null, Length, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, true);
+                return Wrap(ProcDescriptorPath(Descriptor), FileStream, Mapping, Length, false);
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[GuestSharedMemory] Cannot map an anonymous file: {Error.Message}");
+                FileStream?.Dispose();
+                Handle.Dispose();
+                return null;
+            }
+        }
+
+        private static GuestSharedMemory OpenAnonymousFile(string Location, long Length)
+        {
+            string[] Parts = Location.Split('/');
+            if (Parts.Length != 5 || Parts[0].Length != 0 || Parts[1] != "proc" || Parts[3] != "fd"
+                || !uint.TryParse(Parts[2], out uint HostProcessId) || !uint.TryParse(Parts[4], out _)
+                || !GuestSession.IsLiveMemberHost(HostProcessId))
+                return null;
+
+            FileStream FileStream = null;
+            try
+            {
+                FileStream = new FileStream(Location, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+                if (FileStream.Length != Length)
+                {
+                    FileStream.Dispose();
+                    return null;
+                }
+
+                MemoryMappedFile Mapping = MemoryMappedFile.CreateFromFile(FileStream, null, Length, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, true);
+                return Wrap(ProcDescriptorPath((int)FileStream.SafeFileHandle.DangerousGetHandle()), FileStream, Mapping, Length, false);
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[GuestSharedMemory] Cannot open {Location}: {Error.Message}");
+                FileStream?.Dispose();
+                return null;
+            }
+        }
+
+        private static string ProcDescriptorPath(int Descriptor) => $"/proc/{Environment.ProcessId}/fd/{Descriptor}";
+
+        private static GuestSharedMemory CreateSessionFile(long Length)
+        {
+            string Location = null;
+            try
+            {
+                GuestSession.CreatePrivateDirectory(SectionDirectory);
+                Location = Path.Combine(SectionDirectory, Guid.NewGuid().ToString("N") + SectionExtension);
+
+                using (FileStream Initial = new FileStream(Location, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+                    Initial.SetLength(Length);
+
+                GuestSharedMemory Memory = MapSessionFile(Location, Length);
+                if (Memory != null)
+                    return Memory;
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[GuestSharedMemory] Cannot create section memory: {Error.Message}");
+            }
+
+            if (Location != null)
+                Remove(Location);
+
+            return null;
+        }
+
+        private static GuestSharedMemory OpenSessionFile(string Location, long Length)
+        {
+            if (!Location.EndsWith(SectionExtension, StringComparison.Ordinal))
+                return null;
+
+            string Full = Path.GetFullPath(Location);
+            string Root = Path.GetFullPath(SectionDirectory) + Path.DirectorySeparatorChar;
+            if (!Full.StartsWith(Root, StringComparison.Ordinal))
+                return null;
+
+            return MapSessionFile(Full, Length);
+        }
+
+        private static GuestSharedMemory MapSessionFile(string Location, long Length)
+        {
+            FileStream FileStream = null;
+            try
+            {
+                FileStream = new FileStream(Location, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+                if (FileStream.Length != Length)
+                {
+                    FileStream.Dispose();
+                    return null;
+                }
+
+                MemoryMappedFile Mapping = MemoryMappedFile.CreateFromFile(FileStream, null, Length, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, true);
+                return Wrap(Location, FileStream, Mapping, Length, true);
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[GuestSharedMemory] Cannot map {Location}: {Error.Message}");
+                FileStream?.Dispose();
+                return null;
+            }
+        }
+
+        // Owns Stream and Mapping, even when it fails.
+        private static GuestSharedMemory Wrap(string Location, FileStream Stream, MemoryMappedFile Mapping, long Length, bool InSessionFile)
+        {
+            MemoryMappedViewAccessor Accessor = null;
+            try
+            {
+                Accessor = Mapping.CreateViewAccessor(0, Length, MemoryMappedFileAccess.ReadWrite);
+
+                byte* Pointer = null;
+                Accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref Pointer);
+                if (Pointer != null)
+                    return new GuestSharedMemory(Location, Stream, Mapping, Accessor, Pointer + Accessor.PointerOffset, InSessionFile);
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException || Error is ArgumentException)
+            {
+                Utils.LogError($"[GuestSharedMemory] Cannot map a view of {Location}: {Error.Message}");
+            }
+
+            Accessor?.Dispose();
+            Mapping.Dispose();
+            Stream?.Dispose();
+            return null;
+        }
+
+        private static void Remove(string Location)
+        {
+            try
+            {
+                File.Delete(Location);
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[GuestSharedMemory] Cannot remove {Location}: {Error.Message}");
+            }
+        }
+
+        private bool TryRegister()
+        {
+            Slot = SessionHolders.Register(Base + HoldersOffset, HolderSlots);
+            return Slot >= 0;
+        }
+
+        public void Dispose()
+        {
+            if (Base == null)
+                return;
+
+            bool Last = false;
+            if (InSessionFile)
+            {
+                SessionHolders.Release(Base + HoldersOffset, Slot);
+                Last = !SessionHolders.HasLive(Base + HoldersOffset, HolderSlots, false);
+            }
+
+            View.SafeMemoryMappedViewHandle.ReleasePointer();
+            View.Dispose();
+            Map.Dispose();
+            Stream?.Dispose();
+            Base = null;
+
+            if (Last)
+                Remove(Location);
         }
     }
 

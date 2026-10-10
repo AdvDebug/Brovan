@@ -377,7 +377,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             LinkTarget = null;
             Error = LinuxErrno.ESUCCESS;
 
-            if (OperatingSystem.IsWindows())
+            if (GeneralHelper.IsWindows)
                 return TryReadWindowsHostLinkTarget(HostPath, out LinkTarget, out Error);
 
             try

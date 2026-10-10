@@ -1753,6 +1753,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // Host pages, mapped only through the section's views.
         public IntPtr Storage;
+
+        // Null unless Storage is GuestSharedMemory.
+        public string SharedMemoryPath;
+
         public ulong ImageSectionId;
         public int MappedViewCount;
         public bool IsImage => ((Attributes & 0x01000000) != 0);

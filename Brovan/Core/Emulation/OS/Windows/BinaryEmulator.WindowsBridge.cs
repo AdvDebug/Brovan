@@ -2221,6 +2221,26 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
+        internal bool RebackRangeWithHostMemory(ulong BaseAddress, ulong Size, IntPtr HostPointer)
+        {
+            ulong End = GetRangeEnd(BaseAddress, Size);
+            ulong Address = BaseAddress;
+
+            while (Address < End)
+            {
+                if (!TryFindMemoryRegion(Address, out MemoryRegion Region))
+                    return false;
+
+                ulong Chunk = Math.Min(GetRangeEnd(Region.BaseAddress, Region.Size), End) - Address;
+                if (Chunk == 0 || !RebackRegionWithHostMemory(Address, Chunk, HostPointer + (nint)(Address - BaseAddress)))
+                    return false;
+
+                Address += Chunk;
+            }
+
+            return true;
+        }
+
         /// <summary>
         /// Puts ordinary pages back behind a range from <see cref="RebackRegionWithHostMemory"/>. The contents
         /// are lost.
