@@ -78,14 +78,7 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        public static bool IsEnabled
-        {
-            get
-            {
-                lock (SyncRoot)
-                    return OutputStream != null;
-            }
-        }
+        public static bool IsEnabled => Volatile.Read(ref OutputStream) != null;
 
         public static string OutputPath
         {
@@ -157,7 +150,7 @@ namespace Brovan.Core.Emulation
 
         private static void Record(BrovanSocket Socket, ReadOnlySpan<byte> Payload, bool Outbound, EndPoint? RemoteOverride)
         {
-            if (Socket == null || Payload.Length == 0)
+            if (!IsEnabled || Socket == null || Payload.Length == 0)
                 return;
 
             try
@@ -276,9 +269,6 @@ namespace Brovan.Core.Emulation
                 IPEndPoint RemoteEndPoint = null;
                 if (!TryGetIpEndPoint(RemoteOverride ?? Socket.RemoteEndPoint, out RemoteEndPoint))
                     return false;
-
-                LocalEndPoint = Normalize(LocalEndPoint);
-                RemoteEndPoint = Normalize(RemoteEndPoint);
 
                 Endpoints = Outbound ? new PacketEndpoints(LocalEndPoint, RemoteEndPoint) : new PacketEndpoints(RemoteEndPoint, LocalEndPoint);
 

@@ -178,6 +178,7 @@ namespace Brovan.Core.Emulation
     internal struct WhvRunVpExitContext
     {
         [FieldOffset(0)] public WhvRunVpExitReason ExitReason;
+        [FieldOffset(32)] public ulong VpRip;
         [FieldOffset(68)] public uint MemAccessInfo;
         [FieldOffset(72)] public ulong MemGpa;
     }

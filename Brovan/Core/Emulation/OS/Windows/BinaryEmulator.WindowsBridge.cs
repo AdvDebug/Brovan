@@ -102,7 +102,7 @@ namespace Brovan.Core.Emulation
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsTimerHandleSnapshot = new();
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsHandleScratch = new();
         private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsMaterializePacketSnapshot = new();
-        private readonly List<EmulatedThread> WindowsWakeThreadSnapshot = new();
+        private readonly List<EmulatedThread> WindowsWakeCandidates = new();
 
         public string LastFunc = string.Empty;
         public ulong Instruction = 0;
@@ -199,22 +199,31 @@ namespace Brovan.Core.Emulation
             return Guest != null && Guest.IsHandleSignaled(this, Handle);
         }
 
-        internal bool HasHandleWaiters(ulong Handle)
+        internal bool HasHandleWaiters(ulong Handle) =>
+            WinHelper != null && HasHandleWaiters(Handle, WinHelper.HandleManager.GetObjectByHandle(Handle) as WaitableHandleObject);
+
+        private bool HasHandleWaiters(ulong Handle, WaitableHandleObject? Object)
         {
-            if (WinHelper == null)
-                return false;
-
-            foreach (EmulatedThread Thread in LiveThreads)
+            for (int i = 0; i < WakeScanList.Count; i++)
             {
-                if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
-                    continue;
-
-                if (Thread.WaitHandles != null && Thread.WaitHandles.Contains(Handle))
+                if (IsWaitingOnHandle(WakeScanList[i], Handle))
                     return true;
+            }
+
+            if (Object != null)
+            {
+                for (int i = 0; i < Object.FiledWaiterCount; i++)
+                {
+                    if (IsWaitingOnHandle(Object.FiledWaiters[i].Thread, Handle))
+                        return true;
+                }
             }
 
             return false;
         }
+
+        private static bool IsWaitingOnHandle(EmulatedThread Thread, ulong Handle) =>
+            Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive && Thread.WaitHandles != null && Thread.WaitHandles.Contains(Handle);
 
         internal bool TryAcquireWaitHandle(ulong Handle)
         {
@@ -438,8 +447,9 @@ namespace Brovan.Core.Emulation
             long BestDelta = long.MaxValue;
             bool HasCompletionPacketWaiter = false;
 
-            foreach (EmulatedThread Thread in LiveThreads)
+            for (int i = 0; i < WakeScanList.Count; i++)
             {
+                EmulatedThread Thread = WakeScanList[i];
                 if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
                     continue;
 
@@ -460,18 +470,7 @@ namespace Brovan.Core.Emulation
                 if (Pair.Value is not WinTimer Timer)
                     continue;
 
-                bool HasHandleWaiter = false;
-                foreach (EmulatedThread Thread in LiveThreads)
-                {
-                    if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
-                        continue;
-
-                    if (Thread.WaitHandles != null && Thread.WaitHandles.Contains(Pair.Key))
-                    {
-                        HasHandleWaiter = true;
-                        break;
-                    }
-                }
+                bool HasHandleWaiter = HasHandleWaiters(Pair.Key, Timer);
 
                 bool HasWorkerFactoryTimerWaiter = false;
                 if (Packets != null)
@@ -540,22 +539,42 @@ namespace Brovan.Core.Emulation
                 MaterializeSignaledWaitPackets(Packet.IoCompletionHandle);
             }
 
-            WindowsWakeThreadSnapshot.Clear();
-            foreach (EmulatedThread Thread in LiveThreads)
-                WindowsWakeThreadSnapshot.Add(Thread);
-
-            for (int i = 0; i < WindowsWakeThreadSnapshot.Count; i++)
+            // Port waiters are never filed.
+            List<EmulatedThread> Candidates = WindowsWakeCandidates;
+            Candidates.Clear();
+            for (int i = 0; i < WakeScanList.Count; i++)
             {
-                EmulatedThread Thread = WindowsWakeThreadSnapshot[i];
-                if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                EmulatedThread Thread = WakeScanList[i];
+                if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State == null)
+                if (State == null || State.WaitFiled)
                     continue;
 
-                if (!State.WorkerFactoryWaitActive && !State.IoCompletionWaitActive
-                    && (Thread.WaitHandles == null || !Thread.WaitHandles.Contains(TargetObjectHandle)))
+                if (State.WorkerFactoryWaitActive || State.IoCompletionWaitActive
+                    || (Thread.WaitHandles != null && Thread.WaitHandles.Contains(TargetObjectHandle)))
+                    Candidates.Add(Thread);
+            }
+
+            int ScanCandidates = Candidates.Count;
+            if (WinHelper.HandleManager.GetObjectByHandle(TargetObjectHandle) is WaitableHandleObject Target)
+            {
+                for (int i = 0; i < Target.FiledWaiterCount; i++)
+                {
+                    EmulatedThread Thread = Target.FiledWaiters[i].Thread;
+                    if (IsWaitingOnHandle(Thread, TargetObjectHandle))
+                        Candidates.Add(Thread);
+                }
+            }
+
+            if (Candidates.Count > ScanCandidates)
+                SortByOrderKeyDistinct(Candidates);
+
+            for (int i = 0; i < Candidates.Count; i++)
+            {
+                EmulatedThread Thread = Candidates[i];
+                if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
                     continue;
 
                 if (!TrySatisfyThreadWait(Thread))
@@ -565,7 +584,7 @@ namespace Brovan.Core.Emulation
                 WokeThread = true;
             }
 
-            WindowsWakeThreadSnapshot.Clear();
+            Candidates.Clear();
 
             return WokeThread;
         }
@@ -685,18 +704,18 @@ namespace Brovan.Core.Emulation
             if (State == null || State.WaitCheckedObjects == null || !ReferenceEquals(State.WaitCheckedHandles, Thread.WaitHandles))
                 return false;
 
-            if (IsDeadlineExpired(Thread.WaitDeadline, Now))
-                return false;
+            return !IsDeadlineExpired(Thread.WaitDeadline, Now) && !SignalledSince(State.WaitCheckedObjects, State.WaitCheckedEpoch);
+        }
 
-            WaitableHandleObject[] Objects = State.WaitCheckedObjects;
-            long Checked = State.WaitCheckedEpoch;
+        private static bool SignalledSince(WaitableHandleObject[] Objects, long Epoch)
+        {
             for (int i = 0; i < Objects.Length; i++)
             {
-                if (Volatile.Read(ref Objects[i].LastSignalEpoch) > Checked)
-                    return false;
+                if (Volatile.Read(ref Objects[i].LastSignalEpoch) > Epoch)
+                    return true;
             }
 
-            return true;
+            return false;
         }
 
         internal void NoteWaitCheckFailed(EmulatedThread Thread, long ScanEpoch)
@@ -731,6 +750,227 @@ namespace Brovan.Core.Emulation
             }
 
             State.WaitCheckedObjects = Objects;
+        }
+
+        private struct FiledDeadline
+        {
+            public long Deadline;
+            public EmulatedThread Thread;
+        }
+
+        private FiledDeadline[] FiledDeadlineHeap = Array.Empty<FiledDeadline>();
+        private int FiledDeadlineCount;
+
+        private long LastFiledWaitSweepTick;
+        private const long FiledWaitSweepIntervalMs = 50;
+
+        internal static bool IsWaitFiled(EmulatedThread Thread) => WinEmulatedThread.TryGetState(Thread)?.WaitFiled == true;
+
+        // Takes a waiting thread off the wake scan until one of its objects signals, its deadline passes or its
+        // wait changes.
+        internal bool TryFileWait(EmulatedThread Thread, long Now)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State == null || State.WaitFiled || !IsWaitFileable(Thread, State, Now))
+                return false;
+
+            WaitableHandleObject[] Objects = State.WaitCheckedObjects;
+            if (State.FiledSlots == null || State.FiledSlots.Length < Objects.Length)
+                State.FiledSlots = new int[Objects.Length];
+
+            State.FiledObjects = Objects;
+            for (int i = 0; i < Objects.Length; i++)
+                State.FiledSlots[i] = AddFiledWaiter(Objects[i], Thread, i);
+
+            // Pairs with the barrier in WaitableHandleObject.Signal.
+            Interlocked.MemoryBarrier();
+            if (SignalledSince(Objects, State.WaitCheckedEpoch))
+            {
+                RemoveFiledWait(State);
+                return false;
+            }
+
+            if (Thread.WaitDeadline != -1)
+                AddFiledDeadline(Thread, State);
+
+            return true;
+        }
+
+        private bool IsWaitFileable(EmulatedThread Thread, WindowsThreadState State, long Now) =>
+            State.WaitCheckedObjects != null && ReferenceEquals(State.WaitCheckedHandles, Thread.WaitHandles)
+            && Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive && Thread.HostWorker == -1
+            && !IsDeadlineExpired(Thread.WaitDeadline, Now) && !Guest.HasPendingGuestWork(this, Thread);
+
+        internal void UnfileWait(EmulatedThread Thread)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State == null || !State.WaitFiled)
+                return;
+
+            RemoveFiledWait(State);
+            AddToWakeScan(Thread);
+        }
+
+        private void RemoveFiledWait(WindowsThreadState State)
+        {
+            WaitableHandleObject[] Objects = State.FiledObjects;
+            for (int i = 0; i < Objects.Length; i++)
+                RemoveFiledWaiter(Objects[i], State.FiledSlots[i]);
+
+            if (State.FiledDeadlineIndex >= 0)
+                RemoveFiledDeadline(State.FiledDeadlineIndex);
+
+            State.FiledObjects = null;
+        }
+
+        private static int AddFiledWaiter(WaitableHandleObject Object, EmulatedThread Thread, int Slot)
+        {
+            int Count = Object.FiledWaiterCount;
+            if (Object.FiledWaiters == null || Count == Object.FiledWaiters.Length)
+                Array.Resize(ref Object.FiledWaiters, Math.Max(4, Count * 2));
+
+            Object.FiledWaiters[Count] = new FiledWaiter { Thread = Thread, Slot = Slot };
+            Volatile.Write(ref Object.FiledWaiterCount, Count + 1);
+            return Count;
+        }
+
+        private static void RemoveFiledWaiter(WaitableHandleObject Object, int Index)
+        {
+            int Last = Object.FiledWaiterCount - 1;
+            if (Index != Last)
+            {
+                FiledWaiter Moved = Object.FiledWaiters[Last];
+                Object.FiledWaiters[Index] = Moved;
+                WinEmulatedThread.TryGetState(Moved.Thread).FiledSlots[Moved.Slot] = Index;
+            }
+
+            Object.FiledWaiters[Last] = default;
+            Volatile.Write(ref Object.FiledWaiterCount, Last);
+        }
+
+        private void AddFiledDeadline(EmulatedThread Thread, WindowsThreadState State)
+        {
+            if (FiledDeadlineCount == FiledDeadlineHeap.Length)
+                Array.Resize(ref FiledDeadlineHeap, Math.Max(16, FiledDeadlineCount * 2));
+
+            int Index = FiledDeadlineCount++;
+            FiledDeadlineHeap[Index] = new FiledDeadline { Deadline = Thread.WaitDeadline, Thread = Thread };
+            State.FiledDeadlineIndex = Index;
+            SiftFiledDeadline(Index);
+        }
+
+        private void RemoveFiledDeadline(int Index)
+        {
+            WinEmulatedThread.TryGetState(FiledDeadlineHeap[Index].Thread).FiledDeadlineIndex = -1;
+
+            int Last = --FiledDeadlineCount;
+            FiledDeadline Moved = FiledDeadlineHeap[Last];
+            FiledDeadlineHeap[Last] = default;
+            if (Index != Last)
+            {
+                PlaceFiledDeadline(Index, Moved);
+                SiftFiledDeadline(Index);
+            }
+        }
+
+        private void SiftFiledDeadline(int Index)
+        {
+            FiledDeadline Entry = FiledDeadlineHeap[Index];
+            while (Index > 0)
+            {
+                int Parent = (Index - 1) >> 1;
+                if (FiledDeadlineHeap[Parent].Deadline <= Entry.Deadline)
+                    break;
+
+                PlaceFiledDeadline(Index, FiledDeadlineHeap[Parent]);
+                Index = Parent;
+            }
+
+            while (true)
+            {
+                int Child = Index * 2 + 1;
+                if (Child >= FiledDeadlineCount)
+                    break;
+
+                if (Child + 1 < FiledDeadlineCount && FiledDeadlineHeap[Child + 1].Deadline < FiledDeadlineHeap[Child].Deadline)
+                    Child++;
+
+                if (Entry.Deadline <= FiledDeadlineHeap[Child].Deadline)
+                    break;
+
+                PlaceFiledDeadline(Index, FiledDeadlineHeap[Child]);
+                Index = Child;
+            }
+
+            PlaceFiledDeadline(Index, Entry);
+        }
+
+        private void PlaceFiledDeadline(int Index, FiledDeadline Entry)
+        {
+            FiledDeadlineHeap[Index] = Entry;
+            WinEmulatedThread.TryGetState(Entry.Thread).FiledDeadlineIndex = Index;
+        }
+
+        private long EarliestFiledDeadline => FiledDeadlineCount != 0 ? FiledDeadlineHeap[0].Deadline : long.MaxValue;
+
+        private void UnfileWokenWaits(long Now)
+        {
+            if (WinHelper == null)
+                return;
+
+            SignalledWaitables Signalled = WinHelper.HandleManager.Signalled;
+            WaitableHandleObject? Object = Signalled.IsEmpty ? null : Signalled.TakeAll();
+            while (Object != null)
+            {
+                WaitableHandleObject Next = Object.NextSignalled;
+                Object.NextSignalled = null;
+                Interlocked.Exchange(ref Object.SignalQueued, 0);
+
+                while (Object.FiledWaiterCount > 0)
+                    UnfileWait(Object.FiledWaiters[Object.FiledWaiterCount - 1].Thread);
+
+                Object = Next;
+            }
+
+            while (FiledDeadlineCount > 0 && FiledDeadlineHeap[0].Deadline <= Now)
+                UnfileWait(FiledDeadlineHeap[0].Thread);
+        }
+
+        // Backstop for a path that changes a filed wait without unfiling it.
+        private void SweepFiledWaits(long Now)
+        {
+            LastFiledWaitSweepTick = Now;
+
+            foreach (EmulatedThread Thread in Threads.Values)
+            {
+                if (Thread == null)
+                    continue;
+
+                WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+                if (State != null && State.WaitFiled)
+                {
+                    if (!IsFiledWaitCurrent(Thread, State, Now))
+                        UnfileWait(Thread);
+                }
+                else if (!Thread.InWakeScanList && Thread.State != EmulatedThreadState.Terminated)
+                {
+                    AddToWakeScan(Thread);
+                }
+            }
+        }
+
+        private bool IsFiledWaitCurrent(EmulatedThread Thread, WindowsThreadState State, long Now) =>
+            ReferenceEquals(State.FiledObjects, State.WaitCheckedObjects) && IsWaitFileable(Thread, State, Now)
+            && !SignalledSince(State.FiledObjects, State.WaitCheckedEpoch);
+
+        private void UnfileAllWaits()
+        {
+            foreach (EmulatedThread Thread in Threads.Values)
+            {
+                WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+                if (State != null && State.WaitFiled)
+                    RemoveFiledWait(State);
+            }
         }
 
         internal bool TrySatisfyThreadWait(EmulatedThread Thread, long Now)
@@ -993,14 +1233,16 @@ namespace Brovan.Core.Emulation
         }
 
         internal bool HasPendingHostIo() => WinHelper != null &&
-            (WinHelper.AfdConnects.InFlight != 0 || WinHelper.AfdRequests.Count != 0 || WinHelper.PipeRequests.Count != 0 || HasHostWorkWait() ||
+            (WinHelper.AfdConnects.InFlight != 0 || WinHelper.AfdRequests.HasPending || WinHelper.PipeRequests.Count != 0 || HasHostWorkWait() ||
              GeneralHelper.HostConsoleInput.Active);
 
+        // These waits are never filed.
         private bool HasHostWorkWait()
         {
-            foreach (EmulatedThread Thread in Threads.Values)
+            for (int i = 0; i < WakeScanList.Count; i++)
             {
-                if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                EmulatedThread Thread = WakeScanList[i];
+                if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
@@ -1015,9 +1257,10 @@ namespace Brovan.Core.Emulation
 
         internal bool HasActiveGetMessageWait()
         {
-            foreach (EmulatedThread Thread in Threads.Values)
+            for (int i = 0; i < WakeScanList.Count; i++)
             {
-                if (Thread == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                EmulatedThread Thread = WakeScanList[i];
+                if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);

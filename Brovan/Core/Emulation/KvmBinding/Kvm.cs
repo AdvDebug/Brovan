@@ -1360,7 +1360,10 @@ namespace Brovan.Core.Emulation
                         if (errno == KvmNative.ErrnoEintr)
                         {
                             ClearImmediateExit(vp, ref run, bounded);
-                            continue;
+                            if (!TryTakeStubEntryAsHalt())
+                                continue;
+                            if (HandleHltExit(vp)) continue;
+                            return _error == KvmErrors.Ok;
                         }
 
                         _error = KvmErrors.InternalError;
@@ -1393,6 +1396,8 @@ namespace Brovan.Core.Emulation
                             return true;
                         case KvmConstants.ExitIntr:
                             ClearImmediateExit(vp, ref run, bounded);
+                            if (TryTakeStubEntryAsHalt())
+                                goto case KvmConstants.ExitHlt;
                             continue;
                         case KvmConstants.ExitShutdown:
                             _error = KvmErrors.Exception;
@@ -3506,6 +3511,22 @@ namespace Brovan.Core.Emulation
 
             _error = KvmErrors.Ok;
             return false;
+        }
+
+        // A kick can exit with RIP on a stub's hlt before the hlt runs. The exit counts as that hlt.
+        private bool TryTakeStubEntryAsHalt()
+        {
+            ref LinuxKvmRegisters regs = ref GetRegistersRef();
+            ulong stubOffset = regs.Rip - _exceptionStubPageGpa;
+            bool atExceptionStub = regs.Rip >= _exceptionStubPageGpa
+                && stubOffset < KvmConstants.ExceptionVectorCount * KvmConstants.ExceptionStubStride
+                && stubOffset % KvmConstants.ExceptionStubStride == 0;
+            if (!atExceptionStub && !(_guest64 && regs.Rip == _syscallTrapPageGpa))
+                return false;
+
+            regs.Rip++;
+            MarkRegistersDirty();
+            return true;
         }
 
         private unsafe bool HandleMmioExit(VirtualProcessor vp, ref LinuxKvmRun run)

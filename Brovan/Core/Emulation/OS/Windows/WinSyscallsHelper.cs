@@ -368,6 +368,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread == null)
                 return;
 
+            Emulator.UnfileWait(Thread);
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.WaitActive = false;
             Thread.WaitHandles = null;

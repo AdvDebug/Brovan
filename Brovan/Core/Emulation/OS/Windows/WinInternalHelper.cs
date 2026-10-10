@@ -125,6 +125,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<ulong, HandleEntry> HandleTable = new();
         private readonly Dictionary<string, List<ulong>> ObjectIdToHandles = new();
         private readonly WakeSignal Signal;
+        internal readonly SignalledWaitables Signalled = new();
 
         public HandleManager(WakeSignal Signal)
         {
@@ -149,8 +150,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             // Entering the table is the first moment a thread can wait on this object, so it is also the first
             // moment its state changes are worth reporting.
-            if (obj is WaitableHandleObject Waitable)
-                Waitable.WakeSignal ??= Signal;
+            if (obj is WaitableHandleObject Waitable && Waitable.WakeSignal == null)
+            {
+                Waitable.Signalled = Signalled;
+                Volatile.Write(ref Waitable.WakeSignal, Signal);
+            }
 
             WinHandle winHandle = new WinHandle
             {

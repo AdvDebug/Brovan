@@ -84,6 +84,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public long WaitCheckedEpoch = -1;
         public List<ulong> WaitCheckedHandles;
         public WaitableHandleObject[] WaitCheckedObjects;
+
+        // FiledSlots[i] is this thread's index in FiledObjects[i].FiledWaiters.
+        internal WaitableHandleObject[] FiledObjects;
+        internal int[] FiledSlots;
+        internal int FiledDeadlineIndex = -1;
+        internal bool WaitFiled => FiledObjects != null;
         public bool AlertByThreadIdPending { get; set; }
         public bool AlertByThreadIdWaitActive { get; set; }
         public ulong AlertByThreadIdAddress { get; set; }

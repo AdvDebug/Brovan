@@ -1278,10 +1278,18 @@ namespace Brovan.Core.Emulation.OS.Windows
     public abstract class WaitableHandleObject : IHandleObject
     {
         internal WakeSignal WakeSignal;
+        internal SignalledWaitables Signalled;
 
         // Epoch of the last signal, so a scan can skip a waiter whose objects have not signalled.
         // Poisoned across a bump, so either store leaves a value above any epoch a scan checked at.
         internal long LastSignalEpoch;
+
+        // Written only under the kernel lock.
+        internal FiledWaiter[] FiledWaiters;
+        internal int FiledWaiterCount;
+
+        internal WaitableHandleObject NextSignalled;
+        internal int SignalQueued;
 
         public abstract string ObjectId { get; }
 
@@ -1296,9 +1304,47 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Volatile.Write(ref LastSignalEpoch, long.MaxValue);
+
+            // Pairs with the barrier in BinaryEmulator.TryFileWait: this read sees the filed waiter or the filing
+            // sees the poisoned stamp. Push before the bump, so the scan the bump starts finds the object.
+            Interlocked.MemoryBarrier();
+            if (Volatile.Read(ref FiledWaiterCount) != 0)
+                Signalled.Push(this);
+
             long Epoch = WakeSignal.Bump();
             Volatile.Write(ref LastSignalEpoch, Epoch);
         }
+    }
+
+    internal struct FiledWaiter
+    {
+        public EmulatedThread Thread;
+
+        // Index into the thread's FiledObjects.
+        public int Slot;
+    }
+
+    internal sealed class SignalledWaitables
+    {
+        private WaitableHandleObject Head;
+
+        internal bool IsEmpty => Volatile.Read(ref Head) == null;
+
+        internal void Push(WaitableHandleObject Object)
+        {
+            if (Interlocked.CompareExchange(ref Object.SignalQueued, 1, 0) != 0)
+                return;
+
+            WaitableHandleObject Observed;
+            do
+            {
+                Observed = Volatile.Read(ref Head);
+                Object.NextSignalled = Observed;
+            }
+            while (Interlocked.CompareExchange(ref Head, Object, Observed) != Observed);
+        }
+
+        internal WaitableHandleObject TakeAll() => Interlocked.Exchange(ref Head, null);
     }
 
     public class WinProcess : IHandleObject

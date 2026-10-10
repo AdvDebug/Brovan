@@ -43,7 +43,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 State.ApcAlertable = true;
 
             if ((SpecialApc || AlertableWait) && Thread.State == EmulatedThreadState.Waiting)
+            {
+                Instance.UnfileWait(Thread);
                 Thread.State = EmulatedThreadState.Ready;
+            }
 
             if (SpecialApc || AlertableWait)
             {

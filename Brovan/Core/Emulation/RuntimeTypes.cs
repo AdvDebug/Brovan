@@ -10,18 +10,58 @@ namespace Brovan.Core.Emulation
     /// the value it last scanned at, so a slice that produced nothing skips the wakeup scan entirely.
     /// </summary>
     /// <remarks>
-    /// The audio engine and the GUI thread both produce, so the counter is atomic. It only ever counts up: a
-    /// missed bump costs latency until the fallback sweep, a spurious one costs a single scan.
+    /// The audio engine, the GUI thread and the host socket threads produce, so the counter is atomic. It only
+    /// ever counts up: a missed bump costs latency until the fallback sweep, a spurious one costs a single scan.
     /// </remarks>
     public sealed class WakeSignal
     {
+        [ThreadStatic]
+        private static WakeSignal t_served;
+
         private long Counter;
+        private long HostCounter;
+        private int Sleeping;
+        private readonly ManualResetEventSlim Gate = new(false);
 
         public long Current => Volatile.Read(ref Counter);
 
+        // Counts only bumps from threads that did not call BeginServing.
+        public long HostCurrent => Volatile.Read(ref HostCounter);
+
         public long Bump()
         {
-            return Interlocked.Increment(ref Counter);
+            long Epoch = Interlocked.Increment(ref Counter);
+            if (!ReferenceEquals(t_served, this))
+                Interlocked.Increment(ref HostCounter);
+            if (Volatile.Read(ref Sleeping) != 0)
+                Gate.Set();
+
+            return Epoch;
+        }
+
+        public void BeginServing() => t_served = this;
+
+        public void EndServing()
+        {
+            if (ReferenceEquals(t_served, this))
+                t_served = null;
+        }
+
+        // One waiter at a time. False when the counter had already moved.
+        public bool WaitPast(long Observed, int Milliseconds) => WaitWhileUnchanged(ref Counter, Observed, Milliseconds);
+
+        public bool WaitPastHost(long ObservedHost, int Milliseconds) => WaitWhileUnchanged(ref HostCounter, ObservedHost, Milliseconds);
+
+        private bool WaitWhileUnchanged(ref long Count, long Observed, int Milliseconds)
+        {
+            Gate.Reset();
+            Interlocked.Exchange(ref Sleeping, 1);
+            bool Waits = Volatile.Read(ref Count) == Observed;
+            if (Waits)
+                Gate.Wait(Milliseconds);
+
+            Volatile.Write(ref Sleeping, 0);
+            return Waits;
         }
     }
 
@@ -76,6 +116,10 @@ namespace Brovan.Core.Emulation
         public bool ParkWaiting;
         public EmulatedThread ParkTarget;
         public bool Unreferenced;
+
+        // Follows the order of BinaryEmulator.ThreadOrder.
+        internal long OrderKey;
+        internal bool InWakeScanList;
 
         public int EffectivePriority
         {

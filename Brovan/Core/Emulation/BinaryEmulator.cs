@@ -266,6 +266,17 @@ namespace Brovan.Core.Emulation
         private long LastFullWakeupScanTick;
         private uint SlicesSinceFullWakeupScan;
 
+        private List<EmulatedThread> WakeScanList = new();
+        private List<EmulatedThread> WakeScanMerged = new();
+        private List<EmulatedThread> WakeScanWoken = new();
+        private List<EmulatedThread> WakeScanRound = new();
+        private bool WakeScanIterating;
+        private int IndexedThreadOrderCount;
+        private long NextThreadOrderKey;
+        private bool ThreadOrderHasDead;
+        private const int MaxWakeScanRounds = 8;
+        private static readonly Comparer<EmulatedThread> _orderKeyComparer = Comparer<EmulatedThread>.Create((A, B) => A.OrderKey.CompareTo(B.OrderKey));
+
         private static readonly MemoryRegionBaseComparer _memoryRegionBaseComparer = new();
 
         private sealed class MemoryRegionBaseComparer : IComparer<MemoryRegion>
@@ -356,17 +367,31 @@ namespace Brovan.Core.Emulation
         private const int SweepIntervalMs = 1;
         private const int SchedulerThreadStackSize = 4 * 1024 * 1024;
 
+        private bool IdleWaitSkipped;
+
+        private long ParkedEpoch;
+        private readonly ManualResetEventSlim SweepKick = new(false);
+
         // An idle worker sleeps until a producer or the sweeper pulses it. The timeout is only a backstop
         // against a lost pulse.
-        private void IdleWait(int Milliseconds)
+        private void IdleWait(int Milliseconds, long PassEpoch, long PassHostEpoch)
         {
             if (!SmpEnabled)
             {
-                Thread.Sleep(Milliseconds);
+                // A bump from the pass itself ends one wait, never two in a row. A host bump always ends it.
+                IdleWaitSkipped = IdleWaitSkipped
+                    ? !WakeSignal.WaitPastHost(PassHostEpoch, Milliseconds)
+                    : !WakeSignal.WaitPast(PassEpoch, Milliseconds);
                 return;
             }
 
             IdleWorkers++;
+            if (IdleWorkers == SmpWorkerCount)
+            {
+                ParkedEpoch = PassEpoch;
+                SweepKick.Set();
+            }
+
             Monitor.Wait(KernelLock, IdleWaitBackstopMs);
             IdleWorkers--;
         }
@@ -394,16 +419,36 @@ namespace Brovan.Core.Emulation
                 Monitor.Pulse(KernelLock);
         }
 
-        // Timed wakes have no producer, so one thread wakes an idle worker every SweepIntervalMs.
+        // Timed wakes have no producer, so one thread wakes an idle worker every SweepIntervalMs. While every
+        // worker is parked, a bump wakes one at once. A running worker serves its own bumps.
         private void SweepLoop()
         {
+            bool Pulse = true;
             while (!SchedulerExiting)
             {
-                Thread.Sleep(SweepIntervalMs);
+                bool AllIdle;
+                long Observed;
+                SweepKick.Reset();
                 lock (KernelLock)
                 {
-                    if (IdleWorkers != 0)
+                    if (Pulse && IdleWorkers != 0)
+                    {
                         WakeIdleWorker();
+                        ParkedEpoch = WakeSignal.Current;
+                    }
+
+                    AllIdle = IdleWorkers == SmpWorkerCount;
+                    Observed = ParkedEpoch;
+                }
+
+                if (AllIdle)
+                {
+                    WakeSignal.WaitPast(Observed, SweepIntervalMs);
+                    Pulse = true;
+                }
+                else
+                {
+                    Pulse = !SweepKick.Wait(SweepIntervalMs);
                 }
             }
         }
@@ -2296,6 +2341,7 @@ namespace Brovan.Core.Emulation
             else
                 WaitUntilParked(Thread);
 
+            UnfileWait(Thread);
             Thread.ExitCode = ExitCode;
             Thread.WaitActive = false;
             Thread.WaitHandles = null;
@@ -2354,6 +2400,7 @@ namespace Brovan.Core.Emulation
 
             if (Thread.SuspendCount == 0 && Thread.State == EmulatedThreadState.Suspended)
             {
+                UnfileWait(Thread);
                 Thread.State = EmulatedThreadState.Ready;
                 WakeSignal.Bump();
             }
@@ -2418,6 +2465,7 @@ namespace Brovan.Core.Emulation
                     TriggerDebugMessage($"scheduler: wait satisfied tid={Thread.ThreadId} index={Thread.WaitSatisfiedIndex} timedOut={Thread.WaitTimedOut}");
             }
 
+            UnfileWait(Thread);
             Guest.OnThreadWaitSatisfied(this, Thread);
 
             Thread.WaitActive = false;
@@ -2444,16 +2492,21 @@ namespace Brovan.Core.Emulation
                 Thread.State = EmulatedThreadState.Ready;
                 Changed = true;
             }
-            else if (Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive && !CanSkipWaitCheck(Thread, Now))
+            else if (Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive)
             {
-                if (TrySatisfyThreadWait(Thread, Now))
+                bool Check = !CanSkipWaitCheck(Thread, Now);
+                if (Check && TrySatisfyThreadWait(Thread, Now))
                 {
                     CompleteThreadWait(Thread);
                     Changed = true;
                 }
                 else
                 {
-                    NoteWaitCheckFailed(Thread, ScanEpoch);
+                    if (Check)
+                        NoteWaitCheckFailed(Thread, ScanEpoch);
+
+                    if (TryFileWait(Thread, Now))
+                        return false;
                 }
             }
 
@@ -2464,7 +2517,7 @@ namespace Brovan.Core.Emulation
             return Changed;
         }
 
-        private bool UpdateMlfqWakeups(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, bool ScanAllThreads = false)
+        private bool UpdateMlfqWakeups(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick)
         {
             // Read before the timer refresh, so a timer that signals inside this scan counts as later.
             long ScanEpoch = WakeSignal.Current;
@@ -2472,43 +2525,208 @@ namespace Brovan.Core.Emulation
             long EarliestDeadline = long.MaxValue;
             long Now = EmulatedTickCount64;
 
-            if (ScanAllThreads)
-            {
-                foreach (var kvp in Threads)
-                    Changed |= UpdateMlfqThreadWakeup(kvp.Value, ReadyQueues, InQueue, Levels, SchedulerTick, Now, ScanEpoch, ref EarliestDeadline);
-            }
-            else
-            {
-                foreach (EmulatedThread Thread in LiveThreads)
-                    Changed |= UpdateMlfqThreadWakeup(Thread, ReadyQueues, InQueue, Levels, SchedulerTick, Now, ScanEpoch, ref EarliestDeadline);
+            IndexNewThreads();
 
-                if (Debug)
+            WakeScanIterating = true;
+            UnfileWokenWaits(Now);
+            if (Now - LastFiledWaitSweepTick >= FiledWaitSweepIntervalMs)
+                SweepFiledWaits(Now);
+
+            (WakeScanWoken, WakeScanRound) = (WakeScanRound, WakeScanWoken);
+            WakeScanRound.Sort(_orderKeyComparer);
+
+            List<EmulatedThread> Merged = WakeScanMerged;
+            int Listed = 0;
+            int Woken = 0;
+            while (Listed < WakeScanList.Count || Woken < WakeScanRound.Count)
+            {
+                EmulatedThread Thread = Woken >= WakeScanRound.Count || (Listed < WakeScanList.Count && WakeScanList[Listed].OrderKey < WakeScanRound[Woken].OrderKey)
+                    ? WakeScanList[Listed++]
+                    : WakeScanRound[Woken++];
+
+                Changed |= VisitWakeScanThread(Thread, ReadyQueues, InQueue, Levels, SchedulerTick, Now, ScanEpoch, ref EarliestDeadline, out bool Keep);
+                if (Keep)
+                    Merged.Add(Thread);
+            }
+
+            WakeScanMerged = WakeScanList;
+            WakeScanMerged.Clear();
+            WakeScanList = Merged;
+            WakeScanRound.Clear();
+
+            // A visit can signal objects with filed waiters.
+            long Served;
+            int Rounds = 0;
+            while (true)
+            {
+                Served = WakeSignal.Current;
+                UnfileWokenWaits(Now);
+                if (WakeScanWoken.Count == 0)
+                    break;
+
+                (WakeScanWoken, WakeScanRound) = (WakeScanRound, WakeScanWoken);
+                if (++Rounds > MaxWakeScanRounds)
                 {
-                    int LiveInMap = 0;
-                    foreach (var kvp in Threads)
-                    {
-                        if (kvp.Value != null && kvp.Value.State != EmulatedThreadState.Terminated)
-                            LiveInMap++;
-                    }
-
-                    int LiveInOrder = 0;
-                    foreach (EmulatedThread Thread in LiveThreads)
-                    {
-                        if (Thread.State != EmulatedThreadState.Terminated)
-                            LiveInOrder++;
-                    }
-
-                    if (LiveInMap != LiveInOrder)
-                        TriggerDebugMessage($"scheduler: thread order mismatch map={LiveInMap} order={LiveInOrder}");
+                    for (int i = 0; i < WakeScanRound.Count; i++)
+                        InsertByOrderKey(WakeScanList, WakeScanRound[i]);
+                    WakeScanRound.Clear();
+                    Served = ScanEpoch;
+                    break;
                 }
+
+                WakeScanRound.Sort(_orderKeyComparer);
+                for (int i = 0; i < WakeScanRound.Count; i++)
+                {
+                    EmulatedThread Thread = WakeScanRound[i];
+                    Changed |= VisitWakeScanThread(Thread, ReadyQueues, InQueue, Levels, SchedulerTick, Now, ScanEpoch, ref EarliestDeadline, out bool Keep);
+                    if (Keep)
+                        InsertByOrderKey(WakeScanList, Thread);
+                }
+
+                WakeScanRound.Clear();
             }
 
-            EarliestWaitDeadline = EarliestDeadline;
-            LastScannedWakeEpoch = WakeSignal.Current;
+            WakeScanIterating = false;
+
+            if (Debug)
+            {
+                int LiveInMap = 0;
+                foreach (var kvp in Threads)
+                {
+                    if (kvp.Value != null && kvp.Value.State != EmulatedThreadState.Terminated)
+                        LiveInMap++;
+                }
+
+                int LiveInOrder = 0;
+                foreach (EmulatedThread Thread in LiveThreads)
+                {
+                    if (Thread.State != EmulatedThreadState.Terminated)
+                        LiveInOrder++;
+                }
+
+                if (LiveInMap != LiveInOrder)
+                    TriggerDebugMessage($"scheduler: thread order mismatch map={LiveInMap} order={LiveInOrder}");
+            }
+
+            EarliestWaitDeadline = Math.Min(EarliestFiledDeadline, EarliestDeadline);
+            LastScannedWakeEpoch = Served;
             LastFullWakeupScanTick = EmulatedTickCount64;
             SlicesSinceFullWakeupScan = 0;
 
             return Changed;
+        }
+
+        private bool VisitWakeScanThread(EmulatedThread Thread, Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, long Now, long ScanEpoch, ref long EarliestDeadline, out bool Keep)
+        {
+            bool Changed = false;
+            if (Thread.State == EmulatedThreadState.Terminated && Thread.HostWorker == -1)
+                ThreadOrderHasDead = true;
+            else if (!IsWaitFiled(Thread))
+                Changed = UpdateMlfqThreadWakeup(Thread, ReadyQueues, InQueue, Levels, SchedulerTick, Now, ScanEpoch, ref EarliestDeadline);
+
+            Keep = Thread.State != EmulatedThreadState.Terminated && !IsWaitFiled(Thread);
+            if (!Keep)
+                Thread.InWakeScanList = false;
+
+            return Changed;
+        }
+
+        internal void AddToWakeScan(EmulatedThread Thread)
+        {
+            if (Thread == null || Thread.InWakeScanList)
+                return;
+
+            if (Thread.State == EmulatedThreadState.Terminated)
+            {
+                ThreadOrderHasDead = true;
+                return;
+            }
+
+            if (Thread.OrderKey == 0)
+                Thread.OrderKey = ++NextThreadOrderKey;
+
+            Thread.InWakeScanList = true;
+            if (WakeScanIterating)
+                WakeScanWoken.Add(Thread);
+            else
+                InsertByOrderKey(WakeScanList, Thread);
+        }
+
+        private static void InsertByOrderKey(List<EmulatedThread> List, EmulatedThread Thread)
+        {
+            int Count = List.Count;
+            if (Count == 0 || List[Count - 1].OrderKey < Thread.OrderKey)
+            {
+                List.Add(Thread);
+                return;
+            }
+
+            int Index = List.BinarySearch(Thread, _orderKeyComparer);
+            List.Insert(Index < 0 ? ~Index : Index, Thread);
+        }
+
+        private static void SortByOrderKeyDistinct(List<EmulatedThread> List)
+        {
+            List.Sort(_orderKeyComparer);
+
+            int Kept = 0;
+            for (int i = 0; i < List.Count; i++)
+            {
+                if (Kept != 0 && ReferenceEquals(List[Kept - 1], List[i]))
+                    continue;
+
+                List[Kept++] = List[i];
+            }
+
+            List.RemoveRange(Kept, List.Count - Kept);
+        }
+
+        // While the scheduler runs, ThreadOrder only grows at its end and only TrimDeadThreadsFromOrder removes
+        // from it. Returns the WakeScanList index of the first added thread.
+        private int IndexNewThreads()
+        {
+            if (IndexedThreadOrderCount > ThreadOrder.Count)
+            {
+                RebuildWakeScan();
+                return 0;
+            }
+
+            int First = WakeScanList.Count;
+            for (int i = IndexedThreadOrderCount; i < ThreadOrder.Count; i++)
+            {
+                if (Threads.TryGetValue((uint)ThreadOrder[i], out EmulatedThread Thread) && Thread != null && !Thread.InWakeScanList)
+                {
+                    Thread.OrderKey = ++NextThreadOrderKey;
+                    AddToWakeScan(Thread);
+                }
+            }
+
+            IndexedThreadOrderCount = ThreadOrder.Count;
+            return First;
+        }
+
+        // The debugger can rewrite ThreadOrder while the scheduler is stopped.
+        private void RebuildWakeScan()
+        {
+            UnfileAllWaits();
+
+            for (int i = 0; i < WakeScanList.Count; i++)
+                WakeScanList[i].InWakeScanList = false;
+
+            foreach (EmulatedThread Thread in Threads.Values)
+            {
+                if (Thread == null)
+                    continue;
+
+                Thread.InWakeScanList = false;
+                Thread.OrderKey = 0;
+            }
+
+            WakeScanList.Clear();
+            WakeScanWoken.Clear();
+            NextThreadOrderKey = 0;
+            IndexedThreadOrderCount = 0;
+            IndexNewThreads();
         }
 
         private bool TryGetNextWaitSleepMs(out int SleepMs, int MaxSleepMs = 10)
@@ -2516,10 +2734,13 @@ namespace Brovan.Core.Emulation
             SleepMs = 0;
 
             long Now = EmulatedTickCount64;
-            long BestDelta = long.MaxValue;
+            long BestDelta = FiledDeadlineCount != 0 ? EarliestFiledDeadline - Now : long.MaxValue;
+            if (BestDelta <= 0)
+                return true;
 
-            foreach (EmulatedThread Thread in LiveThreads)
+            for (int i = 0; i < WakeScanList.Count; i++)
             {
+                EmulatedThread Thread = WakeScanList[i];
                 if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive || Thread.WaitDeadline == -1)
                     continue;
 
@@ -2554,11 +2775,16 @@ namespace Brovan.Core.Emulation
 
         private void TrimDeadThreadsFromOrder()
         {
+            ThreadOrderHasDead = false;
             for (int i = ThreadOrder.Count - 1; i >= 0; i--)
             {
                 int Tid = ThreadOrder[i];
                 if (!Threads.TryGetValue((uint)Tid, out EmulatedThread Thread) || Thread == null || Thread.State == EmulatedThreadState.Terminated)
+                {
                     ThreadOrder.RemoveAt(i);
+                    if (i < IndexedThreadOrderCount)
+                        IndexedThreadOrderCount--;
+                }
             }
         }
 
@@ -2588,18 +2814,8 @@ namespace Brovan.Core.Emulation
 
         private void EnsureMlfqRunnableThreadsEnqueued(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick)
         {
-            for (int i = 0; i < ThreadOrder.Count; i++)
-            {
-                int Tid = ThreadOrder[i];
-                if (InQueue.Contains(Tid))
-                    continue;
-
-                if (!Threads.TryGetValue((uint)Tid, out EmulatedThread t))
-                    continue;
-
-                if (IsMlfqRunnableThread(t))
-                    EnqueueMlfqThread(t, ReadyQueues, InQueue, Levels, SchedulerTick);
-            }
+            for (int i = IndexNewThreads(); i < WakeScanList.Count; i++)
+                EnqueueMlfqThread(WakeScanList[i], ReadyQueues, InQueue, Levels, SchedulerTick);
         }
 
         private bool TryDequeueMlfqThread(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, out EmulatedThread Thread, out int SelectedLevel)
@@ -2688,14 +2904,13 @@ namespace Brovan.Core.Emulation
                 ReadyQueues[i]?.Clear();
 
             InQueue.Clear();
-            TrimDeadThreadsFromOrder();
+            if (ThreadOrderHasDead)
+                TrimDeadThreadsFromOrder();
+            IndexNewThreads();
 
-            for (int i = 0; i < ThreadOrder.Count; i++)
+            for (int i = 0; i < WakeScanList.Count; i++)
             {
-                int Tid = ThreadOrder[i];
-                if (!Threads.TryGetValue((uint)Tid, out EmulatedThread t))
-                    continue;
-
+                EmulatedThread t = WakeScanList[i];
                 if (!IsMlfqRunnableThread(t))
                     continue;
 
@@ -2714,6 +2929,7 @@ namespace Brovan.Core.Emulation
             _emulator.RestoreCodeCache();
             PublishTimestampCounterSource();
             TrimDeadThreadsFromOrder();
+            RebuildWakeScan();
             if (ThreadOrder.Count == 0)
             {
                 TriggerDebugMessage("scheduler: no threads to run");
@@ -2780,12 +2996,14 @@ namespace Brovan.Core.Emulation
             SmpEnabled = Settings.Smp && _emulator.SupportsThreadResidency;
             if (!SmpEnabled)
             {
+                WakeSignal.BeginServing();
                 try
                 {
                     return RunSchedulerLoop(ReadyQueues, InQueue, Levels, MaxTotalInstructions, MaxSlices, AgingThresholdSlices, AgingThresholdBudget, KnownThreadOrderCount);
                 }
                 finally
                 {
+                    WakeSignal.EndServing();
                     ReleaseDispatch(_mainWorker);
                 }
             }
@@ -2826,6 +3044,7 @@ namespace Brovan.Core.Emulation
         private bool RunSchedulerWorker(SchedulerWorker Worker, Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, ulong MaxTotalInstructions, uint MaxSlices, long AgingThresholdSlices, long AgingThresholdBudget)
         {
             t_worker = Worker;
+            WakeSignal.BeginServing();
             lock (KernelLock)
             {
                 try
@@ -2843,6 +3062,7 @@ namespace Brovan.Core.Emulation
 
                     // Any worker leaving ends the run for all of them.
                     SignalSchedulerExit();
+                    WakeSignal.EndServing();
                 }
             }
         }
@@ -2861,6 +3081,8 @@ namespace Brovan.Core.Emulation
                     return true;
 
                 long SchedulerTick = ++MlfqSchedulerTick;
+                long PassEpoch = WakeSignal.Current;
+                long PassHostEpoch = WakeSignal.HostCurrent;
 
                 if ((SchedulerTick & 0x7) == 0)
                     _emulator.ResolveCodeCache();
@@ -2917,21 +3139,22 @@ namespace Brovan.Core.Emulation
 
                 if (!TryDequeueMlfqThread(ReadyQueues, InQueue, Levels, out EmulatedThread ImmaBeEmulatedOOO, out int SelectedLevel))
                 {
-                    UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick, true);
+                    UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
                     KnownThreadOrderCount = ThreadOrder.Count;
                     SchedulerRefreshRequested = false;
                     Self.WakeupScanRequired = false;
 
                     if (!TryDequeueMlfqThread(ReadyQueues, InQueue, Levels, out ImmaBeEmulatedOOO, out SelectedLevel))
                     {
-                        TrimDeadThreadsFromOrder();
+                        if (ThreadOrderHasDead)
+                            TrimDeadThreadsFromOrder();
                         KnownThreadOrderCount = ThreadOrder.Count;
 
                         // A process created suspended has no runnable thread by design, and it still has to serve
                         // session requests until its creator resumes it.
                         if (StartSuspendedApplied && !StartSuspendedReleased)
                         {
-                            IdleWait(IdleWaitSliceMs);
+                            IdleWait(IdleWaitSliceMs, PassEpoch, PassHostEpoch);
                             Self.WakeupScanRequired = true;
                             continue;
                         }
@@ -2939,7 +3162,7 @@ namespace Brovan.Core.Emulation
                         // A slice on another worker can still make threads runnable.
                         if (DispatchedThreads != 0)
                         {
-                            IdleWait(IdleWaitSliceMs);
+                            IdleWait(IdleWaitSliceMs, PassEpoch, PassHostEpoch);
                             Self.WakeupScanRequired = true;
                             continue;
                         }
@@ -2955,7 +3178,7 @@ namespace Brovan.Core.Emulation
                         {
                             if (Debug)
                                 TriggerDebugMessage($"scheduler: no runnable thread, waiting up to {SleepMs}ms");
-                            IdleWait(Math.Min(SleepMs, IdleWaitSliceMs));
+                            IdleWait(Math.Min(SleepMs, IdleWaitSliceMs), PassEpoch, PassHostEpoch);
                             WinHelper?.KuserSharedData?.RefreshIfUnhooked();
                             Self.WakeupScanRequired = true;
                             continue;
@@ -2963,7 +3186,7 @@ namespace Brovan.Core.Emulation
 
                         if (HasActiveGetMessageWait() || HasPendingHostIo())
                         {
-                            IdleWait(IdleWaitSliceMs);
+                            IdleWait(IdleWaitSliceMs, PassEpoch, PassHostEpoch);
                             WinHelper?.KuserSharedData?.RefreshIfUnhooked();
                             Self.WakeupScanRequired = true;
                             continue;
@@ -2982,13 +3205,16 @@ namespace Brovan.Core.Emulation
                     if (!BindThreadProcessor(ImmaBeEmulatedOOO))
                     {
                         EnqueueMlfqThread(ImmaBeEmulatedOOO, ReadyQueues, InQueue, Levels, SchedulerTick);
-                        IdleWait(IdleWaitSliceMs);
+                        IdleWait(IdleWaitSliceMs, PassEpoch, PassHostEpoch);
                         Self.WakeupScanRequired = true;
                         continue;
                     }
 
                     BoundThisSwitch = true;
                 }
+
+                UnfileWait(ImmaBeEmulatedOOO);
+                AddToWakeScan(ImmaBeEmulatedOOO);
 
                 ImmaBeEmulatedOOO.HostWorker = Self.Index;
                 Self.DispatchedThread = ImmaBeEmulatedOOO;

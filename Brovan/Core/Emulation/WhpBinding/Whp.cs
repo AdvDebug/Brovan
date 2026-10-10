@@ -1469,6 +1469,8 @@ namespace Brovan.Core.Emulation
                             _error = WhpErrors.Ok;
                             return true;
                         case WhvRunVpExitReason.Canceled:
+                            if (TryTakeStubEntryAsHalt(vp, exit.VpRip))
+                                goto case WhvRunVpExitReason.X64Halt;
                             if (Volatile.Read(ref vp.SliceExpiredGeneration) == SliceGeneration && !vp.CompletionActive)
                             {
                                 _error = WhpErrors.Ok;
@@ -3247,6 +3249,21 @@ namespace Brovan.Core.Emulation
 
             _error = WhpErrors.Ok;
             return false;
+        }
+
+        // A cancel can exit with RIP on a stub's hlt before the hlt runs. The exit counts as that hlt.
+        private bool TryTakeStubEntryAsHalt(VirtualProcessor vp, ulong rip)
+        {
+            ulong stubOffset = rip - _exceptionStubPageGpa;
+            bool atExceptionStub = rip >= _exceptionStubPageGpa
+                && stubOffset < WhpConstants.ExceptionVectorCount * WhpConstants.ExceptionStubStride
+                && stubOffset % WhpConstants.ExceptionStubStride == 0;
+            if (!atExceptionStub && !(_guest64 && rip == _syscallTrapPageGpa))
+                return false;
+
+            GetRegistersRef(vp).Rip = rip + 1;
+            vp.RegsDirty = true;
+            return true;
         }
 
         // A write fault can hit a stale read-only TLB entry after write is granted.

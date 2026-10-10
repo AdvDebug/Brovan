@@ -100,7 +100,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint AFD_DISCONNECT_RECV = 0x2;
         private const uint AfdDisconnectInfoSize = 0x10;
 
-        private const int PollRetrySliceMs = 1;
+        private const uint WaitForListenMinOutput = 12;
+
+        private const int SendCopyBytes = 64 * 1024;
 
         private BrovanSocket? _socket;
         private NetworkAccessPolicy _policy;
@@ -115,7 +117,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         private long _connectedAt;
 
         private readonly Dictionary<int, BrovanSocket> _PendingAccepted = new();
-        private int _NextSequence;
+        private int _listenSequence;
+
+        private readonly EndpointWaits _waits = new();
+        private ReadArm? _readArm;
+        private bool _selectReads;
 
         private int WinAf = 2;
         private int WinType = 1;
@@ -129,8 +135,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void Dispose()
         {
+            _readArm?.Release();
+            _readArm = null;
             try { _socket?.Dispose(); } catch { }
             _socket = null;
+
+            foreach (BrovanSocket Accepted in _PendingAccepted.Values)
+                Accepted.Dispose();
+
             _PendingAccepted.Clear();
         }
 
@@ -140,6 +152,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             BrovanSocket? Released = _socket;
             _socket = null;
             _connectedAt = 0;
+            _readArm?.Release();
+            _readArm = null;
+            _selectReads = false;
             if (Released != null)
                 Instance.WinHelper.AfdRequests.ReleaseSocket(this, Released);
         }
@@ -340,26 +355,64 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static uint GuestOutputLength(in DeviceData Data) =>
             Data.OutputBuffer == null ? 0u : Math.Min(Data.OutputLength, (uint)Data.OutputBuffer.Length);
 
-        private BrovanSocket? TryAccept(out EndPoint? Remote)
+        private const int SockaddrIn6Bytes = 28;
+
+        private static int SockaddrBytes(AddressFamily Family) => Family == AddressFamily.InterNetworkV6 ? SockaddrIn6Bytes : 16;
+
+        // NT: a buffer too short for the remote sockaddr leaves the connection queued.
+        private bool TryTakeQueued(BinaryEmulator Instance, uint Available, int HeaderBytes, out BrovanSocket? Accepted, out IPEndPoint? Remote, out NTSTATUS Status)
         {
+            Accepted = null;
             Remote = null;
-            EnsureSocket();
-            if (_socket == null)
-                return null;
+            Status = NTSTATUS.STATUS_SUCCESS;
+            BrovanSocket? Socket = _socket;
+            if (Socket == null)
+            {
+                Status = NTSTATUS.STATUS_INVALID_PARAMETER;
+                return true;
+            }
 
             try
             {
-                if (!_socket.Poll(0, SelectMode.SelectRead))
-                    return null;
+                if (!Socket.Poll(0, SelectMode.SelectRead))
+                    return false;
+            }
+            catch (Exception Ex)
+            {
+                Utils.LogError($"AFD accept failed on the host: {Ex.Message}");
+                Status = NTSTATUS.STATUS_UNSUCCESSFUL;
+                return true;
+            }
 
-                BrovanSocket Accepted = _socket.Accept();
-                Remote = Accepted.RemoteEndPoint;
-                return Accepted;
+            if (Available < HeaderBytes + SockaddrBytes(Socket.AddressFamily))
+            {
+                Status = NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+                return true;
+            }
+
+            EndPoint? From;
+            try
+            {
+                Accepted = Socket.Accept();
+                From = Accepted.RemoteEndPoint;
             }
             catch
             {
-                return null;
+                Accepted?.Dispose();
+                Accepted = null;
+                return false;
             }
+
+            if (From is not IPEndPoint FromIp || !IsEndpointAllowed(Instance, FromIp))
+            {
+                Accepted.Dispose();
+                Accepted = null;
+                Status = NTSTATUS.STATUS_NETWORK_UNREACHABLE;
+                return true;
+            }
+
+            Remote = FromIp;
+            return true;
         }
 
         private static uint MapPollEventsToTriggered(uint Requested, bool ReadReady, bool WriteReady, bool ErrorReady, bool IsListening)
@@ -500,57 +553,78 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        // NT: AfdWaitForListen.
         private NTSTATUS IoctlWaitForListen(ref DeviceData Data, BinaryEmulator Instance)
         {
-            EnsureSocket();
-            if (_socket == null)
-                return NTSTATUS.STATUS_UNSUCCESSFUL;
-
-            if (!Instance.Settings.GetNetworkPolicy().HasAnyAccess())
-                return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
-
-            uint OutputLength = GuestOutputLength(in Data);
-            if (Data.OutputBuffer == null || OutputLength < 12)
+            if (Data.OutputLength < WaitForListenMinOutput || !IsListening)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (OutputLength < 20)
-                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
-
-            BrovanSocket? Accepted = TryAccept(out EndPoint? Remote);
-            if (Accepted == null)
+            PendingRequests Requests = Instance.WinHelper.AfdRequests;
+            if (!Requests.HasAccept(this) && Data.OutputBuffer != null)
             {
-                WinPendingIo? SyncIo = Data.File.Synchronous ? new WinPendingIo(in Data, Instance.CurrentThreadId, Instance.WinHelper.GetEventByHandle(Data.EventHandle, AccessMask.GiveTemp)) : null;
-                if (Instance.WinHelper.TryContinuePipeWait(Data.FileHandle, int.MaxValue, PollRetrySliceMs, SyncIo))
-                    return NTSTATUS.STATUS_PENDING;
+                Span<byte> Response = stackalloc byte[ListenResponseMaxBytes];
+                if (TryListenResponse(Instance, Data.OutputLength, Response, out NTSTATUS Status, out int Length))
+                {
+                    if (Status == NTSTATUS.STATUS_SUCCESS)
+                    {
+                        Response.Slice(0, Length).CopyTo(Data.OutputBuffer);
+                        Data.Information = (ulong)Length;
+                    }
 
-                // STATUS_TIMEOUT is a success status.
-                return NTSTATUS.STATUS_IO_TIMEOUT;
+                    return Status;
+                }
             }
 
-            Instance.WinHelper.ClearPipeWait();
+            Data.Information = 0;
+            return Requests.Pend(Instance, new PendingAccept(Instance, in Data, this));
+        }
 
-            if (Remote != null && !IsEndpointAllowed(Instance, Remote))
-            {
-                try { Accepted.Dispose(); } catch { }
-                return NTSTATUS.STATUS_NETWORK_UNREACHABLE;
-            }
+        private const int ListenResponseMaxBytes = 4 + SockaddrIn6Bytes;
 
-            int Sequence = _NextSequence++;
+        // NT: AfdServiceWaitForListen.
+        private bool TryListenResponse(BinaryEmulator Instance, uint OutputLength, Span<byte> Response, out NTSTATUS Status, out int Length)
+        {
+            Length = 0;
+            if (!TryTakeQueued(Instance, OutputLength, 4, out BrovanSocket? Accepted, out IPEndPoint? Remote, out Status))
+                return false;
+
+            if (Accepted == null || Remote == null)
+                return true;
+
+            // NT: the sequence skips 0.
+            int Sequence = ++_listenSequence;
+            if (Sequence == 0)
+                Sequence = ++_listenSequence;
+
             _PendingAccepted[Sequence] = Accepted;
+            byte[] SockAddr = BuildSockaddr(Remote);
+            BinaryPrimitives.WriteInt32LittleEndian(Response, Sequence);
+            SockAddr.CopyTo(Response.Slice(4));
+            Length = 4 + SockAddr.Length;
+            return true;
+        }
 
-            Array.Clear(Data.OutputBuffer, 0, (int)OutputLength);
-            BinaryPrimitives.WriteInt32LittleEndian(Data.OutputBuffer.AsSpan(0, 4), Sequence);
+        private bool TryTakeListen(BinaryEmulator Instance, PendingAccept Listen, out NTSTATUS Status, out ulong Information)
+        {
+            Information = 0;
+            Span<byte> Response = stackalloc byte[ListenResponseMaxBytes];
+            if (!TryListenResponse(Instance, Listen.OutputLength, Response, out Status, out int Length))
+                return false;
 
-            uint AddressLength = 16;
-            if (Remote is IPEndPoint RemoteIp)
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return true;
+
+            if (!Instance.WriteMemory(Listen.Output, Response.Slice(0, Length)))
             {
-                byte[] SockAddr = BuildSockaddr(RemoteIp);
-                AddressLength = Math.Min((uint)SockAddr.Length, OutputLength - 4);
-                Buffer.BlockCopy(SockAddr, 0, Data.OutputBuffer, 4, (int)AddressLength);
+                if (_PendingAccepted.Remove(BinaryPrimitives.ReadInt32LittleEndian(Response), out BrovanSocket? Orphan))
+                    Orphan.Dispose();
+
+                Status = NTSTATUS.STATUS_ACCESS_VIOLATION;
+                return true;
             }
 
-            Data.Information = 4 + AddressLength;
-            return NTSTATUS.STATUS_SUCCESS;
+            Information = (ulong)Length;
+            return true;
         }
 
         private NTSTATUS IoctlAccept(ref DeviceData Data, BinaryEmulator Instance)
@@ -633,42 +707,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         // TRANSPORT_ADDRESS: the address count and AddressLength, then the sockaddr from its family field on.
         private const int TransportAddressHeaderBytes = 6;
 
-        private int RemoteTdiAddressBytes() => TransportAddressHeaderBytes + (_socket?.AddressFamily == AddressFamily.InterNetworkV6 ? 28 : 16);
-
         private bool TryTakeConnection(BinaryEmulator Instance, PendingAccept Accept, out NTSTATUS Status)
         {
-            Status = NTSTATUS.STATUS_SUCCESS;
-            BrovanSocket? Socket = _socket;
-            if (Socket == null)
-            {
-                Status = NTSTATUS.STATUS_INVALID_PARAMETER;
-                return true;
-            }
-
-            try
-            {
-                if (!Socket.Poll(0, SelectMode.SelectRead))
-                    return false;
-            }
-            catch (Exception Ex)
-            {
-                Utils.LogError($"AFD accept failed on the host: {Ex.Message}");
-                Status = NTSTATUS.STATUS_UNSUCCESSFUL;
-                return true;
-            }
-
-            // NT: the connection stays queued.
-            if (Accept.RemoteLength < RemoteTdiAddressBytes())
-            {
-                Status = NTSTATUS.STATUS_BUFFER_TOO_SMALL;
-                return true;
-            }
-
-            BrovanSocket? Accepted = TryAccept(out EndPoint? Remote);
-            if (Accepted == null)
+            if (!TryTakeQueued(Instance, Accept.RemoteLength, TransportAddressHeaderBytes, out BrovanSocket? Accepted, out IPEndPoint? RemoteIp, out Status))
                 return false;
 
-            if (Remote is not IPEndPoint RemoteIp || !IsEndpointAllowed(Instance, RemoteIp) || Accepted.LocalEndPoint is not IPEndPoint LocalIp)
+            if (Accepted == null || RemoteIp == null)
+                return true;
+
+            if (Accepted.LocalEndPoint is not IPEndPoint LocalIp)
             {
                 try { Accepted.Dispose(); } catch { }
                 Status = NTSTATUS.STATUS_NETWORK_UNREACHABLE;
@@ -760,6 +807,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 if (Segments != null)
                     ArrayPool<(ulong Address, uint Length)>.Shared.Return(Segments);
+            }
+
+            // Valid only while the kernel lock is held.
+            internal unsafe ReadOnlySpan<byte> HostView(BinaryEmulator Instance, uint Offset, int Length)
+            {
+                if (Segments != null)
+                    return default;
+
+                IntPtr Host = Instance.GetHostPointer(FirstAddress + Offset, (ulong)Length);
+                return Host == IntPtr.Zero ? default : new ReadOnlySpan<byte>((void*)Host, Length);
             }
 
             internal bool Read(BinaryEmulator Instance, uint Offset, Span<byte> Into)
@@ -943,17 +1000,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             while ((uint)Sent < Length)
             {
                 int Chunk = (int)Math.Min(Length - (uint)Sent, (uint)NtReadFile.IoChunkBytes);
-                byte[] Payload = Instance.WinHelper.Shared.GetBuffer((uint)Chunk);
-                if (!Buffers.Read(Instance, (uint)Sent, Payload.AsSpan(0, Chunk)))
+                ReadOnlySpan<byte> Payload = Buffers.HostView(Instance, (uint)Sent, Chunk);
+                if (Payload.IsEmpty)
                 {
-                    Status = Sent == 0 ? NTSTATUS.STATUS_ACCESS_VIOLATION : NTSTATUS.STATUS_SUCCESS;
-                    return true;
+                    Chunk = Math.Min(Chunk, SendCopyBytes);
+                    Span<byte> Copy = Instance.WinHelper.Shared.GetSpan((uint)Chunk).Slice(0, Chunk);
+                    if (!Buffers.Read(Instance, (uint)Sent, Copy))
+                    {
+                        Status = Sent == 0 ? NTSTATUS.STATUS_ACCESS_VIOLATION : NTSTATUS.STATUS_SUCCESS;
+                        return true;
+                    }
+
+                    Payload = Copy;
                 }
 
-                int Moved = Socket.Send(Payload.AsSpan(0, Chunk), SocketFlags.None, out Error);
+                int Moved = Socket.Send(Payload, SocketFlags.None, out Error);
                 if (Moved > 0)
                 {
-                    NetworkTrafficPcapCapture.RecordOutbound(Socket, Payload.AsSpan(0, Moved));
+                    NetworkTrafficPcapCapture.RecordOutbound(Socket, Payload.Slice(0, Moved));
                     Sent += Moved;
                 }
 
@@ -1774,17 +1838,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             internal override WinFile File => Io.File;
 
             internal override string WaitLabel => "afd-poll";
-
-            internal bool Names(AfdDevice Endpoint)
-            {
-                for (int i = 0; i < Entries.Length; i++)
-                {
-                    if (ReferenceEquals(Entries[i].Endpoint, Endpoint))
-                        return true;
-                }
-
-                return false;
-            }
         }
 
         internal sealed class PendingTransfer : ParkedIoRequest
@@ -1797,6 +1850,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             // AfdBReceive gave it to the transport, not to the AFD queue.
             internal bool Posted;
+
+            internal long Sequence;
+            internal PendingTransfer? Previous;
+            internal PendingTransfer? Next;
 
             internal PendingTransfer(BinaryEmulator Instance, in DeviceData Data, AfdDevice Endpoint, bool Send, in TransferBuffers Buffers, int Sent)
             {
@@ -1816,8 +1873,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             internal readonly WinPendingIo Io;
             internal readonly AfdDevice Listener;
-            internal readonly AfdDevice Target;
+
+            // Null for AFD_WAIT_FOR_LISTEN.
+            internal readonly AfdDevice? Target;
             internal readonly ulong Output;
+            internal readonly uint OutputLength;
             internal readonly bool FixAddressAlignment;
             internal readonly uint ReceiveLength;
             internal readonly uint LocalLength;
@@ -1828,10 +1888,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             internal PendingAccept(BinaryEmulator Instance, in DeviceData Data, AfdDevice Listener, AfdDevice Target, bool FixAddressAlignment,
                 uint ReceiveLength, uint LocalLength, uint RemoteLength)
+                : this(Instance, in Data, Listener)
             {
-                Io = new WinPendingIo(in Data, Instance.CurrentThreadId, Instance.WinHelper.GetEventByHandle(Data.EventHandle, AccessMask.GiveTemp));
-                Output = Data.UserBuffer;
-                this.Listener = Listener;
                 this.Target = Target;
                 this.FixAddressAlignment = FixAddressAlignment;
                 this.ReceiveLength = ReceiveLength;
@@ -1839,25 +1897,53 @@ namespace Brovan.Core.Emulation.OS.Windows
                 this.RemoteLength = RemoteLength;
             }
 
-            internal AfdDevice WaitsOn => Accepted ? Target : Listener;
+            internal PendingAccept(BinaryEmulator Instance, in DeviceData Data, AfdDevice Listener)
+            {
+                Io = new WinPendingIo(in Data, Instance.CurrentThreadId, Instance.WinHelper.GetEventByHandle(Data.EventHandle, AccessMask.GiveTemp));
+                Output = Data.UserBuffer;
+                OutputLength = Data.OutputLength;
+                this.Listener = Listener;
+            }
+
+            internal AfdDevice WaitsOn => Accepted ? Target! : Listener;
 
             internal override WinFile File => Io.File;
 
-            internal override string WaitLabel => Accepted ? "afd-accept-receive" : "afd-accept";
+            internal override string WaitLabel => Target == null ? "afd-wait-listen" : Accepted ? "afd-accept-receive" : "afd-accept";
+        }
+
+        internal sealed class EndpointWaits
+        {
+            internal readonly List<PendingPoll> Polls = new();
+            internal readonly List<PendingTransfer> Receives = new();
+            internal readonly List<PendingTransfer> Sends = new();
+            internal readonly List<PendingAccept> Accepts = new();
+
+            internal PendingTransfer? FirstTransfer(int SkipReceives = 0, int SkipSends = 0)
+            {
+                PendingTransfer? Receive = SkipReceives < Receives.Count ? Receives[SkipReceives] : null;
+                PendingTransfer? Send = SkipSends < Sends.Count ? Sends[SkipSends] : null;
+                if (Receive == null)
+                    return Send;
+
+                return Send == null || Receive.Sequence < Send.Sequence ? Receive : Send;
+            }
         }
 
         internal sealed class PendingRequests : IDisposable
         {
             private readonly List<PendingPoll> Polls = new();
-            private readonly List<PendingTransfer> Transfers = new();
             private readonly List<PendingAccept> Accepts = new();
             private readonly List<AfdDevice> ReadyEndpoints = new();
+            private PendingTransfer? FirstTransfer;
+            private PendingTransfer? LastTransfer;
             private HostSocketWatcher? Watcher;
             private long EarliestDeadline = -1;
+            private long NextSequence;
 
-            internal int Count => Polls.Count + Transfers.Count + Accepts.Count;
+            internal bool HasPending => Polls.Count != 0 || Accepts.Count != 0 || FirstTransfer != null;
 
-            internal bool HasWork => Count != 0 || (Watcher != null && Watcher.HasReady);
+            internal bool HasWork => HasPending || (Watcher != null && Watcher.HasReady);
 
             internal NTSTATUS Pend(BinaryEmulator Instance, PendingPoll Poll)
             {
@@ -1871,6 +1957,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 for (int i = 0; i < Poll.Entries.Length; i++)
                 {
                     AfdDevice Endpoint = Poll.Entries[i].Endpoint;
+                    List<PendingPoll> Subscribed = Endpoint._waits.Polls;
+                    if (!Subscribed.Contains(Poll))
+                        Subscribed.Add(Poll);
+
                     Watcher!.WatchAlso(Endpoint, Endpoint._socket, Endpoint.WatchModes(Poll.Entries[i].Events));
                 }
 
@@ -1882,8 +1972,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!TryStartWatcher(Instance))
                     return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
 
-                Transfer.Posted = !Transfer.Send && Transfer.Buffers.Total != 0 && !HasQueuedReceive(Transfer.Endpoint);
-                Transfers.Add(Transfer);
+                EndpointWaits Waits = Transfer.Endpoint._waits;
+                Transfer.Posted = !Transfer.Send && Transfer.Buffers.Total != 0 && !HasQueuedReceive(Waits);
+                Transfer.Sequence = NextSequence++;
+                (Transfer.Send ? Waits.Sends : Waits.Receives).Add(Transfer);
+                Link(Transfer);
                 Watcher!.WatchAlso(Transfer.Endpoint, Transfer.Endpoint._socket, TransferModes(Transfer));
                 return Park(Instance, Transfer, in Transfer.Io);
             }
@@ -1893,11 +1986,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 if (!TryStartWatcher(Instance))
                 {
-                    Accept.Target._superAcceptTarget = false;
+                    if (Accept.Target != null)
+                        Accept.Target._superAcceptTarget = false;
+
                     return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
                 }
 
                 Accepts.Add(Accept);
+                Accept.Listener._waits.Accepts.Add(Accept);
                 Watcher!.WatchAlso(Accept.Listener, Accept.Listener._socket, HostSocketWatcher.WatchRead);
                 return Park(Instance, Accept, in Accept.Io);
             }
@@ -1920,23 +2016,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Transfer.Send ? HostSocketWatcher.WatchWrite : HostSocketWatcher.WatchRead;
 
             // AFD keeps the sends and the receives of one endpoint in order.
-            internal bool HasTransfer(AfdDevice Endpoint, bool Send)
-            {
-                for (int i = 0; i < Transfers.Count; i++)
-                {
-                    if (ReferenceEquals(Transfers[i].Endpoint, Endpoint) && Transfers[i].Send == Send)
-                        return true;
-                }
+            internal bool HasTransfer(AfdDevice Endpoint, bool Send) => (Send ? Endpoint._waits.Sends : Endpoint._waits.Receives).Count != 0;
 
-                return false;
-            }
+            internal bool HasAccept(AfdDevice Listener) => Listener._waits.Accepts.Count != 0;
 
-            private bool HasQueuedReceive(AfdDevice Endpoint)
+            private static bool HasQueuedReceive(EndpointWaits Waits)
             {
-                for (int i = 0; i < Transfers.Count; i++)
+                for (int i = 0; i < Waits.Receives.Count; i++)
                 {
-                    PendingTransfer Transfer = Transfers[i];
-                    if (ReferenceEquals(Transfer.Endpoint, Endpoint) && !Transfer.Send && !Transfer.Posted)
+                    if (!Waits.Receives[i].Posted)
                         return true;
                 }
 
@@ -1960,64 +2048,56 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             internal void Recheck(BinaryEmulator Instance, AfdDevice Endpoint)
             {
-                for (int i = 0; i < Polls.Count; i++)
+                EndpointWaits Waits = Endpoint._waits;
+                for (int i = 0; i < Waits.Polls.Count;)
                 {
-                    PendingPoll Poll = Polls[i];
-                    if (!Poll.Names(Endpoint))
-                        continue;
-
+                    PendingPoll Poll = Waits.Polls[i];
                     if (!Instance.WinHelper.IsPendingIoLive(in Poll.Io))
-                    {
-                        Polls.RemoveAt(i--);
-                        End(Instance, Poll, NTSTATUS.STATUS_CANCELLED);
-                        continue;
-                    }
-
-                    if (TryEndReady(Instance, Poll, null))
-                        Polls.RemoveAt(i--);
+                        Finish(Instance, Poll, NTSTATUS.STATUS_CANCELLED);
+                    else if (!TryEndReady(Instance, Poll, null))
+                        i++;
                 }
 
-                bool ReceiveWaits = false;
-                bool SendWaits = false;
-                for (int i = 0; i < Transfers.Count; i++)
-                {
-                    PendingTransfer Transfer = Transfers[i];
-                    if (!ReferenceEquals(Transfer.Endpoint, Endpoint) || (Transfer.Send ? SendWaits : ReceiveWaits))
-                        continue;
-
-                    if (TryFinish(Instance, Transfer))
-                    {
-                        Transfers.RemoveAt(i--);
-                        continue;
-                    }
-
-                    if (Transfer.Send)
-                        SendWaits = true;
-                    else
-                        ReceiveWaits = true;
-                }
+                FinishInOrder(Instance, Waits.Receives);
+                FinishInOrder(Instance, Waits.Sends);
 
                 // Accepts on one listener complete in issue order.
                 bool AcceptWaits = false;
-                for (int i = 0; i < Accepts.Count; i++)
+                for (int i = 0; i < Waits.Accepts.Count;)
                 {
-                    PendingAccept Accept = Accepts[i];
-                    if (!ReferenceEquals(Accept.WaitsOn, Endpoint) || (AcceptWaits && !Accept.Accepted))
-                        continue;
-
-                    if (TryFinish(Instance, Accept))
+                    PendingAccept Accept = Waits.Accepts[i];
+                    if (AcceptWaits && !Accept.Accepted)
                     {
-                        Accepts.RemoveAt(i--);
+                        i++;
                         continue;
                     }
 
-                    if (Accept.Accepted)
+                    bool WasAccepted = Accept.Accepted;
+                    if (TryFinish(Instance, Accept))
+                        continue;
+
+                    if (Accept.Accepted && !WasAccepted)
+                    {
+                        Waits.Accepts.RemoveAt(i);
+                        Accept.Target!._waits.Accepts.Add(Accept);
                         Rearm(Accept.Target);
-                    else
+                        continue;
+                    }
+
+                    if (!Accept.Accepted)
                         AcceptWaits = true;
+
+                    i++;
                 }
 
                 Rearm(Endpoint);
+            }
+
+            private void FinishInOrder(BinaryEmulator Instance, List<PendingTransfer> Queue)
+            {
+                while (Queue.Count != 0 && TryFinish(Instance, Queue[0]))
+                {
+                }
             }
 
             private void Rearm(AfdDevice Endpoint)
@@ -2026,9 +2106,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return;
 
                 byte Modes = 0;
-                for (int i = 0; i < Polls.Count; i++)
+                EndpointWaits Waits = Endpoint._waits;
+                for (int i = 0; i < Waits.Polls.Count; i++)
                 {
-                    PollEntry[] Entries = Polls[i].Entries;
+                    PollEntry[] Entries = Waits.Polls[i].Entries;
                     for (int e = 0; e < Entries.Length; e++)
                     {
                         if (ReferenceEquals(Entries[e].Endpoint, Endpoint))
@@ -2036,30 +2117,34 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
                 }
 
-                for (int i = 0; i < Transfers.Count; i++)
-                {
-                    if (ReferenceEquals(Transfers[i].Endpoint, Endpoint))
-                        Modes |= TransferModes(Transfers[i]);
-                }
+                if (Waits.Receives.Count != 0 || Waits.Accepts.Count != 0)
+                    Modes |= HostSocketWatcher.WatchRead;
 
-                for (int i = 0; i < Accepts.Count; i++)
-                {
-                    if (ReferenceEquals(Accepts[i].WaitsOn, Endpoint))
-                        Modes |= HostSocketWatcher.WatchRead;
-                }
+                if (Waits.Sends.Count != 0)
+                    Modes |= HostSocketWatcher.WatchWrite;
 
                 Watcher.Watch(Endpoint, Endpoint._socket, Modes);
             }
 
-            private static bool TryFinish(BinaryEmulator Instance, PendingAccept Accept)
+            private bool TryFinish(BinaryEmulator Instance, PendingAccept Accept)
             {
                 if (!Instance.WinHelper.IsPendingIoLive(in Accept.Io))
                 {
-                    End(Instance, Accept, NTSTATUS.STATUS_CANCELLED, 0);
+                    Retire(Instance, Accept, NTSTATUS.STATUS_CANCELLED, 0);
                     return true;
                 }
 
                 NTSTATUS Status;
+                ulong Received;
+                if (Accept.Target == null)
+                {
+                    if (!Accept.Listener.TryTakeListen(Instance, Accept, out Status, out Received))
+                        return false;
+
+                    Retire(Instance, Accept, Status, Received);
+                    return true;
+                }
+
                 if (!Accept.Accepted)
                 {
                     if (!Accept.Listener.TryTakeConnection(Instance, Accept, out Status))
@@ -2067,14 +2152,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     if (Status != NTSTATUS.STATUS_SUCCESS || Accept.ReceiveLength == 0)
                     {
-                        End(Instance, Accept, Status, 0);
+                        Retire(Instance, Accept, Status, 0);
                         return true;
                     }
 
                     Accept.Accepted = true;
                 }
 
-                ulong Received;
                 try
                 {
                     if (!Accept.Target.TryReceive(Instance, new TransferBuffers(Accept.Output, Accept.ReceiveLength), out Status, out Received))
@@ -2087,15 +2171,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Received = 0;
                 }
 
-                End(Instance, Accept, Status, Received);
+                Retire(Instance, Accept, Status, Received);
                 return true;
             }
 
-            private static bool TryFinish(BinaryEmulator Instance, PendingTransfer Transfer)
+            private bool TryFinish(BinaryEmulator Instance, PendingTransfer Transfer)
             {
                 if (!Instance.WinHelper.IsPendingIoLive(in Transfer.Io))
                 {
-                    End(Instance, Transfer, NTSTATUS.STATUS_CANCELLED, 0);
+                    Retire(Instance, Transfer, NTSTATUS.STATUS_CANCELLED, 0);
                     return true;
                 }
 
@@ -2122,7 +2206,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Information = 0;
                 }
 
-                End(Instance, Transfer, Status, Information);
+                Retire(Instance, Transfer, Status, Information);
                 return true;
             }
 
@@ -2130,18 +2214,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 long Tick = Instance.EmulatedTickCount64;
                 long Next = -1;
-                for (int i = 0; i < Polls.Count; i++)
+                for (int i = 0; i < Polls.Count;)
                 {
                     PendingPoll Poll = Polls[i];
                     if (BinaryEmulator.IsDeadlineExpired(Poll.Deadline, Tick))
                     {
-                        Polls.RemoveAt(i--);
-                        End(Instance, Poll, NTSTATUS.STATUS_TIMEOUT);
+                        Finish(Instance, Poll, NTSTATUS.STATUS_TIMEOUT);
                         continue;
                     }
 
                     if (Poll.Deadline >= 0 && (Next < 0 || Poll.Deadline < Next))
                         Next = Poll.Deadline;
+
+                    i++;
                 }
 
                 EarliestDeadline = Next;
@@ -2149,14 +2234,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             internal void ReplaceExclusive(BinaryEmulator Instance, AfdDevice Endpoint)
             {
-                for (int i = 0; i < Polls.Count; i++)
+                List<PendingPoll> Subscribed = Endpoint._waits.Polls;
+                for (int i = 0; i < Subscribed.Count; i++)
                 {
-                    PendingPoll Replaced = Polls[i];
-                    if (!Replaced.Exclusive || !Replaced.Names(Endpoint))
+                    PendingPoll Replaced = Subscribed[i];
+                    if (!Replaced.Exclusive)
                         continue;
 
-                    Polls.RemoveAt(i);
-                    End(Instance, Replaced, NTSTATUS.STATUS_SUCCESS);
+                    Finish(Instance, Replaced, NTSTATUS.STATUS_SUCCESS);
                     return;
                 }
             }
@@ -2165,36 +2250,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             internal void EndpointClosed(BinaryEmulator Instance, AfdDevice Endpoint)
             {
                 bool Datagram = Endpoint._socket?.SocketType == SocketType.Dgram;
-                for (int i = 0; i < Polls.Count; i++)
+                EndpointWaits Waits = Endpoint._waits;
+                while (Waits.Polls.Count != 0)
                 {
-                    PendingPoll Poll = Polls[i];
-                    if (!Poll.Names(Endpoint))
-                        continue;
-
-                    Polls.RemoveAt(i--);
-                    TryEndReady(Instance, Poll, Endpoint);
+                    PendingPoll Poll = Waits.Polls[0];
+                    if (!TryEndReady(Instance, Poll, Endpoint))
+                        Forget(Poll);
                 }
 
-                for (int i = 0; i < Transfers.Count; i++)
+                while (Waits.FirstTransfer() is PendingTransfer Transfer)
                 {
-                    PendingTransfer Transfer = Transfers[i];
-                    if (!ReferenceEquals(Transfer.Endpoint, Endpoint))
-                        continue;
-
-                    Transfers.RemoveAt(i--);
                     NTSTATUS Status = Datagram ? NTSTATUS.STATUS_CANCELLED :
                         Transfer.Posted ? NTSTATUS.STATUS_CONNECTION_ABORTED : NTSTATUS.STATUS_LOCAL_DISCONNECT;
-                    End(Instance, Transfer, Status, 0);
+                    Retire(Instance, Transfer, Status, 0);
                 }
 
-                for (int i = 0; i < Accepts.Count; i++)
+                for (int i = 0; i < Accepts.Count;)
                 {
                     PendingAccept Accept = Accepts[i];
-                    if (!ReferenceEquals(Accept.WaitsOn, Endpoint) && !ReferenceEquals(Accept.Target, Endpoint))
-                        continue;
-
-                    Accepts.RemoveAt(i--);
-                    End(Instance, Accept, NTSTATUS.STATUS_CANCELLED, 0);
+                    if (ReferenceEquals(Accept.WaitsOn, Endpoint) || ReferenceEquals(Accept.Target, Endpoint))
+                        Retire(Instance, Accept, NTSTATUS.STATUS_CANCELLED, 0);
+                    else
+                        i++;
                 }
 
                 Endpoint.ReleaseSocket(Instance);
@@ -2211,37 +2288,54 @@ namespace Brovan.Core.Emulation.OS.Windows
             internal int Cancel(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, int ThreadId)
             {
                 int Cancelled = 0;
-                for (int i = 0; i < Polls.Count; i++)
+                for (int i = 0; i < Polls.Count;)
                 {
                     PendingPoll Poll = Polls[i];
-                    if (!Matches(in Poll.Io, File, IoStatusBlock, ThreadId))
-                        continue;
-
-                    Polls.RemoveAt(i--);
-                    End(Instance, Poll, NTSTATUS.STATUS_CANCELLED);
-                    Cancelled++;
+                    if (Matches(in Poll.Io, File, IoStatusBlock, ThreadId))
+                    {
+                        Finish(Instance, Poll, NTSTATUS.STATUS_CANCELLED);
+                        Cancelled++;
+                    }
+                    else
+                    {
+                        i++;
+                    }
                 }
 
-                for (int i = 0; i < Transfers.Count; i++)
+                if (File.Handler?.Target is AfdDevice Endpoint)
                 {
-                    PendingTransfer Transfer = Transfers[i];
-                    if (!Matches(in Transfer.Io, File, IoStatusBlock, ThreadId))
-                        continue;
-
-                    Transfers.RemoveAt(i--);
-                    End(Instance, Transfer, NTSTATUS.STATUS_CANCELLED, 0);
-                    Cancelled++;
+                    int Receive = 0;
+                    int Send = 0;
+                    while (Endpoint._waits.FirstTransfer(Receive, Send) is PendingTransfer Transfer)
+                    {
+                        if (Matches(in Transfer.Io, File, IoStatusBlock, ThreadId))
+                        {
+                            Retire(Instance, Transfer, NTSTATUS.STATUS_CANCELLED, 0);
+                            Cancelled++;
+                        }
+                        else if (Transfer.Send)
+                        {
+                            Send++;
+                        }
+                        else
+                        {
+                            Receive++;
+                        }
+                    }
                 }
 
-                for (int i = 0; i < Accepts.Count; i++)
+                for (int i = 0; i < Accepts.Count;)
                 {
                     PendingAccept Accept = Accepts[i];
-                    if (!Matches(in Accept.Io, File, IoStatusBlock, ThreadId))
-                        continue;
-
-                    Accepts.RemoveAt(i--);
-                    End(Instance, Accept, NTSTATUS.STATUS_CANCELLED, 0);
-                    Cancelled++;
+                    if (Matches(in Accept.Io, File, IoStatusBlock, ThreadId))
+                    {
+                        Retire(Instance, Accept, NTSTATUS.STATUS_CANCELLED, 0);
+                        Cancelled++;
+                    }
+                    else
+                    {
+                        i++;
+                    }
                 }
 
                 return Cancelled;
@@ -2252,40 +2346,38 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             internal void CancelThread(BinaryEmulator Instance, int ThreadId)
             {
-                for (int i = 0; i < Polls.Count; i++)
+                for (int i = 0; i < Polls.Count;)
                 {
                     PendingPoll Poll = Polls[i];
-                    if (Poll.Io.ThreadId != ThreadId || WinSysHelper.CompletesToPort(in Poll.Io))
-                        continue;
-
-                    Polls.RemoveAt(i--);
-                    End(Instance, Poll, NTSTATUS.STATUS_CANCELLED);
+                    if (Poll.Io.ThreadId == ThreadId && !WinSysHelper.CompletesToPort(in Poll.Io))
+                        Finish(Instance, Poll, NTSTATUS.STATUS_CANCELLED);
+                    else
+                        i++;
                 }
 
-                for (int i = 0; i < Transfers.Count; i++)
+                PendingTransfer? Transfer = FirstTransfer;
+                while (Transfer != null)
                 {
-                    PendingTransfer Transfer = Transfers[i];
-                    if (Transfer.Io.ThreadId != ThreadId || WinSysHelper.CompletesToPort(in Transfer.Io))
-                        continue;
+                    PendingTransfer? Next = Transfer.Next;
+                    if (Transfer.Io.ThreadId == ThreadId && !WinSysHelper.CompletesToPort(in Transfer.Io))
+                        Retire(Instance, Transfer, NTSTATUS.STATUS_CANCELLED, 0);
 
-                    Transfers.RemoveAt(i--);
-                    End(Instance, Transfer, NTSTATUS.STATUS_CANCELLED, 0);
+                    Transfer = Next;
                 }
 
-                for (int i = 0; i < Accepts.Count; i++)
+                for (int i = 0; i < Accepts.Count;)
                 {
                     PendingAccept Accept = Accepts[i];
-                    if (Accept.Io.ThreadId != ThreadId || WinSysHelper.CompletesToPort(in Accept.Io))
-                        continue;
-
-                    Accepts.RemoveAt(i--);
-                    End(Instance, Accept, NTSTATUS.STATUS_CANCELLED, 0);
+                    if (Accept.Io.ThreadId == ThreadId && !WinSysHelper.CompletesToPort(in Accept.Io))
+                        Retire(Instance, Accept, NTSTATUS.STATUS_CANCELLED, 0);
+                    else
+                        i++;
                 }
             }
 
             public void Dispose() => Watcher?.Dispose();
 
-            private static bool TryEndReady(BinaryEmulator Instance, PendingPoll Poll, AfdDevice? Closing)
+            private bool TryEndReady(BinaryEmulator Instance, PendingPoll Poll, AfdDevice? Closing)
             {
                 int PointerSize = Instance.WinHelper.PointerSize;
                 Span<byte> Output = Instance.WinHelper.Shared.GetSpan((ulong)PollOutputBytes(Poll.Entries.Length, PointerSize));
@@ -2293,12 +2385,75 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Ready == 0)
                     return false;
 
-                End(Instance, Poll, NTSTATUS.STATUS_SUCCESS, Output, Ready);
+                Finish(Instance, Poll, NTSTATUS.STATUS_SUCCESS, Output, Ready);
                 return true;
             }
 
-            private static void End(BinaryEmulator Instance, PendingPoll Poll, NTSTATUS Status) =>
-                End(Instance, Poll, Status, Instance.WinHelper.Shared.GetSpan(PollHeaderSize), 0);
+            private void Finish(BinaryEmulator Instance, PendingPoll Poll, NTSTATUS Status) =>
+                Finish(Instance, Poll, Status, Instance.WinHelper.Shared.GetSpan(PollHeaderSize), 0);
+
+            private void Finish(BinaryEmulator Instance, PendingPoll Poll, NTSTATUS Status, Span<byte> Output, int Ready)
+            {
+                Forget(Poll);
+                End(Instance, Poll, Status, Output, Ready);
+            }
+
+            private void Forget(PendingPoll Poll)
+            {
+                if (!Polls.Remove(Poll))
+                    return;
+
+                for (int i = 0; i < Poll.Entries.Length; i++)
+                    Poll.Entries[i].Endpoint._waits.Polls.Remove(Poll);
+            }
+
+            private void Retire(BinaryEmulator Instance, PendingTransfer Transfer, NTSTATUS Status, ulong Information)
+            {
+                EndpointWaits Waits = Transfer.Endpoint._waits;
+                if ((Transfer.Send ? Waits.Sends : Waits.Receives).Remove(Transfer))
+                    Unlink(Transfer);
+
+                End(Instance, Transfer, Status, Information);
+            }
+
+            private void Retire(BinaryEmulator Instance, PendingAccept Accept, NTSTATUS Status, ulong Information)
+            {
+                if (Accepts.Remove(Accept))
+                {
+                    Accept.Listener._waits.Accepts.Remove(Accept);
+                    Accept.Target?._waits.Accepts.Remove(Accept);
+                }
+
+                End(Instance, Accept, Status, Information);
+            }
+
+            private void Link(PendingTransfer Transfer)
+            {
+                Transfer.Previous = LastTransfer;
+                Transfer.Next = null;
+                if (LastTransfer != null)
+                    LastTransfer.Next = Transfer;
+                else
+                    FirstTransfer = Transfer;
+
+                LastTransfer = Transfer;
+            }
+
+            private void Unlink(PendingTransfer Transfer)
+            {
+                if (Transfer.Previous != null)
+                    Transfer.Previous.Next = Transfer.Next;
+                else
+                    FirstTransfer = Transfer.Next;
+
+                if (Transfer.Next != null)
+                    Transfer.Next.Previous = Transfer.Previous;
+                else
+                    LastTransfer = Transfer.Previous;
+
+                Transfer.Previous = null;
+                Transfer.Next = null;
+            }
 
             // AFD sets Information on an error too, but copies no output.
             private static void End(BinaryEmulator Instance, PendingPoll Poll, NTSTATUS Status, Span<byte> Output, int Ready)
@@ -2337,11 +2492,124 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (((uint)Status >> 30) == 3)
                     Information = 0;
 
-                Accept.Target._superAcceptTarget = false;
+                if (Accept.Target != null)
+                    Accept.Target._superAcceptTarget = false;
+
                 Accept.Status = Status;
                 Accept.Completed = true;
                 Instance.WinHelper.CompletePendingIo(in Accept.Io, Status, Information);
                 Instance.WakeSignal.Bump();
+            }
+        }
+
+        // NT: data, end of stream and an abort all report as receive readiness.
+        private bool TryArmRead(HostSocketWatcher Watcher, BrovanSocket Socket)
+        {
+            if (_selectReads || IsListening || Socket.SocketType != SocketType.Stream || !Socket.Connected)
+                return false;
+
+            if (_readArm == null || !ReferenceEquals(_readArm.Socket, Socket))
+            {
+                _readArm?.Release();
+                _readArm = new ReadArm(Watcher, this, Socket);
+            }
+
+            if (!_readArm.TryStart(out bool CompletedAtOnce))
+            {
+                _readArm = null;
+                _selectReads = true;
+                return false;
+            }
+
+            if (CompletedAtOnce)
+            {
+                // CheckPollEvents asks select. Unless select agrees, this wait would end again on every pass.
+                bool Readable;
+                try
+                {
+                    Readable = Socket.Poll(0, SelectMode.SelectRead);
+                }
+                catch (Exception Ex) when (Ex is SocketException or ObjectDisposedException)
+                {
+                    Readable = false;
+                }
+
+                if (!Readable)
+                {
+                    _readArm.Release();
+                    _readArm = null;
+                    _selectReads = true;
+                    return false;
+                }
+
+                Watcher.Publish(this);
+            }
+
+            return true;
+        }
+
+        // A zero-byte receive ends on data, end of stream or an error and leaves the data queued, so the
+        // connection takes no Select slot.
+        private sealed class ReadArm
+        {
+            private const int Idle = 0;
+            private const int InFlight = 1;
+            private const int Released = 2;
+
+            private readonly HostSocketWatcher Watcher;
+            private readonly AfdDevice Endpoint;
+            internal readonly BrovanSocket Socket;
+            private readonly SocketAsyncEventArgs Args = new();
+            private int State;
+
+            internal ReadArm(HostSocketWatcher Watcher, AfdDevice Endpoint, BrovanSocket Socket)
+            {
+                this.Watcher = Watcher;
+                this.Endpoint = Endpoint;
+                this.Socket = Socket;
+                Args.SetBuffer(Array.Empty<byte>(), 0, 0);
+                Args.UserToken = this;
+                Args.Completed += OnCompleted;
+            }
+
+            internal bool TryStart(out bool CompletedAtOnce)
+            {
+                CompletedAtOnce = false;
+                if (Interlocked.CompareExchange(ref State, InFlight, Idle) != Idle)
+                    return true;
+
+                try
+                {
+                    if (Socket.ReceiveAsync(Args))
+                        return true;
+                }
+                catch (Exception Ex)
+                {
+                    Utils.LogError($"AFD host receive wait failed: {Ex.Message}");
+                    Volatile.Write(ref State, Released);
+                    Args.Dispose();
+                    return false;
+                }
+
+                Volatile.Write(ref State, Idle);
+                CompletedAtOnce = true;
+                return true;
+            }
+
+            private static void OnCompleted(object? Sender, SocketAsyncEventArgs Completed)
+            {
+                ReadArm Arm = (ReadArm)Completed.UserToken!;
+                if (Interlocked.CompareExchange(ref Arm.State, Idle, InFlight) == InFlight)
+                    Arm.Watcher.Publish(Arm.Endpoint);
+                else
+                    Arm.Args.Dispose();
+            }
+
+            // A wait in flight ends when its socket is disposed and frees Args then.
+            internal void Release()
+            {
+                if (Interlocked.Exchange(ref State, Released) == Idle)
+                    Args.Dispose();
             }
         }
 
@@ -2352,6 +2620,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             internal const byte WatchWrite = 2;
             internal const byte WatchError = 4;
 
+            // .NET refuses a longer list. The wake socket takes one slot of the read list.
+            private const int MaxSelectSockets = 65535;
+
             private readonly object Gate = new();
             private readonly WakeSignal Wake;
             private readonly Dictionary<AfdDevice, (BrovanSocket Socket, byte Modes)> Armed = new();
@@ -2361,6 +2632,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             private volatile bool ReadyPending;
             private bool InSelect;
             private bool Stopping;
+            private bool OverflowReported;
             private volatile bool StartFailed;
             private Socket? WakeReceiver;
             private Socket? WakeSender;
@@ -2370,6 +2642,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             private readonly List<Socket> WriteList = new();
             private readonly List<Socket> ErrorList = new();
             private readonly List<BrovanSocket> Closing = new();
+            private readonly List<AfdDevice> Overflow = new();
             private readonly byte[] WakeBytes = new byte[64];
 
             internal HostSocketWatcher(WakeSignal Wake) => this.Wake = Wake;
@@ -2414,6 +2687,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             private void Arm(AfdDevice Endpoint, BrovanSocket? Socket, byte Modes, bool Merge)
             {
+                bool ReadArmed = Socket != null && (Modes & WatchRead) != 0 && Endpoint.TryArmRead(this, Socket);
+
                 bool Signal;
                 lock (Gate)
                 {
@@ -2421,9 +2696,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Merge && Known)
                         Modes |= Current.Modes;
 
+                    // The read arm also reports an abort, which select does not.
+                    if (ReadArmed)
+                        Modes &= unchecked((byte)~(WatchRead | WatchError));
+
                     if (Socket == null || Modes == 0)
                     {
-                        if (!Merge)
+                        if (!Merge || ReadArmed)
                             Armed.Remove(Endpoint);
 
                         return;
@@ -2438,6 +2717,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Signal)
                     SignalWorker();
+            }
+
+            internal void Publish(AfdDevice Endpoint)
+            {
+                lock (Gate)
+                {
+                    if (Stopping)
+                        return;
+
+                    Ready.Add(Endpoint);
+                    ReadyPending = true;
+                }
+
+                Wake.Bump();
             }
 
             internal void Release(AfdDevice Endpoint, BrovanSocket Socket)
@@ -2475,6 +2768,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 while (true)
                 {
+                    bool Overflowed;
                     lock (Gate)
                     {
                         if (Stopping)
@@ -2484,9 +2778,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                         WriteList.Clear();
                         ErrorList.Clear();
                         Selecting.Clear();
+                        Overflow.Clear();
                         ReadList.Add(WakeReceiver!);
                         foreach (KeyValuePair<AfdDevice, (BrovanSocket Socket, byte Modes)> Watched in Armed)
                         {
+                            if (Selecting.Count == MaxSelectSockets)
+                            {
+                                Overflow.Add(Watched.Key);
+                                continue;
+                            }
+
                             Socket Host = Watched.Value.Socket.Selectable;
                             Selecting[Host] = Watched.Key;
                             if ((Watched.Value.Modes & WatchRead) != 0)
@@ -2497,8 +2798,28 @@ namespace Brovan.Core.Emulation.OS.Windows
                                 ErrorList.Add(Host);
                         }
 
+                        Overflowed = Overflow.Count != 0;
+                        if (Overflowed)
+                        {
+                            for (int i = 0; i < Overflow.Count; i++)
+                            {
+                                Armed.Remove(Overflow[i]);
+                                Ready.Add(Overflow[i]);
+                            }
+
+                            ReadyPending = true;
+                            if (!OverflowReported)
+                            {
+                                OverflowReported = true;
+                                Utils.LogError($"AFD socket watcher: more than {MaxSelectSockets} sockets wait in select, the rest are polled.");
+                            }
+                        }
+
                         InSelect = true;
                     }
+
+                    if (Overflowed)
+                        Wake.Bump();
 
                     bool Failed = false;
                     try

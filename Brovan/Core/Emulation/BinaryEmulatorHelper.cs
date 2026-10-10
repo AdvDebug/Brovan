@@ -573,6 +573,12 @@ namespace Brovan.Core.Emulation
             return _socket.Receive(data, flags, out error);
         }
 
+        public bool ReceiveAsync(SocketAsyncEventArgs args)
+        {
+            EnsureCurrentRemoteAllowed();
+            return _socket.ReceiveAsync(args);
+        }
+
         public int ReceiveFrom(byte[] buffer, int offset, int size, SocketFlags flags, ref EndPoint remoteEP)
         {
             int Received = _socket.ReceiveFrom(buffer, offset, size, flags, ref remoteEP);

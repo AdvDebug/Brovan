@@ -61,6 +61,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 if (TargetThread.State == EmulatedThreadState.Suspended)
                 {
+                    Instance.UnfileWait(TargetThread);
                     TargetThread.State = TargetThread.WaitActive ? EmulatedThreadState.Waiting : EmulatedThreadState.Ready;
                     Instance.WakeSignal.Bump();
                 }
