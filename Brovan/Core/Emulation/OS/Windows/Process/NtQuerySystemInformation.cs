@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Text;
@@ -73,10 +74,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                             // NT fills a shorter buffer with part of the record.
                             if (SystemInformationLength > FullSize)
-                            {
-                                NTSTATUS LongStatus = SetReturnLength(Instance, ReturnLengthPtr, FullSize);
-                                return LongStatus != NTSTATUS.STATUS_SUCCESS ? LongStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
+                                return LengthMismatch(Instance, ReturnLengthPtr, FullSize);
 
                             long CurrentTime = Instance.GetEmulatedSystemTimeFileTimeUtc();
                             long TimeZoneBias = CurrentTimeZoneBias(Instance, out uint TimeZoneId);
@@ -143,10 +141,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         {
                             // SYSTEM_NUMA_INFORMATION: HighestNodeNumber, then one GROUP_AFFINITY per node at 8.
                             if (SystemInformationLength < sizeof(uint))
-                            {
-                                NTSTATUS ShortStatus = SetReturnLength(Instance, ReturnLengthPtr, sizeof(uint));
-                                return ShortStatus != NTSTATUS.STATUS_SUCCESS ? ShortStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
+                                return LengthMismatch(Instance, ReturnLengthPtr, sizeof(uint));
 
                             if (!Instance._emulator.WriteMemory(SystemInformationPtr, 0u))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -173,10 +168,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             uint RequiredLength = 8;
 
                             if (SystemInformationLength < RequiredLength)
-                            {
-                                NTSTATUS ShortStatus = SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
-                                return ShortStatus != NTSTATUS.STATUS_SUCCESS ? ShortStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
+                                return LengthMismatch(Instance, ReturnLengthPtr, RequiredLength);
 
                             uint CodeIntegrityOptions = 0x401;
 
@@ -192,10 +184,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             const uint RequiredLength = 0x20;
 
                             if (SystemInformationLength != RequiredLength)
-                            {
-                                NTSTATUS ShortStatus = SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
-                                return ShortStatus != NTSTATUS.STATUS_SUCCESS ? ShortStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
+                                return LengthMismatch(Instance, ReturnLengthPtr, RequiredLength);
 
                             if (!Instance.IsRegionMapped(SystemInformationPtr, RequiredLength))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -213,10 +202,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             uint RequiredLength = 2;
 
                             if (SystemInformationLength < RequiredLength)
-                            {
-                                NTSTATUS ShortStatus = SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
-                                return ShortStatus != NTSTATUS.STATUS_SUCCESS ? ShortStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
+                                return LengthMismatch(Instance, ReturnLengthPtr, RequiredLength);
 
                             // KernelDebuggerEnabled, KernelDebuggerNotPresent.
                             if (!Instance.WinHelper.WriteByte(SystemInformationPtr + 0, 0) || !Instance.WinHelper.WriteByte(SystemInformationPtr + 1, 1))
@@ -230,12 +216,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             uint Required = Instance._binary.Architecture == BinaryArchitecture.x64 ? 8u : 4u;
 
                             if (SystemInformationLength < Required)
-                            {
-                                if (ReturnLengthPtr != 0 && Instance.IsRegionMapped(ReturnLengthPtr, 4))
-                                    Instance._emulator.WriteMemory(ReturnLengthPtr, Required);
-
-                                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
+                                return LengthMismatch(Instance, ReturnLengthPtr, Required);
 
                             if (Instance._binary.Architecture == BinaryArchitecture.x64)
                             {
@@ -251,10 +232,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                             }
 
-                            if (ReturnLengthPtr != 0 && Instance.IsRegionMapped(ReturnLengthPtr, 4))
-                                Instance._emulator.WriteMemory(ReturnLengthPtr, Required);
-
-                            return NTSTATUS.STATUS_SUCCESS;
+                            return SetReturnLength(Instance, ReturnLengthPtr, Required);
                         }
 
                     case SYSTEM_INFORMATION_CLASS.SystemSecureBootInformation:
@@ -262,10 +240,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             uint RequiredLength = 2;
 
                             if (SystemInformationLength < RequiredLength)
-                            {
-                                NTSTATUS ShortStatus = SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
-                                return ShortStatus != NTSTATUS.STATUS_SUCCESS ? ShortStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
+                                return LengthMismatch(Instance, ReturnLengthPtr, RequiredLength);
 
                             // SecureBootEnabled, SecureBootCapable.
                             if (!Instance.WinHelper.WriteByte(SystemInformationPtr + 0, 1) || !Instance.WinHelper.WriteByte(SystemInformationPtr + 1, 1))
@@ -306,10 +281,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             const uint RequiredLength = 0x0C;
 
                             if (SystemInformationLength < RequiredLength)
-                            {
-                                NTSTATUS ShortStatus = SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
-                                return ShortStatus != NTSTATUS.STATUS_SUCCESS ? ShortStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
+                                return LengthMismatch(Instance, ReturnLengthPtr, RequiredLength);
 
                             ushort ProcessorArchitecture = Instance._binary.Architecture == BinaryArchitecture.x64 ? (ushort)9 : (ushort)0;
                             ushort ProcessorLevel = 6;
@@ -344,6 +316,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                             return Instance.WriteMemory(SystemInformationPtr, Performance) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
                         }
 
+                    case SYSTEM_INFORMATION_CLASS.SystemPoolTagInformation:
+                        return QueryPoolTags(Instance, SystemInformationPtr, (uint)SystemInformationLength, ReturnLengthPtr);
+
                     case SYSTEM_INFORMATION_CLASS.SystemHandleInformation:
                     case SYSTEM_INFORMATION_CLASS.SystemExtendedHandleInformation:
                         return QueryHandles(Instance, SystemInformationClass == SYSTEM_INFORMATION_CLASS.SystemExtendedHandleInformation, SystemInformationPtr, (uint)SystemInformationLength, ReturnLengthPtr);
@@ -364,10 +339,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             const uint RequiredLength = 0x38;
 
                             if (SystemInformationLength < RequiredLength)
-                            {
-                                NTSTATUS ShortStatus = SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
-                                return ShortStatus != NTSTATUS.STATUS_SUCCESS ? ShortStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
+                                return LengthMismatch(Instance, ReturnLengthPtr, RequiredLength);
 
                             GetMemoryFigures(out ulong TotalBytes, out ulong AvailableBytes, out ulong CommittedBytes, out ulong CommitLimitBytes);
 
@@ -393,10 +365,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             ulong PointerFields = SystemInformationPtr + (PointerSize == 8 ? 0x20u : 0x1Cu);
                             uint RequiredLength = PointerSize == 8 ? 0x40u : 0x2Cu;
                             if (SystemInformationLength < RequiredLength)
-                            {
-                                NTSTATUS ShortStatus = SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
-                                return ShortStatus != NTSTATUS.STATUS_SUCCESS ? ShortStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-                            }
+                                return LengthMismatch(Instance, ReturnLengthPtr, RequiredLength);
 
                             uint NumberOfPhysicalPages = Settings.MemoryBudget.GuestPhysicalPages;
                             uint LowestPhysicalPageNumber = 0x00000001;
@@ -427,6 +396,121 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance.WinUnimplemented;
         }
 
+        private const uint PoolTagHeader = 8;
+        private const uint PoolTagEntry = 40;
+        private const uint PoolTagMinimum = PoolTagHeader + PoolTagEntry;
+        private const uint PoolTagHeader32 = 4;
+        private const uint PoolTagEntry32 = 28;
+
+        private static uint PoolTagQueryBytes = 0x40000;
+
+        // Pool tags are kernel state, so the guest sees the host's own table.
+        private static NTSTATUS QueryPoolTags(BinaryEmulator Instance, ulong Buffer, uint Length, ulong ReturnLengthPtr)
+        {
+            if (!GeneralHelper.IsWindows)
+                return Instance.WinUnimplemented;
+
+            // WOW64 asks NT with twice the caller's length and reports NT's required length minus the caller's length
+            // (whNtQuerySystemInformation_SystemPoolTagInformation).
+            bool Wow64 = Instance.WinHelper.PointerSize != 8;
+            if ((Wow64 ? unchecked(Length * 2) : Length) < PoolTagMinimum)
+                return LengthMismatch(Instance, ReturnLengthPtr, Wow64 ? unchecked(PoolTagMinimum - Length) : PoolTagMinimum);
+
+            NTSTATUS Status = ReadHostPoolTags(Instance, Buffer, Wow64 ? 0 : Length, out byte[] Host, out uint Count);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            try
+            {
+                uint Required = PoolTagHeader + Count * PoolTagEntry;
+                return Wow64
+                    ? WritePoolTags32(Instance, Host, Count, Required, Buffer, Length, ReturnLengthPtr)
+                    : WritePoolTags(Instance, Host, Count, Required, Buffer, Length, ReturnLengthPtr);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(Host);
+            }
+        }
+
+        private static unsafe NTSTATUS ReadHostPoolTags(BinaryEmulator Instance, ulong Buffer, uint GuestBytes, out byte[] Table, out uint Count)
+        {
+            Table = null;
+            Count = 0;
+            uint Size = PoolTagQueryBytes;
+            for (int Attempt = 0; Attempt < 4; Attempt++)
+            {
+                byte[] Rented = ArrayPool<byte>.Shared.Rent((int)Size);
+
+                // NT leaves the padding untouched, so the guest's own bytes have to stay there.
+                if (GuestBytes != 0 && !Instance.ReadMemory(Buffer, Rented.AsSpan(0, (int)Math.Min(GuestBytes, Size))))
+                {
+                    ArrayPool<byte>.Shared.Return(Rented);
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                }
+
+                int HostStatus;
+                uint HostRequired = 0;
+                fixed (byte* HostBuffer = Rented)
+                    HostStatus = NativeWinImports.NtQuerySystemInformation((int)SYSTEM_INFORMATION_CLASS.SystemPoolTagInformation, HostBuffer, Size, &HostRequired);
+
+                if (HostStatus >= 0 && HostRequired >= PoolTagHeader && HostRequired <= Size)
+                {
+                    PoolTagQueryBytes = Size;
+                    Table = Rented;
+                    Count = Math.Min(BinaryPrimitives.ReadUInt32LittleEndian(Rented), (HostRequired - PoolTagHeader) / PoolTagEntry);
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
+                ArrayPool<byte>.Shared.Return(Rented);
+                if ((NTSTATUS)HostStatus != NTSTATUS.STATUS_INFO_LENGTH_MISMATCH || HostRequired > Settings.MemoryBudget.PooledIoBytes - 0x4000)
+                    break;
+                Size = HostRequired + 0x4000;
+            }
+            return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        // NT writes the count and every whole entry that fits, even when it returns a length mismatch.
+        private static NTSTATUS WritePoolTags(BinaryEmulator Instance, byte[] Host, uint Count, uint Required, ulong Buffer, uint Length, ulong ReturnLengthPtr)
+        {
+            uint Fit = Math.Min(Count, (Length - PoolTagHeader) / PoolTagEntry);
+            BinaryPrimitives.WriteUInt32LittleEndian(Host, Count);
+            if (!Instance.WriteMemory(Buffer, Host.AsSpan(0, (int)(PoolTagHeader + Fit * PoolTagEntry))))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            NTSTATUS LengthStatus = SetReturnLength(Instance, ReturnLengthPtr, Required);
+            if (LengthStatus != NTSTATUS.STATUS_SUCCESS)
+                return LengthStatus;
+            return Fit == Count ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+        }
+
+        // Unlike native NT, WOW64 writes nothing until the whole table fits.
+        private static NTSTATUS WritePoolTags32(BinaryEmulator Instance, byte[] Host, uint Count, uint Required, ulong Buffer, uint Length, ulong ReturnLengthPtr)
+        {
+            uint Required32 = PoolTagHeader32 + Math.Max(Count, 1u) * PoolTagEntry32;
+            if (unchecked(Length * 2) < Required || Required32 > Length)
+                return LengthMismatch(Instance, ReturnLengthPtr, unchecked(Required - Length));
+
+            // The narrow table is built in place, which is safe because each field lands below every native field
+            // still to be read.
+            Span<byte> Output = Host.AsSpan(0, (int)Required32);
+            BinaryPrimitives.WriteUInt32LittleEndian(Output, Count);
+            for (uint i = 0; i < Count; i++)
+            {
+                ReadOnlySpan<byte> Entry = Host.AsSpan((int)(PoolTagHeader + i * PoolTagEntry), (int)PoolTagEntry);
+                Span<byte> Entry32 = Output.Slice((int)(PoolTagHeader32 + i * PoolTagEntry32), (int)PoolTagEntry32);
+                Entry.Slice(0x00, 12).CopyTo(Entry32);
+                BinaryPrimitives.WriteUInt32LittleEndian(Entry32.Slice(0x0C), (uint)Math.Min(BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(0x10)), uint.MaxValue));
+                Entry.Slice(0x18, 8).CopyTo(Entry32.Slice(0x10));
+                BinaryPrimitives.WriteUInt32LittleEndian(Entry32.Slice(0x18), (uint)Math.Min(BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(0x20)), uint.MaxValue));
+            }
+            Output.Slice((int)(PoolTagHeader32 + Count * PoolTagEntry32)).Clear();
+
+            if (!Instance.WriteMemory(Buffer, Output))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            return SetReturnLength(Instance, ReturnLengthPtr, Required32);
+        }
+
         private static NTSTATUS SetReturnLength(BinaryEmulator Instance, ulong ReturnLengthPtr, uint Length)
         {
             if (ReturnLengthPtr == 0)
@@ -439,16 +523,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        private static NTSTATUS LengthMismatch(BinaryEmulator Instance, ulong ReturnLengthPtr, uint RequiredLength)
+        {
+            NTSTATUS Status = SetReturnLength(Instance, ReturnLengthPtr, RequiredLength);
+            return Status != NTSTATUS.STATUS_SUCCESS ? Status : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+        }
+
         internal static NTSTATUS QueryProcessorPerformance(BinaryEmulator Instance, ulong Buffer, uint Length, ulong ReturnLengthPtr)
         {
             const uint EntrySize = 0x30;
 
             uint CpuCount = Instance.WinHelper.ProcessorCount;
             if (Length < EntrySize)
-            {
-                NTSTATUS ShortStatus = SetReturnLength(Instance, ReturnLengthPtr, EntrySize * CpuCount);
-                return ShortStatus != NTSTATUS.STATUS_SUCCESS ? ShortStatus : NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-            }
+                return LengthMismatch(Instance, ReturnLengthPtr, EntrySize * CpuCount);
 
             uint Entries = Math.Min(CpuCount, Length / EntrySize);
             uint WrittenSize = Entries * EntrySize;

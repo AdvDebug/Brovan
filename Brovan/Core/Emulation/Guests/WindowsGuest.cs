@@ -964,6 +964,10 @@ namespace Brovan.Core.Emulation.Guests
             return false;
         }
 
+        // A fetch at 0 is an access violation in NT, except on the direct blob thread, whose start routine
+        // returns to 0.
+        public bool EndsThreadOnNullFetch(uint ThreadId) => UsesDirectBlobStartup && ThreadId == WinHelper.InitialThreadId;
+
         // NT opens int 3, into, fast fail, assertion, debug service and the system call gate to ring 3 (KiInterruptInitTable).
         public bool RaisableFromUserMode(uint Vector) => Vector is 3 or 4 or 0x29 or 0x2C or 0x2D or 0x2E;
 

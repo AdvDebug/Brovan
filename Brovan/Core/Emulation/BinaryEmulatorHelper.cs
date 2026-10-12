@@ -113,6 +113,7 @@ namespace Brovan.Core.Emulation
         void HandlePrivilegedInstruction(BinaryEmulator Instance);
         void HandleInvalidInstruction(BinaryEmulator Instance);
         bool HandleInvalidMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value);
+        bool EndsThreadOnNullFetch(uint ThreadId);
 
         ulong CreateInitialThread(BinaryEmulator Instance);
         EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8);

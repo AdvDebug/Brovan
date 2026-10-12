@@ -49,6 +49,7 @@ namespace Brovan.Core.Emulation
         ExtendedVmExits = 0x00000001,
         ExceptionExitBitmap = 0x00000002,
         ProcessorFeatures = 0x00001001,
+        CpuidResultList2 = 0x0000100D,
         ProcessorCount = 0x00001fff,
     }
 

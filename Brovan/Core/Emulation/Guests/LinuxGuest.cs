@@ -901,6 +901,8 @@ namespace Brovan.Core.Emulation.Guests
             return false;
         }
 
+        public bool EndsThreadOnNullFetch(uint ThreadId) => true;
+
         internal ulong GetOrCreateSignalRestorer(BinaryEmulator Instance)
         {
             if (Instance.IsX64Guest)

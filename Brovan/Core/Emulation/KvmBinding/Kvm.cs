@@ -2483,6 +2483,7 @@ namespace Brovan.Core.Emulation
                     Unsafe.AsRef<LinuxKvmCpuid2>(buffer).Nent = cpuidEntries;
                     if (KvmNative.ioctl(_systemFd, KvmConstants.KvmIoGetSupportedCpuid, (IntPtr)buffer) < 0)
                         throw new KvmException("KVM_GET_SUPPORTED_CPUID failed", Marshal.GetLastWin32Error());
+                    ApplyHostHypervisorLeaves(ref Unsafe.AsRef<LinuxKvmCpuid2>(buffer), cpuidEntries);
                 }
                 _cpuidTable = table;
                 ConfigureExtendedState();
@@ -2493,6 +2494,36 @@ namespace Brovan.Core.Emulation
                 if (KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoSetCpuid2, (IntPtr)buffer) < 0)
                     throw new KvmException("KVM_SET_CPUID2 failed", Marshal.GetLastWin32Error());
             }
+        }
+
+        private static unsafe void ApplyHostHypervisorLeaves(ref LinuxKvmCpuid2 table, uint capacity)
+        {
+            LinuxKvmCpuidEntry2* entries = (LinuxKvmCpuidEntry2*)Unsafe.AsPointer(ref table.FirstEntry);
+            uint kept = 0;
+            for (uint i = 0; i < table.Nent; i++)
+            {
+                ref LinuxKvmCpuidEntry2 entry = ref entries[i];
+                if (entry.Function >= HostHypervisorLeaves.First && entry.Function <= HostHypervisorLeaves.ReservedLast)
+                    continue;
+                if (entry.Function == HostHypervisorLeaves.FeatureLeaf)
+                    entry.Ecx = HostHypervisorLeaves.HostHasHypervisor ? entry.Ecx | HostHypervisorLeaves.PresentBit : entry.Ecx & ~HostHypervisorLeaves.PresentBit;
+                entries[kept++] = entry;
+            }
+
+            (uint Eax, uint Ebx, uint Ecx, uint Edx)[] leaves = HostHypervisorLeaves.Leaves;
+            uint count = Math.Min((uint)leaves.Length, capacity - kept);
+            for (uint i = 0; i < count; i++)
+            {
+                entries[kept++] = new LinuxKvmCpuidEntry2
+                {
+                    Function = HostHypervisorLeaves.First + i,
+                    Eax = leaves[i].Eax,
+                    Ebx = leaves[i].Ebx,
+                    Ecx = leaves[i].Ecx,
+                    Edx = leaves[i].Edx,
+                };
+            }
+            table.Nent = kept;
         }
 
         // Guest XCR0 stops at x87, SSE and AVX, which is the state the thread contexts carry.

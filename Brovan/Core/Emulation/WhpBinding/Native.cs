@@ -161,6 +161,23 @@ namespace Brovan.Core.Emulation
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct WhvX64CpuidResult2
+    {
+        public uint Function;
+        public uint Index;
+        public uint VpIndex;
+        public uint Flags;
+        public uint Eax;
+        public uint Ebx;
+        public uint Ecx;
+        public uint Edx;
+        public uint MaskEax;
+        public uint MaskEbx;
+        public uint MaskEcx;
+        public uint MaskEdx;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct WhvMemoryRangeEntry
     {
         public ulong GuestAddress;

@@ -177,6 +177,9 @@ namespace Brovan
 
         [DllImport("ntdll.dll")]
         public static extern unsafe int NtQueryInformationFile(SafeFileHandle FileHandle, ulong* IoStatusBlock, void* FileInformation, uint Length, int FileInformationClass);
+
+        [DllImport("ntdll.dll")]
+        public static extern unsafe int NtQuerySystemInformation(int SystemInformationClass, void* SystemInformation, uint SystemInformationLength, uint* ReturnLength);
     }
 
     internal class NativeUnixImports

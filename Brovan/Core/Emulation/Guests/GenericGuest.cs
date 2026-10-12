@@ -188,6 +188,8 @@ namespace Brovan.Core.Emulation.Guests
             return false;
         }
 
+        public bool EndsThreadOnNullFetch(uint ThreadId) => true;
+
         public ulong CreateInitialThread(BinaryEmulator Instance)
         {
             return 0;

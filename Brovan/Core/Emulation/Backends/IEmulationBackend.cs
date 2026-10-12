@@ -1,4 +1,5 @@
 ﻿using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 using System.Text;
 
 namespace Brovan.Core.Emulation
@@ -120,6 +121,40 @@ namespace Brovan.Core.Emulation
         {
             for (uint vector = 0; vector < vectorCount; vector++)
                 idt[vector * 16 + 5] = raisableFromUserMode(vector) ? UserGateAttributes : KernelGateAttributes;
+        }
+    }
+
+    // The guest sees the host's own hypervisor leaves, because CPUID always exits under VT-x and its latency gives
+    // away a guest that claims bare metal.
+    public static class HostHypervisorLeaves
+    {
+        public const uint FeatureLeaf = 1;
+        public const uint PresentBit = 1u << 31;
+        public const uint First = 0x40000000;
+        public const uint ReservedLast = 0x4FFFFFFF;
+
+        public static readonly bool HostHasHypervisor = X86Base.IsSupported && ((uint)X86Base.CpuId((int)FeatureLeaf, 0).Ecx & PresentBit) != 0;
+
+        public static readonly (uint Eax, uint Ebx, uint Ecx, uint Edx)[] Leaves = ReadLeaves();
+
+        private static (uint Eax, uint Ebx, uint Ecx, uint Edx)[] ReadLeaves()
+        {
+            if (!HostHasHypervisor)
+                return Array.Empty<(uint, uint, uint, uint)>();
+
+            (int a, int b, int c, int d) = X86Base.CpuId(unchecked((int)First), 0);
+            uint last = (uint)a;
+            if (last < First)
+                return Array.Empty<(uint, uint, uint, uint)>();
+
+            var leaves = new (uint Eax, uint Ebx, uint Ecx, uint Edx)[Math.Min(last - First + 1, 0x100u)];
+            for (int i = 0; i < leaves.Length; i++)
+            {
+                if (i != 0)
+                    (a, b, c, d) = X86Base.CpuId(unchecked((int)First) + i, 0);
+                leaves[i] = ((uint)a, (uint)b, (uint)c, (uint)d);
+            }
+            return leaves;
         }
     }
 

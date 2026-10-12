@@ -3427,7 +3427,7 @@ namespace Brovan.Core.Emulation
                 WinHelper?.KuserSharedData?.RefreshIfUnhooked();
                 ImmaBeEmulatedOOO.LastRunTick = SchedulerTick;
 
-                if (ImmaBeEmulatedOOO.Context?.RIP == 0)
+                if (ImmaBeEmulatedOOO.Context?.RIP == 0 && ImmaBeEmulatedOOO.State != EmulatedThreadState.Exception)
                 {
                     if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
                     {
@@ -3526,10 +3526,8 @@ namespace Brovan.Core.Emulation
 
         private bool InvalidMemoryHandler(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
         {
-            if (Type == BackendMemoryAccessType.FetchUnmapped && Address == 0)
-            {
+            if (Type == BackendMemoryAccessType.FetchUnmapped && Address == 0 && Guest.EndsThreadOnNullFetch((uint)CurrentThreadId))
                 return false;
-            }
 
             if (TryHandleGuardPageViolation(Type, Address, out bool ResumeAfterGuard))
             {

@@ -2146,12 +2146,50 @@ namespace Brovan.Core.Emulation
             if (WhpNative.Failed(hr))
                 return false;
 
+            AdvertiseHostHypervisor();
+
             hr = WhpNative.WHvSetupPartition(_partition);
             if (WhpNative.Failed(hr))
                 return false;
 
             _processorLimit = processorCount;
             return true;
+        }
+
+        private unsafe void AdvertiseHostHypervisor()
+        {
+            if (!HostHypervisorLeaves.HostHasHypervisor)
+                return;
+
+            (uint Eax, uint Ebx, uint Ecx, uint Edx)[] leaves = HostHypervisorLeaves.Leaves;
+            int count = leaves.Length + 1;
+            WhvX64CpuidResult2* results = stackalloc WhvX64CpuidResult2[count];
+            results[0] = new WhvX64CpuidResult2
+            {
+                Function = HostHypervisorLeaves.FeatureLeaf,
+                Ecx = HostHypervisorLeaves.PresentBit,
+                MaskEcx = HostHypervisorLeaves.PresentBit,
+            };
+            for (int i = 0; i < leaves.Length; i++)
+            {
+                results[i + 1] = new WhvX64CpuidResult2
+                {
+                    Function = HostHypervisorLeaves.First + (uint)i,
+                    Eax = leaves[i].Eax,
+                    Ebx = leaves[i].Ebx,
+                    Ecx = leaves[i].Ecx,
+                    Edx = leaves[i].Edx,
+                    MaskEax = uint.MaxValue,
+                    MaskEbx = uint.MaxValue,
+                    MaskEcx = uint.MaxValue,
+                    MaskEdx = uint.MaxValue,
+                };
+            }
+
+            int hr = WhpNative.WHvSetPartitionProperty(_partition, WhvPartitionPropertyCode.CpuidResultList2, results,
+                (uint)(count * sizeof(WhvX64CpuidResult2)));
+            if (WhpNative.Failed(hr))
+                Utils.LogError($"[Whp] WHvSetPartitionProperty(CpuidResultList2) failed with 0x{hr:X8}. The guest sees no hypervisor.");
         }
 
         private unsafe VirtualProcessor CreateProcessor(uint index)
