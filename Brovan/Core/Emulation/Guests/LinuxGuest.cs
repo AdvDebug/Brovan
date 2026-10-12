@@ -156,7 +156,6 @@ namespace Brovan.Core.Emulation.Guests
         public uint RseqLength;
         public uint RseqSignature;
         public int NiceValue;
-        public bool CpuidEnabled = true;
         public bool FutexWaitActive;
         public bool FutexWaitCompleted;
         public long FutexWaitResult;
@@ -504,6 +503,7 @@ namespace Brovan.Core.Emulation.Guests
                 }
                 else
                 {
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOSYS);
                     if (Instance.Syscalls?.TraceEnabled == true)
                         Instance.Syscalls.RecordSyscall(GuestOsKind.Linux, SyscallAbi.X64, unchecked((uint)syscall), null, new ulong[] { Vals[2], Vals[3], Vals[4], Vals[5], Vals[6], Vals[7] }, Vals[0], Rip, false);
                     if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
@@ -564,6 +564,7 @@ namespace Brovan.Core.Emulation.Guests
                     }
                     else
                     {
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOSYS);
                         if (Instance.Syscalls?.TraceEnabled == true)
                             Instance.Syscalls.RecordSyscall(GuestOsKind.Linux, SyscallAbi.X86, unchecked((uint)syscall), null, ReadLinuxSyscallArguments32(Instance), Instance.ReadRegister32(Registers.UC_X86_REG_EAX), Rip, false);
                         if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
@@ -575,8 +576,312 @@ namespace Brovan.Core.Emulation.Guests
                 {
                     Utils.LogError($"[Linux Interrupt Handler] Failed to run syscall: {ex.Message}");
                 }
+                return false;
             }
-            return false;
+            return TryRaiseTrapSignal(Instance, InterruptNumber);
+        }
+
+        public bool RaisableFromUserMode(uint Vector) => Vector is 3 or 4 or 0x80;
+
+        private bool TryRaiseTrapSignal(BinaryEmulator Instance, uint Vector)
+        {
+            ulong Rip = Instance.ReadRegister(Instance.IPRegister);
+            switch (Vector)
+            {
+                case 0:
+                    QueueSynchronousSignal(Instance, LinuxSignalHelpers.SIGFPE, LinuxSignalHelpers.FPE_INTDIV, Rip, default);
+                    return true;
+                case 1:
+                    QueueSynchronousSignal(Instance, LinuxSignalHelpers.SIGTRAP, TakeDebugTrapCode(Instance), Rip, default);
+                    return true;
+                case 3:
+                    QueueSynchronousSignal(Instance, LinuxSignalHelpers.SIGTRAP, LinuxSignalHelpers.SI_KERNEL, 0, default);
+                    return true;
+                case 4:
+                case 5:
+                    QueueSynchronousSignal(Instance, LinuxSignalHelpers.SIGSEGV, LinuxSignalHelpers.SI_KERNEL, 0, default);
+                    return true;
+                case 12:
+                    QueueSynchronousSignal(Instance, LinuxSignalHelpers.SIGBUS, LinuxSignalHelpers.SI_KERNEL, 0, default);
+                    return true;
+                case 13:
+                    if (!TryFixupUmipInstruction(Instance))
+                        QueueSynchronousSignal(Instance, LinuxSignalHelpers.SIGSEGV, LinuxSignalHelpers.SI_KERNEL, 0, default);
+                    return true;
+                case 16:
+                {
+                    uint Control = (uint)Instance.ReadRegister(Registers.UC_X86_REG_FPCW);
+                    RaiseFloatingPointSignal(Instance, (uint)Instance.ReadRegister(Registers.UC_X86_REG_FPSW) & ~Control, Rip);
+                    return true;
+                }
+                case 19:
+                {
+                    uint Mxcsr = (uint)Instance.ReadRegister(Registers.UC_X86_REG_MXCSR);
+                    RaiseFloatingPointSignal(Instance, Mxcsr & ~(Mxcsr >> 7), Rip);
+                    return true;
+                }
+                default:
+                    return false;
+            }
+        }
+
+        // Linux reports a denormal operand as underflow (fpu__exception_code).
+        private void RaiseFloatingPointSignal(BinaryEmulator Instance, uint Pending, ulong Rip)
+        {
+            int Code = (Pending & 0x01) != 0 ? LinuxSignalHelpers.FPE_FLTINV
+                : (Pending & 0x04) != 0 ? LinuxSignalHelpers.FPE_FLTDIV
+                : (Pending & 0x08) != 0 ? LinuxSignalHelpers.FPE_FLTOVF
+                : (Pending & 0x12) != 0 ? LinuxSignalHelpers.FPE_FLTUND
+                : (Pending & 0x20) != 0 ? LinuxSignalHelpers.FPE_FLTRES
+                : 0;
+            if (Code != 0)
+                QueueSynchronousSignal(Instance, LinuxSignalHelpers.SIGFPE, Code, Rip, default);
+        }
+
+        // A single-step bit with TF clear does not belong to the guest.
+        private static int TakeDebugTrapCode(BinaryEmulator Instance)
+        {
+            ulong Dr6 = Instance.ReadRegister(Registers.UC_X86_REG_DR6);
+            Instance.WriteRegister(Registers.UC_X86_REG_DR6, DebugStatus.ReservedOnes);
+            bool Stepping = (Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS) & (ulong)CPUFlags.TF) != 0;
+            if ((Dr6 & DebugStatus.SingleStep) != 0 && Stepping)
+                return LinuxSignalHelpers.TRAP_TRACE;
+            return (Dr6 & DebugStatus.BreakpointHits) != 0 ? LinuxSignalHelpers.TRAP_HWBKPT : LinuxSignalHelpers.TRAP_BRKPT;
+        }
+
+        // The dummy values a 64-bit Linux kernel stores under UMIP (umip.c).
+        private const ulong UmipGdtBase = 0xFFFFFFFFFFFE0000;
+        private const ulong UmipIdtBase = 0xFFFFFFFFFFFF0000;
+        private const ulong UmipMachineStatusWord = 0x80050033;
+        private const ulong UmipTaskRegister = 0x40;
+
+        private struct UmipOperand
+        {
+            public byte Opcode;
+            public int RegField;
+            public bool IsRegisterForm;
+            public int RmRegister;
+            public int OperandSize;
+            public ulong Address;
+            public int Length;
+        }
+
+        private bool TryFixupUmipInstruction(BinaryEmulator Instance)
+        {
+            if (!Instance._emulator.UmipEnabled)
+                return false;
+
+            ulong Rip = Instance.ReadRegister(Instance.IPRegister);
+            Span<byte> Code = stackalloc byte[BinaryEmulator.MaxInstructionLength];
+            int Length = Instance.ReadInstructionBytes(Rip, Code);
+            if (!TryDecodeUmipInstruction(Instance, Code.Slice(0, Length), Rip, out UmipOperand Operand))
+                return false;
+
+            Span<byte> Data = stackalloc byte[10];
+            Data.Clear();
+            int Size;
+            if (Operand.Opcode == 0x01 && Operand.RegField is 0 or 1)
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(2), Operand.RegField == 1 ? UmipIdtBase : UmipGdtBase);
+                Size = Instance.IsX86Guest ? 6 : 10;
+            }
+            else
+            {
+                ulong Value = Operand.Opcode == 0x01 ? UmipMachineStatusWord : Operand.RegField == 1 ? UmipTaskRegister : 0;
+                if (Operand.IsRegisterForm)
+                {
+                    Instance.WriteGeneralRegister(Operand.RmRegister, Value, Operand.OperandSize);
+                    Instance.WriteRegister(Instance.IPRegister, Rip + (ulong)Operand.Length);
+                    return true;
+                }
+
+                BinaryPrimitives.WriteUInt16LittleEndian(Data, (ushort)Value);
+                Size = sizeof(ushort);
+            }
+
+            if (!Instance.IsAccessible(Operand.Address, (ulong)Size, true)
+                || !Instance.WriteMemory(Operand.Address, Data.Slice(0, Size)))
+            {
+                QueueSynchronousSignal(Instance, LinuxSignalHelpers.SIGSEGV, LinuxSignalHelpers.SEGV_MAPERR, Operand.Address, BackendMemoryAccessType.WriteUnmapped);
+                return true;
+            }
+
+            Instance.WriteRegister(Instance.IPRegister, Rip + (ulong)Operand.Length);
+            return true;
+        }
+
+        // Like Linux, this takes at most four kinds of prefix, REX only right before the opcode, and one segment
+        // override (insn_get_prefixes).
+        private static bool TryDecodeUmipInstruction(BinaryEmulator Instance, ReadOnlySpan<byte> Code, ulong Rip, out UmipOperand Operand)
+        {
+            Operand = default;
+            bool Long = !Instance.IsX86Guest;
+            int OperandSize = 4;
+            int AddressSize = Long ? 8 : 4;
+            int Segment = -1;
+            int Overrides = 0;
+            Span<byte> Kinds = stackalloc byte[4];
+            int KindCount = 0;
+            int Index = 0;
+
+            while (Index < Code.Length && Code[Index] is 0xF0 or 0xF2 or 0xF3 or 0x26 or 0x2E or 0x36 or 0x3E or 0x64 or 0x65 or 0x66 or 0x67)
+            {
+                byte Prefix = Code[Index++];
+                if (Kinds.Slice(0, KindCount).IndexOf(Prefix) >= 0)
+                    continue;
+                if (KindCount == Kinds.Length)
+                    return false;
+                Kinds[KindCount++] = Prefix;
+
+                if (Prefix == 0x67)
+                    AddressSize = Long ? 4 : 2;
+                else if (Prefix == 0x66)
+                    OperandSize = 2;
+                else if (Prefix is 0x64 or 0x65)
+                {
+                    Segment = Prefix;
+                    Overrides++;
+                }
+                else if (Prefix is 0x26 or 0x2E or 0x36 or 0x3E)
+                {
+                    Overrides++;
+                }
+            }
+
+            byte Rex = 0;
+            if (Long && Index < Code.Length && (Code[Index] & 0xF0) == 0x40)
+            {
+                Rex = Code[Index++];
+                if ((Rex & 8) != 0)
+                    OperandSize = 8;
+            }
+
+            if (Index + 3 > Code.Length || Code[Index] != 0x0F || Code[Index + 1] > 0x01)
+                return false;
+
+            byte Opcode = Code[Index + 1];
+            byte ModRm = Code[Index + 2];
+            Index += 3;
+            int Mod = ModRm >> 6;
+            int Reg = (ModRm >> 3) & 7;
+            int Rm = ModRm & 7;
+            bool Known = Opcode == 0x01 ? ((Reg is 0 or 1) && Mod != 3) || Reg == 4 : Reg is 0 or 1;
+            if (!Known)
+                return false;
+
+            Operand.Opcode = Opcode;
+            Operand.RegField = Reg;
+            Operand.OperandSize = OperandSize;
+            if (Mod == 3)
+            {
+                Operand.IsRegisterForm = true;
+                Operand.RmRegister = Rm | ((Rex & 1) << 3);
+                Operand.Length = Index;
+                return true;
+            }
+
+            if (Overrides > 1)
+                return false;
+
+            ulong Address;
+            if (AddressSize == 2)
+            {
+                if (!TryGetAddress16(Instance, Code, ref Index, Mod, Rm, out Address))
+                    return false;
+            }
+            else
+            {
+                ulong Base = 0;
+                ulong Scaled = 0;
+                long Displacement = 0;
+                bool RipRelative = false;
+                bool Disp32 = Mod == 2;
+
+                if (Rm == 4)
+                {
+                    if (Index >= Code.Length)
+                        return false;
+                    byte Sib = Code[Index++];
+                    int ScaledIndex = ((Sib >> 3) & 7) | ((Rex & 2) << 2);
+                    if ((Sib & 7) == 5 && Mod == 0)
+                        Disp32 = true;
+                    else
+                        Base = Instance.ReadGeneralRegister((Sib & 7) | ((Rex & 1) << 3));
+                    if (ScaledIndex != 4)
+                        Scaled = Instance.ReadGeneralRegister(ScaledIndex) << (Sib >> 6);
+                }
+                else if (Rm == 5 && Mod == 0)
+                {
+                    Disp32 = true;
+                    RipRelative = Long;
+                }
+                else
+                {
+                    Base = Instance.ReadGeneralRegister(Rm | ((Rex & 1) << 3));
+                }
+
+                if (Disp32)
+                {
+                    if (Index + sizeof(int) > Code.Length)
+                        return false;
+                    Displacement = BinaryPrimitives.ReadInt32LittleEndian(Code.Slice(Index));
+                    Index += sizeof(int);
+                }
+                else if (Mod == 1)
+                {
+                    if (Index >= Code.Length)
+                        return false;
+                    Displacement = (sbyte)Code[Index++];
+                }
+
+                Address = Base + Scaled + (ulong)Displacement;
+                if (RipRelative)
+                    Address += Rip + (ulong)Index;
+                if (AddressSize == 4)
+                    Address &= 0xFFFFFFFF;
+            }
+
+            if (Segment == 0x64)
+                Address += Instance.ReadRegister(Registers.UC_X86_REG_FS_BASE);
+            else if (Segment == 0x65)
+                Address += Instance.ReadRegister(Registers.UC_X86_REG_GS_BASE);
+
+            Operand.Address = Address;
+            Operand.Length = Index;
+            return true;
+        }
+
+        // The registers each 16-bit ModRM rm value adds: BX+SI, BX+DI, BP+SI, BP+DI, SI, DI, BP, BX.
+        private static ReadOnlySpan<sbyte> Address16Base => new sbyte[] { 3, 3, 5, 5, 6, 7, 5, 3 };
+        private static ReadOnlySpan<sbyte> Address16Index => new sbyte[] { 6, 7, 6, 7, -1, -1, -1, -1 };
+
+        private static bool TryGetAddress16(BinaryEmulator Instance, ReadOnlySpan<byte> Code, ref int Index, int Mod, int Rm, out ulong Address)
+        {
+            Address = 0;
+            long Sum = 0;
+            if (Mod != 0 || Rm != 6)
+            {
+                Sum = (long)Instance.ReadGeneralRegister(Address16Base[Rm]);
+                if (Address16Index[Rm] >= 0)
+                    Sum += (long)Instance.ReadGeneralRegister(Address16Index[Rm]);
+            }
+
+            if (Mod == 2 || (Mod == 0 && Rm == 6))
+            {
+                if (Index + sizeof(short) > Code.Length)
+                    return false;
+                Sum += BinaryPrimitives.ReadInt16LittleEndian(Code.Slice(Index));
+                Index += sizeof(short);
+            }
+            else if (Mod == 1)
+            {
+                if (Index >= Code.Length)
+                    return false;
+                Sum += (sbyte)Code[Index++];
+            }
+
+            Address = (ulong)Sum & 0xFFFF;
+            return true;
         }
 
         public void HandlePrivilegedInstruction(BinaryEmulator Instance)
@@ -707,10 +1012,7 @@ namespace Brovan.Core.Emulation.Guests
             }
 
             ulong StackPointer = Instance.ReadRegister(Instance.IsX64Guest ? Registers.UC_X86_REG_RSP : Registers.UC_X86_REG_ESP);
-            LinuxThreadState State = new LinuxThreadState
-            {
-                CpuidEnabled = Helper.CpuidEnabled
-            };
+            LinuxThreadState State = new LinuxThreadState();
 
             if (Instance.IsX64Guest)
             {
@@ -757,7 +1059,6 @@ namespace Brovan.Core.Emulation.Guests
             LinuxThreadState CurrentState = Instance.CurrentThread?.GuestState as LinuxThreadState;
             LinuxThreadState ThreadState = new LinuxThreadState
             {
-                CpuidEnabled = CurrentState?.CpuidEnabled ?? Helper.CpuidEnabled,
                 FsBase = CurrentState?.FsBase ?? (Instance.IsX64Guest ? Instance.ReadRegister(Registers.UC_X86_REG_FS_BASE) : 0),
                 GsBase = CurrentState?.GsBase ?? (Instance.IsX64Guest ? Instance.ReadRegister(Registers.UC_X86_REG_GS_BASE) : 0)
             };
@@ -1968,7 +2269,7 @@ namespace Brovan.Core.Emulation.Guests
                 }
 
                 if (HasPendingRange)
-                    Instance._emulator.SetMemoryProtection(PendingStart, PendingEnd - PendingStart, PendingProtection);
+                    Instance.ProtectMemoryRange(PendingStart, PendingEnd - PendingStart, PendingProtection);
 
                 PendingStart = Start;
                 PendingEnd = End;
@@ -1977,7 +2278,7 @@ namespace Brovan.Core.Emulation.Guests
             }
 
             if (HasPendingRange)
-                Instance._emulator.SetMemoryProtection(PendingStart, PendingEnd - PendingStart, PendingProtection);
+                Instance.ProtectMemoryRange(PendingStart, PendingEnd - PendingStart, PendingProtection);
         }
 
         private void BuildInitialStack64(BinaryEmulator Instance, ulong StartupEntry, ulong ProgramEntry, ulong ProgramHeaderAddress, ulong ProgramHeaderEntrySize, ulong ProgramHeaderCount, ulong InterpreterBase)

@@ -1,6 +1,6 @@
+using System.Diagnostics;
 using System.IO.MemoryMappedFiles;
 using Brovan.Core.Helpers;
-using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -18,35 +18,60 @@ namespace Brovan.Core.Emulation.OS.Windows
     }
 
     /// <summary>
-    /// One request channel per session slot. A channel is idle when both sequence numbers match, so claiming it
-    /// under the session lock is what keeps a single request in flight.
+    /// Requests to other guest processes of the session. Each process has one lane into every other process.
+    /// Senders without a session slot share the last lane.
     /// </summary>
     internal static class GuestSessionMailbox
     {
-        internal const int MaxPayloadBytes = ChannelSize - PayloadOffset;
+        internal const int MaxPayloadBytes = LaneSize - LaneHeaderSize;
 
         private const string FileName = "mailboxes.bin";
-        private const int ChannelSize = 0x10000;
+
+        private const int LaneCount = GuestSession.SlotCount + 1;
+        private const int SharedLane = GuestSession.SlotCount;
+        private const int LaneSize = 0x10000;
+
+        private const int DoorbellOffset = 0x00;
+        private const int TargetHeaderSize = 0x40;
+        private const int TargetSize = TargetHeaderSize + LaneCount * LaneSize;
 
         private const int RequestSequenceOffset = 0x00;
-        private const int ResponseSequenceOffset = 0x04;
-        private const int OperationOffset = 0x08;
-        private const int StatusOffset = 0x0C;
+        private const int AnswerSequenceOffset = 0x04;
+        private const int ReleasedSequenceOffset = 0x08;
+        private const int OperationOffset = 0x0C;
         private const int AddressOffset = 0x10;
         private const int ArgumentOffset = 0x18;
-        private const int ResultOffset = 0x20;
-        private const int LengthOffset = 0x28;
-        private const int PayloadOffset = 0x40;
+        private const int LengthOffset = 0x20;
+        private const int StatusOffset = 0x24;
+        private const int ResultOffset = 0x28;
+        private const int AnswerLengthOffset = 0x30;
+        private const int AnswerTickOffset = 0x38;
+        private const int LaneHeaderSize = 0x40;
 
         private const int ResponseTimeoutMilliseconds = 5000;
         private const int ResponsePollMilliseconds = 1;
+
+        // Answers often arrive well within one poll interval, so the sender spins first.
+        private static readonly long ResponseSpinTicks = Stopwatch.Frequency / 5000;
 
         private static FileStream _stream;
         private static MemoryMappedFile _map;
         private static MemoryMappedViewAccessor _view;
         private static unsafe byte* _viewBase;
-        private static uint _handledSequence;
         private static bool _unavailable;
+
+        private static readonly uint[] _handledSequences = new uint[LaneCount];
+        private static uint _seenDoorbell;
+        private static bool _rescan;
+        private static int _nextLane;
+        private static int _activeLane = -1;
+
+        private enum Claim
+        {
+            Claimed,
+            Busy,
+            Unavailable,
+        }
 
         internal static NTSTATUS Send(
             int Slot,
@@ -64,147 +89,199 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Input.Length > MaxPayloadBytes || Output.Length > MaxPayloadBytes)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
+            long Target = TargetOffset(Slot);
+            long Lane = LaneOffset(Target, GuestSession.OwnSlot);
+            long Deadline = Environment.TickCount64 + ResponseTimeoutMilliseconds;
+            Backoff Wait = Backoff.Start();
             uint Sequence;
 
-            using (SessionLock Lock = GuestSession.Acquire())
+            while (true)
             {
-                if (!Lock.Held || !TryOpen())
+                Claim Claimed = TryClaim(Target, Lane, Operation, Address, Argument, Input, Output.Length, out Sequence);
+                if (Claimed == Claim.Unavailable)
                     return NTSTATUS.STATUS_NOT_SUPPORTED;
+                if (Claimed == Claim.Claimed)
+                    break;
 
-                long Base = ChannelOffset(Slot);
-                Sequence = _view.ReadUInt32(Base + RequestSequenceOffset);
-                if (Sequence != _view.ReadUInt32(Base + ResponseSequenceOffset))
-                    return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
-
-                _view.Write(Base + OperationOffset, (uint)Operation);
-                _view.Write(Base + StatusOffset, 0u);
-                _view.Write(Base + AddressOffset, Address);
-                _view.Write(Base + ArgumentOffset, Argument);
-                _view.Write(Base + ResultOffset, 0UL);
-                _view.Write(Base + LengthOffset, (uint)(Operation == SessionOperation.ReadMemory ? Output.Length : Input.Length));
-
-                if (Input.Length > 0)
-                    WritePayload(Base, Input);
-
-                Sequence++;
-                _view.Write(Base + RequestSequenceOffset, Sequence);
-                _view.Flush();
+                // STATUS_TIMEOUT is a success code.
+                if (Environment.TickCount64 >= Deadline)
+                    return NTSTATUS.STATUS_IO_TIMEOUT;
+                Wait.Pause();
             }
 
-            long Deadline = Environment.TickCount64 + ResponseTimeoutMilliseconds;
-
-            while (Environment.TickCount64 < Deadline)
+            Wait = Backoff.Start();
+            while (true)
             {
-                Thread.Sleep(ResponsePollMilliseconds);
-
                 if (_view == null)
                     return NTSTATUS.STATUS_NOT_SUPPORTED;
 
-                using SessionLock Lock = GuestSession.Acquire();
-                if (!Lock.Held)
-                    continue;
+                if (Peek(Lane + AnswerSequenceOffset) == Sequence)
+                {
+                    using SessionLock Lock = GuestSession.Acquire();
+                    if (Lock.Held)
+                    {
+                        // Another sender took over the shared lane after this answer sat unread for a full timeout.
+                        if (_view.ReadUInt32(Lane + RequestSequenceOffset) != Sequence)
+                            return NTSTATUS.STATUS_IO_TIMEOUT;
 
-                long Base = ChannelOffset(Slot);
-                if (_view.ReadUInt32(Base + ResponseSequenceOffset) != Sequence)
-                    continue;
+                        Result = _view.ReadUInt64(Lane + ResultOffset);
+                        OutputLength = (int)Math.Min(_view.ReadUInt32(Lane + AnswerLengthOffset), (uint)Output.Length);
 
-                Result = _view.ReadUInt64(Base + ResultOffset);
-                OutputLength = (int)Math.Min(_view.ReadUInt32(Base + LengthOffset), (uint)Output.Length);
+                        if (OutputLength > 0)
+                            PayloadSpan(Lane).Slice(0, OutputLength).CopyTo(Output);
 
-                if (OutputLength > 0)
-                    ReadPayload(Base, Output.Slice(0, OutputLength));
+                        NTSTATUS Status = (NTSTATUS)_view.ReadUInt32(Lane + StatusOffset);
+                        _view.Write(Lane + ReleasedSequenceOffset, Sequence);
+                        return Status;
+                    }
+                }
 
-                return (NTSTATUS)_view.ReadUInt32(Base + StatusOffset);
+                if (Environment.TickCount64 >= Deadline)
+                {
+                    Release(Lane, Sequence);
+                    return NTSTATUS.STATUS_IO_TIMEOUT;
+                }
+                Wait.Pause();
             }
+        }
 
-            // STATUS_TIMEOUT is a success code.
-            return NTSTATUS.STATUS_IO_TIMEOUT;
+        private static Claim TryClaim(long Target, long Lane, SessionOperation Operation, ulong Address, ulong Argument, ReadOnlySpan<byte> Input,
+            int OutputLength, out uint Sequence)
+        {
+            Sequence = 0;
+            using SessionLock Lock = GuestSession.Acquire();
+            if (!Lock.Held || !TryOpen())
+                return Claim.Unavailable;
+
+            uint Last = _view.ReadUInt32(Lane + RequestSequenceOffset);
+            if (!IsLaneFree(Lane, Last))
+                return Claim.Busy;
+
+            _view.Write(Lane + OperationOffset, (uint)Operation);
+            _view.Write(Lane + AddressOffset, Address);
+            _view.Write(Lane + ArgumentOffset, Argument);
+            _view.Write(Lane + LengthOffset, (uint)(Operation == SessionOperation.ReadMemory ? OutputLength : Input.Length));
+
+            if (Input.Length > 0)
+                Input.CopyTo(PayloadSpan(Lane));
+
+            Sequence = Last + 1;
+            _view.Write(Lane + RequestSequenceOffset, Sequence);
+            _view.Write(Target + DoorbellOffset, _view.ReadUInt32(Target + DoorbellOffset) + 1);
+            return Claim.Claimed;
+        }
+
+        // An answer nobody read for a whole timeout belongs to a sender that is gone.
+        private static bool IsLaneFree(long Lane, uint Last)
+            => _view.ReadUInt32(Lane + AnswerSequenceOffset) == Last
+                && (_view.ReadUInt32(Lane + ReleasedSequenceOffset) == Last
+                    || Environment.TickCount64 - _view.ReadInt64(Lane + AnswerTickOffset) >= ResponseTimeoutMilliseconds);
+
+        private static void Release(long Lane, uint Sequence)
+        {
+            using SessionLock Lock = GuestSession.Acquire();
+            if (Lock.Held && _view != null && _view.ReadUInt32(Lane + RequestSequenceOffset) == Sequence)
+                _view.Write(Lane + ReleasedSequenceOffset, Sequence);
         }
 
         /// <summary>
         /// <paramref name="Length"/> is how many bytes the sender wants back for
         /// <see cref="SessionOperation.ReadMemory"/>, and how many it sent otherwise.
         /// </summary>
-        internal static unsafe bool TryReceive(out SessionOperation Operation, out ulong Address, out ulong Argument, out int Length, out byte[] Input)
+        /// <param name="Payload">The lane's payload area. It holds the request, and the answer is written over it.</param>
+        internal static bool TryReceive(out SessionOperation Operation, out ulong Address, out ulong Argument, out int Length, out Span<byte> Payload)
         {
             Operation = SessionOperation.None;
             Address = 0;
             Argument = 0;
             Length = 0;
-            Input = null;
+            Payload = Span<byte>.Empty;
 
             int Slot = GuestSession.OwnSlot;
-
             if (Slot < 0 || _view == null)
                 return false;
 
-            long Base = ChannelOffset(Slot);
-
-            // Peeked without the lock: the scheduler asks every slice, and the sender publishes the sequence last.
-            if (Volatile.Read(ref *(uint*)(_viewBase + Base + RequestSequenceOffset)) == _handledSequence)
+            // Peeked without the lock because the scheduler calls this every slice.
+            long Target = TargetOffset(Slot);
+            if (!_rescan && Peek(Target + DoorbellOffset) == _seenDoorbell)
                 return false;
 
             using SessionLock Lock = GuestSession.Acquire();
             if (!Lock.Held)
                 return false;
 
-            uint Sequence = _view.ReadUInt32(Base + RequestSequenceOffset);
-            if (Sequence == _handledSequence)
-                return false;
-
-            Operation = (SessionOperation)_view.ReadUInt32(Base + OperationOffset);
-            Address = _view.ReadUInt64(Base + AddressOffset);
-            Argument = _view.ReadUInt64(Base + ArgumentOffset);
-
-            Length = (int)Math.Min(_view.ReadUInt32(Base + LengthOffset), (uint)MaxPayloadBytes);
-            if (Length > 0 && Operation != SessionOperation.ReadMemory)
+            _seenDoorbell = _view.ReadUInt32(Target + DoorbellOffset);
+            for (int i = 0; i < LaneCount; i++)
             {
-                Input = new byte[Length];
-                ReadPayload(Base, Input);
+                int Index = (_nextLane + i) % LaneCount;
+                long Lane = LaneOffset(Target, Index);
+                uint Sequence = _view.ReadUInt32(Lane + RequestSequenceOffset);
+                if (Sequence == _handledSequences[Index])
+                    continue;
+
+                Operation = (SessionOperation)_view.ReadUInt32(Lane + OperationOffset);
+                Address = _view.ReadUInt64(Lane + AddressOffset);
+                Argument = _view.ReadUInt64(Lane + ArgumentOffset);
+                Length = (int)Math.Min(_view.ReadUInt32(Lane + LengthOffset), (uint)MaxPayloadBytes);
+                Payload = PayloadSpan(Lane);
+
+                _handledSequences[Index] = Sequence;
+                _activeLane = Index;
+                _nextLane = (Index + 1) % LaneCount;
+                _rescan = true;
+                return true;
             }
 
-            _handledSequence = Sequence;
-            return true;
+            _rescan = false;
+            return false;
         }
 
-        internal static void Complete(NTSTATUS Status, ulong Result, ReadOnlySpan<byte> Output)
+        internal static void Complete(NTSTATUS Status, ulong Result, int Length)
         {
             int Slot = GuestSession.OwnSlot;
-            if (Slot < 0 || _view == null)
+            if (Slot < 0 || _view == null || _activeLane < 0)
                 return;
 
             using SessionLock Lock = GuestSession.Acquire();
             if (!Lock.Held)
                 return;
 
-            long Base = ChannelOffset(Slot);
-            int Length = Math.Min(Output.Length, MaxPayloadBytes);
-
-            if (Length > 0)
-                WritePayload(Base, Output.Slice(0, Length));
-
-            _view.Write(Base + LengthOffset, (uint)Length);
-            _view.Write(Base + ResultOffset, Result);
-            _view.Write(Base + StatusOffset, (uint)Status);
-            _view.Write(Base + ResponseSequenceOffset, _handledSequence);
-            _view.Flush();
+            long Lane = LaneOffset(TargetOffset(Slot), _activeLane);
+            _view.Write(Lane + AnswerLengthOffset, (uint)Math.Min(Length, MaxPayloadBytes));
+            _view.Write(Lane + ResultOffset, Result);
+            _view.Write(Lane + StatusOffset, (uint)Status);
+            _view.Write(Lane + AnswerTickOffset, Environment.TickCount64);
+            _view.Write(Lane + AnswerSequenceOffset, _handledSequences[_activeLane]);
+            _activeLane = -1;
         }
 
         /// <summary>
-        /// A reused slot still holds its previous owner's sequence numbers, which this process would run as a new
-        /// request since it starts counting from zero.
+        /// A reused slot keeps its previous owner's sequence numbers and unread answers. The caller holds the session lock.
         /// </summary>
-        internal static void Reset(int Slot)
+        internal static unsafe void Reset(int Slot)
         {
             if (!TryOpen())
                 return;
 
-            long Base = ChannelOffset(Slot);
-            for (int Offset = 0; Offset < PayloadOffset; Offset += 8)
-                _view.Write(Base + Offset, 0UL);
+            long Target = TargetOffset(Slot);
+            new Span<byte>(_viewBase + Target, TargetHeaderSize).Clear();
+            for (int Index = 0; Index < LaneCount; Index++)
+                new Span<byte>(_viewBase + LaneOffset(Target, Index), LaneHeaderSize).Clear();
 
-            _view.Flush();
-            _handledSequence = 0;
+            for (int Other = 0; Other < GuestSession.SlotCount; Other++)
+            {
+                if (Other == Slot)
+                    continue;
+
+                long Lane = LaneOffset(TargetOffset(Other), Slot);
+                _view.Write(Lane + ReleasedSequenceOffset, _view.ReadUInt32(Lane + RequestSequenceOffset));
+            }
+
+            Array.Clear(_handledSequences);
+            _seenDoorbell = 0;
+            _rescan = false;
+            _nextLane = 0;
+            _activeLane = -1;
         }
 
         internal static void Close()
@@ -230,7 +307,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 System.IO.Directory.CreateDirectory(GuestSession.Directory);
 
-                long Size = (long)GuestSession.SlotCount * ChannelSize;
+                long Size = (long)GuestSession.SlotCount * TargetSize;
 
                 _stream = new FileStream(
                     Path.Combine(GuestSession.Directory, FileName),
@@ -259,19 +336,33 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static void WritePayload(long Base, ReadOnlySpan<byte> Payload)
-        {
-            byte[] Buffer = Payload.ToArray();
-            _view.WriteArray(Base + PayloadOffset, Buffer, 0, Buffer.Length);
-        }
+        private static unsafe uint Peek(long Offset) => Volatile.Read(ref *(uint*)(_viewBase + Offset));
 
-        private static void ReadPayload(long Base, Span<byte> Destination)
-        {
-            byte[] Buffer = new byte[Destination.Length];
-            _view.ReadArray(Base + PayloadOffset, Buffer, 0, Buffer.Length);
-            Buffer.CopyTo(Destination);
-        }
+        private static unsafe Span<byte> PayloadSpan(long Lane) => new(_viewBase + Lane + LaneHeaderSize, MaxPayloadBytes);
 
-        private static long ChannelOffset(int Slot) => (long)Slot * ChannelSize;
+        private static long TargetOffset(int Slot) => (long)Slot * TargetSize;
+
+        private static long LaneOffset(long Target, int Sender)
+            => Target + TargetHeaderSize + (long)(Sender >= 0 ? Sender : SharedLane) * LaneSize;
+
+        private struct Backoff
+        {
+            private long _spinEnd;
+            private SpinWait _spinner;
+
+            public static Backoff Start() => new() { _spinEnd = Stopwatch.GetTimestamp() + ResponseSpinTicks };
+
+            public void Pause()
+            {
+                if (_spinEnd != 0 && Stopwatch.GetTimestamp() < _spinEnd)
+                {
+                    _spinner.SpinOnce(sleep1Threshold: -1);
+                    return;
+                }
+
+                _spinEnd = 0;
+                Thread.Sleep(ResponsePollMilliseconds);
+            }
+        }
     }
 }

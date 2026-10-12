@@ -10,7 +10,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const ulong PageSize = 0x1000;
         private const uint MemCommit = 0x00001000;
-        private const uint MemReserve = 0x00002000;
+        internal const uint MemReserve = 0x00002000;
         private const uint MemReplacePlaceholder = 0x00004000;
         private const uint MemReservePlaceholder = 0x00040000;
         private const uint MemReset = 0x00080000;
@@ -178,7 +178,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // NT: the order of the checks decides the returned status.
         internal static NTSTATUS AllocateCommon(BinaryEmulator Instance, ulong ProcessHandle, ulong BaseAddressPtr, ulong RegionSizePtr, uint AllocationType, uint Protect, ulong ZeroBits, AddressRequirements Requirements, uint OutputWidth, bool Extended)
         {
-            if (!NtReadVirtualMemory.IsAccessible(Instance, BaseAddressPtr, OutputWidth, true) || !NtReadVirtualMemory.IsAccessible(Instance, RegionSizePtr, OutputWidth, true))
+            if (!Instance.IsAccessible(BaseAddressPtr, OutputWidth, true) || !Instance.IsAccessible(RegionSizePtr, OutputWidth, true))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (!Extended && (AllocationType & (MemReservePlaceholder | MemReplacePlaceholder)) != 0)

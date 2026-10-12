@@ -45,6 +45,7 @@ namespace Brovan.Core.Emulation
         private bool _mappingsDirty;
         private bool _populateUnavailable = !WhpNative.HasAdviseGpaRange;
         private bool _avxEnabled;
+        private ulong _cr4Protection;
         private byte[] _xsaveImage;
         private const int XsaveImageSize = 4096;
         private const int XsaveXmmOffset = 160;
@@ -84,7 +85,9 @@ namespace Brovan.Core.Emulation
         private ulong _internalPoolOffset;
         private readonly List<(IntPtr Ptr, ulong Size)> _internalPoolFallbacks = new();
 
+        // Trap page: hlt at 0 for LSTAR, hlt at 32 for CSTAR.
         private ulong _syscallTrapPageGpa;
+
         private ulong _exceptionStubPageGpa;
         private ulong _exceptionIdtPageGpa;
         private ulong _gdtPageGpa;
@@ -116,6 +119,10 @@ namespace Brovan.Core.Emulation
             public ulong CompletionAccessGpa;
             public uint CompletionLen;
             public bool CompletionIsWrite;
+
+            public uint InterruptErrorCode;
+
+            public readonly CachedDebugRegisters DebugRegisterCache = new();
 
             public volatile bool StopRequested;
             public volatile bool Running;
@@ -167,6 +174,7 @@ namespace Brovan.Core.Emulation
 
         private readonly WhvRegisterValue _userCodeSegment;
         private readonly WhvRegisterValue _userDataSegment;
+        private readonly WhvRegisterValue _compatCodeSegment;
 
         private readonly List<MemoryHookEntry> _memoryHooks = new();
         private readonly List<MmioRegion> _mmioRegions = new();
@@ -310,6 +318,7 @@ namespace Brovan.Core.Emulation
             _guest64 = mode == Mode.MODE_64;
             _userCodeSegment = MakeSegment(_guest64 ? WhpConstants.UserCodeSelector : WhpConstants.UserCodeSelector32, true, true);
             _userDataSegment = MakeSegment(_guest64 ? WhpConstants.UserDataSelector : WhpConstants.UserDataSelector32, false, true);
+            _compatCodeSegment = WhvRegisterValue.FromSegment(0, 0xFFFFFFFF, WhpConstants.UserCodeSelector32, SegmentAttributes(true, true, code64: false));
 
             EnsurePlatformSupport();
             _timestampCounterFrequency = QueryTimestampCounterFrequency();
@@ -354,11 +363,17 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        private static bool IsGuestRange(ulong address, ulong size)
+            => InternalPages.IsGuestRange(address, size, WhpConstants.InternalPageTableBase);
+
+        private static bool IsGuestPageRange(ulong address, ulong size)
+            => (address & WhpConstants.PageMask) == 0 && (size & WhpConstants.PageMask) == 0 && IsGuestRange(address, size);
+
         public bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, IntPtr hostPointer)
         {
             if (DisposedCheck() || hostPointer == IntPtr.Zero) return false;
 
-            if ((address & WhpConstants.PageMask) != 0 || (size & WhpConstants.PageMask) != 0)
+            if (!IsGuestPageRange(address, size))
             {
                 _error = WhpErrors.InvalidArgument;
                 return false;
@@ -453,7 +468,7 @@ namespace Brovan.Core.Emulation
         {
             if (DisposedCheck()) return false;
 
-            if ((address & WhpConstants.PageMask) != 0 || (size & WhpConstants.PageMask) != 0)
+            if (!IsGuestPageRange(address, size))
             {
                 _error = WhpErrors.InvalidArgument;
                 return false;
@@ -544,7 +559,7 @@ namespace Brovan.Core.Emulation
         {
             if (DisposedCheck()) return false;
 
-            if ((address & WhpConstants.PageMask) != 0 || (size & WhpConstants.PageMask) != 0)
+            if (!IsGuestPageRange(address, size))
             {
                 _error = WhpErrors.InvalidArgument;
                 return false;
@@ -578,6 +593,11 @@ namespace Brovan.Core.Emulation
         public bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection)
         {
             if (DisposedCheck()) return false;
+            if (!IsGuestRange(address, size))
+            {
+                _error = WhpErrors.InvalidArgument;
+                return false;
+            }
 
             WhpMemoryPermission perm = TranslateProtection(protection);
             bool writable = (perm & WhpMemoryPermission.Write) != 0;
@@ -684,14 +704,14 @@ namespace Brovan.Core.Emulation
             EnsureVirtualMapping(pageBase, page.Permissions);
         }
 
-        private bool TryTouchWatchedPage(ulong errorCode)
+        private bool TryTouchWatchedPage(ulong errorCode, ulong faultAddress)
         {
             const ulong Present = 0x1;
             const ulong Write = 0x2;
             if (_untouchedPages == 0 || (errorCode & Present) != 0)
                 return false;
 
-            ulong pageBase = ReadRegister(Registers.UC_X86_REG_CR2) & ~WhpConstants.PageMask;
+            ulong pageBase = faultAddress & ~WhpConstants.PageMask;
             if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || !page.Untouched || page.Permissions == WhpMemoryPermission.None ||
                 ((errorCode & Write) != 0 && (page.Permissions & WhpMemoryPermission.Write) == 0))
                 return false;
@@ -853,7 +873,7 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck()) return false;
 
             if (read == null || write == null ||
-                (address & WhpConstants.PageMask) != 0 || (size & WhpConstants.PageMask) != 0 || size == 0)
+                size == 0 || !IsGuestPageRange(address, size))
             {
                 _error = WhpErrors.InvalidArgument;
                 return false;
@@ -1378,10 +1398,15 @@ namespace Brovan.Core.Emulation
 
             ulong value = GetGpRegisterPointer(ref GetRegistersRef(), access.Name);
             _error = WhpErrors.Ok;
+            return ReadGpRegisterField(value, access);
+        }
+
+        private static ulong ReadGpRegisterField(ulong current, GpRegisterAccess access)
+        {
             int shiftBits = access.Offset * 8;
             int widthBits = access.Width * 8;
-            if (widthBits >= sizeof(ulong) * 8) return value >> shiftBits;
-            return (value >> shiftBits) & ((1UL << widthBits) - 1);
+            if (widthBits >= sizeof(ulong) * 8) return current >> shiftBits;
+            return (current >> shiftBits) & ((1UL << widthBits) - 1);
         }
 
         public ulong ReadRegister(int register) => ReadRegister((Registers)register);
@@ -1400,7 +1425,6 @@ namespace Brovan.Core.Emulation
             if (_mappingsDirty) RebuildMappings();
 
             VirtualProcessor vp = CurrentVp;
-            ClearTrapFlag(vp);
 
             GetRegistersRef(vp).Rip = start;
             vp.RegsDirty = true;
@@ -1452,6 +1476,14 @@ namespace Brovan.Core.Emulation
                         }
                     }
 
+                    // RIP can only become non-canonical through a register write, which goes through the cache.
+                    if (vp.RegsValid && !LongModeAddress.IsCanonical(vp.Regs.Rip))
+                    {
+                        if (RaiseNonCanonicalFetch(vp))
+                            continue;
+                        return false;
+                    }
+
                     RefreshMmioBackedRegions();
 
                     FlushRegisterCache(vp);
@@ -1469,7 +1501,7 @@ namespace Brovan.Core.Emulation
                             _error = WhpErrors.Ok;
                             return true;
                         case WhvRunVpExitReason.Canceled:
-                            if (TryTakeStubEntryAsHalt(vp, exit.VpRip))
+                            if (TryTakeStubEntryAsHalt(vp, exit.VpRip, exit.VpExecutionState))
                                 goto case WhvRunVpExitReason.X64Halt;
                             if (Volatile.Read(ref vp.SliceExpiredGeneration) == SliceGeneration && !vp.CompletionActive)
                             {
@@ -1777,6 +1809,7 @@ namespace Brovan.Core.Emulation
         {
             if (size == 0) return true;
             if (Volatile.Read(ref _disposing) != 0 || Volatile.Read(ref _disposed) != 0) return false;
+            if (!IsGuestRange(address, size)) return false;
 
             ulong current = address;
             ulong remaining = size;
@@ -1886,18 +1919,17 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private ushort SegmentAttributes(bool isCode, bool isUser)
+        private static ushort SegmentAttributes(bool isCode, bool isUser, bool code64)
         {
             int type = isCode ? 0xB : 0x3;
             int dpl = isUser ? 3 : 0;
-            bool code64 = _guest64 && isCode;
             int db = code64 ? 0 : 1;
             int l = code64 ? 1 : 0;
             return (ushort)(type | (1 << 4) | (dpl << 5) | (1 << 7) | (l << 13) | (db << 14) | (1 << 15));
         }
 
         private WhvRegisterValue MakeSegment(ushort selector, bool isCode, bool isUser)
-            => WhvRegisterValue.FromSegment(0, 0xFFFFFFFF, selector, SegmentAttributes(isCode, isUser));
+            => WhvRegisterValue.FromSegment(0, 0xFFFFFFFF, selector, SegmentAttributes(isCode, isUser, _guest64 && isCode));
 
         private static void QueueCsSs(VirtualProcessor vp, WhvRegisterValue cs, WhvRegisterValue ss)
         {
@@ -2058,6 +2090,7 @@ namespace Brovan.Core.Emulation
                 throw new WhpException("Windows Hypervisor Platform is not present. Enable the 'Windows Hypervisor Platform' optional feature and ensure virtualization is available.");
 
             _avxEnabled = WhpNative.HasXsaveState && HostEnablesAvx();
+            _cr4Protection = PartitionCr4Protection();
         }
 
         private unsafe bool HostEnablesAvx()
@@ -2067,6 +2100,26 @@ namespace Brovan.Core.Emulation
             int hr = WhpNative.WHvGetCapability(WhvCapabilityCode.ProcessorXsaveFeatures, &features, sizeof(ulong), &written);
             const ulong xsaveAndAvx = (1UL << 0) | (1UL << 2);
             return !WhpNative.Failed(hr) && written >= sizeof(ulong) && (features & xsaveAndAvx) == xsaveAndAvx;
+        }
+
+        // WHV_PROCESSOR_FEATURES bits (WinHvPlatformDefs.h).
+        private static unsafe ulong PartitionCr4Protection()
+        {
+            const ulong smepSupport = 1UL << 23;
+            const ulong smapSupport = 1UL << 35;
+            const ulong umipSupport = 1UL << 58;
+
+            ulong features = 0;
+            uint written = 0;
+            int hr = WhpNative.WHvGetCapability(WhvCapabilityCode.ProcessorFeatures, &features, sizeof(ulong), &written);
+            if (WhpNative.Failed(hr) || written < sizeof(ulong))
+                return 0;
+
+            ulong cr4 = 0;
+            if ((features & umipSupport) != 0) cr4 |= ControlRegister4.Umip;
+            if ((features & smepSupport) != 0) cr4 |= ControlRegister4.Smep;
+            if ((features & smapSupport) != 0) cr4 |= ControlRegister4.Smap;
+            return cr4;
         }
 
         private unsafe void ConfigurePartition()
@@ -2134,8 +2187,8 @@ namespace Brovan.Core.Emulation
 
         private unsafe void AllocateProcessorTables(VirtualProcessor vp)
         {
-            vp.GdtPageGpa = AllocateInternalPage(false);
-            vp.TssPageGpa = AllocateInternalPage(false);
+            vp.GdtPageGpa = AllocateInternalPage(WhpMemoryPermission.Read);
+            vp.TssPageGpa = AllocateInternalPage();
             ulong stackSize = ExceptionStackPages * WhpConstants.PageSize;
             ulong stackTop = AllocateInternalRange(stackSize, WhpMemoryPermission.ReadWrite) + stackSize;
 
@@ -2229,7 +2282,7 @@ namespace Brovan.Core.Emulation
 
         private unsafe void InitializeVirtualProcessorState(VirtualProcessor vp)
         {
-            const int maxCount = 17;
+            const int maxCount = 18;
             Span<uint> names = stackalloc uint[maxCount];
             Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[maxCount];
 
@@ -2247,10 +2300,10 @@ namespace Brovan.Core.Emulation
             values[7] = WhvRegisterValue.FromTable(vp.GdtPageGpa, WhpConstants.GdtLimit);
             names[8] = (uint)WhvRegisterName.Idtr;
             values[8] = WhvRegisterValue.FromTable(_exceptionIdtPageGpa, (ushort)(WhpConstants.ExceptionVectorCount * 16 - 1));
-            names[9] = (uint)WhvRegisterName.Cr0; values[9] = WhvRegisterValue.FromReg64(0x80000033UL);
+            names[9] = (uint)WhvRegisterName.Cr0; values[9] = WhvRegisterValue.FromReg64(0x80010033UL);
             names[10] = (uint)WhvRegisterName.Cr3; values[10] = WhvRegisterValue.FromReg64(_pml4Gpa);
             names[11] = (uint)WhvRegisterName.Cr4;
-            values[11] = WhvRegisterValue.FromReg64(_avxEnabled ? 0x620UL | (1UL << 18) : 0x620UL);
+            values[11] = WhvRegisterValue.FromReg64(0x620UL | (_avxEnabled ? ControlRegister4.Osxsave : 0) | _cr4Protection);
             names[12] = (uint)WhvRegisterName.Efer;
             values[12] = WhvRegisterValue.FromReg64((1UL << 8) | (1UL << 10) | (1UL << 11) | (_guest64 ? 1UL << 0 : 0));
 
@@ -2259,8 +2312,9 @@ namespace Brovan.Core.Emulation
             {
                 names[13] = (uint)WhvRegisterName.Star; values[13] = WhvRegisterValue.FromReg64((0x23UL << 48) | (0x08UL << 32));
                 names[14] = (uint)WhvRegisterName.Lstar; values[14] = WhvRegisterValue.FromReg64(_syscallTrapPageGpa);
-                names[15] = (uint)WhvRegisterName.Sfmask; values[15] = WhvRegisterValue.FromReg64(0);
-                count = 16;
+                names[15] = (uint)WhvRegisterName.Sfmask; values[15] = WhvRegisterValue.FromReg64(UserModeFlags.SyscallEntryMask);
+                names[16] = (uint)WhvRegisterName.Cstar; values[16] = WhvRegisterValue.FromReg64(_syscallTrapPageGpa + SyscallTrapPage.CompatSyscallOffset);
+                count = 17;
             }
 
             if (_avxEnabled)
@@ -2286,11 +2340,12 @@ namespace Brovan.Core.Emulation
         {
             if (!_guest64) return;
 
-            _syscallTrapPageGpa = AllocateInternalPage(true);
+            _syscallTrapPageGpa = AllocateInternalPage(WhpMemoryPermission.ReadExecute);
             if (_mappedPages.TryGetValue(_syscallTrapPageGpa, out MappedPage page))
             {
                 byte* code = (byte*)page.HostPage;
                 code[0] = 0xF4;
+                code[SyscallTrapPage.CompatSyscallOffset] = 0xF4;
             }
         }
 
@@ -2307,7 +2362,7 @@ namespace Brovan.Core.Emulation
 
         private void InitializeGdt()
         {
-            _gdtPageGpa = AllocateInternalPage(false);
+            _gdtPageGpa = AllocateInternalPage(WhpMemoryPermission.Read);
             if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage gdtPage) || gdtPage.HostPage == IntPtr.Zero)
                 throw new WhpException("Failed to allocate GDT page.");
 
@@ -2326,21 +2381,10 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private static unsafe void WriteIdtGate(byte* idt, uint vector, ulong handler)
-        {
-            ulong low = (handler & 0xFFFF)
-                      | ((ulong)WhpConstants.KernelCodeSelector << 16)
-                      | ((ulong)(WhpConstants.ExceptionIstIndex & 0x7) << 32)
-                      | ((ulong)WhpConstants.ExceptionGateAttributes << 40)
-                      | (((handler >> 16) & 0xFFFF) << 48);
-            Unsafe.WriteUnaligned(idt + vector * 16, low);
-            Unsafe.WriteUnaligned(idt + vector * 16 + 8, (uint)((handler >> 32) & 0xFFFFFFFF));
-        }
-
         private void InitializeExceptionHandling()
         {
-            _exceptionStubPageGpa = AllocateInternalPage(true);
-            _exceptionIdtPageGpa = AllocateInternalPage(false);
+            _exceptionStubPageGpa = AllocateInternalPage(WhpMemoryPermission.ReadExecute);
+            _exceptionIdtPageGpa = AllocateInternalPage(WhpMemoryPermission.Read);
 
             unsafe
             {
@@ -2355,14 +2399,23 @@ namespace Brovan.Core.Emulation
                 {
                     byte* idt = (byte*)idtPage.HostPage;
                     for (uint vector = 0; vector < WhpConstants.ExceptionVectorCount; vector++)
-                        WriteIdtGate(idt, vector, _exceptionStubPageGpa + vector * WhpConstants.ExceptionStubStride);
+                    {
+                        GuestInterruptGates.WriteIdtGate(idt, vector, _exceptionStubPageGpa + vector * WhpConstants.ExceptionStubStride,
+                            WhpConstants.KernelCodeSelector, WhpConstants.ExceptionIstIndex);
+                    }
                 }
             }
         }
 
+        public unsafe void SetUserInterruptGates(Func<uint, bool> raisableFromUserMode)
+        {
+            if (_mappedPages.TryGetValue(_exceptionIdtPageGpa, out MappedPage idtPage) && idtPage.HostPage != IntPtr.Zero)
+                GuestInterruptGates.SetUserGates((byte*)idtPage.HostPage, WhpConstants.ExceptionVectorCount, raisableFromUserMode);
+        }
+
         private void InitializeLongModePageTables()
         {
-            _pml4Gpa = AllocateInternalPage(false, false);
+            _pml4Gpa = AllocateInternalPage(mapIntoGuest: false);
         }
 
         private void AllocateInternalPool()
@@ -2371,9 +2424,8 @@ namespace Brovan.Core.Emulation
             _internalPoolOffset = 0;
         }
 
-        private ulong AllocateInternalPage(bool executable = false, bool mapIntoGuest = true)
-            => AllocateInternalRange(WhpConstants.PageSize,
-                executable ? WhpMemoryPermission.All : WhpMemoryPermission.ReadWrite, mapIntoGuest);
+        private ulong AllocateInternalPage(WhpMemoryPermission permissions = WhpMemoryPermission.ReadWrite, bool mapIntoGuest = true)
+            => AllocateInternalRange(WhpConstants.PageSize, permissions, mapIntoGuest);
 
         private ulong AllocateInternalRange(ulong size, WhpMemoryPermission permissions, bool mapIntoGuest = true)
         {
@@ -2405,6 +2457,8 @@ namespace Brovan.Core.Emulation
                     HostPage = new IntPtr(backingBase + (long)off),
                     OwnedBacking = IntPtr.Zero,
                     Permissions = permissions,
+                    // The PTE protects an internal page. Its GPA range keeps the flags of the pages around it.
+                    WriteRetained = true,
                 };
                 SetMappedPage(pageGpa, page);
                 _pageTableViews[pageGpa] = page.HostPage;
@@ -2438,6 +2492,13 @@ namespace Brovan.Core.Emulation
                 ulong flags = (permissions & WhpMemoryPermission.Write) != 0
                     ? PageTableEntryDefaultFlags
                     : PageTableEntryDefaultFlags & ~WhpConstants.PageTableEntryWritable;
+
+                if (pageBase >= WhpConstants.InternalPageTableBase)
+                {
+                    flags &= ~WhpConstants.PageTableEntryUser;
+                    if ((permissions & WhpMemoryPermission.Execute) == 0)
+                        flags |= WhpConstants.PageTableEntryNoExecute;
+                }
 
                 if (_watchedPages == 0)
                 {
@@ -2495,7 +2556,7 @@ namespace Brovan.Core.Emulation
                 ulong entry = entries[index];
                 if ((entry & WhpConstants.PageTableEntryPresent) == 0)
                 {
-                    ulong childGpa = AllocateInternalPage(false, false);
+                    ulong childGpa = AllocateInternalPage(mapIntoGuest: false);
                     entries[index] = childGpa | PageTableEntryDefaultFlags;
                     return childGpa;
                 }
@@ -3131,7 +3192,10 @@ namespace Brovan.Core.Emulation
         private void UnmapGpaRange(ulong gpa, ulong size)
             => WhpNative.WHvUnmapGpaRange(_partition, gpa, size);
 
-        private unsafe bool TryReadMemoryInternal(ulong address, Span<byte> buffer)
+        private bool TryReadMemoryInternal(ulong address, Span<byte> buffer)
+            => IsGuestRange(address, (ulong)buffer.Length) && TryReadPages(address, buffer);
+
+        private unsafe bool TryReadPages(ulong address, Span<byte> buffer)
         {
             if (_untouchedPages != 0) RecordHostAccess(address, (ulong)buffer.Length, false);
 
@@ -3161,6 +3225,8 @@ namespace Brovan.Core.Emulation
 
         private unsafe bool TryWriteMemoryInternal(ulong address, ReadOnlySpan<byte> buffer)
         {
+            if (!IsGuestRange(address, (ulong)buffer.Length)) return false;
+
             ulong current = address;
             int offset = 0;
             int remaining = buffer.Length;
@@ -3190,7 +3256,6 @@ namespace Brovan.Core.Emulation
         private bool HandleInvalidInstructionHook()
         {
             bool consumed = false;
-            ulong rip = ReadRegister(Registers.UC_X86_REG_RIP);
 
             for (int i = 0; i < _instructionHooks.Count; i++)
             {
@@ -3201,8 +3266,6 @@ namespace Brovan.Core.Emulation
                 else if (entry.BoolCallback != null) { if (entry.BoolCallback()) consumed = true; }
             }
 
-            if (consumed && ReadRegister(Registers.UC_X86_REG_RIP) == rip)
-                AdvanceRip(2);
             return consumed;
         }
 
@@ -3216,6 +3279,9 @@ namespace Brovan.Core.Emulation
                 _error = WhpErrors.Ok;
                 return false;
             }
+
+            if (_guest64 && rip == _syscallTrapPageGpa + SyscallTrapPage.CompatSyscallOffset + 1)
+                return HandleCompatSyscall(vp);
 
             ulong stubEnd = _exceptionStubPageGpa +
                 WhpConstants.ExceptionVectorCount * WhpConstants.ExceptionStubStride;
@@ -3238,10 +3304,13 @@ namespace Brovan.Core.Emulation
                     return false;
                 }
 
-                ReadExceptionFrame(vp, rip, out uint faultVector, out ulong errorCode);
-                if (faultVector == 14 && (TryTouchWatchedPage(errorCode) || IsStaleWriteFault(vp, errorCode)))
+                bool fromUserMode = ReadExceptionFrame(vp, rip, out uint faultVector, out ulong errorCode);
+                if (!fromUserMode)
+                    return HandleKernelFault(vp, faultVector);
+                ulong faultAddress = faultVector == 14 ? ReadRegister(Registers.UC_X86_REG_CR2) : 0;
+                if (faultVector == 14 && (TryTouchWatchedPage(errorCode, faultAddress) || IsStaleWriteFault(vp, errorCode, faultAddress)))
                     return true;
-                if (HandleException(faultVector, (uint)errorCode))
+                if (HandleException(faultVector, (uint)errorCode, faultAddress))
                     return true;
                 _error = WhpErrors.Exception;
                 return false;
@@ -3251,14 +3320,56 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        // A cancel can exit with RIP on a stub's hlt before the hlt runs. The exit counts as that hlt.
-        private bool TryTakeStubEntryAsHalt(VirtualProcessor vp, ulong rip)
+        // A VM entry at a non-canonical RIP fails, so give the guest the #GP(0) the processor would raise.
+        private bool RaiseNonCanonicalFetch(VirtualProcessor vp)
         {
+            if (HandleException(13, 0) && (vp.StopRequested || LongModeAddress.IsCanonical(GetRegistersRef(vp).Rip)))
+                return true;
+            _error = WhpErrors.Exception;
+            return false;
+        }
+
+        // AMD enters CSTAR on a syscall from compatibility mode, but Intel raises #UD, so the guest gets #UD.
+        private bool HandleCompatSyscall(VirtualProcessor vp)
+        {
+            ref WhpRegisters regs = ref GetRegistersRef(vp);
+            regs.Rip = (uint)regs.Rcx - 2u;
+            regs.Rflags = regs.R11;
+            vp.RegsDirty = true;
+            QueueCsSs(vp, _compatCodeSegment, _userDataSegment);
+
+            if (HandleException(6, 0))
+                return true;
+            _error = WhpErrors.Exception;
+            return false;
+        }
+
+        // A mov ss before a syscall delays a data breakpoint #DB until the syscall entry. Any other fault in ring 0
+        // comes from the backend itself.
+        private bool HandleKernelFault(VirtualProcessor vp, uint vector)
+        {
+            ulong rip = GetRegistersRef(vp).Rip;
+            if (_guest64 && vector == 1 && rip == _syscallTrapPageGpa && HandleSyscallTrap(vp))
+                return true;
+
+            Utils.LogError($"[Whp] Vector 0x{vector:X} faulted in ring 0 at 0x{rip:X}.");
+            _error = WhpErrors.InternalError;
+            return false;
+        }
+
+        // A cancel can exit with RIP on a stub's hlt before the hlt runs. Count it as that hlt only in ring 0,
+        // because ring 3 can jump there too. Bits 0-1 of WHV_X64_VP_EXECUTION_STATE are the CPL.
+        private bool TryTakeStubEntryAsHalt(VirtualProcessor vp, ulong rip, ushort executionState)
+        {
+            if ((executionState & 3) != 0)
+                return false;
+
             ulong stubOffset = rip - _exceptionStubPageGpa;
             bool atExceptionStub = rip >= _exceptionStubPageGpa
                 && stubOffset < WhpConstants.ExceptionVectorCount * WhpConstants.ExceptionStubStride
                 && stubOffset % WhpConstants.ExceptionStubStride == 0;
-            if (!atExceptionStub && !(_guest64 && rip == _syscallTrapPageGpa))
+            bool atSyscallEntry = _guest64 && (rip == _syscallTrapPageGpa || rip == _syscallTrapPageGpa + SyscallTrapPage.CompatSyscallOffset);
+            if (!atExceptionStub && !atSyscallEntry)
                 return false;
 
             GetRegistersRef(vp).Rip = rip + 1;
@@ -3267,14 +3378,15 @@ namespace Brovan.Core.Emulation
         }
 
         // A write fault can hit a stale read-only TLB entry after write is granted.
-        private bool IsStaleWriteFault(VirtualProcessor vp, ulong errorCode)
+        private bool IsStaleWriteFault(VirtualProcessor vp, ulong errorCode, ulong faultAddress)
         {
             const ulong PresentAndWrite = 0x3;
             if ((errorCode & PresentAndWrite) != PresentAndWrite)
                 return false;
 
-            ulong page = ReadRegister(Registers.UC_X86_REG_CR2) & ~WhpConstants.PageMask;
-            if (!_mappedPages.TryGetValue(page, out MappedPage mapped) || (mapped.Permissions & WhpMemoryPermission.Write) == 0)
+            ulong page = faultAddress & ~WhpConstants.PageMask;
+            if (!IsGuestRange(page, WhpConstants.PageSize)
+                || !_mappedPages.TryGetValue(page, out MappedPage mapped) || (mapped.Permissions & WhpMemoryPermission.Write) == 0)
                 return false;
 
             EnsureVirtualMapping(page, mapped.Permissions);
@@ -3455,7 +3567,8 @@ namespace Brovan.Core.Emulation
             MapGpaRange(pageGpa, WhpConstants.PageSize, page.HostPage, flags);
         }
 
-        private void ReadExceptionFrame(VirtualProcessor vp, ulong stubRip, out uint vector, out ulong errorCode)
+        /// <returns>False when the frame was taken in ring 0.</returns>
+        private bool ReadExceptionFrame(VirtualProcessor vp, ulong stubRip, out uint vector, out ulong errorCode)
         {
             vector = (uint)((stubRip - 1 - _exceptionStubPageGpa) / WhpConstants.ExceptionStubStride);
             errorCode = 0;
@@ -3467,14 +3580,14 @@ namespace Brovan.Core.Emulation
             {
                 Span<byte> ecBytes = stackalloc byte[sizeof(ulong)];
                 ecBytes.Clear();
-                TryReadMemoryInternal(frameAddress, ecBytes);
+                TryReadPages(frameAddress, ecBytes);
                 errorCode = BitConverter.ToUInt64(ecBytes);
                 frameAddress += sizeof(ulong);
             }
 
             Span<byte> frameBytes = stackalloc byte[40];
             frameBytes.Clear();
-            TryReadMemoryInternal(frameAddress, frameBytes);
+            TryReadPages(frameAddress, frameBytes);
 
             ulong frameRip = BitConverter.ToUInt64(frameBytes);
             ulong frameCs = BitConverter.ToUInt64(frameBytes.Slice(8));
@@ -3483,13 +3596,12 @@ namespace Brovan.Core.Emulation
             ulong frameSs = BitConverter.ToUInt64(frameBytes.Slice(32));
 
             regs.Rip = frameRip;
-            if (vector == 3) regs.Rip -= 1;
             regs.Rsp = frameRsp;
             regs.Rflags = frameRflags;
             vp.RegsDirty = true;
 
-            QueueCsSs(vp, MakeSegment((ushort)frameCs, true, (frameCs & 3) == 3),
-                MakeSegment((ushort)frameSs, false, (frameSs & 3) == 3));
+            QueueCsSs(vp, MakeSegment((ushort)(frameCs | 3), true, true), MakeSegment((ushort)(frameSs | 3), false, true));
+            return (frameCs & 3) == 3;
         }
 
         private bool HandleSyscallTrap(VirtualProcessor vp)
@@ -3522,14 +3634,12 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        private bool HandleException(uint exception, uint errorCode)
+        private bool HandleException(uint exception, uint errorCode, ulong faultAddress = 0)
         {
             if (exception == 6 && HandleInvalidInstructionHook()) return true;
 
             if (exception == 14)
             {
-                ulong faultAddress = ReadRegister(Registers.UC_X86_REG_CR2);
-
                 // An untouched watched page has no valid PTE, but its faults are still protection faults.
                 bool present = (errorCode & 0x1) != 0 || _mappedPages.ContainsKey(faultAddress & ~WhpConstants.PageMask);
                 bool write = (errorCode & 0x2) != 0;
@@ -3556,18 +3666,15 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
+            CurrentVp.InterruptErrorCode = errorCode;
+            bool handled = false;
             for (int i = 0; i < _interruptHooks.Count; i++)
-                _interruptHooks[i].Callback(exception);
+                handled |= _interruptHooks[i].Callback(exception);
 
-            return _interruptHooks.Count != 0 && exception >= WhpConstants.FirstSoftwareInterruptVector;
+            return handled || (_interruptHooks.Count != 0 && exception >= WhpConstants.FirstSoftwareInterruptVector);
         }
 
-        private void AdvanceRip(ulong amount)
-        {
-            VirtualProcessor vp = CurrentVp;
-            GetRegistersRef(vp).Rip += amount;
-            vp.RegsDirty = true;
-        }
+        public uint InterruptErrorCode => CurrentVp.InterruptErrorCode;
 
         private ref WhpRegisters GetRegistersRef() => ref GetRegistersRef(CurrentVp);
 
@@ -3611,6 +3718,8 @@ namespace Brovan.Core.Emulation
         }
 
         public bool SupportsAvx => _avxEnabled;
+
+        public bool UmipEnabled => (_cr4Protection & ControlRegister4.Umip) != 0;
 
         // Only the YMM upper halves go through the XSAVE image. XMM0-15 stay on the register cache,
         // and a write to a running processor faults inside the platform library instead of failing.
@@ -3793,7 +3902,7 @@ namespace Brovan.Core.Emulation
             values[14] = WhvRegisterValue.FromReg64(vp.Regs.R14);
             values[15] = WhvRegisterValue.FromReg64(vp.Regs.R15);
             values[16] = WhvRegisterValue.FromReg64(vp.Regs.Rip);
-            values[17] = WhvRegisterValue.FromReg64(vp.Regs.Rflags | 0x2UL);
+            values[17] = WhvRegisterValue.FromReg64(UserModeFlags.Clamp(vp.Regs.Rflags));
 
             if (withSegments)
             {
@@ -3915,7 +4024,7 @@ namespace Brovan.Core.Emulation
 
         private bool TryWriteSpecialRegister(Registers register, ulong value)
         {
-            if (IsDebugRegister(register))
+            if (DebugRegisters.IsDebugRegister(register))
             {
                 WriteDebugRegister(register, value);
                 return true;
@@ -3938,6 +4047,7 @@ namespace Brovan.Core.Emulation
                 case Registers.UC_X86_REG_CR8: SetSingleRegister(WhvRegisterName.Cr8, WhvRegisterValue.FromReg64(value)); return true;
                 case Registers.UC_X86_REG_MSR: SetSingleRegister(WhvRegisterName.Efer, WhvRegisterValue.FromReg64(value)); return true;
                 case Registers.UC_X86_REG_FPCW:
+                case Registers.UC_X86_REG_FPSW:
                 case Registers.UC_X86_REG_MXCSR: return WriteFpControl(register, value);
                 default: return false;
             }
@@ -3945,7 +4055,7 @@ namespace Brovan.Core.Emulation
 
         private bool TryReadSpecialRegister(Registers register, out ulong value)
         {
-            if (IsDebugRegister(register))
+            if (DebugRegisters.IsDebugRegister(register))
             {
                 value = ReadDebugRegister(register);
                 return true;
@@ -3968,12 +4078,13 @@ namespace Brovan.Core.Emulation
                 case Registers.UC_X86_REG_CR8: value = GetSingleRegister(WhvRegisterName.Cr8).Low; return true;
                 case Registers.UC_X86_REG_MSR: value = GetSingleRegister(WhvRegisterName.Efer).Low; return true;
                 case Registers.UC_X86_REG_FPCW:
+                case Registers.UC_X86_REG_FPSW:
                 case Registers.UC_X86_REG_MXCSR: return ReadFpControl(register, out value);
                 default: value = 0; return false;
             }
         }
 
-        // Both registers carry unrelated state in the rest of their 128 bits (FpStatus/FpTag/LastFpOp/LastFpRip,
+        // Both registers carry unrelated state in the rest of their 128 bits (FpTag/LastFpOp/LastFpRip,
         // LastFpRdp/XmmStatusControlMask), so a write is a read-modify-write of the cached value.
         private bool WriteFpControl(Registers register, ulong value)
         {
@@ -3983,6 +4094,8 @@ namespace Brovan.Core.Emulation
 
             if (register == Registers.UC_X86_REG_FPCW)
                 vp.Xmm[FpControlSlot].Low = (vp.Xmm[FpControlSlot].Low & ~0xFFFFUL) | (ushort)value;
+            else if (register == Registers.UC_X86_REG_FPSW)
+                vp.Xmm[FpControlSlot].Low = (vp.Xmm[FpControlSlot].Low & ~0xFFFF0000UL) | ((ulong)(ushort)value << 16);
             else
                 vp.Xmm[XmmControlSlot].High = (vp.Xmm[XmmControlSlot].High & ~0xFFFFFFFFUL) | (uint)value;
 
@@ -3997,13 +4110,84 @@ namespace Brovan.Core.Emulation
             if (!vp.XmmValid && !LoadXmmRegisters(vp))
                 return false;
 
-            value = register == Registers.UC_X86_REG_FPCW
-                ? (ushort)vp.Xmm[FpControlSlot].Low
-                : (uint)vp.Xmm[XmmControlSlot].High;
+            value = register switch
+            {
+                Registers.UC_X86_REG_FPCW => (ushort)vp.Xmm[FpControlSlot].Low,
+                Registers.UC_X86_REG_FPSW => (ushort)(vp.Xmm[FpControlSlot].Low >> 16),
+                _ => (uint)vp.Xmm[XmmControlSlot].High,
+            };
             return true;
         }
 
-        private ushort SegmentSelector(WhvRegisterName name) => (ushort)(GetSingleRegister(name).High >> 32);
+        private ushort SegmentSelector(WhvRegisterName name) => Selector(GetSingleRegister(name));
+
+        private static ushort Selector(in WhvRegisterValue segment) => (ushort)(segment.High >> 32);
+
+        private static bool TryGetSelectorName(Registers register, out WhvRegisterName name)
+        {
+            switch (register)
+            {
+                case Registers.UC_X86_REG_CS: name = WhvRegisterName.Cs; return true;
+                case Registers.UC_X86_REG_SS: name = WhvRegisterName.Ss; return true;
+                case Registers.UC_X86_REG_DS: name = WhvRegisterName.Ds; return true;
+                case Registers.UC_X86_REG_ES: name = WhvRegisterName.Es; return true;
+                case Registers.UC_X86_REG_FS: name = WhvRegisterName.Fs; return true;
+                case Registers.UC_X86_REG_GS: name = WhvRegisterName.Gs; return true;
+                default: name = default; return false;
+            }
+        }
+
+        private static bool IsSelectorBatch(int[] registers, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (!TryGetSelectorName((Registers)registers[i], out _))
+                    return false;
+            }
+            return true;
+        }
+
+        // A pending CS or SS reads as its pending value.
+        private unsafe void ReadSelectorBatch(int[] registers, ulong[] values, int count)
+        {
+            VirtualProcessor vp = CurrentVp;
+            uint* names = stackalloc uint[count];
+            int* targets = stackalloc int[count];
+            byte* raw = stackalloc byte[count * sizeof(WhvRegisterValue) + 16];
+            WhvRegisterValue* aligned = AlignRegisterValue(raw);
+            uint fetched = 0;
+            for (int i = 0; i < count; i++)
+            {
+                TryGetSelectorName((Registers)registers[i], out WhvRegisterName name);
+                if (vp.SegmentsDirty && name == WhvRegisterName.Cs)
+                    values[i] = Selector(vp.PendingCs);
+                else if (vp.SegmentsDirty && name == WhvRegisterName.Ss)
+                    values[i] = Selector(vp.PendingSs);
+                else
+                {
+                    names[fetched] = (uint)name;
+                    targets[fetched] = i;
+                    fetched++;
+                }
+            }
+
+            if (fetched == 0)
+                return;
+
+            GetRegisterValues(vp, names, fetched, aligned);
+            for (uint i = 0; i < fetched; i++)
+                values[targets[i]] = Selector(aligned[i]);
+        }
+
+        private unsafe void GetRegisterValues(VirtualProcessor vp, uint* names, uint count, WhvRegisterValue* values)
+        {
+            lock (_vcpuLock)
+            {
+                int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, vp.Index, names, count, values);
+                if (WhpNative.Failed(hr))
+                    throw new WhpException("WHvGetVirtualProcessorRegisters failed", hr);
+            }
+        }
 
         private void WriteSegmentSelector(WhvRegisterName name, ulong selector)
         {
@@ -4041,45 +4225,145 @@ namespace Brovan.Core.Emulation
             descriptor[7] = (byte)(segmentBase >> 24);
         }
 
-        private static bool IsDebugRegister(Registers register) => register switch
+        // Indexed by DebugRegisters.Index.
+        private static readonly WhvRegisterName[] DebugRegisterNames =
         {
-            Registers.UC_X86_REG_DR0 => true,
-            Registers.UC_X86_REG_DR1 => true,
-            Registers.UC_X86_REG_DR2 => true,
-            Registers.UC_X86_REG_DR3 => true,
-            Registers.UC_X86_REG_DR6 => true,
-            Registers.UC_X86_REG_DR7 => true,
-            _ => false,
+            WhvRegisterName.Dr0, WhvRegisterName.Dr1, WhvRegisterName.Dr2, WhvRegisterName.Dr3, WhvRegisterName.Dr7, WhvRegisterName.Dr6,
         };
+
+        private static WhvRegisterName DebugRegisterName(Registers register) => DebugRegisterNames[DebugRegisters.Index(register)];
 
         private void WriteDebugRegister(Registers register, ulong value)
         {
-            WhvRegisterName name = register switch
-            {
-                Registers.UC_X86_REG_DR0 => WhvRegisterName.Dr0,
-                Registers.UC_X86_REG_DR1 => WhvRegisterName.Dr1,
-                Registers.UC_X86_REG_DR2 => WhvRegisterName.Dr2,
-                Registers.UC_X86_REG_DR3 => WhvRegisterName.Dr3,
-                Registers.UC_X86_REG_DR6 => WhvRegisterName.Dr6,
-                Registers.UC_X86_REG_DR7 => WhvRegisterName.Dr7,
-                _ => throw new WhpException("Unsupported WHP debug register"),
-            };
-            SetSingleRegister(name, WhvRegisterValue.FromReg64(value));
+            ReadOnlySpan<int> name = stackalloc int[] { (int)register };
+            ReadOnlySpan<ulong> data = stackalloc ulong[] { value };
+            WriteDebugRegisters(name, data);
         }
 
-        private ulong ReadDebugRegister(Registers register)
+        private unsafe void WriteDebugRegisters(ReadOnlySpan<int> registers, ReadOnlySpan<ulong> values)
         {
-            WhvRegisterName name = register switch
+            VirtualProcessor vp = CurrentVp;
+            uint* names = stackalloc uint[registers.Length];
+            byte* raw = stackalloc byte[registers.Length * sizeof(WhvRegisterValue) + 16];
+            WhvRegisterValue* aligned = AlignRegisterValue(raw);
+            uint changed = 0;
+            for (int i = 0; i < registers.Length; i++)
             {
-                Registers.UC_X86_REG_DR0 => WhvRegisterName.Dr0,
-                Registers.UC_X86_REG_DR1 => WhvRegisterName.Dr1,
-                Registers.UC_X86_REG_DR2 => WhvRegisterName.Dr2,
-                Registers.UC_X86_REG_DR3 => WhvRegisterName.Dr3,
-                Registers.UC_X86_REG_DR6 => WhvRegisterName.Dr6,
-                Registers.UC_X86_REG_DR7 => WhvRegisterName.Dr7,
-                _ => throw new WhpException("Unsupported WHP debug register"),
-            };
-            return GetSingleRegister(name).Low;
+                int index = DebugRegisters.Index((Registers)registers[i]);
+                if (vp.DebugRegisterCache.IsUnchanged(index, values[i]))
+                    continue;
+                names[changed] = (uint)DebugRegisterNames[index];
+                aligned[changed] = WhvRegisterValue.FromReg64(values[i]);
+                changed++;
+            }
+
+            if (changed == 0)
+                return;
+
+            lock (_vcpuLock)
+            {
+                int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, vp.Index, names, changed, aligned);
+                if (WhpNative.Failed(hr))
+                    throw new WhpException("WHvSetVirtualProcessorRegisters(debug) failed", hr);
+            }
+            vp.DebugRegisterCache.Note(registers, values);
+        }
+
+        public bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
+        {
+            if (DisposedCheck()) return false;
+            if (!RegisterBatch.IsValid(registers, values, count))
+            {
+                _error = WhpErrors.InvalidArgument;
+                return false;
+            }
+
+            if (IsGpBatch(registers, count))
+            {
+                VirtualProcessor vp = CurrentVp;
+                ref WhpRegisters regs = ref GetRegistersRef(vp);
+                for (int i = 0; i < count; i++)
+                {
+                    GpRegisterAccess access = ClassifyGpRegister((Registers)registers[i]);
+                    ref ulong target = ref GetGpRegisterPointer(ref regs, access.Name);
+                    target = WriteGpRegisterField(target, access, values[i]);
+                }
+                vp.RegsDirty = true;
+                _error = WhpErrors.Ok;
+                return true;
+            }
+
+            if (DebugRegisters.IsDebugBatch(registers, count))
+            {
+                WriteDebugRegisters(registers.AsSpan(0, count), values.AsSpan(0, count));
+                _error = WhpErrors.Ok;
+                return true;
+            }
+
+            bool written = true;
+            for (int i = 0; i < count; i++)
+                written &= WriteRegister((Registers)registers[i], values[i]);
+            return written;
+        }
+
+        private ulong ReadDebugRegister(Registers register) => GetSingleRegister(DebugRegisterName(register)).Low;
+
+        public unsafe bool ReadRegisterBatch(int[] registers, ulong[] values, int count)
+        {
+            if (DisposedCheck()) return false;
+            if (!RegisterBatch.IsValid(registers, values, count))
+            {
+                _error = WhpErrors.InvalidArgument;
+                return false;
+            }
+
+            if (IsGpBatch(registers, count))
+            {
+                ref WhpRegisters regs = ref GetRegistersRef();
+                for (int i = 0; i < count; i++)
+                {
+                    GpRegisterAccess access = ClassifyGpRegister((Registers)registers[i]);
+                    values[i] = ReadGpRegisterField(GetGpRegisterPointer(ref regs, access.Name), access);
+                }
+                _error = WhpErrors.Ok;
+                return true;
+            }
+
+            if (IsSelectorBatch(registers, count))
+            {
+                ReadSelectorBatch(registers, values, count);
+                _error = WhpErrors.Ok;
+                return true;
+            }
+
+            if (!DebugRegisters.IsDebugBatch(registers, count))
+            {
+                for (int i = 0; i < count; i++)
+                    values[i] = ReadRegister((Registers)registers[i]);
+                return true;
+            }
+
+            uint* names = stackalloc uint[count];
+            byte* raw = stackalloc byte[count * sizeof(WhvRegisterValue) + 16];
+            WhvRegisterValue* aligned = AlignRegisterValue(raw);
+            for (int i = 0; i < count; i++)
+                names[i] = (uint)DebugRegisterName((Registers)registers[i]);
+
+            GetRegisterValues(CurrentVp, names, (uint)count, aligned);
+            for (int i = 0; i < count; i++)
+                values[i] = aligned[i].Low;
+            _error = WhpErrors.Ok;
+            return true;
+        }
+
+        private static bool IsGpBatch(int[] registers, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (!ClassifyGpRegister((Registers)registers[i]).IsValid)
+                    return false;
+            }
+            return true;
         }
 
         private static GpRegisterAccess ClassifyGpRegister(Registers register)
@@ -4168,7 +4452,7 @@ namespace Brovan.Core.Emulation
         {
             ptr = null;
             offset = 0;
-            if (accessSize <= 0) return false;
+            if (accessSize <= 0 || !IsGuestRange(address, (ulong)accessSize)) return false;
 
             ulong pageBase = address & ~WhpConstants.PageMask;
             if (!TryLookupPage(pageBase, out MappedPage page))

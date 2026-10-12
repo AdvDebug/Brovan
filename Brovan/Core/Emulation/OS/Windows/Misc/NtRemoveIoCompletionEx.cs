@@ -96,12 +96,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return ReturnEmpty(Instance, EntriesRemovedPtr, NTSTATUS.STATUS_TIMEOUT);
 
                 Thread.WaitActive = true;
-                Thread.WaitHandles = new List<ulong> { IoCompletionHandle };
+                Thread.WaitOnSingleHandle(IoCompletionHandle);
                 Thread.WaitAll = true;
                 Thread.WaitDeadline = Deadline;
                 State.WaitCompleted = false;
                 State.WaitStatus = NTSTATUS.STATUS_PENDING;
-                State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
+                State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip();
                 State.WaitReturnRIP = State.WaitResumeRIP + 2;
                 State.WaitAlertable = Alertable;
                 State.ResetIoCompletionWait();

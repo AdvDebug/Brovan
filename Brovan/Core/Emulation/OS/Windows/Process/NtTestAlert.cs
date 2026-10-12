@@ -14,9 +14,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (WinEmulatedThread.GetState(Thread).PendingUserApcs == null || WinEmulatedThread.GetState(Thread).PendingUserApcs.Count == 0)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Thread, true);
-            ulong NextRip = SyscallRip + 2;
-            Instance._emulator.WriteRegister(Instance.IPRegister, NextRip);
             WinEmulatedThread.GetState(Thread).ApcAlertable = true;
             Thread.State = EmulatedThreadState.Ready;
             Instance._emulator.StopEmulation();

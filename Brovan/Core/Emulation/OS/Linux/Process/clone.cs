@@ -25,51 +25,57 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             EmulatedThread Parent = Instance.CurrentThread;
             if (Parent == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((flags & CLONE_THREAD) == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOSYS);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOSYS);
                 return;
             }
 
             if ((flags & CLONE_SIGHAND) != 0 && (flags & CLONE_VM) == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((flags & CLONE_THREAD) != 0 && ((flags & CLONE_SIGHAND) == 0 || (flags & CLONE_VM) == 0))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (child_stack == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
+                return;
+            }
+
+            // Linux checks the new FS base as ARCH_SET_FS does (copy_thread).
+            if ((flags & CLONE_SETTLS) != 0 && Context.Abi == SyscallAbi.X64 && tls >= Arch_prctl.TASK_SIZE_MAX)
+            {
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EPERM);
                 return;
             }
 
             uint ThreadId = (uint)Instance.NextThreadId++;
             if ((flags & CLONE_PARENT_SETTID) != 0 && !TryWriteTid(Instance, Context, parent_tidptr, ThreadId))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if ((flags & CLONE_CHILD_SETTID) != 0 && !TryWriteTid(Instance, Context, child_tidptr, ThreadId))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             LinuxThreadState ParentState = Parent.GuestState as LinuxThreadState;
             LinuxThreadState ChildState = new LinuxThreadState
             {
-                CpuidEnabled = ParentState?.CpuidEnabled ?? Helper.CpuidEnabled,
                 FsBase = ParentState?.FsBase ?? (Instance.IsX64Guest ? Instance.ReadRegister(Registers.UC_X86_REG_FS_BASE) : 0),
                 GsBase = ParentState?.GsBase ?? (Instance.IsX64Guest ? Instance.ReadRegister(Registers.UC_X86_REG_GS_BASE) : 0),
                 TIDPtr = (flags & CLONE_CHILD_CLEARTID) != 0 ? child_tidptr : 0,
@@ -115,7 +121,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             Helper.RegisterThread(Child);
             Instance.Threads[ThreadId] = Child;
             Instance.ThreadOrder.Add((int)ThreadId);
-            Helper.SetReturnValue(Instance, Context, ThreadId);
+            Helper.SetReturnValue(Instance, ThreadId);
         }
 
         private static CpuContext CaptureCurrentContext(BinaryEmulator Instance, LinuxSyscallContext Context)

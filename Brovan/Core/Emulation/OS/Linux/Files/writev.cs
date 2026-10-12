@@ -30,7 +30,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             FileDescriptorEntry? Entry = Helper.DescriptorTable.GetEntry(fd);
             if (Entry == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
@@ -42,51 +42,51 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (Entry.Object is not FileObject FObj)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if ((FObj.StatusFlags & O_ACCMODE) == O_RDONLY || (FObj.StatusFlags & O_PATH) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (FObj.IsReadOnlyMount)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EROFS);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EROFS);
                 return;
             }
 
             if (FObj.IsDirectory)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EISDIR);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EISDIR);
                 return;
             }
 
             if (iovCountValue > UIO_MAXIOV)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             int IovCount = (int)iovCountValue;
             if (IovCount == 0)
             {
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
             ulong IovElementSize = Context.Abi == SyscallAbi.X64 ? 16UL : 8UL;
             if (!TryMultiply(IovElementSize, (ulong)IovCount, out ulong IovTableSize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (!Instance.IsRegionMapped(iovAddress, IovTableSize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -97,7 +97,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             {
                 if (!TryReadIoVector(Instance, Context.Abi, iovAddress + ((ulong)i * IovElementSize), out IoVector Vector))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
@@ -117,7 +117,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (TotalLength == 0)
             {
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
@@ -135,7 +135,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
                 if (!Instance.IsRegionMapped(Vector.Base, Vector.EffectiveLength))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
             }
@@ -161,7 +161,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                         Span<byte> Transfer = Helper.Shared.GetSpan((ulong)ChunkLength);
                         if (!Instance.ReadMemory(Vector.Base, Transfer))
                         {
-                            Helper.SetReturnValue(Instance, Context, TotalWritten == 0 ? -(long)LinuxErrno.EFAULT : TotalWritten);
+                            Helper.SetReturnValue(Instance, TotalWritten == 0 ? -(long)LinuxErrno.EFAULT : TotalWritten);
                             return;
                         }
 
@@ -190,7 +190,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                         Span<byte> Transfer = Helper.Shared.GetSpan((ulong)ChunkLength);
                         if (!Instance.ReadMemory(Vector.Base, Transfer))
                         {
-                            Helper.SetReturnValue(Instance, Context, TotalWritten == 0 ? -(long)LinuxErrno.EFAULT : TotalWritten);
+                            Helper.SetReturnValue(Instance, TotalWritten == 0 ? -(long)LinuxErrno.EFAULT : TotalWritten);
                             return;
                         }
 
@@ -202,23 +202,23 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                     FObj.Offset = (ulong)Output.Position;
                 }
 
-                Helper.SetReturnValue(Instance, Context, TotalWritten);
+                Helper.SetReturnValue(Instance, TotalWritten);
             }
             catch (UnauthorizedAccessException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EACCES);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EACCES);
             }
             catch (DirectoryNotFoundException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
             }
             catch (FileNotFoundException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
             }
             catch (IOException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EIO);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EIO);
             }
         }
 
@@ -226,27 +226,27 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         {
             if (IovCountValue > UIO_MAXIOV)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             int IovCount = (int)IovCountValue;
             if (IovCount == 0)
             {
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
             ulong IovElementSize = Context.Abi == SyscallAbi.X64 ? 16UL : 8UL;
             if (!TryMultiply(IovElementSize, (ulong)IovCount, out ulong IovTableSize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (!Instance.IsRegionMapped(IovAddress, IovTableSize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -257,7 +257,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             {
                 if (!TryReadIoVector(Instance, Context.Abi, IovAddress + ((ulong)i * IovElementSize), out IoVector Vector))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
@@ -277,7 +277,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (TotalLength == 0)
             {
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
@@ -289,20 +289,20 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
                 if (!Instance.IsRegionMapped(Vector.Base, Vector.EffectiveLength))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
             }
 
             if (SocketDesc.NonBlocking && SocketHelpers.WouldBlock(SocketDesc, SelectMode.SelectWrite))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EAGAIN);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EAGAIN);
                 return;
             }
 
             if (!SocketHelpers.TryCheckSocketRemotePolicy(Instance, SocketDesc, true, out LinuxErrno Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -320,7 +320,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                     Span<byte> Transfer = Helper.Shared.GetSpan((ulong)ChunkLength);
                     if (!Instance.ReadMemory(Vector.Base, Transfer))
                     {
-                        Helper.SetReturnValue(Instance, Context, TotalSent == 0 ? -(long)LinuxErrno.EFAULT : TotalSent);
+                        Helper.SetReturnValue(Instance, TotalSent == 0 ? -(long)LinuxErrno.EFAULT : TotalSent);
                         return;
                     }
 
@@ -330,22 +330,22 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                         break;
                 }
 
-                Helper.SetReturnValue(Instance, Context, TotalSent);
+                Helper.SetReturnValue(Instance, TotalSent);
             }
             catch (SocketException Ex)
             {
                 if (TotalSent != 0)
                 {
-                    Helper.SetReturnValue(Instance, Context, TotalSent);
+                    Helper.SetReturnValue(Instance, TotalSent);
                     return;
                 }
 
                 LinuxErrno TranslatedError = SocketHelpers.TranslateSocketError(Ex.SocketErrorCode);
-                Helper.SetReturnValue(Instance, Context, -(long)TranslatedError);
+                Helper.SetReturnValue(Instance, -(long)TranslatedError);
             }
             catch (ObjectDisposedException)
             {
-                Helper.SetReturnValue(Instance, Context, TotalSent == 0 ? -(long)LinuxErrno.EBADF : TotalSent);
+                Helper.SetReturnValue(Instance, TotalSent == 0 ? -(long)LinuxErrno.EBADF : TotalSent);
             }
         }
 
@@ -364,25 +364,25 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 {
                     if ((Instance.Settings.Flags & LogFlags.Important) != 0)
                         Instance.TriggerEventMessage($"[!] Special path handler not set for {FileDesc.Path}.", LogFlags.Important);
-                    Helper.SetReturnValue(Instance, Context, TotalWritten == 0 ? -(long)LinuxErrno.ENODEV : TotalWritten);
+                    Helper.SetReturnValue(Instance, TotalWritten == 0 ? -(long)LinuxErrno.ENODEV : TotalWritten);
                     return;
                 }
 
                 if (Result < 0)
                 {
-                    Helper.SetReturnValue(Instance, Context, TotalWritten == 0 ? Result : TotalWritten);
+                    Helper.SetReturnValue(Instance, TotalWritten == 0 ? Result : TotalWritten);
                     return;
                 }
 
                 TotalWritten += Result;
                 if ((ulong)Result < Vector.EffectiveLength)
                 {
-                    Helper.SetReturnValue(Instance, Context, TotalWritten);
+                    Helper.SetReturnValue(Instance, TotalWritten);
                     return;
                 }
             }
 
-            Helper.SetReturnValue(Instance, Context, TotalWritten);
+            Helper.SetReturnValue(Instance, TotalWritten);
         }
 
         private static bool TryReadIoVector(BinaryEmulator Instance, SyscallAbi Abi, ulong Address, out IoVector Vector)

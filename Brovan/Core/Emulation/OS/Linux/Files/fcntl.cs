@@ -31,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             FileDescriptorEntry? Entry = Helper.DescriptorTable.GetEntry(Descriptor);
             if (Entry == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
@@ -44,32 +44,32 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                     DuplicateDescriptor(Instance, Helper, Context, Descriptor, true, Argument);
                     return;
                 case F_GETFD:
-                    Helper.SetReturnValue(Instance, Context, Entry.CloseOnExec ? FD_CLOEXEC : 0L);
+                    Helper.SetReturnValue(Instance, Entry.CloseOnExec ? FD_CLOEXEC : 0L);
                     return;
                 case F_SETFD:
                     Entry.CloseOnExec = (Argument & FD_CLOEXEC) != 0;
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
                 case F_GETFL:
                     if (!TryGetStatusFlags(Entry.Object, out int StatusFlags))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, StatusFlags);
+                    Helper.SetReturnValue(Instance, StatusFlags);
                     return;
                 case F_SETFL:
                     if (!TrySetStatusFlags(Entry.Object, unchecked((int)Argument), out LinuxErrno Error))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)Error);
+                        Helper.SetReturnValue(Instance, -(long)Error);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
                 default:
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
             }
         }
@@ -79,17 +79,17 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             ulong DescriptorLimit = SocketHelpers.GetDescriptorLimit(Helper);
             if (MinimumDescriptor >= DescriptorLimit)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!Helper.DescriptorTable.TryDuplicateHandle(Descriptor, MinimumDescriptor, CloseOnExec, DescriptorLimit, out ulong NewDescriptor))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EMFILE);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EMFILE);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, NewDescriptor);
+            Helper.SetReturnValue(Instance, NewDescriptor);
         }
 
         private static bool TryGetStatusFlags(IFileDescriptorObject DescriptorObject, out int StatusFlags)

@@ -24,15 +24,35 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // The 64-bit TEB a WOW64 thread also owns. SysWOW64 modules reach it through WowTebOffset and use x64 offsets in it.
         public ulong NativeTeb { get; set; }
-        public ulong InitialContext { get; set; }
+
+        // NT enters LdrInitializeThunk when the thread first runs (PspInitializeThunkContext).
+        public bool LoaderThunkPending { get; set; }
         public WinToken ImpersonationToken { get; set; }
         public ulong ExceptionFunc { get; set; }
         public bool ApcAlertable { get; set; }
         public List<WinPendingUserApc> PendingUserApcs { get; set; } = new();
         public ulong ApcFunc { get; set; }
         public bool DispatchException { get; set; }
-        public bool IsHandlingException { get; set; }
-        public int ExceptionNesting { get; set; }
+
+        // NT holds a written context in the trap frame until the thread runs.
+        public bool EFlagsFromContext { get; set; }
+        public bool DebugRegistersFromContext { get; set; }
+
+        // WOW64 reads a CPU area context back as written until the thread runs.
+        public ulong? Wow64EFlags { get; set; }
+        public bool Wow64DebugRegistersHeld { get; set; }
+
+        // Kept after the thread runs so the next write can reuse it.
+        public ulong[]? Wow64DebugRegisters { get; set; }
+
+        public void ReleaseHeldContext()
+        {
+            EFlagsFromContext = false;
+            DebugRegistersFromContext = false;
+            Wow64EFlags = null;
+            Wow64DebugRegistersHeld = false;
+        }
+
         public ulong Win32ThreadInfo { get; set; }
         public ExceptionInformation ExceptionInformation { get; set; }
         public bool WorkerFactoryWaitActive { get; set; }
@@ -82,7 +102,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public NTSTATUS WaitStatus { get; set; }
         public List<object> WaitObjects { get; set; }
         public long WaitCheckedEpoch = -1;
-        public List<ulong> WaitCheckedHandles;
+        public long WaitCheckedGeneration = -1;
         public WaitableHandleObject[] WaitCheckedObjects;
 
         // FiledSlots[i] is this thread's index in FiledObjects[i].FiledWaiters.

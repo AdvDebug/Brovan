@@ -73,7 +73,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        // NT: each query or set right also grants its limited form.
         private static uint MapGenericRights(uint DesiredAccess)
         {
             uint Mapped = DesiredAccess & ~(uint)(AccessMask.GenericRead | AccessMask.GenericWrite | AccessMask.GenericExecute | AccessMask.GenericAll);
@@ -86,11 +85,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Mapped |= GenericExecuteMapping;
             if ((DesiredAccess & (uint)AccessMask.GenericAll) != 0)
                 Mapped |= GenericAllMapping;
-
-            if ((Mapped & (uint)AccessMask.ProcessQueryInformation) != 0)
-                Mapped |= (uint)AccessMask.ProcessQueryLimitedInformation;
-            if ((Mapped & (uint)AccessMask.ProcessSetInformation) != 0)
-                Mapped |= (uint)AccessMask.ProcessSetLimitedInformation;
 
             return Mapped;
         }

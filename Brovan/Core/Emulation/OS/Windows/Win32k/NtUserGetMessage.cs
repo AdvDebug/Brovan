@@ -66,7 +66,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Win32kHelper.DrainHostEvents(Instance);
 
             // NT: a sent message runs inside GetMessage, which then goes on waiting.
-            ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Thread, false);
+            ulong SyscallRip = Instance.WinHelper.GetSyscallRip();
             if (Win32kHelper.ReceiveNotification(Instance, SyscallRip))
                 return NTSTATUS.STATUS_SUCCESS;
 

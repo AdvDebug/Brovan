@@ -23,13 +23,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (requestedBreak == 0)
             {
-                Helper.SetReturnValue(Instance, Context, currentBreak);
+                Helper.SetReturnValue(Instance, currentBreak);
                 return;
             }
 
             if (requestedBreak < Helper.ProgramBreakBase)
             {
-                Helper.SetReturnValue(Instance, Context, currentBreak);
+                Helper.SetReturnValue(Instance, currentBreak);
                 return;
             }
 
@@ -42,7 +42,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 {
                     if (Instance.IsRegionMapped(page, PAGE_SIZE))
                     {
-                        Helper.SetReturnValue(Instance, Context, currentBreak);
+                        Helper.SetReturnValue(Instance, currentBreak);
                         return;
                     }
                 }
@@ -55,7 +55,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                         for (ulong rollback = currentAligned; rollback < mappedUntil; rollback += PAGE_SIZE)
                             Instance.UnmapMemoryRegion(rollback);
 
-                        Helper.SetReturnValue(Instance, Context, currentBreak);
+                        Helper.SetReturnValue(Instance, currentBreak);
                         return;
                     }
 
@@ -68,14 +68,14 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 {
                     if (!Instance.UnmapMemoryRegion(page - PAGE_SIZE))
                     {
-                        Helper.SetReturnValue(Instance, Context, currentBreak);
+                        Helper.SetReturnValue(Instance, currentBreak);
                         return;
                     }
                 }
             }
 
             Helper.ProgramBreak = requestedBreak;
-            Helper.SetReturnValue(Instance, Context, requestedBreak);
+            Helper.SetReturnValue(Instance, requestedBreak);
         }
     }
 }

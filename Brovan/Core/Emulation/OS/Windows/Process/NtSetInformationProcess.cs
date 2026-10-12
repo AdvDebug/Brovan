@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -14,6 +15,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             PROCESSINFOCLASS InfoClass = (PROCESSINFOCLASS)Instance.WinHelper.GetArg(1);
             ulong ProcessInformation = Instance.WinHelper.GetArg(2);
             uint ProcessInformationLength = (uint)Instance.WinHelper.GetArg(3);
+
+            // NT does not look up the handle for this class.
+            if (InfoClass == PROCESSINFOCLASS.ProcessThreadStackAllocation)
+                return AllocateThreadStack(Instance, ProcessHandle, ProcessInformation, ProcessInformationLength);
 
             NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessSetInformation, out WinProcess Target);
             if (Status == NTSTATUS.STATUS_ACCESS_DENIED)
@@ -86,6 +91,56 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Instance.TriggerEventMessage($"[!] NtSetInformationProcess: {InfoClass} (0x{(uint)InfoClass:X}) not implemented.", LogFlags.Syscall);
                     return NTSTATUS.STATUS_SUCCESS;
             }
+        }
+
+        // The _EX form puts a node and three reserved ULONGs in front (MmAllocateUserStack).
+        private static NTSTATUS AllocateThreadStack(BinaryEmulator Instance, ulong ProcessHandle, ulong Information, uint Length)
+        {
+            const uint ExtendedHeaderSize = 16;
+            const uint HighestNode = 0x40;
+
+            if (!HandleManager.IsCurrentProcessPseudoHandle(ProcessHandle))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            uint Width = (uint)Instance.WinHelper.PointerSize;
+            uint InfoSize = 3 * Width;
+            bool Extended = Length == ExtendedHeaderSize + InfoSize;
+            if (!Extended && Length != InfoSize)
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+            Span<byte> Captured = stackalloc byte[(int)(ExtendedHeaderSize + 3 * sizeof(ulong))];
+            Captured = Captured.Slice(0, (int)Length);
+            if (!Instance.IsAccessible(Information, Length, false) || !Instance.ReadMemory(Information, Captured))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (Extended)
+            {
+                if (BinaryPrimitives.ReadUInt32LittleEndian(Captured) > HighestNode
+                    || BinaryPrimitives.ReadUInt32LittleEndian(Captured.Slice(4)) != 0
+                    || BinaryPrimitives.ReadUInt64LittleEndian(Captured.Slice(8)) != 0)
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                Captured = Captured.Slice((int)ExtendedHeaderSize);
+                Information += ExtendedHeaderSize;
+            }
+
+            ulong ReserveSize = Width == 8 ? BinaryPrimitives.ReadUInt64LittleEndian(Captured) : BinaryPrimitives.ReadUInt32LittleEndian(Captured);
+            ulong ZeroBits = Width == 8 ? BinaryPrimitives.ReadUInt64LittleEndian(Captured.Slice(8)) : BinaryPrimitives.ReadUInt32LittleEndian(Captured.Slice(4));
+            if (ReserveSize == 0 || !NtAllocateVirtualMemory.TryGetZeroBitsLimit(ZeroBits, out ulong Highest))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            NtAllocateVirtualMemory.AddressRequirements Requirements = NtAllocateVirtualMemory.AddressRequirements.None;
+            Requirements.Highest = Highest;
+            ulong StackBase = 0;
+            NTSTATUS Status = NtAllocateVirtualMemory.Allocate(Instance, ref StackBase, ref ReserveSize, NtAllocateVirtualMemory.MemReserve, WinSysHelper.PAGE_READWRITE, Requirements);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            // NT keeps the reservation when StackBase cannot be written.
+            ulong StackBasePtr = Information + 2 * Width;
+            if (!Instance.IsAccessible(StackBasePtr, Width, true) || !Instance.WinHelper.WritePointer(StackBasePtr, StackBase))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         // PROCESS_PRIORITY_CLASS is Foreground, PriorityClass. PROCESS_PRIORITY_CLASS_EX is a USHORT of valid bits,

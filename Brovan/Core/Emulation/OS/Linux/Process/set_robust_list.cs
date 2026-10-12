@@ -9,17 +9,14 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             ulong ExpectedSize = Context.Abi == SyscallAbi.X64 ? 24UL : 12UL;
             if (Context.Arg1 != ExpectedSize)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             LinuxThreadState State = Instance.CurrentThread?.GuestState as LinuxThreadState;
             if (State == null && Instance.CurrentThread != null)
             {
-                State = new LinuxThreadState()
-                {
-                    CpuidEnabled = Helper.CpuidEnabled
-                };
+                State = new LinuxThreadState();
 
                 if (Instance.IsX64Guest)
                 {
@@ -36,7 +33,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 State.RobustListLength = Context.Arg1;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
     }
 }

@@ -14,10 +14,10 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             if(Thread == null)
             {
                 Instance.TriggerEventMessage("[-] We couldn't get the current thread for some reason?", LogFlags.Issues);
-                Helper.SetReturnValue(Instance, Context, 9999);
+                Helper.SetReturnValue(Instance, 9999);
                 return;
             }
-            Helper.SetReturnValue(Instance, Context, Thread.ThreadId);
+            Helper.SetReturnValue(Instance, Thread.ThreadId);
         }
     }
 }

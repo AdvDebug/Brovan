@@ -43,7 +43,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             // WM_PAINT runs the window procedure, so this syscall runs again when the callback returns.
             if ((Flags & Win32kHelper.RDW_UPDATENOW) != 0 && Window != null && Window.Dirty && Win32kHelper.IsWindowShown(Instance, Window))
             {
-                ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Instance.CurrentThread, false);
+                ulong SyscallRip = Instance.WinHelper.GetSyscallRip();
                 Window.Dirty = false;
 
                 if (SyscallRip != 0 &&

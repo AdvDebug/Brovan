@@ -16,17 +16,17 @@ namespace Brovan.Core.Emulation.OS.Linux.network
 
             if (!SocketHelpers.TryGetSocket(Helper, Descriptor, out SocketObject SocketHandle, out LinuxErrno Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             if (!TryApplyOption(Instance, Context, SocketHandle, Level, OptionName, OptionValueAddress, OptionLength, out Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
 
         private static bool TryApplyOption(BinaryEmulator Instance, LinuxSyscallContext Context, SocketObject SocketHandle, int Level, int OptionName, ulong OptionValueAddress, ulong OptionLength, out LinuxErrno Error)

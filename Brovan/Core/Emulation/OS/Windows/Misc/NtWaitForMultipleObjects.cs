@@ -139,7 +139,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Thread.WaitDeadline = Deadline;
             WinEmulatedThread.GetState(Thread).WaitCompleted = false;
             WinEmulatedThread.GetState(Thread).WaitStatus = NTSTATUS.STATUS_PENDING;
-            WinEmulatedThread.GetState(Thread).WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
+            WinEmulatedThread.GetState(Thread).WaitResumeRIP = Instance.WinHelper.GetSyscallRip();
             WinEmulatedThread.GetState(Thread).WaitReturnRIP = WinEmulatedThread.GetState(Thread).WaitResumeRIP + 2;
             WinEmulatedThread.GetState(Thread).WaitAlertable = Alertable;
 

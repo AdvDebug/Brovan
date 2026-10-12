@@ -47,7 +47,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER_1;
 
             // NT: WOW64 writes the count and its whole array back after the kernel call.
-            if (PointerSize < 8 && (!NtReadVirtualMemory.IsAccessible(Instance, CountPtr, 4, true) || !NtReadVirtualMemory.IsAccessible(Instance, AddressesPtr, Capacity * 4, true)))
+            if (PointerSize < 8 && (!Instance.IsAccessible(CountPtr, 4, true) || !Instance.IsAccessible(AddressesPtr, Capacity * 4, true)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             Status = Collect(Instance, BaseAddress & ~(PageSize - 1), (Last & ~(PageSize - 1)) + PageSize, (Flags & WriteWatchFlagReset) != 0, AddressesPtr, Capacity, PointerSize, out ulong Count);
@@ -123,7 +123,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // NT: a probe touches each page and a write probe rewrites a byte in each, which write watch records.
         private static bool TryProbe(BinaryEmulator Instance, ulong Address, ulong Length, bool Write)
         {
-            if (!NtReadVirtualMemory.IsAccessible(Instance, Address, Length, Write))
+            if (!Instance.IsAccessible(Address, Length, Write))
                 return false;
 
             Span<byte> Byte = stackalloc byte[1];

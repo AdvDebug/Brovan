@@ -10,7 +10,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             LinuxThreadState CurrentThread = Instance.CurrentThread?.GuestState as LinuxThreadState;
             if (CurrentThread == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -25,12 +25,12 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (NewNice < OldNice)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EPERM);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EPERM);
                 return;
             }
 
             CurrentThread.NiceValue = NewNice;
-            Helper.SetReturnValue(Instance, Context, (long)NewNice);
+            Helper.SetReturnValue(Instance, (long)NewNice);
         }
     }
 }

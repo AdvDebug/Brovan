@@ -20,7 +20,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             int UnsupportedFlags = Flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH);
             if (UnsupportedFlags != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -32,7 +32,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             {
                 if ((Flags & AT_EMPTY_PATH) == 0)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
@@ -40,7 +40,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             }
             else if (!Open.TryReadPath(Instance, PathPointer, out PathValue))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
             else
@@ -52,24 +52,24 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             {
                 if ((Flags & AT_EMPTY_PATH) == 0)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                     return;
                 }
 
                 LinuxErrno EmptyPathError = HandleEmptyPath(Instance, Helper, Context, DirFd, StatBuffer, Variant);
-                Helper.SetReturnValue(Instance, Context, EmptyPathError == LinuxErrno.ESUCCESS ? 0L : -(long)EmptyPathError);
+                Helper.SetReturnValue(Instance, EmptyPathError == LinuxErrno.ESUCCESS ? 0L : -(long)EmptyPathError);
                 return;
             }
 
             string ResolvedPath = Openat.ResolveGuestPath(Helper, DirFd, PathValue, out LinuxErrno ResolveError);
             if (ResolvedPath == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)ResolveError);
+                Helper.SetReturnValue(Instance, -(long)ResolveError);
                 return;
             }
 
             LinuxErrno Error = LinuxStatHelper.WriteResolvedPathStat(Instance, Helper, ResolvedPath, StatBuffer, Variant, FollowSymlink);
-            Helper.SetReturnValue(Instance, Context, Error == LinuxErrno.ESUCCESS ? 0L : -(long)Error);
+            Helper.SetReturnValue(Instance, Error == LinuxErrno.ESUCCESS ? 0L : -(long)Error);
         }
 
         private static LinuxErrno HandleEmptyPath(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context, int DirFd, ulong StatBuffer, LinuxStatVariant Variant)

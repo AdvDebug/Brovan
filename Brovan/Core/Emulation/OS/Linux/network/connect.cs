@@ -13,19 +13,19 @@ namespace Brovan.Core.Emulation.OS.Linux.network
 
             if (!SocketHelpers.TryGetSocket(Helper, Descriptor, out SocketObject SocketHandle, out LinuxErrno Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             if (!SocketHelpers.TryReadSocketAddress(Instance, Address, AddressLength, out EndPoint EndPointValue, out Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             if (!SocketHelpers.TryCheckNetworkPolicy(Instance, EndPointValue, out Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -33,7 +33,7 @@ namespace Brovan.Core.Emulation.OS.Linux.network
             {
                 if (!SocketHandle.PendingConnectCompleted)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EALREADY);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EALREADY);
                     return;
                 }
 
@@ -42,7 +42,7 @@ namespace Brovan.Core.Emulation.OS.Linux.network
                 SocketHandle.PendingConnect = null;
                 SocketHandle.PendingConnectCompleted = false;
 
-                Helper.SetReturnValue(Instance, Context, PendingError == SocketError.Success ? -(long)LinuxErrno.EISCONN : -(long)TranslateConnectError(PendingError, SocketHandle.NonBlocking));
+                Helper.SetReturnValue(Instance, PendingError == SocketError.Success ? -(long)LinuxErrno.EISCONN : -(long)TranslateConnectError(PendingError, SocketHandle.NonBlocking));
                 return;
             }
 
@@ -59,30 +59,30 @@ namespace Brovan.Core.Emulation.OS.Linux.network
                     {
                         SocketHandle.PendingConnect = Args;
                         SocketHandle.PendingConnectCompleted = false;
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINPROGRESS);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINPROGRESS);
                         return;
                     }
 
                     SocketError ErrorCode = Args.SocketError;
                     Args.Dispose();
-                    Helper.SetReturnValue(Instance, Context, ErrorCode == SocketError.Success ? 0L : -(long)TranslateConnectError(ErrorCode, true));
+                    Helper.SetReturnValue(Instance, ErrorCode == SocketError.Success ? 0L : -(long)TranslateConnectError(ErrorCode, true));
                     return;
                 }
 
                 SocketHandle.Handle.Connect(EndPointValue);
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
             }
             catch (SocketException Ex)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)TranslateConnectError(Ex.SocketErrorCode, SocketHandle.NonBlocking));
+                Helper.SetReturnValue(Instance, -(long)TranslateConnectError(Ex.SocketErrorCode, SocketHandle.NonBlocking));
             }
             catch (ObjectDisposedException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
             }
             catch (InvalidOperationException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EALREADY);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EALREADY);
             }
         }
 

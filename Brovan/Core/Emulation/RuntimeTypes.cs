@@ -139,30 +139,35 @@ namespace Brovan.Core.Emulation
         public int ExitCode;
         public int SuspendCount;
         public bool WaitActive;
-        public List<ulong> WaitHandles;
+
+        // Every assignment starts a new wait set, so the wait-check cache keys on the generation.
+        public List<ulong> WaitHandles
+        {
+            get => _waitHandles;
+            set
+            {
+                _waitHandles = value;
+                WaitHandlesGeneration++;
+            }
+        }
+        private List<ulong> _waitHandles;
+        public long WaitHandlesGeneration { get; private set; }
+
+        private List<ulong> _singleWaitHandle;
+
+        public void WaitOnSingleHandle(ulong Handle)
+        {
+            List<ulong> Handles = _singleWaitHandle ??= new List<ulong>(1);
+            Handles.Clear();
+            Handles.Add(Handle);
+            WaitHandles = Handles;
+        }
+
         public bool WaitAll;
         public long WaitDeadline;
         public bool WaitTimedOut;
         public int WaitSatisfiedIndex = -1;
         public bool SwitchingContext;
         public object GuestState { get; set; }
-
-        public void SwitchContext(BinaryEmulator emulator)
-        {
-            if (emulator == null)
-                throw new InvalidOperationException(nameof(emulator));
-
-            if (Context == null)
-                Context = new CpuContext();
-
-            if (State == EmulatedThreadState.Running)
-            {
-                emulator.ReadGprBatch(Context);
-                return;
-            }
-
-            emulator.WriteGprBatch(Context);
-            SwitchingContext = true;
-        }
     }
 }

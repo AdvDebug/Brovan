@@ -4,7 +4,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
     {
         public void Handle(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context)
         {
-            Helper.SetReturnValue(Instance, Context, Helper.Credentials.EffectiveGroupId);
+            Helper.SetReturnValue(Instance, Helper.Credentials.EffectiveGroupId);
         }
     }
 }

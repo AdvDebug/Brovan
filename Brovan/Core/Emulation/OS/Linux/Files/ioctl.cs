@@ -18,13 +18,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             FileDescriptorEntry? Entry = Helper.DescriptorTable.GetEntry(fd);
             if (Entry == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (Entry.Object is not FileObject FileDesc || FileDesc.TerminalState == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOTTY);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOTTY);
                 return;
             }
 
@@ -34,7 +34,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 case LinuxIoctlRequest.TCGETS:
                     if (!WriteBytesToGuest(Instance, Helper, Context, argp, TerminalState.Termios))
                         return;
-                    Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+                    Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
                     return;
 
                 case LinuxIoctlRequest.TCSETS:
@@ -42,13 +42,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 case LinuxIoctlRequest.TCSETSF:
                     if (!ReadBytesFromGuest(Instance, Helper, Context, argp, TerminalState.Termios))
                         return;
-                    Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+                    Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
                     return;
 
                 case LinuxIoctlRequest.TIOCGWINSZ:
                     if (!WriteWinsizeToGuest(Instance, Helper, Context, argp, TerminalState))
                         return;
-                    Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+                    Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
                     return;
 
                 case LinuxIoctlRequest.TIOCSWINSZ:
@@ -58,11 +58,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                     if (Changed)
                         QueueSigwinch(Instance, Helper);
 
-                    Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+                    Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
                     return;
 
                 default:
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOTTY);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOTTY);
                     return;
             }
         }
@@ -71,13 +71,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         {
             if (Address == 0 || !Instance.IsRegionMapped(Address, (ulong)Data.Length))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 
             if (!Instance.WriteMemory(Address, Data))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 
@@ -88,14 +88,14 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         {
             if (Address == 0 || !Instance.IsRegionMapped(Address, (ulong)Destination.Length))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 
             Span<byte> Buffer = stackalloc byte[Destination.Length];
             if (!Instance.ReadMemory(Address, Buffer))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 
@@ -107,7 +107,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         {
             if (Address == 0 || !Instance.IsRegionMapped(Address, WinsizeSize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 
@@ -119,7 +119,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (!Instance.WriteMemory(Address, Buffer))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 
@@ -131,14 +131,14 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             Changed = false;
             if (Address == 0 || !Instance.IsRegionMapped(Address, WinsizeSize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 
             Span<byte> Buffer = stackalloc byte[WinsizeSize];
             if (!Instance.ReadMemory(Address, Buffer))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 

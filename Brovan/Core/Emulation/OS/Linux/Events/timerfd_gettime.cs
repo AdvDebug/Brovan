@@ -19,31 +19,31 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
             FileDescriptorEntry? Entry = Helper.DescriptorTable.GetEntry(fd);
             if (Entry == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (Entry.Object is not TimerfdObject Timerfd)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             int Size = GetItimerspecSize(Context);
             if (curr_value == 0 || !Instance.IsRegionMapped(curr_value, (ulong)Size))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             long Now = LinuxEventHelpers.GetClockNanoseconds(Helper, Timerfd.ClockId);
             if (!WriteItimerspec(Instance, Context, curr_value, Timerfd.IntervalNanoseconds, Timerfd.GetRemainingNanoseconds(Now)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
 
         private int GetTimespecSize(LinuxSyscallContext Context)

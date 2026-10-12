@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Runtime.CompilerServices;
+using System.Text;
 
 namespace Brovan.Core.Emulation
 {
@@ -77,9 +78,140 @@ namespace Brovan.Core.Emulation
     public delegate void MmioReadCallback(ulong offset, Span<byte> destination);
     public delegate void MmioWriteCallback(ulong offset, ReadOnlySpan<byte> data);
     public delegate void CodeHookCallback(ulong address, uint size);
-    public delegate void InterruptHookCallback(uint interruptNumber);
+    public delegate bool InterruptHookCallback(uint interruptNumber);
     public delegate void InstructionHookCallback();
     public delegate bool InstructionBoolHookCallback();
+
+    public static class ControlRegister4
+    {
+        public const ulong Pge = 1UL << 7;
+        public const ulong Umip = 1UL << 11;
+        public const ulong Osxsave = 1UL << 18;
+        public const ulong Smep = 1UL << 20;
+        public const ulong Smap = 1UL << 21;
+    }
+
+    public static class UserModeFlags
+    {
+        // Ring 3 never gets IOPL, VM, VIF, VIP or reserved bits, and some of them would fail the VM entry.
+        public static ulong Clamp(ulong rflags) => (rflags & 0x254FD5) | 0x202;
+
+        // syscall clears TF, IF, DF, NT and AC on its way into ring 0 (SFMASK).
+        public const ulong SyscallEntryMask = 0x44700;
+    }
+
+    public static class GuestInterruptGates
+    {
+        public const byte KernelGateAttributes = 0x8E;
+        public const byte UserGateAttributes = 0xEE;
+
+        public static unsafe void WriteIdtGate(byte* idt, uint vector, ulong handler, ushort selector, byte ist)
+        {
+            ulong low = (handler & 0xFFFF)
+                      | ((ulong)selector << 16)
+                      | ((ulong)(ist & 0x7) << 32)
+                      | ((ulong)KernelGateAttributes << 40)
+                      | (((handler >> 16) & 0xFFFF) << 48);
+            Unsafe.WriteUnaligned(idt + vector * 16, low);
+            Unsafe.WriteUnaligned(idt + vector * 16 + 8, (uint)(handler >> 32));
+        }
+
+        public static unsafe void SetUserGates(byte* idt, uint vectorCount, Func<uint, bool> raisableFromUserMode)
+        {
+            for (uint vector = 0; vector < vectorCount; vector++)
+                idt[vector * 16 + 5] = raisableFromUserMode(vector) ? UserGateAttributes : KernelGateAttributes;
+        }
+    }
+
+    public static class DebugStatus
+    {
+        public const ulong BreakpointHits = 0xF;
+        public const ulong SingleStep = 1UL << 14;
+        public const ulong ReservedOnes = 0xFFFF0FF0;
+    }
+
+    // Keep DR6 last. Backends cache only the first CachedDebugRegisters.Count registers.
+    public static class DebugRegisters
+    {
+        public const int Count = 6;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static int Index(Registers register) => register switch
+        {
+            Registers.UC_X86_REG_DR0 => 0,
+            Registers.UC_X86_REG_DR1 => 1,
+            Registers.UC_X86_REG_DR2 => 2,
+            Registers.UC_X86_REG_DR3 => 3,
+            Registers.UC_X86_REG_DR7 => 4,
+            Registers.UC_X86_REG_DR6 => 5,
+            _ => -1,
+        };
+
+        public static bool IsDebugRegister(Registers register) => Index(register) >= 0;
+
+        public static bool IsDebugBatch(int[] registers, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (Index((Registers)registers[i]) < 0)
+                    return false;
+            }
+            return true;
+        }
+    }
+
+    public sealed class CachedDebugRegisters
+    {
+        public const int Count = 5;
+
+        private readonly ulong[] _values = new ulong[Count];
+
+        public bool IsUnchanged(int index, ulong value) => (uint)index < Count && _values[index] == value;
+
+        public bool IsUnchanged(ReadOnlySpan<int> registers, ReadOnlySpan<ulong> values)
+        {
+            for (int i = 0; i < registers.Length; i++)
+            {
+                if (!IsUnchanged(DebugRegisters.Index((Registers)registers[i]), values[i]))
+                    return false;
+            }
+            return true;
+        }
+
+        public void Note(ReadOnlySpan<int> registers, ReadOnlySpan<ulong> values)
+        {
+            for (int i = 0; i < registers.Length; i++)
+            {
+                int index = DebugRegisters.Index((Registers)registers[i]);
+                if ((uint)index < Count)
+                    _values[index] = values[i];
+            }
+        }
+    }
+
+    public static class RegisterBatch
+    {
+        public static bool IsValid(int[] registers, ulong[] values, int count)
+            => registers != null && values != null && count > 0 && count <= registers.Length && count <= values.Length;
+    }
+
+    public static class LongModeAddress
+    {
+        public static ulong Canonicalize(ulong address) => (ulong)((long)(address << 16) >> 16);
+
+        public static bool IsCanonical(ulong address) => Canonicalize(address) == address;
+    }
+
+    public static class InternalPages
+    {
+        public static bool IsGuestRange(ulong address, ulong size, ulong internalBase)
+            => address < internalBase && size <= internalBase - address;
+    }
+
+    public static class SyscallTrapPage
+    {
+        public const ulong CompatSyscallOffset = 32;
+    }
 
     public interface IEmulationBackend : IDisposable
     {
@@ -201,7 +333,7 @@ namespace Brovan.Core.Emulation
 
         bool ReadRegisterBatch(int[] registers, ulong[] values, int count)
         {
-            if (registers == null || values == null || count <= 0 || count > registers.Length || count > values.Length)
+            if (!RegisterBatch.IsValid(registers, values, count))
                 return false;
 
             for (int i = 0; i < count; i++)
@@ -282,7 +414,7 @@ namespace Brovan.Core.Emulation
 
         bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
         {
-            if (registers == null || values == null || count <= 0 || count > registers.Length || count > values.Length)
+            if (!RegisterBatch.IsValid(registers, values, count))
                 return false;
 
             for (int i = 0; i < count; i++)
@@ -299,6 +431,16 @@ namespace Brovan.Core.Emulation
         IntPtr AddMemoryHook(ulong begin, ulong end, BackendHookType hookType, MemoryHookCallback callback);
         IntPtr AddCodeHook(ulong begin, ulong end, CodeHookCallback callback);
         IntPtr AddInterruptHook(InterruptHookCallback callback);
+
+        uint InterruptErrorCode => 0;
+
+        bool UmipEnabled => false;
+
+        /// <summary>All gates start closed, and int n through a closed gate raises #GP.</summary>
+        void SetUserInterruptGates(Func<uint, bool> raisableFromUserMode)
+        {
+        }
+
         IntPtr AddInstructionHook(BackendInstructionHook instruction, InstructionHookCallback callback);
         IntPtr AddInstructionBoolHook(BackendInstructionHook instruction, InstructionBoolHookCallback callback);
         bool RemoveHook(IntPtr hook);

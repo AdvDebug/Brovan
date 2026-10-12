@@ -6,18 +6,21 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-
             EmulatedThread Thread = Instance.CurrentThread;
             if (Thread == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Thread, true);
-            ulong NextRip = SyscallRip + 2;
-            Instance._emulator.WriteRegister(Instance.IPRegister, NextRip);
+            return Yield(Instance, Thread);
+        }
 
+        internal static NTSTATUS Yield(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            NTSTATUS Status = Instance.HasThreadReadyForYield() ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_NO_YIELD_PERFORMED;
+
+            // The slice ends also when no thread is ready, because host I/O is served only between slices.
             Thread.State = EmulatedThreadState.Ready;
             Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_SUCCESS;
+            return Status;
         }
     }
 }

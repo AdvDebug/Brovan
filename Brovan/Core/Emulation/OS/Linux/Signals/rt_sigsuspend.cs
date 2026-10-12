@@ -12,13 +12,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
 
             if (!LinuxSignalHelpers.IsValidSignalSetSize(sigsetsize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (unewset == 0 || !Instance.IsRegionMapped(unewset, sigsetsize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -26,7 +26,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
             EmulatedThread Thread = Instance.CurrentThread;
             if (State == null || Thread == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -42,7 +42,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
 
             if (LinuxSignalHelpers.TryActivatePendingSignal(State))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINTR);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINTR);
                 Instance._emulator.WriteRegister(Instance.IPRegister, LinuxGuest.GetCurrentSyscallInstructionAddress(Instance, Context));
                 Instance._emulator.StopEmulation();
                 return;
@@ -55,7 +55,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
             Thread.State = EmulatedThreadState.Waiting;
-            Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINTR);
+            Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINTR);
             Instance._emulator.WriteRegister(Instance.IPRegister, LinuxGuest.GetCurrentSyscallInstructionAddress(Instance, Context));
             Instance._emulator.StopEmulation();
         }

@@ -22,7 +22,7 @@ namespace Brovan.Core.Emulation.OS.Linux.network
 
             if (!SocketHelpers.TryGetSocket(Helper, Descriptor, out SocketObject SocketHandle, out LinuxErrno Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -31,20 +31,20 @@ namespace Brovan.Core.Emulation.OS.Linux.network
                 int UnsupportedFlags = Flags & ~(SocketHelpers.SOCK_NONBLOCK | SocketHelpers.SOCK_CLOEXEC);
                 if (UnsupportedFlags != 0)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
             }
 
             if (SocketHandle.NonBlocking && SocketHelpers.WouldBlock(SocketHandle, SelectMode.SelectRead))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EAGAIN);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EAGAIN);
                 return;
             }
 
             if (!SocketHelpers.TryCheckNetworkPolicy(Instance, out Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -63,14 +63,14 @@ namespace Brovan.Core.Emulation.OS.Linux.network
                 if (RemoteEndPoint == null && Instance.Settings.GetNetworkPolicy().Mode != NetworkAccessMode.Full)
                 {
                     try { Accepted.Dispose(); } catch { }
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENETUNREACH);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENETUNREACH);
                     return;
                 }
 
                 if (RemoteEndPoint != null && !SocketHelpers.TryCheckNetworkPolicy(Instance, RemoteEndPoint, out Error))
                 {
                     try { Accepted.Dispose(); } catch { }
-                    Helper.SetReturnValue(Instance, Context, -(long)Error);
+                    Helper.SetReturnValue(Instance, -(long)Error);
                     return;
                 }
 
@@ -84,26 +84,26 @@ namespace Brovan.Core.Emulation.OS.Linux.network
                 if (!Helper.DescriptorTable.TryAddHandle(AcceptedObject, CloseOnExec, DescriptorLimit, out ulong AcceptedDescriptor))
                 {
                     AcceptedObject.Dispose();
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EMFILE);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EMFILE);
                     return;
                 }
 
                 if ((Address != 0 || AddressLengthPointer != 0) && !SocketHelpers.TryWriteSocketAddress(Instance, Address, AddressLengthPointer, Accepted.RemoteEndPoint, out Error))
                 {
                     Helper.DescriptorTable.CloseHandle(AcceptedDescriptor);
-                    Helper.SetReturnValue(Instance, Context, -(long)Error);
+                    Helper.SetReturnValue(Instance, -(long)Error);
                     return;
                 }
 
-                Helper.SetReturnValue(Instance, Context, AcceptedDescriptor);
+                Helper.SetReturnValue(Instance, AcceptedDescriptor);
             }
             catch (SocketException Ex)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)SocketHelpers.TranslateSocketError(Ex.SocketErrorCode));
+                Helper.SetReturnValue(Instance, -(long)SocketHelpers.TranslateSocketError(Ex.SocketErrorCode));
             }
             catch (ObjectDisposedException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
             }
         }
     }

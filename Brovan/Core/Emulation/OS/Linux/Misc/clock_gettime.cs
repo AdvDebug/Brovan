@@ -31,23 +31,23 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
 
             if (TimePointer == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (!TryGetClockValue(Helper, ClockId, out long Seconds, out long Nanoseconds))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!TryWriteTimespec(Instance, Context, TimePointer, Seconds, Nanoseconds, _useTime64LayoutOnX86))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
 
         private static bool TryGetClockValue(LinuxSyscallsHelper Helper, int ClockId, out long Seconds, out long Nanoseconds)

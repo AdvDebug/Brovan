@@ -16,7 +16,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
 
             if (!IsValidSignal(signum) || signum == SIGKILL || signum == SIGSTOP || !LinuxSignalHelpers.IsValidSignalSetSize(sigsetsize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -26,7 +26,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
             {
                 if (!Instance.IsRegionMapped(oldact, (ulong)ActionSize) || !Instance.WriteMemory(oldact, OldAction))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
             }
@@ -35,14 +35,14 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
             {
                 if (!Instance.IsRegionMapped(act, (ulong)ActionSize))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
                 Helper.SetSignalAction(signum, Instance.ReadMemory(act, (uint)ActionSize));
             }
 
-            Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+            Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
         }
 
         private static bool IsValidSignal(int Signal)

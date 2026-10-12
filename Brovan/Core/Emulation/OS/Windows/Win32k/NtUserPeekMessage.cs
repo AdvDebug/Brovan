@@ -20,7 +20,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             uint WakeMask = Win32kHelper.WakeMaskFromPeekFlags(Flags);
             if ((WakeMask & Win32kHelper.QS_SENDMESSAGE) != 0
-                && Win32kHelper.ReceiveNotification(Instance, Instance.WinHelper.GetSyscallRip(Instance.CurrentThread, false)))
+                && Win32kHelper.ReceiveNotification(Instance, Instance.WinHelper.GetSyscallRip()))
             {
                 return NTSTATUS.STATUS_SUCCESS;
             }

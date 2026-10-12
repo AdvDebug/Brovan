@@ -391,19 +391,19 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             FileDescriptorEntry Entry = Helper.DescriptorTable.GetEntry(fd);
             if (Entry == null || Entry.Object is not FileObject FileDesc)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (!_useCompat64 && Context.Abi == SyscallAbi.X86)
             {
                 LinuxErrno Error = WriteStat32(Instance, Helper, FileDesc, statbuf);
-                Helper.SetReturnValue(Instance, Context, Error == LinuxErrno.ESUCCESS ? 0L : -(long)Error);
+                Helper.SetReturnValue(Instance, Error == LinuxErrno.ESUCCESS ? 0L : -(long)Error);
                 return;
             }
 
             LinuxErrno NativeError = LinuxStatHelper.WriteStat(Instance, Helper, Context, FileDesc, statbuf, _useCompat64 ? LinuxStatVariant.Compat64 : LinuxStatVariant.Native);
-            Helper.SetReturnValue(Instance, Context, NativeError == LinuxErrno.ESUCCESS ? 0L : -(long)NativeError);
+            Helper.SetReturnValue(Instance, NativeError == LinuxErrno.ESUCCESS ? 0L : -(long)NativeError);
         }
 
         internal static LinuxErrno WriteStat32(BinaryEmulator Instance, LinuxSyscallsHelper Helper, FileObject FileDesc, ulong StatBuffer)

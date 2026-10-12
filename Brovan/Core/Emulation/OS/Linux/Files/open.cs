@@ -43,7 +43,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         {
             if (!TryReadPath(Instance, Context.Arg0, out string PathValue))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -60,29 +60,29 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             string NormalizedPath = PathAlreadyNormalized ? PathValue : NormalizeLinuxPath(PathValue);
             if (string.IsNullOrEmpty(NormalizedPath))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                 return;
             }
 
             int AccessMode = Flags & O_ACCMODE;
             if (AccessMode != O_RDONLY && AccessMode != O_WRONLY && AccessMode != O_RDWR)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((Flags & O_TMPFILE) == O_TMPFILE)
             {
                 if (AccessMode == O_RDONLY)
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 else
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EOPNOTSUPP);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EOPNOTSUPP);
                 return;
             }
 
             if ((Flags & O_CREAT) != 0 && (Flags & O_DIRECTORY) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -92,9 +92,9 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             if (!TryResolveOpenPath(Helper, NormalizedPath, Flags, CloseOnExec, DescriptorLimit, out string FinalPath, out string HostPath, out LinuxErrno ResolveError, out long SpecialResult))
             {
                 if (ResolveError == LinuxErrno.ESUCCESS)
-                    Helper.SetReturnValue(Instance, Context, SpecialResult);
+                    Helper.SetReturnValue(Instance, SpecialResult);
                 else
-                    Helper.SetReturnValue(Instance, Context, -(long)ResolveError);
+                    Helper.SetReturnValue(Instance, -(long)ResolveError);
 
                 return;
             }
@@ -102,7 +102,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             string WriteHostPath = Helper.ResolveVirtualHostPath(FinalPath);
             if (string.IsNullOrWhiteSpace(WriteHostPath))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EACCES);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EACCES);
                 return;
             }
 
@@ -114,13 +114,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (Exists && (Flags & O_CREAT) != 0 && (Flags & O_EXCL) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EEXIST);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EEXIST);
                 return;
             }
 
             if (Helper.TryGetMountForPath(FinalPath, out LinuxMountEntry MountEntry) && MountEntry.ReadOnly && IsWriteOpen)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EROFS);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EROFS);
                 return;
             }
 
@@ -130,7 +130,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 {
                     if ((Flags & O_TRUNC) != 0 || AccessMode == O_WRONLY || AccessMode == O_RDWR)
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EISDIR);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EISDIR);
                         return;
                     }
 
@@ -146,27 +146,27 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
                     if (!Helper.DescriptorTable.TryAddHandle(DirectoryObject, CloseOnExec, DescriptorLimit, out ulong DirectoryDescriptor))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EMFILE);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EMFILE);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, DirectoryDescriptor);
+                    Helper.SetReturnValue(Instance, DirectoryDescriptor);
                     return;
                 }
 
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EISDIR);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EISDIR);
                 return;
             }
 
             if (!Exists && (Flags & O_CREAT) == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                 return;
             }
 
             if (Exists && (Flags & O_DIRECTORY) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOTDIR);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOTDIR);
                 return;
             }
 
@@ -176,7 +176,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 {
                     if (!TryEnsureWritableParent(Helper, FinalPath, WriteHostPath, out LinuxErrno ParentError))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)ParentError);
+                        Helper.SetReturnValue(Instance, -(long)ParentError);
                         return;
                     }
 
@@ -194,38 +194,38 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             }
             catch (UnauthorizedAccessException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EACCES);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EACCES);
                 return;
             }
             catch (DirectoryNotFoundException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                 return;
             }
             catch (FileNotFoundException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                 return;
             }
             catch (PathTooLongException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENAMETOOLONG);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENAMETOOLONG);
                 return;
             }
             catch (ArgumentException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
             catch (NotSupportedException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
             catch (IOException)
             {
                 LinuxErrno Error = (Flags & O_CREAT) != 0 && (Flags & O_EXCL) != 0 ? LinuxErrno.EEXIST : LinuxErrno.EIO;
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -242,11 +242,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (!Helper.DescriptorTable.TryAddHandle(Object, CloseOnExec, DescriptorLimit, out ulong Descriptor))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EMFILE);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EMFILE);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, Descriptor);
+            Helper.SetReturnValue(Instance, Descriptor);
         }
 
         private static bool TryResolveOpenPath(LinuxSyscallsHelper Helper, string PathValue, int Flags, bool CloseOnExec, ulong DescriptorLimit, out string FinalPath, out string FinalHostPath, out LinuxErrno Error, out long SpecialResult)

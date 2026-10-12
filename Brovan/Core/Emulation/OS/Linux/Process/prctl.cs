@@ -30,23 +30,23 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             {
                 case PR_GET_DUMPABLE:
                     // 1 = SUID_DUMP_USER
-                    Helper.SetReturnValue(Instance, Context, 1L);
+                    Helper.SetReturnValue(Instance, 1L);
                     return;
 
                 case PR_SET_NAME:
                     if (arg2 == 0 || !Instance.IsRegionMapped(arg2, TASK_COMM_LEN))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
 
                 case PR_GET_NAME:
                     if (arg2 == 0 || !Instance.IsRegionMapped(arg2, TASK_COMM_LEN))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
 
@@ -55,33 +55,33 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
                     if (!Instance.WriteMemory(arg2, nameBuf))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
 
                 case PR_CAPBSET_READ:
                     // pretend every capability is in the bounding set
-                    Helper.SetReturnValue(Instance, Context, 1L);
+                    Helper.SetReturnValue(Instance, 1L);
                     return;
 
                 case PR_GET_CHILD_SUBREAPER:
                     // write 0 (not a subreaper) to the caller's int pointer
                     if (arg2 == 0 || !Instance.IsRegionMapped(arg2, 4))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
 
                     if (!Instance._emulator.WriteMemory(arg2, 0))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
 
                 case PR_GET_TID_ADDRESS:
@@ -90,7 +90,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                         int PointerSize = Context.Abi == SyscallAbi.X64 ? 8 : 4;
                         if (arg2 == 0 || !Instance.IsRegionMapped(arg2, (ulong)PointerSize))
                         {
-                            Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                            Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                             return;
                         }
 
@@ -98,11 +98,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                         ulong TIDAddress = TIDState?.TIDPtr ?? 0UL;
                         if(PointerSize == 8 && !Instance._emulator.WriteMemory(arg2, TIDAddress) || !Instance._emulator.WriteMemory(arg2, unchecked((int)TIDAddress)))
                         {
-                            Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                            Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                             return;
                         }
 
-                        Helper.SetReturnValue(Instance, Context, 0L);
+                        Helper.SetReturnValue(Instance, 0L);
                         return;
                     }
 
@@ -110,17 +110,17 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                     // PR_TSC_ENABLE = 1
                     if (arg2 == 0 || !Instance.IsRegionMapped(arg2, 4))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
 
                     if (!Instance._emulator.WriteMemory(arg2, 1))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
 
                 case PR_GET_AUXV:
@@ -133,23 +133,23 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                         {
                             if (arg2 == 0 || !Instance.IsRegionMapped(arg2, copySize))
                             {
-                                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                                 return;
                             }
 
                             if (!Instance.WriteMemory(arg2, auxv.AsSpan(0, (int)copySize)))
                             {
-                                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                                 return;
                             }
                         }
 
-                        Helper.SetReturnValue(Instance, Context, (long)auxv.Length);
+                        Helper.SetReturnValue(Instance, (long)auxv.Length);
                         return;
                     }
 
                 default:
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
             }
         }

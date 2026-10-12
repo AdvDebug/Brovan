@@ -98,7 +98,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_TIMEOUT;
             }
 
-            ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Thread, false);
+            ulong SyscallRip = Instance.WinHelper.GetSyscallRip();
             Thread.WaitActive = true;
             Thread.WaitHandles = null;
             Thread.WaitAll = false;

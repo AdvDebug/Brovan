@@ -15,7 +15,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
             LinuxThreadState State = LinuxSignalHelpers.GetOrCreateThreadState(Instance, Helper);
             if (State == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -28,7 +28,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
 
                 if (!Instance.IsRegionMapped(old_ss, (ulong)StackSize) || !LinuxSignalHelpers.WriteStackT(Instance, Context, old_ss, OldStack))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
             }
@@ -37,33 +37,33 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
             {
                 if (!Instance.IsRegionMapped(ss, (ulong)StackSize))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
                 if (State.SignalStackActive)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EPERM);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EPERM);
                     return;
                 }
 
                 LinuxSignalStack NewStack = LinuxSignalHelpers.ReadStackT(Instance, Context, ss);
                 if ((NewStack.Flags & ~(SS_ONSTACK | SS_DISABLE)) != 0)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if ((NewStack.Flags & SS_DISABLE) == 0 && NewStack.Size < MINSIGSTKSZ)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOMEM);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                     return;
                 }
 
                 State.AlternateSignalStack = NewStack;
             }
 
-            Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+            Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
         }
     }
 }

@@ -11,7 +11,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (length == 0 || !Instance.IsAlignedToPageSize(addr) || length > ulong.MaxValue - (PAGE_SIZE - 1) || addr > ulong.MaxValue - length)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -35,7 +35,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
                 if (!Instance._emulator.UnmapMemory(UnmapStart, UnmapSize))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
@@ -61,7 +61,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 }
             }
 
-            Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+            Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
         }
     }
 }

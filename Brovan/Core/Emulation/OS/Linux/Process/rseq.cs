@@ -16,10 +16,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             LinuxThreadState State = Thread?.GuestState as LinuxThreadState;
             if (State == null && Thread != null)
             {
-                State = new LinuxThreadState()
-                {
-                    CpuidEnabled = Helper.CpuidEnabled
-                };
+                State = new LinuxThreadState();
 
                 if (Instance.IsX64Guest)
                 {
@@ -32,7 +29,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (Thread == null || State == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ESRCH);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ESRCH);
                 return;
             }
 
@@ -40,44 +37,44 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             {
                 if ((Flags & ~RSEQ_FLAG_UNREGISTER) != 0)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if (State.RseqPointer != RseqPointer || State.RseqPointer == 0 || State.RseqLength == 0)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if (State.RseqLength != RseqLength)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if (State.RseqSignature != Signature)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EPERM);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EPERM);
                     return;
                 }
 
                 if (!LinuxGuest.TryResetRegisteredRseq(Instance, State))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
                 State.RseqPointer = 0;
                 State.RseqLength = 0;
                 State.RseqSignature = 0;
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
             if (Flags != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -85,41 +82,41 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             {
                 if (State.RseqPointer != RseqPointer || State.RseqLength != RseqLength)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if (State.RseqSignature != Signature)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EPERM);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EPERM);
                     return;
                 }
 
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBUSY);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBUSY);
                 return;
             }
 
             if (RseqLength < LinuxGuest.RseqOriginalSize)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((RseqPointer & (LinuxGuest.RseqAlignment - 1)) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (RseqLength != LinuxGuest.RseqOriginalSize && RseqLength < LinuxGuest.RseqMinimumFeatureSize)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!Instance.IsRegionMapped(RseqPointer, RseqLength))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -132,11 +129,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 State.RseqPointer = 0;
                 State.RseqLength = 0;
                 State.RseqSignature = 0;
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
     }
 }

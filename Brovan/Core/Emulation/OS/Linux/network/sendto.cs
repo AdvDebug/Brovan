@@ -18,45 +18,45 @@ namespace Brovan.Core.Emulation.OS.Linux.network
 
             if (Length == 0)
             {
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
             if (Length > int.MaxValue)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!Instance.IsRegionMapped(BufferAddress, Length))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (!SocketHelpers.TryGetSocket(Helper, Descriptor, out SocketObject SocketHandle, out LinuxErrno Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             SocketFlags HostFlags = SocketHelpers.TranslateSendFlags(Flags, out bool PerCallNonBlocking, out Error);
             if (Error != LinuxErrno.ESUCCESS)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             if ((SocketHandle.NonBlocking || PerCallNonBlocking) && SocketHelpers.WouldBlock(SocketHandle, SelectMode.SelectWrite))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EAGAIN);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EAGAIN);
                 return;
             }
 
             EndPoint Destination = null;
             if (DestinationAddress == 0 && !SocketHelpers.TryCheckSocketRemotePolicy(Instance, SocketHandle, true, out Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -64,13 +64,13 @@ namespace Brovan.Core.Emulation.OS.Linux.network
             {
                 if (!SocketHelpers.TryReadSocketAddress(Instance, DestinationAddress, DestinationLength, out Destination, out Error))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)Error);
+                    Helper.SetReturnValue(Instance, -(long)Error);
                     return;
                 }
 
                 if (!SocketHelpers.TryCheckNetworkPolicy(Instance, Destination, out Error))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)Error);
+                    Helper.SetReturnValue(Instance, -(long)Error);
                     return;
                 }
             }
@@ -81,7 +81,7 @@ namespace Brovan.Core.Emulation.OS.Linux.network
                 Span<byte> Transfer = Buffer.AsSpan(0, (int)Length);
                 if (!Instance.ReadMemory(BufferAddress, Transfer))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
@@ -89,15 +89,15 @@ namespace Brovan.Core.Emulation.OS.Linux.network
                 if (Sent > 0)
                     NetworkTrafficPcapCapture.RecordOutbound(SocketHandle.Handle, Buffer.AsSpan(0, Sent), Destination);
 
-                Helper.SetReturnValue(Instance, Context, (long)Sent);
+                Helper.SetReturnValue(Instance, (long)Sent);
             }
             catch (SocketException Ex)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)SocketHelpers.TranslateSocketError(Ex.SocketErrorCode));
+                Helper.SetReturnValue(Instance, -(long)SocketHelpers.TranslateSocketError(Ex.SocketErrorCode));
             }
             catch (ObjectDisposedException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
             }
         }
     }

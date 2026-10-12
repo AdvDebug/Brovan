@@ -2632,8 +2632,6 @@ namespace Brovan
             }
             else if (Thread.GuestState is WindowsThreadState WindowsState)
             {
-                if (WindowsState.IsHandlingException)
-                    Flags.Add($"exception-depth={WindowsState.ExceptionNesting}");
                 if (WindowsState.PendingUserApcs != null && WindowsState.PendingUserApcs.Count > 0)
                     Flags.Add($"apc={WindowsState.PendingUserApcs.Count}");
             }

@@ -148,6 +148,7 @@ namespace Brovan.Core.Emulation
         Efer = 0x00002001,
         Star = 0x00002008,
         Lstar = 0x00002009,
+        Cstar = 0x0000200A,
         Sfmask = 0x0000200B,
     }
 
@@ -163,6 +164,7 @@ namespace Brovan.Core.Emulation
         public const ulong PageTableEntryUser = 1UL << 2;
         public const ulong PageTableEntryAccessed = 1UL << 5;
         public const ulong PageTableEntryDirty = 1UL << 6;
+        public const ulong PageTableEntryNoExecute = 1UL << 63;
         public const ulong PageTableEntryAddressMask = 0x000FFFFFFFFFF000UL;
 
         public const ushort KernelCodeSelector = 0x08;
@@ -181,6 +183,5 @@ namespace Brovan.Core.Emulation
         public const uint FirstSoftwareInterruptVector = 32;
         public const ulong ExceptionStubStride = 8;
         public const byte ExceptionIstIndex = 1;
-        public const byte ExceptionGateAttributes = 0xEE;
     }
 }

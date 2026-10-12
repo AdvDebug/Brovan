@@ -13,12 +13,12 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
             ulong fd = Context.Arg0;
             if(!Helper.DescriptorTable.ContainsHandle(fd))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             Helper.DescriptorTable.CloseHandle(fd);
-            Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+            Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
             return;
         }
     }

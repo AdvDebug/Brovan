@@ -91,8 +91,6 @@ namespace Brovan.Core.Emulation
 
         public const ulong QuirkSlotZapAll = 1UL << 7;
 
-        public const ulong Cr4Pge = 1UL << 7;
-        public const ulong Cr4Osxsave = 1UL << 18;
         public const ulong XcrX87 = 1UL << 0;
         public const ulong XcrSse = 1UL << 1;
         public const ulong XcrAvx = 1UL << 2;
@@ -125,6 +123,7 @@ namespace Brovan.Core.Emulation
 
         public const uint MsrStar = 0xC0000081;
         public const uint MsrLstar = 0xC0000082;
+        public const uint MsrCstar = 0xC0000083;
         public const uint MsrSyscallMask = 0xC0000084;
         public const uint MsrEfer = 0xC0000080;
 
@@ -139,9 +138,11 @@ namespace Brovan.Core.Emulation
         public const ulong PageTableEntryUser = 1UL << 2;
         public const ulong PageTableEntryAccessed = 1UL << 5;
         public const ulong PageTableEntryDirty = 1UL << 6;
+        public const ulong PageTableEntryNoExecute = 1UL << 63;
         public const ulong PageTableEntryAddressMask = 0x000FFFFFFFFFF000UL;
 
         public const ushort KernelCodeSelector = 0x08;
+        public const ushort KernelDataSelector = 0x10;
         public const ushort UserDataSelector = 0x2B;
         public const ushort UserCodeSelector = 0x33;
         public const ushort UserCodeSelector32 = 0x23;
@@ -154,7 +155,5 @@ namespace Brovan.Core.Emulation
         public const uint FirstSoftwareInterruptVector = 32;
         public const ulong ExceptionStubStride = 8;
         public const byte ExceptionIstIndex = 1;
-
-        public const byte ExceptionGateAttributes = 0xEE;
     }
 }

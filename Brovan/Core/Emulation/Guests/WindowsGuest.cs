@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -43,10 +44,10 @@ namespace Brovan.Core.Emulation.Guests
         private const ulong GdtDataSelector = GdtDataIndex << 3;
         private const ulong GdtFsSelector = GdtFsIndex << 3;
         private const uint GdtSize = 0x1000;
-        private const ulong NtUserCodeSelector = 0x33;
-        private const ulong NtUserCodeSelector32 = 0x23;
-        private const ulong NtUserDataSelector = 0x2B;
-        private const ulong NtUserTebSelector32 = 0x53;
+        internal const ulong NtUserCodeSelector = 0x33;
+        internal const ulong NtUserCodeSelector32 = 0x23;
+        internal const ulong NtUserDataSelector = 0x2B;
+        internal const ulong NtUserTebSelector32 = 0x53;
         private const byte GdtCodeAccess = 0x9B;
         private const byte GdtDataAccess = 0x93;
         private const byte GdtGranularityDefault = 0xC;
@@ -55,6 +56,9 @@ namespace Brovan.Core.Emulation.Guests
         // NT: PEB BitField.
         private const byte PebIsPackagedProcess = 0x10;
         private const byte PebIsAppContainer = 0x20;
+
+        // NT uses 30 days, and ntdll waits on critical sections with no timeout when this is over an hour.
+        private const ulong CriticalSectionTimeout = unchecked((ulong)(-2592000L * 10000000));
         private const ulong ProcessParametersPackageDependencyData64 = 0x400;
         private const uint FirstLowBoxNumber = 1;
 
@@ -660,10 +664,13 @@ namespace Brovan.Core.Emulation.Guests
             if (Thread == null)
                 return false;
 
+            WindowsThreadState ThreadState = WinEmulatedThread.GetState(Thread);
+            if (ThreadState.LoaderThunkPending)
+                EnterLoaderThunk(Instance, Thread, ThreadState);
+
             if (WinHelper != null && WinHelper.CanDispatchUserApc(Thread))
                 WinHelper.DispatchNextUserApc(Thread);
 
-            WindowsThreadState ThreadState = WinEmulatedThread.GetState(Thread);
             if (ThreadState.DispatchException)
             {
                 if (ThreadState.ExceptionInformation == null)
@@ -672,18 +679,22 @@ namespace Brovan.Core.Emulation.Guests
                 WinHelper?.InvokeException(ThreadState.ExceptionInformation.Status, ThreadState.ExceptionInformation);
 
                 ThreadState.DispatchException = false;
+                if (Thread.State == EmulatedThreadState.Terminated)
+                    return true;
 
+                ThreadState.ReleaseHeldContext();
                 State = Instance._emulator.Emulate(Instance.ReadRegister(Instance.IPRegister), 0, 0, QuantumInstructions);
                 return true;
             }
 
+            ThreadState.ReleaseHeldContext();
             State = Instance._emulator.Emulate(Thread.Context.RIP, 0, 0, QuantumInstructions);
             if (!State && Instance._emulator.GetLastError() == BackendError.Exception)
             {
                 ulong EFlags = Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS);
                 if ((EFlags & (ulong)CPUFlags.TF) != 0 && !ThreadState.DispatchException)
                 {
-                    QueueUserModeException(Instance, NTSTATUS.STATUS_SINGLE_STEP);
+                    QueueUserModeException(Instance, NTSTATUS.STATUS_SINGLE_STEP, CurrentEFlags: EFlags);
                     State = true;
                 }
             }
@@ -706,7 +717,7 @@ namespace Brovan.Core.Emulation.Guests
                     ulong RSP = Instance.ReadRegister(Registers.UC_X86_REG_RSP);
                     for (int i = 0; i < Count; i++)
                     {
-                        if (i == 0) Args[i] = Instance.ReadRegister(Registers.UC_X86_REG_RCX);
+                        if (i == 0) Args[i] = Instance.ReadRegister(Registers.UC_X86_REG_R10);
                         else if (i == 1) Args[i] = Instance.ReadRegister(Registers.UC_X86_REG_RDX);
                         else if (i == 2) Args[i] = Instance.ReadRegister(Registers.UC_X86_REG_R8);
                         else if (i == 3) Args[i] = Instance.ReadRegister(Registers.UC_X86_REG_R9);
@@ -757,7 +768,7 @@ namespace Brovan.Core.Emulation.Guests
                     ? (uint)Instance.ReadRegister(Registers.UC_X86_REG_RAX)
                     : Instance.ReadRegister32(Registers.UC_X86_REG_EAX);
                 SyscallAbi Abi = Instance._binary.Architecture == BinaryArchitecture.x64 ? SyscallAbi.X64 : SyscallAbi.X86;
-                ulong Rip = Instance.WinHelper != null ? Instance.WinHelper.GetSyscallRip(null, false) : Instance.ReadRegister(Instance.IPRegister);
+                ulong Rip = Instance.WinHelper != null ? Instance.WinHelper.GetSyscallRip() : Instance.ReadRegister(Instance.IPRegister);
                 bool CaptureSyscallHistory = Instance.Syscalls?.TraceEnabled == true;
                 ulong[] HistoryArgs = CaptureSyscallHistory ? ReadWindowsSyscallArguments(Instance, 6) : Array.Empty<ulong>();
 
@@ -812,13 +823,13 @@ namespace Brovan.Core.Emulation.Guests
                     }
                 }
 
+                NTSTATUS Status;
                 if (IsImplemented)
                 {
                     if (Syscall >= Win32kServiceBase)
                         Instance.WinHelper.FlushGdiBatch();
 
                     Instance.WinHelper.BeginSyscall();
-                    NTSTATUS Status;
                     try
                     {
                         Status = Entry.Handler.Handle(Instance);
@@ -840,35 +851,31 @@ namespace Brovan.Core.Emulation.Guests
 
                     if (CaptureSyscallHistory)
                         Instance.Syscalls.RecordSyscall(GuestOsKind.Windows, Abi, Syscall, HandlerName, HistoryArgs, (ulong)(uint)Status, Rip, true);
-
-                    bool SuppressStatusWrite = Instance.SuppressSyscallStatusWrite || (Instance.IsX86Guest && Instance.ReadRegister(Instance.IPRegister) == Rip);
-                    Instance.SuppressSyscallStatusWrite = false;
-
-                    if (!SuppressStatusWrite)
-                        SetLastWinErrorRegister(Instance, Status);
                 }
                 else
                 {
+                    Status = Instance.WinUnimplemented;
                     if (Instance.Settings.SyscallNotificationCallback != null)
                     {
-                        Instance.Settings.SyscallNotificationCallback.Invoke(Instance.ReadRegister(Instance.IPRegister), Syscall, null, (ulong)(uint)Instance.WinUnimplemented);
+                        Instance.Settings.SyscallNotificationCallback.Invoke(Instance.ReadRegister(Instance.IPRegister), Syscall, null, (ulong)(uint)Status);
                     }
                     else
                     {
                         if ((Instance.Settings.Flags & LogFlags.General) != 0)
-                            Instance.TriggerEventMessage($"[!] Syscall 0x{Syscall:X} not implemented. returned {Instance.WinUnimplemented}.", LogFlags.General);
+                            Instance.TriggerEventMessage($"[!] Syscall 0x{Syscall:X} not implemented. returned {Status}.", LogFlags.General);
                     }
 
                     if (CaptureSyscallHistory)
-                        Instance.Syscalls.RecordSyscall(GuestOsKind.Windows, Abi, Syscall, HandlerName, HistoryArgs, (ulong)(uint)Instance.WinUnimplemented, Rip, false);
-
-                    bool SuppressStatusWrite = Instance.SuppressSyscallStatusWrite || (Instance.IsX86Guest && Instance.ReadRegister(Instance.IPRegister) == Rip);
-                    Instance.SuppressSyscallStatusWrite = false;
-
-                    if (!SuppressStatusWrite)
-                        SetLastWinErrorRegister(Instance, Instance.WinUnimplemented);
+                        Instance.Syscalls.RecordSyscall(GuestOsKind.Windows, Abi, Syscall, HandlerName, HistoryArgs, (ulong)(uint)Status, Rip, false);
                 }
 
+                bool SuppressStatusWrite = Instance.SuppressSyscallStatusWrite || (Instance.IsX86Guest && Instance.ReadRegister(Instance.IPRegister) == Rip);
+                Instance.SuppressSyscallStatusWrite = false;
+
+                if (!SuppressStatusWrite)
+                    SetLastWinErrorRegister(Instance, Status);
+
+                RaiseSysretSingleStep(Instance, Rip, Entry.Handler);
                 return true;
             }
             catch (Exception ex)
@@ -882,6 +889,31 @@ namespace Brovan.Core.Emulation.Guests
                 SetLastWinErrorRegister(Instance, NTSTATUS.STATUS_UNSUCCESSFUL);
                 return true;
             }
+        }
+
+        // NT returns from a system call with sysretq, which traps on TF before the next instruction runs.
+        private void RaiseSysretSingleStep(BinaryEmulator Instance, ulong SyscallRip, IWinSyscall Handler)
+        {
+            if (Instance.IsX86Guest)
+                return;
+
+            EmulatedThread Thread = Instance.CurrentThread;
+            if (Thread == null || Thread.State is not (EmulatedThreadState.Running or EmulatedThreadState.Ready) || Thread.WaitActive
+                || Thread.SwitchingContext || WinEmulatedThread.GetState(Thread).DispatchException)
+                return;
+
+            ulong EFlags = Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS);
+            if ((EFlags & (ulong)CPUFlags.TF) == 0)
+                return;
+
+            if (Instance.ReadRegister(Instance.IPRegister) != SyscallRip && Handler is not NtSetContextThread)
+                return;
+
+            Span<byte> Code = stackalloc byte[2];
+            if (!Instance.ReadMemory(SyscallRip, Code) || !((Code[0] == 0x0F && Code[1] == 0x05) || (Code[0] == 0xCD && Code[1] == 0x2E)))
+                return;
+
+            QueueUserModeException(Instance, NTSTATUS.STATUS_SINGLE_STEP, CurrentEFlags: EFlags);
         }
 
         public void HandlePrivilegedInstruction(BinaryEmulator Instance)
@@ -932,19 +964,44 @@ namespace Brovan.Core.Emulation.Guests
             return false;
         }
 
+        // NT opens int 3, into, fast fail, assertion, debug service and the system call gate to ring 3 (KiInterruptInitTable).
+        public bool RaisableFromUserMode(uint Vector) => Vector is 3 or 4 or 0x29 or 0x2C or 0x2D or 0x2E;
+
         public bool TryHandleInterrupt(BinaryEmulator Instance, uint InterruptNumber)
         {
             switch (InterruptNumber)
             {
                 case 0:
-                    QueueUserModeException(Instance, NTSTATUS.STATUS_INTEGER_DIVIDE_BY_ZERO);
+                    QueueUserModeException(Instance, ClassifyDivideError(Instance));
                     return true;
                 case 1:
                     QueueUserModeException(Instance, NTSTATUS.STATUS_SINGLE_STEP);
                     return true;
                 case 3:
+                    Instance.WriteRegister(Instance.IPRegister, Instance.ReadRegister(Instance.IPRegister) - 1);
                     QueueUserModeException(Instance, NTSTATUS.STATUS_BREAKPOINT);
                     return true;
+                case 4:
+                    // NT moves the exception address back one byte, not the context RIP (KiOverflowTrap).
+                    QueueUserModeException(Instance, NTSTATUS.STATUS_INTEGER_OVERFLOW,
+                        new ExceptionInformation { ExceptionAddress = Instance.ReadRegister(Instance.IPRegister) - 1 });
+                    return true;
+                case 5:
+                    QueueUserModeException(Instance, NTSTATUS.STATUS_ARRAY_BOUNDS_EXCEEDED);
+                    return true;
+                case 12:
+                    QueueUserModeException(Instance, NTSTATUS.STATUS_ACCESS_VIOLATION, new ExceptionInformation
+                    {
+                        CustomParameters = new ulong[] { (Instance._emulator.InterruptErrorCode | 3) & 0xFFFF, 0 }
+                    });
+                    return true;
+                case 13:
+                    HandleGeneralProtectionFault(Instance);
+                    return true;
+                case 16:
+                    return QueueX87Exception(Instance);
+                case 19:
+                    return QueueSimdException(Instance);
                 case 0x29:
                     if ((Instance.Settings.Flags & LogFlags.General) != 0)
                     {
@@ -956,16 +1013,404 @@ namespace Brovan.Core.Emulation.Guests
                     }
                     Instance.StopEmulation();
                     return true;
+                case 0x2C:
+                    Instance.WriteRegister(Instance.IPRegister, Instance.ReadRegister(Instance.IPRegister) - IntInstructionLength);
+                    QueueUserModeException(Instance, NTSTATUS.STATUS_ASSERTION_FAILURE);
+                    return true;
+                case 0x2D:
+                    RaiseDebugService(Instance);
+                    return true;
                 case 0x2E:
                     if (Instance.IsX86Guest)
                         return TryHandleSyscall(Instance);
-                    QueueUserModeException(Instance, NTSTATUS.STATUS_ILLEGAL_INSTRUCTION);
+                    HandleInt2ESyscall(Instance);
                     return true;
                 default:
                     return false;
             }
         }
 
+        // With no debugger attached, NT handles these x64 services itself and resumes after the int 3 that follows (KdpStub).
+        private void RaiseDebugService(BinaryEmulator Instance)
+        {
+            ulong Rip = Instance.ReadRegister(Instance.IPRegister);
+            ulong Service = Instance.IsX86Guest
+                ? Instance.ReadRegister32(Registers.UC_X86_REG_EAX)
+                : Instance.ReadRegister(Registers.UC_X86_REG_RAX);
+
+            if (!Instance.IsX86Guest && Service is 1 or 3 or 4 or 5)
+            {
+                Instance.WriteRegister(Instance.IPRegister, Rip + 1);
+                return;
+            }
+
+            QueueUserModeException(Instance, NTSTATUS.STATUS_BREAKPOINT, new ExceptionInformation
+            {
+                CustomParameters = new ulong[] { Service },
+                ExceptionAddress = Rip + 1
+            });
+        }
+
+        // NT sends int 2E down the same path as syscall, so the handler sees RIP on the instruction.
+        private void HandleInt2ESyscall(BinaryEmulator Instance)
+        {
+            ulong Return = Instance.ReadRegister(Registers.UC_X86_REG_RIP);
+            ulong Gate = Return - IntInstructionLength;
+            Instance.WriteRegister(Registers.UC_X86_REG_RIP, Gate);
+
+            TryHandleSyscall(Instance);
+
+            ulong Rip = Instance.ReadRegister(Registers.UC_X86_REG_RIP);
+            if (Rip != Gate)
+            {
+                Instance.WriteRegister(Registers.UC_X86_REG_RIP, Rip + IntInstructionLength);
+                return;
+            }
+
+            Instance.WriteRegister(Registers.UC_X86_REG_RIP, Return);
+            Instance.WriteRegister(Registers.UC_X86_REG_RCX, Return);
+            Instance.WriteRegister(Registers.UC_X86_REG_R11, Instance.ReadRegister(Registers.UC_X86_REG_RFLAGS));
+        }
+
+        private bool QueueX87Exception(BinaryEmulator Instance)
+        {
+            Instance.ReadFpControl(out ulong Control, out ulong Status, out _);
+            uint Pending = (uint)Status & ~((uint)Control & 0x3F);
+            return QueueFloatingPointException(Instance, Pending, ExceptionInformation.SingleZeroParameter);
+        }
+
+        // WOW64 gives 32-bit code these same statuses, not the multiple-traps ones the kernel raises.
+        private bool QueueSimdException(BinaryEmulator Instance)
+        {
+            uint Mxcsr = (uint)Instance.ReadRegister(Registers.UC_X86_REG_MXCSR);
+            return QueueFloatingPointException(Instance, Mxcsr & ~(Mxcsr >> 7) & 0x3F, new ulong[] { 0, Mxcsr });
+        }
+
+        private bool QueueFloatingPointException(BinaryEmulator Instance, uint Pending, ulong[] Parameters)
+        {
+            NTSTATUS Status;
+            if ((Pending & 0x1) != 0)
+                Status = (Pending & 0x40) != 0 ? NTSTATUS.STATUS_FLOAT_STACK_CHECK : NTSTATUS.STATUS_FLOAT_INVALID_OPERATION;
+            else if ((Pending & 0x4) != 0)
+                Status = NTSTATUS.STATUS_FLOAT_DIVIDE_BY_ZERO;
+            else if ((Pending & 0x2) != 0)
+                Status = NTSTATUS.STATUS_FLOAT_INVALID_OPERATION;
+            else if ((Pending & 0x8) != 0)
+                Status = NTSTATUS.STATUS_FLOAT_OVERFLOW;
+            else if ((Pending & 0x10) != 0)
+                Status = NTSTATUS.STATUS_FLOAT_UNDERFLOW;
+            else if ((Pending & 0x20) != 0)
+                Status = NTSTATUS.STATUS_FLOAT_INEXACT_RESULT;
+            else
+                return false;
+
+            QueueUserModeException(Instance, Status, new ExceptionInformation { CustomParameters = Parameters });
+            return true;
+        }
+
+        private readonly record struct PrivilegedOpcode(bool TwoByte, byte First, int Count = 1, int Reg = -1, bool? RegisterForm = null, int Rm = -1);
+
+        // The KiOpOneByteTable and KiOpTwoByteTable rows that NT sends to KiOp_Priv.
+        private static readonly PrivilegedOpcode[] PrivilegedOpcodes =
+        {
+            new(TwoByte: false, First: 0xFA),
+            new(TwoByte: false, First: 0xFB),
+            new(TwoByte: false, First: 0xE4, Count: 4),
+            new(TwoByte: false, First: 0xEC, Count: 4),
+            new(TwoByte: false, First: 0x6C, Count: 4),
+            new(TwoByte: false, First: 0xF4),
+            new(TwoByte: true, First: 0x00, Reg: 2),
+            new(TwoByte: true, First: 0x00, Reg: 3),
+            new(TwoByte: true, First: 0x01, Reg: 2, RegisterForm: false),
+            new(TwoByte: true, First: 0x01, Reg: 3, RegisterForm: false),
+            new(TwoByte: true, First: 0x01, Reg: 6),
+            new(TwoByte: true, First: 0x01, Reg: 7, RegisterForm: false),
+            new(TwoByte: true, First: 0x01, Reg: 7, RegisterForm: true, Rm: 0),
+            new(TwoByte: true, First: 0x06),
+            new(TwoByte: true, First: 0x07),
+            new(TwoByte: true, First: 0x08),
+            new(TwoByte: true, First: 0x09),
+            new(TwoByte: true, First: 0x20, Count: 4),
+            new(TwoByte: true, First: 0x30, Count: 4),
+            new(TwoByte: true, First: 0x35),
+        };
+
+        // One bit per prefix, in the order 26, 2E, 36, 3E, 64, 65, 66, 67, F0, F2, F3 and REX.
+        private const uint SegmentPrefixes = 0x3F;
+        private const uint OperandSizePrefix = 1u << 6;
+        private const uint RepeatPrefixes = (1u << 9) | (1u << 10);
+        private const uint RexPrefix = 1u << 11;
+
+        // NT accepts a REX byte anywhere among the prefixes (KiOpPrefixTable).
+        private static bool TryDecodePrefixes(BinaryEmulator Instance, ReadOnlySpan<byte> Code, out int Index, out uint Prefixes, out byte Rex)
+        {
+            Index = 0;
+            Prefixes = 0;
+            Rex = 0;
+            while (Index < Code.Length)
+            {
+                byte Byte = Code[Index];
+                uint Prefix = Byte switch
+                {
+                    0x26 => 1u << 0, 0x2E => 1u << 1, 0x36 => 1u << 2, 0x3E => 1u << 3, 0x64 => 1u << 4, 0x65 => 1u << 5,
+                    0x66 => 1u << 6, 0x67 => 1u << 7, 0xF0 => 1u << 8, 0xF2 => 1u << 9, 0xF3 => 1u << 10,
+                    _ => !Instance.IsX86Guest && (Byte & 0xF0) == 0x40 ? RexPrefix : 0,
+                };
+                if (Prefix == 0)
+                    break;
+
+                uint Conflicts = (Prefix & SegmentPrefixes) != 0 ? SegmentPrefixes : (Prefix & RepeatPrefixes) != 0 ? RepeatPrefixes : Prefix;
+                if ((Prefixes & Conflicts) != 0)
+                    return false;
+                Prefixes |= Prefix;
+                if (Prefix == RexPrefix)
+                    Rex = Byte;
+                Index++;
+            }
+
+            return Index < Code.Length;
+        }
+
+        private static readonly Registers[] SegmentOverrideRegisters =
+        {
+            Registers.UC_X86_REG_ES, Registers.UC_X86_REG_CS, Registers.UC_X86_REG_SS, Registers.UC_X86_REG_DS,
+        };
+
+        // NT reports a divide error with a nonzero divisor as an integer overflow (KiOp_Div).
+        private static NTSTATUS ClassifyDivideError(BinaryEmulator Instance)
+        {
+            ulong Rip = Instance.ReadRegister(Instance.IPRegister);
+            Span<byte> Code = stackalloc byte[BinaryEmulator.MaxInstructionLength];
+            int Length = Instance.ReadInstructionBytes(Rip, Code);
+            if (!TryDecodePrefixes(Instance, Code.Slice(0, Length), out int Index, out uint Prefixes, out byte Rex)
+                || Index + 1 >= Length || Code[Index] is not (0xF6 or 0xF7))
+                return NTSTATUS.STATUS_INTEGER_DIVIDE_BY_ZERO;
+
+            int Size = Code[Index] == 0xF6 ? 1 : (Prefixes & OperandSizePrefix) != 0 ? 2 : (Rex & 8) != 0 ? 8 : 4;
+            byte ModRm = Code[Index + 1];
+            ulong Divisor;
+            if (ModRm >> 6 == 3)
+            {
+                // NT reads a byte register from the low byte of its context slot, so AH reads as SPL.
+                Divisor = Instance.ReadGeneralRegister((ModRm & 7) | ((Rex & 1) << 3));
+            }
+            else
+            {
+                if (!TryGetOperandAddress(Instance, Code.Slice(0, Length), Index + 2, ModRm, Prefixes, Rex, Rip, out ulong Address, out _)
+                    || !IsUserRange(Address, (ulong)Size))
+                    return NTSTATUS.STATUS_INTEGER_DIVIDE_BY_ZERO;
+
+                Span<byte> Operand = stackalloc byte[sizeof(ulong)];
+                if (!Instance.ReadMemory(Address, Operand.Slice(0, Size)))
+                    return NTSTATUS.STATUS_INTEGER_DIVIDE_BY_ZERO;
+                Divisor = BinaryPrimitives.ReadUInt64LittleEndian(Operand);
+            }
+
+            Divisor &= BinaryEmulator.LowBytesMask(Size);
+            return Divisor != 0 ? NTSTATUS.STATUS_INTEGER_OVERFLOW : NTSTATUS.STATUS_INTEGER_DIVIDE_BY_ZERO;
+        }
+
+        // NT does not truncate the address to the address size (KiOpRetrieveRegMemAddress).
+        private static bool TryGetOperandAddress(BinaryEmulator Instance, ReadOnlySpan<byte> Code, int Index, byte ModRm,
+            uint Prefixes, byte Rex, ulong Rip, out ulong Address, out int End)
+        {
+            Address = 0;
+            End = Index;
+            int Mod = ModRm >> 6;
+            int Rm = ModRm & 7;
+            ulong Base = 0;
+            ulong Scaled = 0;
+            bool RipRelative = false;
+
+            if (Rm == 4)
+            {
+                if (Index >= Code.Length)
+                    return false;
+                byte Sib = Code[Index++];
+                if ((Sib & 7) != 5 || Mod != 0)
+                    Base = Instance.ReadGeneralRegister((Sib & 7) | ((Rex & 1) << 3));
+                int ScaledIndex = ((Sib >> 3) & 7) | ((Rex & 2) << 2);
+                if (ScaledIndex != 4)
+                    Scaled = Instance.ReadGeneralRegister(ScaledIndex) << (Sib >> 6);
+            }
+            else if (Mod == 0 && Rm == 5)
+            {
+                RipRelative = !Instance.IsX86Guest;
+            }
+            else
+            {
+                Base = Instance.ReadGeneralRegister(Rm | ((Rex & 1) << 3));
+            }
+
+            long Displacement = 0;
+            if ((Mod == 0 && Rm == 5) || Mod == 2)
+            {
+                if (Index + sizeof(int) > Code.Length)
+                    return false;
+                Displacement = BinaryPrimitives.ReadInt32LittleEndian(Code.Slice(Index));
+                Index += sizeof(int);
+            }
+            else if (Mod == 1)
+            {
+                if (Index >= Code.Length)
+                    return false;
+                Displacement = (sbyte)Code[Index++];
+            }
+
+            End = Index;
+            if (RipRelative)
+                Base = Rip + (ulong)Index;
+            Address = Base + Scaled + (ulong)Displacement;
+
+            if ((Prefixes & SegmentPrefixes) == 0)
+                return true;
+
+            int Segment = System.Numerics.BitOperations.TrailingZeroCount(Prefixes & SegmentPrefixes);
+            if (Segment == 4)
+                Address += Instance.ReadRegister(Registers.UC_X86_REG_FS_BASE);
+            else if (Segment == 5)
+                Address += Instance.ReadRegister(Registers.UC_X86_REG_GS_BASE);
+            else if (Instance.IsX86Guest && (ulong)(ushort)Instance.ReadRegister(SegmentOverrideRegisters[Segment]) is not (NtUserCodeSelector32 or NtUserDataSelector or NtUserCodeSelector))
+                return false;
+            return true;
+        }
+
+        // The tables NT reports for sidt and sgdt under UMIP (KiOpIdtr, KiOpGdtr).
+        private const ushort UmipIdtLimit = 0x0FFF;
+        private const ulong UmipIdtBase = 0xFFFFF80000001000;
+        private const ushort UmipGdtLimit = 0x007F;
+        private const ulong UmipGdtBase = 0xFFFFF8534B590000;
+        private const ulong UmipTaskRegister = 0x40;
+
+        private const ulong UmipMachineStatusWord = 0x80050033;
+
+        private void HandleGeneralProtectionFault(BinaryEmulator Instance)
+        {
+            ulong Rip = Instance.ReadRegister(Instance.IPRegister);
+            Span<byte> Code = stackalloc byte[BinaryEmulator.MaxInstructionLength];
+            Code = Code.Slice(0, Instance.ReadInstructionBytes(Rip, Code));
+            if (TryDecodePrefixes(Instance, Code, out int Index, out uint Prefixes, out byte Rex))
+            {
+                if (Instance._emulator.UmipEnabled && TryEmulateDescriptorStore(Instance, Rip, Code, Index, Prefixes, Rex))
+                    return;
+
+                if (IsPrivilegedInstruction(Code, Index))
+                {
+                    HandlePrivilegedInstruction(Instance);
+                    return;
+                }
+            }
+
+            QueueUserModeException(Instance, NTSTATUS.STATUS_ACCESS_VIOLATION,
+                new ExceptionInformation { Type = ExceptionType.Read, Address = ulong.MaxValue });
+        }
+
+        private bool TryEmulateDescriptorStore(BinaryEmulator Instance, ulong Rip, ReadOnlySpan<byte> Code, int Index, uint Prefixes, byte Rex)
+        {
+            if (Index + 2 >= Code.Length || Code[Index] != 0x0F)
+                return false;
+
+            byte Opcode = Code[Index + 1];
+            byte ModRm = Code[Index + 2];
+            int Reg = (ModRm >> 3) & 7;
+            bool Register = ModRm >> 6 == 3;
+            bool Table = Opcode == 0x01 && (Reg is 0 or 1) && !Register;
+            bool Selector = (Opcode == 0x00 && (Reg is 0 or 1)) || (Opcode == 0x01 && Reg == 4);
+            if (!Table && !Selector)
+                return false;
+
+            ulong Address = 0;
+            int End = Index + 3;
+            if (!Register && !TryGetOperandAddress(Instance, Code, Index + 3, ModRm, Prefixes, Rex, Rip, out Address, out End))
+            {
+                RaiseStoreFault(Instance, ulong.MaxValue);
+                return true;
+            }
+
+            if (Table)
+            {
+                Span<byte> Descriptor = stackalloc byte[10];
+                BinaryPrimitives.WriteUInt16LittleEndian(Descriptor, Reg == 1 ? UmipIdtLimit : UmipGdtLimit);
+                BinaryPrimitives.WriteUInt64LittleEndian(Descriptor.Slice(2), Reg == 1 ? UmipIdtBase : UmipGdtBase);
+                int Size = Instance.IsX86Guest ? 6 : 10;
+                if (!TryStoreToUser(Instance, Address, Descriptor.Slice(0, Size), Size))
+                {
+                    RaiseStoreFault(Instance, Address);
+                    return true;
+                }
+            }
+            else
+            {
+                ulong Value = Opcode == 0x01 ? UmipMachineStatusWord : Reg == 1 ? UmipTaskRegister : 0;
+                int OperandSize = (Prefixes & OperandSizePrefix) != 0 ? 2 : Instance.IsX86Guest ? 4 : 8;
+                if (Register)
+                {
+                    Instance.WriteGeneralRegister((ModRm & 7) | ((Rex & 1) << 3), Value, OperandSize);
+                }
+                else
+                {
+                    Span<byte> Word = stackalloc byte[sizeof(ushort)];
+                    BinaryPrimitives.WriteUInt16LittleEndian(Word, (ushort)Value);
+                    if (!TryStoreToUser(Instance, Address, Word, OperandSize))
+                    {
+                        RaiseStoreFault(Instance, Address);
+                        return true;
+                    }
+                }
+            }
+
+            Instance.WriteRegister(Instance.IPRegister, Rip + (ulong)End);
+            return true;
+        }
+
+        // NT checks the full operand size against the user range, then may store fewer bytes.
+        private static bool TryStoreToUser(BinaryEmulator Instance, ulong Address, ReadOnlySpan<byte> Data, int CheckedSize)
+            => IsUserRange(Address, (ulong)CheckedSize) && Instance.IsAccessible(Address, (ulong)Data.Length, true) && Instance.WriteMemory(Address, Data);
+
+        private static bool IsUserRange(ulong Address, ulong Size)
+            => Address <= NtWow64GetNativeSystemInformation.NativeUserProbeAddress
+                && Size <= NtWow64GetNativeSystemInformation.NativeUserProbeAddress - Address;
+
+        internal void RaiseStoreFault(BinaryEmulator Instance, ulong Address)
+        {
+            QueueUserModeException(Instance, NTSTATUS.STATUS_ACCESS_VIOLATION,
+                new ExceptionInformation { Type = ExceptionType.Write, Address = Address });
+        }
+
+        private static bool IsPrivilegedInstruction(ReadOnlySpan<byte> Code, int Index)
+        {
+            bool TwoByte = false;
+            byte Opcode = Code[Index++];
+            if (Opcode == 0x0F)
+            {
+                if (Index >= Code.Length)
+                    return false;
+                TwoByte = true;
+                Opcode = Code[Index++];
+            }
+
+            foreach (PrivilegedOpcode Row in PrivilegedOpcodes)
+            {
+                if (Row.TwoByte != TwoByte || Opcode < Row.First || Opcode >= Row.First + Row.Count)
+                    continue;
+
+                if (Row.Reg < 0 && Row.RegisterForm == null && Row.Rm < 0)
+                    return true;
+                if (Index >= Code.Length)
+                    return false;
+
+                byte ModRm = Code[Index];
+                if (Row.Reg >= 0 && ((ModRm >> 3) & 7) != Row.Reg)
+                    continue;
+                if (Row.Rm >= 0 && (ModRm & 7) != Row.Rm)
+                    continue;
+                if (Row.RegisterForm is bool RegisterForm && (ModRm >> 6 == 3) != RegisterForm)
+                    continue;
+                return true;
+            }
+
+            return false;
+        }
 
         public ulong CreateInitialThread(BinaryEmulator Instance)
         {
@@ -980,18 +1425,22 @@ namespace Brovan.Core.Emulation.Guests
             return Thread?.ThreadId ?? 0;
         }
 
-        public void QueueUserModeException(BinaryEmulator Instance, NTSTATUS Status, ExceptionInformation Info = null!)
+        public void QueueUserModeException(BinaryEmulator Instance, NTSTATUS Status, ExceptionInformation Info = null!, ulong? CurrentEFlags = null)
         {
             if (Instance._binary == null || (!IsBlob && Instance._binary.FileFormat != BinaryFormat.PE))
                 return;
 
             if (Status == NTSTATUS.STATUS_SINGLE_STEP)
             {
-                ulong EFlags = Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS);
-                Instance.WriteRegister(Registers.UC_X86_REG_EFLAGS, EFlags & ~(ulong)CPUFlags.TF);
+                ulong EFlags = CurrentEFlags ?? Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS);
 
-                ulong Dr6 = Instance.ReadRegister(Registers.UC_X86_REG_DR6);
-                Instance.WriteRegister(Registers.UC_X86_REG_DR6, Dr6 | (1UL << 14));
+                if ((EFlags & (ulong)CPUFlags.TF) != 0)
+                {
+                    Instance.WriteRegister(Registers.UC_X86_REG_EFLAGS, EFlags & ~(ulong)CPUFlags.TF);
+                    ulong Dr6 = Instance.ReadRegister(Registers.UC_X86_REG_DR6);
+                    if ((Dr6 & (DebugStatus.BreakpointHits | DebugStatus.SingleStep)) == 0)
+                        Instance.WriteRegister(Registers.UC_X86_REG_DR6, Dr6 | DebugStatus.SingleStep);
+                }
             }
 
             uint ThreadId = (uint)Instance.CurrentThreadId;
@@ -1235,7 +1684,7 @@ namespace Brovan.Core.Emulation.Guests
                 StackSize = ThreadStackSize,
                 StackAddress = AllocateGuardedThreadStack(Instance, ThreadStackSize, out ulong ThreadStackLimit),
                 StackLimit = ThreadStackLimit,
-                GuestState = new WindowsThreadState { CreateTime = Instance.GetEmulatedSystemTimeFileTimeUtc() }
+                GuestState = NewThreadState(Instance)
             };
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
@@ -1263,12 +1712,6 @@ namespace Brovan.Core.Emulation.Guests
             Thread.Context.RSP = InitialStack;
             Thread.Context.RFLAGS = 0x202;
             ApplyInitialSegments(Instance, Thread.Context);
-            Thread.Context.DR0 = Instance.ReadRegister(Registers.UC_X86_REG_DR0);
-            Thread.Context.DR1 = Instance.ReadRegister(Registers.UC_X86_REG_DR1);
-            Thread.Context.DR2 = Instance.ReadRegister(Registers.UC_X86_REG_DR2);
-            Thread.Context.DR3 = Instance.ReadRegister(Registers.UC_X86_REG_DR3);
-            Thread.Context.DR6 = Instance.ReadRegister(Registers.UC_X86_REG_DR6);
-            Thread.Context.DR7 = Instance.ReadRegister(Registers.UC_X86_REG_DR7);
 
             Instance.Threads[Thread.ThreadId] = Thread;
             Instance.ThreadOrder.Add((int)Thread.ThreadId);
@@ -1277,6 +1720,10 @@ namespace Brovan.Core.Emulation.Guests
 
             return Thread;
         }
+
+        // WOW64 reads a new thread's EFLAGS from its CPU area, not the trap frame.
+        private static WindowsThreadState NewThreadState(BinaryEmulator Instance)
+            => new WindowsThreadState { CreateTime = Instance.GetEmulatedSystemTimeFileTimeUtc(), EFlagsFromContext = Instance.IsX64Guest };
 
         private uint NewThreadId(BinaryEmulator Instance, bool InitialThread)
         {
@@ -1314,23 +1761,18 @@ namespace Brovan.Core.Emulation.Guests
                 StackSize = ThreadStackSize,
                 StackAddress = AllocateGuardedThreadStack(Instance, ThreadStackSize, out ulong ThreadStackLimit),
                 StackLimit = ThreadStackLimit,
-                GuestState = new WindowsThreadState { CreateTime = Instance.GetEmulatedSystemTimeFileTimeUtc() }
+                GuestState = NewThreadState(Instance)
             };
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.Name ??= $"Thread_{Thread.ThreadId}";
 
             State.Teb = AllocateAndInitializeTEB(Instance, Thread, CreateFlags, InitialThread);
+            State.LoaderThunkPending = true;
 
-            Thread.Context.RIP = LdrInitializeThunk;
+            Thread.Context.RIP = RtlUserThreadStart;
             Thread.Context.RFLAGS = 0x202;
             ApplyInitialSegments(Instance, Thread.Context);
-            Thread.Context.DR0 = Instance.ReadRegister(Registers.UC_X86_REG_DR0);
-            Thread.Context.DR1 = Instance.ReadRegister(Registers.UC_X86_REG_DR1);
-            Thread.Context.DR2 = Instance.ReadRegister(Registers.UC_X86_REG_DR2);
-            Thread.Context.DR3 = Instance.ReadRegister(Registers.UC_X86_REG_DR3);
-            Thread.Context.DR6 = Instance.ReadRegister(Registers.UC_X86_REG_DR6);
-            Thread.Context.DR7 = Instance.ReadRegister(Registers.UC_X86_REG_DR7);
 
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
@@ -1339,29 +1781,18 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(InitialRSP, 0UL, 8);
                 InitialRSP -= 0x20;
 
-                ulong ContextAddress = Instance.BuildInitialContext(RtlUserThreadStart, InitialRSP, StartAddress, Parameter);
-                State.InitialContext = ContextAddress;
                 Thread.Context.RSP = InitialRSP;
-                Thread.Context.RCX = ContextAddress;
-                Thread.Context.RDX = _ntdllModule?.MappedBase ?? 0;
+                Thread.Context.RCX = StartAddress;
+                Thread.Context.RDX = Parameter;
             }
             else
             {
-                ulong StackTop = (Thread.StackAddress + Thread.StackSize) & ~0xFUL;
-                ulong ContextEsp = StackTop - 0x10;
+                ulong ContextEsp = ((Thread.StackAddress + Thread.StackSize) & ~0xFUL) - 0x10;
                 Instance._emulator.WriteMemory(ContextEsp, 0u);
 
-                ulong ContextAddress = Instance.BuildInitialContext32(RtlUserThreadStart, ContextEsp, StartAddress, Parameter);
-                State.InitialContext = ContextAddress;
-
-                ulong ThunkEsp = StackTop - 0x40;
-                ThunkEsp -= 4;
-                Instance._emulator.WriteMemory(ThunkEsp, (uint)(_ntdllModule?.MappedBase ?? 0));
-                ThunkEsp -= 4;
-                Instance._emulator.WriteMemory(ThunkEsp, (uint)ContextAddress);
-                ThunkEsp -= 4;
-                Instance._emulator.WriteMemory(ThunkEsp, 0u);
-                Thread.Context.RSP = ThunkEsp;
+                Thread.Context.RSP = ContextEsp;
+                Thread.Context.RAX = StartAddress;
+                Thread.Context.RBX = Parameter;
             }
 
             Instance.Threads[Thread.ThreadId] = Thread;
@@ -1370,6 +1801,61 @@ namespace Brovan.Core.Emulation.Guests
                 Instance.CurrentThreadId = (int)Thread.ThreadId;
 
             return Thread;
+        }
+
+        // The length RtlGetExtendedContextLength2 gives for CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS.
+        private const ulong LoaderThunkContextLength = WindowsThreadContext64.ContextExOffset + WindowsThreadContext64.ContextExSize + 15;
+
+        private void EnterLoaderThunk(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
+        {
+            State.LoaderThunkPending = false;
+            bool X64 = Instance.IsX64Guest;
+            CpuContext ThreadContext = Thread.Context;
+            ulong UserSp = ThreadContext.RSP;
+
+            ulong Length, Context, Sp, FrameBase;
+            uint Flags;
+            if (X64)
+            {
+                Length = LoaderThunkContextLength;
+                Context = (UserSp - Length) & ~0xFUL;
+                Sp = Context - 0x28;
+                FrameBase = Context;
+                Flags = WindowsThreadContext64.CONTEXT_AMD64 | WindowsThreadContext64.CONTEXT_CONTROL | WindowsThreadContext64.CONTEXT_INTEGER
+                    | WindowsThreadContext64.CONTEXT_FLOATING_POINT | WindowsThreadContext64.CONTEXT_DEBUG_REGISTERS;
+            }
+            else
+            {
+                Length = WindowsThreadContext64.MinimumContextSize32;
+                Context = (UserSp - Length) & ~3UL;
+                Sp = Context - 0x10;
+                FrameBase = Sp;
+                Flags = WindowsThreadContext64.CONTEXT_I386 | WindowsThreadContext64.CONTEXT_CONTROL | WindowsThreadContext64.CONTEXT_INTEGER
+                    | WindowsThreadContext64.CONTEXT_SEGMENTS | WindowsThreadContext64.CONTEXT_DEBUG_REGISTERS;
+            }
+
+            ulong FaultAddress = FrameBase;
+            if (Context > UserSp || WinHelper?.TryMapUserFrame(FrameBase, Context + Length - FrameBase, out FaultAddress) != true)
+            {
+                RaiseStoreFault(Instance, FaultAddress);
+                return;
+            }
+
+            WindowsThreadContext64.WriteContext(Instance, Thread, Context, Flags, ContextSource.SavedContext);
+            ulong NtdllBase = _ntdllModule?.MappedBase ?? 0;
+            if (X64)
+            {
+                ThreadContext.RCX = Context;
+                ThreadContext.RDX = NtdllBase;
+            }
+            else
+            {
+                Instance._emulator.WriteMemory(Sp + 4, (ulong)(uint)Context | (ulong)(uint)NtdllBase << 32, 8);
+            }
+
+            ThreadContext.RSP = Sp;
+            ThreadContext.RIP = LdrInitializeThunk;
+            Instance.WriteGprBatch(ThreadContext);
         }
 
 
@@ -1607,6 +2093,9 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(PEB + 0x68, ApiSetMap, 8);
                 Instance._emulator.WriteMemory(PEB + 0xB8, WinHelper.ProcessorCount, 4);
                 Instance._emulator.WriteMemory(PEB + 0xBC, 0, 4);
+                Instance._emulator.WriteMemory(PEB + 0xC0, CriticalSectionTimeout, 8);
+                Instance._emulator.WriteMemory(PEB + 0xD8, 0x10000UL, 8);
+                Instance._emulator.WriteMemory(PEB + 0xE0, 0x1000UL, 8);
                 Instance._emulator.WriteMemory(PEB + 0x118, WindowsVersionInfo.MajorVersion, 4);
                 Instance._emulator.WriteMemory(PEB + 0x11C, WindowsVersionInfo.MinorVersion, 4);
                 Instance._emulator.WriteMemory(PEB + 0x120, WindowsVersionInfo.BuildNumberShort, 2);
@@ -1728,6 +2217,7 @@ namespace Brovan.Core.Emulation.Guests
 
                 Instance._emulator.WriteMemory(PEB + 0x64, WinHelper.ProcessorCount);
                 Instance._emulator.WriteMemory(PEB + 0x68, 0u);
+                Instance._emulator.WriteMemory(PEB + 0x70, CriticalSectionTimeout, 8);
 
                 if (IsPeImage)
                 {
@@ -1773,6 +2263,7 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(NativePEB + 0x10, MainModule.MappedBase, 8);
             Instance._emulator.WriteMemory(NativePEB + 0x68, ApiSetMap, 8);
             Instance._emulator.WriteMemory(NativePEB + 0xB8, WinSysHelper.HostProcessorCount(64), 4);
+            Instance._emulator.WriteMemory(NativePEB + 0xC0, CriticalSectionTimeout, 8);
             Instance._emulator.WriteMemory(NativePEB + 0x118, WindowsVersionInfo.MajorVersion, 4);
             Instance._emulator.WriteMemory(NativePEB + 0x11C, WindowsVersionInfo.MinorVersion, 4);
             Instance._emulator.WriteMemory(NativePEB + 0x120, WindowsVersionInfo.BuildNumberShort, 2);

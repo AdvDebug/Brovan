@@ -11,6 +11,9 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
         private const ulong PAGE_SIZE = 0x1000;
         private const int FILE_COPY_CHUNK_SIZE = 0x100000;
 
+        // The default Linux vm.mmap_min_addr.
+        private const ulong MMAP_MIN_ADDR = 0x10000;
+
         private struct RemapRegion
         {
             public MemoryRegion Region;
@@ -47,25 +50,25 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (length == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (length > ulong.MaxValue - (PAGE_SIZE - 1))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((offset & (PAGE_SIZE - 1)) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!IsPrivate && !IsShared)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -74,7 +77,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             ulong LengthPages = AlignedLength >> 12;
             if (OffsetPages + LengthPages < OffsetPages)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EOVERFLOW);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EOVERFLOW);
                 return;
             }
 
@@ -86,26 +89,26 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 FileDescriptorEntry Entry = Helper.DescriptorTable.GetEntry(fd);
                 if (Entry == null)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                     return;
                 }
 
                 FileDesc = Entry.Object as FileObject;
                 if (FileDesc == null)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                     return;
                 }
 
                 if (FileDesc.IsDirectory)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EACCES);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EACCES);
                     return;
                 }
 
                 if (FileDesc.IsSpecialPath || string.IsNullOrWhiteSpace(FileDesc.HostPath) || !File.Exists(FileDesc.HostPath))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENODEV);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENODEV);
                     return;
                 }
 
@@ -115,13 +118,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
                 if (!CanRead)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EACCES);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EACCES);
                     return;
                 }
 
                 if (IsShared && (prot & 0x2) != 0 && !CanWrite)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EACCES);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EACCES);
                     return;
                 }
 
@@ -131,23 +134,23 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 }
                 catch (UnauthorizedAccessException)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EACCES);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EACCES);
                     return;
                 }
                 catch (IOException)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EIO);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EIO);
                     return;
                 }
                 catch
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if (offset > long.MaxValue)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
             }
@@ -155,23 +158,29 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             MemoryProtection Protection = Helper.TranslateLinuxMemToNative(prot);
             MappingReservation Reservation;
 
+            if (IsFixed && IsPageAligned(addr) && addr < MMAP_MIN_ADDR)
+            {
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EPERM);
+                return;
+            }
+
             if (IsNoReplace)
             {
                 if (!IsPageAligned(addr) || WouldOverflow(addr, AlignedLength))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if (Instance.IsRegionMapped(addr, AlignedLength))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EEXIST);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EEXIST);
                     return;
                 }
 
                 if (!TryMapExactNoReplace(Instance, addr, length, AlignedLength, Protection, out Reservation))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOMEM);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                     return;
                 }
             }
@@ -179,13 +188,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             {
                 if (!IsPageAligned(addr) || WouldOverflow(addr, AlignedLength))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if (!TryMapFixed(Instance, addr, length, AlignedLength, Protection, out Reservation))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOMEM);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                     return;
                 }
             }
@@ -193,7 +202,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             {
                 if (!TryMapNonFixed(Instance, addr, length, AlignedLength, Protection, out Reservation))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOMEM);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                     return;
                 }
             }
@@ -205,7 +214,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             if (Linux != null && FileDesc != null)
                 Linux.RegisterMappedFileModule(FileDesc.Path, FileDesc.HostPath, Reservation.Address, AlignedLength, offset);
 
-            Helper.SetReturnValue(Instance, Context, Reservation.Address);
+            Helper.SetReturnValue(Instance, Reservation.Address);
         }
 
         private bool TryMapNonFixed(BinaryEmulator Instance, ulong AddressHint, ulong RequestedLength, ulong AlignedLength, MemoryProtection Protection, out MappingReservation Reservation)
@@ -319,7 +328,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                     if (!Instance.WriteMemory(CurrentAddress, Buffer.Slice(0, TotalRead)))
                     {
                         RollbackReservation(Instance, Reservation);
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EIO);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EIO);
                         return false;
                     }
 
@@ -333,19 +342,19 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             catch (UnauthorizedAccessException)
             {
                 RollbackReservation(Instance, Reservation);
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EACCES);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EACCES);
                 return false;
             }
             catch (IOException)
             {
                 RollbackReservation(Instance, Reservation);
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EIO);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EIO);
                 return false;
             }
             catch
             {
                 RollbackReservation(Instance, Reservation);
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return false;
             }
 

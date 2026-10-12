@@ -28,13 +28,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
 
             if ((flags & ~AllowedFlags) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (size == 0)
             {
-                Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+                Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
                 return;
             }
 
@@ -54,11 +54,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
 
             if (!Instance.WriteMemory(buf, Data))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, size);
+            Helper.SetReturnValue(Instance, size);
         }
     }
 }

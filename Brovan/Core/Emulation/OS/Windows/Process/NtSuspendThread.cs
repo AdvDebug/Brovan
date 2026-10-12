@@ -42,9 +42,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Instance.CurrentThread != null && TargetThread.ThreadId == (uint)Instance.CurrentThreadId)
             {
-                ulong SyscallRip = Instance.WinHelper.GetSyscallRip(TargetThread, true);
-                ulong NextRip = SyscallRip + 2;
-                Instance._emulator.WriteRegister(Instance.IPRegister, NextRip);
                 Instance._emulator.StopEmulation();
             }
             else

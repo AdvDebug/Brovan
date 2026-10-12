@@ -35,26 +35,26 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
 
             if (Nfds > SocketHelpers.GetDescriptorLimit(Helper))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (Nfds > (ulong.MaxValue / PollfdSize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             ulong PollfdBytes = Nfds * PollfdSize;
             if (PollfdBytes > int.MaxValue)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOMEM);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                 return;
             }
 
             if (PollfdBytes != 0 && (PollfdAddress == 0 || !Instance.IsRegionMapped(PollfdAddress, PollfdBytes)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -66,7 +66,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
                 Span<byte> Pollfds = PollfdBytes == 0 ? Span<byte>.Empty : Helper.Shared.GetSpan(PollfdBytes);
                 if (PollfdBytes != 0 && !Instance.ReadMemory(PollfdAddress, Pollfds))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
@@ -76,11 +76,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
                 {
                     if (PollfdBytes != 0 && !Instance.WriteMemory(PollfdAddress, Pollfds))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, ReadyCount);
+                    Helper.SetReturnValue(Instance, ReadyCount);
                     return;
                 }
 

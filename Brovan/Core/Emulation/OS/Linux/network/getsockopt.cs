@@ -16,28 +16,28 @@ namespace Brovan.Core.Emulation.OS.Linux.network
 
             if (OptionLengthAddress == 0 || !Instance.IsRegionMapped(OptionLengthAddress, 4))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             Span<byte> LengthBuffer = stackalloc byte[4];
             if (!Instance.ReadMemory(OptionLengthAddress, LengthBuffer))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             uint RequestedLength = BinaryPrimitives.ReadUInt32LittleEndian(LengthBuffer);
             if (!SocketHelpers.TryGetSocket(Helper, Descriptor, out SocketObject SocketHandle, out LinuxErrno Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             Span<byte> Value = stackalloc byte[16];
             if (!TryBuildOption(Instance, Context, SocketHandle, Level, OptionName, Value, out int ValueLength, out Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -46,30 +46,30 @@ namespace Brovan.Core.Emulation.OS.Linux.network
             {
                 if (OptionValueAddress == 0 || !Instance.IsRegionMapped(OptionValueAddress, CopyLength))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
                 if (!Instance.WriteMemory(OptionValueAddress, Value.Slice(0, (int)CopyLength)))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
             }
             else if (RequestedLength != 0 && ValueLength != 0 && OptionValueAddress == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             BinaryPrimitives.WriteUInt32LittleEndian(LengthBuffer, (uint)ValueLength);
             if (!Instance.WriteMemory(OptionLengthAddress, LengthBuffer))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
 
         private static bool TryBuildOption(BinaryEmulator Instance, LinuxSyscallContext Context, SocketObject SocketHandle, int Level, int OptionName, Span<byte> Value, out int ValueLength, out LinuxErrno Error)

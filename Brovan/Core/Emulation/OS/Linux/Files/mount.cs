@@ -48,7 +48,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (!Open.TryReadPath(Instance, TargetAddress, out string TargetPath))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -57,7 +57,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             {
                 if (!Open.TryReadPath(Instance, SourceAddress, out SourcePath))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
             }
@@ -67,7 +67,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             {
                 if (!Open.TryReadPath(Instance, FileSystemTypeAddress, out FileSystemType))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
             }
@@ -75,7 +75,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             string NormalizedTarget = Helper.NormalizePath(TargetPath);
             if (string.IsNullOrEmpty(NormalizedTarget))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                 return;
             }
 
@@ -91,19 +91,19 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (PropagationCount > 1)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((MountFlags & PropagationMask) != 0 && (MountFlags & ~(PropagationMask | MS_REC | MS_SILENT)) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((MountFlags & MS_MOVE) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -111,12 +111,12 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             {
                 if (!Helper.TryGetMountForPath(NormalizedTarget, out LinuxMountEntry ExistingMount) || ExistingMount.GuestPath != NormalizedTarget)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 Helper.SetMount(ExistingMount.GuestPath, ExistingMount.HostPath, ExistingMount.IsDirectory, (MountFlags & MS_RDONLY) != 0, ExistingMount.FileSystemType);
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
@@ -124,14 +124,14 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             {
                 if (string.IsNullOrWhiteSpace(SourcePath))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 string NormalizedSource = Helper.NormalizePath(SourcePath);
                 if (string.IsNullOrEmpty(NormalizedSource))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                     return;
                 }
 
@@ -139,7 +139,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 string TargetHostPath = Helper.ResolveHostPath(NormalizedTarget);
                 if (string.IsNullOrEmpty(SourceHostPath) || string.IsNullOrEmpty(TargetHostPath))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                     return;
                 }
 
@@ -150,7 +150,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
                 if ((!SourceIsFile && !SourceIsDirectory) || (!TargetIsFile && !TargetIsDirectory))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                     return;
                 }
 
@@ -158,7 +158,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 {
                     if (!TargetIsDirectory)
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOTDIR);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOTDIR);
                         return;
                     }
                 }
@@ -166,13 +166,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
                 {
                     if (!TargetIsFile)
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOTDIR);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOTDIR);
                         return;
                     }
                 }
 
                 Helper.SetMount(NormalizedTarget, SourceHostPath, SourceIsDirectory, (MountFlags & MS_RDONLY) != 0, "bind");
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
@@ -180,38 +180,38 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             {
                 if (!Helper.TryGetMountForPath(NormalizedTarget, out LinuxMountEntry ExistingMount) || ExistingMount.GuestPath != NormalizedTarget)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(FileSystemType) || !SupportedPseudoFileSystems.Contains(FileSystemType))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENODEV);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENODEV);
                 return;
             }
 
             string PseudoTargetHostPath = Helper.ResolveHostPath(NormalizedTarget);
             if (string.IsNullOrEmpty(PseudoTargetHostPath))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                 return;
             }
 
             if (!Directory.Exists(PseudoTargetHostPath))
             {
                 if (File.Exists(PseudoTargetHostPath))
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOTDIR);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOTDIR);
                 else
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                 return;
             }
 
             Helper.SetMount(NormalizedTarget, PseudoTargetHostPath, true, (MountFlags & MS_RDONLY) != 0, FileSystemType);
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
     }
 }

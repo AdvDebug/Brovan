@@ -772,7 +772,6 @@ namespace Brovan
                 Console.WriteLine($"  APCs:            {(WindowsState.PendingUserApcs == null ? 0 : WindowsState.PendingUserApcs.Count)}");
                 Console.WriteLine($"  Alertable:       {WindowsState.ApcAlertable}");
                 Console.WriteLine($"  WaitStatus:      {WindowsState.WaitStatus}");
-                Console.WriteLine($"  ExceptionDepth:  {WindowsState.ExceptionNesting}");
             }
         }
 

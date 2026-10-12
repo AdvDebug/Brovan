@@ -69,7 +69,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((InformationPtr & 3) != 0)
                 return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
 
-            if (!NtReadVirtualMemory.IsAccessible(Instance, InformationPtr, sizeof(uint), false) || !Instance.WinHelper.TryReadUInt32(InformationPtr, out uint Flags))
+            if (!Instance.IsAccessible(InformationPtr, sizeof(uint), false) || !Instance.WinHelper.TryReadUInt32(InformationPtr, out uint Flags))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out _);
@@ -108,7 +108,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong Address = EntriesPtr + Index * EntrySize;
                 Span<byte> Data = Chunk.Slice(0, Count * (int)EntrySize);
 
-                if (Address < EntriesPtr || !NtReadVirtualMemory.IsAccessible(Instance, Address, (ulong)Data.Length, false) ||
+                if (Address < EntriesPtr || !Instance.IsAccessible(Address, (ulong)Data.Length, false) ||
                     !Instance._emulator.ReadMemory(Address, Data))
                     return false;
 

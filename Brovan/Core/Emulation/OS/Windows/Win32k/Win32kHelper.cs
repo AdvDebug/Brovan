@@ -6194,11 +6194,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return false;
 
             ArgumentBuffer = (CurrentRsp - WindowProcArgumentReserve) & ~0xFUL;
-            if (!Instance.IsRegionMapped(ArgumentBuffer, WindowProcArgumentReserve))
+            if (!Instance.WinHelper.TryMapUserCallbackFrame(ArgumentBuffer, CurrentRsp))
                 return false;
 
-            for (int Offset = 0; Offset < WindowProcArgumentBlockSize; Offset += 8)
-                Instance._emulator.WriteMemory(ArgumentBuffer + (ulong)Offset, 0UL, 8);
+            Instance.WinHelper.WriteZeroMemory(ArgumentBuffer, WindowProcArgumentBlockSize);
 
             return true;
         }

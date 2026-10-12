@@ -13,15 +13,15 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         internal static void Drain(BinaryEmulator Instance)
         {
-            while (GuestSessionMailbox.TryReceive(out SessionOperation Operation, out ulong Address, out ulong Argument, out int Length, out byte[] Input))
+            while (GuestSessionMailbox.TryReceive(out SessionOperation Operation, out ulong Address, out ulong Argument, out int Length, out Span<byte> Payload))
             {
                 NTSTATUS Status;
                 ulong Result = 0;
-                byte[] Output = null;
+                int OutputLength = 0;
 
                 try
                 {
-                    Status = Execute(Instance, Operation, Address, Argument, Length, Input, out Result, out Output);
+                    Status = Execute(Instance, Operation, Address, Argument, Length, Payload.Slice(0, Length), Payload, out Result, out OutputLength);
                 }
                 catch (Exception Ex)
                 {
@@ -29,22 +29,24 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Status = NTSTATUS.STATUS_UNSUCCESSFUL;
                 }
 
-                GuestSessionMailbox.Complete(Status, Result, Output ?? Array.Empty<byte>());
+                GuestSessionMailbox.Complete(Status, Result, OutputLength);
             }
         }
 
+        /// <param name="Input">Shares memory with <paramref name="Output"/>. Read all of it before writing Output.</param>
         private static NTSTATUS Execute(
             BinaryEmulator Instance,
             SessionOperation Operation,
             ulong Address,
             ulong Argument,
             int Length,
-            byte[] Input,
+            ReadOnlySpan<byte> Input,
+            Span<byte> Output,
             out ulong Result,
-            out byte[] Output)
+            out int OutputLength)
         {
             Result = 0;
-            Output = null;
+            OutputLength = 0;
 
             switch (Operation)
             {
@@ -54,25 +56,24 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Length <= 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                    if (NtReadVirtualMemory.AccessibleLength(Instance, Address, (ulong)Length, false) < (ulong)Length)
+                    if (Instance.AccessibleLength(Address, (ulong)Length, false) < (ulong)Length)
                         return NTSTATUS.STATUS_PARTIAL_COPY;
 
-                    byte[] Buffer = new byte[Length];
-                    if (!Instance.ReadMemory(Address, Buffer, (uint)Length))
+                    if (!Instance.ReadMemory(Address, Output.Slice(0, Length)))
                         return NTSTATUS.STATUS_PARTIAL_COPY;
 
-                    Output = Buffer;
+                    OutputLength = Length;
                     Result = (ulong)Length;
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
                 case SessionOperation.WriteMemory:
                 {
-                    if (Input == null || Input.Length == 0)
+                    if (Input.IsEmpty)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                    ulong Writable = NtReadVirtualMemory.AccessibleLength(Instance, Address, (ulong)Input.Length, true);
-                    if (Writable != 0 && !Instance._emulator.WriteMemory(Address, Input, 0, (int)Writable))
+                    ulong Writable = Instance.AccessibleLength(Address, (ulong)Input.Length, true);
+                    if (Writable != 0 && !Instance._emulator.WriteMemory(Address, Input.Slice(0, (int)Writable)))
                         return NTSTATUS.STATUS_PARTIAL_COPY;
 
                     Result = Writable;
@@ -85,14 +86,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Status != NTSTATUS.STATUS_SUCCESS)
                         return Status;
 
-                    Output = new byte[NtQueryVirtualMemory.CanonicalBasicInformationBytes];
-                    NtQueryVirtualMemory.Serialize(Info, true, Output);
+                    OutputLength = NtQueryVirtualMemory.CanonicalBasicInformationBytes;
+                    Output.Slice(0, OutputLength).Clear();
+                    NtQueryVirtualMemory.Serialize(Info, true, Output.Slice(0, OutputLength));
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
                 case SessionOperation.AllocateMemory:
                 {
-                    if (Input == null || Input.Length < 32)
+                    if (Input.Length < 32)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                     ulong BaseAddress = Address;
@@ -100,9 +102,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     NtAllocateVirtualMemory.AddressRequirements Requirements = new NtAllocateVirtualMemory.AddressRequirements
                     {
-                        Lowest = BinaryPrimitives.ReadUInt64LittleEndian(Input.AsSpan(8)),
-                        Highest = BinaryPrimitives.ReadUInt64LittleEndian(Input.AsSpan(16)),
-                        Alignment = BinaryPrimitives.ReadUInt64LittleEndian(Input.AsSpan(24)),
+                        Lowest = BinaryPrimitives.ReadUInt64LittleEndian(Input.Slice(8)),
+                        Highest = BinaryPrimitives.ReadUInt64LittleEndian(Input.Slice(16)),
+                        Alignment = BinaryPrimitives.ReadUInt64LittleEndian(Input.Slice(24)),
                     };
 
                     NTSTATUS Status = NtAllocateVirtualMemory.Allocate(
@@ -110,13 +112,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                         ref BaseAddress,
                         ref RegionSize,
                         BinaryPrimitives.ReadUInt32LittleEndian(Input),
-                        BinaryPrimitives.ReadUInt32LittleEndian(Input.AsSpan(4)),
+                        BinaryPrimitives.ReadUInt32LittleEndian(Input.Slice(4)),
                         Requirements);
 
                     if (Status != NTSTATUS.STATUS_SUCCESS)
                         return Status;
 
-                    Output = new byte[8];
+                    OutputLength = sizeof(ulong);
                     BinaryPrimitives.WriteUInt64LittleEndian(Output, RegionSize);
                     Result = BaseAddress;
                     return NTSTATUS.STATUS_SUCCESS;
@@ -124,7 +126,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case SessionOperation.FreeMemory:
                 {
-                    if (Input == null || Input.Length < 4)
+                    if (Input.Length < 4)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                     ulong BaseAddress = Address;
@@ -134,7 +136,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Status != NTSTATUS.STATUS_SUCCESS)
                         return Status;
 
-                    Output = new byte[8];
+                    OutputLength = sizeof(ulong);
                     BinaryPrimitives.WriteUInt64LittleEndian(Output, RegionSize);
                     Result = BaseAddress;
                     return NTSTATUS.STATUS_SUCCESS;
@@ -142,7 +144,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case SessionOperation.ProtectMemory:
                 {
-                    if (Input == null || Input.Length < 4)
+                    if (Input.Length < 4)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                     ulong BaseAddress = Address;
@@ -152,9 +154,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Status != NTSTATUS.STATUS_SUCCESS)
                         return Status;
 
-                    Output = new byte[12];
+                    OutputLength = sizeof(ulong) + sizeof(uint);
                     BinaryPrimitives.WriteUInt64LittleEndian(Output, RegionSize);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(8), OldProtect);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Output.Slice(8), OldProtect);
                     Result = BaseAddress;
                     return NTSTATUS.STATUS_SUCCESS;
                 }

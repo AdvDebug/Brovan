@@ -108,6 +108,10 @@ namespace Brovan.Core.Emulation
             => Inner.WriteRegister32(register, value);
         public bool WriteRegister32(int register, uint value)
             => Inner.WriteRegister32(register, value);
+        public bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
+            => Inner.WriteRegisterBatch(registers, values, count);
+        public bool ReadRegisterBatch(int[] registers, ulong[] values, int count)
+            => Inner.ReadRegisterBatch(registers, values, count);
         public bool WriteGdtr(ulong Base, uint Limit)
             => false;
         public bool WriteRegisterByte(Registers register, byte value)
@@ -168,6 +172,13 @@ namespace Brovan.Core.Emulation
 
         public IntPtr AddInterruptHook(InterruptHookCallback callback)
             => Inner.AddInterruptHook(callback);
+
+        public uint InterruptErrorCode => Inner.InterruptErrorCode;
+
+        public bool UmipEnabled => Inner.UmipEnabled;
+
+        public void SetUserInterruptGates(Func<uint, bool> raisableFromUserMode)
+            => Inner.SetUserInterruptGates(raisableFromUserMode);
 
         public IntPtr AddInstructionHook(BackendInstructionHook instruction, InstructionHookCallback callback)
             => Inner.AddInstructionHook(instruction, callback);

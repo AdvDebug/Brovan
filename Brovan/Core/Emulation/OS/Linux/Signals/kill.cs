@@ -12,23 +12,23 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
 
             if (!IsValidSignal(sig))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!MatchesCurrentProcess(Helper, pid))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ESRCH);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ESRCH);
                 return;
             }
 
             if (sig != 0 && !QueueProcessSignal(Instance, Helper, sig))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ESRCH);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ESRCH);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
 
         private static bool IsValidSignal(int Signal)

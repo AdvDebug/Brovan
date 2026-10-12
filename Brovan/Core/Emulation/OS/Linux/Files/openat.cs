@@ -10,7 +10,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         {
             if (!Open.TryReadPath(Instance, Context.Arg1, out string PathValue))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -21,7 +21,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             string ResolvedPath = ResolveGuestPath(Helper, DirFd, PathValue, out LinuxErrno Error);
             if (ResolvedPath == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 

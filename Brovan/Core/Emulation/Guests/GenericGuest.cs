@@ -158,6 +158,9 @@ namespace Brovan.Core.Emulation.Guests
             return false;
         }
 
+        // A generic guest has no kernel to close any gate.
+        public bool RaisableFromUserMode(uint Vector) => true;
+
         public bool TryHandleInterrupt(BinaryEmulator Instance, uint InterruptNumber)
         {
             if ((Instance.Settings.Flags & LogFlags.Issues) != 0)

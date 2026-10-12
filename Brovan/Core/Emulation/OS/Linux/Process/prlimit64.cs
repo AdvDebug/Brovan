@@ -39,13 +39,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if ((uint)Resource >= RLIM_NLIMITS)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (Pid != 0 && Pid != Helper.PID)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ESRCH);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ESRCH);
                 return;
             }
 
@@ -56,14 +56,14 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             {
                 if (!Instance.IsRegionMapped(NewLimitPointer, 16))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
                 Span<byte> RawNewLimit = stackalloc byte[16];
                 if (!Instance.ReadMemory(NewLimitPointer, RawNewLimit))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
@@ -75,13 +75,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
                 if (NextLimit.Current > NextLimit.Maximum)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if (NextLimit.Maximum > PreviousLimit.Maximum || NextLimit.Current > PreviousLimit.Maximum)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EPERM);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EPERM);
                     return;
                 }
             }
@@ -90,7 +90,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             {
                 if (!Instance.IsRegionMapped(OldLimitPointer, 16))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
             }
@@ -103,7 +103,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
                 if (!Instance.WriteMemory(OldLimitPointer, OldLimitBytes))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
             }
@@ -111,7 +111,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             if (NewLimitPointer != 0)
                 Helper.ResourceLimits[Resource] = NextLimit;
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
 
         private static LinuxResourceLimit GetResourceLimit(LinuxSyscallsHelper Helper, int Resource)

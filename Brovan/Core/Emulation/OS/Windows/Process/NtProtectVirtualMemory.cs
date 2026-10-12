@@ -95,7 +95,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             MemoryProtection NewProt = Instance.WinHelper.ConvertWinProtectToInternal(NewProtection);
             SpecialProtections NewSpecial = (NewProtection & PageGuard) != 0 ? SpecialProtections.Guard : SpecialProtections.None;
 
-            if (!Instance.ProtectWinMemoryRange(AlignedBase, AlignedSize, NewProt, NewProtection, NewSpecial))
+            if (!Instance.ProtectMemoryRange(AlignedBase, AlignedSize, NewProt, NewProtection, NewSpecial))
                 return NTSTATUS.STATUS_INVALID_PAGE_PROTECTION;
 
             OldProtection = NtQueryVirtualMemory.RegionWinProtect(Instance, OldRegion);

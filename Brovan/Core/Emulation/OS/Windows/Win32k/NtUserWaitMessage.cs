@@ -34,7 +34,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Thread.WaitDeadline = Win32kHelper.GetNextTimerDue(Instance, 0, Thread.ThreadId, 0, 0);
                 State.WaitCompleted = false;
                 State.WaitStatus = NTSTATUS.STATUS_PENDING;
-                State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
+                State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip();
                 State.WaitReturnRIP = State.WaitResumeRIP + 2;
                 State.WaitAlertable = false;
                 State.WaitMessageActive = true;

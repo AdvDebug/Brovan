@@ -28,7 +28,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
 
             if (Nfds < 0 || (ulong)Nfds > SocketHelpers.GetDescriptorLimit(Helper))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -36,7 +36,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
             ulong SetBytes = GetSetByteCount((ulong)Nfds, WordSize);
             if (SetBytes > int.MaxValue)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOMEM);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                 return;
             }
 
@@ -44,19 +44,19 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
                 || !TryValidateFdSet(Instance, WriteFds, SetBytes)
                 || !TryValidateFdSet(Instance, ExceptFds, SetBytes))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (!TryReadTimeout(Instance, Context, TimeoutAddress, out TimeSpan? Timeout, out LinuxErrno Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             if (!TryValidateSigmaskData(Instance, Context, SigmaskDataAddress, out Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -72,7 +72,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
                 || !TryReadFdSet(Instance, WriteFds, SetBytes, _sourceWrite)
                 || !TryReadFdSet(Instance, ExceptFds, SetBytes, _sourceExcept))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -81,7 +81,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
             {
                 if (!TryBuildReadySets(Helper, (int)Nfds, _sourceRead, _sourceWrite, _sourceExcept, _readyRead, _readyWrite, _readyExcept, out int ReadyCount, out Error))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)Error);
+                    Helper.SetReturnValue(Instance, -(long)Error);
                     return;
                 }
 
@@ -92,11 +92,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
                         || !WriteFdSet(Instance, ExceptFds, _readyExcept)
                         || !WriteRemainingTimeout(Instance, Context, TimeoutAddress, Timeout, Timer.Elapsed))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, ReadyCount);
+                    Helper.SetReturnValue(Instance, ReadyCount);
                     return;
                 }
 

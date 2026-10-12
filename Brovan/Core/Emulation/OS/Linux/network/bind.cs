@@ -13,34 +13,34 @@ namespace Brovan.Core.Emulation.OS.Linux.network
 
             if (!SocketHelpers.TryGetSocket(Helper, Descriptor, out SocketObject SocketHandle, out LinuxErrno Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             if (!SocketHelpers.TryReadSocketAddress(Instance, Address, AddressLength, out EndPoint EndPointValue, out Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             if (!SocketHelpers.TryCheckNetworkPolicy(Instance, EndPointValue, out Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             try
             {
                 SocketHandle.Handle.Bind(EndPointValue);
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
             }
             catch (SocketException Ex)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)SocketHelpers.TranslateSocketError(Ex.SocketErrorCode));
+                Helper.SetReturnValue(Instance, -(long)SocketHelpers.TranslateSocketError(Ex.SocketErrorCode));
             }
             catch (ObjectDisposedException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
             }
         }
     }

@@ -32,19 +32,19 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (path == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (!Open.TryReadPath(Instance, path, out string PathValue))
             {
-                Helper.SetReturnValue(Instance, Context, Instance.IsRegionMapped(path, 1) ? -(long)LinuxErrno.ENOENT : -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, Instance.IsRegionMapped(path, 1) ? -(long)LinuxErrno.ENOENT : -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (string.IsNullOrEmpty(PathValue))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                 return;
             }
 
@@ -58,7 +58,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         {
             if (bufPtr == 0 || !Instance.IsRegionMapped(bufPtr, SIZE_64))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -78,18 +78,18 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (!Instance.WriteMemory(bufPtr, buf))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
 
         private static void WriteStatfs32(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context, ulong bufPtr)
         {
             if (bufPtr == 0 || !Instance.IsRegionMapped(bufPtr, SIZE_32))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -109,11 +109,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (!Instance.WriteMemory(bufPtr, buf))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
     }
 }

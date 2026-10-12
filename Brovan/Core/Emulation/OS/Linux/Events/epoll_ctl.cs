@@ -19,32 +19,32 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
             FileDescriptorEntry? EpollEntry = Helper.DescriptorTable.GetEntry(epfd);
             if (EpollEntry == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (EpollEntry.Object is not EpollObject Epoll)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             FileDescriptorEntry? TargetEntry = Helper.DescriptorTable.GetEntry(fd);
             if (TargetEntry == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (fd == epfd)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (TargetEntry.Object is FileObject)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EPERM);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EPERM);
                 return;
             }
 
@@ -54,14 +54,14 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
             {
                 if (eventPtr == 0 || !Instance.IsRegionMapped(eventPtr, EpollEventSize))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
                 Span<byte> EventBytes = stackalloc byte[EpollEventSize];
                 if (!Instance.ReadMemory(eventPtr, EventBytes))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
@@ -75,7 +75,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
                                                     LinuxEventHelpers.EPOLLEXCLUSIVE;
                     if (op != EPOLL_CTL_ADD || TargetEntry.Object is EpollObject || (Events & ~AllowedExclusiveEvents) != 0)
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                         return;
                     }
                 }
@@ -86,7 +86,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
                 case EPOLL_CTL_ADD:
                     if (Epoll.Interests.ContainsKey(fd))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EEXIST);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EEXIST);
                         return;
                     }
 
@@ -97,19 +97,19 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
                         LastReadyEvents = 0,
                         Disabled = false,
                     };
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
 
                 case EPOLL_CTL_MOD:
                     if (!Epoll.Interests.TryGetValue(fd, out EpollInterest Existing))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                         return;
                     }
 
                     if ((Events & LinuxEventHelpers.EPOLLEXCLUSIVE) != 0 || (Existing.Events & LinuxEventHelpers.EPOLLEXCLUSIVE) != 0)
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                         return;
                     }
 
@@ -117,21 +117,21 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
                     Existing.Data = Data;
                     Existing.LastReadyEvents = 0;
                     Existing.Disabled = false;
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
 
                 case EPOLL_CTL_DEL:
                     if (!Epoll.Interests.Remove(fd))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
 
                 default:
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
             }
         }

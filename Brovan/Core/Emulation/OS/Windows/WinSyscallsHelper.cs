@@ -9,6 +9,7 @@ using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Emulation.OS.Windows.Win32k;
+using Brovan.Core.Emulation.Guests;
 using System.IO;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -178,18 +179,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                    (Granted & RequiredAccess) == RequiredAccess;
         }
 
-        internal const ulong Int2EInstructionLength = 2;
+        internal const ulong IntInstructionLength = 2;
 
         internal const ulong AllocationGranularity = 0x10000;
 
-        public ulong GetSyscallRip(EmulatedThread Thread, bool PreferThreadLastRip)
+        public ulong GetSyscallRip()
         {
-            if (PreferThreadLastRip && Thread != null && Thread.LastRIP != 0)
-                return Thread.LastRIP;
-
             ulong Ip = Emulator.ReadRegister(Emulator.IPRegister);
 
-            return Emulator.IsX86Guest ? Ip - Int2EInstructionLength : Ip;
+            return Emulator.IsX86Guest ? Ip - IntInstructionLength : Ip;
         }
 
         /// <returns>False when the timeout cannot be read. A null timeout is an infinite wait.</returns>
@@ -208,12 +206,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         /// <returns>The emulated deadline, the current tick for an immediate timeout, or -1 for an infinite wait.</returns>
         public long ParseRelativeDeadlineMs(long? CapturedTimeout)
-        {
-            if (CapturedTimeout is not long Timeout)
-                return -1;
+            => CapturedTimeout is long Timeout ? Emulator.CreateEmulatedDeadlineMilliseconds(TimeoutToMilliseconds(Timeout)) : -1;
 
+        internal long TimeoutToMilliseconds(long Timeout)
+        {
             if (Timeout == 0)
-                return Emulator.EmulatedTickCount64;
+                return 0;
 
             long Delta100Ns;
             if (Timeout < 0)
@@ -224,7 +222,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 long NowFileTime = Emulator.GetEmulatedSystemTimeFileTimeUtc();
                 if (Timeout <= NowFileTime)
-                    return Emulator.EmulatedTickCount64;
+                    return 0;
 
                 Delta100Ns = Timeout - NowFileTime;
             }
@@ -233,7 +231,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((Delta100Ns % 10000) != 0 && Ms < long.MaxValue)
                 Ms++;
 
-            return Emulator.CreateEmulatedDeadlineMilliseconds(Ms);
+            return Ms;
         }
 
         public uint ReadSyscallNumber()
@@ -272,7 +270,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
-            ulong SyscallRip = GetSyscallRip(Thread, false);
+            ulong SyscallRip = GetSyscallRip();
 
             State.RetrySyscallNumber = ReadSyscallNumber();
             State.RetrySyscallActive = true;
@@ -352,7 +350,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Thread.WaitDeadline = -1;
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_PENDING;
-            State.WaitResumeRIP = GetSyscallRip(Thread, false);
+            State.WaitResumeRIP = GetSyscallRip();
             State.WaitReturnRIP = State.WaitResumeRIP + 2;
             State.WaitAlertable = false;
             State.ApcAlertable = false;
@@ -433,12 +431,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 State.Teb = 0;
                 State.NativeTeb = 0;
-
-                if (State.InitialContext != 0)
-                {
-                    Emulator.UnmapMemoryRegion(State.InitialContext);
-                    State.InitialContext = 0;
-                }
             }
 
             ForgetThreadIfUnreferenced(Thread);
@@ -480,8 +472,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
             State.WaitObjects = null;
             State.DispatchException = false;
-            State.IsHandlingException = false;
-            State.ExceptionNesting = 0;
             State.ExceptionInformation = null;
             State.WorkerFactoryWaitActive = false;
             State.WorkerFactoryHandle = 0;
@@ -3058,17 +3048,26 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public class ExceptionInformation
         {
+            internal const int RecordSize64 = 0x98;
+            internal const int RecordSize32 = 0x50;
+            internal const int MaximumParameters = 15;
+
             public ulong Address;
             public ExceptionType Type;
             public NTSTATUS Status;
             public ulong[] CustomParameters;
             public uint Flags;
 
+            public ulong NestedRecord;
+
+            // NT reports some traps at an address other than the context RIP.
+            public ulong? ExceptionAddress;
+
             public ulong[] Parameters
             {
                 get
                 {
-                    if (CustomParameters != null && CustomParameters.Length != 0)
+                    if (CustomParameters != null)
                         return CustomParameters;
 
                     if (Status == NTSTATUS.STATUS_ACCESS_VIOLATION ||
@@ -3086,7 +3085,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            private static readonly ulong[] SingleZeroParameter = new ulong[1];
+            internal static readonly ulong[] SingleZeroParameter = new ulong[1];
         }
 
         private readonly record struct SectionRange(ulong Base, ulong End);
@@ -3340,10 +3339,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
             }
 
-            if (PointerSize == 4)
-                DispatchExceptionX86(dispatcher, Exception, ExceptionInformation);
-            else
-                DispatchExceptionX64(dispatcher, Exception, ExceptionInformation);
+            bool Dispatched = PointerSize == 4
+                ? DispatchExceptionX86(dispatcher, Exception, ExceptionInformation)
+                : DispatchExceptionX64(dispatcher, Exception, ExceptionInformation);
+
+            // NT sends an exception whose frame does not fit on the stack to the second chance (KiDispatchException).
+            if (!Dispatched)
+                NtTerminateProcess.TerminateCurrentProcess(Emulator, (uint)Exception);
         }
 
         private static ulong AlignDown(ulong Value, ulong Align)
@@ -3411,14 +3413,44 @@ namespace Brovan.Core.Emulation.OS.Windows
             return 0;
         }
 
-        private void DispatchExceptionX86(ulong DispatcherAddress, NTSTATUS Exception, ExceptionInformation ExceptionInformation)
+        private const ulong PageSize = 0x1000;
+
+        // A guard page on the thread's own stack grows it, as in NT. Any other page the guest cannot write fails the dispatch.
+        internal bool TryMapUserFrame(ulong FrameBase, ulong FrameSize, out ulong FaultAddress)
         {
-            const uint ExceptionRecordSize = 0x50;
-            const uint ContextSize = 0x2CC;
-            const uint CONTEXT_I386 = 0x00010000;
-            const uint CONTEXT_CONTROL = 0x00000001;
-            const uint CONTEXT_INTEGER = 0x00000002;
-            const uint CONTEXT_SEGMENTS = 0x00000004;
+            FaultAddress = FrameBase;
+            if (Emulator.IsAccessible(FrameBase, FrameSize, true))
+                return true;
+
+            EmulatedThread Thread = Emulator.CurrentThread;
+            for (ulong Page = AlignDown(FrameBase + FrameSize - 1, PageSize); ; Page -= PageSize)
+            {
+                FaultAddress = Math.Max(Page, FrameBase);
+                if (!Emulator.IsAccessible(Page, PageSize, true))
+                {
+                    if (Thread == null || Page < Thread.StackAddress || Page >= Thread.StackAddress + Thread.StackSize)
+                        return false;
+                    if (!TryCommitStackPage(Page) || !Emulator.IsAccessible(Page, PageSize, true))
+                        return false;
+                }
+
+                if (Page <= FrameBase)
+                    return true;
+            }
+        }
+
+        private bool TryCommitStackPage(ulong Page)
+            => Emulator.TryGrowCurrentStack(Page)
+                || (Emulator.TryFindMemoryRegion(Page, out MemoryRegion Region) && Region.IsReserved && !Region.IsCommitted
+                    && Emulator.CommitMemory(Page, PageSize, PAGE_READWRITE));
+
+        private bool DispatchExceptionX86(ulong DispatcherAddress, NTSTATUS Exception, ExceptionInformation ExceptionInformation)
+        {
+            const uint ExceptionRecordSize = ExceptionInformation.RecordSize32;
+            const uint ContextSize = (uint)WindowsThreadContext64.MinimumContextSize32;
+            const uint ContextFlags = WindowsThreadContext64.CONTEXT_I386 | WindowsThreadContext64.CONTEXT_CONTROL | WindowsThreadContext64.CONTEXT_INTEGER
+                | WindowsThreadContext64.CONTEXT_SEGMENTS | WindowsThreadContext64.CONTEXT_FLOATING_POINT | WindowsThreadContext64.CONTEXT_DEBUG_REGISTERS
+                | WindowsThreadContext64.CONTEXT_EXTENDED_REGISTERS;
 
             uint InitialEsp = Emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
             uint InitialEip = Emulator.ReadRegister32(Registers.UC_X86_REG_EIP);
@@ -3427,75 +3459,49 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint AllocationSize = ContextSize + ExceptionRecordSize + 0x20;
             uint NewEsp = (uint)AlignDown(InitialEsp - AllocationSize, 0x10);
 
-            if (!Emulator.IsRegionMapped(NewEsp, AllocationSize))
+            if (NewEsp > InitialEsp || !TryMapUserFrame(NewEsp, AllocationSize, out _))
             {
-                ulong PageStart = NewEsp & ~0xFFFUL;
-                ulong PageEnd = BinaryEmulator.AlignUp((ulong)NewEsp + AllocationSize, 0x1000);
-
-                for (ulong Page = PageStart; Page < PageEnd; Page += 0x1000)
-                {
-                    if (!Emulator.IsRegionMapped(Page, 1))
-                        Emulator._emulator.MapMemory(Page, 0x1000, MemoryProtection.ReadWrite);
-                    else
-                        Emulator._emulator.SetMemoryProtection(Page, 0x1000, MemoryProtection.ReadWrite);
-                }
-
-                if (!Emulator.IsRegionMapped(NewEsp, AllocationSize))
-                {
-                    Emulator.TriggerEventMessage($"[-] InvokeException failed: 32-bit exception frame not mapped (ESP=0x{NewEsp:X}).", LogFlags.Issues);
-                    return;
-                }
+                if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                    Emulator.TriggerEventMessage($"[-] InvokeException failed: the exception frame does not fit on the stack (ESP=0x{InitialEsp:X}, NewESP=0x{NewEsp:X}).", LogFlags.Issues);
+                return false;
             }
 
             uint ContextAddress = NewEsp + 0x10;
             uint ExceptionRecordAddress = ContextAddress + ContextSize;
 
-            Span<byte> Context = Shared.GetSpan(ContextSize);
-            Context.Clear();
-            WriteUInt32(Context, 0x00, CONTEXT_I386 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS);
-            WriteUInt32(Context, 0x8C, Emulator.ReadRegister32(Registers.UC_X86_REG_GS));
-            WriteUInt32(Context, 0x90, Emulator.ReadRegister32(Registers.UC_X86_REG_FS));
-            WriteUInt32(Context, 0x94, Emulator.ReadRegister32(Registers.UC_X86_REG_ES));
-            WriteUInt32(Context, 0x98, Emulator.ReadRegister32(Registers.UC_X86_REG_DS));
-            WriteUInt32(Context, 0x9C, Emulator.ReadRegister32(Registers.UC_X86_REG_EDI));
-            WriteUInt32(Context, 0xA0, Emulator.ReadRegister32(Registers.UC_X86_REG_ESI));
-            WriteUInt32(Context, 0xA4, Emulator.ReadRegister32(Registers.UC_X86_REG_EBX));
-            WriteUInt32(Context, 0xA8, Emulator.ReadRegister32(Registers.UC_X86_REG_EDX));
-            WriteUInt32(Context, 0xAC, Emulator.ReadRegister32(Registers.UC_X86_REG_ECX));
-            WriteUInt32(Context, 0xB0, Emulator.ReadRegister32(Registers.UC_X86_REG_EAX));
-            WriteUInt32(Context, 0xB4, Emulator.ReadRegister32(Registers.UC_X86_REG_EBP));
-            WriteUInt32(Context, 0xB8, InitialEip);
-            WriteUInt32(Context, 0xBC, Emulator.ReadRegister32(Registers.UC_X86_REG_CS));
-            WriteUInt32(Context, 0xC0, InitialEFlags);
-            WriteUInt32(Context, 0xC4, InitialEsp);
-            WriteUInt32(Context, 0xC8, Emulator.ReadRegister32(Registers.UC_X86_REG_SS));
-            Emulator._emulator.WriteMemory(ContextAddress, Context.Slice(0, (int)ContextSize));
+            Span<byte> Frame = Shared.GetSpan(ContextSize + ExceptionRecordSize);
+            Frame.Clear();
+            WindowsThreadContext64.WriteContext(Emulator, Emulator.CurrentThread, ContextAddress, ContextFlags, Frame: Frame);
 
-            Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
-            Record.Clear();
+            Span<byte> Record = Frame.Slice((int)ContextSize, (int)ExceptionRecordSize);
             WriteUInt32(Record, 0x00, (uint)Exception);
             WriteUInt32(Record, 0x04, ExceptionInformation?.Flags ?? 0);
-            WriteUInt32(Record, 0x08, 0);
-            WriteUInt32(Record, 0x0C, InitialEip);
+            WriteUInt32(Record, 0x08, (uint)(ExceptionInformation?.NestedRecord ?? 0));
+            WriteUInt32(Record, 0x0C, (uint)(ExceptionInformation?.ExceptionAddress ?? InitialEip));
 
             ulong[] Parameters = ExceptionInformation?.Parameters ?? Array.Empty<ulong>();
-            uint NumberParameters = (uint)Math.Min(Parameters.Length, 15);
+            uint NumberParameters = (uint)Math.Min(Parameters.Length, ExceptionInformation.MaximumParameters);
             WriteUInt32(Record, 0x10, NumberParameters);
             for (int i = 0; i < (int)NumberParameters; i++)
                 WriteUInt32(Record, 0x14 + (i * 4), (uint)Parameters[i]);
 
-            Emulator._emulator.WriteMemory(ExceptionRecordAddress, Record.Slice(0, (int)ExceptionRecordSize));
+            Emulator._emulator.WriteMemory(ContextAddress, Frame);
 
-            WriteUInt32(NewEsp, ExceptionRecordAddress);
-            WriteUInt32(NewEsp + 4, ContextAddress);
+            Span<byte> Arguments = stackalloc byte[8];
+            WriteUInt32(Arguments, 0x00, ExceptionRecordAddress);
+            WriteUInt32(Arguments, 0x04, ContextAddress);
+            Emulator._emulator.WriteMemory(NewEsp, Arguments);
 
             Emulator.WriteRegister32(Registers.UC_X86_REG_ESP, NewEsp);
             Emulator.WriteRegister32(Registers.UC_X86_REG_EIP, (uint)DispatcherAddress);
+            if ((InitialEFlags & (uint)CPUFlags.TF) != 0)
+                Emulator.WriteRegister32(Registers.UC_X86_REG_EFLAGS, InitialEFlags & ~(uint)CPUFlags.TF);
+            return true;
         }
 
-        private void DispatchExceptionX64(ulong DispatcherAddress, NTSTATUS Exception, ExceptionInformation ExceptionInformation)
+        private bool DispatchExceptionX64(ulong DispatcherAddress, NTSTATUS Exception, ExceptionInformation ExceptionInformation)
         {
-            const uint ExceptionRecordSize = 0x98;
+            const uint ExceptionRecordSize = ExceptionInformation.RecordSize64;
             const uint MachineFrameSize = 0x40;
 
             ulong InitialRsp = Emulator.ReadRegister(Registers.UC_X86_REG_RSP);
@@ -3522,137 +3528,34 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong NewRsp = AlignDown(InitialRsp - AllocationSize, 0x100);
 
             EmulatedThread Thread = Emulator.CurrentThread;
-            if (Thread != null)
+            if (NewRsp > InitialRsp || !TryMapUserFrame(NewRsp, AllocationSize, out _))
             {
-                ulong StackLow = Thread.StackAddress;
-                ulong StackHigh = Thread.StackAddress + Thread.StackSize;
-
-                if (NewRsp < StackLow || (NewRsp + AllocationSize) > StackHigh)
-                {
-                    if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
-                        Emulator.TriggerEventMessage($"[-] InvokeException failed: insufficient stack space (RSP=0x{InitialRsp:X}, NewRSP=0x{NewRsp:X}, Need=0x{AllocationSize:X}).", LogFlags.Issues);
-                    return;
-                }
+                if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                    Emulator.TriggerEventMessage($"[-] InvokeException failed: the exception frame does not fit on the stack (RSP=0x{InitialRsp:X}, NewRSP=0x{NewRsp:X}, Need=0x{AllocationSize:X}).", LogFlags.Issues);
+                return false;
             }
 
-            if (!Emulator.IsRegionMapped(NewRsp, AllocationSize))
-            {
-                // Commit stack pages in the current thread's stack reserve for the exception frame.
-                if (Thread != null)
-                {
-                    ulong StackLow = Thread.StackAddress;
-                    ulong StackHigh = Thread.StackAddress + Thread.StackSize;
-
-                    if (NewRsp >= StackLow && (NewRsp + AllocationSize) <= StackHigh)
-                    {
-                        ulong PageStart = NewRsp & ~0xFFFUL;
-                        ulong PageEnd = BinaryEmulator.AlignUp(NewRsp + AllocationSize, 0x1000);
-
-                        for (ulong Page = PageStart; Page < PageEnd; Page += 0x1000)
-                        {
-                            if (!Emulator.IsRegionMapped(Page, 1))
-                            {
-                                Emulator._emulator.MapMemory(Page, 0x1000, MemoryProtection.ReadWrite);
-                            }
-                            else
-                            {
-                                Emulator._emulator.SetMemoryProtection(Page, 0x1000, MemoryProtection.ReadWrite);
-                            }
-                        }
-                    }
-                }
-
-                if (!Emulator.IsRegionMapped(NewRsp, AllocationSize))
-                {
-                    if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
-                        Emulator.TriggerEventMessage($"[-] InvokeException failed: exception stack frame is not mapped (NewRSP=0x{NewRsp:X}, Size=0x{AllocationSize:X}).", LogFlags.Issues);
-                    return;
-                }
-            }
-
-            ulong ClearLen = InitialRsp > NewRsp ? (InitialRsp - NewRsp) : AllocationSize;
-            if (ClearLen > 0x2000)
-                ClearLen = 0x2000;
-
-            WriteZeroMemory(NewRsp, (uint)ClearLen);
+            ulong FrameLength = Math.Max(Math.Min(InitialRsp - NewRsp, 0x2000), AllocationSize);
+            Span<byte> FrameBytes = Shared.GetSpan(FrameLength);
+            FrameBytes.Clear();
 
             ulong ContextAddress = NewRsp;
-            ulong ExceptionRecordAddress = NewRsp + ContextSize;
-            ulong MachineFrameAddress = NewRsp + CombinedSize;
 
-            Span<byte> Context = Shared.GetSpan(ContextSize);
-            Context.Clear();
+            const uint Flags = WindowsThreadContext64.CONTEXT_AMD64 | WindowsThreadContext64.CONTEXT_CONTROL | WindowsThreadContext64.CONTEXT_INTEGER
+                | WindowsThreadContext64.CONTEXT_SEGMENTS | WindowsThreadContext64.CONTEXT_FLOATING_POINT | WindowsThreadContext64.CONTEXT_DEBUG_REGISTERS;
+            WindowsThreadContext64.WriteContext(Emulator, Thread, ContextAddress, Flags, XStateAreaOffset: XStateAreaOffset, Frame: FrameBytes);
+            ulong CodeSelector = BinaryPrimitives.ReadUInt16LittleEndian(FrameBytes.Slice(0x38));
+            ulong StackSelector = BinaryPrimitives.ReadUInt16LittleEndian(FrameBytes.Slice(0x42));
 
-            const uint CONTEXT_AMD64 = 0x00100000;
-            const uint CONTEXT_CONTROL = 0x00000001;
-            const uint CONTEXT_INTEGER = 0x00000002;
-            const uint CONTEXT_SEGMENTS = 0x00000004;
-            const uint CONTEXT_DEBUG_REGISTERS = 0x00000010;
-
-            uint Flags = CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_DEBUG_REGISTERS
-                | WindowsThreadContext64.CONTEXT_FLOATING_POINT;
-            if (XState)
-                Flags |= WindowsThreadContext64.CONTEXT_XSTATE;
-            WriteUInt32(Context, 0x30, Flags);
-
-            ulong MxCsr = Emulator.ReadRegister(Registers.UC_X86_REG_MXCSR);
-            WriteUInt32(Context, 0x34, (uint)MxCsr);
-
-            ulong[] Xmm = WindowsThreadContext64.XmmScratch;
-            ulong[] YmmHigh = WindowsThreadContext64.YmmScratch;
-            Emulator.ReadThreadVectorState(Thread, Xmm, YmmHigh);
-            WindowsThreadContext64.FillFltSave(Context.Slice((int)WindowsThreadContext64.FltSaveOffset), Xmm, MxCsr,
-                Emulator.ReadRegister(Registers.UC_X86_REG_FPCW));
-            if (XState)
-                WindowsThreadContext64.WriteContextEx(Context, XStateAreaOffset);
-
-            WriteUInt16(Context, 0x38, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_CS));
-            WriteUInt16(Context, 0x3A, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_DS));
-            WriteUInt16(Context, 0x3C, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_ES));
-            WriteUInt16(Context, 0x3E, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_FS));
-            WriteUInt16(Context, 0x40, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_GS));
-            WriteUInt16(Context, 0x42, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_SS));
-            WriteUInt32(Context, 0x44, (uint)InitialEFlags);
-
-            WriteUInt64(Context, 0x48, Emulator.ReadRegister(Registers.UC_X86_REG_DR0));
-            WriteUInt64(Context, 0x50, Emulator.ReadRegister(Registers.UC_X86_REG_DR1));
-            WriteUInt64(Context, 0x58, Emulator.ReadRegister(Registers.UC_X86_REG_DR2));
-            WriteUInt64(Context, 0x60, Emulator.ReadRegister(Registers.UC_X86_REG_DR3));
-            WriteUInt64(Context, 0x68, Emulator.ReadRegister(Registers.UC_X86_REG_DR6));
-            WriteUInt64(Context, 0x70, Emulator.ReadRegister(Registers.UC_X86_REG_DR7));
-
-            WriteUInt64(Context, 0x78, Emulator.ReadRegister(Registers.UC_X86_REG_RAX));
-            WriteUInt64(Context, 0x80, Emulator.ReadRegister(Registers.UC_X86_REG_RCX));
-            WriteUInt64(Context, 0x88, Emulator.ReadRegister(Registers.UC_X86_REG_RDX));
-            WriteUInt64(Context, 0x90, Emulator.ReadRegister(Registers.UC_X86_REG_RBX));
-            WriteUInt64(Context, 0x98, InitialRsp);
-            WriteUInt64(Context, 0xA0, Emulator.ReadRegister(Registers.UC_X86_REG_RBP));
-            WriteUInt64(Context, 0xA8, Emulator.ReadRegister(Registers.UC_X86_REG_RSI));
-            WriteUInt64(Context, 0xB0, Emulator.ReadRegister(Registers.UC_X86_REG_RDI));
-            WriteUInt64(Context, 0xB8, Emulator.ReadRegister(Registers.UC_X86_REG_R8));
-            WriteUInt64(Context, 0xC0, Emulator.ReadRegister(Registers.UC_X86_REG_R9));
-            WriteUInt64(Context, 0xC8, Emulator.ReadRegister(Registers.UC_X86_REG_R10));
-            WriteUInt64(Context, 0xD0, Emulator.ReadRegister(Registers.UC_X86_REG_R11));
-            WriteUInt64(Context, 0xD8, Emulator.ReadRegister(Registers.UC_X86_REG_R12));
-            WriteUInt64(Context, 0xE0, Emulator.ReadRegister(Registers.UC_X86_REG_R13));
-            WriteUInt64(Context, 0xE8, Emulator.ReadRegister(Registers.UC_X86_REG_R14));
-            WriteUInt64(Context, 0xF0, Emulator.ReadRegister(Registers.UC_X86_REG_R15));
-            WriteUInt64(Context, 0xF8, InitialRip);
-
-            Emulator.WriteMemory(ContextAddress, Context);
-
-            Span<byte> Record = Shared.GetSpan(ExceptionRecordSize);
-            Record.Clear();
+            Span<byte> Record = FrameBytes.Slice((int)ContextSize, (int)ExceptionRecordSize);
             WriteUInt32(Record, 0x00, (uint)Exception);
             WriteUInt32(Record, 0x04, ExceptionInformation?.Flags ?? 0u);
-            WriteUInt64(Record, 0x08, 0UL);  // ExceptionRecord (chained)
-            WriteUInt64(Record, 0x10, InitialRip); // ExceptionAddress
+            WriteUInt64(Record, 0x08, ExceptionInformation?.NestedRecord ?? 0);
+            WriteUInt64(Record, 0x10, ExceptionInformation?.ExceptionAddress ?? InitialRip);
 
             // Generic ExceptionInformation vector (0..15 QWORDs)
             ulong[] Parameters = ExceptionInformation?.Parameters ?? Array.Empty<ulong>();
-            int Count = Parameters.Length;
-            if (Count > 15)
-                Count = 15;
+            int Count = Math.Min(Parameters.Length, ExceptionInformation.MaximumParameters);
 
             WriteUInt32(Record, 0x18, (uint)Count); // NumberParameters
             WriteUInt32(Record, 0x1C, 0u); // __unusedAlignment
@@ -3660,33 +3563,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (int i = 0; i < Count; i++)
                 WriteUInt64(Record, 0x20 + (i * 8), Parameters[i]);
 
-            Emulator.WriteMemory(ExceptionRecordAddress, Record);
-
             // Build MACHINE_FRAME (as the kernel would).
-            Span<byte> Frame = Shared.GetSpan(MachineFrameSize);
-            Frame.Clear();
+            Span<byte> Frame = FrameBytes.Slice((int)CombinedSize, (int)MachineFrameSize);
             WriteUInt64(Frame, 0x00, InitialRip);
-            WriteUInt64(Frame, 0x08, (ulong)(ushort)Emulator.ReadRegister(Registers.UC_X86_REG_CS));
+            WriteUInt64(Frame, 0x08, CodeSelector);
             WriteUInt64(Frame, 0x10, InitialEFlags);
             WriteUInt64(Frame, 0x18, InitialRsp);
-            WriteUInt64(Frame, 0x20, (ulong)(ushort)Emulator.ReadRegister(Registers.UC_X86_REG_SS));
+            WriteUInt64(Frame, 0x20, StackSelector);
 
-            Emulator.WriteMemory(MachineFrameAddress, Frame);
-
-            if (XState)
-                WindowsThreadContext64.WriteXStateArea(Emulator, NewRsp + XStateAreaOffset, YmmHigh, WindowsThreadContext64.XcrAvxFeatures);
+            Emulator.WriteMemory(NewRsp, FrameBytes);
 
             // Enter KiUserExceptionDispatcher exactly like the kernel does: RSP points at CONTEXT, RIP = dispatcher.
+            // NT keeps TF in the CONTEXT but runs the dispatcher without it (KiDispatchException).
             Emulator.WriteRegister(Registers.UC_X86_REG_RSP, ContextAddress);
             Emulator.WriteRegister(Registers.UC_X86_REG_RIP, DispatcherAddress);
+            if ((InitialEFlags & (ulong)CPUFlags.TF) != 0)
+                Emulator.WriteRegister(Registers.UC_X86_REG_EFLAGS, InitialEFlags & ~(ulong)CPUFlags.TF);
             EmulatedThread EmuThread = Emulator.CurrentThread;
             WinEmulatedThread.GetState(EmuThread).DispatchException = true;
-            WinEmulatedThread.GetState(EmuThread).IsHandlingException = true;
-            if (WinEmulatedThread.GetState(EmuThread).ExceptionNesting <= 0)
-                WinEmulatedThread.GetState(EmuThread).ExceptionNesting = 1;
             WinEmulatedThread.GetState(EmuThread).ExceptionInformation = ExceptionInformation;
             EmuThread.ExitCode = (int)Exception;
             Emulator.Threads[(uint)Emulator.CurrentThreadId] = EmuThread;
+            return true;
         }
 
         public bool CanDispatchUserApc(EmulatedThread Thread)
@@ -3804,7 +3702,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (State.PendingUserApcs.Count == 0)
                 return false;
 
-            Emulator._emulator.WriteRegister(Emulator.IPRegister, GetSyscallRip(Thread, false) + 2);
             State.ApcAlertable = true;
             Thread.State = EmulatedThreadState.Ready;
             Emulator._emulator.StopEmulation();
@@ -3850,12 +3747,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             const int ContinueOffset = 0x4F0;
             const int StackLayoutSize = 0x508;
 
-            ulong InitialRsp = Emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-            ulong InitialRip = Emulator.ReadRegister(Registers.UC_X86_REG_RIP);
-            ulong InitialEFlags = Emulator.ReadRegister(Registers.UC_X86_REG_EFLAGS);
+            ulong InitialRsp = Thread.Context.RSP;
 
+            // NT saves the extended state only for a special user APC (KiInitializeUserApc).
             ulong AllocationSize = (ulong)StackLayoutSize;
-            bool XState = WindowsThreadContext64.XStateEnabled(Emulator);
+            bool XState = Apc.IsSpecial && WindowsThreadContext64.XStateEnabled(Emulator);
             ulong XStateAreaOffset = 0;
             if (XState)
             {
@@ -3864,103 +3760,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             ulong NewRsp = AlignDown(InitialRsp - AllocationSize, 0x100);
-            if (Thread != null)
-            {
-                ulong StackLow = Thread.StackAddress;
-                ulong StackHigh = Thread.StackAddress + Thread.StackSize;
-
-                if (NewRsp < StackLow || (NewRsp + AllocationSize) > StackHigh)
-                {
-                    if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
-                        Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: insufficient stack space (RSP=0x{InitialRsp:X}, NewRSP=0x{NewRsp:X}, Need=0x{AllocationSize:X}).", LogFlags.Issues);
-                    return false;
-                }
-            }
-
-            if (!Emulator.IsRegionMapped(NewRsp, AllocationSize))
-            {
-                ulong PageStart = NewRsp & ~0xFFFUL;
-                ulong PageEnd = BinaryEmulator.AlignUp(NewRsp + AllocationSize, 0x1000);
-
-                for (ulong Page = PageStart; Page < PageEnd; Page += 0x1000)
-                {
-                    if (!Emulator.IsRegionMapped(Page, 1))
-                        Emulator._emulator.MapMemory(Page, 0x1000, MemoryProtection.ReadWrite);
-                    else
-                        Emulator._emulator.SetMemoryProtection(Page, 0x1000, MemoryProtection.ReadWrite);
-                }
-            }
-
-            if (!Emulator.IsRegionMapped(NewRsp, AllocationSize))
-            {
-                if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
-                    Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: APC stack frame is not mapped (NewRSP=0x{NewRsp:X}, Size=0x{AllocationSize:X}).", LogFlags.Issues);
-                return false;
-            }
+            ulong FaultAddress = NewRsp;
+            if (NewRsp > InitialRsp || !TryMapUserFrame(NewRsp, AllocationSize, out FaultAddress))
+                return FailUserApcFrame(State, ApcIndex, InitialRsp, NewRsp, FaultAddress);
 
             Span<byte> StackLayout = Shared.GetSpan((uint)StackLayoutSize);
             StackLayout.Clear();
-
-            const uint ContextAmd64 = 0x00100000;
-            const uint ContextControl = 0x00000001;
-            const uint ContextInteger = 0x00000002;
-            const uint ContextSegments = 0x00000004;
-            const uint ContextDebugRegisters = 0x00000010;
 
             WriteUInt64(StackLayout, 0x00, Apc.ApcArgument1);
             WriteUInt64(StackLayout, 0x08, Apc.ApcArgument2);
             WriteUInt64(StackLayout, 0x10, Apc.ApcArgument3);
             WriteUInt64(StackLayout, 0x18, Apc.ApcRoutine);
-            uint ApcContextFlags = ContextAmd64 | ContextControl | ContextInteger | ContextSegments | ContextDebugRegisters
-                | WindowsThreadContext64.CONTEXT_FLOATING_POINT;
-            if (XState)
-                ApcContextFlags |= WindowsThreadContext64.CONTEXT_XSTATE;
-            WriteUInt32(StackLayout, 0x30, ApcContextFlags);
-            ulong ApcMxCsr = Emulator.ReadRegister(Registers.UC_X86_REG_MXCSR);
-            WriteUInt32(StackLayout, 0x34, (uint)ApcMxCsr);
-            ulong[] ApcXmm = WindowsThreadContext64.XmmScratch;
-            ulong[] ApcYmmHigh = WindowsThreadContext64.YmmScratch;
-            Emulator.ReadThreadVectorState(Thread, ApcXmm, ApcYmmHigh);
-            WindowsThreadContext64.FillFltSave(StackLayout.Slice((int)WindowsThreadContext64.FltSaveOffset), ApcXmm, ApcMxCsr,
-                Emulator.ReadRegister(Registers.UC_X86_REG_FPCW));
-            if (XState)
-                WindowsThreadContext64.WriteContextEx(StackLayout, XStateAreaOffset);
-            WriteUInt16(StackLayout, 0x38, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_CS));
-            WriteUInt16(StackLayout, 0x3A, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_DS));
-            WriteUInt16(StackLayout, 0x3C, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_ES));
-            WriteUInt16(StackLayout, 0x3E, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_FS));
-            WriteUInt16(StackLayout, 0x40, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_GS));
-            WriteUInt16(StackLayout, 0x42, (ushort)Emulator.ReadRegister(Registers.UC_X86_REG_SS));
-            WriteUInt32(StackLayout, 0x44, (uint)InitialEFlags);
-            WriteUInt64(StackLayout, 0x48, Emulator.ReadRegister(Registers.UC_X86_REG_DR0));
-            WriteUInt64(StackLayout, 0x50, Emulator.ReadRegister(Registers.UC_X86_REG_DR1));
-            WriteUInt64(StackLayout, 0x58, Emulator.ReadRegister(Registers.UC_X86_REG_DR2));
-            WriteUInt64(StackLayout, 0x60, Emulator.ReadRegister(Registers.UC_X86_REG_DR3));
-            WriteUInt64(StackLayout, 0x68, Emulator.ReadRegister(Registers.UC_X86_REG_DR6));
-            WriteUInt64(StackLayout, 0x70, Emulator.ReadRegister(Registers.UC_X86_REG_DR7));
-            WriteUInt64(StackLayout, 0x78, Emulator.ReadRegister(Registers.UC_X86_REG_RAX));
-            WriteUInt64(StackLayout, 0x80, Emulator.ReadRegister(Registers.UC_X86_REG_RCX));
-            WriteUInt64(StackLayout, 0x88, Emulator.ReadRegister(Registers.UC_X86_REG_RDX));
-            WriteUInt64(StackLayout, 0x90, Emulator.ReadRegister(Registers.UC_X86_REG_RBX));
-            WriteUInt64(StackLayout, 0x98, InitialRsp);
-            WriteUInt64(StackLayout, 0xA0, Emulator.ReadRegister(Registers.UC_X86_REG_RBP));
-            WriteUInt64(StackLayout, 0xA8, Emulator.ReadRegister(Registers.UC_X86_REG_RSI));
-            WriteUInt64(StackLayout, 0xB0, Emulator.ReadRegister(Registers.UC_X86_REG_RDI));
-            WriteUInt64(StackLayout, 0xB8, Emulator.ReadRegister(Registers.UC_X86_REG_R8));
-            WriteUInt64(StackLayout, 0xC0, Emulator.ReadRegister(Registers.UC_X86_REG_R9));
-            WriteUInt64(StackLayout, 0xC8, Emulator.ReadRegister(Registers.UC_X86_REG_R10));
-            WriteUInt64(StackLayout, 0xD0, Emulator.ReadRegister(Registers.UC_X86_REG_R11));
-            WriteUInt64(StackLayout, 0xD8, Emulator.ReadRegister(Registers.UC_X86_REG_R12));
-            WriteUInt64(StackLayout, 0xE0, Emulator.ReadRegister(Registers.UC_X86_REG_R13));
-            WriteUInt64(StackLayout, 0xE8, Emulator.ReadRegister(Registers.UC_X86_REG_R14));
-            WriteUInt64(StackLayout, 0xF0, Emulator.ReadRegister(Registers.UC_X86_REG_R15));
-            WriteUInt64(StackLayout, 0xF8, InitialRip);
             WriteInt32(StackLayout, ContinueOffset, 1);
             WriteInt32(StackLayout, ContinueOffset + 0x4, 1);
 
+            const uint ApcContextFlags = WindowsThreadContext64.CONTEXT_AMD64 | WindowsThreadContext64.CONTEXT_CONTROL | WindowsThreadContext64.CONTEXT_INTEGER
+                | WindowsThreadContext64.CONTEXT_FLOATING_POINT | WindowsThreadContext64.CONTEXT_DEBUG_REGISTERS;
+            WindowsThreadContext64.WriteContext(Emulator, Thread, NewRsp, ApcContextFlags, XStateAreaOffset: XStateAreaOffset, Frame: StackLayout);
             Emulator.WriteMemory(NewRsp, StackLayout);
-            if (XState)
-                WindowsThreadContext64.WriteXStateArea(Emulator, NewRsp + XStateAreaOffset, ApcYmmHigh, WindowsThreadContext64.XcrAvxFeatures);
+
             State.PendingUserApcs.RemoveAt(ApcIndex);
             Thread.Context.RSP = NewRsp;
             Thread.Context.RIP = Dispatcher;
@@ -3969,51 +3787,34 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
+        // NT raises a frame fault to user mode as a first-chance exception (KiInitializeUserApc).
+        // WOW64 drops the APC instead (Wow64ApcRoutineInternal).
+        private bool FailUserApcFrame(WindowsThreadState State, int ApcIndex, ulong StackPointer, ulong NewStackPointer, ulong FaultAddress)
+        {
+            State.PendingUserApcs.RemoveAt(ApcIndex);
+            if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
+                Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: the APC frame does not fit on the stack (SP=0x{StackPointer:X}, NewSP=0x{NewStackPointer:X}).", LogFlags.Issues);
+
+            if (PointerSize == 8)
+                Emulator.WindowsGuest?.RaiseStoreFault(Emulator, FaultAddress);
+            return false;
+        }
+
         private bool DispatchUserApcX86(EmulatedThread Thread, WindowsThreadState State, int ApcIndex, WinPendingUserApc Apc, ulong Dispatcher)
         {
             const uint ContextOffset = 0x14;
-            const uint ContextSize = 0x2CC;
             const uint ExceptionRegistrationOffset = 0x310;
             const uint FrameSize = ExceptionRegistrationOffset + 0x10;
-            const uint ContextI386 = 0x00010000;
-            const uint ContextControl = 0x00000001;
-            const uint ContextInteger = 0x00000002;
-            const uint ContextSegments = 0x00000004;
 
-            CpuContext Ctx = Thread.Context ?? new CpuContext();
-            uint InitialEsp = (uint)Ctx.RSP;
-            uint InitialEip = (uint)Ctx.RIP;
-            uint InitialEFlags = (uint)Ctx.RFLAGS;
+            const uint ContextFlags = WindowsThreadContext64.CONTEXT_I386 | WindowsThreadContext64.CONTEXT_CONTROL | WindowsThreadContext64.CONTEXT_INTEGER
+                | WindowsThreadContext64.CONTEXT_SEGMENTS;
 
+            Thread.Context ??= new CpuContext();
+            uint InitialEsp = (uint)Thread.Context.RSP;
             uint NewEsp = (uint)AlignDown(InitialEsp - FrameSize, 0x10);
-
-            if (Thread.StackSize != 0 && (NewEsp < Thread.StackAddress || (ulong)NewEsp + FrameSize > Thread.StackAddress + Thread.StackSize))
-            {
-                if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
-                    Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: insufficient stack space (ESP=0x{InitialEsp:X}, NewESP=0x{NewEsp:X}).", LogFlags.Issues);
-                return false;
-            }
-
-            if (!Emulator.IsRegionMapped(NewEsp, FrameSize))
-            {
-                ulong PageStart = NewEsp & ~0xFFFUL;
-                ulong PageEnd = BinaryEmulator.AlignUp((ulong)NewEsp + FrameSize, 0x1000);
-
-                for (ulong Page = PageStart; Page < PageEnd; Page += 0x1000)
-                {
-                    if (!Emulator.IsRegionMapped(Page, 1))
-                        Emulator._emulator.MapMemory(Page, 0x1000, MemoryProtection.ReadWrite);
-                    else
-                        Emulator._emulator.SetMemoryProtection(Page, 0x1000, MemoryProtection.ReadWrite);
-                }
-
-                if (!Emulator.IsRegionMapped(NewEsp, FrameSize))
-                {
-                    if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
-                        Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: APC stack frame is not mapped (NewESP=0x{NewEsp:X}).", LogFlags.Issues);
-                    return false;
-                }
-            }
+            ulong FaultAddress = NewEsp;
+            if (NewEsp > InitialEsp || !TryMapUserFrame(NewEsp, FrameSize, out FaultAddress))
+                return FailUserApcFrame(State, ApcIndex, InitialEsp, NewEsp, FaultAddress);
 
             Span<byte> Frame = Shared.GetSpan(FrameSize);
             Frame.Clear();
@@ -4023,35 +3824,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteUInt32(Frame, 0x08, (uint)Apc.ApcArgument2);
             WriteUInt32(Frame, 0x0C, (uint)Apc.ApcArgument3);
             WriteUInt32(Frame, 0x10, 1);
-
-            int Context = (int)ContextOffset;
-            WriteUInt32(Frame, Context + 0x00, ContextI386 | ContextControl | ContextInteger | ContextSegments);
-            WriteUInt32(Frame, Context + 0x8C, (uint)Ctx.GS);
-            WriteUInt32(Frame, Context + 0x90, (uint)Ctx.FS);
-            WriteUInt32(Frame, Context + 0x94, (uint)Ctx.ES);
-            WriteUInt32(Frame, Context + 0x98, (uint)Ctx.DS);
-            WriteUInt32(Frame, Context + 0x9C, (uint)Ctx.RDI);
-            WriteUInt32(Frame, Context + 0xA0, (uint)Ctx.RSI);
-            WriteUInt32(Frame, Context + 0xA4, (uint)Ctx.RBX);
-            WriteUInt32(Frame, Context + 0xA8, (uint)Ctx.RDX);
-            WriteUInt32(Frame, Context + 0xAC, (uint)Ctx.RCX);
-            WriteUInt32(Frame, Context + 0xB0, (uint)Ctx.RAX);
-            WriteUInt32(Frame, Context + 0xB4, (uint)Ctx.RBP);
-            WriteUInt32(Frame, Context + 0xB8, InitialEip);
-            WriteUInt32(Frame, Context + 0xBC, (uint)Ctx.CS);
-            WriteUInt32(Frame, Context + 0xC0, InitialEFlags);
-            WriteUInt32(Frame, Context + 0xC4, InitialEsp);
-            WriteUInt32(Frame, Context + 0xC8, (uint)Ctx.SS);
-
-            _ = ContextSize;
-
+            WindowsThreadContext64.WriteContext(Emulator, Thread, NewEsp + ContextOffset, ContextFlags, ContextSource.SavedContext,
+                Frame: Frame.Slice((int)ContextOffset));
             WriteUInt32(Frame, (int)ExceptionRegistrationOffset, 0xFFFFFFFF);
 
             Emulator.WriteMemory(NewEsp, Frame);
             State.PendingUserApcs.RemoveAt(ApcIndex);
 
-            if (Thread.Context == null)
-                Thread.Context = new CpuContext();
             Thread.Context.RSP = NewEsp;
             Thread.Context.RIP = Dispatcher;
 
@@ -4399,21 +4178,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return 0;
         }
 
-        private ulong _cachedKiUserCallbackDispatcher;
         private ulong _cachedFnDWORDOPTINLPMSG;
-
-        public ulong GetKiUserCallbackDispatcher()
-        {
-            if (_cachedKiUserCallbackDispatcher != 0)
-                return _cachedKiUserCallbackDispatcher;
-
-            WinModule Ntdll = WinModules.FirstOrDefault(m => m != null && m.Name != null && m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase));
-            if (Ntdll == null)
-                return 0;
-
-            _cachedKiUserCallbackDispatcher = GetExportAddress(Ntdll, "KiUserCallbackDispatcher");
-            return _cachedKiUserCallbackDispatcher;
-        }
 
         public ulong GetFnDWORDOPTINLPMSG()
         {
@@ -4445,6 +4210,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : Emulator.ReadMemoryUInt(Table + (ulong)Index * 4);
         }
 
+        private static ulong UserCallbackDispatcherRsp(ulong ArgumentBuffer) => (ArgumentBuffer - 0x80) & ~0xFUL;
+
+        // NT probes the whole callback frame before it writes anything (KeUserModeCallback).
+        internal bool TryMapUserCallbackFrame(ulong ArgumentBuffer, ulong StackPointer)
+        {
+            ulong FrameBase = UserCallbackDispatcherRsp(ArgumentBuffer) - 8;
+            return FrameBase < StackPointer && TryMapUserFrame(FrameBase, StackPointer - FrameBase, out _);
+        }
+
+        /// <param name="ArgumentBuffer">Must lie in a frame that <see cref="TryMapUserCallbackFrame"/> accepted.</param>
         public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinCallbackContinuation Continuation = null,
             ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, ulong? DeferredSyscallResult = null)
         {
@@ -4477,13 +4252,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinEmulatedThread.GetState(Thread).UserCallbackFrames.Push(Frame);
 
-            ulong DispatcherRsp = (ArgumentBuffer - 0x80) & ~0xFUL;
-            for (ulong i = DispatcherRsp; i < ArgumentBuffer; i += 8)
-                Emulator._emulator.WriteMemory(i, 0UL, 8);
-
-            Emulator._emulator.WriteMemory(DispatcherRsp + 0x20, ArgumentBuffer, 8);
-            Emulator._emulator.WriteMemory(DispatcherRsp + 0x28, 0u, 4);
-            Emulator._emulator.WriteMemory(DispatcherRsp + 0x2C, CallbackIndex, 4);
+            ulong DispatcherRsp = UserCallbackDispatcherRsp(ArgumentBuffer);
+            if (DispatcherRsp < ArgumentBuffer)
+            {
+                Span<byte> DispatcherFrame = stackalloc byte[(int)((ArgumentBuffer - DispatcherRsp + 7) & ~7UL)];
+                BinaryPrimitives.WriteUInt64LittleEndian(DispatcherFrame.Slice(0x20), ArgumentBuffer);
+                BinaryPrimitives.WriteUInt32LittleEndian(DispatcherFrame.Slice(0x2C), CallbackIndex);
+                Emulator._emulator.WriteMemory(DispatcherRsp, DispatcherFrame);
+            }
 
             Emulator.WriteRegister(Registers.UC_X86_REG_RCX, ArgumentBuffer);
             Emulator.WriteRegister(Registers.UC_X86_REG_RSP, DispatcherRsp - 8);
@@ -4586,41 +4362,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Emulator.WriteMemory(To, Data);
         }
 
-        public bool InvokeUserCallback(ulong CallbackIndex, ulong ArgumentBuffer, ulong ArgumentBufferSize)
-        {
-            ulong Dispatcher = GetKiUserCallbackDispatcher();
-            if (Dispatcher == 0)
-                return false;
-
-            EmulatedThread Thread = Emulator.CurrentThread;
-            if (Thread == null)
-                return false;
-
-            ulong CurrentRsp = Emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-            ulong CurrentReturnAddress = Emulator.ReadMemoryULong(CurrentRsp);
-
-            WinUserCallbackFrame Frame = new WinUserCallbackFrame
-            {
-                SavedRsp = CurrentRsp,
-                SavedReturnAddress = CurrentReturnAddress,
-            };
-            WinEmulatedThread.GetState(Thread).UserCallbackFrames.Push(Frame);
-
-            ulong FrameSize = 0x40;
-            ulong NewRsp = (CurrentRsp - FrameSize) & ~0xFUL;
-
-            for (ulong i = NewRsp; i < CurrentRsp; i += 8)
-                Emulator._emulator.WriteMemory(i, 0UL, 8);
-
-            Emulator._emulator.WriteMemory(NewRsp + 0x20, ArgumentBuffer, 8);
-            Emulator._emulator.WriteMemory(NewRsp + 0x28, 0u, 4);
-            Emulator._emulator.WriteMemory(NewRsp + 0x2C, (uint)CallbackIndex, 4);
-
-            Emulator.WriteRegister(Registers.UC_X86_REG_RSP, NewRsp - 8);
-            Emulator.WriteRegister(Emulator.IPRegister, Dispatcher);
-            return true;
-        }
-
         private ulong GuestCallTrampoline;
         private const ulong GuestCallTrampolineSize = 0x1000;
         private const int GuestCallResultOffset = 0x00;
@@ -4714,6 +4455,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             ulong CurrentRsp = Emulator.ReadRegister(Registers.UC_X86_REG_RSP);
+            ulong CallRsp = ((CurrentRsp - 0x200) & ~0xFUL) - 8;
+            if (CallRsp >= CurrentRsp || !TryMapUserFrame(CallRsp, CurrentRsp - CallRsp, out _))
+                return false;
+
             WinUserCallbackFrame Frame = new WinUserCallbackFrame
             {
                 SavedRsp = CurrentRsp,
@@ -4733,7 +4478,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinEmulatedThread.GetState(Thread).UserCallbackFrames.Push(Frame);
 
-            ulong CallRsp = ((CurrentRsp - 0x200) & ~0xFUL) - 8;
             Emulator._emulator.WriteMemory(CallRsp, Page + GuestCallCodeOffset, 8);
 
             Emulator.WriteRegister(Registers.UC_X86_REG_RCX, Arg0);
@@ -4932,7 +4676,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const uint PAGE_NOACCESS = 0x01;
         private const uint PAGE_READONLY = 0x02;
-        private const uint PAGE_READWRITE = 0x04;
+        internal const uint PAGE_READWRITE = 0x04;
         private const uint PAGE_EXECUTE = 0x10;
         private const uint PAGE_EXECUTE_READ = 0x20;
         private const uint PAGE_EXECUTE_READWRITE = 0x40;
@@ -5048,13 +4792,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HandleManager.HandleExists(Handle, Type);
         }
 
+        // NT grants the limited rights with the full ones (PspProcessOpen).
+        internal static AccessMask ProcessOpenRights(AccessMask Access)
+        {
+            const AccessMask WriteAndProtect = AccessMask.ProcessVMWrite | AccessMask.ProcessVMOperation;
+            if ((Access & WriteAndProtect) == WriteAndProtect || (Access & AccessMask.ProcessQueryInformation) != 0)
+                Access |= AccessMask.ProcessQueryLimitedInformation;
+            if ((Access & AccessMask.ProcessSetInformation) != 0)
+                Access |= AccessMask.ProcessSetLimitedInformation;
+            return Access;
+        }
+
         public WinHandle OpenProcessHandle(uint PID, AccessMask Permissions)
         {
             WinProcess Process = WinProcesses.FirstOrDefault(p => p.PID == PID);
             if (Process == null)
                 return new WinHandle();
 
-            WinHandle Handle = HandleManager.AddHandle(Process, Permissions);
+            WinHandle Handle = HandleManager.AddHandle(Process, ProcessOpenRights(Permissions));
             AddWinHandle(Handle);
             return Handle;
         }

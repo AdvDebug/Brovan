@@ -10,7 +10,7 @@ namespace Brovan.Core.Emulation.OS.Linux.network
 
             if (!SocketHelpers.TryCreateSocket(Domain, Type, Protocol, out SocketObject SocketObject, out bool CloseOnExec, out LinuxErrno Error, Instance.Settings.NetworkPolicy))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -18,11 +18,11 @@ namespace Brovan.Core.Emulation.OS.Linux.network
             if (!Helper.DescriptorTable.TryAddHandle(SocketObject, CloseOnExec, DescriptorLimit, out ulong Descriptor))
             {
                 SocketObject.Dispose();
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EMFILE);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EMFILE);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, Descriptor);
+            Helper.SetReturnValue(Instance, Descriptor);
         }
     }
 }

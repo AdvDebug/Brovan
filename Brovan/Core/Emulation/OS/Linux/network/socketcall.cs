@@ -37,21 +37,21 @@ namespace Brovan.Core.Emulation.OS.Linux.network
             ulong ArgumentsPointer = Context.Arg1;
             if (ArgumentsPointer == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             int ArgumentCount = GetArgumentCount(Call);
             if (ArgumentCount == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOSYS);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOSYS);
                 return;
             }
 
             ulong ArgumentBytes = (ulong)(ArgumentCount * 4);
             if (!Instance.IsRegionMapped(ArgumentsPointer, ArgumentBytes))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -59,7 +59,7 @@ namespace Brovan.Core.Emulation.OS.Linux.network
             RawArguments.Clear();
             if (!Instance.ReadMemory(ArgumentsPointer, RawArguments.Slice(0, (int)ArgumentBytes)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -120,7 +120,7 @@ namespace Brovan.Core.Emulation.OS.Linux.network
                     GetsockoptSyscall.Handle(Instance, Helper, CallContext);
                     return;
                 default:
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOSYS);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOSYS);
                     return;
             }
         }

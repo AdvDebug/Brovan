@@ -9,10 +9,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             LinuxThreadState State = Instance.CurrentThread?.GuestState as LinuxThreadState;
             if (State == null && Instance.CurrentThread != null)
             {
-                State = new LinuxThreadState()
-                {
-                    CpuidEnabled = Helper.CpuidEnabled
-                };
+                State = new LinuxThreadState();
 
                 if (Instance.IsX64Guest)
                 {
@@ -27,7 +24,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 State.TIDPtr = Context.Arg0;
 
             ulong ThreadId = Instance.CurrentThread != null ? Instance.CurrentThread.ThreadId : (ulong)(uint)Instance.CurrentThreadId;
-            Helper.SetReturnValue(Instance, Context, ThreadId);
+            Helper.SetReturnValue(Instance, ThreadId);
         }
     }
 }

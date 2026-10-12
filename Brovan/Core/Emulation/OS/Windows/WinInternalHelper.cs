@@ -808,7 +808,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Page[OffsetProcessorFeatures + 17] = 1; // XSAVE
                 Page[OffsetProcessorFeatures + 39] = 1; // AVX
-                if (System.Runtime.Intrinsics.X86.Avx2.IsSupported)
+                if (System.Runtime.Intrinsics.X86.X86Base.IsSupported
+                    && (System.Runtime.Intrinsics.X86.X86Base.CpuId(7, 0).Ebx & (1 << 5)) != 0)
                     Page[OffsetProcessorFeatures + 40] = 1; // AVX2
             }
 

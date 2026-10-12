@@ -17,12 +17,12 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             if (!_useCompat64 && Context.Abi == SyscallAbi.X86)
             {
                 LinuxErrno Error32 = Stat.WriteStat32(Instance, Helper, path, statbuf, true);
-                Helper.SetReturnValue(Instance, Context, Error32 == LinuxErrno.ESUCCESS ? 0L : -(long)Error32);
+                Helper.SetReturnValue(Instance, Error32 == LinuxErrno.ESUCCESS ? 0L : -(long)Error32);
                 return;
             }
 
             LinuxErrno Error = LinuxStatHelper.WritePathStat(Instance, Helper, Context, path, statbuf, _useCompat64 ? LinuxStatVariant.Compat64 : LinuxStatVariant.Native, false);
-            Helper.SetReturnValue(Instance, Context, Error == LinuxErrno.ESUCCESS ? 0L : -(long)Error);
+            Helper.SetReturnValue(Instance, Error == LinuxErrno.ESUCCESS ? 0L : -(long)Error);
         }
     }
 }

@@ -370,7 +370,8 @@ namespace Brovan.Core.Emulation
         private bool IdleWaitSkipped;
 
         private long ParkedEpoch;
-        private readonly ManualResetEventSlim SweepKick = new(false);
+        // Spin count 0, so the wait blocks at once and the 1 ms tick stays on time while guest processors load the cores.
+        private readonly ManualResetEventSlim SweepKick = new(false, 0);
 
         // An idle worker sleeps until a producer or the sweeper pulses it. The timeout is only a backstop
         // against a lost pulse.
@@ -1077,6 +1078,47 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
+        internal ulong AccessibleLength(ulong Address, ulong Length, bool Write)
+        {
+            MemoryProtection Needed = Write ? MemoryProtection.Write : MemoryProtection.Read | MemoryProtection.Execute;
+            ulong Done = 0;
+
+            // A region can end partway into its last page, so the lookup starts at the page base.
+            if (Length == 0 || !TryFindMemoryRegionIndex(Address & ~(PageSize - 1), out int Index))
+                return 0;
+
+            Span<MemoryRegion> Regions = CollectionsMarshal.AsSpan(_memory);
+            while (true)
+            {
+                ref MemoryRegion Region = ref Regions[Index];
+                if ((Region.Protections & Needed) == 0 || (Region.SpecialProtections & SpecialProtections.Guard) != 0)
+                    break;
+
+                ulong Current = Address + Done;
+                ulong RegionEnd = Region.BaseAddress + AlignUp(Region.Size, PageSize);
+                if (RegionEnd <= Current)
+                    break;
+
+                Done = Math.Min(Length, RegionEnd - Address);
+                if (Done >= Length)
+                    break;
+
+                ulong NextPage = (Address + Done) & ~(PageSize - 1);
+                int Next = Index;
+                while (Next + 1 < Regions.Length && Regions[Next + 1].BaseAddress <= NextPage)
+                    Next++;
+
+                if (Next == Index || NextPage >= GetRangeEnd(Regions[Next].BaseAddress, Regions[Next].Size))
+                    break;
+                Index = Next;
+            }
+
+            return Done;
+        }
+
+        internal bool IsAccessible(ulong Address, ulong Length, bool Write)
+            => Address + Length >= Address && AccessibleLength(Address, Length, Write) == Length;
+
         internal bool TryFindMemoryRegionIndex(ulong Address, out int Index)
         {
             Index = -1;
@@ -1672,15 +1714,17 @@ namespace Brovan.Core.Emulation
             Guest.HandleInvalidInstruction(this);
         }
 
-        private void InterruptHandler(uint interrupt_number)
+        private bool InterruptHandler(uint interrupt_number)
         {
             if (Debug)
                 TriggerDebugMessage($"cpu: interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}");
             long EpochBeforeCallback = WakeSignal.Current;
+            bool Handled = false;
             try
             {
                 // An unhandled vector leaves IP on the faulting instruction, which re-faults forever.
-                if (!Guest.TryHandleInterrupt(this, interrupt_number) && (Settings.Flags & LogFlags.Issues) != 0)
+                Handled = Guest.TryHandleInterrupt(this, interrupt_number);
+                if (!Handled && (Settings.Flags & LogFlags.Issues) != 0)
                     TriggerEventMessage($"[-] Unhandled CPU interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}.", LogFlags.Issues);
             }
             catch (Exception ex)
@@ -1690,6 +1734,7 @@ namespace Brovan.Core.Emulation
             }
 
             ScanWakeupsAfterCallback(EpochBeforeCallback);
+            return Handled;
         }
 
         /// <summary>
@@ -1697,14 +1742,14 @@ namespace Brovan.Core.Emulation
         /// core at once. A waker whose slice can be capped keeps running, because it usually wakes more threads
         /// or blocks soon. Otherwise its slice ends here, so the woken thread does not wait for the full quantum.
         /// </summary>
-        internal void YieldSliceAfterWake(EmulatedThread WokenThread)
+        internal void YieldSliceAfterWake(EmulatedThread WokenThread, bool EndSlice = false)
         {
             if (WokenThread != null && MlfqLevels > 0)
                 EnqueueMlfqThread(WokenThread, MlfqReadyQueues, MlfqQueuedThreads, MlfqLevels, MlfqSchedulerTick);
             else
                 SchedulerRefreshRequested = true;
 
-            if (_emulator.TryLimitSlice(WakeSliceLimitMicroseconds))
+            if (!EndSlice && _emulator.TryLimitSlice(WakeSliceLimitMicroseconds))
                 return;
 
             if (CurrentThread != null && CurrentThread.State == EmulatedThreadState.Running)
@@ -1714,6 +1759,21 @@ namespace Brovan.Core.Emulation
         }
 
         private const int WakeSliceLimitMicroseconds = 500;
+
+        // NT only yields to a thread that is ready to run (KeYieldExecution).
+        internal bool HasThreadReadyForYield()
+        {
+            if (SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch || EmulatedTickCount64 >= EarliestWaitDeadline)
+                return true;
+
+            foreach (int Tid in MlfqQueuedThreads)
+            {
+                if (Threads.TryGetValue((uint)Tid, out EmulatedThread Thread) && IsMlfqRunnableThread(Thread))
+                    return true;
+            }
+
+            return false;
+        }
 
         private void StopAfterSyntheticInstruction(ulong NextIp)
         {
@@ -1748,13 +1808,6 @@ namespace Brovan.Core.Emulation
             uint Leaf = Is64BitGuest ? (uint)ReadRegister(Registers.UC_X86_REG_RAX) : ReadRegister32(Registers.UC_X86_REG_EAX);
             uint SubLeaf = Is64BitGuest ? (uint)ReadRegister(Registers.UC_X86_REG_RCX) : ReadRegister32(Registers.UC_X86_REG_ECX);
             ulong IP = ReadRegister(IPRegister);
-            LinuxGuest Linux = GetGuest<LinuxGuest>();
-            if (Linux != null && !Linux.Helper.CpuidEnabled)
-            {
-                if ((Settings.Flags & (LogFlags.CPUID | LogFlags.Issues)) != 0)
-                    TriggerEventMessage($"[!] CPUID instruction was blocked by arch_prctl at 0x{IP:X}.", LogFlags.CPUID | LogFlags.Issues);
-                return true;
-            }
 
             void WriteCpuidOutputs(uint Eax, uint Ebx, uint Ecx, uint Edx)
             {
@@ -1957,47 +2010,6 @@ namespace Brovan.Core.Emulation
             return MapUniqueAddress(StackSize, MemoryProtection.ReadWrite);
         }
 
-        internal ulong BuildInitialContext(ulong RIP, ulong RSP, ulong RCX = 0, ulong RDX = 0, uint Flags = 0x00100000 | 0x00000001 | 0x00000002)
-        {
-            const ulong ContextSize = 0x500;
-            ulong ContextAddress = MapUniqueAddress(ContextSize, MemoryProtection.ReadWrite);
-
-            Span<byte> Buf = stackalloc byte[(int)ContextSize];
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x30, 4), Flags);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x44, 4), 0x202u);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0x80, 8), RCX);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0x88, 8), RDX);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0x98, 8), RSP);
-            BinaryPrimitives.WriteUInt64LittleEndian(Buf.Slice(0xF8, 8), RIP);
-            _emulator.WriteMemory(ContextAddress, Buf);
-
-            return ContextAddress;
-        }
-
-        internal ulong BuildInitialContext32(ulong Eip, ulong Esp, ulong Eax, ulong Ebx)
-        {
-            const uint ContextI386ControlIntegerSegments = 0x00010000 | 0x1 | 0x2 | 0x4;
-            const ulong ContextSize = 0x2CC;
-            ulong ContextAddress = MapUniqueAddress(ContextSize, MemoryProtection.ReadWrite);
-
-            Span<byte> Buf = stackalloc byte[(int)ContextSize];
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x00, 4), ContextI386ControlIntegerSegments);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x8C, 4), ReadRegister32(Registers.UC_X86_REG_GS));
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x90, 4), ReadRegister32(Registers.UC_X86_REG_FS));
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x94, 4), ReadRegister32(Registers.UC_X86_REG_ES));
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0x98, 4), ReadRegister32(Registers.UC_X86_REG_DS));
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xA4, 4), (uint)Ebx);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xB0, 4), (uint)Eax);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xB8, 4), (uint)Eip);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xBC, 4), ReadRegister32(Registers.UC_X86_REG_CS));
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xC0, 4), 0x202u);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xC4, 4), (uint)Esp);
-            BinaryPrimitives.WriteUInt32LittleEndian(Buf.Slice(0xC8, 4), ReadRegister32(Registers.UC_X86_REG_SS));
-            _emulator.WriteMemory(ContextAddress, Buf);
-
-            return ContextAddress;
-        }
-
         public EmulatedThread CreateEmulatedThread(ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8)
         {
             return Guest.CreateEmulatedThread(this, StartAddress, Name, Parameter, StackSizeOverride, BasePriority);
@@ -2043,43 +2055,64 @@ namespace Brovan.Core.Emulation
             SaveFloatingPointState(t.Context);
         }
 
+        private ulong[] RegisterScratch => Worker.GprScratch ??= new ulong[GprBatchCount];
+
+        private ulong[] ReadRegisters(int[] Batch)
+        {
+            ulong[] Vals = RegisterScratch;
+            Array.Clear(Vals, 0, Batch.Length);
+            _emulator.ReadRegisterBatch(Batch, Vals, Batch.Length);
+            return Vals;
+        }
+
         private void SaveFloatingPointState(CpuContext c)
         {
             _emulator.ReadVectorState(c.Xmm, c.YmmHigh);
             _emulator.ReadX87State(c.X87, ref c.FPSW, ref c.FPTAG);
-            c.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
-            c.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
+            ulong[] Vals = ReadRegisters(FpControlWordsBatch);
+            c.FPCW = Vals[0];
+            c.MXCSR = Vals[1];
         }
 
         private void LoadFloatingPointState(CpuContext c)
         {
             _emulator.WriteVectorState(c.Xmm, c.YmmHigh);
             _emulator.WriteX87State(c.X87, c.FPSW, c.FPTAG);
-            WriteRegister(Registers.UC_X86_REG_MXCSR, c.MXCSR);
-            WriteRegister(Registers.UC_X86_REG_FPCW, c.FPCW);
+            ulong[] Vals = RegisterScratch;
+            Vals[0] = c.FPCW;
+            Vals[1] = c.MXCSR;
+            _emulator.WriteRegisterBatch(FpControlWordsBatch, Vals, FpControlWordsBatch.Length);
         }
 
-        public bool ReadThreadVectorState(EmulatedThread t, ulong[] xmm, ulong[] ymmHigh)
+        // FPSW is saved and loaded with the x87 state.
+        private static readonly int[] FpControlWordsBatch = { (int)Registers.UC_X86_REG_FPCW, (int)Registers.UC_X86_REG_MXCSR };
+
+        /// <param name="ymmHigh">Pass null to read only XMM0-15 and skip the XSAVE transfer.</param>
+        public bool ReadThreadVectorState(EmulatedThread t, ulong[] xmm, ulong[] ymmHigh, bool FromSavedContext = false)
         {
             if (t == null || t.Context == null) return false;
             EmulatedThread current = CurrentThread;
-            if (ReferenceEquals(t, current))
-                return _emulator.ReadVectorState(xmm, ymmHigh);
+            if (!FromSavedContext && ReferenceEquals(t, current))
+                return ReadProcessorVectorState(xmm, ymmHigh);
 
-            if (_emulator.IsThreadResident(t.ThreadId))
+            if (!FromSavedContext && _emulator.IsThreadResident(t.ThreadId))
             {
                 _emulator.SelectThread(t.ThreadId);
-                bool read = _emulator.ReadVectorState(xmm, ymmHigh);
+                bool read = ReadProcessorVectorState(xmm, ymmHigh);
                 if (current != null) _emulator.SelectThread(current.ThreadId);
                 return read;
             }
 
             Array.Copy(t.Context.Xmm, xmm, t.Context.Xmm.Length);
-            Array.Copy(t.Context.YmmHigh, ymmHigh, t.Context.YmmHigh.Length);
+            if (ymmHigh != null)
+                Array.Copy(t.Context.YmmHigh, ymmHigh, t.Context.YmmHigh.Length);
             return true;
         }
 
-        // SaveContext does not copy MXCSR and FPCW out of a resident thread's processor.
+        private bool ReadProcessorVectorState(ulong[] xmm, ulong[] ymmHigh)
+            => ymmHigh == null ? _emulator.ReadXmmRegisters(xmm) : _emulator.ReadVectorState(xmm, ymmHigh);
+
+        // SaveContext does not copy FPCW, FPSW and MXCSR out of a resident thread's processor.
         public void RefreshThreadFpControl(EmulatedThread t)
         {
             EmulatedThread current = CurrentThread;
@@ -2087,8 +2120,7 @@ namespace Brovan.Core.Emulation
                 return;
 
             _emulator.SelectThread(t.ThreadId);
-            t.Context.MXCSR = ReadRegister(Registers.UC_X86_REG_MXCSR);
-            t.Context.FPCW = ReadRegister(Registers.UC_X86_REG_FPCW);
+            ReadFpControl(out t.Context.FPCW, out t.Context.FPSW, out t.Context.MXCSR);
             if (current != null) _emulator.SelectThread(current.ThreadId);
         }
 
@@ -2099,8 +2131,43 @@ namespace Brovan.Core.Emulation
                 return;
 
             _emulator.SelectThread(t.ThreadId);
-            WriteRegister(Registers.UC_X86_REG_MXCSR, t.Context.MXCSR);
-            WriteRegister(Registers.UC_X86_REG_FPCW, t.Context.FPCW);
+            WriteFpControl(t.Context.FPCW, t.Context.FPSW, t.Context.MXCSR);
+            if (current != null) _emulator.SelectThread(current.ThreadId);
+        }
+
+        private static readonly int[] FpControlBatch =
+        {
+            (int)Registers.UC_X86_REG_FPCW, (int)Registers.UC_X86_REG_FPSW, (int)Registers.UC_X86_REG_MXCSR,
+        };
+
+        public void ReadFpControl(out ulong Fpcw, out ulong Fpsw, out ulong MxCsr)
+        {
+            ulong[] Vals = ReadRegisters(FpControlBatch);
+            Fpcw = Vals[0]; Fpsw = Vals[1]; MxCsr = Vals[2];
+        }
+
+        public void WriteFpControl(ulong Fpcw, ulong Fpsw, ulong? MxCsr)
+        {
+            ulong[] Vals = RegisterScratch;
+            Vals[0] = Fpcw; Vals[1] = Fpsw; Vals[2] = MxCsr.GetValueOrDefault();
+            _emulator.WriteRegisterBatch(FpControlBatch, Vals, MxCsr.HasValue ? 3 : 2);
+        }
+
+        public void WriteThreadDebugRegisters(EmulatedThread t)
+        {
+            if (t == null || t.Context == null) return;
+            EmulatedThread current = CurrentThread;
+            if (ReferenceEquals(t, current))
+            {
+                WriteDebugRegisterBatch(t.Context, DebugRegisterBatch.Length);
+                return;
+            }
+
+            if (!_emulator.IsThreadResident(t.ThreadId))
+                return;
+
+            _emulator.SelectThread(t.ThreadId);
+            WriteDebugRegisterBatch(t.Context, DebugRegisterBatch.Length);
             if (current != null) _emulator.SelectThread(current.ThreadId);
         }
 
@@ -2127,7 +2194,7 @@ namespace Brovan.Core.Emulation
         {
             if (c == null) return false;
             int[] Regs = GetGprBatchRegs();
-            ulong[] Vals = Worker.GprScratch ??= new ulong[GprBatchCount];
+            ulong[] Vals = RegisterScratch;
             if (!_emulator.ReadRegisterBatch(Regs, Vals, Regs.Length))
                 return false;
             c.RAX = Vals[0]; c.RBX = Vals[1]; c.RCX = Vals[2]; c.RDX = Vals[3];
@@ -2147,7 +2214,7 @@ namespace Brovan.Core.Emulation
         {
             if (c == null) return;
             int[] Regs = GetGprBatchRegs();
-            ulong[] Vals = Worker.GprScratch ??= new ulong[GprBatchCount];
+            ulong[] Vals = RegisterScratch;
             Vals[0] = c.RAX; Vals[1] = c.RBX; Vals[2] = c.RCX; Vals[3] = c.RDX;
             Vals[4] = c.RSI; Vals[5] = c.RDI; Vals[6] = c.RBP; Vals[7] = c.RSP;
             if (Regs.Length == GprBatchCount32)
@@ -2169,8 +2236,7 @@ namespace Brovan.Core.Emulation
             LoadContext(t, !_emulator.IsThreadResident(t.ThreadId));
         }
 
-        // A resident thread keeps its vector state in its own processor, so only a first load or a
-        // shared processor takes the saved copy.
+        // A resident thread's processor still holds its vector state and debug registers, so a switch does not reload them.
         private void LoadContext(EmulatedThread t, bool LoadVectorState)
         {
             if (t == null || t.Context == null) return;
@@ -2184,8 +2250,47 @@ namespace Brovan.Core.Emulation
 
             WriteGprBatch(t.Context);
             if (LoadVectorState)
+            {
                 LoadFloatingPointState(t.Context);
+                LoadDebugRegisters(t.Context);
+            }
             Guest.OnThreadContextLoaded(this, t);
+        }
+
+        // DR6 is last so that a load can skip it.
+        private static readonly int[] DebugRegisterBatch =
+        {
+            (int)Registers.UC_X86_REG_DR0, (int)Registers.UC_X86_REG_DR1, (int)Registers.UC_X86_REG_DR2,
+            (int)Registers.UC_X86_REG_DR3, (int)Registers.UC_X86_REG_DR7, (int)Registers.UC_X86_REG_DR6,
+        };
+
+        private void LoadDebugRegisters(CpuContext c) => WriteDebugRegisterBatch(c, DebugRegisterBatch.Length - 1);
+
+        // Returned in CONTEXT order, where DR6 comes before DR7.
+        public void ReadLiveDebugRegisters(Span<ulong> Values)
+        {
+            ulong[] Vals = ReadRegisters(DebugRegisterBatch);
+            Values[0] = Vals[0]; Values[1] = Vals[1]; Values[2] = Vals[2]; Values[3] = Vals[3];
+            Values[4] = Vals[5]; Values[5] = Vals[4];
+        }
+
+        private static readonly int[] SelectorBatch =
+        {
+            (int)Registers.UC_X86_REG_CS, (int)Registers.UC_X86_REG_SS, (int)Registers.UC_X86_REG_DS,
+            (int)Registers.UC_X86_REG_ES, (int)Registers.UC_X86_REG_FS, (int)Registers.UC_X86_REG_GS,
+        };
+
+        public void ReadLiveSelectors(CpuContext c)
+        {
+            ulong[] Vals = ReadRegisters(SelectorBatch);
+            c.CS = Vals[0]; c.SS = Vals[1]; c.DS = Vals[2]; c.ES = Vals[3]; c.FS = Vals[4]; c.GS = Vals[5];
+        }
+
+        private void WriteDebugRegisterBatch(CpuContext c, int Count)
+        {
+            ulong[] Vals = RegisterScratch;
+            Vals[0] = c.DR0; Vals[1] = c.DR1; Vals[2] = c.DR2; Vals[3] = c.DR3; Vals[4] = c.DR7; Vals[5] = c.DR6;
+            _emulator.WriteRegisterBatch(DebugRegisterBatch, Vals, Count);
         }
 
         private void SwitchToThread(int ThreadId, bool BoundThisSwitch = false)
@@ -3470,6 +3575,7 @@ namespace Brovan.Core.Emulation
             Interrupt = InterruptHandler;
             if (_emulator.AddInterruptHook(Interrupt) == IntPtr.Zero)
                 Utils.LogError($"Couldn't add the interrupt hook: {_emulator.GetLastError()}.");
+            _emulator.SetUserInterruptGates(Guest.RaisableFromUserMode);
 
             if (BackendArch == Arch.X86)
             {
@@ -3612,6 +3718,53 @@ namespace Brovan.Core.Emulation
         public byte ReadRegisterByte(Registers Register) => _emulator.ReadRegisterByte(Register);
 
         public byte ReadRegisterByte(int Register) => _emulator.ReadRegisterByte(Register);
+
+        private static readonly Registers[] GeneralRegisters64 =
+        {
+            Registers.UC_X86_REG_RAX, Registers.UC_X86_REG_RCX, Registers.UC_X86_REG_RDX, Registers.UC_X86_REG_RBX,
+            Registers.UC_X86_REG_RSP, Registers.UC_X86_REG_RBP, Registers.UC_X86_REG_RSI, Registers.UC_X86_REG_RDI,
+            Registers.UC_X86_REG_R8, Registers.UC_X86_REG_R9, Registers.UC_X86_REG_R10, Registers.UC_X86_REG_R11,
+            Registers.UC_X86_REG_R12, Registers.UC_X86_REG_R13, Registers.UC_X86_REG_R14, Registers.UC_X86_REG_R15,
+        };
+
+        private static readonly Registers[] GeneralRegisters32 =
+        {
+            Registers.UC_X86_REG_EAX, Registers.UC_X86_REG_ECX, Registers.UC_X86_REG_EDX, Registers.UC_X86_REG_EBX,
+            Registers.UC_X86_REG_ESP, Registers.UC_X86_REG_EBP, Registers.UC_X86_REG_ESI, Registers.UC_X86_REG_EDI,
+        };
+
+        public ulong ReadGeneralRegister(int Index)
+            => IsX86Guest ? ReadRegister32(GeneralRegisters32[Index]) : ReadRegister(GeneralRegisters64[Index]);
+
+        public static ulong LowBytesMask(int Size) => Size >= sizeof(ulong) ? ulong.MaxValue : (1UL << (Size * 8)) - 1;
+
+        public void WriteGeneralRegister(int Index, ulong Value, int Size)
+        {
+            ulong Mask = LowBytesMask(Size);
+            if (IsX86Guest)
+            {
+                Registers Register32 = GeneralRegisters32[Index];
+                uint Kept32 = Size >= sizeof(uint) ? 0 : ReadRegister32(Register32) & ~(uint)Mask;
+                WriteRegister32(Register32, Kept32 | (uint)(Value & Mask));
+                return;
+            }
+
+            Registers Register = GeneralRegisters64[Index];
+            ulong Kept = Size >= sizeof(ulong) ? 0 : ReadRegister(Register) & ~Mask;
+            WriteRegister(Register, Kept | (Value & Mask));
+        }
+
+        public const int MaxInstructionLength = 15;
+
+        public int ReadInstructionBytes(ulong Address, Span<byte> Code)
+        {
+            int Length = (int)Math.Min((ulong)Code.Length, PageSize - (Address & (PageSize - 1)));
+            if (!ReadMemory(Address, Code.Slice(0, Length)))
+                return 0;
+            if (Length < Code.Length && ReadMemory(Address + (ulong)Length, Code.Slice(Length)))
+                Length = Code.Length;
+            return Length;
+        }
 
         public bool WriteMemory(ulong Address, byte[] Data) => _emulator.WriteMemory(Address, Data);
 

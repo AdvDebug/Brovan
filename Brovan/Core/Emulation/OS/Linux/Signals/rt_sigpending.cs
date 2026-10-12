@@ -11,13 +11,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
 
             if (!LinuxSignalHelpers.IsValidSignalSetSize(sigsetsize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (set == 0 || !Instance.IsRegionMapped(set, sigsetsize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -26,11 +26,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Signals
             LinuxSignalHelpers.WritePendingSignals(State, PendingMask);
             if (!Instance.WriteMemory(set, PendingMask.Slice(0, (int)sigsetsize)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+            Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
         }
     }
 }

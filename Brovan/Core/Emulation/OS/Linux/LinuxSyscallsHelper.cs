@@ -703,19 +703,19 @@ namespace Brovan.Core.Emulation.OS.Linux
         {
             if (Count < sizeof(ulong))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!Instance.IsRegionMapped(BufferAddress, sizeof(ulong)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (EventfdDescriptor.Counter == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EAGAIN);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EAGAIN);
                 return;
             }
 
@@ -735,70 +735,70 @@ namespace Brovan.Core.Emulation.OS.Linux
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer, Value);
             if (!Instance.WriteMemory(BufferAddress, Buffer))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, sizeof(ulong));
+            Helper.SetReturnValue(Instance, sizeof(ulong));
         }
 
         public static void WriteEventfd(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context, EventfdObject EventfdDescriptor, ulong BufferAddress, ulong Count)
         {
             if (Count < sizeof(ulong))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!Instance.IsRegionMapped(BufferAddress, sizeof(ulong)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             Span<byte> Buffer = stackalloc byte[sizeof(ulong)];
             if (!Instance.ReadMemory(BufferAddress, Buffer))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             ulong Value = BinaryPrimitives.ReadUInt64LittleEndian(Buffer);
             if (Value == ulong.MaxValue)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (Value > EventfdObject.MaxCounterValue - EventfdDescriptor.Counter)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EAGAIN);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EAGAIN);
                 return;
             }
 
             EventfdDescriptor.Counter += Value;
             Instance.WakeSignal.Bump();
-            Helper.SetReturnValue(Instance, Context, sizeof(ulong));
+            Helper.SetReturnValue(Instance, sizeof(ulong));
         }
 
         public static void ReadTimerfd(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context, TimerfdObject TimerfdDescriptor, ulong BufferAddress, ulong Count)
         {
             if (Count < sizeof(ulong))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!Instance.IsRegionMapped(BufferAddress, sizeof(ulong)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             ulong Expirations = TimerfdDescriptor.ConsumeExpirations(GetClockNanoseconds(Helper, TimerfdDescriptor.ClockId));
             if (Expirations == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EAGAIN);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EAGAIN);
                 return;
             }
 
@@ -806,11 +806,11 @@ namespace Brovan.Core.Emulation.OS.Linux
             BinaryPrimitives.WriteUInt64LittleEndian(Buffer, Expirations);
             if (!Instance.WriteMemory(BufferAddress, Buffer))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, sizeof(ulong));
+            Helper.SetReturnValue(Instance, sizeof(ulong));
         }
 
         public static int WriteReadyEvents(BinaryEmulator Instance, LinuxSyscallsHelper Helper, EpollObject Epoll, ulong EventsAddress, int MaxEvents)
@@ -1909,28 +1909,12 @@ namespace Brovan.Core.Emulation.OS.Linux
 
         public ulong ProgramBreak { get; set; }
         public ulong ProgramBreakBase { get; set; }
-        public bool CpuidEnabled
-        {
-            get => CurrentThreadState?.CpuidEnabled ?? true;
-            set
-            {
-                EmulatedThread Thread = Emulator?.CurrentThread;
-                if (Thread == null)
-                    return;
-
-                if (Thread.GuestState is not LinuxThreadState State)
-                    Thread.GuestState = State = new LinuxThreadState();
-
-                State.CpuidEnabled = value;
-            }
-        }
         public int PID { get; private set; }
         public int ParentPid { get; private set; }
         public int ProcessGroupId { get; private set; }
         public int SessionId { get; private set; }
         internal BinaryEmulator Emulator { get; set; }
         public int CurrentThreadId => Emulator != null && Emulator.CurrentThreadId > 0 ? Emulator.CurrentThreadId : 0;
-        private LinuxThreadState CurrentThreadState => Emulator?.CurrentThread?.GuestState as LinuxThreadState;
         public byte[] AuxiliaryVector { get; set; } = Array.Empty<byte>();
         public Dictionary<int, LinuxResourceLimit> ResourceLimits { get; private set; }
         public FileDescriptorTable DescriptorTable { get; private set; }
@@ -2487,17 +2471,20 @@ namespace Brovan.Core.Emulation.OS.Linux
             return Protection;
         }
 
-        public void SetReturnValue(BinaryEmulator Instance, LinuxSyscallContext Context, long Value)
+        // Linux returns the full sign-extended RAX for int 0x80 in a 64-bit process.
+        public void SetReturnValue(BinaryEmulator Instance, long Value)
         {
-            if (Context.Abi == SyscallAbi.X64)
-            {
+            if (Instance.IsX64Guest)
                 Instance.WriteRegister(Registers.UC_X86_REG_RAX, unchecked((ulong)Value));
-            }
             else
-            {
                 Instance.WriteRegister32(Registers.UC_X86_REG_EAX, unchecked((uint)Value));
-            }
         }
+
+        public void SetReturnValue(BinaryEmulator Instance, LinuxErrno Value)
+            => SetReturnValue(Instance, (long)Value);
+
+        public void SetReturnValue(BinaryEmulator Instance, ulong Value)
+            => SetReturnValue(Instance, unchecked((long)Value));
 
         public void SetThreadReturnValue(BinaryEmulator Instance, EmulatedThread Thread, long Value)
         {
@@ -2508,30 +2495,6 @@ namespace Brovan.Core.Emulation.OS.Linux
                 Thread.Context.RAX = unchecked((ulong)Value);
             else
                 Thread.Context.RAX = unchecked((uint)Value);
-        }
-
-        public void SetReturnValue(BinaryEmulator Instance, LinuxSyscallContext Context, LinuxErrno Value)
-        {
-            if (Context.Abi == SyscallAbi.X64)
-            {
-                Instance.WriteRegister(Registers.UC_X86_REG_RAX, unchecked((ulong)Value));
-            }
-            else
-            {
-                Instance.WriteRegister32(Registers.UC_X86_REG_EAX, unchecked((uint)Value));
-            }
-        }
-
-        public void SetReturnValue(BinaryEmulator Instance, LinuxSyscallContext Context, ulong Value)
-        {
-            if (Context.Abi == SyscallAbi.X64)
-            {
-                Instance.WriteRegister(Registers.UC_X86_REG_RAX, Value);
-            }
-            else
-            {
-                Instance.WriteRegister32(Registers.UC_X86_REG_EAX, unchecked((uint)Value));
-            }
         }
     }
 
@@ -2546,13 +2509,26 @@ namespace Brovan.Core.Emulation.OS.Linux
     internal static class LinuxSignalHelpers
     {
         public const int SIGILL = 4;
+        public const int SIGTRAP = 5;
+        public const int SIGBUS = 7;
+        public const int SIGFPE = 8;
         public const int SIGKILL = 9;
         public const int SIGSEGV = 11;
         public const int SIGSTOP = 19;
+        public const int SI_KERNEL = 0x80;
         public const int ILL_ILLOPN = 2;
         public const int ILL_PRVOPC = 5;
         public const int SEGV_MAPERR = 1;
         public const int SEGV_ACCERR = 2;
+        public const int FPE_INTDIV = 1;
+        public const int FPE_FLTDIV = 3;
+        public const int FPE_FLTOVF = 4;
+        public const int FPE_FLTUND = 5;
+        public const int FPE_FLTRES = 6;
+        public const int FPE_FLTINV = 7;
+        public const int TRAP_BRKPT = 1;
+        public const int TRAP_TRACE = 2;
+        public const int TRAP_HWBKPT = 4;
 
         private const ulong SIG_DFL = 0;
         private const ulong SIG_IGN = 1;
@@ -2568,6 +2544,13 @@ namespace Brovan.Core.Emulation.OS.Linux
         private const ulong X86_EFLAGS_TF = 1UL << 8;
         private const ulong X86_EFLAGS_RF = 1UL << 16;
 
+        private const ulong FIX_EFLAGS = 0x50DD5;
+
+        // A Linux signal handler starts with these (fpu__clear_user_states).
+        private const ulong HandlerFpuControlWord = 0x037F;
+        private const ulong HandlerMxcsr = 0x1F80;
+        private const ulong X87ExceptionStatusBits = 0x80FF;
+
         private const int X64FrameSize = 0x400;
         private const int X64SavedSignalOffset = 0x10;
         private const int X64SavedFaultOffset = 0x18;
@@ -2576,6 +2559,12 @@ namespace Brovan.Core.Emulation.OS.Linux
         private const int X64SavedContextOffset = 0x30;
         private const int X64SigInfoOffset = 0x100;
         private const int X64UContextOffset = 0x180;
+
+        private const int SavedFsBaseOffset = 0x90;
+        private const int SavedGsBaseOffset = 0x98;
+        private const int SavedFpcwOffset = 0xA0;
+        private const int SavedFpswOffset = 0xA8;
+        private const int SavedMxcsrOffset = 0xB0;
 
         private const int REG_R8 = 0;
         private const int REG_R9 = 1;
@@ -2617,10 +2606,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             LinuxThreadState State = Thread.GuestState as LinuxThreadState;
             if (State == null)
             {
-                State = new LinuxThreadState
-                {
-                    CpuidEnabled = Helper.CpuidEnabled
-                };
+                State = new LinuxThreadState();
 
                 if (Instance.IsX64Guest)
                 {
@@ -2668,10 +2654,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             LinuxThreadState State = Thread.GuestState as LinuxThreadState;
             if (State == null)
             {
-                State = new LinuxThreadState
-                {
-                    CpuidEnabled = Helper.CpuidEnabled
-                };
+                State = new LinuxThreadState();
                 Thread.GuestState = State;
             }
 
@@ -2834,7 +2817,8 @@ namespace Brovan.Core.Emulation.OS.Linux
 
             bool WasOnSignalStack = State.SignalStackActive;
             ulong Frame = AllocateSignalFrame(Instance, State, Action.Flags);
-            if (Frame == 0 || !WriteSignalFrame64(Instance, Thread.Context, State, Pending, Action, Restorer, Frame, WasOnSignalStack))
+            ulong Fpsw = Instance.ReadRegister(Registers.UC_X86_REG_FPSW);
+            if (Frame == 0 || !WriteSignalFrame64(Instance, Thread.Context, State, Pending, Action, Restorer, Frame, WasOnSignalStack, Fpsw))
             {
                 TerminateProcessForSignal(Instance, SIGSEGV);
                 return false;
@@ -2859,6 +2843,11 @@ namespace Brovan.Core.Emulation.OS.Linux
             Thread.State = EmulatedThreadState.Running;
 
             LoadContextIntoLiveRegisters(Instance, Thread.Context, State);
+
+            // The x87 stack is left as it is, because the signal frame does not save it.
+            Instance.WriteRegister(Registers.UC_X86_REG_FPCW, HandlerFpuControlWord);
+            Instance.WriteRegister(Registers.UC_X86_REG_FPSW, Fpsw & ~X87ExceptionStatusBits);
+            Instance.WriteRegister(Registers.UC_X86_REG_MXCSR, HandlerMxcsr);
             return true;
         }
 
@@ -2868,13 +2857,13 @@ namespace Brovan.Core.Emulation.OS.Linux
             EmulatedThread Thread = Instance.CurrentThread;
             if (State == null || Thread == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return false;
             }
 
             if (!Instance.IsX64Guest)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOSYS);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOSYS);
                 return false;
             }
 
@@ -2882,13 +2871,17 @@ namespace Brovan.Core.Emulation.OS.Linux
             ulong Frame = LocateSignalFrame64(Instance, Rsp);
             if (Frame == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 
             CpuContext Saved = ReadContextFromUContext64(Instance, Frame + X64UContextOffset);
-            Saved.FS = Instance.ReadMemoryULong(Frame + X64SavedContextOffset + 0x90);
-            Saved.GS = Instance.ReadMemoryULong(Frame + X64SavedContextOffset + 0x98);
+            Saved.RFLAGS = (Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS) & ~FIX_EFLAGS) | (Saved.RFLAGS & FIX_EFLAGS);
+            // If arch_prctl would refuse the saved base, the thread keeps its current one.
+            ulong FsBase = Instance.ReadMemoryULong(Frame + X64SavedContextOffset + SavedFsBaseOffset);
+            ulong GsBase = Instance.ReadMemoryULong(Frame + X64SavedContextOffset + SavedGsBaseOffset);
+            Saved.FS = FsBase < Process.Arch_prctl.TASK_SIZE_MAX ? FsBase : State.FsBase;
+            Saved.GS = GsBase < Process.Arch_prctl.TASK_SIZE_MAX ? GsBase : State.GsBase;
             ReadMask64(Instance, Frame + X64SavedMaskOffset, State.SignalMask);
             State.SignalStackActive = Instance.ReadMemory(Frame + X64SavedStackActiveOffset, 1)[0] != 0;
             if (State.SignalNesting > 0)
@@ -2934,6 +2927,11 @@ namespace Brovan.Core.Emulation.OS.Linux
             Thread.State = EmulatedThreadState.Ready;
             Thread.SwitchingContext = true;
             LoadContextIntoLiveRegisters(Instance, Saved, State);
+
+            ulong SavedFpu = Frame + X64SavedContextOffset;
+            Instance.WriteRegister(Registers.UC_X86_REG_FPCW, (ushort)Instance.ReadMemoryULong(SavedFpu + SavedFpcwOffset));
+            Instance.WriteRegister(Registers.UC_X86_REG_FPSW, (ushort)Instance.ReadMemoryULong(SavedFpu + SavedFpswOffset));
+            Instance.WriteRegister(Registers.UC_X86_REG_MXCSR, (ushort)Instance.ReadMemoryULong(SavedFpu + SavedMxcsrOffset));
             Instance.SuppressSyscallStatusWrite = true;
             Instance._emulator.StopEmulation();
             return true;
@@ -3035,7 +3033,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             return Instance.IsRegionMapped(Frame, X64FrameSize) ? Frame : 0;
         }
 
-        private static bool WriteSignalFrame64(BinaryEmulator Instance, CpuContext Context, LinuxThreadState State, LinuxPendingSignal Pending, LinuxSignalAction Action, ulong Restorer, ulong Frame, bool WasOnSignalStack)
+        private static bool WriteSignalFrame64(BinaryEmulator Instance, CpuContext Context, LinuxThreadState State, LinuxPendingSignal Pending, LinuxSignalAction Action, ulong Restorer, ulong Frame, bool WasOnSignalStack, ulong Fpsw)
         {
             Span<byte> Empty = stackalloc byte[256];
             Empty.Clear();
@@ -3051,7 +3049,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             WriteU64(Instance, Frame + X64SavedSignalOffset, (ulong)(uint)Pending.Signal);
             WriteU64(Instance, Frame + X64SavedFaultOffset, Pending.FaultAddress);
             Instance.WriteMemory(Frame + X64SavedStackActiveOffset, new byte[] { WasOnSignalStack ? (byte)1 : (byte)0 });
-            WriteContext64(Instance, Frame + X64SavedContextOffset, Context, State);
+            WriteContext64(Instance, Frame + X64SavedContextOffset, Context, State, Fpsw);
             WriteSigInfo64(Instance, Frame + X64SigInfoOffset, Pending);
             WriteUContext64(Instance, Frame + X64UContextOffset, Context, State, Pending.FaultAddress);
             return true;
@@ -3206,7 +3204,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             };
         }
 
-        private static void WriteContext64(BinaryEmulator Instance, ulong Address, CpuContext Context, LinuxThreadState State)
+        private static void WriteContext64(BinaryEmulator Instance, ulong Address, CpuContext Context, LinuxThreadState State, ulong Fpsw)
         {
             WriteU64(Instance, Address + 0x00, Context.RAX);
             WriteU64(Instance, Address + 0x08, Context.RBX);
@@ -3226,8 +3224,11 @@ namespace Brovan.Core.Emulation.OS.Linux
             WriteU64(Instance, Address + 0x78, Context.R15);
             WriteU64(Instance, Address + 0x80, Context.RIP);
             WriteU64(Instance, Address + 0x88, Context.RFLAGS);
-            WriteU64(Instance, Address + 0x90, State.FsBase);
-            WriteU64(Instance, Address + 0x98, State.GsBase);
+            WriteU64(Instance, Address + SavedFsBaseOffset, State.FsBase);
+            WriteU64(Instance, Address + SavedGsBaseOffset, State.GsBase);
+            WriteU64(Instance, Address + SavedFpcwOffset, Instance.ReadRegister(Registers.UC_X86_REG_FPCW));
+            WriteU64(Instance, Address + SavedFpswOffset, Fpsw);
+            WriteU64(Instance, Address + SavedMxcsrOffset, Instance.ReadRegister(Registers.UC_X86_REG_MXCSR));
         }
 
         private static void LoadContextIntoLiveRegisters(BinaryEmulator Instance, CpuContext Context, LinuxThreadState State)
@@ -3305,19 +3306,19 @@ namespace Brovan.Core.Emulation.OS.Linux
         {
             if (Signal < 0 || Signal >= LinuxThreadState.SignalCount)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!IgnoreTgid && Tgid != Helper.PID)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ESRCH);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ESRCH);
                 return;
             }
 
             if (!Instance.Threads.TryGetValue(unchecked((uint)Tid), out EmulatedThread Thread) || Thread == null || Thread.State == EmulatedThreadState.Terminated)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ESRCH);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ESRCH);
                 return;
             }
 
@@ -3332,7 +3333,7 @@ namespace Brovan.Core.Emulation.OS.Linux
                 });
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
     }
 

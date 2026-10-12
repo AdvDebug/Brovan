@@ -62,8 +62,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (TargetThread.State == EmulatedThreadState.Suspended)
                 {
                     Instance.UnfileWait(TargetThread);
-                    TargetThread.State = TargetThread.WaitActive ? EmulatedThreadState.Waiting : EmulatedThreadState.Ready;
-                    Instance.WakeSignal.Bump();
+                    if (TargetThread.WaitActive)
+                    {
+                        TargetThread.State = EmulatedThreadState.Waiting;
+                        Instance.WakeSignal.Bump();
+                    }
+                    else
+                    {
+                        // Ending the slice lets the thread run before its resumer can suspend it again.
+                        TargetThread.State = EmulatedThreadState.Ready;
+                        Instance.YieldSliceAfterWake(TargetThread, EndSlice: true);
+                    }
                 }
             }
 

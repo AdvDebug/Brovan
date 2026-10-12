@@ -701,7 +701,7 @@ namespace Brovan.Core.Emulation
         internal bool CanSkipWaitCheck(EmulatedThread Thread, long Now)
         {
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-            if (State == null || State.WaitCheckedObjects == null || !ReferenceEquals(State.WaitCheckedHandles, Thread.WaitHandles))
+            if (State == null || State.WaitCheckedObjects == null || State.WaitCheckedGeneration != Thread.WaitHandlesGeneration)
                 return false;
 
             return !IsDeadlineExpired(Thread.WaitDeadline, Now) && !SignalledSince(State.WaitCheckedObjects, State.WaitCheckedEpoch);
@@ -725,13 +725,13 @@ namespace Brovan.Core.Emulation
                 return;
 
             List<ulong> Handles = Thread.WaitHandles;
-            if (ReferenceEquals(State.WaitCheckedHandles, Handles))
+            if (State.WaitCheckedGeneration == Thread.WaitHandlesGeneration)
             {
                 State.WaitCheckedEpoch = ScanEpoch;
                 return;
             }
 
-            State.WaitCheckedHandles = Handles;
+            State.WaitCheckedGeneration = Thread.WaitHandlesGeneration;
             State.WaitCheckedObjects = null;
             State.WaitCheckedEpoch = ScanEpoch;
 
@@ -797,7 +797,7 @@ namespace Brovan.Core.Emulation
         }
 
         private bool IsWaitFileable(EmulatedThread Thread, WindowsThreadState State, long Now) =>
-            State.WaitCheckedObjects != null && ReferenceEquals(State.WaitCheckedHandles, Thread.WaitHandles)
+            State.WaitCheckedObjects != null && State.WaitCheckedGeneration == Thread.WaitHandlesGeneration
             && Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive && Thread.HostWorker == -1
             && !IsDeadlineExpired(Thread.WaitDeadline, Now) && !Guest.HasPendingGuestWork(this, Thread);
 
@@ -1543,18 +1543,17 @@ namespace Brovan.Core.Emulation
             return null;
         }
 
+        private const uint PAGE_GUARD = 0x100;
+
         private bool GrowThreadStack(EmulatedThread Thread, MemoryRegion GuardBlock)
         {
-            const uint PAGE_READWRITE = 0x04;
-            const uint PAGE_GUARD = 0x100;
-
             ulong BlockSize = AlignUp(GuardBlock.Size, PageSize);
             ulong NextGuard = GuardBlock.BaseAddress - BlockSize;
 
             if (GuardBlock.BaseAddress < BlockSize || NextGuard < Thread.StackAddress)
                 return false;
 
-            if (!ProtectWinMemoryRange(GuardBlock.BaseAddress, BlockSize, GuardBlock.Protections, PAGE_READWRITE))
+            if (!ProtectMemoryRange(GuardBlock.BaseAddress, BlockSize, GuardBlock.Protections, PAGE_READWRITE))
                 return false;
 
             if (!CommitMemory(NextGuard, BlockSize, PAGE_READWRITE | PAGE_GUARD))
@@ -1572,6 +1571,17 @@ namespace Brovan.Core.Emulation
             }
 
             return true;
+        }
+
+        // At the end of the reserve the stack cannot grow, so the guard page just loses its guard.
+        internal bool TryGrowCurrentStack(ulong Address)
+        {
+            EmulatedThread StackOwner = FindThreadStackContaining(Address);
+            if (StackOwner == null || !TryFindMemoryRegion(Address, out MemoryRegion GuardBlock) || !HasGuardProtection(GuardBlock.SpecialProtections))
+                return false;
+
+            return GrowThreadStack(StackOwner, GuardBlock)
+                || ProtectMemoryRange(Address & ~(PageSize - 1), PageSize, GuardBlock.Protections, GuardBlock.Protect & ~PAGE_GUARD);
         }
 
         internal bool TryHandleGuardPageViolation(BackendMemoryAccessType Type, ulong Address, out bool Resume)
@@ -1620,33 +1630,18 @@ namespace Brovan.Core.Emulation
                 ulong MiddleEnd = Math.Min(RegionEnd, PageEnd);
 
                 if (RegionStart < MiddleStart)
-                {
-                    MemoryRegion Left = Region;
-                    Left.BaseAddress = RegionStart;
-                    Left.Size = MiddleStart - RegionStart;
-                    Left.RequestedSize = Left.Size;
-                    Replacement.Add(Left);
-                }
+                    Replacement.Add(ClipRegion(Region, RegionStart, MiddleStart));
 
                 if (MiddleEnd > MiddleStart)
                 {
-                    MemoryRegion Middle = Region;
-                    Middle.BaseAddress = MiddleStart;
-                    Middle.Size = MiddleEnd - MiddleStart;
-                    Middle.RequestedSize = Middle.Size;
+                    MemoryRegion Middle = ClipRegion(Region, MiddleStart, MiddleEnd);
                     Middle.SpecialProtections = SpecialProtections.None;
-                    Middle.Protect &= ~0x100U;
+                    Middle.Protect &= ~PAGE_GUARD;
                     Replacement.Add(Middle);
                 }
 
                 if (MiddleEnd < RegionEnd)
-                {
-                    MemoryRegion Right = Region;
-                    Right.BaseAddress = MiddleEnd;
-                    Right.Size = RegionEnd - MiddleEnd;
-                    Right.RequestedSize = Right.Size;
-                    Replacement.Add(Right);
-                }
+                    Replacement.Add(ClipRegion(Region, MiddleEnd, RegionEnd));
             }
 
             _memory.RemoveRange(First, Last - First);
@@ -1681,52 +1676,47 @@ namespace Brovan.Core.Emulation
             if (Last == First)
                 return;
 
-            List<MemoryRegion> Replacement = new List<MemoryRegion>((Last - First) + 2);
+            int SpliceStart = First;
+            MemoryRegion Head = _memory[First];
+            if (Head.BaseAddress < AlignedBase)
+            {
+                _memory.Insert(First, ClipRegion(Head, Head.BaseAddress, AlignedBase));
+                First++;
+                Last++;
+                _memory[First] = ClipRegion(Head, AlignedBase, GetRangeEnd(Head.BaseAddress, Head.Size));
+            }
+
+            int SpliceEnd = Last;
+            MemoryRegion Tail = _memory[Last - 1];
+            ulong TailEnd = GetRangeEnd(Tail.BaseAddress, Tail.Size);
+            if (TailEnd > AlignedEnd)
+            {
+                _memory[Last - 1] = ClipRegion(Tail, Tail.BaseAddress, AlignedEnd);
+                _memory.Insert(Last, ClipRegion(Tail, AlignedEnd, TailEnd));
+                SpliceEnd++;
+            }
 
             for (int i = First; i < Last; i++)
             {
-                MemoryRegion Region = _memory[i];
-                ulong RegionStart = Region.BaseAddress;
-                ulong RegionEnd = GetRangeEnd(RegionStart, Region.Size);
-
-                if (RegionStart < AlignedBase)
-                {
-                    MemoryRegion LeftPart = Region;
-                    LeftPart.Size = AlignedBase - RegionStart;
-                    LeftPart.RequestedSize = LeftPart.Size;
-                    Replacement.Add(LeftPart);
-                }
-
-                ulong MiddleStart = Math.Max(RegionStart, AlignedBase);
-                ulong MiddleEnd = Math.Min(RegionEnd, AlignedEnd);
-                if (MiddleEnd > MiddleStart)
-                {
-                    MemoryRegion Middle = Region;
-                    Middle.BaseAddress = MiddleStart;
-                    Middle.Size = MiddleEnd - MiddleStart;
-                    Middle.RequestedSize = Middle.Size;
-                    Middle.Protections = Protection;
-                    Middle.Protect = WinProtect;
-                    Middle.SpecialProtections = Special;
-                    Replacement.Add(Middle);
-                }
-
-                if (RegionEnd > AlignedEnd)
-                {
-                    MemoryRegion RightPart = Region;
-                    RightPart.BaseAddress = AlignedEnd;
-                    RightPart.Size = RegionEnd - AlignedEnd;
-                    RightPart.RequestedSize = RightPart.Size;
-                    Replacement.Add(RightPart);
-                }
+                MemoryRegion Middle = _memory[i];
+                Middle.RequestedSize = Middle.Size;
+                Middle.Protections = Protection;
+                Middle.Protect = WinProtect;
+                Middle.SpecialProtections = Special;
+                _memory[i] = Middle;
             }
-
-            _memory.RemoveRange(First, Last - First);
-            _memory.InsertRange(First, Replacement);
 
             // Only the spliced span and the two regions flanking it can have gained a mergeable neighbour;
             // everything outside that window was already merged by whoever wrote it.
-            MergeAdjacentWinRegions(First - 1, First + Replacement.Count);
+            MergeAdjacentWinRegions(SpliceStart - 1, SpliceEnd);
+        }
+
+        private static MemoryRegion ClipRegion(MemoryRegion Region, ulong Start, ulong End)
+        {
+            Region.BaseAddress = Start;
+            Region.Size = End - Start;
+            Region.RequestedSize = Region.Size;
+            return Region;
         }
 
         /// <summary>
@@ -1761,7 +1751,7 @@ namespace Brovan.Core.Emulation
                 Last++;
         }
 
-        internal bool ProtectWinMemoryRange(ulong Address, ulong Size, MemoryProtection Protection, uint WinProtect = 0,
+        internal bool ProtectMemoryRange(ulong Address, ulong Size, MemoryProtection Protection, uint WinProtect = 0,
             SpecialProtections Special = SpecialProtections.None)
         {
             if (Size == 0)
@@ -2645,7 +2635,7 @@ namespace Brovan.Core.Emulation
 
                 MemoryProtection MappedProt = WinHelper.ConvertWinProtectToInternal(Protect);
                 SpecialProtections MappedSpecial = (Protect & 0x100) != 0 ? SpecialProtections.Guard : SpecialProtections.None;
-                if (ProtectWinMemoryRange(BaseAddress, Size, MappedProt, Protect, MappedSpecial))
+                if (ProtectMemoryRange(BaseAddress, Size, MappedProt, Protect, MappedSpecial))
                     return true;
 
                 return false;
@@ -2806,7 +2796,7 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            if (!ProtectWinMemoryRange(BaseAddress, Size, NewProt, Protect, Special))
+            if (!ProtectMemoryRange(BaseAddress, Size, NewProt, Protect, Special))
                 return false;
 
             MarkRangeCommitted(BaseAddress, Size);
@@ -3272,10 +3262,7 @@ namespace Brovan.Core.Emulation
 
             bool CftEnabled = this.Debug || (Settings.Flags & LogFlags.General) != 0;
             if (!CftEnabled)
-            {
-                Thread.LastRIP = Address;
                 return;
-            }
 
             ulong PreviousRip = Thread.LastRIP;
             WinModule MainModule = Helper.WinModules[0];
@@ -3339,7 +3326,8 @@ namespace Brovan.Core.Emulation
                 ulong NewRFlags = ReadMemoryULong(RSP + 0x10);
                 ulong NewRSP = ReadMemoryULong(RSP + 0x18);
                 _emulator.WriteRegister(IPRegister, NewRIP);
-                _emulator.WriteRegister(Registers.UC_X86_REG_EFLAGS, NewRFlags);
+                // An iretq in ring 3 cannot change IOPL or IF.
+                _emulator.WriteRegister(Registers.UC_X86_REG_EFLAGS, UserModeFlags.Clamp(NewRFlags));
                 _emulator.WriteRegister(Registers.UC_X86_REG_RSP, NewRSP);
             }
 

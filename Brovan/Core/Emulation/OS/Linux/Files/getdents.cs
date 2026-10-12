@@ -26,51 +26,51 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (count == 0 || count > int.MaxValue)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             FileDescriptorEntry? Entry = Helper.DescriptorTable.GetEntry(fd);
             if (Entry == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (Entry.Object is not FileObject FileDesc)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOTDIR);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOTDIR);
                 return;
             }
 
             if ((FileDesc.StatusFlags & O_PATH) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (!FileDesc.IsDirectory)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOTDIR);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOTDIR);
                 return;
             }
 
             if (!Instance.IsRegionMapped(dirp, count))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             LinuxErrno Error = TryGetDirectoryEntries(Helper, FileDesc, out List<LinuxDirectoryEntry> Entries);
             if (Error != LinuxErrno.ESUCCESS)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             if (FileDesc.Offset >= (ulong)Entries.Count)
             {
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
@@ -93,18 +93,18 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (BytesWritten == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!Instance.WriteMemory(dirp, Buffer.Slice(0, BytesWritten)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             FileDesc.Offset = EntryIndex;
-            Helper.SetReturnValue(Instance, Context, BytesWritten);
+            Helper.SetReturnValue(Instance, BytesWritten);
         }
 
         private LinuxErrno TryGetDirectoryEntries(LinuxSyscallsHelper Helper, FileObject FileDesc, out List<LinuxDirectoryEntry> Entries)

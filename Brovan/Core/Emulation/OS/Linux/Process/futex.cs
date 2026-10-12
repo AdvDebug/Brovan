@@ -28,7 +28,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 State.FutexWaitActive = false;
                 State.FutexAddress = 0;
                 State.FutexBitset = 0;
-                Helper.SetReturnValue(Instance, Context, Result);
+                Helper.SetReturnValue(Instance, Result);
                 return;
             }
 
@@ -58,7 +58,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                     return;
 
                 default:
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOSYS);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOSYS);
                     return;
             }
         }
@@ -67,26 +67,26 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
         {
             if (Thread == null || State == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((uaddr & 3) != 0 || Bitset == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!Instance.IsRegionMapped(uaddr, 4))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             uint CurrentValue = BitConverter.ToUInt32(Instance.ReadMemory(uaddr, 4), 0);
             if (CurrentValue != ExpectedValue)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EAGAIN);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EAGAIN);
                 return;
             }
 
@@ -95,13 +95,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             {
                 if (!TryParseTimeout(Instance, Context, timeout, out long TimeoutMilliseconds))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if (TimeoutMilliseconds == 0)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ETIMEDOUT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ETIMEDOUT);
                     return;
                 }
 
@@ -124,7 +124,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             Thread.WaitSatisfiedIndex = -1;
             Thread.State = EmulatedThreadState.Waiting;
             Helper.AddFutexWaiter(uaddr, Thread);
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
             Instance._emulator.WriteRegister(Instance.IPRegister, State.FutexWaitResumeRIP);
             Instance._emulator.StopEmulation();
         }
@@ -133,12 +133,12 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
         {
             if ((uaddr & 3) != 0 || Bitset == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             uint Woken = Helper.WakeFutexWaiters(Instance, uaddr, Count, Bitset);
-            Helper.SetReturnValue(Instance, Context, Woken);
+            Helper.SetReturnValue(Instance, Woken);
         }
 
         private bool TryParseTimeout(BinaryEmulator Instance, LinuxSyscallContext Context, ulong Address, out long TimeoutMilliseconds)

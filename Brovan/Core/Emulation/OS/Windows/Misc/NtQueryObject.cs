@@ -48,10 +48,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryGetHandleContext(Instance, Handle, out IHandleObject HandleObject, out string _, out string _))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            // NT wants exactly the structure's size and writes no ReturnLength on a mismatch.
             uint Size = (uint)StructSerializer.GetStructSize<OBJECT_BASIC_INFORMATION_DATA>(Instance._binary.Architecture == BinaryArchitecture.x64);
-            WriteReturnLength(Instance, ReturnLength, Size);
-
-            if (ObjectInformationLength < Size)
+            if (ObjectInformationLength != Size)
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
             if (ObjectInformation == 0 || !Instance.IsRegionMapped(ObjectInformation, Size))
@@ -89,6 +88,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!StructSerializer.WriteStruct(Instance, ObjectInformation, Data).Success)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+            WriteReturnLength(Instance, ReturnLength, Size);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

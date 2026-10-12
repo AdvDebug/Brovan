@@ -892,10 +892,29 @@ namespace Brovan.Core.Emulation
             return WriteRegister((int)register, value);
         }
 
+        // Hypervisor backends run a 32-bit guest in compatibility mode, where the 64-bit names reach the same registers.
+        private static int To32BitRegister(int Register) => Register switch
+        {
+            (int)Registers.UC_X86_REG_RAX => (int)Registers.UC_X86_REG_EAX,
+            (int)Registers.UC_X86_REG_RBX => (int)Registers.UC_X86_REG_EBX,
+            (int)Registers.UC_X86_REG_RCX => (int)Registers.UC_X86_REG_ECX,
+            (int)Registers.UC_X86_REG_RDX => (int)Registers.UC_X86_REG_EDX,
+            (int)Registers.UC_X86_REG_RSI => (int)Registers.UC_X86_REG_ESI,
+            (int)Registers.UC_X86_REG_RDI => (int)Registers.UC_X86_REG_EDI,
+            (int)Registers.UC_X86_REG_RBP => (int)Registers.UC_X86_REG_EBP,
+            (int)Registers.UC_X86_REG_RSP => (int)Registers.UC_X86_REG_ESP,
+            (int)Registers.UC_X86_REG_RIP => (int)Registers.UC_X86_REG_EIP,
+            (int)Registers.UC_X86_REG_RFLAGS => (int)Registers.UC_X86_REG_EFLAGS,
+            _ => Register,
+        };
+
         public unsafe bool WriteRegister(int Register, ulong Value)
         {
             if (DisposedCheck())
                 return false;
+
+            if (mode == Mode.MODE_32)
+                Register = To32BitRegister(Register);
 
             ulong* Slot = DirectRegister(Register, DirectWritable);
             if (Slot != null)
@@ -908,8 +927,9 @@ namespace Brovan.Core.Emulation
             lock (_registerLock)
             {
                 _error = uc_reg_write_raw(_uc, Register, ref Value);
-                return _error == UCErrors.UC_ERR_OK;
             }
+
+            return _error == UCErrors.UC_ERR_OK;
         }
 
         public bool WriteGdtr(ulong Base, uint Limit)
@@ -925,13 +945,7 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        public bool WriteRegister32(Registers register, uint value)
-        {
-            if (DisposedCheck())
-                return false;
-            _error = uc_reg_write(_uc, register, ref value);
-            return _error == UCErrors.UC_ERR_OK;
-        }
+        public bool WriteRegister32(Registers register, uint value) => WriteRegister32((int)register, value);
 
         public bool WriteRegister32(int Register, uint Value)
         {
@@ -977,6 +991,9 @@ namespace Brovan.Core.Emulation
 
             if (_uc == IntPtr.Zero)
                 throw new InvalidOperationException("Unicorn engine is not initialized.");
+
+            if (mode == Mode.MODE_32)
+                Register = To32BitRegister(Register);
 
             ulong* Slot = DirectRegister(Register, DirectReadable);
             if (Slot != null)
@@ -1035,7 +1052,7 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck())
                 return false;
 
-            if (Registers == null || Values == null || Count <= 0 || Count > Registers.Length || Count > Values.Length)
+            if (!RegisterBatch.IsValid(Registers, Values, Count))
                 return false;
 
             fixed (int* RegsPtr = Registers)
@@ -1054,6 +1071,8 @@ namespace Brovan.Core.Emulation
                         continue;
                     }
 
+                    // A narrow register such as a selector fills only the low bytes of its slot.
+                    ValsPtr[i] = 0;
                     NativeRegs[NativeCount] = RegsPtr[i];
                     PtrArray[NativeCount] = &ValsPtr[i];
                     NativeCount++;
@@ -1081,7 +1100,7 @@ namespace Brovan.Core.Emulation
             if (DisposedCheck())
                 return false;
 
-            if (Registers == null || Values == null || Count <= 0 || Count > Registers.Length || Count > Values.Length)
+            if (!RegisterBatch.IsValid(Registers, Values, Count))
                 return false;
 
             fixed (int* RegsPtr = Registers)

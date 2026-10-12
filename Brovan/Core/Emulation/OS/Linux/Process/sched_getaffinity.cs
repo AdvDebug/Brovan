@@ -14,20 +14,20 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (!IsKnownTask(Helper, pid))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ESRCH);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ESRCH);
                 return;
             }
 
             int MaskBytes = Context.Abi == SyscallAbi.X64 ? 8 : 4;
             if (len < (ulong)MaskBytes)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (user_mask_ptr == 0 || !Instance.IsRegionMapped(user_mask_ptr, (ulong)MaskBytes))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -41,11 +41,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (!Instance.WriteMemory(user_mask_ptr, Mask.Slice(0, MaskBytes)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, MaskBytes);
+            Helper.SetReturnValue(Instance, MaskBytes);
         }
 
         private static bool IsKnownTask(LinuxSyscallsHelper Helper, int Pid)

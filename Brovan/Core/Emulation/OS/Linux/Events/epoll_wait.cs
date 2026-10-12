@@ -26,26 +26,26 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
             FileDescriptorEntry? EpollEntry = Helper.DescriptorTable.GetEntry(epfd);
             if (EpollEntry == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (EpollEntry.Object is not EpollObject Epoll)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (maxevents <= 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             ulong EventBytes = checked((ulong)maxevents * EpollEventSize);
             if (!Instance.IsRegionMapped(events, EventBytes))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -58,14 +58,14 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
             if (ReadyCount < 0)
             {
                 RestoreTemporarySignalMask(ThreadState, SavedSignalMask);
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (ReadyCount != 0 || timeout == 0)
             {
                 RestoreTemporarySignalMask(ThreadState, SavedSignalMask);
-                Helper.SetReturnValue(Instance, Context, ReadyCount);
+                Helper.SetReturnValue(Instance, ReadyCount);
                 return;
             }
 
@@ -73,7 +73,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
             if (Thread == null || ThreadState == null)
             {
                 RestoreTemporarySignalMask(ThreadState, SavedSignalMask);
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -86,7 +86,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
 
             if (LinuxSignalHelpers.TryActivatePendingSignal(ThreadState))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINTR);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINTR);
                 Instance._emulator.WriteRegister(Instance.IPRegister, LinuxGuest.GetCurrentSyscallInstructionAddress(Instance, Context));
                 Instance._emulator.StopEmulation();
                 return;
@@ -100,7 +100,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
             Thread.State = EmulatedThreadState.Waiting;
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
             Instance._emulator.WriteRegister(Instance.IPRegister, LinuxGuest.GetCurrentSyscallInstructionAddress(Instance, Context));
             Instance._emulator.StopEmulation();
         }
@@ -113,13 +113,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
 
             if (sigsetsize != LinuxThreadState.SignalSetSize)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return false;
             }
 
             if (!Instance.IsRegionMapped(sigmask, sigsetsize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 
@@ -130,7 +130,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
             SavedSignalMask = (byte[])State.SignalMask.Clone();
             if (!Instance.ReadMemory(sigmask, State.SignalMask.AsSpan(0, LinuxThreadState.SignalSetSize)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return false;
             }
 

@@ -151,7 +151,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             State.MsgWaitMask = WakeMask;
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_PENDING;
-            State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
+            State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip();
             State.WaitReturnRIP = State.WaitResumeRIP + 2;
             State.WaitAlertable = Alertable;
 

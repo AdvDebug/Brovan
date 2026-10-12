@@ -12,13 +12,13 @@ namespace Brovan.Core.Emulation.OS.Linux.network
 
             if (!SocketHelpers.TryGetSocket(Helper, Descriptor, out SocketObject SocketHandle, out LinuxErrno Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             if (!SocketHelpers.TryCheckNetworkPolicy(Instance, out Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -26,7 +26,7 @@ namespace Brovan.Core.Emulation.OS.Linux.network
             {
                 if (SocketHandle.Handle.LocalEndPoint is not IPEndPoint LocalEndPoint || !SocketHelpers.TryCheckNetworkPolicy(Instance, LocalEndPoint, out Error))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENETUNREACH);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENETUNREACH);
                     return;
                 }
             }
@@ -35,15 +35,15 @@ namespace Brovan.Core.Emulation.OS.Linux.network
             {
                 SocketHandle.Handle.Listen(Math.Max(Backlog, 0));
                 SocketHandle.IsListening = true;
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
             }
             catch (SocketException Ex)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)SocketHelpers.TranslateSocketError(Ex.SocketErrorCode));
+                Helper.SetReturnValue(Instance, -(long)SocketHelpers.TranslateSocketError(Ex.SocketErrorCode));
             }
             catch (ObjectDisposedException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
             }
         }
     }

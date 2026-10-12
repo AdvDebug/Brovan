@@ -17,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (TargetThread == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ESRCH);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ESRCH);
                 return;
             }
 
@@ -29,17 +29,17 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (!Instance.IsRegionMapped(Context.Arg1, WordSize) || !Instance.IsRegionMapped(Context.Arg2, WordSize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (!WriteWord(Instance, Context.Arg1, WordSize, Head) || !WriteWord(Instance, Context.Arg2, WordSize, WordSize * 3))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
 
         private static bool WriteWord(BinaryEmulator Instance, ulong Address, ulong WordSize, ulong Value)

@@ -108,6 +108,8 @@ namespace Brovan.Core.Emulation
 
         bool TryHandleSyscall(BinaryEmulator Instance);
         bool TryHandleInterrupt(BinaryEmulator Instance, uint InterruptNumber);
+
+        bool RaisableFromUserMode(uint Vector);
         void HandlePrivilegedInstruction(BinaryEmulator Instance);
         void HandleInvalidInstruction(BinaryEmulator Instance);
         bool HandleInvalidMemory(BinaryEmulator Instance, BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value);

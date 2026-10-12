@@ -21,7 +21,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             // WM_PAINT answers to the window procedure, so this syscall runs again once the callback returns.
             if (Window.Dirty && Window.Visible)
             {
-                ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Instance.CurrentThread, false);
+                ulong SyscallRip = Instance.WinHelper.GetSyscallRip();
                 Window.Dirty = false;
 
                 if (SyscallRip != 0 &&

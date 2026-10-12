@@ -16,40 +16,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_PENDING;
         }
 
-        private static long ReadDelayMs(BinaryEmulator Instance, ulong Ptr)
-        {
-            if (Ptr == 0)
-                return 0;
-
-            long QuadPart = unchecked((long)Instance._emulator.ReadMemoryULong(Ptr));
-            long Delta100Ns;
-
-            if (QuadPart >= 0)
-            {
-                long NowFileTime = Instance.GetEmulatedSystemTimeFileTimeUtc();
-                if (QuadPart <= NowFileTime)
-                    return 0;
-
-                Delta100Ns = QuadPart - NowFileTime;
-            }
-            else
-            {
-                Delta100Ns = QuadPart == long.MinValue ? long.MaxValue : -QuadPart;
-            }
-
-            long DelayMs = Delta100Ns / 10000;
-            if ((Delta100Ns % 10000) != 0 && DelayMs < long.MaxValue)
-                DelayMs++;
-
-            return DelayMs;
-        }
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-
             bool Alertable = (byte)Instance.WinHelper.GetArg(0) != 0;
             ulong DelayIntervalPtr = Instance.WinHelper.GetArg(1);
-            long DelayMs = ReadDelayMs(Instance, DelayIntervalPtr);
             EmulatedThread Thread = Instance.CurrentThread;
 
             if (Thread == null)
@@ -66,22 +36,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread.WaitActive)
                 return ContinueDelay(Instance, Thread);
 
+            // NT only requires 4-byte alignment for the interval.
+            if ((DelayIntervalPtr & 3) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
+
+            if (!Instance.IsAccessible(DelayIntervalPtr, sizeof(long), false) || !Instance.WinHelper.TryReadUInt64(DelayIntervalPtr, out ulong CapturedInterval))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            long Interval = unchecked((long)CapturedInterval);
+            long DelayMs = Instance.WinHelper.TimeoutToMilliseconds(Interval);
+
             if (Instance.WinHelper.TryEndWaitWithUserApc(Thread, Alertable))
                 return NTSTATUS.STATUS_USER_APC;
 
-            ulong SyscallRip = Instance.WinHelper.GetSyscallRip(Thread, false);
-            ulong NextRip = SyscallRip + 2;
-
             if (DelayMs <= 0)
             {
+                // NT returns the yield's status for a zero interval (KeDelayExecutionThread).
+                NTSTATUS Status = NtYieldExecution.Yield(Instance, Thread);
+
                 // A zero delay is a yield, so whoever the caller is standing aside for has to be looked at now.
                 Instance.WakeSignal.Bump();
-                Instance._emulator.WriteRegister(Instance.IPRegister, NextRip);
-                Thread.State = EmulatedThreadState.Ready;
-                Instance._emulator.StopEmulation();
-                return NTSTATUS.STATUS_SUCCESS;
+                return Interval == 0 ? Status : NTSTATUS.STATUS_SUCCESS;
             }
 
+            ulong SyscallRip = Instance.WinHelper.GetSyscallRip();
             Thread.WaitActive = true;
             Thread.WaitHandles = null;
             Thread.WaitAll = false;
@@ -89,7 +67,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinEmulatedThread.GetState(Thread).WaitCompleted = false;
             WinEmulatedThread.GetState(Thread).WaitStatus = NTSTATUS.STATUS_PENDING;
             WinEmulatedThread.GetState(Thread).WaitResumeRIP = SyscallRip;
-            WinEmulatedThread.GetState(Thread).WaitReturnRIP = NextRip;
+            WinEmulatedThread.GetState(Thread).WaitReturnRIP = SyscallRip + 2;
             WinEmulatedThread.GetState(Thread).WaitAlertable = Alertable;
             WinEmulatedThread.GetState(Thread).ApcAlertable = Alertable;
 

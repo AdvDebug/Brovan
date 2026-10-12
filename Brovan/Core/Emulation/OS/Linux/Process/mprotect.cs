@@ -10,13 +10,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (len == 0)
             {
-                Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+                Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
                 return;
             }
 
             if (len > ulong.MaxValue - 0xFFFUL || addr > ulong.MaxValue - len)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -24,23 +24,23 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (!Instance.IsAlignedToPageSize(addr))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!Instance.IsMemoryRangeMapped(addr, AlignedSize))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOMEM);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                 return;
             }
 
-            if (!Instance._emulator.SetMemoryProtection(addr, AlignedSize, Helper.TranslateLinuxMemToNative(prot)))
+            if (!Instance.ProtectMemoryRange(addr, AlignedSize, Helper.TranslateLinuxMemToNative(prot)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+            Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
         }
     }
 }

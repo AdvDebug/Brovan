@@ -15,11 +15,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             LinuxErrno Error = LinuxSeekHelper.TrySeek(Instance, Helper, Descriptor, Offset, Whence, Context.Abi == SyscallAbi.X86, out long Result);
             if (Error != LinuxErrno.ESUCCESS)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, Result);
+            Helper.SetReturnValue(Instance, Result);
         }
     }
 
@@ -36,13 +36,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             LinuxErrno Error = LinuxSeekHelper.TrySeek(Instance, Helper, Descriptor, Offset, Whence, false, out long Result);
             if (Error != LinuxErrno.ESUCCESS)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
             if (!Instance.IsRegionMapped(ResultAddress, 8))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -50,11 +50,11 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             BinaryPrimitives.WriteInt64LittleEndian(ResultBuffer, Result);
             if (!Instance.WriteMemory(ResultAddress, ResultBuffer))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
     }
 

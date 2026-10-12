@@ -14,10 +14,10 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
             Utsname uts = Helper.CreateUtsname(Instance.IsX64Guest);
             if (!StructSerializer.WriteStruct(Instance, buf, uts).Success)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
-            Helper.SetReturnValue(Instance, Context, LinuxErrno.ESUCCESS);
+            Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
         }
     }
 }

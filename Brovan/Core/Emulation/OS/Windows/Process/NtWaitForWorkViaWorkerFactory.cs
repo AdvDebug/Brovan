@@ -117,12 +117,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_TIMEOUT;
 
             Thread.WaitActive = true;
-            Thread.WaitHandles = new List<ulong> { WorkerFactoryHandle };
+            Thread.WaitOnSingleHandle(WorkerFactoryHandle);
             Thread.WaitAll = true;
             Thread.WaitDeadline = Deadline;
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_PENDING;
-            State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip(Thread, false);
+            State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip();
             State.WaitReturnRIP = State.WaitResumeRIP + 2;
             State.WaitAlertable = false;
             State.WorkerFactoryReservedEntries?.Clear();

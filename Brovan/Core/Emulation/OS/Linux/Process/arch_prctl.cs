@@ -5,129 +5,76 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 {
     internal class Arch_prctl : ILinuxSyscall
     {
-        private const ulong ARCH_SET_GS = 0x1001;
-        private const ulong ARCH_SET_FS = 0x1002;
-        private const ulong ARCH_GET_FS = 0x1003;
-        private const ulong ARCH_GET_GS = 0x1004;
-        private const ulong ARCH_GET_CPUID = 0x1005;
-        private const ulong ARCH_SET_CPUID = 0x1006;
+        private const uint ARCH_SET_GS = 0x1001;
+        private const uint ARCH_SET_FS = 0x1002;
+        private const uint ARCH_GET_FS = 0x1003;
+        private const uint ARCH_GET_GS = 0x1004;
+        private const uint ARCH_GET_CPUID = 0x1011;
+        private const uint ARCH_SET_CPUID = 0x1012;
+
+        // Linux TASK_SIZE_MAX with 4-level paging.
+        internal const ulong TASK_SIZE_MAX = 0x7FFFFFFFF000;
 
         public void Handle(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context)
         {
-            ulong op = Context.Arg0;
+            uint op = (uint)Context.Arg0;
             ulong value = Context.Arg1;
 
             switch (op)
             {
                 case ARCH_SET_FS:
-                    if (Context.Abi != SyscallAbi.X64)
-                    {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
-                        return;
-                    }
-
-                    Instance.WriteRegister(Registers.UC_X86_REG_FS_BASE, value);
-                    Helper.SetReturnValue(Instance, Context, 0L);
-                    return;
-
                 case ARCH_SET_GS:
                     if (Context.Abi != SyscallAbi.X64)
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                         return;
                     }
 
-                    Instance.WriteRegister(Registers.UC_X86_REG_GS_BASE, value);
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    if (value >= TASK_SIZE_MAX)
+                    {
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EPERM);
+                        return;
+                    }
+
+                    Instance.WriteRegister(op == ARCH_SET_FS ? Registers.UC_X86_REG_FS_BASE : Registers.UC_X86_REG_GS_BASE, value);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
 
                 case ARCH_GET_FS:
-                    if (Context.Abi != SyscallAbi.X64)
-                    {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
-                        return;
-                    }
-
-                    if (!Instance.IsRegionMapped(value, 8))
-                    {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
-                        return;
-                    }
-
-                    Span<byte> FsBaseBytes = stackalloc byte[8];
-                    BinaryPrimitives.WriteUInt64LittleEndian(FsBaseBytes, Instance.ReadRegister(Registers.UC_X86_REG_FS_BASE));
-                    if (!Instance.WriteMemory(value, FsBaseBytes))
-                    {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
-                        return;
-                    }
-                    Helper.SetReturnValue(Instance, Context, 0L);
-                    return;
-
                 case ARCH_GET_GS:
                     if (Context.Abi != SyscallAbi.X64)
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                         return;
                     }
 
-                    if (!Instance.IsRegionMapped(value, 8))
+                    if (!Instance.IsAccessible(value, 8, true))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
 
-                    Span<byte> GsBaseBytes = stackalloc byte[8];
-                    BinaryPrimitives.WriteUInt64LittleEndian(GsBaseBytes, Instance.ReadRegister(Registers.UC_X86_REG_GS_BASE));
-                    if (!Instance.WriteMemory(value, GsBaseBytes))
+                    Span<byte> BaseBytes = stackalloc byte[8];
+                    BinaryPrimitives.WriteUInt64LittleEndian(BaseBytes, Instance.ReadRegister(op == ARCH_GET_FS ? Registers.UC_X86_REG_FS_BASE : Registers.UC_X86_REG_GS_BASE));
+                    if (!Instance.WriteMemory(value, BaseBytes))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                         return;
                     }
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, 0L);
                     return;
 
+                // These match Linux on a CPU without CPUID faulting (do_arch_prctl_common).
                 case ARCH_GET_CPUID:
-                    {
-                        int size = Context.Abi == SyscallAbi.X64 ? 8 : 4;
-                        if (!Instance.IsRegionMapped(value, (ulong)size))
-                        {
-                            Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
-                            return;
-                        }
-
-                        if (Context.Abi == SyscallAbi.X64)
-                        {
-                            Span<byte> CpuidBytes = stackalloc byte[8];
-                            BinaryPrimitives.WriteUInt64LittleEndian(CpuidBytes, Helper.CpuidEnabled ? 1UL : 0UL);
-                            if (!Instance.WriteMemory(value, CpuidBytes))
-                            {
-                                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
-                                return;
-                            }
-                        }
-                        else
-                        {
-                            Span<byte> CpuidBytes = stackalloc byte[4];
-                            BinaryPrimitives.WriteUInt32LittleEndian(CpuidBytes, Helper.CpuidEnabled ? 1U : 0U);
-                            if (!Instance.WriteMemory(value, CpuidBytes))
-                            {
-                                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
-                                return;
-                            }
-                        }
-
-                        Helper.SetReturnValue(Instance, Context, 0L);
-                        return;
-                    }
+                    Helper.SetReturnValue(Instance, 1L);
+                    return;
 
                 case ARCH_SET_CPUID:
-                    Helper.CpuidEnabled = value != 0;
-                    Helper.SetReturnValue(Instance, Context, 0L);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENODEV);
                     return;
 
                 default:
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
             }
         }

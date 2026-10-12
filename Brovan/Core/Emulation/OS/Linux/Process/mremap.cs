@@ -19,37 +19,37 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             if (!Instance.IsAlignedToPageSize(OldAddress))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((Flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP)) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (NewSize == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((Flags & MREMAP_FIXED) != 0 && (Flags & MREMAP_MAYMOVE) == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((Flags & MREMAP_DONTUNMAP) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (OldSize == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
@@ -57,25 +57,25 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             ulong NewAlignedSize = Instance.AlignToPageSize(NewSize);
             if (OldAlignedSize == 0 || NewAlignedSize == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (OldAddress > ulong.MaxValue - OldAlignedSize)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (!Instance.TryFindMemoryRegionByBase(OldAddress, out int SourceIndex, out MemoryRegion SourceRegion))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
             ulong SourceAlignedSize = Instance.AlignToPageSize(SourceRegion.Size);
             if (OldAlignedSize != SourceAlignedSize)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -83,13 +83,13 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             {
                 if (!Instance.IsAlignedToPageSize(NewAddress) || NewAddress > ulong.MaxValue - NewAlignedSize)
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
 
                 if (RangesOverlap(OldAddress, OldAlignedSize, NewAddress, NewAlignedSize))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
             }
@@ -100,18 +100,18 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 {
                     if (!TryMoveRegion(Instance, Helper, SourceIndex, SourceRegion, OldAddress, OldAlignedSize, NewAddress, NewSize, true, out ulong FixedAddress))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOMEM);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                         return;
                     }
 
-                    Helper.SetReturnValue(Instance, Context, FixedAddress);
+                    Helper.SetReturnValue(Instance, FixedAddress);
                     return;
                 }
 
                 SourceRegion.Size = NewSize;
                 UpdatePoisonedMemory(ref SourceRegion, OldAddress, NewSize, NewAlignedSize);
                 Instance.SetMemoryRegion(SourceIndex, SourceRegion);
-                Helper.SetReturnValue(Instance, Context, OldAddress);
+                Helper.SetReturnValue(Instance, OldAddress);
                 return;
             }
 
@@ -123,7 +123,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 {
                     if (!Instance._emulator.UnmapMemory(TailAddress, TailSize))
                     {
-                        Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                         return;
                     }
 
@@ -133,7 +133,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 SourceRegion.Size = NewSize;
                 UpdatePoisonedMemory(ref SourceRegion, OldAddress, NewSize, NewAlignedSize);
                 Instance.SetMemoryRegion(SourceIndex, SourceRegion);
-                Helper.SetReturnValue(Instance, Context, OldAddress);
+                Helper.SetReturnValue(Instance, OldAddress);
                 return;
             }
 
@@ -146,25 +146,25 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                     SourceRegion.Size = NewSize;
                     UpdatePoisonedMemory(ref SourceRegion, OldAddress, NewSize, NewAlignedSize);
                     Instance.SetMemoryRegion(SourceIndex, SourceRegion);
-                    Helper.SetReturnValue(Instance, Context, OldAddress);
+                    Helper.SetReturnValue(Instance, OldAddress);
                     return;
                 }
             }
 
             if ((Flags & MREMAP_MAYMOVE) == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOMEM);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                 return;
             }
 
             ulong DestinationAddress = (Flags & MREMAP_FIXED) != 0 ? NewAddress : 0;
             if (!TryMoveRegion(Instance, Helper, SourceIndex, SourceRegion, OldAddress, OldAlignedSize, DestinationAddress, NewSize, (Flags & MREMAP_FIXED) != 0, out ulong ResultAddress))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOMEM);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                 return;
             }
 
-            Helper.SetReturnValue(Instance, Context, ResultAddress);
+            Helper.SetReturnValue(Instance, ResultAddress);
         }
 
         private static bool TryMoveRegion(BinaryEmulator Instance, LinuxSyscallsHelper Helper, int SourceIndex, MemoryRegion SourceRegion, ulong OldAddress, ulong OldAlignedSize, ulong NewAddress, ulong NewSize, bool FixedAddress, out ulong ResultAddress)

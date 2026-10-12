@@ -20,20 +20,20 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (count == 0)
             {
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
             if (count > int.MaxValue)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             FileDescriptorEntry? Entry = Helper.DescriptorTable.GetEntry(fd);
             if (Entry == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
@@ -57,25 +57,25 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
             if (Entry.Object is EpollObject)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (Entry.Object is not FileObject FileDesc)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if ((FileDesc.StatusFlags & O_ACCMODE) == O_WRONLY || (FileDesc.StatusFlags & O_PATH) != 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (FileDesc.IsDirectory)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EISDIR);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EISDIR);
                 return;
             }
 
@@ -83,19 +83,19 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
             {
                 if (Helper.SpecialPathsHandler.TryHandle(Instance, Helper, FileDesc, buf, count, false, out long Result))
                 {
-                    Helper.SetReturnValue(Instance, Context, Result);
+                    Helper.SetReturnValue(Instance, Result);
                     return;
                 }
 
                 if ((Instance.Settings.Flags & LogFlags.Important) != 0)
                     Instance.TriggerEventMessage($"[!] Special path handler not set for {FileDesc.Path}.", LogFlags.Important);
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENODEV);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENODEV);
                 return;
             }
 
             if (!Instance.IsRegionMapped(buf, count))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
@@ -120,27 +120,27 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
                 if (BytesRead > 0 && !Instance.WriteMemory(buf, Transfer.Slice(0, BytesRead)))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
-                Helper.SetReturnValue(Instance, Context, (long)BytesRead);
+                Helper.SetReturnValue(Instance, (long)BytesRead);
             }
             catch (UnauthorizedAccessException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EACCES);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EACCES);
             }
             catch (DirectoryNotFoundException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
             }
             catch (FileNotFoundException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.ENOENT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOENT);
             }
             catch (IOException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EIO);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EIO);
             }
         }
 
@@ -148,19 +148,19 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
         {
             if (!Instance.IsRegionMapped(BufferAddress, Count))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (SocketDesc.NonBlocking && SocketHelpers.WouldBlock(SocketDesc, SelectMode.SelectRead))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EAGAIN);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EAGAIN);
                 return;
             }
 
             if (!SocketHelpers.TryCheckSocketRemotePolicy(Instance, SocketDesc, true, out LinuxErrno Error))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)Error);
+                Helper.SetReturnValue(Instance, -(long)Error);
                 return;
             }
 
@@ -171,19 +171,19 @@ namespace Brovan.Core.Emulation.OS.Linux.Files
 
                 if (Received > 0 && !Instance.WriteMemory(BufferAddress, Transfer.Slice(0, Received)))
                 {
-                    Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                     return;
                 }
 
-                Helper.SetReturnValue(Instance, Context, Received);
+                Helper.SetReturnValue(Instance, Received);
             }
             catch (SocketException Ex)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)SocketHelpers.TranslateSocketError(Ex.SocketErrorCode));
+                Helper.SetReturnValue(Instance, -(long)SocketHelpers.TranslateSocketError(Ex.SocketErrorCode));
             }
             catch (ObjectDisposedException)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
             }
         }
 

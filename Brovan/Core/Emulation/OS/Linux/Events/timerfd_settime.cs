@@ -25,52 +25,52 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
             FileDescriptorEntry? Entry = Helper.DescriptorTable.GetEntry(fd);
             if (Entry == null)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EBADF);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EBADF);
                 return;
             }
 
             if (Entry.Object is not TimerfdObject Timerfd)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if ((flags & ~ValidFlags) != 0 || new_value == 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             int Size = GetItimerspecSize(Context);
             if (!Instance.IsRegionMapped(new_value, (ulong)Size) || (old_value != 0 && !Instance.IsRegionMapped(old_value, (ulong)Size)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             long Now = LinuxEventHelpers.GetClockNanoseconds(Helper, Timerfd.ClockId);
             if (old_value != 0 && !WriteItimerspec(Instance, Context, old_value, Timerfd.IntervalNanoseconds, Timerfd.GetRemainingNanoseconds(Now)))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (!ReadItimerspec(Instance, Context, new_value, out long IntervalNanoseconds, out long ValueNanoseconds))
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EFAULT);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EFAULT);
                 return;
             }
 
             if (IntervalNanoseconds < 0 || ValueNanoseconds < 0)
             {
-                Helper.SetReturnValue(Instance, Context, -(long)LinuxErrno.EINVAL);
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                 return;
             }
 
             if (ValueNanoseconds == 0)
             {
                 Timerfd.Disarm();
-                Helper.SetReturnValue(Instance, Context, 0L);
+                Helper.SetReturnValue(Instance, 0L);
                 return;
             }
 
@@ -80,7 +80,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Events
                 NextExpiration = Now;
 
             Timerfd.Arm(NextExpiration, IntervalNanoseconds, Absolute);
-            Helper.SetReturnValue(Instance, Context, 0L);
+            Helper.SetReturnValue(Instance, 0L);
         }
 
         private int GetTimespecSize(LinuxSyscallContext Context)

@@ -72,6 +72,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 AccessMask NewAccess = ((Flags & DuplicateFlags.DUPLICATE_SAME_ACCESS) != 0)
                     ? SourceAccess
                     : (AccessMask)(uint)DesiredAccess;
+                if (SourceObject is WinProcess)
+                    NewAccess = WinSysHelper.ProcessOpenRights(NewAccess);
 
                 ObjectHandleFlags NewAttributes = ((Flags & DuplicateFlags.DUPLICATE_SAME_ATTRIBUTES) != 0)
                     ? SourceAttributes
