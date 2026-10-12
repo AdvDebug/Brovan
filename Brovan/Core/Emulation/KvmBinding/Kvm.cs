@@ -113,6 +113,7 @@ namespace Brovan.Core.Emulation
 
             // Parked in the trap page with kernel CS/SS, so no segment write reaches the vCPU.
             public bool InSyscallStub;
+            public bool SyscallScratchWritten;
 
             public bool InIretStub;
             public UserReturnState IretReturn;
@@ -1220,6 +1221,22 @@ namespace Brovan.Core.Emulation
         }
 
         public bool WriteRegister(int register, ulong value) => WriteRegister((Registers)register, value);
+
+        public void SetSyscallReturnRegisters(ulong ReturnRip)
+        {
+            if (DisposedCheck()) return;
+
+            ref LinuxKvmRegisters regs = ref GetRegistersRef();
+            NoteSyscallScratchWrite(GpRegisterName.Rcx, regs.Rcx, ReturnRip);
+            NoteSyscallScratchWrite(GpRegisterName.R11, regs.R11, regs.Rflags);
+            regs.Rcx = ReturnRip;
+            regs.R11 = regs.Rflags;
+            regs.Rdx = 0;
+            regs.R8 = regs.Rsp;
+            regs.R9 = 0;
+            regs.R10 = 0;
+            MarkRegistersDirty();
+        }
 
         public bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
         {
@@ -4125,6 +4142,7 @@ namespace Brovan.Core.Emulation
             MarkRegistersDirty();
             ShowUserCodeAndStackSegments();
             CurrentVp.InSyscallStub = true;
+            CurrentVp.SyscallScratchWritten = false;
 
             if (_syscallHook.Callback != null) _syscallHook.Callback();
             else if (_syscallHook.BoolCallback != null) _syscallHook.BoolCallback();
@@ -4146,11 +4164,10 @@ namespace Brovan.Core.Emulation
             sregs.Ss = MakeSegment(KvmConstants.UserDataSelector, false, true);
         }
 
-        // Only valid while RCX and R11 hold what the syscall left.
         private void NoteSyscallScratchWrite(GpRegisterName name, ulong before, ulong after)
         {
             if (before != after && (name == GpRegisterName.Rcx || name == GpRegisterName.R11))
-                LeaveSyscallStub(CurrentVp);
+                CurrentVp.SyscallScratchWritten = true;
         }
 
         private static void LeaveSyscallStub(VirtualProcessor vp)
@@ -4166,6 +4183,11 @@ namespace Brovan.Core.Emulation
             // sysretq traps as soon as it restores TF, so a return with TF set goes through iretq instead.
             if (vp.SingleStepRequested || (run.Regs.Rflags & 0x100UL) != 0)
                 run.DirtyRegs |= KvmConstants.SyncSpecialRegisters;
+
+            // A value written to RCX or R11 survives sysretq only when it is the one sysretq loads there.
+            if (vp.SyscallScratchWritten && (run.Regs.Rcx != run.Regs.Rip || run.Regs.R11 != run.Regs.Rflags))
+                run.DirtyRegs |= KvmConstants.SyncSpecialRegisters;
+            vp.SyscallScratchWritten = false;
 
             if ((run.DirtyRegs & KvmConstants.SyncSpecialRegisters) != 0)
             {

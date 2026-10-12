@@ -220,6 +220,14 @@ namespace Brovan.Generators
                     m.Constants[name] = cv;
             }
 
+            foreach (XElement e in root.Descendants("enum"))
+            {
+                string name = (string)e.Attribute("name");
+                string bit = (string)e.Attribute("bitpos");
+                if (name != null && bit != null && !m.Constants.ContainsKey(name) && TryParseIntLiteral(bit, out int pos) && pos >= 0 && pos < 31)
+                    m.Constants[name] = 1 << pos;
+            }
+
             // An extension enum carries a block number and an offset instead of a value.
             foreach (XElement e in root.Descendants("enum"))
             {
@@ -544,7 +552,6 @@ namespace Brovan.Generators
 
         private static readonly Dictionary<string, string> ExtDenylist = new Dictionary<string, string>
         {
-            ["VK_KHR_external_memory_win32"] = "host handle crosses the boundary",
             ["VK_KHR_external_semaphore_win32"] = "host handle crosses the boundary",
             ["VK_KHR_external_fence_win32"] = "host handle crosses the boundary",
             ["VK_KHR_win32_keyed_mutex"] = "host handle crosses the boundary",
@@ -591,7 +598,20 @@ namespace Brovan.Generators
         private static readonly Dictionary<string, string[]> ExtKnownGaps = new Dictionary<string, string[]>
         {
             ["VK_KHR_maintenance6"] = new[] { "VkBindMemoryStatus" },
+            ["VK_KHR_external_memory_win32"] = new[] { "VkExportMemoryWin32HandleInfoKHR" },
         };
+
+        private static readonly Dictionary<string, string> HostReplaced = new Dictionary<string, string>
+        {
+            ["vkGetMemoryWin32HandleKHR"] = "BrovVulkGenMemory.GetMemoryWin32Handle",
+            ["vkGetMemoryWin32HandlePropertiesKHR"] = "BrovVulkGenMemory.GetMemoryWin32HandleProperties",
+        };
+
+        private static bool HostImplemented(VkExtension ext)
+        {
+            List<string> commands = EffectiveCommands(ext).ToList();
+            return commands.Count != 0 && commands.All(HostReplaced.ContainsKey);
+        }
 
         private static HashSet<string> Advertised = new HashSet<string>();
 
@@ -1109,7 +1129,7 @@ namespace Brovan.Generators
         {
             if (ExtDenylist.TryGetValue(ext.Name, out string denied))
                 return denied;
-            if (ext.Platform != null && ext.Name != "VK_KHR_win32_surface")
+            if (ext.Platform != null && ext.Name != "VK_KHR_win32_surface" && !HostImplemented(ext))
                 return "platform " + ext.Platform;
             foreach (string cn in EffectiveCommands(ext).OrderBy(x => x, StringComparer.Ordinal))
             {
@@ -1751,7 +1771,9 @@ namespace Brovan.Generators
             if (c.Name == "vkQueueSubmit" || c.Name == "vkQueueSubmit2")
                 head.Append("                BrovVulkGenMemory.SyncAllMappingsToHost(st, inst);\n");
             head.Append(b);
-            string call = "BrovVulkApi." + c.Name + "(" + string.Join(", ", callArgs) + ")";
+            string call = HostReplaced.TryGetValue(c.Name, out string replacement)
+                ? replacement + "(st, inst, " + string.Join(", ", callArgs) + ")"
+                : "BrovVulkApi." + c.Name + "(" + string.Join(", ", callArgs) + ")";
             if (c.Ret == "void")
             {
                 head.Append("                ");
@@ -2737,6 +2759,13 @@ namespace Brovan.Generators
                     lb.AppendLine("            [\"" + kv.Key + "." + off.Key + "\"] = " + off.Value + ",");
             }
             lb.AppendLine("        };");
+            lb.AppendLine("    }");
+            lb.AppendLine();
+            lb.AppendLine("    internal static class BrovVulkConstants");
+            lb.AppendLine("    {");
+            foreach (KeyValuePair<string, int> kv in m.Constants.OrderBy(k => k.Key, StringComparer.Ordinal))
+                if (kv.Key.StartsWith("VK_", StringComparison.Ordinal))
+                    lb.AppendLine("        internal const int " + kv.Key + " = " + kv.Value + ";");
             lb.AppendLine("    }");
             lb.AppendLine("}");
 

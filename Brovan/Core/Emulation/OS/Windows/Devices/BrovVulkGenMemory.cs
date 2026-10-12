@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 using Brovan.Core.Helpers;
+using Microsoft.Win32.SafeHandles;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -22,6 +23,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int StPhysicalDeviceProperties2 = 1000059001;
         private const uint HandleTypeHostAllocation = 0x80;
 
+        private const string ExternalMemoryWin32Name = "VK_KHR_external_memory_win32";
+        private const uint HandleTypeOpaqueWin32 = (uint)BrovVulkConstants.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+        private const uint HandleTypeOpaqueWin32Kmt = (uint)BrovVulkConstants.VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT;
+
+        private static readonly int ExportHandleTypes = BrovVulkLayout.MemberOffset["VkExportMemoryAllocateInfo.handleTypes"];
+        private static readonly int ImportHandleType = BrovVulkLayout.MemberOffset["VkImportMemoryWin32HandleInfoKHR.handleType"];
+        private static readonly int ImportHandle = BrovVulkLayout.MemberOffset["VkImportMemoryWin32HandleInfoKHR.handle"];
+        private static readonly int ImportName = BrovVulkLayout.MemberOffset["VkImportMemoryWin32HandleInfoKHR.name"];
+        private static readonly int GetHandleMemory = BrovVulkLayout.MemberOffset["VkMemoryGetWin32HandleInfoKHR.memory"];
+        private static readonly int GetHandleType = BrovVulkLayout.MemberOffset["VkMemoryGetWin32HandleInfoKHR.handleType"];
+
         private static readonly IntPtr ExternalMemoryHostExtName = Marshal.StringToHGlobalAnsi("VK_EXT_external_memory_host");
 
         internal static int CreateDevice(GenReader r, GenBuf w, GenState st, int createInfoSid)
@@ -34,6 +46,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             IntPtr ci = BrovVulkGenStruct.Rebuild(createInfoSid, r, st);
 
             int standIns = VulkanStandIns.StripDeviceFeatures(st, pd, ci);
+            bool win32Memory = EnablesExtension(ci, ExternalMemoryWin32Name);
 
             bool importCapable = DeviceSupportsHostImport(pd, st);
             if (importCapable)
@@ -57,6 +70,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             st.SetDevicePhysical(device, pd);
             st.SetDeviceStandIns(device, standIns);
+            if (win32Memory)
+                st.EnableWin32Memory(device);
 
             if (importCapable)
             {
@@ -100,6 +115,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
+        private static bool EnablesExtension(IntPtr createInfo, string name)
+        {
+            uint count = *(uint*)(createInfo + VulkanStandIns.DeviceCreateInfoExtensionCount);
+            IntPtr names = *(IntPtr*)(createInfo + VulkanStandIns.DeviceCreateInfoExtensionNames);
+            for (uint k = 0; names != IntPtr.Zero && k < count; k++)
+            {
+                byte* entry = *(byte**)(names + (int)(k * 8));
+                if (entry != null && AnsiEquals(entry, name))
+                    return true;
+            }
+            return false;
+        }
+
         private static bool AnsiEquals(byte* p, string s)
         {
             int i = 0;
@@ -138,6 +166,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             // The import path rewrites allocationSize, so the guest's own size is taken first.
             ulong requested = *(ulong*)(ai + 16);
 
+            int translated = TranslateExternalMemory(st, inst, device, ai, out bool external, out uint exportTypes, out SafeHandle? shared);
+            if (translated < 0)
+                return translated;
+
             uint imported = 0;
             IntPtr memory = IntPtr.Zero;
             int rr = -1;
@@ -145,6 +177,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (bounceVa == 0 || bounceSize == 0)
             {
                 ImportStats.Record(ImportOutcome.NoGuestBounce, 0);
+            }
+            else if (external)
+            {
+                ImportStats.Record(ImportOutcome.ExternalMemory, requested);
             }
             else if (!st.TryGetDeviceImport(device, out GenState.DeviceImport di))
             {
@@ -194,7 +230,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (imported == 0)
             {
-                rr = (int)BrovVulkApi.vkAllocateMemory(device, ai, IntPtr.Zero, (IntPtr)(&memory));
+                bool referenced = false;
+                try
+                {
+                    shared?.DangerousAddRef(ref referenced);
+                    rr = (int)BrovVulkApi.vkAllocateMemory(device, ai, IntPtr.Zero, (IntPtr)(&memory));
+                }
+                finally
+                {
+                    if (referenced)
+                        shared!.DangerousRelease();
+                }
+
                 if (rr >= 0 && memory == IntPtr.Zero)
                     rr = VkErrorInitializationFailed;
             }
@@ -203,11 +250,94 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             uint id = st.Register(memory, "VkDeviceMemory", deviceId);
             st.SetMemorySize(id, requested);
+            st.SetExportTypes(id, exportTypes);
             if (imported != 0)
                 st.MarkImported(id);
             w.WriteU32(id);
             return rr;
         }
+
+        private static int TranslateExternalMemory(GenState st, IGuestMemory inst, IntPtr device, IntPtr allocateInfo, out bool external, out uint exportTypes, out SafeHandle? shared)
+        {
+            external = false;
+            exportTypes = 0;
+            shared = null;
+            bool importSeen = false;
+            for (IntPtr node = *(IntPtr*)(allocateInfo + VkOffsets.NodePNext); node != IntPtr.Zero; node = *(IntPtr*)(node + VkOffsets.NodePNext))
+            {
+                int sType = *(int*)node;
+                if (sType == BrovVulkConstants.VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO)
+                {
+                    exportTypes |= *(uint*)(node + ExportHandleTypes);
+                    external = true;
+                    continue;
+                }
+
+                if (sType != BrovVulkConstants.VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR)
+                    continue;
+
+                uint type = *(uint*)(node + ImportHandleType);
+                ulong guestHandle = *(ulong*)(node + ImportHandle);
+                IntPtr host;
+                if (importSeen || !st.HasWin32Memory(device) || *(IntPtr*)(node + ImportName) != IntPtr.Zero)
+                    return BrovVulkConstants.VK_ERROR_INVALID_EXTERNAL_HANDLE;
+                importSeen = true;
+
+                if (type == HandleTypeOpaqueWin32)
+                {
+                    shared = inst.FindSharedGpuMemoryHandle(guestHandle);
+                    if (shared == null)
+                        return BrovVulkConstants.VK_ERROR_INVALID_EXTERNAL_HANDLE;
+                    host = shared.DangerousGetHandle();
+                }
+                else if (type != HandleTypeOpaqueWin32Kmt || guestHandle > uint.MaxValue || !st.TryGetKmtHostShare((uint)guestHandle, out host))
+                {
+                    return BrovVulkConstants.VK_ERROR_INVALID_EXTERNAL_HANDLE;
+                }
+
+                *(IntPtr*)(node + ImportHandle) = host;
+                external = true;
+            }
+
+            return BrovVulkConstants.VK_SUCCESS;
+        }
+
+        internal static int GetMemoryWin32Handle(GenState st, IGuestMemory inst, IntPtr device, IntPtr info, IntPtr handle)
+        {
+            IntPtr memory = *(IntPtr*)(info + GetHandleMemory);
+            uint type = *(uint*)(info + GetHandleType);
+            uint id = st.IdOf(memory, "VkDeviceMemory");
+
+            // The Windows driver answers success and a null handle for memory not exported with the type.
+            if (id == 0 || !st.HasWin32Memory(device) || (type != HandleTypeOpaqueWin32 && type != HandleTypeOpaqueWin32Kmt) || (st.ExportTypes(id) & type) == 0)
+                return BrovVulkConstants.VK_SUCCESS;
+
+            if (type == HandleTypeOpaqueWin32Kmt && st.TryGetKmtToken(id, out uint token))
+            {
+                *(IntPtr*)handle = (IntPtr)token;
+                return BrovVulkConstants.VK_SUCCESS;
+            }
+
+            IntPtr host = IntPtr.Zero;
+            int rr = (int)BrovVulkApi.vkGetMemoryWin32HandleKHR(device, info, (IntPtr)(&host));
+            if (rr < 0 || host == IntPtr.Zero)
+                return rr;
+
+            if (type == HandleTypeOpaqueWin32Kmt)
+            {
+                if (!st.TryAddKmtShare(id, host, out token))
+                    return BrovVulkConstants.VK_ERROR_TOO_MANY_OBJECTS;
+                *(IntPtr*)handle = (IntPtr)token;
+                return rr;
+            }
+
+            *(IntPtr*)handle = (IntPtr)(long)inst.AddSharedGpuMemoryHandle(new SafeFileHandle(host, ownsHandle: true));
+            return rr;
+        }
+
+        // The spec rejects the opaque handle types here, and the guest has no D3D resources of its own.
+        internal static int GetMemoryWin32HandleProperties(GenState st, IGuestMemory inst, IntPtr device, int handleType, IntPtr handle, IntPtr properties) =>
+            BrovVulkConstants.VK_ERROR_INVALID_EXTERNAL_HANDLE;
 
         private static bool ImportTypeBitsAllow(IntPtr device, GenState.DeviceImport di, IntPtr host, uint memoryTypeIndex)
         {
@@ -441,6 +571,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             DeviceAlignmentUnusable,
             MappingShared,
             MappingCopied,
+            ExternalMemory,
         }
 
         /// <summary>

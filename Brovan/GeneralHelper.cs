@@ -1828,7 +1828,15 @@ namespace Brovan
             public static string LinuxCurrentDirectory = "/";
             public static string DefaultDriveLetter = "C";
 
-            public static bool Wow64FileRedirect;
+            // Redirection is per guest thread, so each syscall sets it on the host thread that runs it.
+            [ThreadStatic] private static byte t_wow64FileRedirect;
+            public static bool Wow64FileRedirectDefault;
+
+            public static bool Wow64FileRedirect
+            {
+                get => t_wow64FileRedirect == 0 ? Wow64FileRedirectDefault : t_wow64FileRedirect == 1;
+                set => t_wow64FileRedirect = value ? (byte)1 : (byte)2;
+            }
 
             private const string System32WindowsPath = "C:\\Windows\\System32";
             private const string SysWow64WindowsPath = "C:\\Windows\\SysWOW64";
@@ -3793,8 +3801,43 @@ namespace Brovan
                 return Resolved;
             }
 
-            private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> SandboxLinkCache =
-                new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+            private static readonly PathCache<string> SandboxLinkCache = new PathCache<string>(StringComparer.Ordinal);
+
+            // At the budget the cache is cleared, not trimmed. An entry is cheap to rebuild, and a reset follows the
+            // paths in use now.
+            internal sealed class PathCache<TValue>
+            {
+                private readonly System.Collections.Concurrent.ConcurrentDictionary<string, TValue> Entries;
+                private int Inserts;
+
+                public PathCache(StringComparer Comparer)
+                {
+                    Entries = new System.Collections.Concurrent.ConcurrentDictionary<string, TValue>(Comparer);
+                }
+
+                public bool TryGetValue(string Key, out TValue Value) => Entries.TryGetValue(Key, out Value);
+
+                public bool ContainsKey(string Key) => Entries.ContainsKey(Key);
+
+                // An invalidation moves Generation before it clears. If it moved after the caller read Seen, the value
+                // may be stale and the insert is taken back.
+                public void Add(string Key, TValue Value, ref int Generation, int Seen)
+                {
+                    if (Volatile.Read(ref Inserts) >= Core.Settings.MemoryBudget.SandboxPathCacheEntries)
+                        Clear();
+
+                    Interlocked.Increment(ref Inserts);
+                    Entries[Key] = Value;
+                    if (Volatile.Read(ref Generation) != Seen)
+                        Entries.TryRemove(new KeyValuePair<string, TValue>(Key, Value));
+                }
+
+                public void Clear()
+                {
+                    Volatile.Write(ref Inserts, 0);
+                    Entries.Clear();
+                }
+            }
 
             // A probe scope caches host path queries. Open one only in a handler that changes nothing on the host.
             [ThreadStatic] private static Dictionary<string, FileInfo> ProbeScopeEntries;
@@ -3815,6 +3858,8 @@ namespace Brovan
                 ProbeScopeDepth++;
                 return default;
             }
+
+            public static void ForgetScopedProbes() => ProbeScopeEntries?.Clear();
 
             public static FileInfo GetHostInfo(string HostPath)
             {
@@ -4233,13 +4278,15 @@ namespace Brovan
             /// </summary>
             public static void InvalidateSandboxLinkCache()
             {
+                Interlocked.Increment(ref SandboxLinkGeneration);
                 SandboxLinkCache.Clear();
                 SandboxPlainComponents.Clear();
             }
 
+            private static int SandboxLinkGeneration;
+
             // Components known to exist and not be reparse points. All walks share them.
-            private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> SandboxPlainComponents =
-                new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+            private static readonly PathCache<byte> SandboxPlainComponents = new PathCache<byte>(StringComparer.Ordinal);
 
             private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, bool EnforceAllowedRoots = true)
             {
@@ -4250,12 +4297,9 @@ namespace Brovan
                 if (SandboxLinkCache.TryGetValue(Key, out string Cached))
                     return Cached;
 
+                int Generation = Volatile.Read(ref SandboxLinkGeneration);
                 string Resolved = ResolveSandboxLinks(FullPath, IncludeFinal, EnforceAllowedRoots, 0);
-
-                if (SandboxLinkCache.Count >= Core.Settings.MemoryBudget.SandboxPathCacheEntries)
-                    SandboxLinkCache.Clear();
-
-                SandboxLinkCache[Key] = Resolved;
+                SandboxLinkCache.Add(Key, Resolved, ref SandboxLinkGeneration, Generation);
                 return Resolved;
             }
 
@@ -4300,6 +4344,7 @@ namespace Brovan
                         if (SandboxPlainComponents.ContainsKey(Current))
                             continue;
 
+                        int Generation = Volatile.Read(ref SandboxLinkGeneration);
                         if (!TryGetHostAttributes(GetHostInfo(Current), out FileAttributes Attributes))
                         {
                             // An unreadable entry can still hold a link below it.
@@ -4309,11 +4354,7 @@ namespace Brovan
 
                         if ((Attributes & FileAttributes.ReparsePoint) == 0)
                         {
-                            // Cleared, not trimmed. An entry is one attribute query to rebuild, and a reset follows the paths in use now.
-                            if (SandboxPlainComponents.Count >= Core.Settings.MemoryBudget.SandboxPathCacheEntries)
-                                SandboxPlainComponents.Clear();
-
-                            SandboxPlainComponents.TryAdd(Current, 0);
+                            SandboxPlainComponents.Add(Current, 0, ref SandboxLinkGeneration, Generation);
                             continue;
                         }
 

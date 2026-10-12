@@ -339,7 +339,18 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<IntPtr, int> _deviceStandIns = new Dictionary<IntPtr, int>();
         private readonly Dictionary<IntPtr, uint> _layoutSets = new Dictionary<IntPtr, uint>();
         private readonly Dictionary<IntPtr, ulong> _bufferSizes = new Dictionary<IntPtr, ulong>();
+        private readonly HashSet<IntPtr> _win32MemoryDevices = new HashSet<IntPtr>();
+        private readonly Dictionary<uint, uint> _exportTypes = new Dictionary<uint, uint>();
+        private readonly Dictionary<uint, uint> _kmtTokenOfMemory = new Dictionary<uint, uint>();
+        private readonly Dictionary<uint, IntPtr> _kmtHostShares = new Dictionary<uint, IntPtr>();
+        private readonly Stack<uint> _freeKmtSlots = new Stack<uint>();
+        private uint _nextKmtSlot;
         private uint _next = 1;
+
+        // NT D3DKMT global share handles have this form.
+        private const uint KmtTokenBase = 0x40000002;
+        private const int KmtTokenShift = 6;
+        private const uint MaxKmtSlots = 1u << 24;
 
         public readonly BrovVulkWsi Wsi = new BrovVulkWsi();
         public readonly VulkanStandInState StandIns = new VulkanStandInState();
@@ -430,7 +441,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     else if (e.Type == "VkBuffer")
                         _bufferSizes.Remove(e.Ptr);
                     else if (e.Type == "VkDevice")
+                    {
                         _devicePhysical.Remove(e.Ptr);
+                        _win32MemoryDevices.Remove(e.Ptr);
+                    }
                     else if (e.Type == "VkSwapchainKHR" || e.Type == "VkSurfaceKHR")
                         Wsi.Forget(e.Ptr, e.Type);
 
@@ -444,6 +458,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 _mappings.Remove(next);
                 _importedMem.Remove(next);
                 _memorySizes.Remove(next);
+                if (_exportTypes.Count != 0)
+                    _exportTypes.Remove(next);
+                if (_kmtTokenOfMemory.Count != 0 && _kmtTokenOfMemory.Remove(next, out uint token))
+                {
+                    _kmtHostShares.Remove(token);
+                    _freeKmtSlots.Push((token - KmtTokenBase) >> KmtTokenShift);
+                }
 
                 if (_children.Remove(next, out HashSet<uint>? children))
                 {
@@ -508,6 +529,40 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void MarkImported(uint id) => _importedMem.Add(id);
 
         public bool IsImportedMemory(uint id) => _importedMem.Contains(id);
+
+        public void EnableWin32Memory(IntPtr device) => _win32MemoryDevices.Add(device);
+
+        public bool HasWin32Memory(IntPtr device) => _win32MemoryDevices.Contains(device);
+
+        public void SetExportTypes(uint id, uint handleTypes)
+        {
+            if (handleTypes != 0)
+                _exportTypes[id] = handleTypes;
+        }
+
+        public uint ExportTypes(uint id) => _exportTypes.TryGetValue(id, out uint types) ? types : 0;
+
+        public bool TryGetKmtToken(uint id, out uint token) => _kmtTokenOfMemory.TryGetValue(id, out token);
+
+        // The guest gets a token, because a host global share handle names objects of other host processes.
+        public bool TryAddKmtShare(uint id, IntPtr hostShare, out uint token)
+        {
+            token = 0;
+            uint slot;
+            if (_freeKmtSlots.Count != 0)
+                slot = _freeKmtSlots.Pop();
+            else if (_nextKmtSlot < MaxKmtSlots)
+                slot = _nextKmtSlot++;
+            else
+                return false;
+
+            token = KmtTokenBase + (slot << KmtTokenShift);
+            _kmtTokenOfMemory[id] = token;
+            _kmtHostShares[token] = hostShare;
+            return true;
+        }
+
+        public bool TryGetKmtHostShare(uint token, out IntPtr hostShare) => _kmtHostShares.TryGetValue(token, out hostShare);
 
         public void SetDeviceImport(IntPtr device, DeviceImport import) => _deviceImports[device] = import;
 

@@ -208,6 +208,8 @@ namespace Brovan.Core.Emulation.Guests
 
         public GuestOsKind Os => GuestOsKind.Linux;
 
+        public bool SupportsConcurrentSyscalls => false;
+
         private BlobData _blob;
         private ulong _initialStackBase;
         private ulong _initialStackSize;

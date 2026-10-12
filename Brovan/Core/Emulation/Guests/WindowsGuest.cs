@@ -25,6 +25,8 @@ namespace Brovan.Core.Emulation.Guests
     {
         public GuestOsKind Os => GuestOsKind.Windows;
 
+        public bool SupportsConcurrentSyscalls => true;
+
         public ulong StackSize { get; private set; }
         public ulong PEB { get; internal set; }
 
@@ -420,12 +422,7 @@ namespace Brovan.Core.Emulation.Guests
             else if (Thread.WaitSatisfiedIndex >= 0 && WaitStatus == NTSTATUS.STATUS_SUCCESS)
                 WaitStatus = (NTSTATUS)(uint)Thread.WaitSatisfiedIndex;
 
-            if (Thread.Context == null)
-                Thread.Context = new CpuContext();
-
-            ulong ResumeRip = State.WaitReturnRIP != 0 ? State.WaitReturnRIP : (State.WaitResumeRIP != 0 ? State.WaitResumeRIP + 2 : Thread.Context.RIP);
-            Thread.Context.RIP = ResumeRip;
-            Thread.Context.RAX = (ulong)(uint)WaitStatus;
+            ReturnFromWait(Instance, Thread, State, WaitStatus);
 
             State.WaitCompleted = false;
             State.WaitStatus = WaitStatus;
@@ -442,12 +439,6 @@ namespace Brovan.Core.Emulation.Guests
             State.GetMessageWaitActive = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
-
-            if (Instance.CurrentThread == Thread)
-            {
-                Instance.WriteRegister(Registers.UC_X86_REG_RIP, Thread.Context.RIP);
-                Instance.WriteRegister(Registers.UC_X86_REG_RAX, Thread.Context.RAX);
-            }
         }
 
         /// <summary>
@@ -461,6 +452,11 @@ namespace Brovan.Core.Emulation.Guests
             bool Cancelled = State.SyncIoCancelled;
             Thread.Context.RIP = Cancelled ? State.WaitResumeRIP + 2 : State.WaitResumeRIP;
             Thread.Context.RAX = Cancelled ? (ulong)(uint)NTSTATUS.STATUS_CANCELLED : State.RetrySyscallNumber;
+
+            // Only a cancelled call returns. Otherwise the syscall runs again and needs its arguments.
+            bool ExitRegisters = Cancelled && Instance.IsX64Guest;
+            if (ExitRegisters)
+                SetSyscallExitContext(Thread.Context);
 
             if (Cancelled)
             {
@@ -493,10 +489,7 @@ namespace Brovan.Core.Emulation.Guests
             Thread.WaitSatisfiedIndex = -1;
 
             if (Instance.CurrentThread == Thread)
-            {
-                Instance.WriteRegister(Registers.UC_X86_REG_RIP, Thread.Context.RIP);
-                Instance.WriteRegister(Registers.UC_X86_REG_RAX, Thread.Context.RAX);
-            }
+                WriteWaitReturn(Instance, Thread.Context, ExitRegisters);
         }
 
         // The request already wrote the IO_STATUS_BLOCK.
@@ -504,12 +497,7 @@ namespace Brovan.Core.Emulation.Guests
         {
             NTSTATUS Status = State.IoRequest.Status;
 
-            if (Thread.Context == null)
-                Thread.Context = new CpuContext();
-
-            ulong ResumeRip = State.WaitReturnRIP != 0 ? State.WaitReturnRIP : (State.WaitResumeRIP != 0 ? State.WaitResumeRIP + 2 : Thread.Context.RIP);
-            Thread.Context.RIP = ResumeRip;
-            Thread.Context.RAX = (ulong)(uint)Status;
+            ReturnFromWait(Instance, Thread, State, Status);
 
             State.IoRequest = null;
             State.WaitCompleted = false;
@@ -521,12 +509,6 @@ namespace Brovan.Core.Emulation.Guests
             State.ApcAlertable = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
-
-            if (Instance.CurrentThread == Thread)
-            {
-                Instance.WriteRegister(Registers.UC_X86_REG_RIP, Thread.Context.RIP);
-                Instance.WriteRegister(Registers.UC_X86_REG_RAX, Thread.Context.RAX);
-            }
         }
 
         private void CompleteIoCompletionWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
@@ -550,12 +532,7 @@ namespace Brovan.Core.Emulation.Guests
                 WaitStatus = NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (Thread.Context == null)
-                Thread.Context = new CpuContext();
-
-            ulong ResumeRip = State.WaitReturnRIP != 0 ? State.WaitReturnRIP : (State.WaitResumeRIP != 0 ? State.WaitResumeRIP + 2 : Thread.Context.RIP);
-            Thread.Context.RIP = ResumeRip;
-            Thread.Context.RAX = (ulong)(uint)WaitStatus;
+            ReturnFromWait(Instance, Thread, State, WaitStatus);
 
             State.ResetIoCompletionWait();
             State.WaitCompleted = false;
@@ -567,12 +544,6 @@ namespace Brovan.Core.Emulation.Guests
             State.ApcAlertable = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
-
-            if (Instance.CurrentThread == Thread)
-            {
-                Instance.WriteRegister(Registers.UC_X86_REG_RIP, Thread.Context.RIP);
-                Instance.WriteRegister(Registers.UC_X86_REG_RAX, Thread.Context.RAX);
-            }
         }
 
         private bool IsWorkerFactoryReady(BinaryEmulator Instance, WinWorkerFactory Factory)
@@ -630,12 +601,7 @@ namespace Brovan.Core.Emulation.Guests
                 }
             }
 
-            if (Thread.Context == null)
-                Thread.Context = new CpuContext();
-
-            ulong ResumeRip = State.WaitReturnRIP != 0 ? State.WaitReturnRIP : (State.WaitResumeRIP != 0 ? State.WaitResumeRIP + 2 : Thread.Context.RIP);
-            Thread.Context.RIP = ResumeRip;
-            Thread.Context.RAX = (ulong)(uint)WaitStatus;
+            ReturnFromWait(Instance, Thread, State, WaitStatus);
 
             State.WorkerFactoryWaitActive = false;
             State.WorkerFactoryHandle = 0;
@@ -650,12 +616,6 @@ namespace Brovan.Core.Emulation.Guests
             State.WaitAlertable = false;
             State.WaitObjects = null;
             State.ApcAlertable = false;
-
-            if (Instance.CurrentThread == Thread)
-            {
-                Instance.WriteRegister(Registers.UC_X86_REG_RIP, Thread.Context.RIP);
-                Instance.WriteRegister(Registers.UC_X86_REG_RAX, Thread.Context.RAX);
-            }
         }
 
         public bool ExecuteThreadSlice(BinaryEmulator Instance, EmulatedThread Thread, uint QuantumInstructions, out bool State)
@@ -755,7 +715,67 @@ namespace Brovan.Core.Emulation.Guests
 
             Instance.WinHelper.ClearPipeWait();
             SetLastWinErrorRegister(Instance, NTSTATUS.STATUS_CANCELLED);
+            SetSyscallExitRegisters(Instance, Rip);
             return true;
+        }
+
+        // NT returns from every x64 system call with rcx, rdx and r8 to r11 set as KiSystemServiceExit sets them.
+        // A waiting thread keeps its arguments for the retry, and a handler that moved RIP set its own context.
+        private void SetSyscallExitRegisters(BinaryEmulator Instance, ulong SyscallRip)
+        {
+            if (!Instance.IsX64Guest || Instance.CurrentThread?.State == EmulatedThreadState.Waiting
+                || Instance.ReadRegister(Instance.IPRegister) != SyscallRip)
+                return;
+
+            Instance._emulator.SetSyscallReturnRegisters(SyscallRip + 2);
+        }
+
+        private static void SetSyscallExitContext(CpuContext Context)
+        {
+            Context.RCX = Context.RIP;
+            Context.R11 = Context.RFLAGS;
+            Context.RDX = 0;
+            Context.R8 = Context.RSP;
+            Context.R9 = 0;
+            Context.R10 = 0;
+        }
+
+        private static void ReturnFromWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State, NTSTATUS Status)
+        {
+            CpuContext Context = Thread.Context ??= new CpuContext();
+            Context.RAX = (ulong)(uint)Status;
+
+            bool ExitRegisters = false;
+            if (State.WaitReturnRIP != 0 || State.WaitResumeRIP != 0)
+            {
+                Context.RIP = State.WaitReturnRIP != 0 ? State.WaitReturnRIP : State.WaitResumeRIP + 2;
+                ExitRegisters = Instance.IsX64Guest;
+                if (ExitRegisters)
+                    SetSyscallExitContext(Context);
+            }
+
+            if (Instance.CurrentThread == Thread)
+                WriteWaitReturn(Instance, Context, ExitRegisters);
+        }
+
+        private static readonly int[] WaitReturnRegisters =
+        {
+            (int)Registers.UC_X86_REG_RIP, (int)Registers.UC_X86_REG_RAX, (int)Registers.UC_X86_REG_RCX, (int)Registers.UC_X86_REG_R11,
+            (int)Registers.UC_X86_REG_RDX, (int)Registers.UC_X86_REG_R8, (int)Registers.UC_X86_REG_R9, (int)Registers.UC_X86_REG_R10,
+        };
+
+        private static void WriteWaitReturn(BinaryEmulator Instance, CpuContext Context, bool ExitRegisters)
+        {
+            ulong[] Values = Instance.RegisterScratch;
+            Values[0] = Context.RIP;
+            Values[1] = Context.RAX;
+            Values[2] = Context.RCX;
+            Values[3] = Context.R11;
+            Values[4] = Context.RDX;
+            Values[5] = Context.R8;
+            Values[6] = Context.R9;
+            Values[7] = Context.R10;
+            Instance._emulator.WriteRegisterBatch(WaitReturnRegisters, Values, ExitRegisters ? WaitReturnRegisters.Length : 2);
         }
 
         public bool TryHandleSyscall(BinaryEmulator Instance)
@@ -875,6 +895,7 @@ namespace Brovan.Core.Emulation.Guests
                 if (!SuppressStatusWrite)
                     SetLastWinErrorRegister(Instance, Status);
 
+                SetSyscallExitRegisters(Instance, Rip);
                 RaiseSysretSingleStep(Instance, Rip, Entry.Handler);
                 return true;
             }

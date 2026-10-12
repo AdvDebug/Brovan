@@ -114,6 +114,8 @@ namespace Brovan.Core.Emulation
             => Inner.WriteRegisterBatch(registers, values, count);
         public bool ReadRegisterBatch(int[] registers, ulong[] values, int count)
             => Inner.ReadRegisterBatch(registers, values, count);
+        public void SetSyscallReturnRegisters(ulong ReturnRip)
+            => Inner.SetSyscallReturnRegisters(ReturnRip);
         public bool WriteGdtr(ulong Base, uint Limit)
             => false;
         public bool WriteRegisterByte(Registers register, byte value)

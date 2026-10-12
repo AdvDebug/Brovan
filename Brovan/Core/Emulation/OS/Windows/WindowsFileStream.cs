@@ -141,6 +141,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Another stream can hold a probe for the same path, so materializing a write copy has to reach all of them.
         private static void DropStoreProbes() => Interlocked.Increment(ref VfsProbeVersion);
 
+        internal static int ProbeVersion => Volatile.Read(ref VfsProbeVersion);
+
         public string EffectiveReadHostPath
         {
             get
@@ -335,13 +337,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Read, string Write)> GuestPathCache =
-            new(StringComparer.OrdinalIgnoreCase);
+        private static readonly GeneralHelper.IO.PathCache<(string Read, string Write)> GuestPathCache = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly GeneralHelper.IO.PathCache<(string Read, string Write)> RedirectedGuestPathCache = new(StringComparer.OrdinalIgnoreCase);
+
         public static void InvalidateGuestPathCache()
         {
-            GuestPathCache.Clear();
-            Interlocked.Increment(ref VfsProbeVersion);
+            DropGuestPaths();
             GeneralHelper.IO.InvalidateSandboxLinkCache();
+        }
+
+        private static void DropGuestPaths()
+        {
+            Interlocked.Increment(ref VfsProbeVersion);
+            GuestPathCache.Clear();
+            RedirectedGuestPathCache.Clear();
         }
 
         /// <summary>
@@ -356,24 +365,22 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
             }
 
-            GuestPathCache.Clear();
-            Interlocked.Increment(ref VfsProbeVersion);
+            DropGuestPaths();
         }
 
         public static WindowsFileStream FromGuestPath(string GuestPath, bool CreateWriteDirectories = false, bool NativeSystemView = false)
         {
             bool Cacheable = !CreateWriteDirectories && !NativeSystemView && GuestPath != null;
-            if (Cacheable && GuestPathCache.TryGetValue(GuestPath, out var Cached))
+            var Cache = GeneralHelper.IO.Wow64FileRedirect ? RedirectedGuestPathCache : GuestPathCache;
+            if (Cacheable && Cache.TryGetValue(GuestPath, out var Cached))
                 return new WindowsFileStream(GuestPath, Cached.Read, Cached.Write);
+
+            int Version = Volatile.Read(ref VfsProbeVersion);
             string ReadHostPath = GeneralHelper.IO.ResolveHostPath(GuestPath, BinaryFormat.PE, false, false, NativeSystemView);
             string WriteHostPath = GeneralHelper.IO.ResolveVirtualHostPath(GuestPath, BinaryFormat.PE, CreateWriteDirectories);
             if (Cacheable && ReadHostPath != null && WriteHostPath != null)
-            {
-                if (GuestPathCache.Count >= Brovan.Core.Settings.MemoryBudget.SandboxPathCacheEntries)
-                    GuestPathCache.Clear();
+                Cache.Add(GuestPath, (ReadHostPath, WriteHostPath), ref VfsProbeVersion, Version);
 
-                GuestPathCache[GuestPath] = (ReadHostPath, WriteHostPath);
-            }
             return new WindowsFileStream(GuestPath, ReadHostPath, WriteHostPath);
         }
 

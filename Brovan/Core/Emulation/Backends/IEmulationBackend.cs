@@ -457,6 +457,16 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        void SetSyscallReturnRegisters(ulong ReturnRip)
+        {
+            WriteRegister(Registers.UC_X86_REG_RCX, ReturnRip);
+            WriteRegister(Registers.UC_X86_REG_R11, ReadRegister(Registers.UC_X86_REG_RFLAGS));
+            WriteRegister(Registers.UC_X86_REG_R8, ReadRegister(Registers.UC_X86_REG_RSP));
+            WriteRegister(Registers.UC_X86_REG_RDX, 0UL);
+            WriteRegister(Registers.UC_X86_REG_R9, 0UL);
+            WriteRegister(Registers.UC_X86_REG_R10, 0UL);
+        }
+
         CPUFlags GetCPUFlags();
         bool SetCPUFlags(CPUFlags flags);
 

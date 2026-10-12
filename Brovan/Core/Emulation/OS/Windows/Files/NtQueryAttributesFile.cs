@@ -39,29 +39,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(EmulatedPath))
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
-            using WindowsFileStream Stream = WindowsFileStream.FromGuestPath(EmulatedPath);
-            string HostPath = Stream.WriteHostPath;
-            bool Found = TryGetLayerAttributes(HostPath, out FileInfo Info, out FileAttributes Attributes);
+            bool Found;
+            bool Readable;
+            string HostPath;
+            FileInfo Info;
+            FileAttributes Attributes;
+            bool ParentExists;
+            using (Instance.WinHelper.LeaveKernelLock())
+                Found = LookUpHostAttributes(EmulatedPath, out Readable, out HostPath, out Info, out Attributes, out ParentExists);
+
             if (!Found)
             {
-                if (string.IsNullOrEmpty(Stream.ReadHostPath))
+                if (!Readable)
                     return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
-
-                if (!string.Equals(Stream.ReadHostPath, HostPath, StringComparison.Ordinal))
-                {
-                    HostPath = Stream.ReadHostPath;
-                    Found = TryGetLayerAttributes(HostPath, out Info, out Attributes);
-                }
-            }
-
-            if (!Found)
-            {
 
                 if (!Instance.WinHelper.IsSyntheticDirectory(EmulatedPath))
                 {
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                         Instance.TriggerEventMessage($"[!] {SyscallName}: file not found: Name=\"{Name}\", FullName=\"{FullName}\", SyntheticDir=\"{EmulatedPath}\".", LogFlags.Syscall);
-                    return NtCreateFile.ParentDirectoryExists(EmulatedPath)
+                    return ParentExists
                         ? NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND
                         : NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
                 }
@@ -93,6 +89,23 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.TriggerEventMessage($"[+] {SyscallName}: Name=\"{Name}\", FullName=\"{FullName}\", HostPath=\"{HostPath}\".", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static bool LookUpHostAttributes(string EmulatedPath, out bool Readable, out string HostPath, out FileInfo Info,
+            out FileAttributes Attributes, out bool ParentExists)
+        {
+            using WindowsFileStream Stream = WindowsFileStream.FromGuestPath(EmulatedPath);
+            Readable = !string.IsNullOrEmpty(Stream.ReadHostPath);
+            HostPath = Stream.WriteHostPath;
+            bool Found = TryGetLayerAttributes(HostPath, out Info, out Attributes);
+            if (!Found && Readable && !string.Equals(Stream.ReadHostPath, HostPath, StringComparison.Ordinal))
+            {
+                HostPath = Stream.ReadHostPath;
+                Found = TryGetLayerAttributes(HostPath, out Info, out Attributes);
+            }
+
+            ParentExists = Found || !Readable || NtCreateFile.ParentDirectoryExists(EmulatedPath);
+            return Found;
         }
 
         private static bool TryGetLayerAttributes(string HostPath, out FileInfo Info, out FileAttributes Attributes)

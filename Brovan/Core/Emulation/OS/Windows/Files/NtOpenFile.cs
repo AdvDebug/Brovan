@@ -95,9 +95,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Path = Path.Replace('/', '\\').TrimEnd('\0');
 
-            WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
-            Stream.OpenForLookup(NtCreateFile.WantsReadData(DesiredAccess));
-            NTSTATUS Status = CheckExistingPath(Instance, Stream, Path, DesiredAccess, ShareAccess, OpenOptions, ref IsDirectory);
+            WindowsFileStream Stream = NtCreateFile.OpenLookupStream(Instance, Path, NtCreateFile.WantsReadData(DesiredAccess), out bool ParentExists);
+            NTSTATUS Status = CheckExistingPath(Instance, Stream, Path, DesiredAccess, ShareAccess, OpenOptions, ParentExists, ref IsDirectory);
             if (Status != NTSTATUS.STATUS_SUCCESS)
             {
                 Stream.Dispose();
@@ -132,17 +131,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS CheckExistingPath(BinaryEmulator Instance, WindowsFileStream Stream, string Path, AccessMask DesiredAccess, uint ShareAccess, uint OpenOptions, ref bool IsDirectory)
+        private static NTSTATUS CheckExistingPath(BinaryEmulator Instance, WindowsFileStream Stream, string Path, AccessMask DesiredAccess, uint ShareAccess, uint OpenOptions, bool ParentExists, ref bool IsDirectory)
         {
-            bool DirectoryExists = IsDriveRootPath(Path) || Stream.ExistsAsDirectory;
+            NTSTATUS Status = NtCreateFile.ClassifyExisting(Stream, Path, OpenOptions, ref IsDirectory, out bool Exists);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            // With neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE the caller takes whatever is there,
-            // which is how SetFileAttributes opens a directory
-            IsDirectory = IsDirectory || (DirectoryExists && (OpenOptions & FILE_NON_DIRECTORY_FILE) == 0);
-
-            bool Exists = IsDirectory ? DirectoryExists : Stream.ExistsAsFile;
             if (!Exists)
-                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+                return ParentExists ? NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND : NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
 
             if ((OpenOptions & NtCreateFile.FILE_DELETE_ON_CLOSE) != 0)
             {
@@ -198,15 +194,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return false;
-        }
-
-        private static bool IsDriveRootPath(string Path)
-        {
-            if (string.IsNullOrWhiteSpace(Path))
-                return false;
-
-            string Value = Path.Trim().TrimEnd('\0').Replace('/', '\\');
-            return Value.Length == 3 && char.IsLetter(Value[0]) && Value[1] == ':' && Value[2] == '\\';
         }
 
         private static string NormalizeNtObjectPath(string Path)

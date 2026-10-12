@@ -239,7 +239,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return "Event";
             if (HandleObject is WinSemaphore)
                 return "Semaphore";
-            if (HandleObject is WinSection)
+            if (HandleObject is WinSection || HandleObject is WinSharedGpuMemory)
                 return "Section";
             if (HandleObject is EmulatedThread)
                 return "Thread";

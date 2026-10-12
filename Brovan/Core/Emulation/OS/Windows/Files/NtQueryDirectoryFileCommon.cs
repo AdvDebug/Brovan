@@ -54,22 +54,32 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool MaskChanged = MaskProvided && !string.Equals(DirectoryHandle.DirectoryMask ?? string.Empty, Mask, StringComparison.OrdinalIgnoreCase);
 
             bool FirstQueryOfScan = false;
-            if (DirectoryHandle.DirectoryEntries == null || RestartScan || MaskChanged)
+            bool Restarting = RestartScan || MaskChanged;
+            if (DirectoryHandle.DirectoryEntries == null || Restarting)
             {
-                string HostPath = GeneralHelper.IO.ResolveHostPath(DirectoryHandle.Path, Helpers.BinaryHelpers.BinaryFormat.PE);
-                if (string.IsNullOrEmpty(HostPath) || !Directory.Exists(HostPath))
+                string GuestDirectory = DirectoryHandle.Path;
+                string EffectiveMask = MaskProvided ? Mask : (DirectoryHandle.DirectoryMask ?? string.Empty);
+                List<WinDirectoryEntry> Entries;
+                using (Instance.WinHelper.LeaveKernelLock())
+                    Entries = ListDirectory(GuestDirectory, EffectiveMask);
+
+                if (Entries == null)
                 {
                     Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                     return NTSTATUS.STATUS_INVALID_HANDLE;
                 }
 
-                string EffectiveMask = MaskProvided ? Mask : (DirectoryHandle.DirectoryMask ?? string.Empty);
-                DirectoryHandle.DirectoryEntries = ScanDirectory(HostPath, GeneralHelper.IO.ResolveNativeHostPath(DirectoryHandle.Path), EffectiveMask, DirectoryHandle.Path);
-                DirectoryHandle.DirectoryIndex = 0;
-                DirectoryHandle.DirectoryMask = EffectiveMask;
-                FirstQueryOfScan = true;
+                // A first query continues a scan that another query on the same handle started while the lock was out.
+                if (Restarting || DirectoryHandle.DirectoryEntries == null)
+                {
+                    DirectoryHandle.DirectoryEntries = Entries;
+                    DirectoryHandle.DirectoryIndex = 0;
+                    DirectoryHandle.DirectoryMask = EffectiveMask;
+                    FirstQueryOfScan = true;
+                }
+
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                    Instance.TriggerEventMessage($"[+] NtQueryDirectoryFile: Enumerating directory \"{DirectoryHandle.Path}\".", LogFlags.Syscall);
+                    Instance.TriggerEventMessage($"[+] NtQueryDirectoryFile: Enumerating directory \"{GuestDirectory}\".", LogFlags.Syscall);
             }
 
             if (DirectoryHandle.DirectoryIndex >= DirectoryHandle.DirectoryEntries.Count)
@@ -202,6 +212,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             return DirectoryPath.EndsWith("\\", StringComparison.Ordinal)
                 ? DirectoryPath + Name
                 : DirectoryPath + "\\" + Name;
+        }
+
+        private static List<WinDirectoryEntry> ListDirectory(string GuestPath, string Mask)
+        {
+            string HostPath = GeneralHelper.IO.ResolveHostPath(GuestPath, Helpers.BinaryHelpers.BinaryFormat.PE);
+            if (string.IsNullOrEmpty(HostPath) || !Directory.Exists(HostPath))
+                return null;
+
+            return ScanDirectory(HostPath, GeneralHelper.IO.ResolveNativeHostPath(GuestPath), Mask, GuestPath);
         }
 
         private static List<WinDirectoryEntry> ScanDirectory(string HostPath, string NativePath, string Mask, string GuestPath)

@@ -301,6 +301,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_APP_INIT_FAILURE = 0xC0000145,
         STATUS_MAPPED_ALIGNMENT = 0xC0000220,
         STATUS_NOT_FOUND = 0xC0000225,
+        STATUS_NO_MATCH = 0xC0000272,
+        STATUS_INVALID_IMAGE_HASH = 0xC0000428,
         STATUS_WMI_GUID_NOT_FOUND = 0xC0000295,
         STATUS_NO_MORE_FILES = 0x80000006,
         STATUS_INVALID_CID = 0xC000000B,
@@ -1145,7 +1147,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         EtwRegistrationHandle = 14,
         SemaphoreHandle = 15,
         JobHandle = 16,
-        DirectoryHandle = 17
+        DirectoryHandle = 17,
+        SharedGpuMemoryHandle = 18
     }
 
     public sealed class WinToken : IHandleObject
@@ -2353,6 +2356,23 @@ namespace Brovan.Core.Emulation.OS.Windows
         public string ObjectId => $"ETW_{ProviderGuid:N}_{RegistrationIndex}";
 
         public HandleType ObjectType => HandleType.EtwRegistrationHandle;
+    }
+
+    // Device memory that the host Vulkan driver exported as an NT handle.
+    public sealed class WinSharedGpuMemory : IHandleObject
+    {
+        public readonly SafeHandle Host;
+        private readonly string Id;
+
+        public WinSharedGpuMemory(SafeHandle Host)
+        {
+            this.Host = Host;
+            Id = $"SharedGpuMemory_{Host.DangerousGetHandle():X}";
+        }
+
+        public string ObjectId => Id;
+
+        public HandleType ObjectType => HandleType.SharedGpuMemoryHandle;
     }
 
     public class WinTimer : WaitableHandleObject

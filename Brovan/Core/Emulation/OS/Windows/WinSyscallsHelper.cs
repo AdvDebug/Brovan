@@ -420,6 +420,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Thread.StackAddress = 0;
             }
 
+            Warbird?.ReleaseThread(Thread.ThreadId);
+
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
             if (State != null)
             {
@@ -1937,16 +1939,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public ulong GetArg64(int Index, bool UInt = false)
         {
-            if (_argCacheValid)
+            if (_argCache.Valid)
             {
                 switch (Index)
                 {
-                    case 0: return _argCacheR10;
-                    case 1: return _argCacheRDX;
-                    case 2: return _argCacheR8;
-                    case 3: return _argCacheR9;
+                    case 0: return _argCache.R10;
+                    case 1: return _argCache.RDX;
+                    case 2: return _argCache.R8;
+                    case 3: return _argCache.R9;
                 }
-                ulong StackArgAddress = _argCacheRSP + 0x28UL + (ulong)((Index - 4) * 8);
+                ulong StackArgAddress = _argCache.RSP + 0x28UL + (ulong)((Index - 4) * 8);
                 return UInt ? Emulator._emulator.ReadMemoryUInt(StackArgAddress) : Emulator._emulator.ReadMemoryULong(StackArgAddress);
             }
 
@@ -1965,7 +1967,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Emulator._binary.Architecture == BinaryArchitecture.x64)
                 return GetArg64(Index);
 
-            return Emulator._emulator.ReadMemoryUInt(_argCacheArgBase + (ulong)(Index * 4));
+            return Emulator._emulator.ReadMemoryUInt(_argCache.ArgBase + (ulong)(Index * 4));
         }
 
         public uint GetArg32(int Index) => (uint)GetArg(Index);
@@ -2327,6 +2329,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<string, int> ImageViewCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal KuserSharedDataManager KuserSharedData;
         internal RPC.Ports.BaseSrvNlsUserInfo NlsUserInfo;
+        internal Warbird? Warbird;
         internal HandleManager HandleManager;
         private static string WinRegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
         public RegistryManager RegManager = new RegistryManager(WinRegPath);
@@ -2373,13 +2376,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private bool _argCacheValid;
-        private ulong _argCacheR10;
-        private ulong _argCacheRDX;
-        private ulong _argCacheR8;
-        private ulong _argCacheR9;
-        private ulong _argCacheRSP;
-        private ulong _argCacheArgBase;
+        private struct SyscallArgCache
+        {
+            public bool Valid;
+            public ulong R10;
+            public ulong RDX;
+            public ulong R8;
+            public ulong R9;
+            public ulong RSP;
+            public ulong ArgBase;
+        }
+
+        private SyscallArgCache _argCache;
 
         internal bool X86GateArgs = true;
 
@@ -2401,11 +2409,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (Emulator._binary.Architecture != BinaryArchitecture.x64)
             {
-                _argCacheValid = false;
+                _argCache.Valid = false;
                 if (Emulator._binary.Architecture == BinaryArchitecture.x86)
                 {
                     uint ESP = Emulator._emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
-                    _argCacheArgBase = X86GateArgs ? ESP + 8u : ESP + 4u;
+                    _argCache.ArgBase = X86GateArgs ? ESP + 8u : ESP + 4u;
                     RefreshWow64FileRedirect();
                 }
                 return;
@@ -2419,12 +2427,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Vals[3] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R9);
                 Vals[4] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RSP);
             }
-            _argCacheR10 = Vals[0];
-            _argCacheRDX = Vals[1];
-            _argCacheR8 = Vals[2];
-            _argCacheR9 = Vals[3];
-            _argCacheRSP = Vals[4];
-            _argCacheValid = true;
+            _argCache.R10 = Vals[0];
+            _argCache.RDX = Vals[1];
+            _argCache.R8 = Vals[2];
+            _argCache.R9 = Vals[3];
+            _argCache.RSP = Vals[4];
+            _argCache.Valid = true;
         }
 
         // RtlWow64EnableFsRedirectionEx writes it, and ntdll turns redirection off through it
@@ -2438,7 +2446,34 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void EndSyscall()
         {
-            _argCacheValid = false;
+            _argCache.Valid = false;
+        }
+
+        // The host work inside the using block must read no handle, object, guest memory or helper state.
+        internal KernelLockRelease LeaveKernelLock() => new KernelLockRelease(this);
+
+        internal readonly struct KernelLockRelease : IDisposable
+        {
+            private readonly WinSysHelper Helper;
+            // Syscalls on other workers replace the argument cache while the lock is out.
+            private readonly SyscallArgCache Args;
+            public readonly bool Left;
+
+            public KernelLockRelease(WinSysHelper Helper)
+            {
+                this.Helper = Helper;
+                Args = Helper._argCache;
+                Left = Helper.Emulator.TryLeaveKernelLock();
+            }
+
+            public void Dispose()
+            {
+                if (!Left)
+                    return;
+
+                Helper.Emulator.EnterKernelLock();
+                Helper._argCache = Args;
+            }
         }
 
         public List<WinSemaphore> WinSemaphores = new List<WinSemaphore>();
@@ -4678,7 +4713,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint PAGE_READONLY = 0x02;
         internal const uint PAGE_READWRITE = 0x04;
         private const uint PAGE_EXECUTE = 0x10;
-        private const uint PAGE_EXECUTE_READ = 0x20;
+        internal const uint PAGE_EXECUTE_READ = 0x20;
         private const uint PAGE_EXECUTE_READWRITE = 0x40;
 
         public ulong ConvertInternalToWinProtect(MemoryProtection Protection)
@@ -10572,6 +10607,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case EmulatedThread Thread:
                     ForgetThreadIfUnreferenced(Thread);
+                    break;
+
+                case WinSharedGpuMemory SharedGpuMemory:
+                    SharedGpuMemory.Host.Dispose();
                     break;
             }
         }

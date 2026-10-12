@@ -345,22 +345,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
 
-            Stream = WindowsFileStream.FromGuestPath(Path);
-            Stream.OpenForLookup(WantsReadData(Permissions));
-            bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
-            bool FileExists = Stream.ExistsAsFile;
-
-            // With neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE the caller takes whatever is
-            // there. CreateFile(FILE_FLAG_BACKUP_SEMANTICS) directory handle exactly that way
-            IsDirectory = IsDirectory || (DirectoryExists && (CreateOptions & FILE_NON_DIRECTORY_FILE) == 0);
-            Exists = IsDirectory ? DirectoryExists : FileExists;
-            ParentExists = true;
-
-            if (IsDirectory && FileExists)
-                return NTSTATUS.STATUS_NOT_A_DIRECTORY;
-
-            if (!IsDirectory && DirectoryExists)
-                return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
+            Stream = OpenLookupStream(Instance, Path, WantsReadData(Permissions), out ParentExists);
+            NTSTATUS Status = ClassifyExisting(Stream, Path, CreateOptions, ref IsDirectory, out Exists);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
             if ((CreateOptions & FILE_DELETE_ON_CLOSE) != 0 && Stream.IsReadOnly)
                 return NTSTATUS.STATUS_CANNOT_DELETE;
@@ -371,8 +359,48 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.ShareAccessAllows(Path, Permissions, ShareAccess))
                 return NTSTATUS.STATUS_SHARING_VIOLATION;
 
-            ParentExists = Exists || (Stream.KnownParentExists ?? ParentDirectoryExists(Path));
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // With neither FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE the caller takes whatever is there. That is how
+        // CreateFile(FILE_FLAG_BACKUP_SEMANTICS) and SetFileAttributes open a directory.
+        internal static NTSTATUS ClassifyExisting(WindowsFileStream Stream, string Path, uint Options, ref bool IsDirectory, out bool Exists)
+        {
+            bool DirectoryExists = Stream.ExistsAsDirectory || IsDriveRootPath(Path);
+            bool FileExists = Stream.ExistsAsFile;
+            IsDirectory = IsDirectory || (DirectoryExists && (Options & FILE_NON_DIRECTORY_FILE) == 0);
+            Exists = IsDirectory ? DirectoryExists : FileExists;
+
+            if (IsDirectory && FileExists)
+                return NTSTATUS.STATUS_NOT_A_DIRECTORY;
+
+            return !IsDirectory && DirectoryExists ? NTSTATUS.STATUS_FILE_IS_A_DIRECTORY : NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // A sandbox change while the lock is out moves the probe version, and the lookup then runs again under the lock.
+        internal static WindowsFileStream OpenLookupStream(BinaryEmulator Instance, string Path, bool ReadData, out bool ParentExists)
+        {
+            int Version = WindowsFileStream.ProbeVersion;
+            WindowsFileStream Stream;
+            WinSysHelper.KernelLockRelease Release = Instance.WinHelper.LeaveKernelLock();
+            using (Release)
+                Stream = LookUpHostEntry(Path, ReadData, out ParentExists);
+
+            if (!Release.Left || WindowsFileStream.ProbeVersion == Version)
+                return Stream;
+
+            Stream.Dispose();
+            GeneralHelper.IO.ForgetScopedProbes();
+            return LookUpHostEntry(Path, ReadData, out ParentExists);
+        }
+
+        private static WindowsFileStream LookUpHostEntry(string Path, bool ReadData, out bool ParentExists)
+        {
+            WindowsFileStream Stream = WindowsFileStream.FromGuestPath(Path);
+            Stream.OpenForLookup(ReadData);
+            ParentExists = Stream.ExistsAsFile || Stream.ExistsAsDirectory || IsDriveRootPath(Path)
+                || (Stream.KnownParentExists ?? ParentDirectoryExists(Path));
+            return Stream;
         }
 
         private static NTSTATUS PreparePathForDisposition(WindowsFileStream Stream, bool IsDirectory, bool Exists, bool ParentExists, uint CreateDisposition, out uint Information)

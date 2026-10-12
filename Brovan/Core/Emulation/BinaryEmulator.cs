@@ -349,11 +349,15 @@ namespace Brovan.Core.Emulation
         public ulong UserAddressEnd => AlignUp(MaxAddress, PageSize);
         private const int IdleWaitSliceMs = 5;
 
-        // Held by every host thread that touches emulator state. A hypervisor backend releases it only for
-        // the time a processor spends in the guest, see IEmulationBackend.UseRunLock.
+        // Held by every host thread that touches emulator state. A hypervisor backend releases it for the time
+        // a processor spends in the guest (IEmulationBackend.UseRunLock), and a syscall handler for host work
+        // (TryLeaveKernelLock).
         internal readonly object KernelLock = new();
 
+        private static readonly bool ConcurrentSyscallsDisabled = Environment.GetEnvironmentVariable("BROVAN_NO_CONCURRENT_SYSCALLS") == "1";
+
         private bool SmpEnabled;
+        private bool ConcurrentSyscalls => SmpEnabled && Guest.SupportsConcurrentSyscalls && !ConcurrentSyscallsDisabled;
         private volatile bool SchedulerExiting;
         private int IdleWorkers;
         private int ParkWaiters;
@@ -523,6 +527,22 @@ namespace Brovan.Core.Emulation
                 }
             }
         }
+
+        // The thread stays dispatched with the lock out, so WaitUntilParked waits for it as for a thread in the guest.
+        internal bool TryLeaveKernelLock()
+        {
+            if (!ConcurrentSyscalls || !Monitor.IsEntered(KernelLock))
+                return false;
+
+            Monitor.Exit(KernelLock);
+            if (!Monitor.IsEntered(KernelLock))
+                return true;
+
+            Monitor.Enter(KernelLock);
+            return false;
+        }
+
+        internal void EnterKernelLock() => Monitor.Enter(KernelLock);
 
         // The console thread's view of the guest follows the thread it last ran once the workers are gone.
         private void ReselectCurrentThread()
@@ -810,7 +830,7 @@ namespace Brovan.Core.Emulation
             _binary = Binary;
             BackendArch = Arch.X86;
             BackendMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
-            GeneralHelper.IO.Wow64FileRedirect = Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86;
+            GeneralHelper.IO.Wow64FileRedirectDefault = Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86;
             GuestImagePath = ResolveGuestImagePath(Binary);
             _emulator = BackendFactory.Create(Settings.BackendKind, BackendArch, BackendMode, Settings.NoHooks, GuestImagePath, Binary.Location);
             _emulator.NoHooks = Settings.NoHooks;
@@ -843,7 +863,7 @@ namespace Brovan.Core.Emulation
             _binary = Binary;
             BackendArch = arch;
             BackendMode = mode;
-            GeneralHelper.IO.Wow64FileRedirect = Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86;
+            GeneralHelper.IO.Wow64FileRedirectDefault = Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86;
             GuestImagePath = ResolveGuestImagePath(_binary, Guest);
             _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks, GuestImagePath, _binary.Location);
             this.Settings = Settings;
@@ -2055,7 +2075,7 @@ namespace Brovan.Core.Emulation
             SaveFloatingPointState(t.Context);
         }
 
-        private ulong[] RegisterScratch => Worker.GprScratch ??= new ulong[GprBatchCount];
+        internal ulong[] RegisterScratch => Worker.GprScratch ??= new ulong[GprBatchCount];
 
         private ulong[] ReadRegisters(int[] Batch)
         {

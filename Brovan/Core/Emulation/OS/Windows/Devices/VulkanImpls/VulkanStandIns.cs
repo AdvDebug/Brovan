@@ -79,8 +79,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static readonly int DeviceCreateInfoPNext = BrovVulkLayout.MemberOffset["VkDeviceCreateInfo.pNext"];
         private static readonly int DeviceCreateInfoEnabledFeatures = BrovVulkLayout.MemberOffset["VkDeviceCreateInfo.pEnabledFeatures"];
-        private static readonly int DeviceCreateInfoExtensionCount = BrovVulkLayout.MemberOffset["VkDeviceCreateInfo.enabledExtensionCount"];
-        private static readonly int DeviceCreateInfoExtensionNames = BrovVulkLayout.MemberOffset["VkDeviceCreateInfo.ppEnabledExtensionNames"];
+        internal static readonly int DeviceCreateInfoExtensionCount = BrovVulkLayout.MemberOffset["VkDeviceCreateInfo.enabledExtensionCount"];
+        internal static readonly int DeviceCreateInfoExtensionNames = BrovVulkLayout.MemberOffset["VkDeviceCreateInfo.ppEnabledExtensionNames"];
 
         // Every feature struct shares the VkPhysicalDeviceFeatures2 header.
         private static readonly int FeatureBits = BrovVulkLayout.MemberOffset["VkPhysicalDeviceFeatures2.features"];

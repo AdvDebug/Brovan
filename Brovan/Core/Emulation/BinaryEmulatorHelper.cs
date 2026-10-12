@@ -103,6 +103,8 @@ namespace Brovan.Core.Emulation
     {
         GuestOsKind Os { get; }
 
+        bool SupportsConcurrentSyscalls { get; }
+
         void Initialize(BinaryEmulator Instance, BinaryFile Binary);
         void Start(BinaryEmulator Instance);
 
@@ -150,6 +152,11 @@ namespace Brovan.Core.Emulation
         IntPtr EnsureHostWindowHandle(ulong GuestHwnd);
 
         void EnsureHostXlibSurfaceHandles(out IntPtr Connection, out IntPtr Window);
+
+        // Takes ownership of Host. The last guest handle closes it.
+        ulong AddSharedGpuMemoryHandle(SafeHandle Host);
+
+        SafeHandle? FindSharedGpuMemoryHandle(ulong GuestHandle);
     }
 
     [Flags]

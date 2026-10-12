@@ -216,10 +216,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return Instance.WriteMemory(SystemInformationPtr, Relations) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
                     }
 
+                // NT serves this class only through NtQuerySystemInformation.
                 case SYSTEM_INFORMATION_CLASS.SystemControlFlowTransition:
-                    if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
-                        Instance.TriggerEventMessage($"[!] Warbird transition query using NtQuerySystemInformationEx at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.Suspicious);
-                    return NTSTATUS.STATUS_NOT_IMPLEMENTED;
+                    return NTSTATUS.STATUS_INVALID_INFO_CLASS;
 
                 case SYSTEM_INFORMATION_CLASS.SystemSupportedProcessorArchitectures:
                 case SYSTEM_INFORMATION_CLASS.SystemSupportedProcessorArchitectures2:

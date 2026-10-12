@@ -379,27 +379,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                     ulong ImagePtrSize = (ulong)Instance.WinHelper.PointerSize;
                     ulong RequiredLength = ImagePtrSize == 8 ? 0x18UL : 0x0CUL;
 
-                    if (ReturnLength != 0)
-                    {
-                        if (!Instance.WinHelper.WritePointer(ReturnLength, RequiredLength))
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                    }
-
+                    // NT writes ReturnLength only on success.
                     if (MemoryInformationLength < RequiredLength)
                         return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
                     if (!Instance.IsRegionMapped(MemoryInformation, RequiredLength))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    WinModule Module = Instance.WinHelper.FindMappedImageViewByAddress(Address);
-
-                    if (Module == null)
-                        return NTSTATUS.STATUS_INVALID_ADDRESS;
+                    NTSTATUS ImageStatus = QueryImageView(Instance, Address, out WinModule? Module);
+                    if (ImageStatus != NTSTATUS.STATUS_SUCCESS)
+                        return ImageStatus;
 
                     MEMORY_IMAGE_INFORMATION Info = new MEMORY_IMAGE_INFORMATION
                     {
-                        ImageBase = Module.MappedBase,
-                        SizeOfImage = Module.SizeOfImage,
+                        ImageBase = Module?.MappedBase ?? 0,
+                        SizeOfImage = Module?.SizeOfImage ?? 0,
                         Flags = 0
                     };
 
@@ -421,6 +415,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance.WriteMemory(MemoryInformation, Data.Slice(0, (int)RequiredLength)))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+                    if (ReturnLength != 0 && !Instance.WinHelper.WritePointer(ReturnLength, RequiredLength))
+                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
@@ -428,6 +425,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance.TriggerEventMessage($"[-] NtQueryVirtualMemory was called with an unsupported class: 0x{MemoryInformationClass:X} ({MemoryInformationClass}).", LogFlags.Important);
             }
             return Instance.WinUnimplemented;
+        }
+
+        // NT gives allocated memory outside an image an empty record, and fails free memory.
+        internal static NTSTATUS QueryImageView(BinaryEmulator Instance, ulong Address, out WinModule? Module)
+        {
+            Module = Instance.WinHelper.FindMappedImageViewByAddress(Address);
+            if (Module != null)
+                return NTSTATUS.STATUS_SUCCESS;
+
+            NTSTATUS Status = BuildBasicInformation(Instance, Address, out MEMORY_BASIC_INFORMATION Info);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            return Info.State == (uint)MemFree ? NTSTATUS.STATUS_INVALID_ADDRESS : NTSTATUS.STATUS_SUCCESS;
         }
 
         internal static NTSTATUS BuildBasicInformation(BinaryEmulator Instance, ulong Address, out MEMORY_BASIC_INFORMATION Info)

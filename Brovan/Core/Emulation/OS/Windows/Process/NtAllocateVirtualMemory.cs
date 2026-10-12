@@ -9,7 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtAllocateVirtualMemory : IWinSyscall
     {
         private const ulong PageSize = 0x1000;
-        private const uint MemCommit = 0x00001000;
+        internal const uint MemCommit = 0x00001000;
         internal const uint MemReserve = 0x00002000;
         private const uint MemReplacePlaceholder = 0x00004000;
         private const uint MemReservePlaceholder = 0x00040000;

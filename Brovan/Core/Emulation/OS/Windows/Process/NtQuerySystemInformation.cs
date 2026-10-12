@@ -250,9 +250,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         }
 
                     case SYSTEM_INFORMATION_CLASS.SystemControlFlowTransition:
-                        if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0)
-                            Instance.TriggerEventMessage($"[!] Warbird transition query using NtQuerySystemInformation at 0x{Instance.ReadRegister(Instance.IPRegister):X}.", LogFlags.Suspicious);
-                        return NTSTATUS.STATUS_NOT_IMPLEMENTED;
+                        return Warbird.Query(Instance, SystemInformationPtr, (uint)SystemInformationLength, ReturnLengthPtr);
 
                     case SYSTEM_INFORMATION_CLASS.SystemProcessInformation:
                         {

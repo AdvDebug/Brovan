@@ -58,6 +58,15 @@ namespace Brovan.Core.Emulation
         void IGuestMemory.EnsureHostXlibSurfaceHandles(out IntPtr Connection, out IntPtr Window) =>
             WinHelper.EnsureHostXlibSurfaceHandles(out Connection, out Window);
 
+        // DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, as NT maps them for a section.
+        private const AccessMask SharedGpuMemoryAccess = AccessMask.StandardRightsRequired | AccessMask.SectionQuery | AccessMask.SectionMapWrite | AccessMask.SectionMapRead;
+
+        ulong IGuestMemory.AddSharedGpuMemoryHandle(SafeHandle Host) =>
+            WinHelper.OpenObjectHandle(new WinSharedGpuMemory(Host), SharedGpuMemoryAccess).Handle;
+
+        SafeHandle? IGuestMemory.FindSharedGpuMemoryHandle(ulong GuestHandle) =>
+            WinHelper.HandleManager.GetObjectByHandle<WinSharedGpuMemory>(GuestHandle)?.Host;
+
         internal ulong TEB => WindowsGuest?.GetCurrentTeb(this) ?? 0;
 
         /// <summary>
@@ -2243,6 +2252,20 @@ namespace Brovan.Core.Emulation
             Region.InitialProtections = WinHelper.ConvertWinProtectToInternal(Protect);
             _memory[Index] = Region;
             return true;
+        }
+
+        // The process cannot free a secured allocation or change its protection (MmSecureVirtualMemory).
+        internal void SecureMemoryRegion(ulong AllocationBase)
+        {
+            if (!TryFindMemoryRegionByBase(AllocationBase, out int Index, out MemoryRegion Region) || Region.AllocationBase != AllocationBase)
+                return;
+
+            for (; Index < _memory.Count && _memory[Index].AllocationBase == AllocationBase; Index++)
+            {
+                Region = _memory[Index];
+                Region.IsSecured = true;
+                _memory[Index] = Region;
+            }
         }
 
         public bool SplitPlaceholder(ulong Start, ulong End, bool Release)

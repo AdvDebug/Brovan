@@ -28,6 +28,7 @@ namespace Brovan.Core.Emulation.Guests
         private readonly Dictionary<string, int> RegisterNames;
 
         public GuestOsKind Os => GuestOsKind.Generic;
+        public bool SupportsConcurrentSyscalls => false;
         public Arch BackendArch { get; }
         public Mode BackendMode { get; }
         public ulong LoadAddress { get; }
