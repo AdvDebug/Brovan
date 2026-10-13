@@ -6,11 +6,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const uint AlpcBasicInformation = 0;
         private const uint AlpcPortInformation = 1;
-        private const uint AlpcAssociateCompletionPortInformation = 2;
+        internal const uint AlpcAssociateCompletionPortInformation = 2;
         private const uint AlpcConnectedSIDInformation = 3;
         private const uint AlpcServerInformation = 4;
         private const uint AlpcMessageZoneInformation = 5;
-        private const uint AlpcRegisterCompletionListInformation = 6;
+        internal const uint AlpcRegisterCompletionListInformation = 6;
         private const uint AlpcUnregisterCompletionListInformation = 7;
         private const uint AlpcServerSessionInformation = 12;
 

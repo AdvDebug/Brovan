@@ -2,7 +2,6 @@ using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
-    // No other process connects, so the named object is all a server port needs.
     internal class NtAlpcCreatePort : IWinSyscall
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -25,17 +24,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 PortName = FullName ?? string.Empty;
             }
 
-            WinPort Created = new WinPort { Name = PortName, IsServer = true };
+            if (PortName.Length != 0 && NtConnectPort.FindPortByName(Instance, PortName) != null)
+                return NTSTATUS.STATUS_OBJECT_NAME_COLLISION;
+
+            WinPort Created = AlpcMessaging.CreateConnectionPort(PortName);
             if (PortName.Length != 0)
-            {
-                if (NtConnectPort.FindPortByName(Instance, PortName) != null)
-                    return NTSTATUS.STATUS_OBJECT_NAME_COLLISION;
-
                 Instance.WinHelper.WinPorts.Add(Created);
-            }
 
-            WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Created, AccessMask.StandardRightsAll);
-            Instance.WinHelper.AddWinHandle(Handle);
+            WinHandle Handle = Instance.WinHelper.OpenObjectHandle(Created, AccessMask.StandardRightsAll);
 
             if (!Instance.WinHelper.WritePointer(PortHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

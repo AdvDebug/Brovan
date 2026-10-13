@@ -7,6 +7,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const uint MaxPackets = 0x7FFFFFF;
 
+        // NT: WORKER_FACTORY_DEFERRED_WORK on x64, a message the thread pool asks the kernel to send.
+        private const int DeferredWorkSize = 0x18;
+        private const ulong DeferredWorkAlignment = 8;
+        private const uint DeferredAlpcSend = 0x1;
+
         // FILE_IO_COMPLETION_INFORMATION.
         internal static bool WritePacket(BinaryEmulator Instance, ulong MiniPackets, uint Index, WinIoCompletionEntry Entry)
         {
@@ -59,7 +64,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint Count = (uint)Instance.WinHelper.GetArg(2);
             ulong PacketsReturnedPtr = Instance.WinHelper.GetArg(3);
             ulong DeferredWork = Instance.WinHelper.GetArg(4);
-            _ = DeferredWork;
 
             if (MiniPackets == 0 || Count == 0 || Count > MaxPackets)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -69,6 +73,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsMemoryRangeMapped(MiniPackets, Count * PacketSize)
                 || (PacketsReturnedPtr != 0 && !Instance.IsMemoryRangeMapped(PacketsReturnedPtr, 4)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            ulong DeferredMessage = 0;
+            ulong DeferredPort = 0;
+            if (DeferredWork != 0 && AlpcMessaging.Supported(Instance))
+            {
+                if ((DeferredWork & (DeferredWorkAlignment - 1)) != 0)
+                    return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
+
+                Span<byte> Work = stackalloc byte[DeferredWorkSize];
+                if (!Instance.ReadMemory(DeferredWork, Work))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                if ((BinaryPrimitives.ReadUInt32LittleEndian(Work.Slice(0x14, 4)) & DeferredAlpcSend) != 0)
+                {
+                    DeferredMessage = BinaryPrimitives.ReadUInt64LittleEndian(Work.Slice(0x00, 8));
+                    DeferredPort = BinaryPrimitives.ReadUInt64LittleEndian(Work.Slice(0x08, 8));
+                }
+            }
 
             EmulatedThread Thread = Instance.CurrentThread;
             if (Thread == null)
@@ -91,6 +113,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
                 return Status;
             }
+
+            if (DeferredMessage != 0)
+                AlpcMessaging.SendDeferred(Instance, DeferredPort, DeferredMessage);
 
             Instance.MaterializeSignaledWaitPackets(Factory.IoCompletionHandle);
 

@@ -206,6 +206,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_INVALID_PARAMETER = 0xC000000D,
         STATUS_INVALID_DEVICE_REQUEST = 0xC0000010,
         STATUS_FILE_CORRUPT_ERROR = 0xC0000102,
+        STATUS_INVALID_MESSAGE = 0xC0000702,
         STATUS_ALREADY_REGISTERED = 0xC0000718,
         STATUS_END_OF_FILE = 0xC0000011,
         STATUS_NO_MEMORY = 0xC0000017,
@@ -236,6 +237,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_OBJECT_NAME_INVALID = 0xC0000033,
         STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034,
         STATUS_OBJECT_NAME_COLLISION = 0xC0000035,
+        STATUS_PORT_DISCONNECTED = 0xC0000037,
         STATUS_OBJECT_PATH_INVALID = 0xC0000039,
         STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A,
         STATUS_OBJECT_PATH_SYNTAX_BAD = 0xC000003B,
@@ -245,6 +247,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_CRC_ERROR = 0xC000003F,
         STATUS_SECTION_TOO_BIG = 0xC0000040,
         STATUS_PORT_CONNECTION_REFUSED = 0xC0000041,
+        STATUS_INVALID_PORT_HANDLE = 0xC0000042,
         STATUS_INVALID_PAGE_PROTECTION = 0xC0000045,
         STATUS_SUSPEND_COUNT_EXCEEDED = 0xC000004A,
         STATUS_THREAD_IS_TERMINATING = 0xC000004B,
@@ -1379,6 +1382,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint ShutdownFlags;
         public BinaryArchitecture Arch;
         public WinToken PrimaryToken;
+
+        public WinToken GetPrimaryToken() => PrimaryToken ??= new WinToken { Type = TokenType.Primary, SessionId = WinToken.InteractiveSessionId, OwningProcessId = PID };
         public ulong InstrumentationCallback;
         public WinJob Job;
 
@@ -2653,10 +2658,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
     public sealed class WinPort : IHandleObject
     {
+        private static long NextUnnamedId;
+
         public string Name;
 
-        // From NtAlpcCreatePort. Nothing connects, so no message arrives.
-        public bool IsServer;
+        // Set on a connection port from NtAlpcCreatePort.
+        internal AlpcServerQueue Queue;
+        public bool IsServer => Queue != null;
+
+        // Both communication ports of a connection share it.
+        internal AlpcConnection Connection;
+        internal bool IsClientEnd;
+        private string UnnamedId;
 
         /// <summary>
         /// Optional per-port message handler invoked by NtAlpcSendWaitReceivePort.
@@ -2675,7 +2688,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public List<ulong> ReceivedHandles;
 
-        public string ObjectId => Name;
+        public string ObjectId => !string.IsNullOrEmpty(Name) ? Name : UnnamedId ??= $"\\ALPC Port {System.Threading.Interlocked.Increment(ref NextUnnamedId):X}";
         public HandleType ObjectType => HandleType.PortHandle;
     }
 

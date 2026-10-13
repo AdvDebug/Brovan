@@ -1,28 +1,13 @@
 using System;
 using System.Collections.Generic;
 using static Brovan.Core.Helpers.BinaryHelpers;
+using static Brovan.Core.Emulation.OS.Windows.AlpcMessaging;
 using Brovan.Core.Emulation.OS.Windows.RPC.Ports;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtAlpcSendWaitReceivePort : IWinSyscall
     {
-        private const int PortMessageHeaderSize = 0x28;
-
-        private const uint AlpcMessageSecurityAttribute = 0x80000000;
-        private const uint AlpcMessageViewAttribute = 0x40000000;
-        private const uint AlpcMessageContextAttribute = 0x20000000;
-        private const uint AlpcMessageHandleAttribute = 0x10000000;
-
-        private const int AlpcAttributeHeaderSize = 8;
-        private const int AlpcSecurityAttributeSize = 24;
-        private const int AlpcViewAttributeSize = 32;
-        private const int AlpcContextAttributeSize = 32;
-        private const int AlpcHandleAttributeSize = 24;
-        private const int OffPmDataLength = 0x00;
-        private const int OffPmTotalLength = 0x02;
-        private const int OffPmMessageId = 0x18;
-
         private static readonly object SyncRoot = new object();
         private static uint NextMessageId = 1;
 
@@ -42,10 +27,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Port == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            if (SendMessagePtr != 0 && !Instance.IsRegionMapped(SendMessagePtr, (ulong)PortMessageHeaderSize))
+            if (AlpcMessaging.Owns(Port))
+                return AlpcMessaging.SendWaitReceive(Instance, Port, SendMessagePtr, SendMessageAttributesPtr, ReceiveMessagePtr, BufferLengthPtr, ReceiveMessageAttributesPtr, TimeoutPtr);
+
+            if (SendMessagePtr != 0 && !Instance.IsRegionMapped(SendMessagePtr, (ulong)HeaderSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (ReceiveMessagePtr != 0 && !Instance.IsRegionMapped(ReceiveMessagePtr, (ulong)PortMessageHeaderSize))
+            if (ReceiveMessagePtr != 0 && !Instance.IsRegionMapped(ReceiveMessagePtr, (ulong)HeaderSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             ulong ReceiveBufferLength = 0;
@@ -55,10 +43,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                 ReceiveBufferLength = BufferLengthPtr != 0 ? Instance._emulator.ReadMemoryULong(BufferLengthPtr) : 0;
-                if (ReceiveBufferLength < (ulong)PortMessageHeaderSize)
+                if (ReceiveBufferLength < (ulong)HeaderSize)
                 {
                     if (BufferLengthPtr != 0)
-                        Instance._emulator.WriteMemory(BufferLengthPtr, (ulong)PortMessageHeaderSize);
+                        Instance._emulator.WriteMemory(BufferLengthPtr, (ulong)HeaderSize);
                     return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
                 }
 
@@ -71,13 +59,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (SendMessagePtr != 0)
             {
-                Span<byte> SendHeader = stackalloc byte[PortMessageHeaderSize];
+                Span<byte> SendHeader = stackalloc byte[HeaderSize];
                 if (!Instance.ReadMemory(SendMessagePtr, SendHeader))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                SendTotalLength = ReadU16(SendHeader, OffPmTotalLength);
+                SendTotalLength = ReadU16(SendHeader, OffTotalLength);
 
-                if (SendTotalLength < PortMessageHeaderSize || SendTotalLength > 0xFFFF)
+                if (SendTotalLength < HeaderSize || SendTotalLength > 0xFFFF)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                 if (!Instance.IsRegionMapped(SendMessagePtr, SendTotalLength))
@@ -118,16 +106,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Reply.HostWork != null && Instance.WinHelper.TryRetrySyscallWhenDone(Reply.HostWork))
                         return NTSTATUS.STATUS_PENDING;
                 }
-                else if (SendBytes != null)
-                {
-                    ReplyBytes = SendBytes;
-                }
 
                 Port.DeliveredHandles = Reply?.Handles;
                 if (Port.DeliveredHandles != null)
                     PublishHandleAttribute(Instance, ReceiveMessageAttributesPtr, AllocatedAttributes, Port.DeliveredHandles.Count);
 
-                ulong WriteLength = (ulong)(ReplyBytes?.Length ?? PortMessageHeaderSize);
+                ulong WriteLength = (ulong)(ReplyBytes?.Length ?? HeaderSize);
                 if (WriteLength > ReceiveBufferLength)
                 {
                     if (BufferLengthPtr != 0)
@@ -143,8 +127,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 else
                 {
-                    Span<byte> EmptyReply = stackalloc byte[PortMessageHeaderSize];
-                    FinalizeReplyHeader(EmptyReply, PortMessageHeaderSize);
+                    Span<byte> EmptyReply = stackalloc byte[HeaderSize];
+                    FinalizeReplyHeader(EmptyReply, HeaderSize);
                     if (!Instance._emulator.WriteMemory(ReceiveMessagePtr, EmptyReply))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }
@@ -180,21 +164,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         private static void PublishHandleAttribute(BinaryEmulator Instance, ulong AttributesPtr, uint AllocatedAttributes, int HandleCount)
         {
-            if (AttributesPtr == 0 || HandleCount <= 0 || (AllocatedAttributes & AlpcMessageHandleAttribute) == 0)
+            if (AttributesPtr == 0 || HandleCount <= 0 || (AllocatedAttributes & HandleAttribute) == 0)
                 return;
 
-            ulong Offset = AlpcAttributeHeaderSize;
-            if ((AllocatedAttributes & AlpcMessageSecurityAttribute) != 0)
-                Offset += AlpcSecurityAttributeSize;
-            if ((AllocatedAttributes & AlpcMessageViewAttribute) != 0)
-                Offset += AlpcViewAttributeSize;
-            if ((AllocatedAttributes & AlpcMessageContextAttribute) != 0)
-                Offset += AlpcContextAttributeSize;
-
-            if (!Instance.IsRegionMapped(AttributesPtr + Offset, AlpcHandleAttributeSize))
+            ulong Offset = AttributeOffset(AllocatedAttributes, HandleAttribute);
+            if (!Instance.IsRegionMapped(AttributesPtr + Offset, HandleAttributeSize))
                 return;
 
-            Instance._emulator.WriteMemory(AttributesPtr + 4, AlpcMessageHandleAttribute);
+            Instance._emulator.WriteMemory(AttributesPtr + 4, HandleAttribute);
             Instance._emulator.WriteMemory(AttributesPtr + Offset + 0x00, 0u);
             Instance._emulator.WriteMemory(AttributesPtr + Offset + 0x08, 0UL, 8);
             Instance._emulator.WriteMemory(AttributesPtr + Offset + 0x10, (uint)HandleCount);
@@ -202,22 +179,15 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static List<ulong> ReadHandleAttribute(BinaryEmulator Instance, ulong AttributesPtr)
         {
-            if (AttributesPtr == 0 || !Instance.IsRegionMapped(AttributesPtr, AlpcAttributeHeaderSize))
+            if (AttributesPtr == 0 || !Instance.IsRegionMapped(AttributesPtr, AttributeHeaderSize))
                 return null;
 
             uint ValidAttributes = Instance._emulator.ReadMemoryUInt(AttributesPtr + 4);
-            if ((ValidAttributes & AlpcMessageHandleAttribute) == 0)
+            if ((ValidAttributes & HandleAttribute) == 0)
                 return null;
 
-            ulong Offset = AlpcAttributeHeaderSize;
-            if ((ValidAttributes & AlpcMessageSecurityAttribute) != 0)
-                Offset += AlpcSecurityAttributeSize;
-            if ((ValidAttributes & AlpcMessageViewAttribute) != 0)
-                Offset += AlpcViewAttributeSize;
-            if ((ValidAttributes & AlpcMessageContextAttribute) != 0)
-                Offset += AlpcContextAttributeSize;
-
-            if (!Instance.IsRegionMapped(AttributesPtr + Offset, AlpcHandleAttributeSize))
+            ulong Offset = AttributeOffset(ValidAttributes, HandleAttribute);
+            if (!Instance.IsRegionMapped(AttributesPtr + Offset, HandleAttributeSize))
                 return null;
 
             ulong Handle = Instance._emulator.ReadMemoryULong(AttributesPtr + Offset + 0x08);
@@ -229,18 +199,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static void FinalizeReplyHeader(Span<byte> Reply, ushort TotalLength)
         {
-            if (Reply.Length < PortMessageHeaderSize)
+            if (Reply.Length < HeaderSize)
                 return;
 
-            WriteU16(Reply, OffPmTotalLength, TotalLength);
-            WriteU16(Reply, OffPmDataLength, TotalLength >= PortMessageHeaderSize ? (ushort)(TotalLength - PortMessageHeaderSize) : (ushort)0);
+            WriteU16(Reply, OffTotalLength, TotalLength);
+            WriteU16(Reply, OffDataLength, TotalLength >= HeaderSize ? (ushort)(TotalLength - HeaderSize) : (ushort)0);
 
-            if (ReadU32(Reply, OffPmMessageId) != 0)
+            if (ReadU32(Reply, OffMessageId) != 0)
                 return;
 
             lock (SyncRoot)
             {
-                WriteU32(Reply, OffPmMessageId, NextMessageId++);
+                WriteU32(Reply, OffMessageId, NextMessageId++);
                 if (NextMessageId == 0)
                     NextMessageId = 1;
             }

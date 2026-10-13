@@ -428,7 +428,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Buffer.Clear();
 
                         User Owner = OwnerProcess?.RunningUser ?? Instance.WinHelper.CurrentUser;
-                        ulong AuthenticationId = Owner == User.System ? WinToken.SystemLogonId : Owner == User.LocalService ? WinToken.LocalServiceLogonId : WinToken.InteractiveLogonId;
+                        ulong AuthenticationId = AuthenticationIdOf(Owner);
                         bool Primary = Token.Type == TokenType.Primary;
 
                         BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), Token.TokenId);
@@ -481,6 +481,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         internal static byte[] InteractiveUserSid() => BuildSid(1, 5, 21, 1000, 1000, 1000, 1001);
+
+        internal static ulong AuthenticationIdOf(User Owner)
+        {
+            return Owner == User.System ? WinToken.SystemLogonId : Owner == User.LocalService ? WinToken.LocalServiceLogonId : WinToken.InteractiveLogonId;
+        }
 
         internal static byte[] BuildSid(byte Revision, ulong IdentifierAuthority, params uint[] SubAuthorities)
         {

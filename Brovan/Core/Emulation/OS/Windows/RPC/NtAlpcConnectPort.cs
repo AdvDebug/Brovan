@@ -1,5 +1,4 @@
-﻿using System.Linq;
-using static Brovan.Core.Helpers.BinaryHelpers;
+﻿using static Brovan.Core.Helpers.BinaryHelpers;
 using Brovan.Core.Emulation.OS.Windows.RPC.Ports;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -24,16 +23,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(PortName))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            return Connect(Instance, PortHandlePtr, PortName);
-        }
-
-        internal static NTSTATUS Connect(BinaryEmulator Instance, ulong PortHandlePtr, string PortName)
-        {
-            // Find existing port or create a new one with the CSRSS handler.
-            WinPort Port = Instance.WinHelper.WinPorts
-                .FirstOrDefault(p => string.Equals(p.Name, PortName,
-                    StringComparison.OrdinalIgnoreCase));
-
+            WinPort Port = NtConnectPort.FindPortForOpen(Instance, PortName);
             if (Port == null)
             {
                 Port = new WinPort
@@ -44,9 +34,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.WinPorts.Add(Port);
             }
 
-            WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(
-                Port, AccessMask.StandardRightsAll);
-            Instance.WinHelper.AddWinHandle(Handle);
+            return Connect(Instance, PortHandlePtr, Port);
+        }
+
+        // NtAlpcConnectPort and NtAlpcConnectPortEx both pass ConnectionMessage, BufferLength and Timeout in slots 6, 7 and 10.
+        internal static NTSTATUS Connect(BinaryEmulator Instance, ulong PortHandlePtr, WinPort Port)
+        {
+            if (Port.Queue != null)
+                return AlpcMessaging.ConnectGuest(Instance, Port, PortHandlePtr, Instance.WinHelper.GetArg(6), Instance.WinHelper.GetArg(7), Instance.WinHelper.GetArg(10));
+
+            WinHandle Handle = Instance.WinHelper.OpenObjectHandle(Port, AccessMask.StandardRightsAll);
 
             if (!Instance.WinHelper.WritePointer(PortHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -59,7 +56,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if ((Instance.Settings.Flags & LogFlags.General) != 0)
                 Instance.TriggerEventMessage(
-                $"[+] ALPC connect \"{PortName}\" Handle=0x{Handle.Handle:X}",
+                $"[+] ALPC connect \"{Port.Name}\" Handle=0x{Handle.Handle:X}",
                 LogFlags.General);
 
             return NTSTATUS.STATUS_SUCCESS;

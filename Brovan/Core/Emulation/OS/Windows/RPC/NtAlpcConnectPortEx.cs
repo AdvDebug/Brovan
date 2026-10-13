@@ -1,4 +1,3 @@
-using System.Linq;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -22,7 +21,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(PortName))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            if (!Instance.WinHelper.WinPorts.Any(Port => string.Equals(Port.Name, PortName, StringComparison.OrdinalIgnoreCase)))
+            WinPort Port = NtConnectPort.FindPortForOpen(Instance, PortName);
+            if (Port == null)
             {
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[!] NtAlpcConnectPortEx: no port \"{PortName}\".", LogFlags.Syscall);
@@ -31,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
-            return NtAlpcConnectPort.Connect(Instance, PortHandlePtr, PortName);
+            return NtAlpcConnectPort.Connect(Instance, PortHandlePtr, Port);
         }
     }
 }

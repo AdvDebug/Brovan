@@ -162,6 +162,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(PortName))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
+            WinPort Port = FindPortForOpen(Instance, PortName);
+            if (Port?.Queue != null)
+            {
+                Brovan.Core.Helpers.Utils.LogError($"[-] LPC: \"{PortName}\" is an ALPC port of this process, which an LPC client cannot reach.");
+                return NTSTATUS.STATUS_NOT_SUPPORTED;
+            }
+
             WinSection PortSection = null;
             if (ClientViewPtr != 0)
             {
@@ -187,7 +194,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return ViewStatus;
             }
 
-            WinPort Port = FindPortByName(Instance, PortName);
             if (Port == null)
             {
                 Port = new WinPort
@@ -197,10 +203,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 };
 
                 Helper.WinPorts.Add(Port);
-            }
-            else if (Port.Handler == null)
-            {
-                Port.Handler = CsrssPortHandler.Handle;
             }
 
             WinHandle Handle = Helper.HandleManager.AddHandle(Port, AccessMask.StandardRightsAll);
@@ -278,6 +280,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return null;
+        }
+
+        internal static WinPort FindPortForOpen(BinaryEmulator Instance, string Name)
+        {
+            WinPort Port = FindPortByName(Instance, Name);
+            if (Port != null)
+                return Port;
+
+            string ShadowName = Instance.WinHelper.GetShadowObjectName(Name);
+            return ShadowName != null ? FindPortByName(Instance, ShadowName) : null;
         }
 
         private static WinSection FindSectionByName(BinaryEmulator Instance, string Name)

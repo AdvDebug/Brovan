@@ -158,6 +158,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint SystemVolume = 1;
         private const ulong GuestUserId = 1;
 
+        private const string AppContainerProfiles = "\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer";
+        private static readonly string[] AppContainerFolders = { "Temp" };
+        private static readonly string[] AppContainerHiddenFolders = { "INetCache", "INetCookies", "INetHistory" };
+        private static readonly string[] PackageDataFolders = { "AppData", "LocalCache", "LocalState", "RoamingState", "Settings", "SystemAppData", "TempState" };
+
         // NT: a subset of CacheManagement::_Initialize_Structure.
         private static readonly (string Table, string[] Indexes)[] StateRepositoryTables =
         {
@@ -276,6 +281,57 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             PublishStateRepositoryCache(Helper, Identity);
             PublishUserDependencyMiniRepository(Instance, Helper, Identity);
+            PublishUserProfile(Helper, Identity.Package);
+        }
+
+        // NT: the deployment creates the AppContainer profile of the package and its data folders for the user.
+        private static void PublishUserProfile(WinSysHelper Helper, AppxPackage Package)
+        {
+            string Moniker = Package.FamilyName.ToLowerInvariant();
+            string Profiles = "\\Registry\\User\\" + Helper.CurrentUserSid + AppContainerProfiles;
+            string Mapping = Profiles + "\\Mappings\\" + FormatSid(DeriveAppContainerSid(Package.FamilyName));
+
+            if (!Helper.CreateRegistryKeyPath(Mapping + "\\Children", false, out _) ||
+                !Helper.CreateRegistryKeyPath(Profiles + "\\Storage\\" + Moniker + "\\Children", false, out _) ||
+                !SetUserString(Helper, Mapping, "DisplayName", Package.DisplayName ?? string.Empty) ||
+                !SetUserString(Helper, Mapping, "Moniker", Moniker))
+                Utils.LogError($"[-] AppX: the AppContainer profile of {Package.FamilyName} cannot be written to the user hive.");
+
+            string Root = WinSysHelper.CurrentUserProfile + "\\AppData\\Local\\Packages\\" + Package.FamilyName;
+            string AppContainer = Root + "\\AC";
+            CreateUserFolder(AppContainer, false);
+            foreach (string Name in AppContainerFolders)
+                CreateUserFolder(AppContainer + "\\" + Name, false);
+            foreach (string Name in AppContainerHiddenFolders)
+                CreateUserFolder(AppContainer + "\\" + Name, true);
+            foreach (string Name in PackageDataFolders)
+                CreateUserFolder(Root + "\\" + Name, false);
+        }
+
+        private static bool SetUserString(WinSysHelper Helper, string KeyPath, string Name, string Value)
+        {
+            byte[] Data = Encoding.Unicode.GetBytes(Value + "\0");
+            WinRegKey Key = Helper.ResolveRegistryKey(KeyPath);
+            if (Key != null && Helper.TryGetRegistryValue(Key, Name, out ValueNode Existing) && Existing.Type == WinSysHelper.RegSz &&
+                Existing.Data != null && Existing.Data.AsSpan().SequenceEqual(Data))
+                return true;
+
+            return Helper.SetRegistryValue(KeyPath, Name, WinSysHelper.RegSz, Data);
+        }
+
+        private static void CreateUserFolder(string GuestPath, bool Hidden)
+        {
+            try
+            {
+                using WindowsFileStream Folder = WindowsFileStream.FromGuestPath(GuestPath, CreateWriteDirectories: true);
+                Folder.CreateDirectory();
+                if (Hidden && !Folder.TryApplyAttributes(FileAttributes.Hidden | FileAttributes.System))
+                    Utils.LogError($"[-] AppX: the attributes of {GuestPath} cannot be set.");
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[-] AppX: {GuestPath} cannot be created: {Error.Message}");
+            }
         }
 
         // NT: OpenPackageInfoByFullName reads this file.

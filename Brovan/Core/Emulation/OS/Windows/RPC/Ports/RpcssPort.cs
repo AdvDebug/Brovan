@@ -17,6 +17,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint ProcAllocateReservedIds = 3;
         private const uint ProcBulkUpdateOIDs = 4;
         private const uint ProcServerAllocateOXIDAndOIDs = 6;
+        private const uint ProcServerFreeOXIDAndOIDs = 8;
+        private const uint ProcDisconnect = 10;
         private const uint ProcRegisterWindowPropInterface = 6;
         private const uint ProcGetWindowPropInterface = 7;
         private const uint ProcNotifyDragDropStartOrStop = 13;
@@ -39,6 +41,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const int RevokeOffset = HwndOffset + 8;
 
         private const uint OrOk = 0;
+        private const uint OrBadOxid = 1910;
+        private const int FreeOxidOffset = 24;
 
         private static readonly Dictionary<(ulong Connection, uint Context), Guid> Contexts = new Dictionary<(ulong Connection, uint Context), Guid>();
         private static readonly Dictionary<uint, byte[]> WindowProps = new Dictionary<uint, byte[]>();
@@ -46,6 +50,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private static readonly Guid ProcessIdentifier = Guid.NewGuid();
         private static readonly ulong ProcessSignature = (ulong)Random.Shared.NextInt64(1, long.MaxValue);
         private static readonly ulong LocalMachineId = (ulong)Random.Shared.NextInt64(1, long.MaxValue);
+        private static readonly HashSet<ulong> ServerOxids = new HashSet<ulong>();
         private static ulong NextId = 0x1000;
         private static uint NextCookie = 1;
 
@@ -108,6 +113,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
                 case ProcServerAllocateOXIDAndOIDs:
                     return ServerAllocateOXIDAndOIDs(Stub);
+
+                case ProcServerFreeOXIDAndOIDs:
+                    return ServerFreeOXIDAndOIDs(Stub);
+
+                case ProcDisconnect:
+                    return Disconnect();
             }
 
             return null;
@@ -268,7 +279,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return null;
 
             Ndr20Writer Writer = new Ndr20Writer(64 + (int)Count * 8);
-            Writer.WriteUInt64(NextId++);
+            ulong Oxid = NextId++;
+            ServerOxids.Add(Oxid);
+            Writer.WriteUInt64(Oxid);
             Writer.WriteUInt64(NextId++);
 
             Writer.WriteUInt32(Count);
@@ -322,6 +335,32 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.AlignTo(4);
             Writer.WriteUInt32(OrOk);
             Writer.WriteUInt32(0);
+            return Writer.ToArray();
+        }
+
+        // The resolver keeps no state for OIDs, so the array after the OXID is not read.
+        private static byte[] ServerFreeOXIDAndOIDs(ReadOnlySpan<byte> Stub)
+        {
+            if (Stub.Length < FreeOxidOffset + sizeof(ulong))
+                return null;
+
+            ulong Oxid = BinaryPrimitives.ReadUInt64LittleEndian(Stub.Slice(FreeOxidOffset, sizeof(ulong)));
+            return BuildStatus(ServerOxids.Remove(Oxid) ? OrOk : OrBadOxid);
+        }
+
+        // NT: rpcss runs down the process context and returns a NULL handle.
+        private static byte[] Disconnect()
+        {
+            Ndr20Writer Writer = new Ndr20Writer(Ndr20Writer.ContextHandleSize + 4);
+            Writer.WriteContextHandle(ReadOnlySpan<byte>.Empty);
+            Writer.WriteUInt32(OrOk);
+            return Writer.ToArray();
+        }
+
+        private static byte[] BuildStatus(uint Status)
+        {
+            Ndr20Writer Writer = new Ndr20Writer(4);
+            Writer.WriteUInt32(Status);
             return Writer.ToArray();
         }
 

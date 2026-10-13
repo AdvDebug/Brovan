@@ -1021,7 +1021,13 @@ namespace Brovan.Core.Emulation
             if (State != null && State.IoRequest != null)
             {
                 if (!State.IoRequest.Completed)
-                    return false;
+                {
+                    if (!IsDeadlineExpired(Thread.WaitDeadline, Now))
+                        return false;
+
+                    State.IoRequest.Status = NTSTATUS.STATUS_TIMEOUT;
+                    State.IoRequest.Completed = true;
+                }
 
                 Thread.WaitSatisfiedIndex = 0;
                 return true;

@@ -337,7 +337,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.PipeWaitDeadline = -1;
         }
 
-        internal void ParkForIoRequest(ParkedIoRequest Request)
+        // A request that is not complete by the deadline ends with STATUS_TIMEOUT.
+        internal void ParkForIoRequest(ParkedIoRequest Request, long Deadline = -1)
         {
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null)
@@ -347,7 +348,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Thread.WaitActive = true;
             Thread.WaitHandles = null;
             Thread.WaitAll = false;
-            Thread.WaitDeadline = -1;
+            Thread.WaitDeadline = Deadline;
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_PENDING;
             State.WaitResumeRIP = GetSyscallRip();
@@ -2591,7 +2592,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT: ObpLookupObjectName goes on in the shadow directory only when it does not insert an object.
-        private string? GetShadowObjectName(string FullName)
+        internal string? GetShadowObjectName(string FullName)
         {
             if (!TryGetNamedObjectDirectory(FullName, out WinObjectDirectory Parent, out string LeafName, out IHandleObject? Existing) || Existing != null || Parent.ShadowPath == null)
                 return null;
@@ -10597,8 +10598,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     WinMutexes.Remove(Mutex);
                     break;
 
-                case WinPort Port when Port.IsServer:
-                    WinPorts.Remove(Port);
+                case WinPort Port:
+                    if (Port.IsServer)
+                        WinPorts.Remove(Port);
+                    AlpcMessaging.PortClosed(Emulator, Port);
                     break;
 
                 case WinPrivateNamespace Namespace:
