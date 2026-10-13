@@ -9677,7 +9677,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
-        private bool TryReadRegistryValue(string NtPath, string ValueName, out ValueNode Value)
+        public bool TryReadRegistryValue(string NtPath, string ValueName, out ValueNode Value)
         {
             Value = null;
 

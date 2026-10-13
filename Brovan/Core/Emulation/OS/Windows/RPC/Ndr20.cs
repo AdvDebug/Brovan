@@ -83,6 +83,26 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             Position += ContextHandleSize;
         }
 
+        public void WriteGuid(Guid Value)
+        {
+            AlignTo(4);
+            Reserve(16);
+            Value.TryWriteBytes(Buffer.AsSpan(Position, 16));
+            Position += 16;
+        }
+
+        public void WriteUniqueUInt32(bool Present, uint Value)
+        {
+            if (!Present)
+            {
+                WriteUInt32(0);
+                return;
+            }
+
+            WriteUniqueReferent();
+            WriteUInt32(Value);
+        }
+
         public void WriteContextHandle(Guid Uuid)
         {
             Span<byte> Cookie = stackalloc byte[ContextHandleSize];
@@ -227,13 +247,57 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             Position = (Position + Alignment - 1) & ~(Alignment - 1);
         }
 
-        public bool TrySkip(int Count)
+        public bool TrySkip(int Count) => TryReadBytes(Count, out _);
+
+        public bool TryReadBytes(int Count, out ReadOnlySpan<byte> Value)
         {
-            if (Count < 0 || Position + Count > Data.Length)
+            Value = default;
+            if (Count < 0 || Count > Data.Length - Position)
                 return false;
 
+            Value = Data.Slice(Position, Count);
             Position += Count;
             return true;
+        }
+
+        public bool TryReadFloat(out float Value)
+        {
+            bool Read = TryReadUInt32(out uint Bits);
+            Value = BitConverter.UInt32BitsToSingle(Bits);
+            return Read;
+        }
+
+        public bool TryReadGuid(out Guid Value)
+        {
+            Value = Guid.Empty;
+            Align(4);
+            if (!TryReadBytes(16, out ReadOnlySpan<byte> Bytes))
+                return false;
+
+            Value = new Guid(Bytes);
+            return true;
+        }
+
+        public bool TryReadUniqueGuid(out Guid Value)
+        {
+            Value = Guid.Empty;
+
+            if (!TryReadUInt32(out uint ReferentId))
+                return false;
+
+            return ReferentId == 0 || TryReadGuid(out Value);
+        }
+
+        public bool TryReadUniqueUInt32(out bool Present, out uint Value)
+        {
+            Present = false;
+            Value = 0;
+
+            if (!TryReadUInt32(out uint ReferentId))
+                return false;
+
+            Present = ReferentId != 0;
+            return !Present || TryReadUInt32(out Value);
         }
 
         public bool TryReadConformantWideString(out string Value)

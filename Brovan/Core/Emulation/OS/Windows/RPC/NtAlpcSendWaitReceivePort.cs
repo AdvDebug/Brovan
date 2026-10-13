@@ -24,7 +24,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int OffPmMessageId = 0x18;
 
         private static readonly object SyncRoot = new object();
-        private static readonly Dictionary<string, Queue<byte[]>> PortQueues = new(StringComparer.OrdinalIgnoreCase);
         private static uint NextMessageId = 1;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -161,16 +160,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (SendBytes != null)
             {
-                lock (SyncRoot)
-                {
-                    if (!PortQueues.TryGetValue(Port.Name, out Queue<byte[]> Queue))
-                    {
-                        Queue = new Queue<byte[]>();
-                        PortQueues[Port.Name] = Queue;
-                    }
-                    Queue.Enqueue(SendBytes);
-                }
-
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtAlpcSendWaitReceivePort: Port=\"{Port.Name}\", Flags=0x{Flags:X}, SentLength=0x{SendBytes.Length:X}", LogFlags.Syscall);
 
