@@ -124,6 +124,14 @@ internal sealed unsafe class FuzzGuest : IGuestMemory, IDisposable
         Window = IntPtr.Zero;
     }
 
+    public ulong AddSharedGpuMemoryHandle(SafeHandle Host)
+    {
+        Host.Dispose();
+        return 0;
+    }
+
+    public SafeHandle? FindSharedGpuMemoryHandle(ulong GuestHandle) => null;
+
     public void ResetDirty(byte Fill)
     {
         if (_dirtyHigh != 0)
