@@ -12,6 +12,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong NativeMinimumUserModeAddress = 0x10000UL;
         private const ushort NativeProcessorArchitectureAmd64 = 9;
 
+        // NT: a probe bounds the range by the native MmUserProbeAddress, for a WOW64 caller too.
+        internal static bool IsUserRange(ulong Address, ulong Size)
+            => Address <= NativeUserProbeAddress && Size <= NativeUserProbeAddress - Address;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             SYSTEM_INFORMATION_CLASS SystemInformationClass = (SYSTEM_INFORMATION_CLASS)Instance.WinHelper.GetArg(0);

@@ -18,9 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint QueryFlags = (uint)Instance.WinHelper.GetArg(8);
             ulong FileName = Instance.WinHelper.GetArg(9);
 
-            NTSTATUS Status = NtQueryDirectoryFileCommon.Handle(Instance, FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName);
-            Instance.WinHelper.SignalIoEvent(EventHandle, Status);
-            return Status;
+            return NtQueryDirectoryFileCommon.Handle(Instance, FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName);
         }
     }
 }

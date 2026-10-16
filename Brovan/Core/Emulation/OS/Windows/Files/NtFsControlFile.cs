@@ -1,4 +1,5 @@
 using System;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -7,50 +8,26 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-                return Handle64(Instance);
+            ulong FileHandle = Instance.WinHelper.GetArg(0);
+            ulong EventHandle = Instance.WinHelper.GetArg(1);
+            ulong ApcRoutine = Instance.WinHelper.GetArg(2);
+            ulong ApcContext = Instance.WinHelper.GetArg(3);
+            ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(4);
+            uint FsControlCode = (uint)Instance.WinHelper.GetArg(5);
+            ulong InputBufferPtr = Instance.WinHelper.GetArg(6);
+            uint InputBufferLength = (uint)Instance.WinHelper.GetArg(7);
+            ulong OutputBufferPtr = Instance.WinHelper.GetArg(8);
+            uint OutputBufferLength = (uint)Instance.WinHelper.GetArg(9);
 
-            return Handle32(Instance);
+            return ControlFile(Instance, FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength);
         }
 
-        private static NTSTATUS Handle64(BinaryEmulator Instance)
-        {
-            ulong FileHandle = Instance.WinHelper.GetArg64(0);
-            ulong EventHandle = Instance.WinHelper.GetArg64(1);
-            ulong ApcRoutine = Instance.WinHelper.GetArg64(2);
-            ulong ApcContext = Instance.WinHelper.GetArg64(3);
-            ulong IoStatusBlockPtr = Instance.WinHelper.GetArg64(4);
-            uint FsControlCode = (uint)Instance.WinHelper.GetArg64(5, true);
-            ulong InputBufferPtr = Instance.WinHelper.GetArg64(6);
-            uint InputBufferLength = (uint)Instance.WinHelper.GetArg64(7, true);
-            ulong OutputBufferPtr = Instance.WinHelper.GetArg64(8);
-            uint OutputBufferLength = (uint)Instance.WinHelper.GetArg64(9, true);
-
-            return ControlFile(Instance, FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, Is64Bit: true);
-        }
-
-        private static NTSTATUS Handle32(BinaryEmulator Instance)
-        {
-            uint FileHandle = Instance.WinHelper.GetArg32(0);
-            uint EventHandle = Instance.WinHelper.GetArg32(1);
-            uint ApcRoutine = Instance.WinHelper.GetArg32(2);
-            uint ApcContext = Instance.WinHelper.GetArg32(3);
-            uint IoStatusBlockPtr = Instance.WinHelper.GetArg32(4);
-            uint FsControlCode = Instance.WinHelper.GetArg32(5);
-            uint InputBufferPtr = Instance.WinHelper.GetArg32(6);
-            uint InputBufferLength = Instance.WinHelper.GetArg32(7);
-            uint OutputBufferPtr = Instance.WinHelper.GetArg32(8);
-            uint OutputBufferLength = Instance.WinHelper.GetArg32(9);
-
-            return ControlFile(Instance, FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, Is64Bit: false);
-        }
-
-        private static NTSTATUS QueuePipeControl(BinaryEmulator Instance, WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, uint FsControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength, bool Is64Bit)
+        private static NTSTATUS QueuePipeControl(BinaryEmulator Instance, WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, uint FsControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength)
         {
             GuestNamedPipe Pipe = File.Pipe;
             bool Listen = FsControlCode == GuestNamedPipe.FSCTL_PIPE_LISTEN;
 
-            // NT: a listen that fails at once leaves the IO_STATUS_BLOCK and the event alone.
+            // NT: a listen that fails at once leaves the IO_STATUS_BLOCK alone and the event reset.
             if (Listen && Pipe.IsServer && Pipe.Channel.Connected)
                 return Pipe.Channel.PeerClosed ? NTSTATUS.STATUS_PIPE_CLOSING : NTSTATUS.STATUS_PIPE_CONNECTED;
 
@@ -82,32 +59,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Status;
         }
 
-        private static NTSTATUS ControlFile(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, uint FsControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength, bool Is64Bit)
+        private static NTSTATUS ControlFile(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, uint FsControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength)
         {
-            if (IoStatusBlockPtr == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            NTSTATUS Status = NtDeviceIoControlFile.CheckRequest(Instance, FileHandle, IoStatusBlockPtr, ApcRoutine, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, out WinFile File);
+            if (Status == NTSTATUS.STATUS_SUCCESS)
+                Status = Instance.WinHelper.ReferenceIoEvent(EventHandle);
 
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, Is64Bit ? 0x10UL : 0x08UL))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            if (!NtDeviceIoControlFile.ProbeControlBuffers(Instance, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            // NT: these fail before the event or the IO_STATUS_BLOCK is touched.
-            WinFile File = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            if (File == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            if (!HasControlAccess(Instance, FileHandle, FsControlCode))
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-
-            Instance.WinHelper.ResetIoEvent(EventHandle);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+            {
+                Instance.WinHelper.ClearPipeWait();
+                return Status;
+            }
 
             if (File.Pipe != null && !File.Pipe.IsDirectory &&
                 (FsControlCode == GuestNamedPipe.FSCTL_PIPE_LISTEN || FsControlCode == GuestNamedPipe.FSCTL_PIPE_TRANSCEIVE))
-                return QueuePipeControl(Instance, File, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, Is64Bit);
+                return QueuePipeControl(Instance, File, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength);
 
-            NTSTATUS Status = NtDeviceIoControlFile.CheckControlBuffers(Instance, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength);
+            Status = NtDeviceIoControlFile.CheckControlBuffers(Instance, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -123,7 +91,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             byte[] RentedOutput = null;
             try
             {
-                Status = NtDeviceIoControlFile.CaptureControlBuffers(Instance, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, ref Data, out RentedInput, out RentedOutput);
+                Status = NtDeviceIoControlFile.CaptureControlBuffers(Instance, FsControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, ref Data, out RentedInput, out RentedOutput);
                 if (Data.OutputBuffer != null)
                     Data.OutputLength = OutputBufferLength;
 
@@ -139,8 +107,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                         else
                             Status = WindowsStorageDeviceSupport.HandleFsControl(FsControlCode, ref Data, File);
                     }
-                    catch
+                    catch (Exception Ex)
                     {
+                        Utils.LogError($"[NtFsControlFile] 0x{FsControlCode:X} on {File.Path}: {Ex.Message}");
                         Status = NTSTATUS.STATUS_UNSUCCESSFUL;
                     }
                 }
@@ -172,49 +141,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             ulong Information = Data.Information;
-            WriteIoStatus(Instance, IoStatusBlockPtr, Status, Information, Is64Bit);
-
-            if (EventHandle != 0 && Status != NTSTATUS.STATUS_PENDING)
-            {
-                WinEvent Ev = Instance.WinHelper.GetEventByHandle(EventHandle, AccessMask.GiveTemp);
-                if (Ev != null)
-                    Ev.Signaled = true;
-            }
-
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, Information);
+            Instance.WinHelper.SignalIoEvent(EventHandle, Status);
             Instance.WinHelper.QueueImmediateCompletion(File, ApcRoutine, ApcContext, IoStatusBlockPtr, Status, Information);
-            return Status;
-        }
-
-        private static bool HasControlAccess(BinaryEmulator Instance, ulong FileHandle, uint ControlCode)
-        {
-            uint RequiredAccess = (ControlCode >> 14) & 0x3;
-            if (RequiredAccess == 0)
-                return true;
-
-            if ((RequiredAccess & 0x1) != 0 &&
-                !Instance.WinHelper.HandleManager.CheckAccess(FileHandle, AccessMask.GenericRead) &&
-                !Instance.WinHelper.HandleManager.CheckAccess(FileHandle, AccessMask.FileReadData))
-            {
-                return false;
-            }
-
-            if ((RequiredAccess & 0x2) != 0 &&
-                !Instance.WinHelper.HandleManager.CheckAccess(FileHandle, AccessMask.GenericWrite) &&
-                !Instance.WinHelper.HandleManager.CheckAccess(FileHandle, AccessMask.FileWriteData))
-            {
-                return false;
-            }
-
-            return true;
-        }
-
-        private static NTSTATUS WriteIoStatus(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information, bool Is64Bit)
-        {
-            if (Is64Bit)
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, Information);
-            else
-                Instance.WinHelper.WriteIoStatusBlock(Instance, (uint)IoStatusBlockPtr, Status, (uint)Information);
-
             return Status;
         }
     }

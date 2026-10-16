@@ -32,7 +32,6 @@ namespace Brovan.Core.Helpers
 
     internal class Utils
     {
-        private const int StdOutputHandle = -11;
         private const int LogFlushInterval = 64;
 
         private static readonly object LogLock = new object();
@@ -176,7 +175,7 @@ namespace Brovan.Core.Helpers
             {
             }
 
-            IntPtr Handle = NativeWinImports.GetStdHandle(StdOutputHandle);
+            IntPtr Handle = NativeWinImports.GetStdHandle(NativeWinImports.StdOutputHandle);
             if (!NativeWinImports.GetConsoleMode(Handle, out int Mode))
                 return;
 
@@ -292,7 +291,7 @@ namespace Brovan.Core.Helpers
 
         public static void DumpConsole()
         {
-            IntPtr ConsoleHandle = NativeWinImports.GetStdHandle(StdOutputHandle);
+            IntPtr ConsoleHandle = NativeWinImports.GetStdHandle(NativeWinImports.StdOutputHandle);
             if (ConsoleHandle == IntPtr.Zero)
             {
                 PrintHighlight("[-] No console attached.", true);

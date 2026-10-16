@@ -591,6 +591,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Ev.Signaled = false;
         }
 
+        // NT references and resets the event once per request, so a re-run skips it.
+        // Event handles keep the raw DesiredAccess, so EVENT_MODIFY_STATE is not checked.
+        internal NTSTATUS ReferenceIoEvent(ulong EventHandle)
+        {
+            if (EventHandle == 0 || WinEmulatedThread.TryGetState(Emulator.CurrentThread)?.SyncIoRerun == true)
+                return NTSTATUS.STATUS_SUCCESS;
+
+            NTSTATUS Status = ReferenceObjectByHandle(EventHandle, AccessMask.GiveTemp, out WinEvent Event);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            Event.Signaled = false;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
         /// <summary>
         /// Signals the optional event a file request carries, which is what GetOverlappedResult waits on.
         /// </summary>
@@ -603,6 +618,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Ev != null)
                 Ev.Signaled = true;
         }
+
+        internal bool ProbeIoStatusBlock(ulong IoStatusBlockPtr) => Emulator.IsMemoryRangeMapped(IoStatusBlockPtr, (uint)(PointerSize * 2));
 
         // NT probes the block when the request starts and ignores a fault when it completes.
         public bool WriteIoStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
@@ -2226,8 +2243,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Inherited standard handles go into the process parameters whatever the subsystem is.
         internal bool InheritedStandardHandles;
 
-        private bool StdOutInherited;
-
         internal byte[] InheritedEnvironment;
 
         private WinHandle InheritedStandardHandle(ulong Value)
@@ -2242,14 +2257,59 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinHandle ConsoleHandle;
         public readonly ConsoleState ConsoleState = new ConsoleState();
 
-        public static WinFile CreateStandardHandleFile(ConsoleObjectKind Kind)
+        public static WinFile CreateStandardHandleFile(HostStreamKind Stream)
         {
-            bool Redirected = Kind == ConsoleObjectKind.Input ? Console.IsInputRedirected : Console.IsOutputRedirected;
+            bool Redirected = Stream switch
+            {
+                HostStreamKind.Input => Console.IsInputRedirected,
+                HostStreamKind.Error => Console.IsErrorRedirected,
+                _ => Console.IsOutputRedirected,
+            };
 
             if (Redirected)
-                return CreateHostStreamFile(Kind == ConsoleObjectKind.Input ? HostStreamKind.Input : HostStreamKind.Output);
+                return IsHostNullDevice(Stream) ? CreateNullDeviceFile() : CreateHostStreamFile(Stream);
 
-            return CreateConsoleObject(Kind);
+            return CreateConsoleObject(Stream == HostStreamKind.Input ? ConsoleObjectKind.Input : ConsoleObjectKind.Output);
+        }
+
+        private static unsafe bool IsHostNullDevice(HostStreamKind Stream)
+        {
+            (int StdHandle, int Descriptor) = Stream switch
+            {
+                HostStreamKind.Input => (NativeWinImports.StdInputHandle, 0),
+                HostStreamKind.Error => (NativeWinImports.StdErrorHandle, 2),
+                _ => (NativeWinImports.StdOutputHandle, 1),
+            };
+
+            if (GeneralHelper.IsWindows)
+            {
+                uint* Information = stackalloc uint[2];
+                ulong* IoStatus = stackalloc ulong[2];
+                IntPtr Handle = NativeWinImports.GetStdHandle(StdHandle);
+                return NativeWinImports.NtQueryVolumeInformationFile(Handle, IoStatus, Information, sizeof(uint) * 2, (int)NtQueryVolumeInformationFile.FileFsDeviceInformation) >= 0 && Information[0] == NtQueryVolumeInformationFile.FILE_DEVICE_NULL;
+            }
+
+            const int AtEmptyPath = 0x1000;
+            const uint StatxType = 0x1;
+            const ushort FileTypeMask = 0xF000, CharacterDevice = 0x2000;
+            byte* Buffer = stackalloc byte[256];
+            if (!GeneralHelper.IO.TryStatx(Descriptor, string.Empty, AtEmptyPath, StatxType, Buffer))
+                return false;
+
+            // Linux: /dev/null is character device 1:3.
+            return (*(ushort*)(Buffer + 0x1C) & FileTypeMask) == CharacterDevice && *(uint*)(Buffer + 0x80) == 1 && *(uint*)(Buffer + 0x84) == 3;
+        }
+
+        private static WinFile CreateNullDeviceFile()
+        {
+            return new WinFile() { Device = true, Path = NullDevice.ObjectName, Handler = NullDevice.Handle, Mode = WinFile.FILE_SYNCHRONOUS_IO_NONALERT };
+        }
+
+        internal void AddConsoleStandardHandles()
+        {
+            STD_IN ??= HandleManager.AddHandle(CreateStandardHandleFile(HostStreamKind.Input), AccessMask.FileReadData);
+            STD_OUT ??= HandleManager.AddHandle(CreateStandardHandleFile(HostStreamKind.Output), AccessMask.FileWriteData);
+            STD_ERR ??= HandleManager.AddHandle(CreateStandardHandleFile(HostStreamKind.Error), AccessMask.FileWriteData);
         }
 
         internal static WinFile CreateConsoleObject(ConsoleObjectKind Kind)
@@ -2919,18 +2979,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             STD_IN = InheritedStandardHandle(InheritedStd[0]);
             STD_OUT = InheritedStandardHandle(InheritedStd[1]);
             STD_ERR = InheritedStandardHandle(InheritedStd[2]);
-            StdOutInherited = STD_OUT != null;
 
             if (Binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui))
             {
-                STD_IN ??= HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Input), AccessMask.FileReadData);
-                STD_OUT ??= HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Output), AccessMask.FileWriteData);
-                STD_ERR ??= StdOutInherited ? HandleManager.AddHandle(CreateStandardHandleFile(ConsoleObjectKind.Output), AccessMask.FileWriteData) : STD_OUT;
+                AddConsoleStandardHandles();
             }
             else if (!InheritedStandardHandles)
             {
-                STD_IN ??= HandleManager.AddHandle(new WinFile(), AccessMask.None);
-                STD_OUT ??= HandleManager.AddHandle(new WinFile(), AccessMask.FileWriteData);
+                STD_IN ??= HandleManager.AddHandle(new WinFile { Mode = WinFile.FILE_SYNCHRONOUS_IO_NONALERT }, AccessMask.None);
+                STD_OUT ??= HandleManager.AddHandle(new WinFile { Mode = WinFile.FILE_SYNCHRONOUS_IO_NONALERT }, AccessMask.FileWriteData);
                 STD_ERR ??= STD_OUT;
             }
             uint WininitPID = GenerateRandomPID();
@@ -8773,9 +8830,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // NT: IopReadFile and IopWriteFile capture the offset before the event reset, and IopExceptionFilter
         // reports a misaligned one as STATUS_DATATYPE_MISALIGNMENT_ERROR.
-        public NTSTATUS ReadFileByteOffset(ulong ByteOffsetPtr, long CurrentPosition, out long Offset)
+        public NTSTATUS ReadFileByteOffset(ulong ByteOffsetPtr, out long Offset)
         {
-            Offset = CurrentPosition;
+            Offset = 0;
             if (ByteOffsetPtr == 0)
                 return NTSTATUS.STATUS_SUCCESS;
 
@@ -10090,13 +10147,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinEvent? GetEventByHandle(ulong Handle, AccessMask Purpose)
         {
-            if (!HandleManager.HandleExists(Handle, HandleType.EventHandle))
-                return null;
-
-            if (!HandleManager.CheckAccess(Handle, Purpose))
-                return null;
-
-            return HandleManager.GetObjectByHandle<WinEvent>(Handle);
+            return ReferenceObjectByHandle(Handle, Purpose, out WinEvent Event) == NTSTATUS.STATUS_SUCCESS ? Event : null;
         }
 
         public WinHandle CreateJobHandle(string? Name, AccessMask Permissions)
@@ -10170,10 +10221,34 @@ namespace Brovan.Core.Emulation.OS.Windows
             return ReferenceObjectByHandle(Handle, RequiredAccess, out Object, out _, out _);
         }
 
+        internal NTSTATUS ReferenceObjectByHandle<T>(ulong Handle, AccessMask RequiredAccess, out T Object, out AccessMask GrantedAccess) where T : class, IHandleObject
+        {
+            return ReferenceObjectByHandle(Handle, RequiredAccess, out Object, out _, out GrantedAccess);
+        }
+
+        // NT: a pseudo handle names only an object of its own type, and the 32-bit forms count only for a WOW64 caller.
+        private bool PseudoHandleNamesOtherType<T>(ulong Handle) where T : class, IHandleObject
+        {
+            if (Handle == HandleManager.CurrentProcess || (Handle == HandleManager.CurrentProcess32 && PointerSize == 4))
+                return !typeof(T).IsAssignableFrom(typeof(WinProcess));
+
+            if (Handle == HandleManager.CurrentThread || (Handle == HandleManager.CurrentThread32 && PointerSize == 4))
+                return !typeof(T).IsAssignableFrom(typeof(EmulatedThread)) && !typeof(T).IsAssignableFrom(typeof(WinRemoteThread));
+
+            return false;
+        }
+
         internal NTSTATUS ReferenceObjectByHandle<T>(ulong Handle, AccessMask RequiredAccess, out T Object, out ulong Key, out AccessMask GrantedAccess) where T : class, IHandleObject
         {
             Object = null;
             GrantedAccess = AccessMask.None;
+
+            if (Handle >= HandleManager.CurrentThread32 && PseudoHandleNamesOtherType<T>(Handle))
+            {
+                Key = 0;
+                return NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+            }
+
             if (!HandleManager.TryGetHandle(Handle, out Key, out HandleEntry Entry) || Entry.Object == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 

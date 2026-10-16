@@ -12,35 +12,51 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static NTSTATUS Handle(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock, ulong FileInformation, uint Length, uint FileInformationClass, uint QueryFlags, ulong FileName)
         {
+            NTSTATUS Status = Query(Instance, FileHandle, EventHandle, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName, out bool EventReset);
+            if (EventReset)
+                Instance.WinHelper.SignalIoEvent(EventHandle, Status);
+            return Status;
+        }
+
+        private static NTSTATUS Query(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock, ulong FileInformation, uint Length, uint FileInformationClass, uint QueryFlags, ulong FileName, out bool EventReset)
+        {
+            EventReset = false;
             using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
             if (IoStatusBlock == 0 || FileInformation == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.IsRegionMapped(IoStatusBlock, 0x10) || !Instance.IsMemoryRangeMapped(FileInformation, Length))
+            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlock) || !Instance.IsMemoryRangeMapped(FileInformation, Length))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             ulong ClassHeaderSize = GetHeaderSize(FileInformationClass);
             if (ClassHeaderSize == 0)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
                 return NTSTATUS.STATUS_INVALID_INFO_CLASS;
-            }
 
             // A buffer under the fixed part is a length error, not an overflow.
             if (Length < ClassHeaderSize)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-            }
 
-            WinFile DirectoryHandle = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            if (DirectoryHandle == null || DirectoryHandle.Device)
+            NTSTATUS Reference = Instance.WinHelper.ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out WinFile DirectoryHandle, out AccessMask Granted);
+            if (Reference != NTSTATUS.STATUS_SUCCESS)
+                return Reference;
+
+            if (!WinFile.AllowsRead(Granted))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            if (DirectoryHandle.RefusesApcRoutine(ApcRoutine))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (DirectoryHandle.Device)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
-            Instance.WinHelper.ResetIoEvent(EventHandle);
+            NTSTATUS EventStatus = Instance.WinHelper.ReferenceIoEvent(EventHandle);
+            if (EventStatus != NTSTATUS.STATUS_SUCCESS)
+                return EventStatus;
+
+            EventReset = true;
 
             string Mask = ReadUnicodeString64(Instance, FileName);
             if (Mask == null)
@@ -104,8 +120,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 string EntryName = Entry.Name ?? string.Empty;
                 int NameBytes = Encoding.Unicode.GetByteCount(EntryName);
 
-                ulong HeaderSize = GetHeaderSize(FileInformationClass);
-                ulong EntrySize = HeaderSize + (ulong)NameBytes;
+                ulong EntrySize = ClassHeaderSize + (ulong)NameBytes;
                 ulong EndOffset = NewOffset + EntrySize;
                 RequiredLength = EndOffset;
 
@@ -124,7 +139,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Span<byte> Record = Instance.WinHelper.Shared.GetSpan(EntrySize).Slice(0, (int)EntrySize);
                 Record.Clear();
                 FormatEntry(Record, FileInformationClass, Entry, (uint)CurrentIndex, NameBytes);
-                Encoding.Unicode.GetBytes(EntryName, Record.Slice((int)HeaderSize));
+                Encoding.Unicode.GetBytes(EntryName, Record.Slice((int)ClassHeaderSize));
 
                 if (PreviousEntryOffset != ulong.MaxValue)
                     BinaryPrimitives.WriteUInt32LittleEndian(NextEntryOffset, (uint)(NewOffset - PreviousEntryOffset));

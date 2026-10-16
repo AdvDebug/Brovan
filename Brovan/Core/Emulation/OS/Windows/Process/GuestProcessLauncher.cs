@@ -268,7 +268,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (File.Device)
             {
-                if (!NullDevice.IsNullDevicePath(File.Path))
+                if (!File.IsNullDevice)
                     return false;
 
                 WriteHeader(Writer, Handle, Entry, KindDevice);
@@ -434,11 +434,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case KindHostStream:
                 {
                     HostStreamKind Stream = (HostStreamKind)Reader.ReadByte();
-                    if (Stream != HostStreamKind.Input && Stream != HostStreamKind.Output)
+                    if (Stream is not (HostStreamKind.Input or HostStreamKind.Output or HostStreamKind.Error))
                         throw new FormatException($"unknown host stream kind {(byte)Stream}");
 
                     // Stands for this process's own stream, which may be a console here.
-                    File = WinSysHelper.CreateStandardHandleFile(Stream == HostStreamKind.Input ? ConsoleObjectKind.Input : ConsoleObjectKind.Output);
+                    File = WinSysHelper.CreateStandardHandleFile(Stream);
                     break;
                 }
 

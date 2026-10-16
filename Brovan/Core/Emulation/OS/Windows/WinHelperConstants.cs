@@ -75,12 +75,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         Output
     }
 
-    // The emulator's own redirected stdin or stdout.
+    // The emulator's own redirected stdin, stdout or stderr.
     public enum HostStreamKind : byte
     {
         None = 0,
         Input,
-        Output
+        Output,
+        Error
     }
 
     [StructLayout(LayoutKind.Explicit, Pack = 1)]
@@ -262,6 +263,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_BAD_IMPERSONATION_LEVEL = 0xC00000A5,
         STATUS_CANT_OPEN_ANONYMOUS = 0xC00000A6,
         STATUS_GENERIC_NOT_MAPPED = 0xC00000E6,
+        STATUS_INVALID_USER_BUFFER = 0xC00000E8,
         STATUS_FREE_VM_NOT_AT_BASE = 0xC000009F,
         STATUS_INVALID_PARAMETER_1 = 0xC00000EF,
         STATUS_INVALID_PARAMETER_2 = 0xC00000F0,
@@ -1517,6 +1519,24 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // NT waits inside every I/O call on a synchronous file.
         public bool Synchronous => (Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) != 0;
+
+        // NT: a file bound to a completion port takes no APC routine. Bit 0 of the routine marks a WOW64 caller.
+        public bool RefusesApcRoutine(ulong ApcRoutine) => CompletionHandle != 0 && (ApcRoutine & ~1UL) != 0;
+
+        // The guest sees the emulator's own redirected streams as pipes.
+        public bool IsNamedPipe => Pipe != null || HostStream != HostStreamKind.None;
+
+        public bool IsNullDevice => Device && Path == NullDevice.ObjectName;
+
+        internal const AccessMask ReadDataAccess = AccessMask.GenericAll | AccessMask.MaximumAllowed | AccessMask.GenericRead | AccessMask.FileReadData;
+        internal const AccessMask WriteDataAccess = AccessMask.GenericAll | AccessMask.MaximumAllowed | AccessMask.GenericWrite | AccessMask.FileWriteData;
+
+        public static bool AllowsRead(AccessMask Access) => (Access & ReadDataAccess) != 0;
+
+        // NT: on a named pipe FILE_APPEND_DATA is FILE_CREATE_PIPE_INSTANCE and grants no write.
+        public bool AllowsWrite(AccessMask Access) => (Access & WriteDataAccess) != 0 || ((Access & AccessMask.FileAppendData) != 0 && !IsNamedPipe);
+
+        public static bool IsAppendOnly(AccessMask Access) => (Access & AccessMask.FileAppendData) != 0 && (Access & WriteDataAccess) == 0;
 
         internal GuestNamedPipe Pipe;
 

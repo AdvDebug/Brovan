@@ -115,6 +115,10 @@ namespace Brovan
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 
+        public const int StdInputHandle = -10;
+        public const int StdOutputHandle = -11;
+        public const int StdErrorHandle = -12;
+
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern IntPtr GetStdHandle(int nStdHandle);
 
@@ -180,6 +184,9 @@ namespace Brovan
 
         [DllImport("ntdll.dll")]
         public static extern unsafe int NtQuerySystemInformation(int SystemInformationClass, void* SystemInformation, uint SystemInformationLength, uint* ReturnLength);
+
+        [DllImport("ntdll.dll")]
+        public static extern unsafe int NtQueryVolumeInformationFile(IntPtr FileHandle, ulong* IoStatusBlock, void* FsInformation, uint Length, int FsInformationClass);
     }
 
     internal class NativeUnixImports
@@ -1249,7 +1256,6 @@ namespace Brovan
         // Reads only on demand, so a child that inherits host stdin sees every byte this process did not ask for.
         public static class HostStreamInput
         {
-            private const int StdInputHandle = -10;
             private const int FilePipeLocalInformation = 24;
             private const int FilePipeLocalInformationBytes = 0x28;
             private const int NamedPipeStateOffset = 0x20;
@@ -1365,7 +1371,7 @@ namespace Brovan
                 {
                     byte* Information = stackalloc byte[FilePipeLocalInformationBytes];
                     ulong* IoStatus = stackalloc ulong[2];
-                    IntPtr Handle = NativeWinImports.GetStdHandle(StdInputHandle);
+                    IntPtr Handle = NativeWinImports.GetStdHandle(NativeWinImports.StdInputHandle);
                     int Status = NativeWinImports.NtQueryInformationFile(Handle, IoStatus, Information, FilePipeLocalInformationBytes, FilePipeLocalInformation);
                     return Status >= 0 && *(uint*)(Information + NamedPipeStateOffset) == FilePipeClosingState;
                 }
@@ -4063,6 +4069,28 @@ namespace Brovan
 
             private static bool StatxMissing;
 
+            internal static unsafe bool TryStatx(int DirectoryFd, string Path, int Flags, uint Mask, byte* Buffer)
+            {
+                const int ENOSYS = 38;
+                if (StatxMissing)
+                    return false;
+
+                try
+                {
+                    if (NativeUnixImports.Statx(DirectoryFd, Path, Flags, Mask, Buffer) == 0)
+                        return true;
+
+                    if (Marshal.GetLastPInvokeError() == ENOSYS)
+                        StatxMissing = true;
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    StatxMissing = true;
+                }
+
+                return false;
+            }
+
             public static unsafe bool TryGetHostFileStamp(string HostPath, out HostFileStamp Stamp)
             {
                 Stamp = default;
@@ -4087,28 +4115,23 @@ namespace Brovan
                     }
 
                     byte* Buffer = stackalloc byte[256];
-                    if (!StatxMissing)
+                    const int AtFdCwd = -100;
+                    const uint StatxBasicStats = 0x7FF, StatxNeeded = 0x3C0;
+                    if (TryStatx(AtFdCwd, HostPath, 0, StatxBasicStats, Buffer))
                     {
-                        try
-                        {
-                            const int AtFdCwd = -100;
-                            const uint StatxBasicStats = 0x7FF, StatxNeeded = 0x3C0;
-                            if (NativeUnixImports.Statx(AtFdCwd, HostPath, 0, StatxBasicStats, Buffer) != 0
-                                || (*(uint*)Buffer & StatxNeeded) != StatxNeeded)
-                                return false;
+                        if ((*(uint*)Buffer & StatxNeeded) != StatxNeeded)
+                            return false;
 
-                            ulong Device = ((ulong)*(uint*)(Buffer + 136) << 32) | *(uint*)(Buffer + 140);
-                            Stamp = new HostFileStamp(Device, *(ulong*)(Buffer + 32), 0,
-                                *(long*)(Buffer + 96) * 1_000_000_000 + *(uint*)(Buffer + 104),
-                                *(long*)(Buffer + 112) * 1_000_000_000 + *(uint*)(Buffer + 120),
-                                *(long*)(Buffer + 40));
-                            return true;
-                        }
-                        catch (EntryPointNotFoundException)
-                        {
-                            StatxMissing = true;
-                        }
+                        ulong Device = ((ulong)*(uint*)(Buffer + 136) << 32) | *(uint*)(Buffer + 140);
+                        Stamp = new HostFileStamp(Device, *(ulong*)(Buffer + 32), 0,
+                            *(long*)(Buffer + 96) * 1_000_000_000 + *(uint*)(Buffer + 104),
+                            *(long*)(Buffer + 112) * 1_000_000_000 + *(uint*)(Buffer + 120),
+                            *(long*)(Buffer + 40));
+                        return true;
                     }
+
+                    if (!StatxMissing)
+                        return false;
 
                     // x86_64 and arm64 place these stat fields at the same offsets.
                     Architecture Arch = RuntimeInformation.ProcessArchitecture;
@@ -4207,7 +4230,6 @@ namespace Brovan
             {
                 const int AtEmptyPath = 0x1000;
                 const uint StatxBasicStats = 0x7FF, StatxNeeded = 0x2E0;
-                const int ENOSYS = 38;
 
                 CreationTime = 0;
                 LastAccessTime = 0;
@@ -4221,18 +4243,8 @@ namespace Brovan
                 try
                 {
                     Handle.DangerousAddRef(ref Added);
-                    if (NativeUnixImports.Statx((int)Handle.DangerousGetHandle(), string.Empty, AtEmptyPath, StatxBasicStats, Buffer) != 0)
-                    {
-                        if (Marshal.GetLastPInvokeError() == ENOSYS)
-                            StatxMissing = true;
-
+                    if (!TryStatx((int)Handle.DangerousGetHandle(), string.Empty, AtEmptyPath, StatxBasicStats, Buffer))
                         return false;
-                    }
-                }
-                catch (EntryPointNotFoundException)
-                {
-                    StatxMissing = true;
-                    return false;
                 }
                 finally
                 {

@@ -1,3 +1,5 @@
+using System;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -6,56 +8,29 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-                return Handle64(Instance);
+            ulong FileHandle = Instance.WinHelper.GetArg(0);
+            ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(1);
 
-            return Handle32(Instance);
-        }
-
-        private static NTSTATUS Handle64(BinaryEmulator Instance)
-        {
-            ulong FileHandle = Instance.WinHelper.GetArg64(0);
-            ulong IoStatusBlockPtr = Instance.WinHelper.GetArg64(1);
+            NTSTATUS Reference = Instance.WinHelper.ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out WinFile FileObj, out AccessMask Granted);
+            if (Reference != NTSTATUS.STATUS_SUCCESS)
+                return Reference;
 
             if (IoStatusBlockPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
+            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            NTSTATUS Status = FlushHandle(Instance, FileHandle);
+            if (!FileObj.AllowsWrite(Granted))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            NTSTATUS Status = Flush(FileObj);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
             return Status;
         }
 
-        private static NTSTATUS Handle32(BinaryEmulator Instance)
+        private static NTSTATUS Flush(WinFile FileObj)
         {
-            uint FileHandle = Instance.WinHelper.GetArg32(0);
-            uint IoStatusBlockPtr = Instance.WinHelper.GetArg32(1);
-
-            if (IoStatusBlockPtr == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, 0x08))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            NTSTATUS Status = FlushHandle(Instance, FileHandle);
-            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
-            return Status;
-        }
-
-        private static NTSTATUS FlushHandle(BinaryEmulator Instance, ulong FileHandle)
-        {
-            WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            if (FileObj == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            if (FileObj.HostStream == HostStreamKind.Output)
-            {
-                Console.Out.Flush();
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
             if (FileObj.Device)
                 return NTSTATUS.STATUS_SUCCESS;
 
@@ -71,8 +46,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Stream.Flush();
                 return NTSTATUS.STATUS_SUCCESS;
             }
-            catch
+            catch (Exception Ex)
             {
+                Utils.LogError($"[NtFlushBuffersFile] {FileObj.Path}: {Ex.Message}");
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
         }

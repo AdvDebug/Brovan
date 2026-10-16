@@ -21,44 +21,33 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool FailImmediately = (Instance.WinHelper.GetArg(8) & 0xFF) != 0;
             bool ExclusiveLock = (Instance.WinHelper.GetArg(9) & 0xFF) != 0;
 
-            if (IoStatusBlockPtr == 0)
+            NTSTATUS Status = CheckRequest(Instance, FileHandle, IoStatusBlockPtr, ByteOffsetPtr, LengthPtr, out WinFile FileObj, out long Offset, out ulong Length);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            if (FileObj.RefusesApcRoutine(ApcRoutine))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            if (FileObj == null)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
-                SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_INVALID_HANDLE);
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-            }
-
-            NTSTATUS CaptureStatus = Instance.WinHelper.ReadFileLockRange(ByteOffsetPtr, LengthPtr, out long Offset, out ulong Length);
-            if (CaptureStatus != NTSTATUS.STATUS_SUCCESS)
-                return CaptureStatus;
 
             Instance.WinHelper.ResetIoEvent(EventHandle);
 
             if (FileObj.Device)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
-                SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST);
+                Instance.WinHelper.SignalIoEvent(EventHandle, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST);
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
             }
 
             if (FileObj.Directory)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
-                SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_INVALID_PARAMETER);
+                Instance.WinHelper.SignalIoEvent(EventHandle, NTSTATUS.STATUS_INVALID_PARAMETER);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
             if (!Instance.WinHelper.IsValidFileLockRange(Offset, Length))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_LOCK_RANGE, 0);
-                SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_INVALID_LOCK_RANGE);
+                Instance.WinHelper.SignalIoEvent(EventHandle, NTSTATUS.STATUS_INVALID_LOCK_RANGE);
                 return NTSTATUS.STATUS_INVALID_LOCK_RANGE;
             }
 
@@ -69,14 +58,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_PENDING;
 
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_LOCK_NOT_GRANTED, 0);
-                SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_LOCK_NOT_GRANTED);
+                Instance.WinHelper.SignalIoEvent(EventHandle, NTSTATUS.STATUS_LOCK_NOT_GRANTED);
                 PostFastLockPacket(Instance, FileObj, ApcContext, NTSTATUS.STATUS_LOCK_NOT_GRANTED);
                 return NTSTATUS.STATUS_LOCK_NOT_GRANTED;
             }
 
             FileObj.AddLock((ulong)Offset, Length, Key, ExclusiveLock);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
-            SignalEvent(Instance, EventHandle, NTSTATUS.STATUS_SUCCESS);
+            Instance.WinHelper.SignalIoEvent(EventHandle, NTSTATUS.STATUS_SUCCESS);
             PostFastLockPacket(Instance, FileObj, ApcContext, NTSTATUS.STATUS_SUCCESS);
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -84,22 +73,29 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        // NT checks in this order and writes no IO_STATUS_BLOCK for a failure here.
+        internal static NTSTATUS CheckRequest(BinaryEmulator Instance, ulong FileHandle, ulong IoStatusBlockPtr, ulong ByteOffsetPtr, ulong LengthPtr, out WinFile FileObj, out long Offset, out ulong Length)
+        {
+            Offset = 0;
+            Length = 0;
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out FileObj, out AccessMask Granted);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            if ((Granted & (WinFile.ReadDataAccess | WinFile.WriteDataAccess)) == 0)
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            return Instance.WinHelper.ReadFileLockRange(ByteOffsetPtr, LengthPtr, out Offset, out Length);
+        }
 
         // NT: the fast lock path posts a failure too, and queues no APC.
         private static void PostFastLockPacket(BinaryEmulator Instance, WinFile File, ulong ApcContext, NTSTATUS Status)
         {
             if ((File.CompletionNotificationModes & WinSysHelper.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) == 0)
                 Instance.WinHelper.QueueFileCompletion(Instance, File, ApcContext, Status, 0);
-        }
-
-        private static void SignalEvent(BinaryEmulator Instance, ulong EventHandle, NTSTATUS Status)
-        {
-            if (EventHandle == 0 || Status == NTSTATUS.STATUS_PENDING)
-                return;
-
-            WinEvent Ev = Instance.WinHelper.GetEventByHandle(EventHandle, AccessMask.GiveTemp);
-            if (Ev != null)
-                Ev.Signaled = true;
         }
     }
 }

@@ -95,7 +95,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Path = Path.Replace('/', '\\').TrimEnd('\0');
 
-            WindowsFileStream Stream = NtCreateFile.OpenLookupStream(Instance, Path, NtCreateFile.WantsReadData(DesiredAccess), out bool ParentExists);
+            WindowsFileStream Stream = NtCreateFile.OpenLookupStream(Instance, Path, WinFile.AllowsRead(DesiredAccess), out bool ParentExists);
             NTSTATUS Status = CheckExistingPath(Instance, Stream, Path, DesiredAccess, ShareAccess, OpenOptions, ParentExists, ref IsDirectory);
             if (Status != NTSTATUS.STATUS_SUCCESS)
             {

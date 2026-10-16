@@ -86,6 +86,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal WinPendingIo? SyncIo { get; set; }
         internal bool SyncIoCancelled { get; set; }
         internal bool SyncIoBetweenRetries { get; set; }
+        internal bool SyncIoRerun { get; set; }
         internal ulong SyncIoRip { get; set; }
         internal uint SyncIoSyscall { get; set; }
 

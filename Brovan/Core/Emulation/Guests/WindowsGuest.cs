@@ -705,10 +705,15 @@ namespace Brovan.Core.Emulation.Guests
         private bool TryEndCancelledRetry(BinaryEmulator Instance, uint Syscall, ulong Rip)
         {
             WindowsThreadState State = WinEmulatedThread.TryGetState(Instance.CurrentThread);
-            if (State == null || !State.SyncIoBetweenRetries)
+            if (State == null)
                 return false;
 
-            bool Cancelled = State.SyncIoCancelled && State.SyncIoRip == Rip && State.SyncIoSyscall == Syscall;
+            bool SameCall = State.SyncIoBetweenRetries && State.SyncIoRip == Rip && State.SyncIoSyscall == Syscall;
+            bool Cancelled = SameCall && State.SyncIoCancelled;
+            State.SyncIoRerun = SameCall && !Cancelled;
+            if (!State.SyncIoBetweenRetries)
+                return false;
+
             State.ResetSyncIo();
             if (!Cancelled)
                 return false;
@@ -1222,7 +1227,7 @@ namespace Brovan.Core.Emulation.Guests
             else
             {
                 if (!TryGetOperandAddress(Instance, Code.Slice(0, Length), Index + 2, ModRm, Prefixes, Rex, Rip, out ulong Address, out _)
-                    || !IsUserRange(Address, (ulong)Size))
+                    || !NtWow64GetNativeSystemInformation.IsUserRange(Address, (ulong)Size))
                     return NTSTATUS.STATUS_INTEGER_DIVIDE_BY_ZERO;
 
                 Span<byte> Operand = stackalloc byte[sizeof(ulong)];
@@ -1390,11 +1395,7 @@ namespace Brovan.Core.Emulation.Guests
 
         // NT checks the full operand size against the user range, then may store fewer bytes.
         private static bool TryStoreToUser(BinaryEmulator Instance, ulong Address, ReadOnlySpan<byte> Data, int CheckedSize)
-            => IsUserRange(Address, (ulong)CheckedSize) && Instance.IsAccessible(Address, (ulong)Data.Length, true) && Instance.WriteMemory(Address, Data);
-
-        private static bool IsUserRange(ulong Address, ulong Size)
-            => Address <= NtWow64GetNativeSystemInformation.NativeUserProbeAddress
-                && Size <= NtWow64GetNativeSystemInformation.NativeUserProbeAddress - Address;
+            => NtWow64GetNativeSystemInformation.IsUserRange(Address, (ulong)CheckedSize) && Instance.IsAccessible(Address, (ulong)Data.Length, true) && Instance.WriteMemory(Address, Data);
 
         internal void RaiseStoreFault(BinaryEmulator Instance, ulong Address)
         {
@@ -1988,29 +1989,8 @@ namespace Brovan.Core.Emulation.Guests
         /// </summary>
         private void EnsureDirectBlobStandardHandles()
         {
-            if (WinHelper.ConsoleHandle == null)
-            {
-                WinFile Console = new WinFile
-                {
-                    Device = true,
-                    Path = "\\Device\\ConDrv\\Connect",
-                    ConsoleKind = ConsoleObjectKind.Connect,
-                    Handler = ConsoleServer.Handle
-                };
-                WinHelper.ConsoleHandle = WinHelper.HandleManager.AddHandle(Console, AccessMask.GenericRead | AccessMask.GenericWrite);
-            }
-
-            if (WinHelper.STD_IN == null)
-            {
-                WinFile StdIn = WinSysHelper.CreateStandardHandleFile(ConsoleObjectKind.Input);
-                WinHelper.STD_IN = WinHelper.HandleManager.AddHandle(StdIn, AccessMask.FileReadData);
-            }
-
-            if (WinHelper.STD_OUT == null)
-            {
-                WinFile StdOut = WinSysHelper.CreateStandardHandleFile(ConsoleObjectKind.Output);
-                WinHelper.STD_OUT = WinHelper.HandleManager.AddHandle(StdOut, AccessMask.FileWriteData);
-            }
+            WinHelper.ConsoleHandle ??= WinHelper.HandleManager.AddHandle(WinSysHelper.CreateConsoleObject(ConsoleObjectKind.Connect), AccessMask.GenericRead | AccessMask.GenericWrite);
+            WinHelper.AddConsoleStandardHandles();
         }
 
         private static void JoinGuestSession(BinaryEmulator Instance, WinModule MainModule)

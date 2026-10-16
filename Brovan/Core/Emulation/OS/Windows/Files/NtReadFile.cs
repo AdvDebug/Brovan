@@ -1,4 +1,5 @@
 using System;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -9,17 +10,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            ulong Event = Instance.WinHelper.GetArg(1);
-            NTSTATUS Status = Read(Instance, out bool EventDone);
-            if (!EventDone)
-                Instance.WinHelper.SignalIoEvent(Event, Status);
-            return Status;
-        }
-
-        private static NTSTATUS Read(BinaryEmulator Instance, out bool EventDone)
-        {
-            EventDone = false;
-
             ulong FileHandle = Instance.WinHelper.GetArg(0);
             ulong EventHandle = Instance.WinHelper.GetArg(1);
             ulong ApcRoutine = Instance.WinHelper.GetArg(2);
@@ -28,77 +18,46 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong BufferPtr = Instance.WinHelper.GetArg(5);
             uint Length = (uint)Instance.WinHelper.GetArg(6);
             ulong ByteOffsetPtr = Instance.WinHelper.GetArg(7);
-            ulong Key = Instance.WinHelper.GetArg(8);
 
-            if (IoStatusBlockPtr == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            NTSTATUS Status = BeginRequest(Instance, FileHandle, EventHandle, IoStatusBlockPtr, BufferPtr, Length, ApcRoutine, ByteOffsetPtr, Write: false, out WinFile FileObj, out long Offset);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (FileObj.Pipe != null)
+                return ReadPipe(Instance, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
 
-            WinFile PipeFile = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            EventDone = PipeFile != null && (PipeFile.Pipe != null || PipeFile.HostStream == HostStreamKind.Input);
+            if (FileObj.HostStream == HostStreamKind.Input)
+                return ReadHostStream(Instance, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
 
-            long Offset = 0;
-            if (PipeFile != null)
+            Status = Read(Instance, FileHandle, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset);
+            Instance.WinHelper.SignalIoEvent(EventHandle, Status);
+            return Status;
+        }
+
+        private static NTSTATUS Read(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, long Offset)
+        {
+            if (FileObj.ConsoleKind == ConsoleObjectKind.Input)
             {
-                NTSTATUS OffsetStatus = Instance.WinHelper.ReadFileByteOffset(ByteOffsetPtr, PipeFile.Position, out Offset);
-                if (OffsetStatus != NTSTATUS.STATUS_SUCCESS)
-                {
-                    EventDone = true;
-                    return OffsetStatus;
-                }
-            }
-
-            if (PipeFile?.Pipe != null)
-                return ReadPipe(Instance, FileHandle, PipeFile, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
-
-            if (PipeFile?.ConsoleKind == ConsoleObjectKind.Input)
-            {
-                WinPendingIo Io = Instance.WinHelper.SynchronousIo(PipeFile, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr);
+                WinPendingIo Io = Instance.WinHelper.SynchronousIo(FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr);
                 return ConsoleServer.ReadFile(Instance, in Io, BufferPtr, Length);
             }
 
-            if (PipeFile?.HostStream == HostStreamKind.Input)
-                return ReadHostStream(Instance, FileHandle, PipeFile, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
+            // NT: the null device answers EOF to a zero-length read too.
+            if (FileObj.IsNullDevice)
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
+                return NTSTATUS.STATUS_END_OF_FILE;
+            }
 
             if (Length == 0)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
-                Instance.WinHelper.QueueImmediateCompletion(PipeFile, ApcRoutine, ApcContext, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
+                Instance.WinHelper.QueueImmediateCompletion(FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            // NT: probed before the event reset. A fault leaves the IO_STATUS_BLOCK alone.
-            if (!Instance.IsMemoryRangeMapped(BufferPtr, Length))
-            {
-                EventDone = true;
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            }
-
-            WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            if (FileObj == null)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-            }
-
-            Instance.WinHelper.ResetIoEvent(EventHandle);
-
             if (FileObj.Device)
             {
-                if (NullDevice.IsNullDevicePath(FileObj.Path))
-                {
-                    if (!HasReadAccess(Instance, FileHandle))
-                    {
-                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                        return NTSTATUS.STATUS_ACCESS_DENIED;
-                    }
-
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_END_OF_FILE, 0);
-                    return NTSTATUS.STATUS_END_OF_FILE;
-                }
-
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_DEVICE_REQUEST, 0);
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
             }
@@ -109,21 +68,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
             }
 
-            if (!HasReadAccess(Instance, FileHandle))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-            }
-
             WindowsFileStream Stream = FileObj.GetFileStream();
             if (Stream == null || !Stream.ExistsAsFile)
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND, 0);
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
-
-            if (Offset < 0)
-                Offset = 0;
 
             int ToRead = Length > int.MaxValue ? int.MaxValue : (int)Length;
 
@@ -177,8 +127,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 // A file that went away under the stream reads as ended.
             }
-            catch
+            catch (Exception Ex)
             {
+                Utils.LogError($"[NtReadFile] {FileObj.Path}: {Ex.Message}");
                 if (Done == 0)
                 {
                     Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
@@ -192,7 +143,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_END_OF_FILE;
             }
 
-            if (ByteOffsetPtr == 0)
+            if (FileObj.Synchronous)
                 FileObj.Position = Offset + Done;
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Done);
@@ -204,17 +155,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        // NT: access and buffer failures leave the event and the IO_STATUS_BLOCK alone.
-        private static NTSTATUS ReadPipe(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
+        private static NTSTATUS ReadPipe(BinaryEmulator Instance, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
         {
-            if (!HasReadAccess(Instance, FileHandle))
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-
-            if (Length != 0 && !Instance.IsMemoryRangeMapped(BufferPtr, Length))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            Instance.WinHelper.ResetIoEvent(EventHandle);
-
             PipeRequest Request = Instance.WinHelper.PipeRequests.Create(Instance, PipeRequestKind.Read, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr);
             Request.Buffer = BufferPtr;
             Request.Length = (int)Math.Min(Length, (uint)GuestNamedPipe.MaxMessageBytes);
@@ -222,16 +164,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT: a zero-byte read still waits for data. A failure leaves the IO_STATUS_BLOCK alone and the event reset.
-        private static NTSTATUS ReadHostStream(BinaryEmulator Instance, ulong FileHandle, WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
+        private static NTSTATUS ReadHostStream(BinaryEmulator Instance, WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
         {
-            if (!HasReadAccess(Instance, FileHandle))
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-
-            if (Length != 0 && !Instance.IsMemoryRangeMapped(BufferPtr, Length))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            Instance.WinHelper.ResetIoEvent(EventHandle);
-
             Task NextChange = GeneralHelper.HostStreamInput.NextChange;
             int Capacity = (int)Math.Min(Length, (uint)Brovan.Core.Settings.MemoryBudget.HostStreamInputBytes);
             Span<byte> Data = Capacity == 0 ? Span<byte>.Empty : Instance.WinHelper.Shared.GetSpan((uint)Capacity).Slice(0, Capacity);
@@ -265,24 +199,54 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-
-        private static bool HasReadAccess(BinaryEmulator Instance, ulong FileHandle)
+        // The order follows IopReadFile and IopValidateAndGetWriteParameters, and no failure writes the IO_STATUS_BLOCK.
+        internal static NTSTATUS BeginRequest(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, ulong ApcRoutine, ulong ByteOffsetPtr, bool Write, out WinFile FileObj, out long Offset)
         {
-            AccessMask Granted = Instance.WinHelper.HandleManager.GetPermissionsByHandle(FileHandle);
+            Offset = 0;
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out FileObj, out AccessMask Granted);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            if ((Granted & AccessMask.GenericAll) == AccessMask.GenericAll)
-                return true;
+            if (!(Write ? FileObj.AllowsWrite(Granted) : WinFile.AllowsRead(Granted)))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
 
-            if ((Granted & AccessMask.GenericRead) == AccessMask.GenericRead)
-                return true;
+            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if ((Granted & AccessMask.FileAllAccess) == AccessMask.FileAllAccess)
-                return true;
+            // NT: a read buffer is probed for write page by page, a write buffer for read by range only.
+            if (Length != 0 && !(Write ? NtWow64GetNativeSystemInformation.IsUserRange(BufferPtr, Length) : Instance.IsAccessible(BufferPtr, Length, true)))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if ((Granted & AccessMask.FileReadData) == AccessMask.FileReadData)
-                return true;
+            if (FileObj.RefusesApcRoutine(ApcRoutine))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            return false;
+            Status = Instance.WinHelper.ReadFileByteOffset(ByteOffsetPtr, out long Requested);
+            if (Status == NTSTATUS.STATUS_SUCCESS)
+                Status = Instance.WinHelper.ReferenceIoEvent(EventHandle);
+
+            if (Status != NTSTATUS.STATUS_SUCCESS || !HasFileOffset(FileObj))
+                return Status;
+
+            return ResolveFileOffset(FileObj, ByteOffsetPtr != 0 ? Requested : null, Write, Write && WinFile.IsAppendOnly(Granted), out Offset);
+        }
+
+        internal const long FileWriteToEndOfFile = -1;
+        private const long FileUseFilePointerPosition = -2;
+
+        // Console and volume objects carry no open mode, so a device other than a pipe skips the offset rules.
+        private static bool HasFileOffset(WinFile FileObj) => !FileObj.Device || FileObj.IsNamedPipe;
+
+        private static NTSTATUS ResolveFileOffset(WinFile FileObj, long? Requested, bool Write, bool AppendOnly, out long Offset)
+        {
+            Offset = 0;
+            if (Requested == null && !FileObj.Synchronous)
+                return FileObj.IsNamedPipe ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            Offset = AppendOnly ? FileWriteToEndOfFile : Requested ?? FileUseFilePointerPosition;
+            if (Offset == FileUseFilePointerPosition && FileObj.Synchronous)
+                Offset = FileObj.Position;
+
+            return Offset >= 0 || (Write && Offset == FileWriteToEndOfFile) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_PARAMETER;
         }
     }
 }

@@ -345,7 +345,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             using GeneralHelper.IO.ProbeScope Scope = GeneralHelper.IO.BeginProbeScope();
 
-            Stream = OpenLookupStream(Instance, Path, WantsReadData(Permissions), out ParentExists);
+            Stream = OpenLookupStream(Instance, Path, WinFile.AllowsRead(Permissions), out ParentExists);
             NTSTATUS Status = ClassifyExisting(Stream, Path, CreateOptions, ref IsDirectory, out Exists);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
@@ -529,15 +529,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             return Stream != null && Stream.IsReadOnly;
-        }
-
-        internal static bool WantsReadData(AccessMask Permissions)
-        {
-            return (Permissions & AccessMask.FileReadData) == AccessMask.FileReadData
-                || (Permissions & AccessMask.GenericRead) == AccessMask.GenericRead
-                || (Permissions & AccessMask.GenericAll) == AccessMask.GenericAll
-                || (Permissions & AccessMask.FileAllAccess) == AccessMask.FileAllAccess
-                || (Permissions & AccessMask.MaximumAllowed) != 0;
         }
 
         /// <summary>

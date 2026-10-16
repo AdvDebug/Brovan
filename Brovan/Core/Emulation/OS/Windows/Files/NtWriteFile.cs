@@ -1,4 +1,5 @@
 using System;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -7,17 +8,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            ulong Event = Instance.WinHelper.GetArg(1);
-            NTSTATUS Status = Write(Instance, out bool EventDone);
-            if (!EventDone)
-                Instance.WinHelper.SignalIoEvent(Event, Status);
-            return Status;
-        }
-
-        private static NTSTATUS Write(BinaryEmulator Instance, out bool EventDone)
-        {
-            EventDone = false;
-
             ulong FileHandle = Instance.WinHelper.GetArg(0);
             ulong EventHandle = Instance.WinHelper.GetArg(1);
             ulong ApcRoutine = Instance.WinHelper.GetArg(2);
@@ -26,60 +16,38 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong BufferPtr = Instance.WinHelper.GetArg(5);
             uint Length = (uint)Instance.WinHelper.GetArg(6);
             ulong ByteOffsetPtr = Instance.WinHelper.GetArg(7);
-            ulong KeyPtr = Instance.WinHelper.GetArg(8);
 
-            if (IoStatusBlockPtr == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            // NT: handle before buffer, and neither failure touches the IO_STATUS_BLOCK or the event.
-            WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            if (FileObj == null)
-            {
-                EventDone = true;
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-            }
-
-            if (Length != 0 && (BufferPtr == 0 || !Instance.IsRegionMapped(BufferPtr, Length)))
-            {
-                EventDone = true;
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            }
-
-            NTSTATUS OffsetStatus = Instance.WinHelper.ReadFileByteOffset(ByteOffsetPtr, FileObj.Position, out long RequestedOffset);
-            if (OffsetStatus != NTSTATUS.STATUS_SUCCESS)
-            {
-                EventDone = true;
-                return OffsetStatus;
-            }
+            NTSTATUS Status = NtReadFile.BeginRequest(Instance, FileHandle, EventHandle, IoStatusBlockPtr, BufferPtr, Length, ApcRoutine, ByteOffsetPtr, Write: true, out WinFile FileObj, out long Offset);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
             if (FileObj.Pipe != null)
+                return WritePipe(Instance, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
+
+            if (FileObj.ConsoleKind == ConsoleObjectKind.Output || FileObj.HostStream is HostStreamKind.Output or HostStreamKind.Error)
             {
-                EventDone = true;
-                return WritePipe(Instance, FileHandle, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
+                // NT: a pipe copies the buffer at once, so a fault leaves the IO_STATUS_BLOCK alone.
+                if (Length != 0 && !Instance.IsAccessible(BufferPtr, Length, false))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                Status = HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length, FileObj.HostStream == HostStreamKind.Error);
+                Instance.WinHelper.QueueImmediateCompletion(FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, Status, Length);
+            }
+            else
+            {
+                Status = Write(Instance, FileHandle, FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset);
             }
 
-            Instance.WinHelper.ResetIoEvent(EventHandle);
+            Instance.WinHelper.SignalIoEvent(EventHandle, Status);
+            return Status;
+        }
 
-            if (FileObj.ConsoleKind == ConsoleObjectKind.Output || FileObj.HostStream == HostStreamKind.Output)
-            {
-                NTSTATUS OutputStatus = HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length);
-                Instance.WinHelper.QueueImmediateCompletion(FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, OutputStatus, Length);
-                return OutputStatus;
-            }
-
+        private static NTSTATUS Write(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, long Offset)
+        {
             if (FileObj.Device)
             {
-                if (NullDevice.IsNullDevicePath(FileObj.Path))
+                if (FileObj.IsNullDevice)
                 {
-                    if (!HasWriteAccess(Instance, FileHandle))
-                    {
-                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                        return NTSTATUS.STATUS_ACCESS_DENIED;
-                    }
-
                     Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Length);
                     Instance.WinHelper.QueueImmediateCompletion(FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Length);
                     return NTSTATUS.STATUS_SUCCESS;
@@ -95,12 +63,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_FILE_IS_A_DIRECTORY;
             }
 
-            if (!HasWriteAccess(Instance, FileHandle))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-            }
-
             if ((Instance.Settings.Flags & LogFlags.Suspicious) != 0 && WarnWrite(FileObj.Path, out string WarnData))
                 Instance.TriggerEventMessage($"[!] The emulated program tried to write to {WarnData}", LogFlags.Suspicious);
 
@@ -111,16 +73,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
-            bool AppendOnly = IsAppendOnlyHandle(Instance, FileHandle);
-            long Offset = AppendOnly ? Stream.Length : RequestedOffset;
-            if (Offset < 0)
-                Offset = 0;
+            if (Offset == NtReadFile.FileWriteToEndOfFile)
+                Offset = Stream.Length;
 
             int ToWrite = Length > int.MaxValue ? int.MaxValue : (int)Length;
             if (ToWrite != 0 && FileObj.HasConflictingIoLock((ulong)Offset, (ulong)ToWrite, true))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_LOCK_CONFLICT, 0);
                 return NTSTATUS.STATUS_FILE_LOCK_CONFLICT;
+            }
+
+            // NT: the file system faults on the user buffer after the probe passed, and writes none of it.
+            if (ToWrite != 0 && !Instance.IsAccessible(BufferPtr, (ulong)ToWrite, false))
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_USER_BUFFER, 0);
+                return NTSTATUS.STATUS_INVALID_USER_BUFFER;
             }
 
             // Bounded chunks keep a guest-sized write from growing the shared scratch buffer to the data size.
@@ -132,22 +99,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                     int ChunkSize = Math.Min(NtReadFile.IoChunkBytes, ToWrite - Done);
                     Span<byte> Incoming = Instance.WinHelper.ReadMemorySpan(BufferPtr + (ulong)Done, (uint)ChunkSize);
                     if (Incoming.Length == 0)
-                    {
-                        if (Done == 0)
-                        {
-                            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
-                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
-                        }
-
                         break;
-                    }
 
                     Stream.WriteAt(Offset + Done, Incoming);
                     Done += Incoming.Length;
                 }
             }
-            catch
+            catch (Exception Ex)
             {
+                Utils.LogError($"[NtWriteFile] {FileObj.Path}: {Ex.Message}");
                 if (Done == 0)
                 {
                     Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
@@ -156,7 +116,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             FileObj.Real = true;
-            FileObj.Position = Offset + Done;
+            if (FileObj.Synchronous && ToWrite != 0)
+                FileObj.Position = Offset + Done;
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Done);
             Instance.WinHelper.QueueImmediateCompletion(FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, (ulong)Done);
@@ -167,14 +128,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        // NT: an access failure comes before the event reset, and no failure writes the IO_STATUS_BLOCK.
-        private static NTSTATUS WritePipe(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
+        // NT: no failure writes the IO_STATUS_BLOCK.
+        private static NTSTATUS WritePipe(BinaryEmulator Instance, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
         {
-            if (!HasWriteAccess(Instance, FileHandle))
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-
-            Instance.WinHelper.ResetIoEvent(EventHandle);
-
             bool MessagePipe = FileObj.Pipe.PipeType == GuestNamedPipe.FILE_PIPE_MESSAGE_MODE;
             if (Length > (MessagePipe ? (uint)GuestNamedPipe.MaxMessageBytes : int.MaxValue))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -196,7 +152,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance.WinHelper.PipeRequests.Submit(Instance, Request);
         }
 
-        private static NTSTATUS HandleStdOut(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length)
+        private static NTSTATUS HandleStdOut(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, bool StandardError)
         {
             if (Length == 0)
             {
@@ -215,52 +171,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 Instance.WinHelper.ConsoleState.TrackOutput(Data);
-                GeneralHelper.ConsoleWrite(Data, Instance.Settings.ConsoleOutputMode);
+                GeneralHelper.ConsoleWrite(Data, Instance.Settings.ConsoleOutputMode, StandardError);
                 Done += Step;
             }
 
-            Console.Out.Flush();
-
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Length);
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-
-        private static bool HasWriteAccess(BinaryEmulator Instance, ulong FileHandle)
-        {
-            AccessMask Granted = Instance.WinHelper.HandleManager.GetPermissionsByHandle(FileHandle);
-
-            if ((Granted & AccessMask.GenericAll) == AccessMask.GenericAll)
-                return true;
-
-            if ((Granted & AccessMask.GenericWrite) == AccessMask.GenericWrite)
-                return true;
-
-            if ((Granted & AccessMask.FileAllAccess) == AccessMask.FileAllAccess)
-                return true;
-
-            if ((Granted & AccessMask.FileWriteData) == AccessMask.FileWriteData)
-                return true;
-
-            if ((Granted & AccessMask.FileAppendData) == AccessMask.FileAppendData)
-                return true;
-
-            return false;
-        }
-
-        private static bool IsAppendOnlyHandle(BinaryEmulator Instance, ulong FileHandle)
-        {
-            AccessMask Granted = Instance.WinHelper.HandleManager.GetPermissionsByHandle(FileHandle);
-
-            if ((Granted & AccessMask.FileAppendData) == AccessMask.FileAppendData &&
-                (Granted & AccessMask.FileWriteData) != AccessMask.FileWriteData &&
-                (Granted & AccessMask.GenericWrite) != AccessMask.GenericWrite &&
-                (Granted & AccessMask.GenericAll) != AccessMask.GenericAll)
-            {
-                return true;
-            }
-
-            return false;
         }
 
         private static bool WarnWrite(string Path, out string Data)

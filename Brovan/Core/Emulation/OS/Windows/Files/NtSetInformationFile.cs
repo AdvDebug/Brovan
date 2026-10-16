@@ -1,5 +1,7 @@
+using System;
 using System.Buffers.Binary;
 using System.Text;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -32,15 +34,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IoStatusBlock == 0 || FileInformation == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.IsRegionMapped(IoStatusBlock, 0x10) || !Instance.IsRegionMapped(FileInformation, Length))
+            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlock) || !Instance.IsRegionMapped(FileInformation, Length))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            if (FileObj == null)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-            }
+            NTSTATUS Reference = Instance.WinHelper.ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out WinFile FileObj);
+            if (Reference != NTSTATUS.STATUS_SUCCESS)
+                return Reference;
 
             FILE_INFORMATION_CLASS InfoClass = (FILE_INFORMATION_CLASS)FileInformationClass;
 
@@ -50,7 +49,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (InfoClass == FILE_INFORMATION_CLASS.FileIoCompletionNotificationInformation)
                 return HandleIoCompletionNotification(Instance, FileObj, IoStatusBlock, FileInformation, Length);
 
-            if ((FileObj.Pipe != null || FileObj.HostStream != HostStreamKind.None) && InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation)
+            if (FileObj.IsNamedPipe && InfoClass == FILE_INFORMATION_CLASS.FilePipeInformation)
                 return HandleFilePipeInformation(Instance, FileObj, IoStatusBlock, FileInformation, Length);
 
             if (FileObj.Device)
@@ -472,15 +471,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Stream.SetLength(Size);
             }
-            catch
+            catch (Exception Ex)
             {
+                Utils.LogError($"[NtSetInformationFile] end of file on {FileObj.Path}: {Ex.Message}");
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_ACCESS_DENIED, 0);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
             FileObj.Real = true;
-            if (FileObj.Position > Size)
-                FileObj.Position = Size;
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, RequiredSize);
             return NTSTATUS.STATUS_SUCCESS;

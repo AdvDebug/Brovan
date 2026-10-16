@@ -14,22 +14,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong LengthPtr = Instance.WinHelper.GetArg(3);
             uint Key = (uint)Instance.WinHelper.GetArg(4);
 
-            if (IoStatusBlockPtr == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            WinFile FileObj = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            if (FileObj == null)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-            }
-
-            NTSTATUS CaptureStatus = Instance.WinHelper.ReadFileLockRange(ByteOffsetPtr, LengthPtr, out long Offset, out ulong Length);
-            if (CaptureStatus != NTSTATUS.STATUS_SUCCESS)
-                return CaptureStatus;
+            NTSTATUS Status = NtLockFile.CheckRequest(Instance, FileHandle, IoStatusBlockPtr, ByteOffsetPtr, LengthPtr, out WinFile FileObj, out long Offset, out ulong Length);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
             if (FileObj.Device)
             {

@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using Brovan.Core.Helpers;
 using Brovan.Core.Settings;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -26,21 +27,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong OutputBufferPtr = Instance.WinHelper.GetArg(8);
             uint OutputBufferLength = (uint)Instance.WinHelper.GetArg(9);
 
-            if (IoStatusBlockPtr == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            NTSTATUS Status = CheckRequest(Instance, FileHandle, IoStatusBlockPtr, ApcRoutine, IoControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, out WinFile File);
+            if (Status == NTSTATUS.STATUS_SUCCESS)
+                Status = Instance.WinHelper.ReferenceIoEvent(EventHandle);
 
-            if (!Instance.IsRegionMapped(IoStatusBlockPtr, (uint)(Instance.WinHelper.PointerSize * 2)))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            if (!ProbeControlBuffers(Instance, IoControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            WinFile File = Instance.WinHelper.GetFileByHandle(FileHandle, AccessMask.GiveTemp);
-            if (File == null)
+            if (Status != NTSTATUS.STATUS_SUCCESS)
             {
                 Instance.WinHelper.ClearPipeWait();
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_HANDLE, 0);
-                return NTSTATUS.STATUS_INVALID_HANDLE;
+                return Status;
             }
 
             if (!File.Device || File.Handler == null)
@@ -49,15 +43,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
             }
 
-            if (!HasIoControlAccess(Instance, FileHandle, IoControlCode))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_DENIED, 0);
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-            }
-
-            Instance.WinHelper.ResetIoEvent(EventHandle);
-
-            NTSTATUS Status = CheckControlBuffers(Instance, IoControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength);
+            Status = CheckControlBuffers(Instance, IoControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -75,7 +61,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             byte[] RentedOutput = null;
             try
             {
-                Status = CaptureControlBuffers(Instance, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, ref Data, out RentedInput, out RentedOutput);
+                Status = CaptureControlBuffers(Instance, IoControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength, ref Data, out RentedInput, out RentedOutput);
                 Data.OutputLength = OutputBufferLength;
 
                 if (Status == NTSTATUS.STATUS_SUCCESS)
@@ -84,8 +70,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     {
                         Status = File.Handler(IoControlCode, ref Data, Instance);
                     }
-                    catch
+                    catch (Exception Ex)
                     {
+                        Utils.LogError($"[NtDeviceIoControlFile] 0x{IoControlCode:X} on {File.Path}: {Ex.Message}");
                         Status = NTSTATUS.STATUS_UNSUCCESSFUL;
                     }
                 }
@@ -100,14 +87,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong Information = Data.Information;
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, Information);
-
-            if (EventHandle != 0 && Status != NTSTATUS.STATUS_PENDING)
-            {
-                WinEvent Ev = Instance.WinHelper.GetEventByHandle(EventHandle, AccessMask.GiveTemp);
-                if (Ev != null)
-                    Ev.Signaled = true;
-            }
-
+            Instance.WinHelper.SignalIoEvent(EventHandle, Status);
             Instance.WinHelper.QueueImmediateCompletion(File, ApcRoutine, ApcContext, IoStatusBlockPtr, Status, Information);
             return Status;
         }
@@ -115,18 +95,40 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const uint METHOD_BUFFERED = 0;
         internal const uint METHOD_NEITHER = 3;
 
-        // NT: probed before the handle lookup. Each page of a buffered output, only the range of an input.
-        internal static bool ProbeControlBuffers(BinaryEmulator Instance, uint ControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength)
+        // NT checks in this order and writes no IO_STATUS_BLOCK for a failure here.
+        internal static NTSTATUS CheckRequest(BinaryEmulator Instance, ulong FileHandle, ulong IoStatusBlockPtr, ulong ApcRoutine, uint ControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength, out WinFile File)
+        {
+            File = null;
+            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (!ProbeControlBuffers(Instance, ControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out File, out AccessMask Granted);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            if (File.RefusesApcRoutine(ApcRoutine))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (!HasControlAccess(Granted, ControlCode))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT touches each page of a buffered output buffer but checks only the range of an input buffer.
+        private static bool ProbeControlBuffers(BinaryEmulator Instance, uint ControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength)
         {
             uint Method = ControlCode & 3;
-            if (Method == METHOD_BUFFERED && OutputBufferPtr != 0 && !Instance.IsMemoryRangeMapped(OutputBufferPtr, OutputBufferLength))
+            if (Method == METHOD_BUFFERED && OutputBufferPtr != 0 && OutputBufferLength != 0 && !Instance.IsAccessible(OutputBufferPtr, OutputBufferLength, true))
                 return false;
 
             if (Method == METHOD_NEITHER || InputBufferPtr == 0 || InputBufferLength == 0)
                 return true;
 
-            ulong InputEnd = InputBufferPtr + InputBufferLength;
-            return InputEnd >= InputBufferPtr && InputEnd <= NtWow64GetNativeSystemInformation.NativeUserProbeAddress;
+            return NtWow64GetNativeSystemInformation.IsUserRange(InputBufferPtr, InputBufferLength);
         }
 
         // NT: checked after the event reset. A failure leaves the IO_STATUS_BLOCK alone.
@@ -151,12 +153,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT: a METHOD_NEITHER driver fails a bad buffer as a normal request.
-        internal static NTSTATUS CaptureControlBuffers(BinaryEmulator Instance, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength, ref DeviceData Data, out byte[] RentedInput, out byte[] RentedOutput)
+        internal static NTSTATUS CaptureControlBuffers(BinaryEmulator Instance, uint ControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength, ref DeviceData Data, out byte[] RentedInput, out byte[] RentedOutput)
         {
             RentedInput = null;
             RentedOutput = null;
 
-            if (OutputBufferPtr != 0 && !Instance.IsMemoryRangeMapped(OutputBufferPtr, OutputBufferLength))
+            uint Method = ControlCode & 3;
+            bool OutputLocked = Method != METHOD_BUFFERED && Method != METHOD_NEITHER;
+            if (OutputBufferPtr != 0 && !OutputLocked && !Instance.IsMemoryRangeMapped(OutputBufferPtr, OutputBufferLength))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (InputBufferPtr != 0 && InputBufferLength != 0)
@@ -208,27 +212,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ArrayPool<byte>.Shared.Return(RentedInput);
         }
 
-        private static bool HasIoControlAccess(BinaryEmulator Instance, ulong FileHandle, uint IoControlCode)
+        private static bool HasControlAccess(AccessMask Granted, uint ControlCode)
         {
-            uint RequiredAccess = (IoControlCode >> 14) & 0x3;
-            if (RequiredAccess == 0)
-                return true;
-
-            if ((RequiredAccess & 0x1) != 0 &&
-                !Instance.WinHelper.HandleManager.CheckAccess(FileHandle, AccessMask.GenericRead) &&
-                !Instance.WinHelper.HandleManager.CheckAccess(FileHandle, AccessMask.FileReadData))
-            {
-                return false;
-            }
-
-            if ((RequiredAccess & 0x2) != 0 &&
-                !Instance.WinHelper.HandleManager.CheckAccess(FileHandle, AccessMask.GenericWrite) &&
-                !Instance.WinHelper.HandleManager.CheckAccess(FileHandle, AccessMask.FileWriteData))
-            {
-                return false;
-            }
-
-            return true;
+            uint RequiredAccess = (ControlCode >> 14) & 0x3;
+            return ((RequiredAccess & 0x1) == 0 || (Granted & WinFile.ReadDataAccess) != 0)
+                && ((RequiredAccess & 0x2) == 0 || (Granted & WinFile.WriteDataAccess) != 0);
         }
 
     }

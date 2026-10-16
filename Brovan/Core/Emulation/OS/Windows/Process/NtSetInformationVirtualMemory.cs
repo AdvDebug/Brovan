@@ -11,7 +11,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint PrefetchFlagsMask = 1;
         private const ulong MaxEntries = 0x0FFFFFFFFFFFFFFFUL;
         private const ulong HighestUserAddress = NtWow64GetNativeSystemInformation.NativeMaximumUserModeAddress;
-        private const ulong UserProbeAddress = NtWow64GetNativeSystemInformation.NativeUserProbeAddress;
         private const int ChunkEntries = 256;
 
         // NT: the WOW64 thunk and the kernel copy the entries, and fail when they cannot allocate the copy.
@@ -61,8 +60,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if ((EntriesPtr & 3) != 0)
                     return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
 
-                ulong EntriesEnd = EntriesPtr + EntryCount * EntrySize;
-                if (EntriesEnd > UserProbeAddress || EntriesEnd < EntriesPtr)
+                if (!NtWow64GetNativeSystemInformation.IsUserRange(EntriesPtr, EntryCount * EntrySize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 

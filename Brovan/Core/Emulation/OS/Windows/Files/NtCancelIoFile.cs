@@ -9,7 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             File = null;
 
-            if (!Instance.IsMemoryRangeMapped(IoStatusBlockPtr, (ulong)Instance.WinHelper.PointerSize * 2))
+            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             IHandleObject Object = Instance.WinHelper.HandleManager.GetObjectByHandle(FileHandle);
