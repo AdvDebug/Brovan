@@ -50,7 +50,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             NtTerminateJobObject.CloseJobsOfExitingProcess(Instance);
             GuestSession.PublishExit(ExitCode);
-            Environment.ExitCode = (int)ExitCode;
+            Utils.SetGuestExitCode(ExitCode);
             TerminateThreads(Instance, ExitCode, false);
             Instance.WinHelper.HideDesktopWindow();
             Instance.StopEmulation();

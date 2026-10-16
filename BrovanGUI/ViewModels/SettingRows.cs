@@ -107,15 +107,15 @@ namespace BrovanGUI.ViewModels
             IsOverridden = true;
         }
 
-        public static SettingRow Create(SettingEntry Entry, SettingsScope Scope, bool HypervisorAvailable)
+        public static SettingRow Create(SettingEntry Entry, SettingsScope Scope, MainViewModel Owner)
         {
             SettingRow Row = Entry.Type switch
             {
                 "boolean" => new ToggleRow(Entry, Scope),
-                "choice" => new ChoiceRow(Entry, Scope, HypervisorAvailable),
+                "choice" => new ChoiceRow(Entry, Scope, Owner.Setup.HypervisorAvailable),
                 "integer" or "real" => new NumberRow(Entry, Scope),
                 "list" => new ListRow(Entry, Scope),
-                _ => new TextRow(Entry, Scope),
+                _ => new TextRow(Entry, Scope, Owner),
             };
 
             Row.Refresh();
@@ -232,12 +232,22 @@ namespace BrovanGUI.ViewModels
     {
         private string Text = string.Empty;
 
-        public TextRow(SettingEntry Entry, SettingsScope Scope) : base(Entry, Scope)
+        public TextRow(SettingEntry Entry, SettingsScope Scope, MainViewModel Owner) : base(Entry, Scope)
         {
             IsPath = Entry.Key.EndsWith("dir", StringComparison.OrdinalIgnoreCase);
+            if (IsPath)
+            {
+                BrowseCommand = new AsyncCommand(async () =>
+                {
+                    string? Picked = await Owner.Dialogs.PickFolderAsync(Label);
+                    if (Picked != null)
+                        TextValue = Picked;
+                }, Owner.ReportError);
+            }
         }
 
         public bool IsPath { get; }
+        public AsyncCommand? BrowseCommand { get; }
 
         public string TextValue
         {
@@ -334,14 +344,14 @@ namespace BrovanGUI.ViewModels
 
         public static string ChoiceLabel(string Key, string Value)
         {
-            switch (Key + "=" + Value)
+            switch (Key, Value)
             {
-                case "backend.kind=unicorn": return "Unicorn (software)";
-                case "backend.kind=whp": return "Windows Hypervisor";
-                case "backend.kind=kvm": return "KVM hypervisor";
-                case "net.mode=none": return "Blocked";
-                case "net.mode=loopback": return "This computer only";
-                case "net.mode=full": return "Full access";
+                case ("backend.kind", "unicorn"): return "Unicorn (software)";
+                case ("backend.kind", "whp"): return "Windows Hypervisor";
+                case ("backend.kind", "kvm"): return "KVM hypervisor";
+                case ("net.mode", "none"): return "Blocked";
+                case ("net.mode", "loopback"): return "This computer only";
+                case ("net.mode", "full"): return "Full access";
             }
 
             return Value.Length == 0 ? Value : char.ToUpperInvariant(Value[0]) + Value.Substring(1);
@@ -349,7 +359,7 @@ namespace BrovanGUI.ViewModels
 
         public static bool ChoiceAvailable(string Key, string Value, bool HypervisorAvailable)
         {
-            if (Key != "backend.kind")
+            if (Key != BrovanHost.BackendKey)
                 return true;
 
             return Value switch
@@ -385,7 +395,7 @@ namespace BrovanGUI.ViewModels
             return false;
         }
 
-        public static List<CategoryViewModel> BuildCategories(IReadOnlyList<SettingEntry> Schema, SettingsScope Scope, bool IncludeGlobal, bool HypervisorAvailable)
+        public static List<CategoryViewModel> BuildCategories(IReadOnlyList<SettingEntry> Schema, SettingsScope Scope, bool IncludeGlobal, MainViewModel Owner)
         {
             List<CategoryViewModel> Result = new List<CategoryViewModel>();
             List<string> Seen = new List<string>();
@@ -411,7 +421,7 @@ namespace BrovanGUI.ViewModels
                     if (Entry.IsGlobal && !IncludeGlobal)
                         continue;
 
-                    Rows.Add(SettingRow.Create(Entry, Scope, HypervisorAvailable));
+                    Rows.Add(SettingRow.Create(Entry, Scope, Owner));
                 }
 
                 if (Rows.Count != 0)

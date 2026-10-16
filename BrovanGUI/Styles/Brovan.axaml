@@ -10,18 +10,6 @@
         <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
 
-    <Style Selector="TextBlock.label">
-        <Setter Property="FontSize" Value="14" />
-        <Setter Property="VerticalAlignment" Value="Center" />
-    </Style>
-
-    <Style Selector="TextBlock.help">
-        <Setter Property="FontSize" Value="12" />
-        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
-        <Setter Property="TextWrapping" Value="Wrap" />
-        <Setter Property="Margin" Value="0,2,0,0" />
-    </Style>
-
     <Style Selector="TextBlock.muted">
         <Setter Property="FontSize" Value="12" />
         <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
@@ -74,12 +62,12 @@
         <Setter Property="Stroke" Value="{DynamicResource TextSecondary}" />
     </Style>
 
-    <Style Selector="Path.icon.good">
-        <Setter Property="Stroke" Value="{DynamicResource Good}" />
-    </Style>
-
     <Style Selector="Path.icon.warn">
         <Setter Property="Stroke" Value="{DynamicResource Warn}" />
+    </Style>
+
+    <Style Selector="Button:disabled Path.icon">
+        <Setter Property="Opacity" Value="0.4" />
     </Style>
 
     <Style Selector="Ellipse.dot">

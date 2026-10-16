@@ -2007,6 +2007,7 @@ namespace Brovan.Core.Emulation.Guests
                 {
                     Instance.TriggerEventMessage($"[!] Another process in the session asked this one to stop with exit code 0x{ExitCode:X}.", LogFlags.Important);
                     GuestSession.PublishExit(ExitCode);
+                    Utils.SetGuestExitCode(ExitCode);
                     Instance.RequestTermination();
                 });
         }

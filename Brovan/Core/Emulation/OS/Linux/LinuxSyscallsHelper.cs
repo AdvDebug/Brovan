@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading;
 using Brovan;
 using Brovan.Core.Emulation.Guests;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Linux
@@ -3113,6 +3114,7 @@ namespace Brovan.Core.Emulation.OS.Linux
 
             if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                 Instance.TriggerEventMessage($"[!] Linux process terminated by signal {Signal}.", LogFlags.Issues);
+            Utils.SetGuestExitCode((uint)ExitCode);
             Instance._emulator.StopEmulation();
         }
 

@@ -2,7 +2,6 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Data;
 using Avalonia.Input;
-using Avalonia.Input.Platform;
 using Avalonia.Media;
 using Avalonia.Media.TextFormatting;
 using BrovanGUI.ViewModels;
@@ -224,7 +223,7 @@ namespace BrovanGUI.Views
 
         private void MeasureFont()
         {
-            TextLayout Sample = new TextLayout("Mg", new Typeface(FontFamily), FontSize, Brushes.Black);
+            using TextLayout Sample = new TextLayout("Mg", new Typeface(FontFamily), FontSize, Brushes.Black);
             LineHeight = Math.Ceiling(Sample.Height);
             CharWidth = Sample.WidthIncludingTrailingWhitespace / 2;
         }
@@ -268,7 +267,7 @@ namespace BrovanGUI.Views
                 string Text = Ring[i];
                 if (Text.Length != 0)
                 {
-                    TextLayout Layout = new TextLayout(Text, Face, FontSize, BrushFor(Text));
+                    using TextLayout Layout = new TextLayout(Text, Face, FontSize, BrushFor(Text));
                     Layout.Draw(Context, new Point(X, Y));
                 }
 
@@ -346,10 +345,18 @@ namespace BrovanGUI.Views
         protected override void OnPointerWheelChanged(PointerWheelEventArgs Event)
         {
             base.OnPointerWheelChanged(Event);
-            if (Event.KeyModifiers.HasFlag(KeyModifiers.Shift))
-                HorizontalOffset = Math.Clamp(HorizontalOffset - Event.Delta.Y * 40, 0, HorizontalMaximumValue);
-            else
-                LineOffset = Math.Clamp(LineOffset - Event.Delta.Y * 3, 0, ScrollMaximumValue);
+            double Horizontal = Event.Delta.X;
+            double Vertical = Event.Delta.Y;
+            if (Horizontal == 0 && Event.KeyModifiers.HasFlag(KeyModifiers.Shift))
+            {
+                Horizontal = Vertical;
+                Vertical = 0;
+            }
+
+            if (Horizontal != 0)
+                HorizontalOffset = Math.Clamp(HorizontalOffset - Horizontal * 40, 0, HorizontalMaximumValue);
+            if (Vertical != 0)
+                LineOffset = Math.Clamp(LineOffset - Vertical * 3, 0, ScrollMaximumValue);
 
             Event.Handled = true;
         }
@@ -357,22 +364,34 @@ namespace BrovanGUI.Views
         protected override void OnKeyDown(KeyEventArgs Event)
         {
             base.OnKeyDown(Event);
-            if (!Event.KeyModifiers.HasFlag(KeyModifiers.Control))
-                return;
 
-            if (Event.Key == Key.C)
+            if (Event.Key == Key.A && Event.KeyModifiers.HasFlag(KeyModifiers.Control))
             {
-                string? Text = SelectedText;
-                if (Text != null)
-                    _ = TopLevel.GetTopLevel(this)?.Clipboard?.SetTextAsync(Text);
+                if (Lines != null && Lines.Count != 0)
+                {
+                    SelectionAnchor = Lines.FirstLineNumber;
+                    SelectionEnd = Lines.FirstLineNumber + Lines.Count - 1;
+                    InvalidateVisual();
+                }
 
                 Event.Handled = true;
+                return;
             }
-            else if (Event.Key == Key.A && Lines != null && Lines.Count != 0)
+
+            double? Target = Event.Key switch
             {
-                SelectionAnchor = Lines.FirstLineNumber;
-                SelectionEnd = Lines.FirstLineNumber + Lines.Count - 1;
-                InvalidateVisual();
+                Key.Up => LineOffset - 1,
+                Key.Down => LineOffset + 1,
+                Key.PageUp => LineOffset - ViewportLinesValue,
+                Key.PageDown => LineOffset + ViewportLinesValue,
+                Key.Home => 0,
+                Key.End => ScrollMaximumValue,
+                _ => null,
+            };
+
+            if (Target.HasValue)
+            {
+                LineOffset = Math.Clamp(Target.Value, 0, ScrollMaximumValue);
                 Event.Handled = true;
             }
         }

@@ -5,7 +5,9 @@ using System.Net;
 using Brovan.Core.Emulation;
 using Brovan.Core.Helpers.WindowsImage;
 using Brovan.Core.Settings;
+using Brovan.Core;
 using static Brovan.GeneralHelper;
+using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan
 {
@@ -373,9 +375,8 @@ namespace Brovan
 
             if (SettingProblems.Count != 0)
             {
-                // A refused option reports even in silent mode.
                 foreach (string Problem in SettingProblems)
-                    PrintHighlight($"[-] {Problem}", true, false, true);
+                    PrintFatal($"[-] {Problem}");
 
                 return;
             }
@@ -383,13 +384,16 @@ namespace Brovan
             if (TryInstallWindowsSystemFiles(args))
                 return;
 
-            bool HardwareBackendRequested = Settings.Backend != EmulationBackendKind.Unicorn;
-
-            if (!IsWindows && !Directory.Exists(WindowsLibsPath))
+            if (Settings.Backend == EmulationBackendKind.Whp && !IsWindows)
             {
-                PrintHighlight($"[-] Couldn't find the windows libs directory inside. expected path: {WindowsLibsPath}", true);
-                PrintHighlight("[*] Run Brovan with --install-windows --windows-iso <path> to extract them from Windows installation media.", true);
-                Environment.Exit(0);
+                PrintFatal("[-] backend.kind: whp runs only on Windows");
+                return;
+            }
+
+            if (Settings.Backend == EmulationBackendKind.Kvm && !IsLinux)
+            {
+                PrintFatal("[-] backend.kind: kvm runs only on Linux");
+                return;
             }
 
             AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
@@ -418,122 +422,11 @@ namespace Brovan
                 return;
             }
 
-            // Prefer the map from the imported apisetschema.dll over anything else
-            bool ApiSetMapReady = false;
-            if (!File.Exists(BinaryEmulator.ApiSetMapPath) || File.GetLastWriteTimeUtc(Path.Combine(WindowsLibsPath, "apisetschema.dll")) > File.GetLastWriteTimeUtc(BinaryEmulator.ApiSetMapPath))
-            {
-                try
-                {
-                    ApiSetMapReady = WindowsImageImporter.TryWriteApiSetMap(AppContext.BaseDirectory, Message => PrintHighlight(Message, true));
-                }
-                catch (Exception Error)
-                {
-                    PrintHighlight($"[-] Could not read the API set map from apisetschema.dll: \"{Error.Message}\".", true);
-                }
-            }
-
-            if (!ApiSetMapReady && !File.Exists(BinaryEmulator.ApiSetMapPath))
-            {
-                if (IsWindows)
-                {
-                    try
-                    {
-                        if (DumpApiSetMap())
-                        {
-                            PrintHighlight("[*] Dumped ApiSetMap of the host to the emulator's directory to be used.");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        PrintHighlight($"[-] Failed to dump ApiSetMap: \"{ex.Message}\". Brovan will attempt to generate one.");
-                        try
-                        {
-                            byte[] ApiSetMap = CrossGenerator.GenerateMap();
-                            File.WriteAllBytes(Path.Combine(AppContext.BaseDirectory, "apisetmap.bin"), ApiSetMap);
-                            PrintHighlight("[+] Custom ApiSetMap was generated.", true);
-                        }
-                        catch (Exception exception)
-                        {
-                            PrintHighlight($"[-] Failed to generate and write the map: {exception.Message}", true);
-                            Environment.Exit(-1);
-                        }
-                    }
-                }
-                else
-                {
-                    PrintHighlight("[!] Cannot dump ApiSetMap because you are not running on Windows. The emulator will try to make a custom one.", true);
-                    try
-                    {
-                        byte[] ApiSetMap = CrossGenerator.GenerateMap();
-                        File.WriteAllBytes(Path.Combine(AppContext.BaseDirectory, "apisetmap.bin"), ApiSetMap);
-                        PrintHighlight("[+] Custom ApiSetMap was generated.", true);
-                    }
-                    catch (Exception ex)
-                    {
-                        PrintHighlight($"[-] Failed to generate and write the map: {ex.Message}", true);
-                        Environment.Exit(-1);
-                    }
-                }
-            }
-
-            string RegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
-            if (!Directory.Exists(RegPath))
-            {
-                if (IsWindows)
-                {
-                    DumpRegAsAdmin("WinReg");
-                }
-                else
-                {
-                    PrintHighlight("[-] Cannot dump Registry because you are not running on Windows. Dump one from a Windows machine into a 'WinReg' directory next to the emulator, or run Brovan with --install-windows --windows-iso <path>.", true);
-                    Environment.Exit(-1);
-                }
-            }
-            else if (!VerifyRegDump(RegPath, true))
-            {
-                if (IsWindows)
-                {
-                    DumpRegAsAdmin("WinReg");
-                }
-                else
-                {
-                    PrintHighlight("[-] Some registry hives are missing. dump them from a windows machine.");
-                }
-            }
-
             string Command = null;
             string FilePath = null;
             string WorkingDirectory = null;
             string GuestCommandLine = null;
             List<string> ProgramArgumentsList = new List<string>();
-
-            if (!SettingsStore.TryBuildNetworkPolicy(Settings, out NetworkAccessPolicy NetworkPolicy))
-            {
-                PrintHighlight("[-] Invalid network allow address. expected an IPv4 or IPv6 address.", true, false, true);
-                return;
-            }
-
-            SettingsStore.ApplyGlobals(Settings);
-
-            if (IsWindows && Settings.Backend == EmulationBackendKind.Unicorn && !HardwareBackendRequested && Unicorn.IsCFGEnabled())
-            {
-                if (Environment.GetEnvironmentVariable("BROVAN_CFG_DISABLED") != "1")
-                {
-                    PrintHighlight("[!] Control Flow Guard is enabled, Brovan will try to restart the process with CFG disabled.", true);
-                    if (!RestartProcessWithCfgDisabled(true))
-                    {
-                        PrintHighlight("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process. Failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.", true);
-                        Environment.Exit(-1);
-                    }
-                }
-                else
-                {
-                    PrintHighlight("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process, and Brovan failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.", true);
-                    Environment.Exit(-1);
-                }
-
-                Environment.Exit(0); // it should exit by itself inside RestartProcessWithCfgDisabled but keep this here too just in case
-            }
 
             for (int i = 0; i < RemainingArgs.Count; i++)
             {
@@ -591,18 +484,132 @@ namespace Brovan
 
             if (!File.Exists(FilePath))
             {
-                PrintHighlight($"[-] File with the path \"{FilePath}\" does not exist.");
+                PrintFatal($"[-] File with the path \"{FilePath}\" does not exist.");
                 return;
             }
+
+            if (!SettingsStore.TryBuildNetworkPolicy(Settings, out NetworkAccessPolicy NetworkPolicy))
+            {
+                PrintFatal("[-] Invalid network allow address. expected an IPv4 or IPv6 address.");
+                return;
+            }
+
+            SettingsStore.ApplyGlobals(Settings);
+
+            if (IsWindows && Settings.Backend == EmulationBackendKind.Unicorn && Unicorn.IsCFGEnabled())
+            {
+                if (Environment.GetEnvironmentVariable("BROVAN_CFG_DISABLED") != "1")
+                {
+                    PrintHighlight("[!] Control Flow Guard is enabled, Brovan will try to restart the process with CFG disabled.", true);
+                    RestartProcessWithCfgDisabled(true);
+                }
+
+                PrintFatal("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process, and Brovan failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.");
+                return;
+            }
+
+            if (BinaryFile.GetBinaryFormat(FilePath) != BinaryFormat.ELF && !TryPrepareWindowsFiles())
+                return;
 
             string[] ProgramArguments = ProgramArgumentsList.ToArray();
             string RawProgramArguments = GuestCommandLine ?? BuildRawProgramArguments(ProgramArguments);
             if (GuestCommandLine != null)
                 ProgramArguments = SplitCommandLine(GuestCommandLine);
 
-            // Set the dll import resolver based on the platform
             NativeLibraryResolver.Register();
             EmulationMenu.EmulationMenu.RunEmulator(FilePath, Settings.Quick, Settings.Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, !Settings.Hooks, Settings.Backend, WorkingDirectory, Settings.Smp, Settings.Cores);
+        }
+
+        private static bool TryPrepareWindowsFiles()
+        {
+            if (!IsWindows && !Directory.Exists(WindowsLibsPath))
+            {
+                PrintFatal($"[-] Couldn't find the windows libs directory inside. expected path: {WindowsLibsPath}");
+                PrintHighlight("[*] Run Brovan with --install-windows --windows-iso <path> to extract them from Windows installation media.", ColorPrefixOnly: true, IgnoreSilent: true);
+                return false;
+            }
+
+            // Prefer the map from the imported apisetschema.dll over anything else
+            bool ApiSetMapReady = false;
+            if (!File.Exists(BinaryEmulator.ApiSetMapPath) || File.GetLastWriteTimeUtc(Path.Combine(WindowsLibsPath, "apisetschema.dll")) > File.GetLastWriteTimeUtc(BinaryEmulator.ApiSetMapPath))
+            {
+                try
+                {
+                    ApiSetMapReady = WindowsImageImporter.TryWriteApiSetMap(AppContext.BaseDirectory, Message => PrintHighlight(Message, true));
+                }
+                catch (Exception Error)
+                {
+                    PrintHighlight($"[-] Could not read the API set map from apisetschema.dll: \"{Error.Message}\".", true);
+                }
+            }
+
+            if (!ApiSetMapReady && !File.Exists(BinaryEmulator.ApiSetMapPath))
+            {
+                if (IsWindows)
+                {
+                    try
+                    {
+                        if (DumpApiSetMap())
+                        {
+                            PrintHighlight("[*] Dumped ApiSetMap of the host to the emulator's directory to be used.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        PrintHighlight($"[-] Failed to dump ApiSetMap: \"{ex.Message}\". Brovan will attempt to generate one.");
+                        if (!TryGenerateApiSetMap())
+                            return false;
+                    }
+                }
+                else
+                {
+                    PrintHighlight("[!] Cannot dump ApiSetMap because you are not running on Windows. The emulator will try to make a custom one.", true);
+                    if (!TryGenerateApiSetMap())
+                        return false;
+                }
+            }
+
+            string RegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
+            if (!Directory.Exists(RegPath))
+            {
+                if (IsWindows)
+                {
+                    DumpRegAsAdmin("WinReg");
+                }
+                else
+                {
+                    PrintFatal("[-] Cannot dump Registry because you are not running on Windows. Dump one from a Windows machine into a 'WinReg' directory next to the emulator, or run Brovan with --install-windows --windows-iso <path>.");
+                    return false;
+                }
+            }
+            else if (!VerifyRegDump(RegPath, true))
+            {
+                if (IsWindows)
+                {
+                    DumpRegAsAdmin("WinReg");
+                }
+                else
+                {
+                    PrintHighlight("[-] Some registry hives are missing. dump them from a windows machine.");
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TryGenerateApiSetMap()
+        {
+            try
+            {
+                File.WriteAllBytes(BinaryEmulator.ApiSetMapPath, CrossGenerator.GenerateMap());
+                PrintHighlight("[+] Custom ApiSetMap was generated.", true);
+                return true;
+            }
+            catch (Exception Error)
+            {
+                PrintFatal($"[-] Failed to generate and write the map: {Error.Message}");
+                return false;
+            }
         }
     }
 }

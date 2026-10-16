@@ -6,15 +6,17 @@ namespace BrovanGUI.ViewModels
     {
         private readonly MainViewModel Owner;
         private SetupState State = new SetupState();
+        private string? HypervisorProblemValue;
         private bool Busy;
 
         public SetupViewModel(MainViewModel Owner)
         {
             this.Owner = Owner;
+            HypervisorProblemValue = BrovanHost.HypervisorProblem();
 
             BrowseBrovanCommand = new AsyncCommand(BrowseBrovan, Owner.ReportError);
-            RefreshCommand = new RelayCommand(Refresh);
-            InstallFromIsoCommand = new AsyncCommand(InstallFromIso, Owner.ReportError, () => CanInstallWindows);
+            RefreshCommand = new RelayCommand(Reprobe);
+            InstallFromIsoCommand = new AsyncCommand(InstallSystemFilesAsync, Owner.ReportError, () => CanInstallWindows);
             InstallRuntimesCommand = new AsyncCommand(() => Run("Installing the Visual C++ runtimes", "--install-runtimes", "--accept-windows-license"), Owner.ReportError, () => CanInstallWindows);
             InstallDxvkCommand = new AsyncCommand(() => Run("Installing DXVK", "--install-dxvk"), Owner.ReportError, () => CanRunTool);
             OpenFolderCommand = new RelayCommand(() =>
@@ -43,6 +45,8 @@ namespace BrovanGUI.ViewModels
         public string BrovanPath => State.Executable ?? "Not found. Put BrovanGUI next to " + BrovanHost.ExecutableName + " or locate it here.";
         public StatusKind BrovanStatus => BrovanFound ? StatusKind.Good : StatusKind.Bad;
 
+        public bool NeedsSystemFiles => HostIsLinux && !State.SystemFiles;
+
         public StatusKind SystemFilesStatus => State.SystemFiles ? StatusKind.Good : StatusKind.Bad;
         public string SystemFilesDescription => State.SystemFiles
             ? "Installed."
@@ -58,12 +62,14 @@ namespace BrovanGUI.ViewModels
             ? "Ready."
             : "Copied from this Windows installation on the first launch, which asks for administrator rights once.";
 
-        public bool HypervisorAvailable => State.HypervisorAvailable;
-        public string HypervisorName => State.HypervisorName;
-        public StatusKind HypervisorStatus => State.HypervisorAvailable ? StatusKind.Good : StatusKind.Warn;
-        public string HypervisorDescription => State.HypervisorAvailable
-            ? "Available. Games run at near native speed on it. Pick it as the backend in a profile or in Settings."
-            : State.HypervisorHint;
+        public bool HypervisorAvailable => HypervisorProblemValue == null;
+        public string HypervisorName => BrovanHost.HypervisorName;
+        public StatusKind HypervisorStatus => HypervisorAvailable ? StatusKind.Good : StatusKind.Warn;
+        public string HypervisorDescription => HypervisorAvailable
+            ? "Available, and programs run on it unless a profile or Settings picks another backend. Games run at near native speed on it."
+            : "Not available, so programs run on Unicorn, the slower software backend. " + HypervisorProblemValue;
+
+        public string HypervisorProblem => HypervisorProblemValue ?? string.Empty;
 
         public StatusKind DxvkStatus => State.DxvkVersion != null ? StatusKind.Good : StatusKind.Warn;
         public string DxvkDescription => State.DxvkVersion != null
@@ -100,9 +106,23 @@ namespace BrovanGUI.ViewModels
         public bool CanRunTool => BrovanFound && !Busy;
         public bool CanInstallWindows => CanRunTool && LicenseAccepted;
 
+        private void Reprobe()
+        {
+            bool Available = HypervisorAvailable;
+            HypervisorProblemValue = BrovanHost.HypervisorProblem();
+            Raise(nameof(HypervisorAvailable));
+            Raise(nameof(HypervisorStatus));
+            Raise(nameof(HypervisorDescription));
+            Raise(nameof(HypervisorProblem));
+            Refresh();
+
+            // A choice row keeps the availability it was built with.
+            if (HypervisorAvailable != Available)
+                Owner.Rebuild();
+        }
+
         public void Refresh()
         {
-            bool Hypervisor = State.HypervisorAvailable;
             State = BrovanHost.Inspect(Owner.BrovanExecutable);
             Raise(nameof(HostIsWindows));
             Raise(nameof(HostIsLinux));
@@ -115,18 +135,10 @@ namespace BrovanGUI.ViewModels
             Raise(nameof(RuntimesDescription));
             Raise(nameof(RegistryStatus));
             Raise(nameof(RegistryDescription));
-            Raise(nameof(HypervisorAvailable));
-            Raise(nameof(HypervisorName));
-            Raise(nameof(HypervisorStatus));
-            Raise(nameof(HypervisorDescription));
             Raise(nameof(DxvkStatus));
             Raise(nameof(DxvkDescription));
             Raise(nameof(LogExists));
             RefreshCommands();
-
-            // A choice row keeps the availability it was built with.
-            if (State.HypervisorAvailable != Hypervisor)
-                Owner.Rebuild();
         }
 
         private void RefreshCommands()
@@ -145,19 +157,33 @@ namespace BrovanGUI.ViewModels
                 await Owner.SetBrovanPath(Picked);
         }
 
-        private async Task InstallFromIso()
+        public async Task<bool> InstallSystemFilesAsync()
         {
-            string? Picked = await Owner.Dialogs.PickFileAsync("Choose a Windows ISO, WIM or ESD", "*.iso", "*.wim", "*.esd");
-            if (Picked != null)
-                await Run("Installing the Windows system files from " + Path.GetFileName(Picked), "--install-windows", "--accept-windows-license", "--windows-iso", Picked);
+            if (!CanInstallWindows)
+                return false;
+
+            string? Picked;
+            IsBusy = true;
+            try
+            {
+                Picked = await Owner.Dialogs.PickFileAsync("Choose a Windows 11 ISO", "*.iso", "*.wim", "*.esd");
+            }
+            finally
+            {
+                IsBusy = false;
+            }
+
+            return Picked != null
+                && await Run("Installing the Windows system files from " + Path.GetFileName(Picked), "--install-windows", "--accept-windows-license", "--windows-iso", Picked) == 0
+                && State.SystemFiles;
         }
 
-        private async Task Run(string Title, params string[] Arguments)
+        private async Task<int> Run(string Title, params string[] Arguments)
         {
             IsBusy = true;
             try
             {
-                await Owner.RunTool(Title, Arguments);
+                return await Owner.RunTool(Title, Arguments);
             }
             finally
             {

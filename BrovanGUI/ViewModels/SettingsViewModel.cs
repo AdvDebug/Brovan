@@ -7,6 +7,7 @@ namespace BrovanGUI.ViewModels
         private readonly MainViewModel Owner;
         private Choice? Theme;
         private List<CategoryViewModel> CategoryList = new List<CategoryViewModel>();
+        private string BackendWarningValue = string.Empty;
 
         public SettingsViewModel(MainViewModel Owner)
         {
@@ -26,12 +27,7 @@ namespace BrovanGUI.ViewModels
 
             Theme ??= Themes[0];
 
-            ResetDefaultsCommand = new RelayCommand(() =>
-            {
-                Owner.Library.Defaults.Clear();
-                Owner.Save();
-                Owner.DefaultsChanged();
-            });
+            ResetDefaultsCommand = new RelayCommand(Owner.ResetDefaults);
             OpenLibraryFolderCommand = new RelayCommand(() => BrovanHost.OpenExternal(LibraryStore.Directory));
         }
 
@@ -40,6 +36,12 @@ namespace BrovanGUI.ViewModels
         public RelayCommand OpenLibraryFolderCommand { get; }
         public string LibraryPath => LibraryStore.FilePath;
         public string SchemaStatus => Owner.SchemaStatus;
+
+        public string BackendWarning
+        {
+            get => BackendWarningValue;
+            private set => Set(ref BackendWarningValue, value);
+        }
 
         public Choice? SelectedTheme
         {
@@ -61,25 +63,17 @@ namespace BrovanGUI.ViewModels
             private set => Set(ref CategoryList, value);
         }
 
-        public void Rebuild(IReadOnlyList<SettingEntry> Schema, bool HypervisorAvailable)
+        public void Rebuild(IReadOnlyList<SettingEntry> Schema)
         {
-            SettingsScope Scope = new SettingsScope(Owner.Library.Defaults, Key =>
-            {
-                foreach (SettingEntry Entry in Schema)
-                {
-                    if (Entry.Key == Key)
-                        return Entry.DefaultText;
-                }
-
-                return string.Empty;
-            }, () =>
+            SettingsScope Scope = new SettingsScope(Owner.Library.Defaults, Owner.DefaultValue, () =>
             {
                 Owner.Save();
                 Owner.DefaultsChanged();
             });
 
-            Categories = SettingLabels.BuildCategories(Schema, Scope, true, HypervisorAvailable);
+            Categories = SettingLabels.BuildCategories(Schema, Scope, true, Owner);
             Raise(nameof(SchemaStatus));
+            BackendWarning = Owner.BackendWarning(null);
         }
 
         public void RefreshRows()
@@ -87,6 +81,8 @@ namespace BrovanGUI.ViewModels
             foreach (CategoryViewModel Category in CategoryList)
                 foreach (SettingRow Row in Category.Rows)
                     Row.Refresh();
+
+            BackendWarning = Owner.BackendWarning(null);
         }
     }
 }

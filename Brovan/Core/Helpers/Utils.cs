@@ -289,6 +289,21 @@ namespace Brovan.Core.Helpers
             }
         }
 
+        public static void PrintFatal(string Message)
+        {
+            PrintHighlight(Message, ColorPrefixOnly: true, IgnoreSilent: true);
+            Environment.ExitCode = 1;
+        }
+
+        // A Linux host keeps only the low byte of an exit status, so a failure must not read as 0 there.
+        public static void SetGuestExitCode(uint Code)
+        {
+            if (!GeneralHelper.IsWindows && Code > 0xFF)
+                Code = Math.Max(Code & 0xFF, 1u);
+
+            Environment.ExitCode = (int)Code;
+        }
+
         public static void DumpConsole()
         {
             IntPtr ConsoleHandle = NativeWinImports.GetStdHandle(NativeWinImports.StdOutputHandle);

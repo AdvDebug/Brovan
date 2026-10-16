@@ -13,7 +13,15 @@
                     <TextBlock Classes="h1" Text="Settings" />
                     <TextBlock Classes="muted" Text="Defaults for every program. A profile can override any of them." />
                 </StackPanel>
-                <Button Grid.Column="1" Classes="secondary" Command="{Binding ResetDefaultsCommand}" VerticalAlignment="Center">
+                <Button Grid.Column="1" Classes="secondary" x:Name="ResetButton" VerticalAlignment="Center">
+                    <Button.Flyout>
+                        <Flyout Placement="BottomEdgeAlignedRight">
+                            <StackPanel Spacing="12" Width="260">
+                                <TextBlock Text="Undo every change made on this page? Settings a profile sets for itself stay." TextWrapping="Wrap" />
+                                <Button Classes="danger" Content="Reset" HorizontalAlignment="Right" Click="ResetClick" />
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <Path Classes="icon" Width="14" Height="14" Data="{StaticResource IconReset}" />
                         <TextBlock Text="Reset defaults" VerticalAlignment="Center" />
@@ -21,12 +29,10 @@
                 </Button>
             </Grid>
 
-            <Border Classes="banner" IsVisible="{Binding SchemaStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
-                <StackPanel Orientation="Horizontal" Spacing="10">
-                    <Path Classes="icon warn" Data="{StaticResource IconWarning}" />
-                    <TextBlock Text="{Binding SchemaStatus}" VerticalAlignment="Center" TextWrapping="Wrap" />
-                </StackPanel>
-            </Border>
+            <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="{Binding SchemaStatus}"
+                            IsVisible="{Binding SchemaStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="{Binding BackendWarning}"
+                            IsVisible="{Binding BackendWarning, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
 
             <StackPanel>
                 <TextBlock Classes="group" Text="Appearance" />

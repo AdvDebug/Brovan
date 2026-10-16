@@ -10,13 +10,14 @@ namespace BrovanGUI.ViewModels
         private Bitmap? IconValue;
         private bool Running;
         private List<CategoryViewModel> CategoryList = new List<CategoryViewModel>();
+        private string BackendWarningValue = string.Empty;
 
         public ProfileViewModel(Profile Model, MainViewModel Owner)
         {
             this.Model = Model;
             this.Owner = Owner;
 
-            LaunchCommand = new RelayCommand(() => Owner.Launch(this));
+            LaunchCommand = new AsyncCommand(() => Owner.Launch(this), Owner.ReportError);
             StopCommand = new RelayCommand(() => Owner.Stop(this));
             BrowseExecutableCommand = new AsyncCommand(BrowseExecutable, Owner.ReportError);
             BrowseWorkingDirectoryCommand = new AsyncCommand(BrowseWorkingDirectory, Owner.ReportError);
@@ -31,7 +32,7 @@ namespace BrovanGUI.ViewModels
         }
 
         public Profile Model { get; }
-        public RelayCommand LaunchCommand { get; }
+        public AsyncCommand LaunchCommand { get; }
         public RelayCommand StopCommand { get; }
         public AsyncCommand BrowseExecutableCommand { get; }
         public AsyncCommand BrowseWorkingDirectoryCommand { get; }
@@ -109,13 +110,18 @@ namespace BrovanGUI.ViewModels
 
         public bool ExecutableMissing => Executable.Length == 0 || !File.Exists(Executable);
 
+        // Avalonia render data keeps its own reference to every bitmap it draws.
         public Bitmap? Icon
         {
             get => IconValue;
             private set
             {
-                if (Set(ref IconValue, value))
-                    Raise(nameof(HasIcon));
+                Bitmap? Old = IconValue;
+                if (!Set(ref IconValue, value))
+                    return;
+
+                Raise(nameof(HasIcon));
+                Old?.Dispose();
             }
         }
 
@@ -135,24 +141,25 @@ namespace BrovanGUI.ViewModels
 
         public string SchemaStatus => Owner.SchemaStatus;
 
-        public void Rebuild(IReadOnlyList<SettingEntry> Schema, Dictionary<string, string> Defaults, bool HypervisorAvailable)
+        public string BackendWarning
         {
-            SettingsScope Scope = new SettingsScope(Model.Settings, Key =>
+            get => BackendWarningValue;
+            private set => Set(ref BackendWarningValue, value);
+        }
+
+        public bool IsDiscarded { get; private set; }
+
+        public void Rebuild(IReadOnlyList<SettingEntry> Schema)
+        {
+            SettingsScope Scope = new SettingsScope(Model.Settings, Owner.InheritedValue, () =>
             {
-                if (Defaults.TryGetValue(Key, out string? Value))
-                    return Value;
+                Owner.Save();
+                BackendWarning = Owner.BackendWarning(Model);
+            });
 
-                foreach (SettingEntry Entry in Schema)
-                {
-                    if (Entry.Key == Key)
-                        return Entry.DefaultText;
-                }
-
-                return string.Empty;
-            }, Owner.Save);
-
-            Categories = SettingLabels.BuildCategories(Schema, Scope, false, HypervisorAvailable);
+            Categories = SettingLabels.BuildCategories(Schema, Scope, false, Owner);
             Raise(nameof(SchemaStatus));
+            BackendWarning = Owner.BackendWarning(Model);
         }
 
         public void RefreshRows()
@@ -160,6 +167,8 @@ namespace BrovanGUI.ViewModels
             foreach (CategoryViewModel Category in CategoryList)
                 foreach (SettingRow Row in Category.Rows)
                     Row.Refresh();
+
+            BackendWarning = Owner.BackendWarning(Model);
         }
 
         private void LoadIcon()
@@ -176,10 +185,18 @@ namespace BrovanGUI.ViewModels
                 Bitmap? Loaded = PeIcon.Load(Path);
                 Dispatcher.UIThread.Post(() =>
                 {
-                    if (Executable == Path)
+                    if (Executable == Path && !IsDiscarded)
                         Icon = Loaded;
+                    else
+                        Loaded?.Dispose();
                 });
             });
+        }
+
+        public void Discard()
+        {
+            IsDiscarded = true;
+            Icon = null;
         }
 
         private async Task BrowseExecutable()

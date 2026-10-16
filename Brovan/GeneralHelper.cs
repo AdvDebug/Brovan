@@ -115,6 +115,9 @@ namespace Brovan
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+
         public const int StdInputHandle = -10;
         public const int StdOutputHandle = -11;
         public const int StdErrorHandle = -12;
@@ -690,6 +693,7 @@ namespace Brovan
             ulong MitigationPolicy = 0x00000002UL << 40;
             ulong MitigationPolicy2 = 0x00000002UL << 8;
 
+            uint ChildExitCode = 0;
             IntPtr AttributeListSize = IntPtr.Zero;
             NativeWinImports.InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref AttributeListSize);
 
@@ -753,6 +757,8 @@ namespace Brovan
                     if (KeepAlive)
                     {
                         NativeWinImports.WaitForSingleObject(ProcessInfo.hProcess, 0xFFFFFFFF);
+                        if (!NativeWinImports.GetExitCodeProcess(ProcessInfo.hProcess, out ChildExitCode))
+                            ChildExitCode = 1;
                     }
 
                     if (ProcessInfo.hProcess != IntPtr.Zero)
@@ -790,7 +796,7 @@ namespace Brovan
                     Marshal.FreeHGlobal(MitigationPtr);
             }
 
-            Environment.Exit(0);
+            Environment.Exit((int)ChildExitCode);
             return true;
         }
 

@@ -83,6 +83,8 @@ namespace BrovanGUI.ViewModels
     public sealed class OutputViewModel : ObservableObject
     {
         private const int Capacity = 5000;
+        private const int MaxLineLength = 4096;
+        public const double MinHeight = 100;
 
         private readonly object Gate = new object();
         private readonly List<string> PendingLines = new List<string>();
@@ -97,12 +99,15 @@ namespace BrovanGUI.ViewModels
         private string StatusValue = "Idle";
         private string InputValue = string.Empty;
         private bool Open;
+        private double HeightValue;
 
-        public OutputViewModel(bool Open, Action Persist)
+        public OutputViewModel(bool Open, double Height, Action Persist)
         {
             this.Open = Open;
+            HeightValue = Math.Max(MinHeight, Height);
             this.Persist = Persist;
-            Timer = new DispatcherTimer(TimeSpan.FromMilliseconds(50), DispatcherPriority.Background, Flush);
+            Timer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(50) };
+            Timer.Tick += Flush;
             ClearCommand = new RelayCommand(Clear);
             ToggleCommand = new RelayCommand(() => IsOpen = !IsOpen);
         }
@@ -135,35 +140,43 @@ namespace BrovanGUI.ViewModels
             }
         }
 
+        // The resize grip sets Height on every pointer move and calls SaveLayout once when the drag ends.
+        public double Height
+        {
+            get => HeightValue;
+            set => Set(ref HeightValue, Math.Max(MinHeight, value));
+        }
+
+        public void SaveLayout()
+        {
+            Persist();
+        }
+
         public void Write(string Text)
         {
             lock (Gate)
             {
-                foreach (char Character in Text)
+                ReadOnlySpan<char> Rest = Text;
+                while (Rest.Length != 0)
                 {
-                    if (Character == '\n')
+                    int Stop = Rest.IndexOfAny('\n', '\r');
+                    AppendToOpenLine(Stop < 0 ? Rest : Rest.Slice(0, Stop));
+                    if (Stop < 0)
+                        break;
+
+                    if (Rest[Stop] == '\n')
                     {
                         PendingLines.Add(OpenLine.ToString());
                         OpenLine.Clear();
                         OpenDirty = true;
                         CarriageReturn = false;
-                        continue;
                     }
-
-                    if (Character == '\r')
+                    else
                     {
                         CarriageReturn = true;
-                        continue;
                     }
 
-                    if (CarriageReturn)
-                    {
-                        OpenLine.Clear();
-                        CarriageReturn = false;
-                    }
-
-                    OpenLine.Append(Character);
-                    OpenDirty = true;
+                    Rest = Rest.Slice(Stop + 1);
                 }
 
                 if (PendingLines.Count > Capacity)
@@ -175,6 +188,33 @@ namespace BrovanGUI.ViewModels
                     Dispatcher.UIThread.Post(Timer.Start);
                 }
             }
+        }
+
+        private void AppendToOpenLine(ReadOnlySpan<char> Run)
+        {
+            if (Run.Length == 0)
+                return;
+
+            if (CarriageReturn)
+            {
+                OpenLine.Clear();
+                CarriageReturn = false;
+            }
+
+            while (Run.Length != 0)
+            {
+                if (OpenLine.Length == MaxLineLength)
+                {
+                    PendingLines.Add(OpenLine.ToString());
+                    OpenLine.Clear();
+                }
+
+                int Take = Math.Min(Run.Length, MaxLineLength - OpenLine.Length);
+                OpenLine.Append(Run.Slice(0, Take));
+                Run = Run.Slice(Take);
+            }
+
+            OpenDirty = true;
         }
 
         public void WriteLine(string Text)

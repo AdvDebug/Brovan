@@ -17,25 +17,30 @@ namespace BrovanGUI.ViewModels
 
     public sealed class MainViewModel : ObservableObject
     {
-        private readonly Dictionary<string, Process> Running = new Dictionary<string, Process>();
+        private readonly Dictionary<ProfileViewModel, Process> Running = new Dictionary<ProfileViewModel, Process>();
         private readonly DispatcherTimer SaveTimer;
         private Process? Tool;
+        private string? ToolTitle;
         private ProfileViewModel? Selected;
         private PageKind Page;
         private SettingEntry[] Schema = Array.Empty<SettingEntry>();
+        private Dictionary<string, string> SchemaDefaults = new Dictionary<string, string>();
+        private Task SchemaLoad = Task.CompletedTask;
+        private int SchemaGeneration;
         private string SchemaStatusValue = "Reading the settings Brovan supports...";
 
         public MainViewModel(Dialogs Dialogs, string? LaunchProfile)
         {
             this.Dialogs = Dialogs;
-            bool FirstRun = !File.Exists(LibraryStore.FilePath);
             Library = LibraryStore.Load(out string? LibraryProblem);
-            SaveTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(400), DispatcherPriority.Background, (_, _) => SaveNow());
+            SaveTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(400) };
+            SaveTimer.Tick += (_, _) => SaveNow();
             ApplyTheme();
 
-            Output = new OutputViewModel(Library.OutputOpen, () =>
+            Output = new OutputViewModel(Library.OutputOpen, Library.OutputHeight, () =>
             {
                 Library.OutputOpen = Output.IsOpen;
+                Library.OutputHeight = Output.Height;
                 Save();
             });
             Output.InputSubmitted += Line =>
@@ -59,7 +64,7 @@ namespace BrovanGUI.ViewModels
 
             AddProfileCommand = new AsyncCommand(AddProfile, ReportError);
             RemoveSelectedCommand = new RelayCommand(RemoveSelected);
-            ShowSetupCommand = new RelayCommand(() => CurrentPageKind = PageKind.Setup);
+            ShowSetupCommand = new RelayCommand(ShowSetup);
             ShowSettingsCommand = new RelayCommand(() => CurrentPageKind = PageKind.Settings);
             OpenManualCommand = new RelayCommand(() => BrovanHost.OpenExternal("https://github.com/AdvDebug/Brovan/wiki"));
 
@@ -70,9 +75,6 @@ namespace BrovanGUI.ViewModels
             BrovanExecutable = BrovanHost.Locate(Library.BrovanPath);
             Setup.Refresh();
 
-            if (FirstRun)
-                SeedDefaults();
-
             foreach (ProfileViewModel Profile in Profiles)
             {
                 if (Profile.Id == Library.SelectedProfile)
@@ -82,21 +84,19 @@ namespace BrovanGUI.ViewModels
             Selected ??= Profiles.Count != 0 ? Profiles[0] : null;
             Page = BrovanExecutable == null ? PageKind.Setup : PageKind.Profile;
 
-            _ = Start(LaunchProfile);
+            SchemaLoad = LoadSchema();
+            if (LaunchProfile != null)
+                LaunchNamed(LaunchProfile);
         }
 
-        private async Task Start(string? LaunchProfile)
+        private void LaunchNamed(string LaunchProfile)
         {
-            await LoadSchema();
-            if (LaunchProfile == null)
-                return;
-
             foreach (ProfileViewModel Profile in Profiles)
             {
                 if (string.Equals(Profile.Name, LaunchProfile, StringComparison.OrdinalIgnoreCase) || Profile.Id == LaunchProfile)
                 {
                     SelectedProfile = Profile;
-                    Launch(Profile);
+                    Profile.LaunchCommand.Execute(null);
                     return;
                 }
             }
@@ -174,6 +174,12 @@ namespace BrovanGUI.ViewModels
             }
         }
 
+        private void ShowSetup()
+        {
+            Setup.Refresh();
+            CurrentPageKind = PageKind.Setup;
+        }
+
         public bool IsSetupPage => Page == PageKind.Setup;
         public bool IsSettingsPage => Page == PageKind.Settings;
 
@@ -210,14 +216,43 @@ namespace BrovanGUI.ViewModels
             ReportProblem(Error.Message);
         }
 
-        // Brovan's own defaults suit analysis, not launching.
-        private void SeedDefaults()
+        public void ResetDefaults()
         {
-            Library.Defaults["log.silent"] = "true";
-            if (Setup.HypervisorAvailable)
-                Library.Defaults["backend.kind"] = BrovanHost.BackendValue;
+            Library.Defaults.Clear();
+            Save();
+            DefaultsChanged();
+        }
 
-            SaveNow();
+        public string BackendWarning(Profile? Model)
+        {
+            string? Chosen = BrovanHost.ChosenValue(Model, Library.Defaults, BrovanHost.BackendKey);
+            if (Chosen == null)
+            {
+                return Setup.HypervisorAvailable
+                    ? string.Empty
+                    : "Programs run on Unicorn, the slower software backend, because " + Setup.HypervisorName + " cannot be used. " + Setup.HypervisorProblem;
+            }
+
+            string Backend = Chosen.Trim().ToLowerInvariant();
+            if (SettingLabels.ChoiceAvailable(BrovanHost.BackendKey, Backend, Setup.HypervisorAvailable))
+                return string.Empty;
+
+            string Warning = SettingLabels.ChoiceLabel(BrovanHost.BackendKey, Backend) + " is selected, but this computer cannot run it, so the launch fails.";
+            return Backend == BrovanHost.BackendValue ? Warning + " " + Setup.HypervisorProblem : Warning;
+        }
+
+        public string DefaultValue(string Key)
+        {
+            string? Value = BrovanHost.LauncherDefault(Key, Setup.HypervisorAvailable);
+            if (Value != null)
+                return Value;
+
+            return SchemaDefaults.TryGetValue(Key, out string? Default) ? Default : string.Empty;
+        }
+
+        public string InheritedValue(string Key)
+        {
+            return Library.Defaults.TryGetValue(Key, out string? Value) ? Value : DefaultValue(Key);
         }
 
         public void ApplyTheme()
@@ -236,39 +271,50 @@ namespace BrovanGUI.ViewModels
             Save();
             BrovanExecutable = BrovanHost.Locate(Path);
             Setup.Refresh();
-            await LoadSchema();
+            SchemaLoad = LoadSchema();
+            await SchemaLoad;
         }
 
         private async Task LoadSchema()
         {
+            int Generation = ++SchemaGeneration;
+            SettingEntry[] Loaded = Array.Empty<SettingEntry>();
+            string Status;
+
             if (BrovanExecutable == null)
             {
-                Schema = Array.Empty<SettingEntry>();
-                SchemaStatus = "Brovan was not found, so its settings cannot be shown. Go to Setup to locate it.";
-                Rebuild();
+                Status = "Brovan was not found, so its settings cannot be shown. Go to Setup to locate it.";
+            }
+            else
+            {
+                try
+                {
+                    Loaded = await SettingSchema.LoadAsync(BrovanExecutable);
+                    Status = string.Empty;
+                }
+                catch (Exception Error)
+                {
+                    Status = Error.Message;
+                }
+            }
+
+            if (Generation != SchemaGeneration)
                 return;
-            }
 
-            try
-            {
-                Schema = await SettingSchema.LoadAsync(BrovanExecutable);
-                SchemaStatus = string.Empty;
-            }
-            catch (Exception Error)
-            {
-                Schema = Array.Empty<SettingEntry>();
-                SchemaStatus = Error.Message;
-            }
+            Schema = Loaded;
+            SchemaDefaults = new Dictionary<string, string>(Loaded.Length);
+            foreach (SettingEntry Entry in Loaded)
+                SchemaDefaults[Entry.Key] = Entry.DefaultText;
 
+            SchemaStatus = Status;
             Rebuild();
         }
 
         public void Rebuild()
         {
-            bool Hypervisor = Setup.HypervisorAvailable;
-            Settings.Rebuild(Schema, Hypervisor);
+            Settings.Rebuild(Schema);
             foreach (ProfileViewModel Profile in Profiles)
-                Profile.Rebuild(Schema, Library.Defaults, Hypervisor);
+                Profile.Rebuild(Schema);
         }
 
         public void DefaultsChanged()
@@ -285,6 +331,14 @@ namespace BrovanGUI.ViewModels
                 AddProfileFromPath(Picked);
         }
 
+        public void AddDroppedFile(string Path)
+        {
+            if (BrovanHost.IsProgram(Path))
+                AddProfileFromPath(Path);
+            else
+                ReportProblem(System.IO.Path.GetFileName(Path) + " was not added. It is not a Windows or Linux program, or it could not be read.");
+        }
+
         public void AddProfileFromPath(string Path)
         {
             Profile Model = new Profile
@@ -295,7 +349,7 @@ namespace BrovanGUI.ViewModels
             Library.Profiles.Add(Model);
 
             ProfileViewModel Profile = new ProfileViewModel(Model, this);
-            Profile.Rebuild(Schema, Library.Defaults, Setup.HypervisorAvailable);
+            Profile.Rebuild(Schema);
             Profiles.Add(Profile);
             SelectedProfile = Profile;
         }
@@ -310,6 +364,7 @@ namespace BrovanGUI.ViewModels
             int Index = Profiles.IndexOf(Profile);
             Profiles.Remove(Profile);
             Library.Profiles.Remove(Profile.Model);
+            Profile.Discard();
             SaveNow();
 
             Selected = null;
@@ -319,64 +374,161 @@ namespace BrovanGUI.ViewModels
             Raise(nameof(CurrentPage));
         }
 
-        public void Launch(ProfileViewModel Profile)
+        public async Task Launch(ProfileViewModel Profile)
         {
-            if (Running.ContainsKey(Profile.Id))
+            if (!CanLaunch(Profile))
                 return;
+
+            if (!SchemaLoad.IsCompleted || Schema.Length == 0)
+            {
+                await SchemaReady();
+                if (Schema.Length == 0)
+                {
+                    SchemaLoad = LoadSchema();
+                    await SchemaReady();
+                }
+
+                if (!CanLaunch(Profile))
+                    return;
+            }
+
+            if (Setup.NeedsSystemFiles && !BrovanHost.IsLinuxProgram(Profile.Executable))
+            {
+                Setup.Refresh();
+                if (Setup.NeedsSystemFiles && (!await InstallSystemFiles(Profile) || !CanLaunch(Profile)))
+                    return;
+            }
+
+            if (Schema.Length == 0)
+                ReportProblem(Profile.Name + " starts with Brovan's own defaults, because Brovan's settings could not be read. " + SchemaStatus);
+
+            Start(Profile);
+        }
+
+        private bool CanLaunch(ProfileViewModel Profile)
+        {
+            if (Running.ContainsKey(Profile) || Profile.IsDiscarded)
+                return false;
 
             if (BrovanExecutable == null)
             {
                 ReportProblem("Brovan was not found. Open Setup and locate it first.");
-                CurrentPageKind = PageKind.Setup;
-                return;
+                ShowSetup();
+                return false;
             }
 
             if (Profile.ExecutableMissing)
             {
                 ReportProblem("The program file does not exist: " + Profile.Executable);
-                return;
+                return false;
             }
 
-            List<string> Arguments = BrovanHost.LaunchArguments(Profile.Model, Library.Defaults, Schema);
+            return true;
+        }
+
+        private async Task SchemaReady()
+        {
+            while (!SchemaLoad.IsCompleted)
+                await SchemaLoad;
+        }
+
+        private async Task<bool> InstallSystemFiles(ProfileViewModel Profile)
+        {
+            CurrentPageKind = PageKind.Setup;
+            if (!Setup.LicenseAccepted)
+            {
+                ReportProblem(Profile.Name + " needs the Windows system files. Confirm the Windows license here, then choose a Windows 11 ISO.");
+                return false;
+            }
+
+            if (Setup.IsBusy)
+            {
+                ReportProblem(Profile.Name + " needs the Windows system files. Launch it again when the running setup task ends.");
+                return false;
+            }
+
+            return await Setup.InstallSystemFilesAsync();
+        }
+
+        private void Start(ProfileViewModel Profile)
+        {
+            List<string> Arguments = BrovanHost.LaunchArguments(Profile.Model, Library.Defaults, Schema, Setup.HypervisorAvailable);
+            Process? Child = StartBrovan(BrovanExecutable!, Arguments, BackendWarning(Profile.Model), Code =>
+            {
+                Running.Remove(Profile);
+                Profile.IsRunning = false;
+                Output.WriteLine(Code == 0 ? "[*] " + Profile.Name + " finished." : "[-] " + Profile.Name + " exited with code " + Code + ".");
+                if (Code != 0)
+                    Output.IsOpen = true;
+
+                if (Running.Count == 0)
+                    OutputViewModel.ReleaseMemory();
+            });
+
+            if (Child == null)
+                return;
+
+            Running[Profile] = Child;
+            Profile.IsRunning = true;
+            Profile.Model.LastLaunched = DateTime.Now;
+            Save();
+            UpdateStatus();
+        }
+
+        // Exited runs on the UI thread.
+        private Process? StartBrovan(string Executable, IReadOnlyList<string> Arguments, string Warning, Action<int> Exited)
+        {
             Output.WriteLine(string.Empty);
-            Output.WriteLine("> " + BrovanHost.CommandLine(BrovanExecutable, Arguments));
-            Output.Status = "Running " + Profile.Name;
+            Output.WriteLine("> " + BrovanHost.CommandLine(Executable, Arguments));
+            if (Warning.Length != 0)
+                Output.WriteLine("[!] " + Warning);
 
             try
             {
-                Process Child = BrovanHost.Start(BrovanExecutable, Arguments, Output.Write, Code =>
+                return BrovanHost.Start(Executable, Arguments, Output.Write, Code => Dispatcher.UIThread.Post(() =>
                 {
-                    Dispatcher.UIThread.Post(() =>
-                    {
-                        Running.Remove(Profile.Id);
-                        Profile.IsRunning = false;
-                        Output.WriteLine(Code == 0 ? "[*] " + Profile.Name + " finished." : "[-] " + Profile.Name + " exited with code " + Code + ".");
-                        if (Code != 0)
-                            Output.IsOpen = true;
-
-                        if (Running.Count == 0)
-                        {
-                            Output.Status = "Idle";
-                            OutputViewModel.ReleaseMemory();
-                        }
-                    });
-                });
-
-                Running[Profile.Id] = Child;
-                Profile.IsRunning = true;
-                Profile.Model.LastLaunched = DateTime.Now;
-                Save();
+                    Exited(Code);
+                    UpdateStatus();
+                }));
             }
             catch (Exception Error)
             {
                 ReportProblem("Could not start Brovan: " + Error.Message);
-                Output.Status = "Idle";
+                return null;
             }
+        }
+
+        private void UpdateStatus()
+        {
+            if (Running.Count == 0)
+                Output.Status = ToolTitle ?? "Idle";
+            else
+                Output.Status = (ToolTitle != null ? ToolTitle + ". " : string.Empty) + "Running " + string.Join(", ", RunningNames());
+        }
+
+        public bool HasRunning => Running.Count != 0 || Tool != null;
+
+        private List<string> RunningNames()
+        {
+            List<string> Names = new List<string>(Running.Count + 1);
+            foreach (ProfileViewModel Profile in Running.Keys)
+                Names.Add(Profile.Name);
+
+            return Names;
+        }
+
+        public string StopWarning()
+        {
+            List<string> Names = RunningNames();
+            if (ToolTitle != null)
+                Names.Insert(0, ToolTitle);
+
+            return string.Join(", ", Names) + (Names.Count == 1 ? " is still running. Closing Brovan stops it." : " are still running. Closing Brovan stops them.");
         }
 
         public void Stop(ProfileViewModel Profile)
         {
-            if (Running.TryGetValue(Profile.Id, out Process? Child))
+            if (Running.TryGetValue(Profile, out Process? Child))
                 Kill(Child);
         }
 
@@ -392,6 +544,7 @@ namespace BrovanGUI.ViewModels
             {
                 Kill(Tool);
                 Tool = null;
+                ToolTitle = null;
             }
         }
 
@@ -411,45 +564,32 @@ namespace BrovanGUI.ViewModels
             if (Tool != null)
                 return Tool;
 
-            if (Selected != null && Running.TryGetValue(Selected.Id, out Process? Child))
+            if (Selected != null && Running.TryGetValue(Selected, out Process? Child))
                 return Child;
 
             return null;
         }
 
-        public Task RunTool(string Title, IReadOnlyList<string> Arguments)
+        public Task<int> RunTool(string Title, IReadOnlyList<string> Arguments)
         {
             if (BrovanExecutable == null)
-                return Task.CompletedTask;
+                return Task.FromResult(-1);
 
-            TaskCompletionSource Done = new TaskCompletionSource();
+            TaskCompletionSource<int> Done = new TaskCompletionSource<int>();
             Output.IsOpen = true;
-            Output.WriteLine(string.Empty);
-            Output.WriteLine("> " + BrovanHost.CommandLine(BrovanExecutable, Arguments));
-            Output.Status = Title;
-
-            try
+            Tool = StartBrovan(BrovanExecutable, Arguments, string.Empty, Code =>
             {
-                Tool = BrovanHost.Start(BrovanExecutable, Arguments, Output.Write, Code =>
-                {
-                    Dispatcher.UIThread.Post(() =>
-                    {
-                        Tool = null;
-                        Output.WriteLine(Code == 0 ? "[+] Done." : "[-] Failed with code " + Code + ".");
-                        if (Running.Count == 0)
-                            Output.Status = "Idle";
+                Tool = null;
+                ToolTitle = null;
+                Output.WriteLine(Code == 0 ? "[+] Done." : "[-] Failed with code " + Code + ".");
+                Done.TrySetResult(Code);
+            });
 
-                        Done.TrySetResult();
-                    });
-                });
-            }
-            catch (Exception Error)
-            {
-                ReportProblem("Could not start Brovan: " + Error.Message);
-                Output.Status = "Idle";
-                Done.TrySetResult();
-            }
+            if (Tool == null)
+                return Task.FromResult(-1);
 
+            ToolTitle = Title;
+            UpdateStatus();
             return Done.Task;
         }
     }

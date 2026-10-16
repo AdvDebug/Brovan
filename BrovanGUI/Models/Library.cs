@@ -21,6 +21,7 @@ namespace BrovanGUI.Models
         public string Theme { get; set; } = "dark";
         public string SelectedProfile { get; set; } = string.Empty;
         public bool OutputOpen { get; set; }
+        public double OutputHeight { get; set; } = 260;
         public bool LicenseAccepted { get; set; }
         public Dictionary<string, string> Defaults { get; set; } = new();
         public List<Profile> Profiles { get; set; } = new();
@@ -57,7 +58,7 @@ namespace BrovanGUI.Models
 
                 LibraryDocument? Document = JsonSerializer.Deserialize(Text, LibraryJsonContext.Default.LibraryDocument);
                 if (Document != null)
-                    return Document;
+                    return Normalize(Document);
 
                 Problem = "The library file is empty.";
             }
@@ -80,6 +81,45 @@ namespace BrovanGUI.Models
             }
 
             return new LibraryDocument { SavingDisabled = true };
+        }
+
+        // A JSON null replaces the initialiser, and the file can be edited by hand.
+        private static LibraryDocument Normalize(LibraryDocument Document)
+        {
+            Document.BrovanPath ??= string.Empty;
+            Document.Theme ??= "dark";
+            Document.SelectedProfile ??= string.Empty;
+            Document.Defaults = WithoutNulls(Document.Defaults);
+            Document.Profiles ??= new();
+            Document.Profiles.RemoveAll(Profile => Profile == null);
+
+            foreach (Profile Profile in Document.Profiles)
+            {
+                if (string.IsNullOrEmpty(Profile.Id))
+                    Profile.Id = Guid.NewGuid().ToString("N");
+
+                Profile.Name ??= string.Empty;
+                Profile.Executable ??= string.Empty;
+                Profile.Arguments ??= string.Empty;
+                Profile.WorkingDirectory ??= string.Empty;
+                Profile.Settings = WithoutNulls(Profile.Settings);
+            }
+
+            return Document;
+        }
+
+        private static Dictionary<string, string> WithoutNulls(Dictionary<string, string>? Settings)
+        {
+            if (Settings == null)
+                return new Dictionary<string, string>();
+
+            foreach (KeyValuePair<string, string> Pair in Settings)
+            {
+                if (Pair.Value == null)
+                    Settings.Remove(Pair.Key);
+            }
+
+            return Settings;
         }
 
         public static string? Save(LibraryDocument Document)

@@ -1153,12 +1153,17 @@ namespace Brovan.EmulationMenu
             {
                 e.Cancel = true;
                 Exiting = true;
-                Console.ResetColor();
-                Console.ForegroundColor = ConsoleColor.White;
-                Console.BackgroundColor = ConsoleColor.Black;
-                Environment.Exit(0);
+                RestoreConsoleAndExit(0);
             };
             CancelKeyPressRegistered = true;
+        }
+
+        private static void RestoreConsoleAndExit(int Code)
+        {
+            Console.ResetColor();
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.BackgroundColor = ConsoleColor.Black;
+            Environment.Exit(Code);
         }
 
         [RequiresUnreferencedCode("Uses reflection to enumerate types and invoke methods.")]
@@ -1240,10 +1245,7 @@ namespace Brovan.EmulationMenu
 
                 case "exit":
                 case "quit":
-                    Console.ResetColor();
-                    Console.ForegroundColor = ConsoleColor.White;
-                    Console.BackgroundColor = ConsoleColor.Black;
-                    Environment.Exit(0);
+                    RestoreConsoleAndExit(Environment.ExitCode);
                     break;
 
                 case "showinstrs":
@@ -2177,8 +2179,8 @@ namespace Brovan.EmulationMenu
         {
             if (Binary != null && Binary.FileFormat != BinaryFormat.Unknown && Binary.Architecture == BinaryArchitecture.Unknown)
             {
-                PrintHighlight($"[-] The file format is {Binary.FileFormat} but the architecture of the file is not supported.", true);
-                Environment.Exit(-1);
+                PrintFatal($"[-] The file format is {Binary.FileFormat} but the architecture of the file is not supported.");
+                Environment.Exit(Environment.ExitCode);
             }
 
             if (Binary == null || Binary.FileFormat == BinaryFormat.Unknown)
@@ -2394,7 +2396,7 @@ namespace Brovan.EmulationMenu
 
                 if (Binary.FileFormat == BinaryFormat.Unknown && !UseWindowsBlobGuest && !UseLinuxBlobGuest && !UseGenericGuest)
                 {
-                    PrintHighlight("[-] Unknown-format blobs are currently only supported through Windows, Linux, or Generic Emulation :(", true);
+                    PrintFatal("[-] Unknown-format blobs are currently only supported through Windows, Linux, or Generic Emulation :(");
                     return;
                 }
 
@@ -2542,9 +2544,12 @@ namespace Brovan.EmulationMenu
                             }
                         }
                     }
-                    catch
+                    catch (Exception Error)
                     {
-                        Command = null;
+                        LogError($"[EmulationMenu] Startup command failed: {Error.Message}\n Stack trace:\n{Error.StackTrace}");
+                        PrintFatal($"[-] Startup command failed: {Error.Message}");
+                        if (Console.IsInputRedirected)
+                            return;
                     }
                 }
 
@@ -2590,10 +2595,7 @@ namespace Brovan.EmulationMenu
                         ClearDebuggerCommandPromptLine();
                         Console.WriteLine();
                         PrintHighlight("[-] Standard input is closed, the command prompt cannot read commands. Exiting.", true);
-                        Console.ResetColor();
-                        Console.ForegroundColor = ConsoleColor.White;
-                        Console.BackgroundColor = ConsoleColor.Black;
-                        Environment.Exit(0);
+                        RestoreConsoleAndExit(Environment.ExitCode);
                     }
 
                     if (string.IsNullOrWhiteSpace(Input))
@@ -2639,7 +2641,7 @@ namespace Brovan.EmulationMenu
             catch (Exception ex)
             {
                 LogError($"[EmulationMenu] Error in the emulation menu: {ex.Message}\n Stack trace:\n{ex.StackTrace}");
-                PrintHighlight($"[-] Error in the emulation menu: {ex.Message}");
+                PrintFatal($"[-] Error in the emulation menu: {ex.Message}");
             }
         }
     }

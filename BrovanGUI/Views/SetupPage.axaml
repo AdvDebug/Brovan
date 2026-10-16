@@ -43,7 +43,7 @@
             <StackPanel IsVisible="{Binding HostIsLinux}">
                 <TextBlock Classes="group" Text="Windows system files" />
                 <StackPanel Spacing="4">
-                    <views:SettingCard Header="Windows license" Description="Using the extracted files needs a valid Windows license. Supply your own Windows installation media. only the needed files are kept.">
+                    <views:SettingCard Header="Windows license" Description="Using the extracted files needs a valid Windows license. Supply your own Windows 11 ISO. Only the files Brovan needs are kept.">
                         <CheckBox IsChecked="{Binding LicenseAccepted}" Content="I have one" />
                     </views:SettingCard>
                     <views:SettingCard Header="System libraries and registry" Description="{Binding SystemFilesDescription}" Status="{Binding SystemFilesStatus}">

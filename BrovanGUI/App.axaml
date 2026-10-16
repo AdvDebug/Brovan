@@ -1,6 +1,7 @@
 <Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:views="using:BrovanGUI.Views"
+             xmlns:sys="using:System"
              x:Class="BrovanGUI.App"
              RequestedThemeVariant="Dark">
 
@@ -96,6 +97,9 @@
                 <Style Selector="^:has-titlebar /template/ Panel#PART_TitleTextPanel">
                     <Setter Property="IsVisible" Value="False" />
                 </Style>
+                <Style Selector="^ /template/ Button#PART_FullScreenButton">
+                    <Setter Property="IsVisible" Value="False" />
+                </Style>
             </ControlTheme>
 
             <StreamGeometry x:Key="IconPlus">M12 5v14M5 12h14</StreamGeometry>
@@ -109,14 +113,21 @@
             <StreamGeometry x:Key="IconChevronDown">M6 9l6 6 6-6</StreamGeometry>
             <StreamGeometry x:Key="IconChevronUp">M18 15l-6-6-6 6</StreamGeometry>
             <StreamGeometry x:Key="IconReset">M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8M3 3v5h5</StreamGeometry>
-            <StreamGeometry x:Key="IconCheck">M20 6L9 17l-5-5</StreamGeometry>
             <StreamGeometry x:Key="IconWarning">M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4M12 17h.01</StreamGeometry>
             <StreamGeometry x:Key="IconDownload">M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3</StreamGeometry>
             <StreamGeometry x:Key="IconTerminal">M4 17l6-6-6-6M12 19h8</StreamGeometry>
             <StreamGeometry x:Key="IconExternal">M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3</StreamGeometry>
             <StreamGeometry x:Key="IconRefresh">M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15</StreamGeometry>
             <StreamGeometry x:Key="IconCopy">M20 9h-9a2 2 0 00-2 2v9a2 2 0 002 2h9a2 2 0 002-2v-9a2 2 0 00-2-2zM5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1</StreamGeometry>
-            <StreamGeometry x:Key="IconFile">M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8</StreamGeometry>
+
+            <DataTemplate x:Key="WarningBanner" DataType="sys:String">
+                <Border Classes="banner">
+                    <Grid ColumnDefinitions="Auto,*">
+                        <Path Classes="icon warn" Data="{StaticResource IconWarning}" Margin="0,0,10,0" />
+                        <TextBlock Grid.Column="1" Text="{Binding}" VerticalAlignment="Center" TextWrapping="Wrap" />
+                    </Grid>
+                </Border>
+            </DataTemplate>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

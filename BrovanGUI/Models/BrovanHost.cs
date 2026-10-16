@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -13,9 +14,6 @@ namespace BrovanGUI.Models
         public bool Runtimes;
         public bool Registry;
         public string? DxvkVersion;
-        public bool HypervisorAvailable;
-        public string HypervisorName = string.Empty;
-        public string HypervisorHint = string.Empty;
         public bool HostIsWindows = OperatingSystem.IsWindows();
     }
 
@@ -70,65 +68,141 @@ namespace BrovanGUI.Models
                 }
             }
 
-            if (OperatingSystem.IsWindows())
-            {
-                State.HypervisorName = "Windows Hypervisor Platform";
-                State.HypervisorAvailable = HypervisorPresent();
-                State.HypervisorHint = "Not available. Turn it on under Windows Features, as \"Windows Hypervisor Platform\", then restart.";
-            }
-            else
-            {
-                State.HypervisorName = "KVM";
-                State.HypervisorAvailable = KvmUsable(out string Hint);
-                State.HypervisorHint = Hint;
-            }
-
             return State;
+        }
+
+        public static string HypervisorName => OperatingSystem.IsWindows() ? "Windows Hypervisor Platform" : "KVM";
+
+        public static string? HypervisorProblem()
+        {
+            if (RuntimeInformation.OSArchitecture != Architecture.X64)
+                return "It runs x86 programs only on an x86-64 processor, and this computer has an " + RuntimeInformation.OSArchitecture + " processor.";
+
+            return OperatingSystem.IsWindows() ? WhpProblem() : KvmProblem();
         }
 
         // WinHvPlatform.dll ships whether or not WHP is turned on, so the capability must be asked for.
         [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-        private static bool HypervisorPresent()
+        private static string? WhpProblem()
         {
+            int Status;
+            int Present;
+            uint Written;
             try
             {
-                int Status = WHvGetCapability(WhvCapabilityHypervisorPresent, out int Present, sizeof(int), out uint Written);
-                return Status >= 0 && Written >= sizeof(int) && Present != 0;
+                Status = WHvGetCapability(WhvCapabilityHypervisorPresent, out Present, sizeof(int), out Written);
             }
-            catch (Exception)
+            catch (Exception Error) when (Error is DllNotFoundException or EntryPointNotFoundException)
             {
-                return false;
+                return "Windows Hypervisor Platform is not installed. Turn it on under Windows Features, then restart.";
             }
+
+            // PF_VIRT_FIRMWARE_ENABLED reads false while a hypervisor is running, so it is checked only when none is.
+            if (Status < 0 || Written < sizeof(int) || Present == 0)
+            {
+                return IsProcessorFeaturePresent(PfVirtFirmwareEnabled)
+                    ? "Windows Hypervisor Platform is turned off. Turn it on under Windows Features, then restart."
+                    : "Virtualization is turned off in the firmware. Turn on Intel VT-x or AMD-V in the BIOS or UEFI settings.";
+            }
+
+            Status = WHvCreatePartition(out IntPtr Partition);
+            if (Status < 0)
+                return "Windows Hypervisor Platform could not create a virtual machine (error 0x" + Status.ToString("X8") + "). Check that it is turned on under Windows Features.";
+
+            WHvDeletePartition(Partition);
+            return null;
         }
 
         private const uint WhvCapabilityHypervisorPresent = 0;
+        private const uint PfVirtFirmwareEnabled = 21;
 
         [DllImport("WinHvPlatform.dll")]
         private static extern int WHvGetCapability(uint Code, out int Buffer, uint BufferSize, out uint Written);
 
-        private static bool KvmUsable(out string Hint)
+        [DllImport("WinHvPlatform.dll")]
+        private static extern int WHvCreatePartition(out IntPtr Partition);
+
+        [DllImport("WinHvPlatform.dll")]
+        private static extern int WHvDeletePartition(IntPtr Partition);
+
+        [DllImport("kernel32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsProcessorFeaturePresent(uint Feature);
+
+        private static string? KvmProblem()
         {
             try
             {
                 using SafeFileHandle Device = File.OpenHandle("/dev/kvm", FileMode.Open, FileAccess.ReadWrite);
-                Hint = string.Empty;
-                return true;
+                return null;
             }
             catch (UnauthorizedAccessException)
             {
-                Hint = "KVM is on, but this user may not open /dev/kvm. Run \"sudo usermod -aG kvm $USER\", then log out and in again.";
-                return false;
+                return "KVM is on, but this user may not open /dev/kvm. Run \"sudo usermod -aG kvm $USER\", then log out and in again.";
             }
             catch (Exception)
             {
-                Hint = "Not available. Needs /dev/kvm, which the kvm_intel or kvm_amd module provides. Turn virtualisation on in the firmware if the module will not load.";
-                return false;
+                return "There is no /dev/kvm, which the kvm_intel or kvm_amd module provides. Turn virtualization on in the firmware if the module will not load.";
             }
         }
 
+        public const string BackendKey = "backend.kind";
+
         public static string BackendValue => OperatingSystem.IsWindows() ? "whp" : "kvm";
 
-        public static List<string> LaunchArguments(Profile Program, IReadOnlyDictionary<string, string> Defaults, IReadOnlyList<SettingEntry> Schema)
+        private const ushort MzMagic = 0x5A4D;
+        private const uint ElfMagic = 0x464C457F;
+
+        public static bool IsProgram(string Path)
+        {
+            uint Magic = ReadMagic(Path);
+            return (ushort)Magic == MzMagic || Magic == ElfMagic;
+        }
+
+        public static bool IsLinuxProgram(string Path)
+        {
+            return ReadMagic(Path) == ElfMagic;
+        }
+
+        private static uint ReadMagic(string Path)
+        {
+            Span<byte> Header = stackalloc byte[4];
+            try
+            {
+                using SafeFileHandle Handle = File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                return RandomAccess.Read(Handle, Header, 0) == Header.Length ? BinaryPrimitives.ReadUInt32LittleEndian(Header) : 0;
+            }
+            catch (IOException)
+            {
+                return 0;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return 0;
+            }
+        }
+
+        // Brovan's own defaults suit analysis, not launching.
+        public static string? LauncherDefault(string Key, bool HypervisorAvailable)
+        {
+            return Key switch
+            {
+                "log.silent" => "true",
+                "backend.hooks" => "false",
+                BackendKey => HypervisorAvailable ? BackendValue : "unicorn",
+                _ => null,
+            };
+        }
+
+        public static string? ChosenValue(Profile? Program, IReadOnlyDictionary<string, string> Defaults, string Key)
+        {
+            if (Program != null && Program.Settings.TryGetValue(Key, out string? Value))
+                return Value;
+
+            return Defaults.TryGetValue(Key, out Value) ? Value : null;
+        }
+
+        public static List<string> LaunchArguments(Profile Program, IReadOnlyDictionary<string, string> Defaults, IReadOnlyList<SettingEntry> Schema, bool HypervisorAvailable)
         {
             List<string> Arguments = new List<string>();
 
@@ -137,7 +211,8 @@ namespace BrovanGUI.Models
                 if (!Entry.AppliesToHost)
                     continue;
 
-                if (!Program.Settings.TryGetValue(Entry.Key, out string? Value) && !Defaults.TryGetValue(Entry.Key, out Value))
+                string? Value = ChosenValue(Program, Defaults, Entry.Key) ?? LauncherDefault(Entry.Key, HypervisorAvailable);
+                if (Value == null)
                     continue;
 
                 if (Entry.Repeatable)

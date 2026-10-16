@@ -1,5 +1,6 @@
 using System.Linq;
 using Brovan.Core.Emulation.Guests;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Linux.Process
 {
@@ -11,10 +12,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             EmulatedThread CurrentThread = Instance.CurrentThread;
             if (CurrentThread == null)
             {
-                if ((Instance.Settings.Flags & LogFlags.Important) != 0)
-                    Instance.TriggerEventMessage($"[!] Process has been terminated with error code: {error_code}", LogFlags.Important);
-                Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
-                Instance.StopEmulation();
+                Exit_group.EndProcess(Instance, Helper, error_code);
                 return;
             }
 
@@ -31,9 +29,14 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             Instance._emulator.WriteRegister(Instance.IPRegister, 0UL);
             if (HasOtherRunningThreads)
+            {
                 Instance._emulator.StopEmulation();
+            }
             else
+            {
+                Utils.SetGuestExitCode((byte)error_code);
                 Instance.StopEmulation();
+            }
         }
     }
 }

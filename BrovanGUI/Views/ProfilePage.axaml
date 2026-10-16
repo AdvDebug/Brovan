@@ -31,19 +31,12 @@
                 </StackPanel>
             </Grid>
 
-            <Border Classes="banner" IsVisible="{Binding ExecutableMissing}">
-                <StackPanel Orientation="Horizontal" Spacing="10">
-                    <Path Classes="icon warn" Data="{StaticResource IconWarning}" />
-                    <TextBlock Text="The program file was not found. Pick it again below." VerticalAlignment="Center" />
-                </StackPanel>
-            </Border>
-
-            <Border Classes="banner" IsVisible="{Binding SchemaStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
-                <StackPanel Orientation="Horizontal" Spacing="10">
-                    <Path Classes="icon warn" Data="{StaticResource IconWarning}" />
-                    <TextBlock Text="{Binding SchemaStatus}" VerticalAlignment="Center" TextWrapping="Wrap" />
-                </StackPanel>
-            </Border>
+            <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="The program file was not found. Pick it again below."
+                            IsVisible="{Binding ExecutableMissing}" />
+            <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="{Binding SchemaStatus}"
+                            IsVisible="{Binding SchemaStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="{Binding BackendWarning}"
+                            IsVisible="{Binding BackendWarning, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
 
             <StackPanel>
                 <TextBlock Classes="group" Text="Program" />
@@ -54,9 +47,14 @@
                     <views:SettingCard Header="Executable" Description="The Windows or Linux program Brovan runs.">
                         <TextBox Classes="form" Text="{Binding Executable}">
                             <TextBox.InnerRightContent>
-                                <Button Classes="iconbtn inner" Command="{Binding BrowseExecutableCommand}" ToolTip.Tip="Browse">
-                                    <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconFolder}" />
-                                </Button>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Classes="iconbtn inner" Command="{Binding OpenFolderCommand}" IsEnabled="{Binding !ExecutableMissing}" ToolTip.Tip="Open the program's folder">
+                                        <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconExternal}" />
+                                    </Button>
+                                    <Button Classes="iconbtn inner" Command="{Binding BrowseExecutableCommand}" ToolTip.Tip="Browse">
+                                        <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconFolder}" />
+                                    </Button>
+                                </StackPanel>
                             </TextBox.InnerRightContent>
                         </TextBox>
                     </views:SettingCard>

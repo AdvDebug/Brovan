@@ -373,6 +373,9 @@ namespace Brovan.Android
             if (!File.Exists(path))
                 return StatusBinaryNotFound;
 
+            if (Core.BinaryFile.GetBinaryFormat(path) == BinaryHelpers.BinaryFormat.ELF)
+                return StatusOk;
+
             if (!Directory.Exists(GeneralHelper.WindowsLibsPath))
                 return StatusMissingWindowsLibs;
 

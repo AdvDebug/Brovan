@@ -8,7 +8,8 @@
         Width="1180" Height="800" MinWidth="900" MinHeight="600"
         Background="{DynamicResource BgWindow}"
         WindowDecorationsTheme="{StaticResource UntitledDecorations}"
-        WindowStartupLocation="CenterScreen">
+        WindowStartupLocation="CenterScreen"
+        DragDrop.AllowDrop="True">
 
     <Window.DataTemplates>
         <DataTemplate DataType="vm:ProfileViewModel">
@@ -88,7 +89,13 @@
                     <Button Classes="iconbtn" Command="{Binding ResetCommand}" IsVisible="{Binding IsOverridden}" ToolTip.Tip="Back to the default">
                         <Path Classes="icon muted" Width="13" Height="13" Data="{StaticResource IconReset}" />
                     </Button>
-                    <TextBox Classes="setting" Text="{Binding TextValue}" PlaceholderText="Default" VerticalAlignment="Center" />
+                    <TextBox Classes="setting" Text="{Binding TextValue}" PlaceholderText="Default" VerticalAlignment="Center">
+                        <TextBox.InnerRightContent>
+                            <Button Classes="iconbtn inner" Command="{Binding BrowseCommand}" IsVisible="{Binding IsPath}" ToolTip.Tip="Browse">
+                                <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconFolder}" />
+                            </Button>
+                        </TextBox.InnerRightContent>
+                    </TextBox>
                 </StackPanel>
             </views:SettingCard>
         </DataTemplate>
@@ -107,7 +114,7 @@
 
     <Grid ColumnDefinitions="256,*">
 
-        <Border Grid.Column="0" Background="{DynamicResource BgSidebar}" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="0,0,1,0">
+        <Border Grid.Column="0" x:Name="Sidebar" Background="{DynamicResource BgSidebar}" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="0,0,1,0">
             <Grid RowDefinitions="40,Auto,*,Auto">
 
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="16,0" VerticalAlignment="Center" IsHitTestVisible="False">
@@ -133,7 +140,7 @@
                 </Grid>
 
                 <ListBox Grid.Row="2" x:Name="ProfileList" ItemsSource="{Binding Profiles}" SelectedItem="{Binding ListSelection}"
-                         Background="Transparent" Margin="8,0" DragDrop.AllowDrop="True">
+                         Background="Transparent" Margin="8,0">
                     <ListBox.Resources>
                         <SolidColorBrush x:Key="SystemControlHighlightListAccentLowBrush" Color="#00000000" />
                         <SolidColorBrush x:Key="SystemControlHighlightListAccentMediumBrush" Color="#00000000" />
@@ -163,7 +170,7 @@
                                 <Border Grid.Column="1" Width="28" Height="28" CornerRadius="6" Background="{DynamicResource BgTile}" ClipToBounds="True">
                                     <Panel>
                                         <TextBlock Text="{Binding Initial}" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="{Binding !HasIcon}" />
-                                        <Image Source="{Binding Icon}" Width="22" Height="22" IsVisible="{Binding HasIcon}" />
+                                        <Image Source="{Binding Icon}" Width="22" Height="22" IsVisible="{Binding HasIcon}" RenderOptions.BitmapInterpolationMode="HighQuality" />
                                     </Panel>
                                 </Border>
                                 <TextBlock Grid.Column="2" Text="{Binding Name}" Margin="10,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
@@ -212,7 +219,8 @@
                             <Path Classes="icon muted" Data="{StaticResource IconTerminal}" Width="14" Height="14" />
                             <TextBlock Text="Output" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" />
                         </StackPanel>
-                        <TextBlock Grid.Column="2" Classes="muted" Text="{Binding Output.Status}" Margin="12,0,0,0" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="2" Classes="muted" Text="{Binding Output.Status}" Margin="12,0,0,0" VerticalAlignment="Center"
+                                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
                         <Button Grid.Column="3" Classes="iconbtn" Click="CopyOutputClick" ToolTip.Tip="Copy the selected lines, or everything">
                             <Path Classes="icon muted" Data="{StaticResource IconCopy}" Width="14" Height="14" />
                         </Button>
@@ -220,8 +228,8 @@
                             <Path Classes="icon muted" Data="{StaticResource IconTrash}" Width="14" Height="14" />
                         </Button>
                     </Grid>
-                    <Grid Grid.Row="1" RowDefinitions="*,Auto,Auto" ColumnDefinitions="*,Auto" Height="260" IsVisible="{Binding Output.IsOpen}" Background="{DynamicResource BgOutput}">
-                        <views:LogView x:Name="Log" Lines="{Binding Output.Lines}" Margin="4,2,0,0"
+                    <Grid Grid.Row="1" x:Name="OutputPane" RowDefinitions="*,Auto,Auto" ColumnDefinitions="*,Auto" Height="{Binding Output.Height}" IsVisible="{Binding Output.IsOpen}" Background="{DynamicResource BgOutput}">
+                        <views:LogView x:Name="Log" Lines="{Binding Output.Lines}" Margin="4,2,0,0" KeyDown="LogKeyDown"
                                        FontFamily="Cascadia Mono, Consolas, DejaVu Sans Mono, Menlo, monospace" FontSize="12"
                                        Foreground="{DynamicResource TextPrimary}" GoodBrush="{DynamicResource Good}" WarnBrush="{DynamicResource Warn}"
                                        BadBrush="{DynamicResource Bad}" AccentBrush="{DynamicResource Accent}" SelectionBrush="{DynamicResource BgSelected}" />
@@ -236,6 +244,25 @@
                     </Grid>
                 </Grid>
             </Border>
+
+            <Border Grid.Row="1" x:Name="OutputGrip" Height="6" Margin="0,-3,0,0" VerticalAlignment="Top" Background="Transparent"
+                    Cursor="SizeNorthSouth" IsVisible="{Binding Output.IsOpen}"
+                    PointerPressed="GripPressed" PointerMoved="GripMoved" PointerReleased="GripReleased" PointerCaptureLost="GripCaptureLost" />
         </Grid>
+
+        <Border Grid.ColumnSpan="2" x:Name="CloseOverlay" Background="#99000000" IsVisible="False"
+                KeyboardNavigation.TabNavigation="Cycle" KeyDown="CloseOverlayKeyDown">
+            <Border Width="400" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="24,20" CornerRadius="8"
+                    Background="{DynamicResource BgCard}" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="1">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="Stop and close?" FontSize="16" FontWeight="SemiBold" />
+                    <TextBlock x:Name="CloseMessage" Classes="muted" FontSize="13" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" Margin="0,10,0,0">
+                        <Button x:Name="CancelCloseButton" Classes="secondary" Content="Keep running" Click="CancelCloseClick" />
+                        <Button Classes="danger secondary" Content="Stop and close" Click="ConfirmCloseClick" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Border>
     </Grid>
 </Window>

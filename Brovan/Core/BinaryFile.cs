@@ -11,6 +11,7 @@ using System.Runtime;
 using System.Buffers;
 using System.Collections.Frozen;
 using System.Collections.Concurrent;
+using Microsoft.Win32.SafeHandles;
 
 namespace Brovan.Core
 {
@@ -141,34 +142,9 @@ namespace Brovan.Core
 
         private void ParseBinary(ReadOnlySpan<byte> Data)
         {
-            bool FormatFound = false;
-            foreach (var BinaryMagicNumber in BinaryMagicNumbers)
+            FileFormat = GetBinaryFormat(Data);
+            if (FileFormat == BinaryFormat.Unknown)
             {
-                byte[] MagicBytes = BinaryMagicNumber.Value;
-                if (Data.Length >= MagicBytes.Length)
-                {
-                    bool Valid = true;
-                    for (int i = 0; i < MagicBytes.Length; i++)
-                    {
-                        if (MagicBytes[i] != Data[i])
-                        {
-                            Valid = false;
-                            break;
-                        }
-                    }
-
-                    if (Valid)
-                    {
-                        FormatFound = true;
-                        FileFormat = BinaryMagicNumber.Key;
-                        break;
-                    }
-                }
-            }
-
-            if (!FormatFound)
-            {
-                FileFormat = BinaryFormat.Unknown;
                 BinarySize = Data.Length;
                 return;
             }
@@ -2314,30 +2290,36 @@ namespace Brovan.Core
             return BinaryCorruptionStatus.Unknown;
         }
 
-        public static BinaryFormat GetBinaryFormat(byte[] Data)
+        public static BinaryFormat GetBinaryFormat(ReadOnlySpan<byte> Data)
         {
-            foreach (var BinaryMagicNumber in BinaryMagicNumbers)
+            foreach (KeyValuePair<BinaryFormat, byte[]> Magic in BinaryMagicNumbers)
             {
-                byte[] MagicBytes = BinaryMagicNumber.Value;
-                if (Data.Length >= MagicBytes.Length)
-                {
-                    bool Valid = true;
-                    for (int i = 0; i < MagicBytes.Length; i++)
-                    {
-                        if (MagicBytes[i] != Data[i])
-                        {
-                            Valid = false;
-                            break;
-                        }
-                    }
-
-                    if (Valid)
-                    {
-                        return BinaryMagicNumber.Key;
-                    }
-                }
+                if (Data.StartsWith(Magic.Value))
+                    return Magic.Key;
             }
+
             return BinaryFormat.Unknown;
+        }
+
+        public static BinaryFormat GetBinaryFormat(string FilePath)
+        {
+            Span<byte> Header = stackalloc byte[4];
+            int Read;
+            try
+            {
+                using SafeFileHandle Handle = File.OpenHandle(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                Read = RandomAccess.Read(Handle, Header, 0);
+            }
+            catch (IOException)
+            {
+                return BinaryFormat.Unknown;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return BinaryFormat.Unknown;
+            }
+
+            return GetBinaryFormat(Header.Slice(0, Read));
         }
 
         public static BinaryArchitecture GetBinaryArch(byte[] Data, BinaryFormat Format)
