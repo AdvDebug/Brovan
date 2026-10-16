@@ -137,9 +137,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (!Instance._emulator.ReadMemory(Address, Requirements))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                            Lowest = ReadPointerField(Requirements, 0, PointerSize);
-                            Highest = ReadPointerField(Requirements, 1, PointerSize);
-                            Alignment = ReadPointerField(Requirements, 2, PointerSize);
+                            Lowest = WinSysHelper.ReadPointerField(Requirements, 0, PointerSize);
+                            Highest = WinSysHelper.ReadPointerField(Requirements, 1, PointerSize);
+                            Alignment = WinSysHelper.ReadPointerField(Requirements, 2, PointerSize);
                             break;
                         }
 
@@ -168,13 +168,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private static ulong ReadPointerField(ReadOnlySpan<byte> Fields, int Index, uint PointerSize)
-        {
-            return PointerSize == 8
-                ? BinaryPrimitives.ReadUInt64LittleEndian(Fields.Slice(Index * 8))
-                : BinaryPrimitives.ReadUInt32LittleEndian(Fields.Slice(Index * 4));
         }
     }
 }

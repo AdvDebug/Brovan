@@ -5,9 +5,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtDuplicateObject : IWinSyscall
     {
-        private const uint OBJ_PROTECT_CLOSE = 0x00000001;
-        private const uint OBJ_INHERIT = 0x00000002;
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong SourceProcessHandle = Instance.WinHelper.GetArg(0);
@@ -37,7 +34,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (SourceProcess == null || SourceProcess.PID != Instance.WinHelper.PID)
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
 
-            if (!TryResolveSourceObject(Instance, SourceHandle, out IHandleObject SourceObject, out AccessMask SourceAccess, out ObjectHandleFlags SourceAttributes))
+            if (!TryResolveSourceObject(Instance, SourceHandle, out IHandleObject SourceObject, out AccessMask SourceAccess, out ObjectHandleFlags SourceAttributes, out ulong SourceKey))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             WinHandle NewHandle = null;
@@ -77,13 +74,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 ObjectHandleFlags NewAttributes = ((Flags & DuplicateFlags.DUPLICATE_SAME_ATTRIBUTES) != 0)
                     ? SourceAttributes
-                    : ConvertObjectHandleAttributes(HandleAttributes);
+                    : WinSysHelper.HandleFlagsOf(HandleAttributes);
 
-                NewHandle = Instance.WinHelper.HandleManager.AddHandle(SourceObject, NewAccess);
-                Instance.WinHelper.HandleManager.SetHandleFlags(NewHandle.Handle, NewAttributes);
-                Instance.WinHelper.AddWinHandle(NewHandle);
+                NewHandle = Instance.WinHelper.OpenObjectHandle(SourceObject, NewAccess, NewAttributes);
+                if (SourceObject is WinPort Port)
+                    AlpcMessaging.ShareServedClient(Port, SourceKey, NewHandle.Handle);
 
-                if (!WriteDuplicatedHandle(Instance, TargetHandlePtr, NewHandle.Handle, HandleSize))
+                if (!Instance.WinHelper.WritePointer(TargetHandlePtr, NewHandle.Handle))
                 {
                     Instance.WinHelper.CloseHandle(NewHandle.Handle);
 
@@ -127,11 +124,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Process != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_HANDLE;
         }
 
-        private static bool TryResolveSourceObject(BinaryEmulator Instance, ulong SourceHandle, out IHandleObject SourceObject, out AccessMask SourceAccess, out ObjectHandleFlags SourceAttributes)
+        private static bool TryResolveSourceObject(BinaryEmulator Instance, ulong SourceHandle, out IHandleObject SourceObject, out AccessMask SourceAccess, out ObjectHandleFlags SourceAttributes, out ulong SourceKey)
         {
             SourceObject = null;
             SourceAccess = AccessMask.None;
             SourceAttributes = ObjectHandleFlags.None;
+            SourceKey = 0;
 
             if (IsCurrentProcessPseudo(SourceHandle))
             {
@@ -147,15 +145,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return SourceObject != null;
             }
 
-            if (!Instance.WinHelper.HandleManager.HandleExists(SourceHandle))
+            if (!Instance.WinHelper.HandleManager.TryGetHandle(SourceHandle, out SourceKey, out HandleEntry Entry) || Entry.Object == null)
                 return false;
 
-            SourceObject = Instance.WinHelper.HandleManager.GetObjectByHandle(SourceHandle);
-            if (SourceObject == null)
-                return false;
-
-            SourceAccess = Instance.WinHelper.HandleManager.GetPermissionsByHandle(SourceHandle);
-            SourceAttributes = Instance.WinHelper.HandleManager.GetHandleFlags(SourceHandle);
+            SourceObject = Entry.Object;
+            SourceAccess = Entry.Permissions;
+            SourceAttributes = Entry.Flags;
             return true;
         }
 
@@ -172,27 +167,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
 
             return (Granted & AccessMask.ProcessDupHandle) != 0;
-        }
-
-        private static ObjectHandleFlags ConvertObjectHandleAttributes(uint HandleAttributes)
-        {
-            ObjectHandleFlags Flags = ObjectHandleFlags.None;
-
-            if ((HandleAttributes & OBJ_INHERIT) != 0)
-                Flags |= ObjectHandleFlags.Inherit;
-
-            if ((HandleAttributes & OBJ_PROTECT_CLOSE) != 0)
-                Flags |= ObjectHandleFlags.ProtectFromClose;
-
-            return Flags;
-        }
-
-        private static bool WriteDuplicatedHandle(BinaryEmulator Instance, ulong TargetHandlePtr, ulong Handle, uint HandleSize)
-        {
-            if (HandleSize == 4)
-                return Instance._emulator.WriteMemory(TargetHandlePtr, (uint)Handle, 4);
-
-            return Instance._emulator.WriteMemory(TargetHandlePtr, Handle, 8);
         }
 
         private static void CloseSourceHandle(BinaryEmulator Instance, ulong SourceHandle)

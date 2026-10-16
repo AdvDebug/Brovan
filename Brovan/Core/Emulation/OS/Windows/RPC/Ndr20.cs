@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Brovan.Core.Emulation.OS.Windows.RPC
@@ -40,6 +41,36 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             Reserve(Value.Length);
             Value.CopyTo(Buffer.AsSpan(Position, Value.Length));
             Position += Value.Length;
+        }
+
+        public void WriteZeros(int Count)
+        {
+            Reserve(Count);
+            Buffer.AsSpan(Position, Count).Clear();
+            Position += Count;
+        }
+
+        public void WriteUtf16(ReadOnlySpan<char> Value)
+        {
+            int Bytes = Value.Length * sizeof(char);
+            Reserve(Bytes);
+            Encoding.Unicode.GetBytes(Value, Buffer.AsSpan(Position, Bytes));
+            Position += Bytes;
+        }
+
+        public void WriteByte(byte Value)
+        {
+            Reserve(1);
+            Buffer[Position++] = Value;
+        }
+
+        // The bytes are zero, and the span is valid until the next write.
+        public Span<byte> Take(int Count)
+        {
+            Reserve(Count);
+            Span<byte> Taken = Buffer.AsSpan(Position, Count);
+            Position += Count;
+            return Taken;
         }
 
         public void WriteUInt16(ushort Value)
@@ -154,14 +185,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             WriteUInt32(CharCount);
             WriteUInt32(0);
             WriteUInt32(CharCount);
-
-            int Bytes = (int)CharCount * 2;
-            Reserve(Bytes);
-            Buffer.AsSpan(Position, Bytes).Clear();
-            Encoding.Unicode.GetBytes(Value, Buffer.AsSpan(Position, Bytes - 2));
-            Position += Bytes;
+            WriteUtf16(Value);
+            WriteUInt16(0);
             AlignTo(4);
         }
+
+        public readonly ReadOnlySpan<byte> Written => Buffer.AsSpan(0, Position);
 
         public byte[] ToArray()
         {
@@ -303,21 +332,24 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public bool TryReadConformantWideString(out string Value)
         {
             Value = null;
-
-            if (!TryReadUInt32(out uint MaxCount) || !TryReadUInt32(out _) || !TryReadUInt32(out uint ActualCount))
+            if (!TryReadConformantWideChars(out ReadOnlySpan<byte> Chars, out _))
                 return false;
 
-            if (ActualCount > MaxCount)
-                return false;
-
-            if (ActualCount > (uint)(Data.Length - Position) / 2)
-                return false;
-
-            int Bytes = (int)ActualCount * 2;
-
-            Value = Encoding.Unicode.GetString(Data.Slice(Position, Bytes)).TrimEnd('\0');
-            Position += Bytes;
+            Value = Encoding.Unicode.GetString(MemoryMarshal.AsBytes(MemoryMarshal.Cast<byte, char>(Chars).TrimEnd('\0')));
             return true;
+        }
+
+        public bool TryReadConformantWideChars(out ReadOnlySpan<byte> Chars, out uint Offset)
+        {
+            Chars = default;
+            Offset = 0;
+            if (!TryReadUInt32(out uint MaxCount) || !TryReadUInt32(out Offset) || !TryReadUInt32(out uint ActualCount))
+                return false;
+
+            if (ActualCount > MaxCount || ActualCount > (uint)(Data.Length - Position) / 2)
+                return false;
+
+            return TryReadBytes((int)ActualCount * 2, out Chars);
         }
 
         public bool TryReadUniqueWideString(out string Value)

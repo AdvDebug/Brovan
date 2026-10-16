@@ -774,11 +774,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        private const uint OBJ_PROTECT_CLOSE = 0x1;
         internal const uint OBJ_INHERIT = 0x2;
         internal const uint OBJ_CASE_INSENSITIVE = 0x40;
         internal const uint OBJ_OPENIF = 0x80;
         private const uint OBJ_KERNEL_HANDLE = 0x200;
         private const uint ValidObjectAttributes = 0x00011FF2;
+
+        internal static ObjectHandleFlags HandleFlagsOf(uint Attributes)
+        {
+            ObjectHandleFlags Flags = ObjectHandleFlags.None;
+            if ((Attributes & OBJ_INHERIT) != 0)
+                Flags |= ObjectHandleFlags.Inherit;
+            if ((Attributes & OBJ_PROTECT_CLOSE) != 0)
+                Flags |= ObjectHandleFlags.ProtectFromClose;
+            return Flags;
+        }
 
         public NTSTATUS ReadObjectAttributes(ulong ObjectAttributesPtr, out uint Length, out ulong RootDirectory, out ulong ObjectName, out uint Attributes)
         {
@@ -855,6 +866,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong ReadPointer(ulong Address, uint PointerWidth)
         {
             return PointerWidth == 8 ? Emulator._emulator.ReadMemoryULong(Address) : Emulator._emulator.ReadMemoryUInt(Address);
+        }
+
+        internal static ulong ReadPointerField(ReadOnlySpan<byte> Fields, int Index, uint PointerSize)
+        {
+            return PointerSize == 8
+                ? BinaryPrimitives.ReadUInt64LittleEndian(Fields.Slice(Index * 8))
+                : BinaryPrimitives.ReadUInt32LittleEndian(Fields.Slice(Index * 4));
         }
 
         public bool WritePointer(ulong Address, ulong Value)
@@ -2314,12 +2332,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return State.PrioritySaturation != 0 ? 16 * State.PrioritySaturation : Thread.BasePriority - (int)CurrentPriority;
         }
         public User CurrentUser = User.Standard;
-        public string CurrentUserSid = "S-1-5-21-1000-1000-1000-1001";
+        public string CurrentUserSid => NtQueryInformationToken.InteractiveUserSidText;
         public const string CurrentUserName = "User";
         public const string CurrentUserProfile = @"C:\Users\" + CurrentUserName;
 
         public List<WinHandle> WinHandles = new List<WinHandle>();
         public List<WinProcess> WinProcesses = new List<WinProcess>();
+        internal WinProcess ShellProcess { get; private set; }
         internal WinProcess OwnProcess { get; private set; }
         public List<WinFile> WinFiles = new List<WinFile>();
 
@@ -2521,6 +2540,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Parent.Remove(LeafName, Object);
         }
 
+        public bool IsNamedObject(IHandleObject Object)
+        {
+            return NamedObjects.TryGetValue(Object.ObjectId, out List<IHandleObject> Spellings) && Spellings.Contains(Object);
+        }
+
         public IHandleObject? FindNamedObject(string? FullName, bool IgnoreCase)
         {
             if (FullName == null || !NamedObjects.TryGetValue(FullName, out List<IHandleObject> Spellings))
@@ -2600,9 +2624,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Parent.ShadowPath + "\\" + LeafName;
         }
 
-        public WinHandle OpenObjectHandle(IHandleObject Object, AccessMask Permissions)
+        public WinHandle OpenObjectHandle(IHandleObject Object, AccessMask Permissions, ObjectHandleFlags Flags = ObjectHandleFlags.None)
         {
-            WinHandle Handle = HandleManager.AddHandle(Object, Permissions);
+            WinHandle Handle = HandleManager.AddHandle(Object, Permissions, Flags);
             AddWinHandle(Handle);
             return Handle;
         }
@@ -2954,6 +2978,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach (WinProcess Process in WinProcesses)
             {
+                if (Process.PID == ShellPID)
+                    ShellProcess = Process;
+
                 if (Process.PID == PID)
                 {
                     OwnProcess = Process;
@@ -3049,6 +3076,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Name = RPC.Ports.DnsResolverPortHandler.PortName,
                 Handler = RPC.Ports.DnsResolverPortHandler.Handle
+            });
+
+            WinPorts.Add(new WinPort
+            {
+                Name = RPC.Ports.ActivationManagerPortHandler.PortName,
+                Handler = RPC.Ports.ActivationManagerPortHandler.Handle
             });
 
             // The kernel publishes these under \KernelObjects on every system. ntdll's commit-condition
@@ -10132,16 +10165,28 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // Statuses follow ObReferenceObjectByHandle.
-        internal NTSTATUS ResolveIoCompletionHandle(ulong Handle, out WinIoCompletion Completion)
+        internal NTSTATUS ReferenceObjectByHandle<T>(ulong Handle, AccessMask RequiredAccess, out T Object) where T : class, IHandleObject
         {
-            Completion = null;
+            return ReferenceObjectByHandle(Handle, RequiredAccess, out Object, out _, out _);
+        }
 
-            IHandleObject Object = HandleManager.GetObjectByHandle(Handle);
-            if (Object == null)
+        internal NTSTATUS ReferenceObjectByHandle<T>(ulong Handle, AccessMask RequiredAccess, out T Object, out ulong Key, out AccessMask GrantedAccess) where T : class, IHandleObject
+        {
+            Object = null;
+            GrantedAccess = AccessMask.None;
+            if (!HandleManager.TryGetHandle(Handle, out Key, out HandleEntry Entry) || Entry.Object == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            Completion = Object as WinIoCompletion;
-            return Completion != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+            GrantedAccess = Entry.Permissions;
+
+            if (Entry.Object is not T Referenced)
+                return NTSTATUS.STATUS_OBJECT_TYPE_MISMATCH;
+
+            if (!HandleManager.Grants(Entry.Permissions, RequiredAccess))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            Object = Referenced;
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         // Statuses follow ObReferenceObjectByHandle.
@@ -10518,7 +10563,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinSection? ClosingSection = null;
             IHandleObject? ClosingSyncObject = null;
 
-            if (HandleManager.TryGetHandle(Handle, out HandleEntry Entry))
+            if (HandleManager.TryGetHandle(Handle, out ulong Key, out HandleEntry Entry))
             {
                 if (Entry.Object != null && Entry.Object.ObjectType == HandleType.FileHandle)
                 {
@@ -10559,6 +10604,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 else
                 {
                     ClosingSyncObject = Entry.Object;
+                    if (Entry.Object is WinPort Served)
+                        AlpcMessaging.ReleaseServedClient(Served, Key);
                 }
             }
 

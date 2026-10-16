@@ -127,7 +127,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (DwmApiPortHandler.TryHandle(Port?.Name, SendData, Reply, Instance))
                 return NTSTATUS.STATUS_SUCCESS;
 
-            Reply.Data = HandleGenericRpcPort(Port, SendData, Reply.Connection, Instance);
+            Reply.Data = HandleGenericRpcPort(Port, SendData, Reply, Instance);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -219,7 +219,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return Reply;
         }
 
-        private static byte[] HandleGenericRpcPort(WinPort Port, byte[] SendData, ulong Connection, BinaryEmulator Instance)
+        private static byte[] HandleGenericRpcPort(WinPort Port, byte[] SendData, PortReply Served, BinaryEmulator Instance)
         {
             if (TryBuildDceRpcReply(Port, SendData, out byte[] RpcReply, Instance))
             {
@@ -230,7 +230,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             if (LrpcPacket.TryParse(SendData, out LrpcMessage Message))
             {
-                if (RpcssPortHandler.TryHandle(Port?.Name, Connection, Message, Instance.WinHelper.PID, out byte[] RpcssReply))
+                if (RpcssPortHandler.TryHandle(Port, Served, Message, Instance, out byte[] RpcssReply))
                     return RpcssReply;
 
                 if (Message.Type == LrpcMessageType.Bind)
@@ -247,7 +247,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     if ((Instance.Settings.Flags & LogFlags.General) != 0)
                         Instance.TriggerEventMessage($"[!] No server for proc {Message.ProcNumber} on \"{Port?.Name}\"; faulting.", LogFlags.General);
 
-                    return LrpcPacket.BuildFault(Message, RpcSProcnumOutOfRange);
+                    return LrpcPacket.BuildFault(Message, LrpcPacket.RpcSProcnumOutOfRange);
                 }
             }
 
@@ -255,8 +255,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             PreparePortReply(Reply);
             return Reply;
         }
-
-        private const uint RpcSProcnumOutOfRange = 1745;
 
         private static void HandleCsrSrvConnect(byte[] Reply, BinaryEmulator Instance)
         {
@@ -1303,7 +1301,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             BaseSrvNlsUserInfo Server = new BaseSrvNlsUserInfo(Address, Root == null ? null : Instance.WinHelper.NormalizeNtRegistryPath(Root + @"\Control Panel\International"));
 
             BinaryPrimitives.WriteUInt64LittleEndian(Server.Info.AsSpan(LogonIdOffset, 8), WinToken.InteractiveLogonId);
-            byte[] Sid = NtQueryInformationToken.InteractiveUserSid();
+            byte[] Sid = NtQueryInformationToken.InteractiveUserSid;
             Sid.CopyTo(Server.Info.AsSpan(UserSidOffset, Sid.Length));
 
             if (Server.InternationalKeyPath != null)

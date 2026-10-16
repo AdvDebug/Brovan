@@ -281,15 +281,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             PublishStateRepositoryCache(Helper, Identity);
             PublishUserDependencyMiniRepository(Instance, Helper, Identity);
-            PublishUserProfile(Helper, Identity.Package);
+            PublishUserProfile(Helper, Identity);
         }
 
         // NT: the deployment creates the AppContainer profile of the package and its data folders for the user.
-        private static void PublishUserProfile(WinSysHelper Helper, AppxPackage Package)
+        private static void PublishUserProfile(WinSysHelper Helper, AppxProcessIdentity Identity)
         {
+            AppxPackage Package = Identity.Package;
             string Moniker = Package.FamilyName.ToLowerInvariant();
             string Profiles = "\\Registry\\User\\" + Helper.CurrentUserSid + AppContainerProfiles;
-            string Mapping = Profiles + "\\Mappings\\" + FormatSid(DeriveAppContainerSid(Package.FamilyName));
+            string Mapping = Profiles + "\\Mappings\\" + NtQueryInformationToken.FormatSid(Identity.AppContainerSid);
 
             if (!Helper.CreateRegistryKeyPath(Mapping + "\\Children", false, out _) ||
                 !Helper.CreateRegistryKeyPath(Profiles + "\\Storage\\" + Moniker + "\\Children", false, out _) ||
@@ -394,7 +395,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Families[Package.FamilyName] = FamilyId;
 
                     string NewFamilyKey = FormatCacheId(FamilyId);
-                    string PackageSid = FormatSid(DeriveAppContainerSid(Package.FamilyName));
+                    string PackageSid = NtQueryInformationToken.FormatSid(DeriveAppContainerSid(Package.FamilyName));
                     string FamilyRow = "PackageFamily\\Data\\" + NewFamilyKey;
                     Written &= CreateCacheKey(Helper, FamilyRow);
                     Written &= SetCacheString(Helper, FamilyRow, "PackageFamilyName", Package.FamilyName);
@@ -537,19 +538,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 return 0;
             }
-        }
-
-        internal static string FormatSid(byte[] Sid)
-        {
-            ulong Authority = 0;
-            for (int Index = 2; Index < 8; Index++)
-                Authority = (Authority << 8) | Sid[Index];
-
-            StringBuilder Builder = new StringBuilder("S-").Append(Sid[0]).Append('-').Append(Authority);
-            for (int Index = 0; Index < Sid[1]; Index++)
-                Builder.Append('-').Append(BinaryPrimitives.ReadUInt32LittleEndian(Sid.AsSpan(8 + Index * 4, 4)));
-
-            return Builder.ToString();
         }
 
         private struct InstalledPackage
@@ -1154,14 +1142,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Sids.Add(DeriveCapabilitySid(Capability));
             }
 
-            uint[] PackageRids = new uint[(AppContainerSid[1]) - 1];
-            for (int Index = 0; Index < PackageRids.Length; Index++)
-                PackageRids[Index] = BinaryPrimitives.ReadUInt32LittleEndian(AppContainerSid.AsSpan(12 + Index * 4, 4));
-
-            uint[] CapabilityRids = new uint[PackageRids.Length + 1];
-            CapabilityRids[0] = 3;
-            PackageRids.CopyTo(CapabilityRids, 1);
-            Sids.Add(NtQueryInformationToken.BuildSid(1, 15, CapabilityRids));
+            byte[] PackageCapability = (byte[])AppContainerSid.Clone();
+            BinaryPrimitives.WriteUInt32LittleEndian(PackageCapability.AsSpan(NtQueryInformationToken.SidLength(0)), NtQueryInformationToken.AppCapabilityBaseRid);
+            Sids.Add(PackageCapability);
             return Sids.ToArray();
         }
 
@@ -1200,28 +1183,28 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static byte[] DeriveAppContainerSid(string FamilyName)
         {
             byte[] Hash = SHA256.HashData(Encoding.Unicode.GetBytes(FamilyName.ToLowerInvariant()));
-            uint[] Rids = new uint[8];
-            Rids[0] = 2;
+            Span<uint> Rids = stackalloc uint[8];
+            Rids[0] = NtQueryInformationToken.AppPackageBaseRid;
             for (int Index = 0; Index < 7; Index++)
                 Rids[Index + 1] = BinaryPrimitives.ReadUInt32LittleEndian(Hash.AsSpan(Index * 4, 4));
 
-            return NtQueryInformationToken.BuildSid(1, 15, Rids);
+            return NtQueryInformationToken.BuildSid(NtQueryInformationToken.AppPackageAuthority, Rids);
         }
 
         internal static byte[] DeriveCapabilitySid(string Capability)
         {
             int WellKnown = Array.FindIndex(WellKnownCapabilities, Name => string.Equals(Name, Capability, StringComparison.OrdinalIgnoreCase));
             if (WellKnown >= 0)
-                return NtQueryInformationToken.BuildSid(1, 15, 3, (uint)WellKnown + 1);
+                return NtQueryInformationToken.BuildSid(NtQueryInformationToken.AppPackageAuthority, NtQueryInformationToken.AppCapabilityBaseRid, (uint)WellKnown + 1);
 
             byte[] Hash = SHA256.HashData(Encoding.Unicode.GetBytes(Capability.ToUpperInvariant()));
-            uint[] Rids = new uint[10];
-            Rids[0] = 3;
+            Span<uint> Rids = stackalloc uint[10];
+            Rids[0] = NtQueryInformationToken.AppCapabilityBaseRid;
             Rids[1] = 1024;
             for (int Index = 0; Index < 8; Index++)
                 Rids[Index + 2] = BinaryPrimitives.ReadUInt32LittleEndian(Hash.AsSpan(Index * 4, 4));
 
-            return NtQueryInformationToken.BuildSid(1, 15, Rids);
+            return NtQueryInformationToken.BuildSid(NtQueryInformationToken.AppPackageAuthority, Rids);
         }
 
         private static bool TryMapArchitecture(string Name, out ushort Architecture)

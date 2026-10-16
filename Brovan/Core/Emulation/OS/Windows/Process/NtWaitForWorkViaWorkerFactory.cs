@@ -76,6 +76,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong DeferredMessage = 0;
             ulong DeferredPort = 0;
+            uint DeferredFlags = 0;
             if (DeferredWork != 0 && AlpcMessaging.Supported(Instance))
             {
                 if ((DeferredWork & (DeferredWorkAlignment - 1)) != 0)
@@ -89,6 +90,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     DeferredMessage = BinaryPrimitives.ReadUInt64LittleEndian(Work.Slice(0x00, 8));
                     DeferredPort = BinaryPrimitives.ReadUInt64LittleEndian(Work.Slice(0x08, 8));
+                    DeferredFlags = BinaryPrimitives.ReadUInt32LittleEndian(Work.Slice(0x10, 4));
                 }
             }
 
@@ -115,7 +117,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             if (DeferredMessage != 0)
-                AlpcMessaging.SendDeferred(Instance, DeferredPort, DeferredMessage);
+                AlpcMessaging.SendDeferred(Instance, DeferredPort, DeferredFlags, DeferredMessage);
 
             Instance.MaterializeSignaledWaitPackets(Factory.IoCompletionHandle);
 

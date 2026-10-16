@@ -1,4 +1,4 @@
-using static Brovan.Core.Helpers.BinaryHelpers;
+using static Brovan.Core.Emulation.OS.Windows.NtQueryInformationToken;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -7,10 +7,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint OwnerSecurityInformation = 0x00000001;
         private const uint GroupSecurityInformation = 0x00000002;
         private const uint DaclSecurityInformation = 0x00000004;
-        private const ushort SecurityDescriptorRevision = 1;
-        private const ushort SeDaclPresent = 0x0004;
-        private const ushort SeSelfRelative = 0x8000;
-        private const int SelfRelativeSecurityDescriptorSize = 20;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -25,26 +21,52 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS QuerySecurityObject(BinaryEmulator Instance, ulong Handle, uint SecurityInformation, ulong SecurityDescriptorPtr, uint Length, ulong LengthNeededPtr)
         {
-            if (!IsKnownHandle(Instance, Handle))
+            bool Found = Instance.WinHelper.HandleManager.TryGetHandle(Handle, out HandleEntry Entry);
+            if (!Found && !IsSpecialHandle(Handle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if (SecurityInformation == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!WriteLengthNeeded(Instance, LengthNeededPtr, (uint)SelfRelativeSecurityDescriptorSize))
+            // Brovan keeps no descriptor per object, so it reports what a new object would get, with a NULL DACL.
+            bool HasDescriptor = Entry.Object == null || HasSecurityDescriptor(Instance, Entry.Object);
+            byte[]? Owner = null;
+            byte[]? Group = null;
+            if (HasDescriptor && (SecurityInformation & (OwnerSecurityInformation | GroupSecurityInformation)) != 0)
+            {
+                WinToken Token = Instance.WinHelper.OwnProcess.GetPrimaryToken();
+                WinProcess TokenOwner = OwnerOf(Instance, Token);
+                if ((SecurityInformation & OwnerSecurityInformation) != 0)
+                    Owner = UserSidOf(Token, TokenOwner);
+                if ((SecurityInformation & GroupSecurityInformation) != 0)
+                    Group = PrimaryGroupOf(Token, TokenOwner);
+            }
+
+            // NT places the owner and then the group after the header (SeQuerySecurityDescriptorInfo).
+            int OwnerOffset = NtAccessCheck.SelfRelativeHeaderSize;
+            int GroupOffset = OwnerOffset + (Owner?.Length ?? 0);
+            int Required = GroupOffset + (Group?.Length ?? 0);
+            if (LengthNeededPtr != 0 && !Instance.WinHelper.WriteUInt32(LengthNeededPtr, (uint)Required))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (Length < SelfRelativeSecurityDescriptorSize)
+            if (Length < Required)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
             if (SecurityDescriptorPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.IsRegionMapped(SecurityDescriptorPtr, SelfRelativeSecurityDescriptorSize))
+            if (!Instance.IsMemoryRangeMapped(SecurityDescriptorPtr, (ulong)Required))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            byte[] SecurityDescriptor = BuildSelfRelativeSecurityDescriptor(SecurityInformation);
-            if (!Instance._emulator.WriteMemory(SecurityDescriptorPtr, SecurityDescriptor))
+            ushort Control = HasDescriptor && (SecurityInformation & DaclSecurityInformation) != 0 ? NtAccessCheck.SeDaclPresent : (ushort)0;
+            Span<byte> SecurityDescriptor = stackalloc byte[NtAccessCheck.SelfRelativeHeaderSize + 2 * SidLength(MaxSubAuthorities)];
+            SecurityDescriptor = SecurityDescriptor.Slice(0, Required);
+            NtAccessCheck.WriteSelfRelativeHeader(SecurityDescriptor, Control, OwnerOffset: Owner == null ? 0 : OwnerOffset, GroupOffset: Group == null ? 0 : GroupOffset,
+                DaclOffset: 0);
+            Owner?.CopyTo(SecurityDescriptor.Slice(OwnerOffset));
+            Group?.CopyTo(SecurityDescriptor.Slice(GroupOffset));
+
+            if (!Instance.WriteMemory(SecurityDescriptorPtr, SecurityDescriptor))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -52,62 +74,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static bool IsKnownHandle(BinaryEmulator Instance, ulong Handle)
+        private static bool IsSpecialHandle(ulong Handle)
         {
             return HandleManager.IsCurrentProcessPseudoHandle(Handle) ||
                    HandleManager.IsCurrentThreadPseudoHandle(Handle) ||
                    Handle == uint.MaxValue ||
                    Handle == HandleManager.KNOWN_DLLS_DIRECTORY ||
                    Handle == HandleManager.KNOWN_DLLS32_DIRECTORY ||
-                   Handle == HandleManager.RPC_CONTROL_DIRECTORY ||
-                   Instance.WinHelper.HandleExists(Handle);
+                   Handle == HandleManager.RPC_CONTROL_DIRECTORY;
         }
 
-        private static bool WriteLengthNeeded(BinaryEmulator Instance, ulong LengthNeededPtr, uint LengthNeeded)
+        // NT gives an object a descriptor only when its type requires one or the object has a name.
+        private static bool HasSecurityDescriptor(BinaryEmulator Instance, IHandleObject Object)
         {
-            if (LengthNeededPtr == 0)
-                return true;
-
-            if (!Instance.IsRegionMapped(LengthNeededPtr, 4))
-                return false;
-
-            return Instance._emulator.WriteMemory(LengthNeededPtr, LengthNeeded);
-        }
-
-        private static byte[] BuildSelfRelativeSecurityDescriptor(uint SecurityInformation)
-        {
-            byte[] Buffer = new byte[SelfRelativeSecurityDescriptorSize];
-            ushort Control = SeSelfRelative;
-
-            if ((SecurityInformation & DaclSecurityInformation) != 0)
-                Control |= SeDaclPresent;
-
-            Buffer[0] = (byte)SecurityDescriptorRevision;
-            Buffer[1] = 0;
-            WriteUInt16(Buffer, 2, Control);
-
-            if ((SecurityInformation & OwnerSecurityInformation) != 0)
-                WriteUInt32(Buffer, 4, 0);
-            if ((SecurityInformation & GroupSecurityInformation) != 0)
-                WriteUInt32(Buffer, 8, 0);
-            WriteUInt32(Buffer, 12, 0);
-            WriteUInt32(Buffer, 16, 0);
-
-            return Buffer;
-        }
-
-        private static void WriteUInt16(byte[] Buffer, int Offset, ushort Value)
-        {
-            Buffer[Offset] = (byte)Value;
-            Buffer[Offset + 1] = (byte)(Value >> 8);
-        }
-
-        private static void WriteUInt32(byte[] Buffer, int Offset, uint Value)
-        {
-            Buffer[Offset] = (byte)Value;
-            Buffer[Offset + 1] = (byte)(Value >> 8);
-            Buffer[Offset + 2] = (byte)(Value >> 16);
-            Buffer[Offset + 3] = (byte)(Value >> 24);
+            return Object.ObjectType is HandleType.ProcessHandle or HandleType.ThreadHandle or HandleType.TokenHandle or HandleType.FileHandle
+                       or HandleType.RegistryKeyHandle or HandleType.JobHandle or HandleType.DirectoryHandle
+                   || Instance.WinHelper.IsNamedObject(Object);
         }
     }
 }

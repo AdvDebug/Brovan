@@ -253,6 +253,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_THREAD_IS_TERMINATING = 0xC000004B,
         STATUS_SECTION_PROTECTION = 0xC000004E,
         STATUS_PRIVILEGE_NOT_HELD = 0xC0000061,
+        STATUS_UNKNOWN_REVISION = 0xC0000058,
+        STATUS_NO_IMPERSONATION_TOKEN = 0xC000005C,
+        STATUS_NONE_MAPPED = 0xC0000073,
+        STATUS_INVALID_ACL = 0xC0000077,
+        STATUS_INVALID_SID = 0xC0000078,
+        STATUS_INVALID_SECURITY_DESCR = 0xC0000079,
+        STATUS_BAD_IMPERSONATION_LEVEL = 0xC00000A5,
+        STATUS_CANT_OPEN_ANONYMOUS = 0xC00000A6,
+        STATUS_GENERIC_NOT_MAPPED = 0xC00000E6,
         STATUS_FREE_VM_NOT_AT_BASE = 0xC000009F,
         STATUS_INVALID_PARAMETER_1 = 0xC00000EF,
         STATUS_INVALID_PARAMETER_2 = 0xC00000F0,
@@ -329,6 +338,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_NO_YIELD_PERFORMED = 0x40000024,
         STATUS_FILE_LOCK_CONFLICT = 0xC0000054,
         STATUS_LOCK_NOT_GRANTED = 0xC0000055,
+        STATUS_DELETE_PENDING = 0xC0000056,
         STATUS_NOT_SAME_OBJECT = 0xC00001AC,
         STATUS_PORT_NOT_SET = 0xC0000353,
         STATUS_RANGE_NOT_LOCKED = 0xC000007E,
@@ -1195,6 +1205,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             AppContainerNumber = Source.AppContainerNumber;
             CapabilitySids = Source.CapabilitySids;
             SecurityAttributes = Source.SecurityAttributes;
+        }
+
+        // NT gives a duplicate a new TokenId and keeps the ModifiedId.
+        public WinToken Duplicate(TokenType NewType, SecurityImpersonationLevel NewLevel, bool NewEffectiveOnly)
+        {
+            WinToken Copy = (WinToken)MemberwiseClone();
+            Copy.TokenId = NtAllocateLocallyUniqueId.Allocate();
+            Copy.Type = NewType;
+            Copy.ImpersonationLevel = NewLevel;
+            Copy.EffectiveOnly = NewEffectiveOnly;
+            return Copy;
         }
     }
 
@@ -2640,9 +2661,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         public byte[] Data;
         public List<ulong> Handles;
         public long NotBeforeTick;
-        public ulong Connection;
 
         public Task HostWork;
+
+        internal WinPort Port;
+        internal ulong HandleKey;
+        private ServedClient? Served;
+
+        internal ServedClient Client => Served ??= AlpcMessaging.ServedClientOf(Port, HandleKey);
 
         public void AttachHandle(ulong Handle)
         {
@@ -2670,6 +2696,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal AlpcConnection Connection;
         internal bool IsClientEnd;
         private string UnnamedId;
+
+        // NT keeps the security contexts of a port in the ALPC handle table of the port.
+        internal Dictionary<ulong, AlpcSecurityContext> SecurityContexts;
+        internal ulong NextSecurityContext;
+
+        internal Dictionary<ulong, ServedClient> ServedClients;
 
         /// <summary>
         /// Optional per-port message handler invoked by NtAlpcSendWaitReceivePort.

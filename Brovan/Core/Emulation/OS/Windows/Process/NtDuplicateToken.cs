@@ -1,18 +1,16 @@
-using static Brovan.Core.Helpers.BinaryHelpers;
+using System.Buffers.Binary;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtDuplicateToken : IWinSyscall
     {
-        private const uint OBJ_PROTECT_CLOSE = 0x00000001;
-        private const uint OBJ_INHERIT = 0x00000002;
         private const uint TokenPrimary = 1;
         private const uint TokenImpersonation = 2;
 
+        private const int SecurityQosField = 5;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            bool Is64 = Instance._binary.Architecture == BinaryArchitecture.x64;
-
             ulong ExistingTokenHandle = Instance.WinHelper.GetArg(0);
             ulong DesiredAccess = (uint)Instance.WinHelper.GetArg(1);
             ulong ObjectAttributesPtr = Instance.WinHelper.GetArg(2);
@@ -20,42 +18,40 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint RequestedTokenType = (uint)Instance.WinHelper.GetArg(4);
             ulong NewTokenHandlePtr = Instance.WinHelper.GetArg(5);
 
+            if (RequestedTokenType != TokenPrimary && RequestedTokenType != TokenImpersonation)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
             uint HandleSize = (uint)Instance.WinHelper.PointerSize;
             if (NewTokenHandlePtr == 0 || !Instance.IsRegionMapped(NewTokenHandlePtr, HandleSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (RequestedTokenType != TokenPrimary && RequestedTokenType != TokenImpersonation)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            NTSTATUS Status = CaptureSecurityQos(Instance, ObjectAttributesPtr, out SecurityImpersonationLevel? RequestedLevel);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            if (!TryResolveToken(Instance, ExistingTokenHandle, out WinToken SourceToken, out AccessMask SourceAccess))
-                return NTSTATUS.STATUS_INVALID_HANDLE;
+            // NT references the source with ObReferenceObjectByHandle, which knows no token pseudo handles.
+            Status = Instance.WinHelper.ReferenceObjectByHandle(ExistingTokenHandle, AccessMask.TokenDuplicate, out WinToken SourceToken, out _, out AccessMask SourceAccess);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            if (!HasTokenDuplicateAccess(SourceAccess))
-                return NTSTATUS.STATUS_ACCESS_DENIED;
+            // NT gives a copy without a QoS the level of its source, and a primary source counts as anonymous.
+            TokenType NewType = RequestedTokenType == TokenPrimary ? TokenType.Primary : TokenType.Impersonation;
+            bool SourceImpersonates = SourceToken.Type == TokenType.Impersonation;
+            SecurityImpersonationLevel SourceLevel = SourceImpersonates ? SourceToken.ImpersonationLevel : SecurityImpersonationLevel.SecurityAnonymous;
+            SecurityImpersonationLevel ImpersonationLevel = RequestedLevel ?? SourceLevel;
+            bool LevelAllowed = NewType == TokenType.Impersonation ? ImpersonationLevel <= SourceLevel : SourceLevel >= SecurityImpersonationLevel.SecurityImpersonation;
+            if (SourceImpersonates && !LevelAllowed)
+                return NTSTATUS.STATUS_BAD_IMPERSONATION_LEVEL;
 
-            NTSTATUS Status = ReadObjectAttributes(Instance, ObjectAttributesPtr, Is64, out uint HandleAttributes, out SecurityImpersonationLevel ImpersonationLevel);
+            // NT checks the object attributes when it creates the copy (ObCreateObjectEx).
+            Status = Instance.WinHelper.ReadCreateObjectName(ObjectAttributesPtr, out _, out uint HandleAttributes);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
             AccessMask NewAccess = MapDesiredTokenAccess((AccessMask)(uint)DesiredAccess, SourceAccess);
-            WinToken NewToken = new WinToken
-            {
-                Type = RequestedTokenType == TokenPrimary ? TokenType.Primary : TokenType.Impersonation,
-                SessionId = SourceToken.SessionId,
-                IsElevated = SourceToken.IsElevated,
-                IsRestricted = SourceToken.IsRestricted,
-                EffectiveOnly = EffectiveOnly,
-                ImpersonationLevel = ImpersonationLevel,
-                OwningProcessId = SourceToken.OwningProcessId,
-                OwningThreadId = SourceToken.OwningThreadId,
-                ModifiedId = SourceToken.ModifiedId
-            };
-            NewToken.CopyIdentityFrom(SourceToken);
+            WinToken NewToken = SourceToken.Duplicate(NewType, ImpersonationLevel, EffectiveOnly);
 
-            WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(NewToken, NewAccess);
-            Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ConvertObjectHandleAttributes(HandleAttributes));
-            Instance.WinHelper.AddWinHandle(Handle);
-
+            WinHandle Handle = Instance.WinHelper.OpenObjectHandle(NewToken, NewAccess, WinSysHelper.HandleFlagsOf(HandleAttributes));
             if (!Instance.WinHelper.WritePointer(NewTokenHandlePtr, Handle.Handle))
             {
                 Instance.WinHelper.CloseHandle(Handle.Handle);
@@ -65,33 +61,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtDuplicateToken: Token=0x{ExistingTokenHandle:X} -> 0x{Handle.Handle:X}, Type={NewToken.Type}, Access=0x{(uint)NewAccess:X}.", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private static bool TryResolveToken(BinaryEmulator Instance, ulong TokenHandle, out WinToken Token, out AccessMask Access)
-        {
-            Access = AccessMask.None;
-            if (NtQueryInformationToken.ResolveToken(Instance, TokenHandle, out Token) != NTSTATUS.STATUS_SUCCESS)
-                return false;
-
-            long SignedHandle = HandleManager.ToSignedHandle(TokenHandle);
-            Access = SignedHandle == -4 || SignedHandle == -5 || SignedHandle == -6
-                ? AccessMask.TokenAllAccess
-                : Instance.WinHelper.HandleManager.GetPermissionsByHandle(TokenHandle);
-            return true;
-        }
-
-        private static bool HasTokenDuplicateAccess(AccessMask Access)
-        {
-            if (Access == AccessMask.GiveTemp)
-                return true;
-
-            if ((Access & AccessMask.GenericAll) != 0)
-                return true;
-
-            if ((Access & AccessMask.MaximumAllowed) != 0)
-                return true;
-
-            return (Access & AccessMask.TokenDuplicate) == AccessMask.TokenDuplicate;
         }
 
         private static AccessMask MapDesiredTokenAccess(AccessMask DesiredAccess, AccessMask SourceAccess)
@@ -113,55 +82,42 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Mapped;
         }
 
-        private static NTSTATUS ReadObjectAttributes(BinaryEmulator Instance, ulong ObjectAttributesPtr, bool Is64, out uint HandleAttributes, out SecurityImpersonationLevel ImpersonationLevel)
+        // NT checks the length before it copies the QoS (SeCaptureSecurityQos).
+        private static NTSTATUS CaptureSecurityQos(BinaryEmulator Instance, ulong ObjectAttributesPtr, out SecurityImpersonationLevel? ImpersonationLevel)
         {
-            HandleAttributes = 0;
-            ImpersonationLevel = SecurityImpersonationLevel.SecurityImpersonation;
-
+            ImpersonationLevel = null;
             if (ObjectAttributesPtr == 0)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            uint ObjectAttributesSize = Is64 ? 0x30u : 0x18u;
-            if (!Instance.IsRegionMapped(ObjectAttributesPtr, ObjectAttributesSize))
+            if ((ObjectAttributesPtr & 3) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
+
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+            Span<byte> Field = stackalloc byte[sizeof(ulong)];
+            if (!Instance.ReadMemory(ObjectAttributesPtr + SecurityQosField * PointerSize, Field.Slice(0, (int)PointerSize)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            HandleAttributes = Is64
-                ? Instance._emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x18)
-                : Instance._emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x0C);
-
-            ulong SecurityQosPtr = Is64
-                ? Instance._emulator.ReadMemoryULong(ObjectAttributesPtr + 0x28)
-                : Instance._emulator.ReadMemoryUInt(ObjectAttributesPtr + 0x14);
-
+            ulong SecurityQosPtr = WinSysHelper.ReadPointerField(Field, 0, PointerSize);
             if (SecurityQosPtr == 0)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            const uint SecurityQosMinimumSize = 0x0C;
-            if (!Instance.IsRegionMapped(SecurityQosPtr, SecurityQosMinimumSize))
+            if ((SecurityQosPtr & 3) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
+
+            Span<byte> Qos = stackalloc byte[SecurityQos.Size];
+            if (!Instance.ReadMemory(SecurityQosPtr, Qos.Slice(0, sizeof(uint))))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            uint Length = Instance._emulator.ReadMemoryUInt(SecurityQosPtr);
-            if (Length < SecurityQosMinimumSize)
+            if (BinaryPrimitives.ReadUInt32LittleEndian(Qos) != SecurityQos.Size)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            uint Level = Instance._emulator.ReadMemoryUInt(SecurityQosPtr + 0x04);
-            if (Level <= (uint)SecurityImpersonationLevel.SecurityDelegation)
-                ImpersonationLevel = (SecurityImpersonationLevel)Level;
+            if (!Instance.ReadMemory(SecurityQosPtr + sizeof(uint), Qos.Slice(sizeof(uint))))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private static ObjectHandleFlags ConvertObjectHandleAttributes(uint HandleAttributes)
-        {
-            ObjectHandleFlags Flags = ObjectHandleFlags.None;
-
-            if ((HandleAttributes & OBJ_INHERIT) != 0)
-                Flags |= ObjectHandleFlags.Inherit;
-
-            if ((HandleAttributes & OBJ_PROTECT_CLOSE) != 0)
-                Flags |= ObjectHandleFlags.ProtectFromClose;
-
-            return Flags;
+            NTSTATUS Status = SecurityQos.Read(Qos, out SecurityQos Captured);
+            if (Status == NTSTATUS.STATUS_SUCCESS)
+                ImpersonationLevel = Captured.Level;
+            return Status;
         }
     }
 }

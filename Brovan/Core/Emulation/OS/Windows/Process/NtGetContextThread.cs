@@ -538,6 +538,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((GrantedAccess & AccessMask.ThreadAllAccess) == AccessMask.ThreadAllAccess)
                 return true;
 
+            // NT grants the limited query right along with the full one (PspThreadOpen, PspThreadMapping).
+            const AccessMask QueryLimitedGrants = AccessMask.ThreadQueryInformation | AccessMask.GenericRead | AccessMask.GenericExecute | AccessMask.MaximumAllowed;
+            if (RequiredAccess == AccessMask.ThreadQueryLimitedInformation && (GrantedAccess & QueryLimitedGrants) != 0)
+                return true;
+
             return (GrantedAccess & RequiredAccess) == RequiredAccess;
         }
 

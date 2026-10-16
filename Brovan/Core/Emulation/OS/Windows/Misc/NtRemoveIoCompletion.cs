@@ -30,7 +30,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Thread.WaitActive && !Instance.WinHelper.TryReadTimeout(TimeoutPtr, out Timeout))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            NTSTATUS HandleStatus = Instance.WinHelper.ResolveIoCompletionHandle(IoCompletionHandle, out WinIoCompletion Completion);
+            NTSTATUS HandleStatus = Instance.WinHelper.ReferenceObjectByHandle(IoCompletionHandle, AccessMask.None, out WinIoCompletion Completion);
             if (HandleStatus != NTSTATUS.STATUS_SUCCESS)
                 return HandleStatus;
 

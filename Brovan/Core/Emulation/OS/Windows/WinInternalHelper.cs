@@ -119,6 +119,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static bool IsCurrentProcessPseudoHandle(ulong Handle) => Handle == CurrentProcess || Handle == CurrentProcess32;
 
+        public const long CurrentProcessToken = -4;
+        public const long CurrentThreadToken = -5;
+        public const long CurrentThreadEffectiveToken = -6;
+
+        public static bool IsTokenPseudoHandle(ulong Handle)
+        {
+            long Signed = ToSignedHandle(Handle);
+            return Signed >= CurrentThreadEffectiveToken && Signed <= CurrentProcessToken;
+        }
+
         public static long ToSignedHandle(ulong Handle) => Handle <= uint.MaxValue ? (int)(uint)Handle : (long)Handle;
 
         private ulong NextHandle = 0x40;
@@ -132,9 +142,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             this.Signal = Signal;
         }
 
-        public WinHandle AddHandle(IHandleObject obj, AccessMask Permissions)
+        public WinHandle AddHandle(IHandleObject obj, AccessMask Permissions, ObjectHandleFlags Flags = ObjectHandleFlags.None)
         {
-            return Insert(AllocateHandleValue(), obj, Permissions, ObjectHandleFlags.None);
+            return Insert(AllocateHandleValue(), obj, Permissions, Flags);
         }
 
         // NT gives an inherited handle the value it had in the creator. Null when the value is taken or invalid.
@@ -295,6 +305,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return TryGetEntry(Handle, out _, out Entry);
         }
 
+        // Every tag-bit form of a handle gives the same Key.
+        public bool TryGetHandle(ulong Handle, out ulong Key, out HandleEntry Entry)
+        {
+            return TryGetEntry(Handle, out Key, out Entry);
+        }
+
         public bool TryRemoveHandle(ulong Handle, out HandleEntry Entry)
         {
             if (!TryGetEntry(Handle, out ulong Key, out Entry))
@@ -368,10 +384,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool CheckAccess(ulong Handle, AccessMask RequiredAccess)
         {
-            if (!TryGetEntry(Handle, out _, out HandleEntry Entry))
-                return false;
-            AccessMask GrantedAccess = Entry.Permissions;
+            return TryGetEntry(Handle, out _, out HandleEntry Entry) && Grants(Entry.Permissions, RequiredAccess);
+        }
 
+        public static bool Grants(AccessMask GrantedAccess, AccessMask RequiredAccess)
+        {
             if (RequiredAccess == AccessMask.GiveTemp)
                 return true;
 

@@ -178,8 +178,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x15, 0x16, 0x17,
         };
 
-        private const uint RpcSProcnumOutOfRange = 1745;
-        private const uint RpcXBadStubData = 1783;
+        private const uint RpcSProcnumOutOfRange = LrpcPacket.RpcSProcnumOutOfRange;
+        private const uint RpcXBadStubData = LrpcPacket.RpcXBadStubData;
         private const uint ErrorNotFound = 1168;
         private const int EAccessDenied = unchecked((int)0x80070005);
         private const int EInvalidArg = unchecked((int)0x80070057);
@@ -226,11 +226,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     break;
             }
 
-            if (Reply.Data == null)
-            {
-                Reply.Data = new byte[LrpcPacket.HeaderSize];
-                Array.Copy(SendData, Reply.Data, Math.Min(LrpcPacket.HeaderSize, SendData.Length));
-            }
+            Reply.Data ??= LrpcPacket.EchoHeader(SendData);
 
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -337,24 +333,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private static uint GetCallerSessionId(BinaryEmulator Instance)
         {
-            WinToken Token = null;
-
-            if (Instance.CurrentThreadId >= 0 && Instance.Threads.TryGetValue((uint)Instance.CurrentThreadId, out EmulatedThread Thread))
-                Token = WinEmulatedThread.TryGetState(Thread)?.ImpersonationToken;
-
-            if (Token == null)
-            {
-                foreach (WinProcess Process in Instance.WinHelper.WinProcesses)
-                {
-                    if (Process.PID == Instance.WinHelper.PID)
-                    {
-                        Token = Process.PrimaryToken;
-                        break;
-                    }
-                }
-            }
-
-            return Token?.SessionId ?? WinToken.InteractiveSessionId;
+            return NtQueryInformationToken.EffectiveToken(Instance)?.SessionId ?? WinToken.InteractiveSessionId;
         }
 
         private static byte[] DispatchAudioClient(in LrpcMessage Message, PortReply Reply, BinaryEmulator Instance)

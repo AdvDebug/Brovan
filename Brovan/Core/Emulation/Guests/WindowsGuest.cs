@@ -2053,7 +2053,7 @@ namespace Brovan.Core.Emulation.Guests
                 Token.AppContainerSid = Identity.AppContainerSid;
                 Token.AppContainerNumber = FirstLowBoxNumber;
                 Token.CapabilitySids = Identity.CapabilitySids;
-                WinHelper.CreateAppContainerNamedObjects(AppxPackageModel.FormatSid(Identity.AppContainerSid));
+                WinHelper.CreateAppContainerNamedObjects(NtQueryInformationToken.FormatSid(Identity.AppContainerSid));
             }
 
             AppxPackageModel.PublishRegistration(Instance, WinHelper, Identity);

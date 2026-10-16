@@ -39,8 +39,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint DnsErrorNoDnsServers = 9852;
 
         private const uint RpcSCallFailed = 1726;
-        private const uint RpcSProcnumOutOfRange = 1745;
-        private const uint RpcXBadStubData = 1783;
+        private const uint RpcSProcnumOutOfRange = LrpcPacket.RpcSProcnumOutOfRange;
+        private const uint RpcXBadStubData = LrpcPacket.RpcXBadStubData;
 
         // DNS_QUERY_DUAL_ADDR: AAAA records first, then the A records mapped into IPv6.
         private const ulong QueryDualAddr = 0x4000;
@@ -78,11 +78,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     break;
             }
 
-            if (Reply.Data == null)
-            {
-                Reply.Data = new byte[LrpcPacket.HeaderSize];
-                Array.Copy(SendData, Reply.Data, Math.Min(LrpcPacket.HeaderSize, SendData.Length));
-            }
+            Reply.Data ??= LrpcPacket.EchoHeader(SendData);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

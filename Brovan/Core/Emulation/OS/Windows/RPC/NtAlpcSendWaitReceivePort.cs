@@ -23,12 +23,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ReceiveMessageAttributesPtr = Instance.WinHelper.GetArg(6);
             ulong TimeoutPtr = Instance.WinHelper.GetArg(7);
 
-            WinPort Port = Instance.WinHelper.HandleManager.GetObjectByHandle<WinPort>(PortHandle);
-            if (Port == null)
+            if (!Instance.WinHelper.HandleManager.TryGetHandle(PortHandle, out ulong PortKey, out HandleEntry PortEntry) || PortEntry.Object is not WinPort Port)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if (AlpcMessaging.Owns(Port))
-                return AlpcMessaging.SendWaitReceive(Instance, Port, SendMessagePtr, SendMessageAttributesPtr, ReceiveMessagePtr, BufferLengthPtr, ReceiveMessageAttributesPtr, TimeoutPtr);
+                return AlpcMessaging.SendWaitReceive(Instance, Port, Flags, SendMessagePtr, SendMessageAttributesPtr, ReceiveMessagePtr, BufferLengthPtr, ReceiveMessageAttributesPtr, TimeoutPtr);
 
             if (SendMessagePtr != 0 && !Instance.IsRegionMapped(SendMessagePtr, (ulong)HeaderSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -94,7 +93,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 PortReply Reply = null;
                 if (SendBytes != null && Port.Handler != null)
                 {
-                    Reply = new PortReply { Connection = PortHandle };
+                    Reply = new PortReply { Port = Port, HandleKey = PortKey };
                     Port.ReceivedHandles = ReadHandleAttribute(Instance, SendMessageAttributesPtr);
                     Port.Handler(Port, SendBytes, Reply, Instance);
                     ReplyBytes = Reply.Data ?? SendBytes;
