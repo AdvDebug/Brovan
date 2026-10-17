@@ -100,6 +100,7 @@ namespace Brovan.Core.Emulation
         public const int ErrnoEintr = 4;
         public const int ErrnoNoEntry = 2;
         public const int ErrnoAccess = 13;
+        public const int ErrnoEfault = 14;
     }
 
     [StructLayout(LayoutKind.Sequential)]

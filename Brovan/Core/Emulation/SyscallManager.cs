@@ -83,6 +83,7 @@ namespace Brovan.Core.Emulation
                 _traceEnabled = value;
                 if (!value)
                     ClearHistory();
+                _emu?.RefreshGuestKernel();
             }
         }
 
@@ -170,16 +171,24 @@ namespace Brovan.Core.Emulation
                 _rules.Add(r);
                 Volatile.Write(ref _ruleCount, _rules.Count);
             }
+
+            _emu?.RefreshGuestKernel();
         }
 
         public bool RemoveRule(string idOrName)
         {
+            int removed;
             lock (_lock)
             {
-                int removed = _rules.RemoveAll(x => x.Id == idOrName || x.Name?.Equals(idOrName, StringComparison.OrdinalIgnoreCase) == true);
+                removed = _rules.RemoveAll(x => x.Id == idOrName || x.Name?.Equals(idOrName, StringComparison.OrdinalIgnoreCase) == true);
                 Volatile.Write(ref _ruleCount, _rules.Count);
-                return removed > 0;
             }
+
+            if (removed == 0)
+                return false;
+
+            _emu?.RefreshGuestKernel();
+            return true;
         }
 
         /// <summary>

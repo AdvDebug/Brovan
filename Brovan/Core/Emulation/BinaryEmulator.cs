@@ -207,6 +207,9 @@ namespace Brovan.Core.Emulation
         /// <summary>Host threads that run guest code at once. Zero picks a count from the host.</summary>
         public int SmpWorkers;
 
+        /// <summary>Lets a hypervisor backend serve some system calls inside the guest.</summary>
+        public bool GuestKernel;
+
 #pragma warning disable
         public BinaryEmulatorSettings()
         {
@@ -224,6 +227,7 @@ namespace Brovan.Core.Emulation
             Debug = false;
             BackendKind = EmulationBackendKind.Unicorn;
             Smp = true;
+            GuestKernel = true;
 #pragma warning restore
         }
 
@@ -241,6 +245,34 @@ namespace Brovan.Core.Emulation
         internal BinaryFile _binary;
 
         internal IEmulationBackend _emulator;
+
+        private static readonly bool GuestKernelStats = Environment.GetEnvironmentVariable("BROVAN_GUEST_KERNEL_STATS") == "1";
+
+        internal IGuestKernel GuestKernel =>
+            Settings.GuestKernel && Settings.SyscallNotificationCallback == null && (Settings.Flags & (LogFlags.General | LogFlags.Syscall)) == 0
+                ? _emulator?.GuestKernel
+                : null;
+
+        private readonly object GuestKernelRefreshLock = new();
+
+        internal void RefreshGuestKernel()
+        {
+            if (_emulator?.GuestKernel is not IGuestKernel Kernel)
+                return;
+
+            lock (GuestKernelRefreshLock)
+                Kernel.Enabled = Syscalls?.TraceEnabled != true && Syscalls?.HasRules != true;
+        }
+
+        private void ReportGuestKernelStats()
+        {
+            if (!GuestKernelStats || _emulator?.GuestKernel is not IGuestKernel Kernel)
+                return;
+
+            foreach (GuestKernelCallStats Call in Kernel.Stats)
+                Utils.LogError($"[GuestKernel] {Call.Name} served={Call.Served} aborted={Call.Aborted}");
+            Utils.FlushLog();
+        }
 
         internal List<MemoryRegion> _memory = new();
         // Sorted and coalesced. Change it only through AddFreedRegion and ConsumeFreedMemoryRange.
@@ -356,7 +388,7 @@ namespace Brovan.Core.Emulation
 
         private static readonly bool ConcurrentSyscallsDisabled = Environment.GetEnvironmentVariable("BROVAN_NO_CONCURRENT_SYSCALLS") == "1";
 
-        private bool SmpEnabled;
+        internal bool SmpEnabled { get; private set; }
         private bool ConcurrentSyscalls => SmpEnabled && Guest.SupportsConcurrentSyscalls && !ConcurrentSyscallsDisabled;
         private volatile bool SchedulerExiting;
         private int IdleWorkers;
@@ -2287,11 +2319,24 @@ namespace Brovan.Core.Emulation
         private void LoadDebugRegisters(CpuContext c) => WriteDebugRegisterBatch(c, DebugRegisterBatch.Length - 1);
 
         // Returned in CONTEXT order, where DR6 comes before DR7.
-        public void ReadLiveDebugRegisters(Span<ulong> Values)
+        public void ReadLiveDebugRegisters(CpuContext c, Span<ulong> Values)
         {
             ulong[] Vals = ReadRegisters(DebugRegisterBatch);
             Values[0] = Vals[0]; Values[1] = Vals[1]; Values[2] = Vals[2]; Values[3] = Vals[3];
             Values[4] = Vals[5]; Values[5] = Vals[4];
+            if (c == null)
+                return;
+
+            Span<ulong> Requested = stackalloc ulong[] { c.DR0, c.DR1, c.DR2, c.DR3 };
+            ulong Limit = _emulator.MaxMappableAddress;
+            for (int i = 0; i < Requested.Length; i++)
+            {
+                if (Requested[i] > Limit)
+                {
+                    Values[i] = Requested[i];
+                    Values[5] |= c.DR7 & BreakpointEnables(i);
+                }
+            }
         }
 
         private static readonly int[] SelectorBatch =
@@ -2306,12 +2351,25 @@ namespace Brovan.Core.Emulation
             c.CS = Vals[0]; c.SS = Vals[1]; c.DS = Vals[2]; c.ES = Vals[3]; c.FS = Vals[4]; c.GS = Vals[5];
         }
 
+        // Only the backend's own pages sit above MaxMappableAddress, so a breakpoint there could never hit guest memory.
         private void WriteDebugRegisterBatch(CpuContext c, int Count)
         {
             ulong[] Vals = RegisterScratch;
             Vals[0] = c.DR0; Vals[1] = c.DR1; Vals[2] = c.DR2; Vals[3] = c.DR3; Vals[4] = c.DR7; Vals[5] = c.DR6;
+            ulong Limit = _emulator.MaxMappableAddress;
+            for (int i = 0; i < 4; i++)
+            {
+                if (Vals[i] > Limit)
+                {
+                    Vals[i] = 0;
+                    Vals[4] &= ~BreakpointEnables(i);
+                }
+            }
+
             _emulator.WriteRegisterBatch(DebugRegisterBatch, Vals, Count);
         }
+
+        private static ulong BreakpointEnables(int Index) => 3UL << (Index * 2);
 
         private void SwitchToThread(int ThreadId, bool BoundThisSwitch = false)
         {
@@ -3665,6 +3723,7 @@ namespace Brovan.Core.Emulation
             // The guest has stopped here. Dispose() is not a reliable hook: the menu's
             // "exit" command calls Environment.Exit.
             _emulator.PersistCodeCache();
+            ReportGuestKernelStats();
         }
 
         public ulong AlignToPageSize(ulong Size)

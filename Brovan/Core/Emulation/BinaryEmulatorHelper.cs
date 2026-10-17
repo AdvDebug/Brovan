@@ -70,6 +70,8 @@ namespace Brovan.Core.Emulation
             ushort[] Map = _indexMap;
             return _entries[Number < (uint)Map.Length ? Map[Number] : 0];
         }
+
+        public ReadOnlySpan<TEntry> Entries => _entries.AsSpan(1);
     }
 
     /// <summary>

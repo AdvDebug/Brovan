@@ -197,6 +197,7 @@ namespace Brovan.Core.Emulation
         [FieldOffset(0)] public WhvRunVpExitReason ExitReason;
         [FieldOffset(8)] public ushort VpExecutionState;
         [FieldOffset(32)] public ulong VpRip;
+        [FieldOffset(40)] public ulong VpRflags;
         [FieldOffset(68)] public uint MemAccessInfo;
         [FieldOffset(72)] public ulong MemGpa;
     }

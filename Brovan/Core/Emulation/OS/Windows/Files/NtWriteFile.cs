@@ -16,8 +16,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong BufferPtr = Instance.WinHelper.GetArg(5);
             uint Length = (uint)Instance.WinHelper.GetArg(6);
             ulong ByteOffsetPtr = Instance.WinHelper.GetArg(7);
+            ulong KeyPtr = Instance.WinHelper.GetArg(8);
 
-            NTSTATUS Status = NtReadFile.BeginRequest(Instance, FileHandle, EventHandle, IoStatusBlockPtr, BufferPtr, Length, ApcRoutine, ByteOffsetPtr, Write: true, out WinFile FileObj, out long Offset);
+            NTSTATUS Status = NtReadFile.BeginRequest(Instance, FileHandle, EventHandle, IoStatusBlockPtr, BufferPtr, Length, ApcRoutine, ByteOffsetPtr, KeyPtr, Write: true, out WinFile FileObj, out long Offset, out uint Key);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -35,14 +36,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                Status = Write(Instance, FileHandle, FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset);
+                try
+                {
+                    Status = Write(Instance, FileHandle, FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset, Key);
+                }
+                finally
+                {
+                    FileObj.ReleasePosition();
+                }
             }
 
             Instance.WinHelper.SignalIoEvent(EventHandle, Status);
             return Status;
         }
 
-        private static NTSTATUS Write(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, long Offset)
+        private static NTSTATUS Write(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, long Offset, uint Key)
         {
             if (FileObj.Device)
             {
@@ -77,7 +85,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Offset = Stream.Length;
 
             int ToWrite = Length > int.MaxValue ? int.MaxValue : (int)Length;
-            if (ToWrite != 0 && FileObj.HasConflictingIoLock((ulong)Offset, (ulong)ToWrite, true))
+            if (ToWrite != 0 && FileObj.HasConflictingIoLock((ulong)Offset, (ulong)ToWrite, Key, true))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_LOCK_CONFLICT, 0);
                 return NTSTATUS.STATUS_FILE_LOCK_CONFLICT;

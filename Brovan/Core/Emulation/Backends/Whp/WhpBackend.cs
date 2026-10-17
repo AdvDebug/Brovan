@@ -168,6 +168,7 @@ namespace Brovan.Core.Emulation
         public void StopThread(uint threadId) => Inner.StopThread(threadId);
         public void StopAllProcessors() => Inner.StopAllProcessors();
         public void HoldProcessorsOutOfGuest() => Inner.HoldProcessorsOutOfGuest();
+        public IGuestKernel GuestKernel => Inner.GuestKernel;
 
         public IntPtr AddCodeHook(ulong begin, ulong end, CodeHookCallback callback)
             => Inner.AddCodeHook(begin, end, callback);

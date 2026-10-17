@@ -92,6 +92,7 @@ namespace Brovan
             Console.WriteLine("  --backend=<name>  Choose the emulation backend: unicorn (default), kvm (Linux), or whp (Windows Hypervisor Platform).");
             Console.WriteLine("  --cores=<n>       Guest threads a hypervisor backend runs at once. Defaults to the host's logical processors minus one.");
             Console.WriteLine("  --no-smp          Run guest threads one at a time on a hypervisor backend, through the cooperative scheduler.");
+            Console.WriteLine("  --no-guest-kernel Send every system call to the host, even those a hypervisor backend can serve inside the guest.");
             Console.WriteLine("  --cwd <dir>       Directory the emulated program starts in. Defaults to the directory of the binary.");
             Console.WriteLine("  --jit-cache[=<dir>]");
             Console.WriteLine("                    Directory for the persisted Unicorn JIT code cache, which lets a");
@@ -517,7 +518,7 @@ namespace Brovan
                 ProgramArguments = SplitCommandLine(GuestCommandLine);
 
             NativeLibraryResolver.Register();
-            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Settings.Quick, Settings.Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, !Settings.Hooks, Settings.Backend, WorkingDirectory, Settings.Smp, Settings.Cores);
+            EmulationMenu.EmulationMenu.RunEmulator(FilePath, Settings.Quick, Settings.Silent, Command, RawProgramArguments, ProgramArguments, NetworkPolicy, !Settings.Hooks, Settings.Backend, WorkingDirectory, Settings.Smp, Settings.Cores, GuestKernel: Settings.GuestKernel);
         }
 
         private static bool TryPrepareWindowsFiles()

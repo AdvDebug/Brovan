@@ -280,8 +280,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(File.Path))
                 return false;
 
-            File.SharedPosition ??= SharedFilePosition.Create(File.Position);
-            if (File.SharedPosition == null)
+            if (!File.TrySharePosition())
                 return false;
 
             WriteHeader(Writer, Handle, Entry, KindFile);
@@ -923,6 +922,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Arguments.Add("--no-smp");
             else if (Instance.Settings.SmpWorkers > 0)
                 Arguments.Add($"--cores={Instance.Settings.SmpWorkers}");
+
+            if (!Instance.Settings.GuestKernel)
+                Arguments.Add("--no-guest-kernel");
 
             if (!UnicornCodeCache.Enabled)
                 Arguments.Add("--no-jit-cache");

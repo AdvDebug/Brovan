@@ -38,8 +38,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IoStatusBlockPtr == 0 || FsInfoBuffer == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlockPtr, out NTSTATUS ProbeStatus))
+                return ProbeStatus;
 
             if (!Instance.IsRegionMapped(FsInfoBuffer, Math.Max(Length, 1u)))
                 return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);

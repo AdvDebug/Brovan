@@ -641,7 +641,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static uint ModeFromCreateOptions(uint CreateOptions)
         {
-            return CreateOptions & (WinFile.FILE_SYNCHRONOUS_IO_ALERT | WinFile.FILE_SYNCHRONOUS_IO_NONALERT);
+            return CreateOptions & (WinFile.FILE_NO_INTERMEDIATE_BUFFERING | WinFile.SynchronousModes);
         }
 
         internal static bool TryOpenPipeRelative(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, ulong RootDirectory, string Name, uint CreateOptions, bool Inherit, out NTSTATUS Status)

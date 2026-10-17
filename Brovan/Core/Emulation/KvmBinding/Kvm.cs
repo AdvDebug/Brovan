@@ -26,7 +26,7 @@ namespace Brovan.Core.Emulation
         public KvmException() : base("KVM backend exception occurred.") { }
     }
 
-    public sealed class Kvm : IDisposable
+    public sealed class Kvm : IDisposable, IGuestKernelBackend
     {
         private int _systemFd = -1;
         private int _partitionFd = -1;
@@ -79,6 +79,7 @@ namespace Brovan.Core.Emulation
         private readonly List<ulong> _activeSlotStarts = new();
         private readonly HashSet<ulong> _keptSlotStarts = new();
         private const int SlotHeadroom = 64;
+        private bool HasSlotHeadroom => _activeSlots.Count + _kernelViewSlots.Count + SlotHeadroom < _maxMemslots;
         private bool _fullRebuildRequired = true;
         private readonly List<DirtyRange> _dirtyRanges = new();
         private const int MaxDirtyRanges = 16;
@@ -92,10 +93,13 @@ namespace Brovan.Core.Emulation
         private readonly List<(IntPtr Ptr, ulong Size)> _internalPoolFallbacks = new();
 
         private ulong _syscallTrapPageGpa;
+        private GuestKernelHost _guestKernel;
+        private readonly Dictionary<ulong, int> _kernelViewSlots = new();
         private ulong _exceptionStubPageGpa;
         private ulong _exceptionIdtPageGpa;
         private ulong _gdtPageGpa;
         private const ulong ExceptionStackPages = 2;
+        private const ulong InterruptFrameBytes = 5 * sizeof(ulong);
 
         private readonly object _vcpuLock = new();
 
@@ -110,16 +114,26 @@ namespace Brovan.Core.Emulation
             public uint ThreadId;
             public ulong GdtPageGpa;
             public ulong TssPageGpa;
+            public ulong SyscallStubGpa;
+            public IntPtr SyscallSpill;
 
             // Parked in the trap page with kernel CS/SS, so no segment write reaches the vCPU.
             public bool InSyscallStub;
             public bool SyscallScratchWritten;
+
+            // An MMIO exit stopped a kernel call, which ends after KVM finishes the access.
+            public bool KernelCallStopped;
+            public ulong KernelCallRip;
+            public ulong KernelCallRflags;
 
             public bool InIretStub;
             public UserReturnState IretReturn;
 
             public ulong InterruptFrameGpa;
             public IntPtr InterruptFrameHost;
+
+            public ulong DebugFrameGpa;
+            public IntPtr DebugFrameHost;
 
             public bool MmioCompletionPending;
             public bool FaultRegistersSaved;
@@ -144,7 +158,8 @@ namespace Brovan.Core.Emulation
             public long Binding;
         }
 
-        // Trap page: hlt at 0 for LSTAR, sysretq at 8, CR3 reload and sysretq at 16, hlt at 32 for CSTAR.
+        // Trap page: sysretq at 8, CR3 reload and sysretq at 16, hlt at 32 for CSTAR. LSTAR goes to each processor's own
+        // syscall stub.
         private const ulong SyscallReturnOffset = 8;
         private const ulong FlushingSyscallReturnOffset = 16;
 
@@ -1231,11 +1246,16 @@ namespace Brovan.Core.Emulation
             NoteSyscallScratchWrite(GpRegisterName.R11, regs.R11, regs.Rflags);
             regs.Rcx = ReturnRip;
             regs.R11 = regs.Rflags;
+            SetSyscallReturnVolatiles(ref regs);
+            MarkRegistersDirty();
+        }
+
+        private static void SetSyscallReturnVolatiles(ref LinuxKvmRegisters regs)
+        {
             regs.Rdx = 0;
             regs.R8 = regs.Rsp;
             regs.R9 = 0;
             regs.R10 = 0;
-            MarkRegistersDirty();
         }
 
         public bool WriteRegisterBatch(int[] registers, ulong[] values, int count)
@@ -1438,6 +1458,7 @@ namespace Brovan.Core.Emulation
 
             if (_mappingsDirty) RebuildMappings();
 
+            _guestKernel?.Seal();
             VirtualProcessor vp = CurrentVp;
             ref LinuxKvmRun run = ref GetRunRef(vp);
 
@@ -1447,6 +1468,7 @@ namespace Brovan.Core.Emulation
             vp.StopRequested = false;
             vp.MmioCompletionPending = false;
             vp.FaultRegistersSaved = false;
+            vp.KernelCallStopped = false;
             vp.SingleStepRequested = count == 1;
             run.ImmediateExit = 0;
 
@@ -1525,27 +1547,33 @@ namespace Brovan.Core.Emulation
                         }
                     }
 
+                    uint exitReason = run.ExitReason;
                     if (rc < 0)
                     {
-                        if (errno == KvmNative.ErrnoEintr)
+                        // A host file that shrank under a kernel view leaves pages KVM cannot fault in.
+                        if (errno == KvmNative.ErrnoEfault && TryFinishInterruptedKernelCall(vp, ref run, out bool faulted))
                         {
-                            ClearImmediateExit(vp, ref run, bounded);
-                            if (!TryTakeStubEntryAsHalt())
-                                continue;
-                            if (HandleHltExit(vp)) continue;
+                            if (faulted) continue;
                             return _error == KvmErrors.Ok;
                         }
 
-                        _error = KvmErrors.InternalError;
-                        throw new KvmException("KVM_RUN failed", errno);
+                        if (errno != KvmNative.ErrnoEintr)
+                        {
+                            _error = KvmErrors.InternalError;
+                            throw new KvmException("KVM_RUN failed", errno);
+                        }
+
+                        exitReason = KvmConstants.ExitIntr;
                     }
 
-                    switch (run.ExitReason)
+                    switch (exitReason)
                     {
                         case KvmConstants.ExitHlt:
                             if (HandleHltExit(vp)) continue;
                             return _error == KvmErrors.Ok;
                         case KvmConstants.ExitMmio:
+                            if (TryDeferKernelCallExit(vp, ref run))
+                                continue;
                             if (!HandleMmioExit(vp, ref run))
                                 StopEmulation();
                             continue;
@@ -1566,6 +1594,11 @@ namespace Brovan.Core.Emulation
                             return true;
                         case KvmConstants.ExitIntr:
                             ClearImmediateExit(vp, ref run, bounded);
+                            if (TryFinishInterruptedKernelCall(vp, ref run, out bool kickResumed))
+                            {
+                                if (kickResumed) continue;
+                                return _error == KvmErrors.Ok;
+                            }
                             if (TryTakeStubEntryAsHalt())
                                 goto case KvmConstants.ExitHlt;
                             continue;
@@ -2446,11 +2479,12 @@ namespace Brovan.Core.Emulation
             vp.GdtPageGpa = AllocateInternalPage(KvmMemoryPermission.Read);
             vp.TssPageGpa = AllocateInternalPage();
             ulong stackSize = ExceptionStackPages * KvmConstants.PageSize;
-            ulong stackTop = AllocateInternalRange(stackSize, KvmMemoryPermission.ReadWrite) + stackSize;
-            ulong interruptFrame = stackTop - 5 * sizeof(ulong);
-            vp.InterruptFrameGpa = interruptFrame;
-            if (_mappedPages.TryGetValue(interruptFrame & ~KvmConstants.PageMask, out MappedPage framePage) && framePage.HostPage != IntPtr.Zero)
-                vp.InterruptFrameHost = (IntPtr)((byte*)framePage.HostPage + (interruptFrame & KvmConstants.PageMask));
+            ulong stackBase = AllocateInternalRange(stackSize, KvmMemoryPermission.ReadWrite, out IntPtr stackHost);
+            ulong stackTop = stackBase + stackSize;
+            vp.InterruptFrameGpa = stackTop - InterruptFrameBytes;
+            vp.InterruptFrameHost = stackHost + (nint)(vp.InterruptFrameGpa - stackBase);
+            vp.DebugFrameGpa = GuestInterruptGates.DebugStackTop(stackTop) - InterruptFrameBytes;
+            vp.DebugFrameHost = stackHost + (nint)(vp.DebugFrameGpa - stackBase);
 
             if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage template)
                 || !_mappedPages.TryGetValue(vp.GdtPageGpa, out MappedPage gdtPage)
@@ -2461,10 +2495,7 @@ namespace Brovan.Core.Emulation
             Unsafe.CopyBlockUnaligned(gdt, (byte*)template.HostPage, (uint)KvmConstants.PageSize);
             WriteTssDescriptor(gdt, vp.TssPageGpa);
 
-            byte* tss = (byte*)tssPage.HostPage;
-            Unsafe.WriteUnaligned(tss + 0x04, stackTop);
-            Unsafe.WriteUnaligned(tss + 0x24, stackTop);
-            Unsafe.WriteUnaligned(tss + 0x66, (ushort)0x68);
+            GuestInterruptGates.WriteTss((byte*)tssPage.HostPage, stackTop);
         }
 
         private static unsafe void WriteTssDescriptor(byte* gdt, ulong tssBase)
@@ -2641,9 +2672,10 @@ namespace Brovan.Core.Emulation
 
             if (_guest64)
             {
+                AllocateSyscallStub(vp);
                 SetMsr(vp, KvmConstants.MsrStar, (0x23UL << 48) | (0x08UL << 32));
                 SetMsr(vp, KvmConstants.MsrSyscallMask, UserModeFlags.SyscallEntryMask);
-                SetMsr(vp, KvmConstants.MsrLstar, _syscallTrapPageGpa);
+                SetMsr(vp, KvmConstants.MsrLstar, vp.SyscallStubGpa);
                 SetMsr(vp, KvmConstants.MsrCstar, _syscallTrapPageGpa + SyscallTrapPage.CompatSyscallOffset);
             }
         }
@@ -2721,7 +2753,6 @@ namespace Brovan.Core.Emulation
                 if (_mappedPages.TryGetValue(_syscallTrapPageGpa, out MappedPage page))
                 {
                     byte* code = (byte*)page.HostPage;
-                    code[0] = 0xF4;
                     code[SyscallReturnOffset] = 0x48;
                     code[SyscallReturnOffset + 1] = 0x0F;
                     code[SyscallReturnOffset + 2] = 0x07;
@@ -2731,6 +2762,75 @@ namespace Brovan.Core.Emulation
                 }
             }
         }
+
+        // The syscall registers reach the host through the run page, so the stub spills them only for kernel calls.
+        private void AllocateSyscallStub(VirtualProcessor vp)
+        {
+            vp.SyscallStubGpa = AllocateInternalRange(KvmConstants.PageSize, KvmMemoryPermission.ReadExecute, out IntPtr code);
+            ulong spillGpa = AllocateInternalRange(KvmConstants.PageSize, KvmMemoryPermission.ReadWrite, out vp.SyscallSpill);
+            _guestKernel ??= new GuestKernelHost(this, KvmConstants.InternalPageTableBase, KvmConstants.UserCodeSelector,
+                KvmConstants.UserDataSelector, smap: (_cr4Protection & ControlRegister4.Smap) != 0, alwaysSpill: false);
+            _guestKernel.AddProcessor(vp.SyscallStubGpa, code, spillGpa, vp.SyscallSpill);
+        }
+
+        public IGuestKernel GuestKernel => Disposed ? null : _guestKernel;
+
+        bool IGuestKernelBackend.DisposedCheck() => DisposedCheck();
+
+        ulong IGuestKernelBackend.AllocateKernelRange(ulong size, bool writable, out IntPtr host)
+        {
+            ulong address = AllocateInternalRange(size, writable ? KvmMemoryPermission.ReadWrite : KvmMemoryPermission.Read, out host);
+            RebuildMappings();
+            return address;
+        }
+
+        bool IGuestKernelBackend.MapKernelView(IntPtr host, ulong address, ulong size)
+        {
+            if (!HasSlotHeadroom)
+                return false;
+
+            int slot = -1;
+            try
+            {
+                slot = AllocateSlotId();
+                SetMemslot(slot, address, size, host, KvmConstants.MemSlotReadOnly);
+            }
+            catch (KvmException ex)
+            {
+                if (slot >= 0)
+                    _freeSlotIds.Add(slot);
+                Utils.LogError($"[Kvm] No memory slot for a kernel view at 0x{address:X}: {ex.Message}");
+                return false;
+            }
+
+            _kernelViewSlots[address] = slot;
+            return true;
+        }
+
+        void IGuestKernelBackend.UnmapKernelView(ulong address, ulong size)
+        {
+            if (_kernelViewSlots.Remove(address, out int slot))
+                DeleteMemslot(slot);
+        }
+
+        IntPtr IGuestKernelBackend.EnsureKernelPageDirectory(ulong address)
+        {
+            try
+            {
+                ulong pdptGpa = EnsureChildTable(_pml4Gpa, (int)((address >> 39) & 0x1FF));
+                ulong pdGpa = EnsureChildTable(pdptGpa, (int)((address >> 30) & 0x1FF));
+                if (_mappingsDirty)
+                    RebuildMappings();
+                return _pageTableViews.TryGetValue(pdGpa, out IntPtr pd) ? pd : IntPtr.Zero;
+            }
+            catch (KvmException ex)
+            {
+                Utils.LogError($"[Kvm] No page table for a kernel view at 0x{address:X}: {ex.Message}");
+                return IntPtr.Zero;
+            }
+        }
+
+        void IGuestKernelBackend.EvictProcessors() => EvictProcessors();
 
         private void InitializeGdt()
         {
@@ -2786,7 +2886,7 @@ namespace Brovan.Core.Emulation
                     for (uint vector = 0; vector < KvmConstants.ExceptionVectorCount; vector++)
                     {
                         GuestInterruptGates.WriteIdtGate(idt, vector, _exceptionStubPageGpa + vector * KvmConstants.ExceptionStubStride,
-                            KvmConstants.KernelCodeSelector, KvmConstants.ExceptionIstIndex);
+                            KvmConstants.KernelCodeSelector);
                     }
                 }
             }
@@ -2813,6 +2913,9 @@ namespace Brovan.Core.Emulation
             => AllocateInternalRange(KvmConstants.PageSize, permissions, mapIntoGuest);
 
         private ulong AllocateInternalRange(ulong size, KvmMemoryPermission permissions, bool mapIntoGuest = true)
+            => AllocateInternalRange(size, permissions, out _, mapIntoGuest);
+
+        private ulong AllocateInternalRange(ulong size, KvmMemoryPermission permissions, out IntPtr host, bool mapIntoGuest = true)
         {
             if ((size & KvmConstants.PageMask) != 0)
                 size = (size + KvmConstants.PageMask) & ~KvmConstants.PageMask;
@@ -2832,6 +2935,7 @@ namespace Brovan.Core.Emulation
 
             ulong baseGpa = _nextInternalGpa;
             _nextInternalGpa += size;
+            host = backing;
 
             long backingBase = backing.ToInt64();
             for (ulong off = 0; off < size; off += KvmConstants.PageSize)
@@ -3023,7 +3127,7 @@ namespace Brovan.Core.Emulation
 
             if (!_fullRebuildRequired)
             {
-                if (_activeSlots.Count + SlotHeadroom < _maxMemslots)
+                if (HasSlotHeadroom)
                 {
                     RebuildDirtyRanges();
                 }
@@ -3103,7 +3207,7 @@ namespace Brovan.Core.Emulation
         private void MarkIntactSlots(ulong spanStart, ulong spanEnd)
         {
             _keptSlotStarts.Clear();
-            if (_activeSlots.Count + SlotHeadroom >= _maxMemslots) return;
+            if (!HasSlotHeadroom) return;
 
             int firstIndex = FirstActiveSlotIndexAtOrBefore(spanStart);
             for (int i = firstIndex; i < _activeSlotStarts.Count; i++)
@@ -3706,7 +3810,7 @@ namespace Brovan.Core.Emulation
         {
             ulong rip = ReadRegister(Registers.UC_X86_REG_RIP);
 
-            if (_guest64 && _syscallHook != null && rip == (_syscallTrapPageGpa + 1))
+            if (_guest64 && _syscallHook != null && rip == vp.SyscallStubGpa + _guestKernel.Layout.ResumeOffset)
             {
                 if (HandleSyscallTrap()) return true;
                 _error = KvmErrors.Ok;
@@ -3737,23 +3841,23 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        // A kick can exit with RIP on a stub's hlt before the hlt runs. Count it as that hlt only in ring 0,
-        // because ring 3 can jump there too.
+        // A kick can exit with RIP on a stub's hlt before the hlt runs, or in the register stores before the syscall
+        // stub's hlt. Count it as that hlt only in ring 0, because ring 3 can jump there too.
         private bool TryTakeStubEntryAsHalt()
         {
+            VirtualProcessor vp = CurrentVp;
             ref LinuxKvmRegisters regs = ref GetRegistersRef();
-            ulong stubOffset = regs.Rip - _exceptionStubPageGpa;
-            bool atExceptionStub = regs.Rip >= _exceptionStubPageGpa
-                && stubOffset < KvmConstants.ExceptionVectorCount * KvmConstants.ExceptionStubStride
-                && stubOffset % KvmConstants.ExceptionStubStride == 0;
-            bool atSyscallEntry = _guest64
-                && (regs.Rip == _syscallTrapPageGpa || regs.Rip == _syscallTrapPageGpa + SyscallTrapPage.CompatSyscallOffset);
-            if (!atExceptionStub && !atSyscallEntry)
+            bool atExceptionStub = GuestInterruptGates.IsStubEntry(_exceptionStubPageGpa, KvmConstants.ExceptionVectorCount,
+                KvmConstants.ExceptionStubStride, regs.Rip, out _);
+            bool inSyscallStores = _guest64 && regs.Rip >= vp.SyscallStubGpa
+                && regs.Rip <= vp.SyscallStubGpa + _guestKernel.Layout.HaltOffset;
+            bool atCompatEntry = _guest64 && regs.Rip == _syscallTrapPageGpa + SyscallTrapPage.CompatSyscallOffset;
+            if (!atExceptionStub && !inSyscallStores && !atCompatEntry)
                 return false;
             if (GetSpecialRegistersRef().Cs.Dpl != 0)
                 return false;
 
-            regs.Rip++;
+            regs.Rip = inSyscallStores ? vp.SyscallStubGpa + _guestKernel.Layout.ResumeOffset : regs.Rip + 1;
             MarkRegistersDirty();
             return true;
         }
@@ -3968,7 +4072,12 @@ namespace Brovan.Core.Emulation
         {
             bool fromUserMode = ReadExceptionFrame(stubRip, out uint vector, out ulong errorCode);
             if (!fromUserMode)
+            {
+                ref LinuxKvmRun run = ref GetRunRef();
+                if (TryFinishKernelCall(CurrentVp, ref run, run.Regs.Rip, run.Regs.Rflags, out bool resumed))
+                    return resumed;
                 return HandleKernelFault(vector);
+            }
             if (vector == 14 && (TryTouchWatchedPage(errorCode) || IsStaleFault(errorCode)))
                 return true;
             if (HandleException(vector, (uint)errorCode))
@@ -3977,13 +4086,18 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        // A mov ss before a syscall delays a data breakpoint #DB until the syscall entry. Any other fault in ring 0
+        // A mov ss before a syscall or a user gate delays a data breakpoint #DB into ring 0. Any other fault in ring 0
         // comes from the backend itself.
-        private bool HandleKernelFault(uint vector)
+        private unsafe bool HandleKernelFault(uint vector)
         {
             ulong rip = GetRegistersRef().Rip;
-            if (_guest64 && vector == 1 && rip == _syscallTrapPageGpa && HandleSyscallTrap())
+            if (_guest64 && vector == 1 && rip == CurrentVp.SyscallStubGpa && HandleSyscallTrap())
                 return true;
+
+            if (vector == 1 && _mappedPages.TryGetValue(_exceptionIdtPageGpa, out MappedPage idtPage)
+                && GuestInterruptGates.IsUserGateEntry((byte*)idtPage.HostPage, _exceptionStubPageGpa, KvmConstants.ExceptionVectorCount,
+                    KvmConstants.ExceptionStubStride, rip))
+                return HandleExceptionTrap(rip + 1);
 
             Utils.LogError($"[Kvm] Vector 0x{vector:X} faulted in ring 0 at 0x{rip:X}.");
             _error = KvmErrors.InternalError;
@@ -4038,9 +4152,12 @@ namespace Brovan.Core.Emulation
             ulong frameAddress = run.Regs.Rsp + (hasErrorCode ? sizeof(ulong) : 0UL);
 
             Span<ulong> frame = stackalloc ulong[5];
-            if (frameAddress == vp.InterruptFrameGpa && vp.InterruptFrameHost != IntPtr.Zero)
+            IntPtr frameHost = frameAddress == vp.InterruptFrameGpa ? vp.InterruptFrameHost
+                : frameAddress == vp.DebugFrameGpa ? vp.DebugFrameHost
+                : IntPtr.Zero;
+            if (frameHost != IntPtr.Zero)
             {
-                ulong* pushed = (ulong*)vp.InterruptFrameHost;
+                ulong* pushed = (ulong*)frameHost;
                 if (hasErrorCode)
                     errorCode = pushed[-1];
                 new ReadOnlySpan<ulong>(pushed, frame.Length).CopyTo(frame);
@@ -4140,9 +4257,7 @@ namespace Brovan.Core.Emulation
             regs.Rcx = postSyscallR10;
             regs.Rflags = savedRflags;
             MarkRegistersDirty();
-            ShowUserCodeAndStackSegments();
-            CurrentVp.InSyscallStub = true;
-            CurrentVp.SyscallScratchWritten = false;
+            ReturnThroughSyscallTrapPage(CurrentVp);
 
             if (_syscallHook.Callback != null) _syscallHook.Callback();
             else if (_syscallHook.BoolCallback != null) _syscallHook.BoolCallback();
@@ -4154,6 +4269,83 @@ namespace Brovan.Core.Emulation
                 regs.Rip += 2;
             MarkRegistersDirty();
             return true;
+        }
+
+        private bool InSyscallStubPage(VirtualProcessor vp, ulong rip)
+            => _guest64 && rip >= vp.SyscallStubGpa && rip < vp.SyscallStubGpa + KvmConstants.PageSize;
+
+        // A kernel call never resumes after an exit, because its views can be unmapped during the wait for the lock.
+        private unsafe bool TryFinishKernelCall(VirtualProcessor vp, ref LinuxKvmRun run, ulong rip, ulong rflags, out bool resumed)
+        {
+            resumed = false;
+            if (!InSyscallStubPage(vp, rip))
+                return false;
+
+            GuestKernelCallState state = _guestKernel.Settle(vp.SyscallSpill, rip - vp.SyscallStubGpa, rflags);
+            if (state == GuestKernelCallState.None)
+                return false;
+
+            // A stop on a deferred mapping would repeat until the mappings are rebuilt.
+            if (_mappingsDirty)
+                RebuildMappings();
+
+            ref LinuxKvmRegisters regs = ref run.Regs;
+            new ReadOnlySpan<ulong>((void*)vp.SyscallSpill, GuestSyscallStub.RegisterSlots)
+                .CopyTo(MemoryMarshal.CreateSpan(ref regs.Rax, GuestSyscallStub.RegisterSlots));
+            run.DirtyRegs |= KvmConstants.SyncGeneralRegisters;
+            if (state == GuestKernelCallState.Committed)
+            {
+                regs.Rip = regs.Rcx;
+                regs.Rflags = regs.R11;
+                regs.Rax = 0;
+                SetSyscallReturnVolatiles(ref regs);
+                ReturnThroughSyscallTrapPage(vp);
+                resumed = true;
+                return true;
+            }
+
+            resumed = HandleSyscallTrap();
+            if (!resumed)
+                _error = KvmErrors.Ok;
+            return true;
+        }
+
+        private bool TryFinishInterruptedKernelCall(VirtualProcessor vp, ref LinuxKvmRun run, out bool resumed)
+        {
+            if (vp.KernelCallStopped)
+            {
+                vp.KernelCallStopped = false;
+                return TryFinishKernelCall(vp, ref run, vp.KernelCallRip, vp.KernelCallRflags, out resumed);
+            }
+
+            resumed = false;
+            return run.Sregs.Cs.Dpl == 0 && TryFinishKernelCall(vp, ref run, run.Regs.Rip, run.Regs.Rflags, out resumed);
+        }
+
+        // KVM finishes the access on the next entry, and immediate_exit ends that entry before more guest code runs.
+        private bool TryDeferKernelCallExit(VirtualProcessor vp, ref LinuxKvmRun run)
+        {
+            if (!vp.KernelCallStopped)
+            {
+                if (run.Sregs.Cs.Dpl != 0 || !InSyscallStubPage(vp, run.Regs.Rip)
+                    || _guestKernel.Layout.Classify(run.Regs.Rip - vp.SyscallStubGpa, run.Regs.Rflags, out _) == GuestKernelCallState.None)
+                    return false;
+
+                vp.KernelCallStopped = true;
+                vp.KernelCallRip = run.Regs.Rip;
+                vp.KernelCallRflags = run.Regs.Rflags;
+            }
+
+            vp.MmioCompletionPending = true;
+            run.ImmediateExit = 1;
+            return true;
+        }
+
+        private void ReturnThroughSyscallTrapPage(VirtualProcessor vp)
+        {
+            ShowUserCodeAndStackSegments();
+            vp.InSyscallStub = true;
+            vp.SyscallScratchWritten = false;
         }
 
         // sysretq loads the user segments, so the register page write is not marked dirty.

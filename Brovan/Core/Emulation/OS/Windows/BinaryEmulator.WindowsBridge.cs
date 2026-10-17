@@ -1321,6 +1321,9 @@ namespace Brovan.Core.Emulation
             return Directory.VirtualAddress != 0 && Directory.Size != 0;
         }
 
+        internal static bool IsDynamicallyRelocatable(BinaryFile Binary)
+            => (Binary.PE.DllCharacteristics & DllCharacteristics.DynamicBase) != 0 && HasBaseRelocations(Binary);
+
         internal void ApplyPERelocations(WinModule Module, BinaryFile Binary, ulong ImageBase = 0)
         {
             ulong PreferredBase = Binary.PE.ImageBase;
@@ -1560,63 +1563,90 @@ namespace Brovan.Core.Emulation
 
         private const uint PAGE_GUARD = 0x100;
 
-        private bool GrowThreadStack(EmulatedThread Thread, MemoryRegion GuardBlock)
+        private const ulong NativeGuaranteedStackBytes = 0x1748;
+        private const ulong Wow64GuaranteedStackBytes = 0xF78;
+
+        // NT keeps 3 guard pages below a thread stack, and 2 below a WOW64 one.
+        internal ulong StackGuardSize => (_binary.Architecture == BinaryArchitecture.x64 ? 3UL : 2UL) * PageSize;
+
+        // The guard size and the fallback when it does not fit follow MiCheckForUserStackOverflow.
+        private NTSTATUS GrowThreadStack(EmulatedThread Thread, ulong FaultPage)
         {
-            ulong BlockSize = AlignUp(GuardBlock.Size, PageSize);
-            ulong NextGuard = GuardBlock.BaseAddress - BlockSize;
-
-            if (GuardBlock.BaseAddress < BlockSize || NextGuard < Thread.StackAddress)
-                return false;
-
-            if (!ProtectMemoryRange(GuardBlock.BaseAddress, BlockSize, GuardBlock.Protections, PAGE_READWRITE))
-                return false;
-
-            if (!CommitMemory(NextGuard, BlockSize, PAGE_READWRITE | PAGE_GUARD))
-                return false;
-
-            Thread.StackLimit = GuardBlock.BaseAddress;
-
+            bool Native = _binary.Architecture == BinaryArchitecture.x64;
             ulong Teb = WinEmulatedThread.GetState(Thread).Teb;
+            ulong Guaranteed = Teb != 0 ? ReadMemoryUInt(Teb + (Native ? NativeGuaranteedStackBytes : Wow64GuaranteedStackBytes)) : 0;
+            ulong GuardSize = Math.Max(Guaranteed != 0 ? AlignUp(Guaranteed, PageSize) + PageSize : 0, StackGuardSize);
+            ulong Floor = Thread.StackAddress + PageSize;
+
+            bool Room = FaultPage >= Floor + GuardSize;
+            ulong ReleaseBase = Room ? FaultPage - GuardSize + PageSize : Floor;
+            ulong ReleaseSize = Room ? GuardSize - PageSize : GuardSize;
+
+            NTSTATUS Status = NTSTATUS.STATUS_SUCCESS;
+            Thread.StackLimit = FaultPage;
+            if (!Room || !CommitMemory(FaultPage - GuardSize, GuardSize, PAGE_READWRITE | PAGE_GUARD))
+            {
+                if (ReleaseBase + ReleaseSize <= Thread.StackAddress + Thread.StackSize && IsRegionCommitted(ReleaseBase, ReleaseSize))
+                    ProtectMemoryRange(ReleaseBase, ReleaseSize, WinHelper.ConvertWinProtectToInternal(PAGE_READWRITE), PAGE_READWRITE);
+                Thread.StackLimit = ReleaseBase;
+                Status = NTSTATUS.STATUS_STACK_OVERFLOW;
+            }
+
             if (Teb != 0)
             {
-                if (_binary.Architecture == BinaryArchitecture.x64)
+                if (Native)
                     _emulator.WriteMemory(Teb + 0x10, Thread.StackLimit, 8);
                 else
                     _emulator.WriteMemory(Teb + 0x8, (uint)Thread.StackLimit);
             }
 
-            return true;
+            return Status;
         }
 
-        // At the end of the reserve the stack cannot grow, so the guard page just loses its guard.
-        internal bool TryGrowCurrentStack(ulong Address)
-        {
-            EmulatedThread StackOwner = FindThreadStackContaining(Address);
-            if (StackOwner == null || !TryFindMemoryRegion(Address, out MemoryRegion GuardBlock) || !HasGuardProtection(GuardBlock.SpecialProtections))
-                return false;
-
-            return GrowThreadStack(StackOwner, GuardBlock)
-                || ProtectMemoryRange(Address & ~(PageSize - 1), PageSize, GuardBlock.Protections, GuardBlock.Protect & ~PAGE_GUARD);
-        }
+        // At the end of the reserve the page only loses its guard, so a frame can still be written there.
+        internal bool TryGrowCurrentStack(ulong Address) => FindThreadStackContaining(Address) != null && TryResolveGuardPage(Address, out _);
 
         internal bool TryHandleGuardPageViolation(BackendMemoryAccessType Type, ulong Address, out bool Resume)
         {
             Resume = false;
 
             WindowsGuest GuestEnvironment = WindowsGuest;
-            if (GuestEnvironment == null || Guest == null || Guest.Os != GuestOsKind.Windows || !IsGuardFaultType(Type))
+            if (GuestEnvironment == null || Guest == null || Guest.Os != GuestOsKind.Windows || !IsGuardFaultType(Type)
+                || !TryResolveGuardPage(Address, out NTSTATUS Status))
                 return false;
 
-            if (!TryFindMemoryRegion(Address, out MemoryRegion GuardedRegion) || !HasGuardProtection(GuardedRegion.SpecialProtections))
-                return false;
-
-            EmulatedThread StackOwner = FindThreadStackContaining(Address);
-            if (StackOwner != null && GrowThreadStack(StackOwner, GuardedRegion))
+            if (Status == NTSTATUS.STATUS_SUCCESS)
             {
                 Resume = true;
                 return true;
             }
 
+            ExceptionInformation Info = new ExceptionInformation
+            {
+                Address = Address,
+                Type = MapGuardAccessType(Type),
+                Status = Status
+            };
+
+            GuestEnvironment.QueueUserModeException(this, Status, Info);
+            return true;
+        }
+
+        internal bool TryResolveGuardPage(ulong Address, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_GUARD_PAGE_VIOLATION;
+            if (!TryFindMemoryRegion(Address, out MemoryRegion GuardedRegion) || !HasGuardProtection(GuardedRegion.SpecialProtections)
+                || !UnguardPage(Address, GuardedRegion))
+                return false;
+
+            EmulatedThread StackOwner = FindThreadStackContaining(Address);
+            if (StackOwner != null)
+                Status = GrowThreadStack(StackOwner, Address & ~(PageSize - 1));
+            return true;
+        }
+
+        private bool UnguardPage(ulong Address, MemoryRegion GuardedRegion)
+        {
             ulong PageBase = Address & ~(PageSize - 1);
             if (!_emulator.SetMemoryProtection(PageBase, PageSize, GuardedRegion.Protections))
                 return false;
@@ -1662,19 +1692,6 @@ namespace Brovan.Core.Emulation
             _memory.RemoveRange(First, Last - First);
             _memory.InsertRange(First, Replacement);
             MergeAllWinRegions();
-
-            NTSTATUS Status = StackOwner != null
-                ? NTSTATUS.STATUS_STACK_OVERFLOW
-                : NTSTATUS.STATUS_GUARD_PAGE_VIOLATION;
-
-            ExceptionInformation Info = new ExceptionInformation
-            {
-                Address = Address,
-                Type = MapGuardAccessType(Type),
-                Status = Status
-            };
-
-            GuestEnvironment.QueueUserModeException(this, Status, Info);
             return true;
         }
 

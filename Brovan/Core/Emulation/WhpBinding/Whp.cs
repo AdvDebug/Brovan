@@ -25,7 +25,7 @@ namespace Brovan.Core.Emulation
         public WhpException() : base("WHP backend exception occurred.") { }
     }
 
-    public sealed class Whp : IDisposable
+    public sealed class Whp : IDisposable, IGuestKernelBackend
     {
         private IntPtr _partition = IntPtr.Zero;
         private const uint SharedVpIndex = 0;
@@ -87,6 +87,8 @@ namespace Brovan.Core.Emulation
 
         // Trap page: hlt at 32 for CSTAR. LSTAR goes to each processor's own syscall stub.
         private ulong _syscallTrapPageGpa;
+
+        private GuestKernelHost _guestKernel;
 
         private ulong _exceptionStubPageGpa;
         private ulong _exceptionIdtPageGpa;
@@ -1427,6 +1429,7 @@ namespace Brovan.Core.Emulation
 
             if (_mappingsDirty) RebuildMappings();
 
+            _guestKernel?.Seal();
             VirtualProcessor vp = CurrentVp;
 
             GetRegistersRef(vp).Rip = start;
@@ -1506,6 +1509,11 @@ namespace Brovan.Core.Emulation
                             _error = WhpErrors.Ok;
                             return true;
                         case WhvRunVpExitReason.Canceled:
+                            if (TryFinishKernelCall(vp, exit.VpRip, exit.VpRflags, exit.VpExecutionState, out bool resumed))
+                            {
+                                if (resumed) continue;
+                                return _error == WhpErrors.Ok;
+                            }
                             if (TryTakeStubEntryAsHalt(vp, exit.VpRip, exit.VpExecutionState))
                             {
                                 if (HandleHltExit(vp, vp.Regs.Rip, Spilled: false)) continue;
@@ -2252,10 +2260,7 @@ namespace Brovan.Core.Emulation
             WriteDescriptor(gdt, tssIndex, vp.TssPageGpa & 0xFFFFFFFF, 0x67, 0x89, 0x0);
             Unsafe.WriteUnaligned(gdt + (tssIndex + 1) * 8, vp.TssPageGpa >> 32);
 
-            byte* tss = (byte*)tssPage.HostPage;
-            Unsafe.WriteUnaligned(tss + 0x04, stackTop);
-            Unsafe.WriteUnaligned(tss + 0x24, stackTop);
-            Unsafe.WriteUnaligned(tss + 0x66, (ushort)0x68);
+            GuestInterruptGates.WriteTss((byte*)tssPage.HostPage, stackTop);
 
             if (_guest64)
                 AllocateSyscallStub(vp);
@@ -2401,72 +2406,50 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        // The stub stores the 16 general registers to its spill page and halts. For a plain return the host writes
-        // them back with an iretq frame and resumes after the hlt, so a syscall needs no register hypercall. Every
-        // store and load is 7 bytes with a rip-relative operand.
-        private static class SyscallStub
+        // A plain return reloads the registers through the iretq frame, so a syscall needs no register hypercall.
+        private void AllocateSyscallStub(VirtualProcessor vp)
         {
-            public const int RegisterSlots = 16;
-            public const int HaltOffset = RegisterSlots * 7;
-            public const int ResumeOffset = HaltOffset + 1;
-            public const int ReturnOffset = ResumeOffset + 7 + 15 * 7;
+            vp.SyscallStubGpa = AllocateInternalRange(WhpConstants.PageSize, WhpMemoryPermission.ReadExecute, out IntPtr code);
+            ulong spillGpa = AllocateInternalRange(WhpConstants.PageSize, WhpMemoryPermission.ReadWrite, out vp.SyscallSpill);
+            _guestKernel ??= new GuestKernelHost(this, WhpConstants.InternalPageTableBase, WhpConstants.UserCodeSelector,
+                WhpConstants.UserDataSelector, smap: (_cr4Protection & ControlRegister4.Smap) != 0, alwaysSpill: true);
+            _guestKernel.AddProcessor(vp.SyscallStubGpa, code, spillGpa, vp.SyscallSpill);
+        }
 
-            // WhpRegisters order: rax, rbx, rcx, rdx, rsi, rdi, rsp, rbp, r8 to r15.
-            public const int RspSlot = 6;
-            public const int FrameSlot = RegisterSlots;
+        public IGuestKernel GuestKernel => Disposed ? null : _guestKernel;
 
-            private static ReadOnlySpan<byte> RegisterCodes => new byte[] { 0, 3, 1, 2, 6, 7, 4, 5, 0, 1, 2, 3, 4, 5, 6, 7 };
+        bool IGuestKernelBackend.DisposedCheck() => DisposedCheck();
 
-            public static unsafe void Write(byte* code, ulong codeGpa, ulong spillGpa)
+        ulong IGuestKernelBackend.AllocateKernelRange(ulong size, bool writable, out IntPtr host)
+        {
+            ulong address = AllocateInternalRange(size, writable ? WhpMemoryPermission.ReadWrite : WhpMemoryPermission.Read, out host);
+            RebuildMappings();
+            return address;
+        }
+
+        unsafe bool IGuestKernelBackend.MapKernelView(IntPtr host, ulong address, ulong size)
+            => !WhpNative.Failed(WhpNative.WHvMapGpaRange(_partition, (void*)host, address, size, WhvMapGpaRangeFlags.Read));
+
+        void IGuestKernelBackend.UnmapKernelView(ulong address, ulong size) => UnmapGpaRange(address, size);
+
+        IntPtr IGuestKernelBackend.EnsureKernelPageDirectory(ulong address)
+        {
+            try
             {
-                int offset = 0;
-                for (int slot = 0; slot < RegisterSlots; slot++)
-                    EmitRipRelative(code, ref offset, codeGpa, 0x89, slot, spillGpa + (ulong)slot * 8);
-
-                code[offset++] = 0xF4;
-
-                // lea rsp, [frame]
-                EmitRipRelative(code, ref offset, codeGpa, 0x8D, RspSlot, spillGpa + FrameSlot * 8);
-                for (int slot = 0; slot < RegisterSlots; slot++)
-                {
-                    if (slot != RspSlot)
-                        EmitRipRelative(code, ref offset, codeGpa, 0x8B, slot, spillGpa + (ulong)slot * 8);
-                }
-
-                // iretq
-                code[offset++] = 0x48;
-                code[offset] = 0xCF;
+                ulong pdptGpa = EnsureChildTable(_pml4Gpa, (int)((address >> 39) & 0x1FF));
+                ulong pdGpa = EnsureChildTable(pdptGpa, (int)((address >> 30) & 0x1FF));
+                if (_mappingsDirty)
+                    RebuildMappings();
+                return _pageTableViews.TryGetValue(pdGpa, out IntPtr pd) ? pd : IntPtr.Zero;
             }
-
-            private static unsafe void EmitRipRelative(byte* code, ref int offset, ulong codeGpa, byte opcode, int slot, ulong target)
+            catch (WhpException ex)
             {
-                long displacement = (long)target - (long)(codeGpa + (ulong)offset + 7);
-                if (displacement != (int)displacement)
-                    throw new WhpException("The syscall spill page is out of rip-relative reach of its stub.");
-
-                code[offset] = (byte)(slot < 8 ? 0x48 : 0x4C);
-                code[offset + 1] = opcode;
-                code[offset + 2] = (byte)((RegisterCodes[slot] << 3) | 5);
-                Unsafe.WriteUnaligned(code + offset + 3, (int)displacement);
-                offset += 7;
+                Utils.LogError($"[Whp] No page table for a kernel view at 0x{address:X}: {ex.Message}");
+                return IntPtr.Zero;
             }
         }
 
-        private unsafe void AllocateSyscallStub(VirtualProcessor vp)
-        {
-            vp.SyscallStubGpa = AllocateInternalPage(WhpMemoryPermission.ReadExecute);
-            ulong spillGpa = AllocateInternalPage();
-            if (!_mappedPages.TryGetValue(vp.SyscallStubGpa, out MappedPage codePage)
-                || !_mappedPages.TryGetValue(spillGpa, out MappedPage spillPage))
-                throw new WhpException("Failed to allocate the syscall stub.");
-
-            SyscallStub.Write((byte*)codePage.HostPage, vp.SyscallStubGpa, spillGpa);
-            vp.SyscallSpill = spillPage.HostPage;
-
-            ulong* frame = (ulong*)spillPage.HostPage + SyscallStub.FrameSlot;
-            frame[1] = WhpConstants.UserCodeSelector;
-            frame[4] = WhpConstants.UserDataSelector;
-        }
+        void IGuestKernelBackend.EvictProcessors() => EvictProcessors();
 
         private static unsafe void WriteDescriptor(byte* gdt, int index, ulong segmentBase, uint limit, byte access, byte flags)
         {
@@ -2520,7 +2503,7 @@ namespace Brovan.Core.Emulation
                     for (uint vector = 0; vector < WhpConstants.ExceptionVectorCount; vector++)
                     {
                         GuestInterruptGates.WriteIdtGate(idt, vector, _exceptionStubPageGpa + vector * WhpConstants.ExceptionStubStride,
-                            WhpConstants.KernelCodeSelector, WhpConstants.ExceptionIstIndex);
+                            WhpConstants.KernelCodeSelector);
                     }
                 }
             }
@@ -2547,6 +2530,9 @@ namespace Brovan.Core.Emulation
             => AllocateInternalRange(WhpConstants.PageSize, permissions, mapIntoGuest);
 
         private ulong AllocateInternalRange(ulong size, WhpMemoryPermission permissions, bool mapIntoGuest = true)
+            => AllocateInternalRange(size, permissions, out _, mapIntoGuest);
+
+        private ulong AllocateInternalRange(ulong size, WhpMemoryPermission permissions, out IntPtr host, bool mapIntoGuest = true)
         {
             if ((size & WhpConstants.PageMask) != 0)
                 size = (size + WhpConstants.PageMask) & ~WhpConstants.PageMask;
@@ -2566,6 +2552,7 @@ namespace Brovan.Core.Emulation
 
             ulong baseGpa = _nextInternalGpa;
             _nextInternalGpa += size;
+            host = backing;
 
             long backingBase = backing.ToInt64();
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
@@ -3404,7 +3391,7 @@ namespace Brovan.Core.Emulation
 
         private bool HandleHltExit(VirtualProcessor vp, ulong rip, bool Spilled)
         {
-            if (_guest64 && _syscallHook != null && rip == vp.SyscallStubGpa + SyscallStub.ResumeOffset)
+            if (_guest64 && _syscallHook != null && rip == vp.SyscallStubGpa + _guestKernel.Layout.ResumeOffset)
             {
                 if (HandleSyscallTrap(vp, Spilled)) return true;
                 _error = WhpErrors.Ok;
@@ -3437,7 +3424,12 @@ namespace Brovan.Core.Emulation
 
                 bool fromUserMode = ReadExceptionFrame(vp, rip, out uint faultVector, out ulong errorCode);
                 if (!fromUserMode)
+                {
+                    ref WhpRegisters frame = ref GetRegistersRef(vp);
+                    if (TryFinishKernelCall(vp, frame.Rip, frame.Rflags, 0, out bool resumed))
+                        return resumed;
                     return HandleKernelFault(vp, faultVector);
+                }
                 ulong faultAddress = faultVector == 14 ? ReadRegister(Registers.UC_X86_REG_CR2) : 0;
                 if (faultVector == 14 && (TryTouchWatchedPage(errorCode, faultAddress) || IsStaleWriteFault(vp, errorCode, faultAddress)))
                     return true;
@@ -3475,17 +3467,56 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        // A mov ss before a syscall delays a data breakpoint #DB until the syscall entry. Any other fault in ring 0
+        // A mov ss before a syscall or a user gate delays a data breakpoint #DB into ring 0. Any other fault in ring 0
         // comes from the backend itself.
-        private bool HandleKernelFault(VirtualProcessor vp, uint vector)
+        private unsafe bool HandleKernelFault(VirtualProcessor vp, uint vector)
         {
             ulong rip = GetRegistersRef(vp).Rip;
             if (_guest64 && vector == 1 && rip == vp.SyscallStubGpa && HandleSyscallTrap(vp, Spilled: false))
                 return true;
 
+            if (vector == 1 && _mappedPages.TryGetValue(_exceptionIdtPageGpa, out MappedPage idtPage)
+                && GuestInterruptGates.IsUserGateEntry((byte*)idtPage.HostPage, _exceptionStubPageGpa, WhpConstants.ExceptionVectorCount,
+                    WhpConstants.ExceptionStubStride, rip))
+                return HandleHltExit(vp, rip + 1, Spilled: false);
+
             Utils.LogError($"[Whp] Vector 0x{vector:X} faulted in ring 0 at 0x{rip:X}.");
             _error = WhpErrors.InternalError;
             return false;
+        }
+
+        // A kernel call never resumes after an exit, because its views can be unmapped during the wait for the lock.
+        private bool TryFinishKernelCall(VirtualProcessor vp, ulong rip, ulong rflags, ushort executionState, out bool resumed)
+        {
+            resumed = false;
+            if (!_guest64 || (executionState & 3) != 0 || rip < vp.SyscallStubGpa || rip >= vp.SyscallStubGpa + WhpConstants.PageSize)
+                return false;
+
+            GuestKernelCallState state = _guestKernel.Settle(vp.SyscallSpill, rip - vp.SyscallStubGpa, rflags);
+            if (state == GuestKernelCallState.None)
+                return false;
+
+            // A stop on a deferred mapping would repeat until the mappings are rebuilt.
+            if (_mappingsDirty)
+                RebuildMappings();
+
+            ref WhpRegisters regs = ref LoadSpilledRegisters(vp);
+            if (state == GuestKernelCallState.Committed)
+            {
+                regs.Rip = regs.Rcx;
+                regs.Rflags = regs.R11;
+                regs.Rax = 0;
+                SetSyscallReturnVolatiles(ref regs);
+                vp.RegsDirty = true;
+                QueueCsSs(vp, _userCodeSegment, _userDataSegment);
+                resumed = true;
+                return true;
+            }
+
+            resumed = HandleSyscallTrap(vp, Spilled: false);
+            if (!resumed)
+                _error = WhpErrors.Ok;
+            return true;
         }
 
         // A cancel can exit with RIP on a stub's hlt before the hlt runs. Count it as that hlt only in ring 0,
@@ -3496,16 +3527,14 @@ namespace Brovan.Core.Emulation
             if ((executionState & 3) != 0)
                 return false;
 
-            ulong stubOffset = rip - _exceptionStubPageGpa;
-            bool atExceptionStub = rip >= _exceptionStubPageGpa
-                && stubOffset < WhpConstants.ExceptionVectorCount * WhpConstants.ExceptionStubStride
-                && stubOffset % WhpConstants.ExceptionStubStride == 0;
+            bool atExceptionStub = GuestInterruptGates.IsStubEntry(_exceptionStubPageGpa, WhpConstants.ExceptionVectorCount,
+                WhpConstants.ExceptionStubStride, rip, out _);
             bool atCompatEntry = _guest64 && rip == _syscallTrapPageGpa + SyscallTrapPage.CompatSyscallOffset;
-            bool inSyscallStores = _guest64 && rip >= vp.SyscallStubGpa && rip <= vp.SyscallStubGpa + SyscallStub.HaltOffset;
+            bool inSyscallStores = _guest64 && rip >= vp.SyscallStubGpa && rip <= vp.SyscallStubGpa + _guestKernel.Layout.HaltOffset;
 
             ulong haltRip;
             if (inSyscallStores)
-                haltRip = vp.SyscallStubGpa + SyscallStub.ResumeOffset;
+                haltRip = vp.SyscallStubGpa + _guestKernel.Layout.ResumeOffset;
             else if (atExceptionStub || atCompatEntry)
                 haltRip = rip + 1;
             else
@@ -3535,6 +3564,9 @@ namespace Brovan.Core.Emulation
 
         private bool HandleMemoryAccess(VirtualProcessor vp, ref WhvRunVpExitContext exit)
         {
+            if (TryFinishKernelCall(vp, exit.VpRip, exit.VpRflags, exit.VpExecutionState, out bool resumed))
+                return resumed;
+
             ulong gpa = exit.MemGpa;
             uint info = exit.MemAccessInfo;
             WhvMemoryAccessType accessType = (WhvMemoryAccessType)(info & 0x3);
@@ -3780,8 +3812,8 @@ namespace Brovan.Core.Emulation
         private static unsafe ref WhpRegisters LoadSpilledRegisters(VirtualProcessor vp)
         {
             ref WhpRegisters regs = ref vp.Regs;
-            new ReadOnlySpan<ulong>((void*)vp.SyscallSpill, SyscallStub.RegisterSlots)
-                .CopyTo(MemoryMarshal.CreateSpan(ref regs.Rax, SyscallStub.RegisterSlots));
+            new ReadOnlySpan<ulong>((void*)vp.SyscallSpill, GuestSyscallStub.RegisterSlots)
+                .CopyTo(MemoryMarshal.CreateSpan(ref regs.Rax, GuestSyscallStub.RegisterSlots));
             vp.RegsValid = true;
             return ref regs;
         }
@@ -3796,11 +3828,11 @@ namespace Brovan.Core.Emulation
                 return false;
 
             ulong* spill = (ulong*)vp.SyscallSpill;
-            MemoryMarshal.CreateReadOnlySpan(ref regs.Rax, SyscallStub.RegisterSlots)
-                .CopyTo(new Span<ulong>(spill, SyscallStub.RegisterSlots));
+            MemoryMarshal.CreateReadOnlySpan(ref regs.Rax, GuestSyscallStub.RegisterSlots)
+                .CopyTo(new Span<ulong>(spill, GuestSyscallStub.RegisterSlots));
 
-            // The selectors in frame[1] and frame[4] never change, so AllocateSyscallStub writes them once.
-            ulong* frame = spill + SyscallStub.FrameSlot;
+            // The selectors in frame[1] and frame[4] never change, so GuestKernelHost writes them with the stub.
+            ulong* frame = spill + GuestSyscallStub.FrameSlot;
             frame[0] = regs.Rip;
             frame[2] = UserModeFlags.Clamp(regs.Rflags);
             frame[3] = regs.Rsp;
@@ -3817,7 +3849,7 @@ namespace Brovan.Core.Emulation
             ulong offset = exit.VpRip - vp.SyscallStubGpa;
             bool insideReturn = (exit.VpExecutionState & 3) == 0
                 && exit.ExitReason != WhvRunVpExitReason.X64Halt
-                && offset >= SyscallStub.ResumeOffset && offset <= SyscallStub.ReturnOffset;
+                && offset >= _guestKernel.Layout.ResumeOffset && offset <= _guestKernel.Layout.ReturnOffset;
 
             if (insideReturn)
                 AbandonSpillReturn(vp);
@@ -3831,7 +3863,7 @@ namespace Brovan.Core.Emulation
             if (!vp.RegsValid)
             {
                 ulong* spill = (ulong*)vp.SyscallSpill;
-                ulong* frame = spill + SyscallStub.FrameSlot;
+                ulong* frame = spill + GuestSyscallStub.FrameSlot;
                 LoadSpilledRegisters(vp);
                 vp.Regs.Rip = frame[0];
                 vp.Regs.Rflags = frame[2];
@@ -4488,11 +4520,16 @@ namespace Brovan.Core.Emulation
             ref WhpRegisters regs = ref GetRegistersRef(vp);
             regs.Rcx = ReturnRip;
             regs.R11 = regs.Rflags;
+            SetSyscallReturnVolatiles(ref regs);
+            vp.RegsDirty = true;
+        }
+
+        private static void SetSyscallReturnVolatiles(ref WhpRegisters regs)
+        {
             regs.Rdx = 0;
             regs.R8 = regs.Rsp;
             regs.R9 = 0;
             regs.R10 = 0;
-            vp.RegsDirty = true;
         }
 
         public bool WriteRegisterBatch(int[] registers, ulong[] values, int count)

@@ -26,6 +26,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint BusTypeVirtual = 14;
 
         internal const ulong BytesPerSector = 512;
+
+        // FILE_LONG_ALIGNMENT, what an NTFS volume on an NVMe disk reports.
+        internal const uint AlignmentRequirement = 3;
         internal const ulong SectorsPerCluster = 8;
         internal const ulong BytesPerCluster = BytesPerSector * SectorsPerCluster;
         internal const ulong TotalClusters = 0x01000000UL;

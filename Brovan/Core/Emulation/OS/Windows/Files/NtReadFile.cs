@@ -18,8 +18,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong BufferPtr = Instance.WinHelper.GetArg(5);
             uint Length = (uint)Instance.WinHelper.GetArg(6);
             ulong ByteOffsetPtr = Instance.WinHelper.GetArg(7);
+            ulong KeyPtr = Instance.WinHelper.GetArg(8);
 
-            NTSTATUS Status = BeginRequest(Instance, FileHandle, EventHandle, IoStatusBlockPtr, BufferPtr, Length, ApcRoutine, ByteOffsetPtr, Write: false, out WinFile FileObj, out long Offset);
+            NTSTATUS Status = BeginRequest(Instance, FileHandle, EventHandle, IoStatusBlockPtr, BufferPtr, Length, ApcRoutine, ByteOffsetPtr, KeyPtr, Write: false, out WinFile FileObj, out long Offset, out uint Key);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -29,12 +30,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (FileObj.HostStream == HostStreamKind.Input)
                 return ReadHostStream(Instance, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length);
 
-            Status = Read(Instance, FileHandle, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset);
+            try
+            {
+                Status = Read(Instance, FileHandle, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset, Key);
+            }
+            finally
+            {
+                FileObj.ReleasePosition();
+            }
+
             Instance.WinHelper.SignalIoEvent(EventHandle, Status);
+            if (Status == NTSTATUS.STATUS_SUCCESS)
+                Instance.WinHelper.KernelFileReads?.NoteRead(FileHandle, FileObj, EventHandle, ApcRoutine, ByteOffsetPtr, KeyPtr, Length);
+
             return Status;
         }
 
-        private static NTSTATUS Read(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, long Offset)
+        private static NTSTATUS Read(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, long Offset, uint Key)
         {
             if (FileObj.ConsoleKind == ConsoleObjectKind.Input)
             {
@@ -88,7 +100,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 ToRead = (int)Math.Min(ToRead, FileLength - Offset);
-                if (FileObj.HasConflictingIoLock((ulong)Offset, (ulong)ToRead, false))
+                if (FileObj.HasConflictingIoLock((ulong)Offset, (ulong)ToRead, Key, false))
                 {
                     Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_LOCK_CONFLICT, 0);
                     return NTSTATUS.STATUS_FILE_LOCK_CONFLICT;
@@ -97,6 +109,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             // Bounded chunks keep a guest-sized read from growing the shared scratch buffer to the file size.
             int Done = 0;
+            bool StreamEnded = false;
             try
             {
                 while (Done < ToRead)
@@ -105,7 +118,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Span<byte> Slice = Instance.WinHelper.Shared.GetSpan((uint)ChunkSize);
                     int Got = Stream.ReadAt(Offset + Done, Slice.Slice(0, ChunkSize));
                     if (Got <= 0)
+                    {
+                        StreamEnded = true;
                         break;
+                    }
 
                     if (!Instance._emulator.WriteMemory(BufferPtr + (ulong)Done, Slice.Slice(0, Got)))
                     {
@@ -120,12 +136,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     Done += Got;
                     if (Got < ChunkSize)
+                    {
+                        StreamEnded = true;
                         break;
+                    }
                 }
             }
             catch (FileNotFoundException)
             {
                 // A file that went away under the stream reads as ended.
+                StreamEnded = true;
             }
             catch (Exception Ex)
             {
@@ -136,6 +156,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_DENIED;
                 }
             }
+
+            if (StreamEnded)
+                Instance.WinHelper.KernelFileReads?.NoteEnd(FileObj, Offset + Done);
 
             if (Done == 0)
             {
@@ -200,9 +223,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // The order follows IopReadFile and IopValidateAndGetWriteParameters, and no failure writes the IO_STATUS_BLOCK.
-        internal static NTSTATUS BeginRequest(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, ulong ApcRoutine, ulong ByteOffsetPtr, bool Write, out WinFile FileObj, out long Offset)
+        internal static NTSTATUS BeginRequest(BinaryEmulator Instance, ulong FileHandle, ulong EventHandle, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, ulong ApcRoutine, ulong ByteOffsetPtr, ulong KeyPtr, bool Write, out WinFile FileObj, out long Offset, out uint Key)
         {
             Offset = 0;
+            Key = 0;
             NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out FileObj, out AccessMask Granted);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
@@ -210,28 +234,52 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!(Write ? FileObj.AllowsWrite(Granted) : WinFile.AllowsRead(Granted)))
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
-            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlockPtr, out NTSTATUS ProbeStatus))
+                return ProbeStatus;
 
             // NT: a read buffer is probed for write page by page, a write buffer for read by range only.
-            if (Length != 0 && !(Write ? NtWow64GetNativeSystemInformation.IsUserRange(BufferPtr, Length) : Instance.IsAccessible(BufferPtr, Length, true)))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (Length != 0)
+            {
+                Status = !Write ? Instance.WinHelper.ProbeForWrite(BufferPtr, Length)
+                    : NtWow64GetNativeSystemInformation.IsUserRange(BufferPtr, Length) ? NTSTATUS.STATUS_SUCCESS
+                    : NTSTATUS.STATUS_ACCESS_VIOLATION;
+                if (Status != NTSTATUS.STATUS_SUCCESS)
+                    return Status;
+            }
 
             if (FileObj.RefusesApcRoutine(ApcRoutine))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            Status = Instance.WinHelper.ReadFileByteOffset(ByteOffsetPtr, out long Requested);
+            Status = Instance.WinHelper.ReadFileByteOffset(ByteOffsetPtr, out long? Requested);
+            if (Status == NTSTATUS.STATUS_SUCCESS)
+                Status = Instance.WinHelper.ReadFileKey(KeyPtr, out Key);
+            if (Status == NTSTATUS.STATUS_SUCCESS && FileObj.NoIntermediateBuffering && !FileObj.Device)
+                Status = CheckSectorAlignment(FileObj, BufferPtr, Length, Requested, Write);
             if (Status == NTSTATUS.STATUS_SUCCESS)
                 Status = Instance.WinHelper.ReferenceIoEvent(EventHandle);
 
             if (Status != NTSTATUS.STATUS_SUCCESS || !HasFileOffset(FileObj))
                 return Status;
 
-            return ResolveFileOffset(FileObj, ByteOffsetPtr != 0 ? Requested : null, Write, Write && WinFile.IsAppendOnly(Granted), out Offset);
+            return ResolveFileOffset(FileObj, Requested, Write, Write && WinFile.IsAppendOnly(Granted), out Offset);
         }
 
         internal const long FileWriteToEndOfFile = -1;
         private const long FileUseFilePointerPosition = -2;
+
+        // The offset checks follow IopReadFile and IopValidateAndGetWriteParameters.
+        private static NTSTATUS CheckSectorAlignment(WinFile FileObj, ulong BufferPtr, uint Length, long? Offset, bool Write)
+        {
+            const ulong SectorMask = WindowsStorageDeviceSupport.BytesPerSector - 1;
+            if ((Length & SectorMask) != 0 || (BufferPtr & FileObj.AlignmentRequirement) != 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (Offset is not long Value
+                || (Write && (Value == FileWriteToEndOfFile || (Value == FileUseFilePointerPosition && FileObj.Synchronous))))
+                return NTSTATUS.STATUS_SUCCESS;
+
+            return ((ulong)Value & SectorMask) == 0 ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_PARAMETER;
+        }
 
         // Console and volume objects carry no open mode, so a device other than a pipe skips the offset rules.
         private static bool HasFileOffset(WinFile FileObj) => !FileObj.Device || FileObj.IsNamedPipe;
@@ -244,7 +292,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Offset = AppendOnly ? FileWriteToEndOfFile : Requested ?? FileUseFilePointerPosition;
             if (Offset == FileUseFilePointerPosition && FileObj.Synchronous)
-                Offset = FileObj.Position;
+                Offset = FileObj.ClaimPosition();
 
             return Offset >= 0 || (Write && Offset == FileWriteToEndOfFile) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_PARAMETER;
         }

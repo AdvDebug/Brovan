@@ -619,7 +619,35 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Ev.Signaled = true;
         }
 
-        internal bool ProbeIoStatusBlock(ulong IoStatusBlockPtr) => Emulator.IsMemoryRangeMapped(IoStatusBlockPtr, (uint)(PointerSize * 2));
+        // NT write-probes only the ULONG Status at the start of the block.
+        internal bool TryProbeIoStatusBlock(ulong IoStatusBlockPtr, out NTSTATUS Status)
+        {
+            Status = ProbeForWrite(IoStatusBlockPtr, sizeof(uint));
+            return Status == NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT writes one byte of each page in order, so a guard page faults as it would for the guest (IopReadFile).
+        internal NTSTATUS ProbeForWrite(ulong Address, uint Length)
+        {
+            if (!NtWow64GetNativeSystemInformation.IsUserRange(Address, Length))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            ulong Done = Emulator.AccessibleLength(Address, Length, true);
+            while (Done < Length)
+            {
+                if (!Emulator.TryResolveGuardPage(Address + Done, out NTSTATUS Status))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                if (Status != NTSTATUS.STATUS_SUCCESS)
+                    return Status;
+
+                ulong More = Emulator.AccessibleLength(Address + Done, Length - Done, true);
+                if (More == 0)
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                Done += More;
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
 
         // NT probes the block when the request starts and ignores a fault when it completes.
         public bool WriteIoStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
@@ -2695,6 +2723,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal readonly AfdDevice.HostConnects AfdConnects = new AfdDevice.HostConnects();
         internal readonly AfdDevice.PendingRequests AfdRequests = new AfdDevice.PendingRequests();
         internal readonly PipeRequestQueue PipeRequests = new PipeRequestQueue();
+        internal KernelFileReads KernelFileReads;
         public List<WinSection> WinSections = new List<WinSection>();
         private readonly Dictionary<ulong, int> WinHandleIndex = new Dictionary<ulong, int>();
         internal void AddWinHandle(WinHandle h)
@@ -4494,25 +4523,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int GuestCallScratchOffset = 0x08;
         private const int GuestCallCodeOffset = 0x20;
 
-        private bool TryGetNtSyscallNumber(string Name, out uint Number)
-        {
-            Number = 0;
-            WinModule Ntdll = WinModules.FirstOrDefault(m => m != null && m.Name != null && m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase));
-            if (Ntdll == null)
-                return false;
-
-            ulong Stub = GetExportAddress(Ntdll, Name);
-            if (Stub == 0 || !Emulator.IsRegionMapped(Stub, 8))
-                return false;
-
-            // mov r10, rcx ; mov eax, imm32
-            if (Emulator.ReadMemoryUInt(Stub) != 0xB8D18B4Cu)
-                return false;
-
-            Number = Emulator.ReadMemoryUInt(Stub + 4);
-            return true;
-        }
-
         /// <summary>
         /// Builds the page a guest callback returns to. Its code calls NtCallbackReturn, which unwinds the
         /// frame pushed by BeginGuestCall.
@@ -4522,7 +4532,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (GuestCallTrampoline != 0 && Emulator.IsRegionMapped(GuestCallTrampoline, GuestCallTrampolineSize))
                 return GuestCallTrampoline;
 
-            if (!TryGetNtSyscallNumber("NtCallbackReturn", out uint CallbackReturn))
+            if (!Emulator.IsX64Guest || Emulator.WindowsGuest is not WindowsGuest Guest
+                || !Guest.TryGetSyscallNumber(nameof(NtCallbackReturn), out uint CallbackReturn))
                 return 0;
 
             ulong Page = Emulator.MapUniqueAddress(GuestCallTrampolineSize, MemoryProtection.All);
@@ -8644,35 +8655,29 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IncludeChildren)
                 Prefix = GuestPath.EndsWith("\\", StringComparison.Ordinal) ? GuestPath : GuestPath + "\\";
 
+            KernelFileReads?.ReleasePath(GuestPath, Prefix);
+
             foreach (WinFile FileObj in WinFiles)
             {
-                if (FileObj == null || string.IsNullOrEmpty(FileObj.Path))
-                    continue;
-
-                if (string.Equals(FileObj.Path, GuestPath, StringComparison.OrdinalIgnoreCase)
-                    || (Prefix != null && FileObj.Path.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase)))
-                {
+                if (FileObj != null && MatchesGuestPath(FileObj.Path, GuestPath, Prefix))
                     FileObj.ReleaseFileStream();
-                }
             }
 
             foreach (WinSection Section in WinSections)
             {
-                if (Section == null || string.IsNullOrEmpty(Section.Path))
-                    continue;
-
-                if (string.Equals(Section.Path, GuestPath, StringComparison.OrdinalIgnoreCase)
-                    || (Prefix != null && Section.Path.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase)))
-                {
+                if (Section != null && MatchesGuestPath(Section.Path, GuestPath, Prefix))
                     Section.ReleaseFileStream();
-                }
             }
 
             GeneralHelper.IO.FlushPendingCloses();
         }
 
+        internal static bool MatchesGuestPath(string Path, string GuestPath, string ChildPrefix)
+            => !string.IsNullOrEmpty(Path) && (string.Equals(Path, GuestPath, StringComparison.OrdinalIgnoreCase)
+               || (ChildPrefix != null && Path.StartsWith(ChildPrefix, StringComparison.OrdinalIgnoreCase)));
+
         private const uint FILE_SHARE_READ = 0x00000001;
-        private const uint FILE_SHARE_WRITE = 0x00000002;
+        internal const uint FILE_SHARE_WRITE = 0x00000002;
         private const uint FILE_SHARE_DELETE = 0x00000004;
 
         private static uint AccessToShareBits(AccessMask Access)
@@ -8830,9 +8835,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // NT: IopReadFile and IopWriteFile capture the offset before the event reset, and IopExceptionFilter
         // reports a misaligned one as STATUS_DATATYPE_MISALIGNMENT_ERROR.
-        public NTSTATUS ReadFileByteOffset(ulong ByteOffsetPtr, out long Offset)
+        public NTSTATUS ReadFileByteOffset(ulong ByteOffsetPtr, out long? Offset)
         {
-            Offset = 0;
+            Offset = null;
             if (ByteOffsetPtr == 0)
                 return NTSTATUS.STATUS_SUCCESS;
 
@@ -8844,6 +8849,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Offset = unchecked((long)RawOffset);
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        public NTSTATUS ReadFileKey(ulong KeyPtr, out uint Key)
+        {
+            Key = 0;
+            return KeyPtr == 0 || TryReadUInt32(KeyPtr, out Key) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }
 
         public WinHandle CreateMutexHandle(string? Name, AccessMask Permissions)
@@ -10656,12 +10667,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Endpoint.Dispose();
                     }
 
+                    KernelFileReads?.ReleaseHandle(Handle);
+
                     if (Closing != null && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
                     {
-                        List<ulong> HandlesForObject = HandleManager.GetHandlesByObjectId(Closing.ObjectId);
-                        HandlesForObject.Remove(Handle);
-                        if (HandlesForObject.Count == 0)
+                        if (HandleManager.CountHandlesByObjectId(Closing.ObjectId) <= 1)
                         {
+                            KernelFileReads?.ReleaseFile(Closing);
+                            Closing.ReleaseLocks();
                             UnregisterOpenFile(Closing);
                             if (Closing.DeletePending)
                                 ApplyDeleteOnClose(Closing);

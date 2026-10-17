@@ -99,8 +99,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static NTSTATUS CheckRequest(BinaryEmulator Instance, ulong FileHandle, ulong IoStatusBlockPtr, ulong ApcRoutine, uint ControlCode, ulong InputBufferPtr, uint InputBufferLength, ulong OutputBufferPtr, uint OutputBufferLength, out WinFile File)
         {
             File = null;
-            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlockPtr, out NTSTATUS ProbeStatus))
+                return ProbeStatus;
 
             if (!ProbeControlBuffers(Instance, ControlCode, InputBufferPtr, InputBufferLength, OutputBufferPtr, OutputBufferLength))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

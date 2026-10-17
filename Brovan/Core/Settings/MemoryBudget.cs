@@ -51,6 +51,10 @@ namespace Brovan.Core.Settings
 
         public static int HostStreamInputBytes { get; private set; }
 
+        public static int KernelReadFiles { get; private set; }
+
+        public static long KernelReadViewBytes { get; private set; }
+
         public static ulong GuestPhysicalBytes { get; private set; }
 
         // NT memory reports count in 4 KiB pages.
@@ -74,6 +78,8 @@ namespace Brovan.Core.Settings
             SandboxPathCacheEntries = (int)Pick(Off: 32768, Minimal: 24576, Medium: 16384, High: 8192, Aggressive: 4096);
             ConsoleInputRecords = (int)Pick(Off: 262144, Minimal: 131072, Medium: 65536, High: 32768, Aggressive: 16384);
             HostStreamInputBytes = (int)Kilobytes(Pick(Off: 64, Minimal: 64, Medium: 32, High: 16, Aggressive: 8));
+            KernelReadFiles = (int)Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8);
+            KernelReadViewBytes = (long)Megabytes(Pick(Off: 256, Minimal: 192, Medium: 128, High: 64, Aggressive: 32));
             ulong PhysicalMegabytes = Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
 
             GuestPhysicalBytes = Megabytes(PhysicalMegabytes);

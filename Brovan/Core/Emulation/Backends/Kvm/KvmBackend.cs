@@ -150,6 +150,7 @@ namespace Brovan.Core.Emulation
         public void StopThread(uint threadId) => Inner.StopThread(threadId);
         public void StopAllProcessors() => Inner.StopAllProcessors();
         public void HoldProcessorsOutOfGuest() => Inner.HoldProcessorsOutOfGuest();
+        public IGuestKernel GuestKernel => Inner.GuestKernel;
         public uint ReadRegister32(Registers register)
             => Inner.ReadRegister32(register);
         public uint ReadRegister32(int register)

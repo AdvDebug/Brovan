@@ -63,6 +63,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_LOCK_NOT_GRANTED;
             }
 
+            Instance.WinHelper.KernelFileReads?.ReleaseLockedPath(FileObj.Path);
             FileObj.AddLock((ulong)Offset, Length, Key, ExclusiveLock);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
             Instance.WinHelper.SignalIoEvent(EventHandle, NTSTATUS.STATUS_SUCCESS);
@@ -85,8 +86,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((Granted & (WinFile.ReadDataAccess | WinFile.WriteDataAccess)) == 0)
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
-            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlockPtr, out NTSTATUS ProbeStatus))
+                return ProbeStatus;
 
             return Instance.WinHelper.ReadFileLockRange(ByteOffsetPtr, LengthPtr, out Offset, out Length);
         }

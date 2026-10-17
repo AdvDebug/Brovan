@@ -345,11 +345,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static ulong SanitizeRip(ulong Rip) => LongModeAddress.Canonicalize(Rip);
 
-        // NT zeroes a breakpoint address above the user range, and the backend's own limit applies too.
-        private static ulong SanitizeDebugAddress(BinaryEmulator Instance, ulong Address)
-            => Address <= NtWow64GetNativeSystemInformation.NativeMaximumUserModeAddress && Address <= Instance._emulator.MaxMappableAddress
-                ? Address
-                : 0;
+        // NT zeroes a breakpoint address above the user range.
+        private static ulong SanitizeDebugAddress(ulong Address)
+            => Address <= NtWow64GetNativeSystemInformation.NativeMaximumUserModeAddress ? Address : 0;
 
         private const ulong Dr7LocalEnables = 0x55;
         private const ulong Dr7LocalExact = 0x100;
@@ -368,7 +366,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool Held = WinEmulatedThread.TryGetState(Thread)?.DebugRegistersFromContext == true;
             if (IsCurrentThread && !Held)
             {
-                Instance.ReadLiveDebugRegisters(Values);
+                Instance.ReadLiveDebugRegisters(Context, Values);
             }
             else if (Context != null)
             {
@@ -413,10 +411,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             // If no breakpoint is enabled before or after, no CONTEXT can see the debug registers, so the processor
             // keeps its own.
             bool Observable = ((Context.DR7 | Dr7) & Dr7Enables) != 0;
-            Context.DR0 = SanitizeDebugAddress(Instance, Dr0);
-            Context.DR1 = SanitizeDebugAddress(Instance, Dr1);
-            Context.DR2 = SanitizeDebugAddress(Instance, Dr2);
-            Context.DR3 = SanitizeDebugAddress(Instance, Dr3);
+            Context.DR0 = SanitizeDebugAddress(Dr0);
+            Context.DR1 = SanitizeDebugAddress(Dr1);
+            Context.DR2 = SanitizeDebugAddress(Dr2);
+            Context.DR3 = SanitizeDebugAddress(Dr3);
             Context.DR6 = 0;
             Context.DR7 = Dr7;
             if (Observable)

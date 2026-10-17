@@ -18,8 +18,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IoStatusBlockPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlockPtr, out NTSTATUS ProbeStatus))
+                return ProbeStatus;
 
             if (!FileObj.AllowsWrite(Granted))
                 return NTSTATUS.STATUS_ACCESS_DENIED;

@@ -105,6 +105,10 @@ namespace Brovan.Core.Settings
             Help = "Run guest threads at once on a hypervisor backend.")]
         public bool Smp { get; set; } = true;
 
+        [Setting("backend.guest-kernel", SettingCategory.Backend, CliNegated = "--no-guest-kernel",
+            Help = "Serve some system calls inside the guest on a hypervisor backend, without leaving the guest.")]
+        public bool GuestKernel { get; set; } = true;
+
         [Setting("backend.cores", SettingCategory.Backend, Cli = "--cores", Min = 0, Max = 4096,
             Help = "Guest threads a hypervisor backend runs at once. 0 picks host processors minus one.")]
         public int Cores { get; set; }

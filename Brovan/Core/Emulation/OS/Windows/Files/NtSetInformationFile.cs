@@ -34,7 +34,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IoStatusBlock == 0 || FileInformation == 0)
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlock) || !Instance.IsRegionMapped(FileInformation, Length))
+            if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlock, out NTSTATUS ProbeStatus))
+                return ProbeStatus;
+
+            if (!Instance.IsRegionMapped(FileInformation, Length))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             NTSTATUS Reference = Instance.WinHelper.ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out WinFile FileObj);
@@ -144,8 +147,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_HANDLE;
             }
 
-            FileObj.CompletionHandle = Port;
-            FileObj.CompletionKey = Key;
+            FileObj.BindCompletionPort(Port, Key);
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
             return NTSTATUS.STATUS_SUCCESS;
@@ -416,8 +418,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
             }
 
-            const uint SynchronousBits = WinFile.FILE_SYNCHRONOUS_IO_ALERT | WinFile.FILE_SYNCHRONOUS_IO_NONALERT;
-            FileObj.Mode = (ReadUInt32(Instance, FileInformation + 0x00) & ~SynchronousBits) | (FileObj.Mode & SynchronousBits);
+            // NT keeps write-through as it is on a noncached open.
+            const uint SettableBits = WinFile.FILE_WRITE_THROUGH | WinFile.FILE_SEQUENTIAL_ONLY | WinFile.SynchronousModes;
+            uint NewMode = ReadUInt32(Instance, FileInformation + 0x00);
+            uint Synchronous = NewMode & WinFile.SynchronousModes;
+            if ((NewMode & ~SettableBits) != 0 || (Synchronous != 0) != FileObj.Synchronous || Synchronous == WinFile.SynchronousModes)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            uint Kept = WinFile.FILE_NO_INTERMEDIATE_BUFFERING | (FileObj.NoIntermediateBuffering ? WinFile.FILE_WRITE_THROUGH : 0);
+            FileObj.Mode = (NewMode & ~Kept) | (FileObj.Mode & Kept);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileModeInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }

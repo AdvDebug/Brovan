@@ -1465,6 +1465,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             public ulong Length;
             public ulong Key;
             public bool Exclusive;
+            public WinFile Owner;
         }
 
         public string Path;
@@ -1482,17 +1483,42 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Set once a child process inherits this file.
         internal SharedFilePosition SharedPosition;
 
+        internal KernelFileCell KernelCell;
+        internal int SlowReads;
+
         public long Position
         {
-            get => SharedPosition != null ? SharedPosition.Value : LocalPosition;
+            get => KernelCell != null ? KernelCell.Offset : SharedPosition != null ? SharedPosition.Value : LocalPosition;
             set
             {
-                if (SharedPosition != null)
+                if (KernelCell != null)
+                    KernelCell.Offset = value;
+                else if (SharedPosition != null)
                     SharedPosition.Value = value;
                 else
                     LocalPosition = value;
             }
         }
+
+        // Guest ring 0 cannot move the offset until the new one is stored or ReleasePosition runs.
+        internal long ClaimPosition() => KernelCell != null ? KernelCell.Claim() : Position;
+
+        internal void ReleasePosition() => KernelCell?.Release();
+
+        internal bool TrySharePosition()
+        {
+            KernelCell?.Owner.ReleaseFile(this);
+            SharedPosition ??= SharedFilePosition.Create(Position);
+            return SharedPosition != null;
+        }
+
+        internal void BindCompletionPort(ulong Port, ulong Key)
+        {
+            KernelCell?.Owner.ReleaseFile(this);
+            CompletionHandle = Port;
+            CompletionKey = Key;
+        }
+
         public bool DeletePending;
         public AccessMask GrantedAccess;
         public uint ShareAccess;
@@ -1514,11 +1540,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ConsoleObjectKind ConsoleKind;
         public HostStreamKind HostStream;
 
+        internal const uint FILE_WRITE_THROUGH = 0x2;
+        internal const uint FILE_SEQUENTIAL_ONLY = 0x4;
+        internal const uint FILE_NO_INTERMEDIATE_BUFFERING = 0x8;
         internal const uint FILE_SYNCHRONOUS_IO_ALERT = 0x10;
         internal const uint FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
+        internal const uint SynchronousModes = FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT;
 
         // NT waits inside every I/O call on a synchronous file.
-        public bool Synchronous => (Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) != 0;
+        public bool Synchronous => (Mode & SynchronousModes) != 0;
+
+        public bool NoIntermediateBuffering => (Mode & FILE_NO_INTERMEDIATE_BUFFERING) != 0;
+
+        public uint AlignmentRequirement => Device ? 0 : WindowsStorageDeviceSupport.AlignmentRequirement;
 
         // NT: a file bound to a completion port takes no APC routine. Bit 0 of the routine marks a WOW64 caller.
         public bool RefusesApcRoutine(ulong ApcRoutine) => CompletionHandle != 0 && (ApcRoutine & ~1UL) != 0;
@@ -1608,11 +1642,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!LockRangesOverlap(Existing.Offset, Existing.Length, Offset, Length))
                     continue;
 
-                bool SameKey = Existing.Key == Key;
+                bool SameOwner = Existing.Owner == this && Existing.Key == Key;
 
                 if (Existing.Exclusive)
                 {
-                    if (!SameKey)
+                    if (!SameOwner)
                         return Existing;
 
                     if (ExclusiveLock)
@@ -1635,7 +1669,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Offset = Offset,
                 Length = Length,
                 Key = Key,
-                Exclusive = ExclusiveLock
+                Exclusive = ExclusiveLock,
+                Owner = this
             });
         }
 
@@ -1644,11 +1679,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (int i = 0; i < Locks.Count; i++)
             {
                 WinLockFile Existing = Locks[i];
-                if (Existing.Offset != Offset)
-                    continue;
-                if (Existing.Length != Length)
-                    continue;
-                if (Existing.Key != Key)
+                if (Existing.Owner != this || Existing.Offset != Offset || Existing.Length != Length || Existing.Key != Key)
                     continue;
 
                 Locks.RemoveAt(i);
@@ -1658,17 +1689,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
-        public bool HasConflictingIoLock(ulong Offset, ulong Length, bool WriteOperation)
+        // NT drops a file object's locks when the process closes its last handle to it (IopCloseFile).
+        internal void ReleaseLocks()
+        {
+            int Kept = 0;
+            for (int i = 0; i < Locks.Count; i++)
+            {
+                if (Locks[i].Owner != this)
+                    Locks[Kept++] = Locks[i];
+            }
+
+            Locks.RemoveRange(Kept, Locks.Count - Kept);
+        }
+
+        // NT lets a shared lock block writes through its own file object too (FsRtlFastCheckLockForWrite).
+        public bool HasConflictingIoLock(ulong Offset, ulong Length, ulong Key, bool WriteOperation)
         {
             foreach (WinLockFile Existing in Locks)
             {
                 if (!LockRangesOverlap(Existing.Offset, Existing.Length, Offset, Length))
                     continue;
 
-                if (WriteOperation)
-                    return true;
-
-                if (Existing.Exclusive)
+                if (Existing.Exclusive ? Existing.Owner != this || Existing.Key != Key : WriteOperation)
                     return true;
             }
 
@@ -2348,7 +2390,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     ? "loader worker"
                     : null;
                 int BasePriority = (int)(Factory.ThreadBasePriority != 0 ? Factory.ThreadBasePriority : Instance.WinHelper.CurrentPriority);
-                EmulatedThread Thread = Guest.CreateEmulatedThread(Instance, Factory.StartRoutine, ThreadName, Factory.StartParameter, StackOverride, BasePriority, CreateFlags, false);
+                EmulatedThread Thread = Guest.CreateEmulatedThread(Instance, Factory.StartRoutine, ThreadName, Factory.StartParameter, StackOverride, BasePriority, CreateFlags, false, Factory.StackCommit);
                 if (Thread == null)
                     break;
 

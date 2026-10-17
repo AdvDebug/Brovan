@@ -49,7 +49,24 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             public IntPtr Pointer { get; private set; }
 
-            public View(MemoryMappedFile Mapping, MemoryMappedViewAccessor Accessor)
+            // Owns Mapping from here on, and disposes it if the view cannot be made.
+            public static View Create(MemoryMappedFile Mapping, long Length, MemoryMappedFileAccess Access)
+            {
+                MemoryMappedViewAccessor Accessor = null;
+                try
+                {
+                    Accessor = Mapping.CreateViewAccessor(0, Length, Access);
+                    return new View(Mapping, Accessor);
+                }
+                catch
+                {
+                    Accessor?.Dispose();
+                    Mapping.Dispose();
+                    throw;
+                }
+            }
+
+            private View(MemoryMappedFile Mapping, MemoryMappedViewAccessor Accessor)
             {
                 byte* Base = null;
                 Accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref Base);
@@ -237,22 +254,18 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static View Open(string ImagePath, ulong ImageSize)
         {
             FileStream Stream = new FileStream(ImagePath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            MemoryMappedFile Mapping = null;
-            MemoryMappedViewAccessor Accessor = null;
+            MemoryMappedFile Mapping;
             try
             {
                 Mapping = MemoryMappedFile.CreateFromFile(Stream, null, 0, MemoryMappedFileAccess.CopyOnWrite, HandleInheritability.None, false);
-                Stream = null;
-                Accessor = Mapping.CreateViewAccessor(0, (long)ImageSize, MemoryMappedFileAccess.CopyOnWrite);
-                return new View(Mapping, Accessor);
             }
             catch
             {
-                Accessor?.Dispose();
-                Mapping?.Dispose();
-                Stream?.Dispose();
+                Stream.Dispose();
                 throw;
             }
+
+            return View.Create(Mapping, (long)ImageSize, MemoryMappedFileAccess.CopyOnWrite);
         }
 
         private static void TrimDirectory(string Directory)

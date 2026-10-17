@@ -28,6 +28,11 @@ namespace Brovan.Core.Emulation.Guests
         public bool SupportsConcurrentSyscalls => true;
 
         public ulong StackSize { get; private set; }
+        private ulong StackCommit;
+        private bool RandomizeThreadStacks = true;
+
+        private ulong StackOffsetSlots(int Range) => RandomizeThreadStacks ? (ulong)Random.Shared.Next(Range) : 0;
+
         public ulong PEB { get; internal set; }
 
         // The 64-bit PEB a WOW64 process also owns. SysWOW64 modules reach it through the TEB and read it with x64 offsets.
@@ -150,6 +155,10 @@ namespace Brovan.Core.Emulation.Guests
             }
 
             StackSize = Binary.Architecture == BinaryArchitecture.x64 ? Binary.PE.OptionalHeader64.SizeOfStackReserve : Binary.PE.OptionalHeader32.SizeOfStackReserve;
+            StackCommit = Binary.Architecture == BinaryArchitecture.x64 ? Binary.PE.OptionalHeader64.SizeOfStackCommit : Binary.PE.OptionalHeader32.SizeOfStackCommit;
+
+            // NT sets StackRandomizationDisabled unless the image is ASLR-relocated or IL-only (PspApplyMitigationOptions).
+            RandomizeThreadStacks = Binary.PE.ILOnly || BinaryEmulator.IsDynamicallyRelocatable(Binary);
             ulong ImageBase = Binary.PE.ImageBase;
             ReadOnlySpan<byte> BinaryData = Binary.GetBinaryData();
             ulong ImageSize = Instance.AlignToPageSize(Binary.PE.SizeOfImage != 0 ? Binary.PE.SizeOfImage : (uint)Binary.BinarySize);
@@ -277,15 +286,17 @@ namespace Brovan.Core.Emulation.Guests
 
         public void Start(BinaryEmulator Instance)
         {
-            if (WinHelper == null || WinHelper.WinModules.Count == 0)
+            if (WinHelper == null)
                 return;
 
-            ulong TID = CreateInitialThread(Instance);
-            if (!Instance.Threads.TryGetValue((uint)TID, out EmulatedThread Thread) || Thread == null)
-                return;
+            if (WinHelper.WinModules.Count != 0 && Instance.Threads.TryGetValue((uint)CreateInitialThread(Instance), out EmulatedThread Thread)
+                && Thread != null)
+            {
+                Instance.LoadContext(Thread);
+                Instance.RunMlfqScheduler();
+            }
 
-            Instance.LoadContext(Thread);
-            Instance.RunMlfqScheduler();
+            WinHelper.KernelFileReads?.Dispose();
         }
 
         public void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread)
@@ -700,6 +711,21 @@ namespace Brovan.Core.Emulation.Guests
         }
 
         private const uint Win32kServiceBase = 0x1000;
+
+        internal bool TryGetSyscallNumber(string Name, out uint Number)
+        {
+            foreach (WinSyscallEntry Entry in WinSyscallTable.Entries)
+            {
+                if (Entry.Name == Name)
+                {
+                    Number = Entry.Number;
+                    return true;
+                }
+            }
+
+            Number = 0;
+            return false;
+        }
 
         // Any other syscall means the thread left the I/O.
         private bool TryEndCancelledRetry(BinaryEmulator Instance, uint Syscall, ulong Rip)
@@ -1508,23 +1534,28 @@ namespace Brovan.Core.Emulation.Guests
                 Instance.WriteRegister32(Registers.UC_X86_REG_EAX, (uint)Status);
         }
 
-        private const ulong StackGuardPages = 3;
-        private const ulong InitialStackCommitPages = 4;
+        // NT fills the PEB heap segment sizes from the system defaults, not from the image header (MmCreatePeb).
+        private const ulong HeapSegmentReserve = 0x100000;
+        private const ulong HeapSegmentCommit = 0x2000;
 
-        private static ulong AllocateGuardedThreadStack(BinaryEmulator Instance, ulong StackSize, out ulong StackLimit)
+        private const ulong DefaultStackCommit = 0x4000;
+
+        // NT commits the requested size, or the image's, with the guard pages below it (RtlCreateUserStack).
+        private ulong AllocateGuardedThreadStack(BinaryEmulator Instance, ulong StackSize, ulong StackCommitOverride, out ulong StackLimit)
         {
             const uint PAGE_READWRITE = 0x04;
             const uint PAGE_GUARD = 0x100;
 
             StackLimit = 0;
 
-            ulong GuardSize = StackGuardPages * PageSize;
-            ulong CommitSize = InitialStackCommitPages * PageSize;
+            ulong GuardSize = Instance.StackGuardSize;
+            ulong Commit = StackCommitOverride != 0 ? StackCommitOverride : StackCommit;
+            ulong CommitSize = Instance.AlignToPageSize(Commit != 0 ? Commit : DefaultStackCommit);
             ulong Reserve = Instance.AlignToPageSize(StackSize);
 
             // Deliberately not allocate. its finder starts at 4 GB for x64 guests,
             // which puts the stack nowhere near the rest of the address space Brovan hands out.
-            if (Instance.WinHelper != null && Reserve > GuardSize + CommitSize &&
+            if (Instance.WinHelper != null && Reserve >= GuardSize + CommitSize &&
                 Instance.TryFindFreeBaseAddress(Reserve, AllocationGranularity, Instance.BaseAddress, Instance.MaxAddress, out ulong Base) &&
                 Instance.ReserveMemory(Base, Reserve, PAGE_READWRITE))
             {
@@ -1708,7 +1739,7 @@ namespace Brovan.Core.Emulation.Guests
                 StartAddress = StartAddress,
                 Parameter = Parameter,
                 StackSize = ThreadStackSize,
-                StackAddress = AllocateGuardedThreadStack(Instance, ThreadStackSize, out ulong ThreadStackLimit),
+                StackAddress = AllocateGuardedThreadStack(Instance, ThreadStackSize, 0, out ulong ThreadStackLimit),
                 StackLimit = ThreadStackLimit,
                 GuestState = NewThreadState(Instance)
             };
@@ -1765,7 +1796,7 @@ namespace Brovan.Core.Emulation.Guests
             return CreateEmulatedThread(Instance, StartAddress, Name, Parameter, StackSizeOverride, BasePriority, 0, false);
         }
 
-        internal EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name, ulong Parameter, ulong? StackSizeOverride, int BasePriority, uint CreateFlags, bool InitialThread)
+        internal EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name, ulong Parameter, ulong? StackSizeOverride, int BasePriority, uint CreateFlags, bool InitialThread, ulong StackCommitOverride = 0)
         {
             ResolveLdrInitializeThunk(Instance);
             ResolveRtlUserThreadStart(Instance);
@@ -1785,7 +1816,7 @@ namespace Brovan.Core.Emulation.Guests
                 StartAddress = StartAddress,
                 Parameter = Parameter,
                 StackSize = ThreadStackSize,
-                StackAddress = AllocateGuardedThreadStack(Instance, ThreadStackSize, out ulong ThreadStackLimit),
+                StackAddress = AllocateGuardedThreadStack(Instance, ThreadStackSize, StackCommitOverride, out ulong ThreadStackLimit),
                 StackLimit = ThreadStackLimit,
                 GuestState = NewThreadState(Instance)
             };
@@ -1800,9 +1831,10 @@ namespace Brovan.Core.Emulation.Guests
             Thread.Context.RFLAGS = 0x202;
             ApplyInitialSegments(Instance, Thread.Context);
 
+            // NT starts a thread up to 0x7F0 bytes below its stack base, 0x7FC on a WOW64 stack (PspSetupUserStack).
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
             {
-                ulong InitialRSP = (Thread.StackAddress + Thread.StackSize) & ~0xFUL;
+                ulong InitialRSP = ((Thread.StackAddress + Thread.StackSize) & ~0xFUL) - 16UL * StackOffsetSlots(0x80);
                 InitialRSP -= 8;
                 Instance._emulator.WriteMemory(InitialRSP, 0UL, 8);
                 InitialRSP -= 0x20;
@@ -1813,7 +1845,7 @@ namespace Brovan.Core.Emulation.Guests
             }
             else
             {
-                ulong ContextEsp = ((Thread.StackAddress + Thread.StackSize) & ~0xFUL) - 0x10;
+                ulong ContextEsp = ((Thread.StackAddress + Thread.StackSize) & ~0xFUL) - 0x10 - 4UL * StackOffsetSlots(0x200);
                 Instance._emulator.WriteMemory(ContextEsp, 0u);
 
                 Thread.Context.RSP = ContextEsp;
@@ -2067,6 +2099,7 @@ namespace Brovan.Core.Emulation.Guests
                 EnsureDirectBlobStandardHandles();
 
             WinSyscallTable = HelperFunctions.BuildWinSyscallTable(Instance._binary.Architecture);
+            WinHelper.KernelFileReads = KernelFileReads.TryCreate(Instance, this);
             Win32kDpi.SeedFromImage(Instance, MainModule);
             JoinGuestSession(Instance, MainModule);
 
@@ -2110,19 +2143,11 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(PEB + 0x2C0, WinToken.InteractiveSessionId, 4);
                 Instance._emulator.WriteMemory(PEB + WinSxS.PebActivationContextData64, ProcessActivationContext, 8);
 
-                if (IsPeImage)
-                {
-                    Instance._emulator.WriteMemory(PEB + 0xC8, Instance._binary.PE.OptionalHeader64.SizeOfHeapReserve);
-                    Instance._emulator.WriteMemory(PEB + 0xD0, Instance._binary.PE.OptionalHeader64.SizeOfHeapCommit);
-                }
-                else if (UsesDirectBlobStartup)
-                {
-                    Instance._emulator.WriteMemory(PEB + 0xC8, 0x100000UL);
-                    Instance._emulator.WriteMemory(PEB + 0xD0, 0x10000UL);
-                }
-
                 if (IsPeImage || UsesDirectBlobStartup)
                 {
+                    Instance._emulator.WriteMemory(PEB + 0xC8, HeapSegmentReserve);
+                    Instance._emulator.WriteMemory(PEB + 0xD0, HeapSegmentCommit);
+
                     string ImagePath = IsPeImage
                         ? Instance.GuestImagePath
                         : (!string.IsNullOrWhiteSpace(Instance.GuestImagePath) ? Instance.GuestImagePath : (!string.IsNullOrWhiteSpace(MainModule.Path) ? MainModule.Path : (!string.IsNullOrWhiteSpace(MainModule.Name) ? MainModule.Name : "blob.bin")));
@@ -2230,10 +2255,8 @@ namespace Brovan.Core.Emulation.Guests
                     ProcessParams = BuildProcessParameters32(Instance, MainModule);
                     Instance._emulator.WriteMemory(PEB + 0x10, (uint)ProcessParams);
 
-                    uint HeapReserve = Instance._binary.PE.OptionalHeader32.SizeOfHeapReserve;
-                    uint HeapCommit = Instance._binary.PE.OptionalHeader32.SizeOfHeapCommit;
-                    Instance._emulator.WriteMemory(PEB + 0x78, HeapReserve != 0 ? HeapReserve : 0x100000u);
-                    Instance._emulator.WriteMemory(PEB + 0x7C, HeapCommit != 0 ? HeapCommit : 0x2000u);
+                    Instance._emulator.WriteMemory(PEB + 0x78, (uint)HeapSegmentReserve);
+                    Instance._emulator.WriteMemory(PEB + 0x7C, (uint)HeapSegmentCommit);
                     Instance._emulator.WriteMemory(PEB + 0x80, 0x10000u);
                     Instance._emulator.WriteMemory(PEB + 0x84, 0x1000u);
                     Instance._emulator.WriteMemory(PEB + 0x88, 0u);

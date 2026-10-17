@@ -55,8 +55,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Length < QueryOperationLength[(int)FileInformationClass])
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
-            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlock))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlock, out NTSTATUS ProbeStatus))
+                return ProbeStatus;
 
             if (Realigned)
                 return NTSTATUS.STATUS_SUCCESS;
@@ -129,7 +129,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FILE_INFORMATION_CLASS.FileModeInformation:
                     return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileModeInformationSize, File.Mode);
                 case FILE_INFORMATION_CLASS.FileAlignmentInformation:
-                    return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileAlignmentInformationSize, 0);
+                    return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileAlignmentInformationSize, File.AlignmentRequirement);
                 case FILE_INFORMATION_CLASS.FileIoCompletionNotificationInformation:
                     return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileIoCompletionNotificationInformationSize, File.CompletionNotificationModes);
                 case FILE_INFORMATION_CLASS.FileAllInformation:
@@ -460,6 +460,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x4C), (uint)Granted);
             System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Fixed.Slice(0x50), File.Position);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x58), File.Mode);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x5C), File.AlignmentRequirement);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x60), (uint)NameByteLength);
             Instance._emulator.WriteMemory(FileInformation, Fixed);
 

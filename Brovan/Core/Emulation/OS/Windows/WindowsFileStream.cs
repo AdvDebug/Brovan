@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.IO.MemoryMappedFiles;
 using Microsoft.Win32.SafeHandles;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -142,6 +143,24 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static void DropStoreProbes() => Interlocked.Increment(ref VfsProbeVersion);
 
         internal static int ProbeVersion => Volatile.Read(ref VfsProbeVersion);
+
+        internal static event Action<string> HostFileChanging;
+
+        // The view holds the host file open until it is disposed. Null with a nonzero Length means the file is shorter than
+        // MinLength.
+        internal WinImageLayoutCache.View TryMapReadView(long MaxLength, long MinLength, out long Length)
+        {
+            lock (HandleLock)
+            {
+                SafeFileHandle Handle = AcquireReadHandle();
+                Length = Handle == null ? 0 : Math.Min(RandomAccess.GetLength(Handle), MaxLength);
+                if (Length <= 0 || Length < MinLength)
+                    return null;
+
+                MemoryMappedFile Map = MemoryMappedFile.CreateFromFile(Handle, null, 0, MemoryMappedFileAccess.Read, HandleInheritability.None, true);
+                return WinImageLayoutCache.View.Create(Map, Length, MemoryMappedFileAccess.Read);
+            }
+        }
 
         public string EffectiveReadHostPath
         {
@@ -392,6 +411,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void WriteAllBytes(byte[] Data)
         {
             ValidateBuffer(Data, 0, Data.Length);
+            HostFileChanging?.Invoke(GuestPath);
             EnsureWriteStore(false);
 
             using FileStream Stream = new FileStream(WriteHostPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
@@ -412,6 +432,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             string SourcePath = Source.GetReadableFilePath();
             EnsureWriteParentExists();
+            HostFileChanging?.Invoke(GuestPath);
 
             try
             {
@@ -556,6 +577,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (value < 0)
                 throw new ArgumentOutOfRangeException(nameof(value));
 
+            HostFileChanging?.Invoke(GuestPath);
             lock (HandleLock)
             {
                 RandomAccess.SetLength(AcquireWriteHandle(), value);
@@ -570,6 +592,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!WriteParentKnownToExist)
                 EnsureWriteParentExists();
 
+            HostFileChanging?.Invoke(GuestPath);
             lock (HandleLock)
             {
                 CloseCachedHandle();
@@ -804,6 +827,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 throw new UnauthorizedAccessException("The Windows VFS write path is a directory.");
 
             EnsureWriteParentExists();
+            HostFileChanging?.Invoke(GuestPath);
 
             if (CopyExisting && !IsSamePath(ReadHostPath, WriteHostPath) && !string.IsNullOrWhiteSpace(ReadHostPath) && File.Exists(ReadHostPath))
             {

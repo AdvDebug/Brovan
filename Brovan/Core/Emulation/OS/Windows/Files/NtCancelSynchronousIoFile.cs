@@ -11,8 +11,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong IoRequestToCancel = Instance.WinHelper.GetArg(1);
             ulong IoStatusBlockPtr = Instance.WinHelper.GetArg(2);
 
-            if (!Instance.WinHelper.ProbeIoStatusBlock(IoStatusBlockPtr))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlockPtr, out NTSTATUS ProbeStatus))
+                return ProbeStatus;
 
             EmulatedThread Thread = WindowsThreadContext64.ResolveThread(Instance, ThreadHandle);
             IHandleObject Object = Thread == null ? Instance.WinHelper.HandleManager.GetObjectByHandle(ThreadHandle) : null;

@@ -154,6 +154,5 @@ namespace Brovan.Core.Emulation
         public const int ExceptionVectorCount = 256;
         public const uint FirstSoftwareInterruptVector = 32;
         public const ulong ExceptionStubStride = 8;
-        public const byte ExceptionIstIndex = 1;
     }
 }

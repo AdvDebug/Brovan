@@ -139,7 +139,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             EmulatedThread NewThread = Guest != null
-                ? Guest.CreateEmulatedThread(Instance, StartRoutine, null, Argument, StackOverride, 8, (uint)CreateFlags, false)
+                ? Guest.CreateEmulatedThread(Instance, StartRoutine, null, Argument, StackOverride, 8, (uint)CreateFlags, false, CommitSize)
                 : Instance.CreateEmulatedThread(StartRoutine, null, Argument, StackOverride);
             if (NewThread == null)
                 return NTSTATUS.STATUS_NO_MEMORY;

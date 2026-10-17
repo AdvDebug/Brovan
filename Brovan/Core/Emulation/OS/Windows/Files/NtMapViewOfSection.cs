@@ -319,7 +319,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
                     // NT relocates an ASLR image once per section, and all views share it. Other images keep their preferred base.
-                    bool Relocatable = !Image.PE.ILOnly && (Image.PE.DllCharacteristics & DllCharacteristics.DynamicBase) != 0 && BinaryEmulator.HasBaseRelocations(Image);
+                    bool Relocatable = !Image.PE.ILOnly && BinaryEmulator.IsDynamicallyRelocatable(Image);
                     ulong SectionBase = Section.ImageBase != 0 ? Section.ImageBase : Relocatable ? 0 : Image.PE.ImageBase;
 
                     WinModule Module = Instance.LoadWinLibrary(Image, false, false, RequestedBase, ImageBase: SectionBase);
