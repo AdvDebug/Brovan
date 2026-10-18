@@ -256,6 +256,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             return TryParkForSyscallRetry(-1, HostWork, SyncIo);
         }
 
+        internal T TakeRetriedHostWork<T>() where T : Task
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Emulator.CurrentThread);
+            if (State?.HostWork is not T Work)
+                return null;
+
+            State.HostWork = null;
+            return State.SyncIoRerun ? Work : null;
+        }
+
+        internal static void EndBrovVulkWaits()
+        {
+            if (!DeviceRegistry.IsValueCreated)
+                return;
+
+            foreach (IWinDevice Device in DeviceRegistry.Value.Values)
+            {
+                if (Device is BrovVulkDevice Vulkan)
+                    Vulkan.GenState.Waits.EndCalls();
+            }
+        }
+
         // I/O that NtCancelSynchronousIoFile can cancel.
         internal WinPendingIo SynchronousIo(WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock)
         {

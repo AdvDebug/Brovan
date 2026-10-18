@@ -99,6 +99,7 @@ namespace Brovan.Generators
             public string Ret;
             public readonly List<Param> Params = new List<Param>();
             public string Alias;
+            public string ErrorCodes;
         }
 
         private sealed class Model
@@ -313,7 +314,7 @@ namespace Brovan.Generators
                 XElement proto = c.Element("proto");
                 if (proto == null)
                     continue;
-                Command cmd = new Command { Name = proto.Element("name")?.Value, Ret = proto.Element("type")?.Value };
+                Command cmd = new Command { Name = proto.Element("name")?.Value, Ret = proto.Element("type")?.Value, ErrorCodes = (string)c.Attribute("errorcodes") };
                 foreach (XElement p in c.Elements("param"))
                 {
                     if ((string)p.Attribute("api") == "vulkansc")
@@ -605,6 +606,36 @@ namespace Brovan.Generators
         {
             ["vkGetMemoryWin32HandleKHR"] = "BrovVulkGenMemory.GetMemoryWin32Handle",
             ["vkGetMemoryWin32HandlePropertiesKHR"] = "BrovVulkGenMemory.GetMemoryWin32HandleProperties",
+            ["vkWaitForFences"] = "BrovVulkWaits.WaitForFences",
+            ["vkWaitSemaphores"] = "BrovVulkWaits.WaitSemaphores",
+        };
+
+        // The guest does not wait for a reply to these. It sends them in one batch before its next ioctl.
+        private static readonly HashSet<string> PostedCommands = new HashSet<string>
+        {
+            "vkUpdateDescriptorSets",
+        };
+
+        // The guest picks the handle ids of these creations, so that it can post them.
+        private static readonly HashSet<string> GuestIds = new HashSet<string>
+        {
+            "vkAllocateDescriptorSets",
+        };
+
+        // vulkan_shim.c exports these by hand and calls the generated bvk_gen_<name>.
+        private static readonly HashSet<string> GuestWrapped = new HashSet<string>
+        {
+            "vkAllocateDescriptorSets", "vkCreateDescriptorPool", "vkResetDescriptorPool", "vkDestroyDescriptorPool",
+            "vkCreateDescriptorSetLayout", "vkDestroyDescriptorSetLayout", "vkDestroyDevice",
+        };
+
+        private const uint PostedBatchId = 0xFFFFFFFD;
+        private const uint GuestIdBase = 0x80000000;
+
+        // Keep this in step with the handle types that BrovVulkWaits pins.
+        private static readonly HashSet<string> ParkedWaitHandleTypes = new HashSet<string>
+        {
+            "VkFence", "VkSemaphore", "VkDevice", "VkInstance",
         };
 
         private static bool HostImplemented(VkExtension ext)
@@ -702,6 +733,40 @@ namespace Brovan.Generators
         private static readonly DiagnosticDescriptor ExtGuard = new DiagnosticDescriptor(
             "BVK001", "BrovVulk extension table drift",
             "{0}: {1}", "BrovVulk", DiagnosticSeverity.Error, true);
+
+        private static readonly DiagnosticDescriptor GuestAnswerGuard = new DiagnosticDescriptor(
+            "BVK002", "BrovVulk command the guest answers has an unsupported shape",
+            "{0}: {1}", "BrovVulk", DiagnosticSeverity.Error, true);
+
+        private static IEnumerable<(string Name, string Problem)> GuestAnswerProblems(Model m)
+        {
+            foreach (string n in PostedCommands)
+            {
+                if (!m.Commands.TryGetValue(n, out Command c))
+                    yield return (n, "not found in vk.xml");
+                else if (c.Ret != "void" || c.Name.StartsWith("vkCmd", StringComparison.Ordinal)
+                         || c.Params.Count == 0 || (c.Params[0].Type != "VkDevice" && c.Params[0].Type != "VkQueue"))
+                    yield return (n, "a posted command must be a void device or queue command");
+                else if (c.Params.Any(p => ParamKind(m, p).EndsWith("Out", StringComparison.Ordinal)))
+                    yield return (n, "a posted command cannot have outputs");
+                else if (HostReplaced.ContainsKey(n) || ReleasesMappings(c))
+                    yield return (n, "the host side of a posted command must be generated and read no guest pages");
+                else if (!EmitGuestTrampoline(m, c).Contains("bvk_post(BVK_" + n + ")"))
+                    yield return (n, "the guest trampoline is written by hand and does not post");
+            }
+
+            foreach (string n in GuestIds)
+            {
+                if (!m.Commands.TryGetValue(n, out Command c))
+                    yield return (n, "not found in vk.xml");
+                else if (c.Ret != "VkResult" || c.Params.Count == 0 || c.Params[0].Type != "VkDevice")
+                    yield return (n, "a guest-id command must be a VkResult device command");
+                else if (GuestIdOutIndex(m, c) < 0 || c.Params.Count(p => ParamKind(m, p).EndsWith("Out", StringComparison.Ordinal) || IsStructLenHandleArrayOut(m, p)) != 1)
+                    yield return (n, "a guest-id command needs one output, a handle array sized by a struct member");
+                else if (!FindParent(m, c, c.Params[GuestIdOutIndex(m, c)].Type, out _, out _))
+                    yield return (n, "the parent of a guest-id handle is not an argument");
+            }
+        }
 
         private sealed class MDesc
         {
@@ -1254,6 +1319,39 @@ namespace Brovan.Generators
             return idx;
         }
 
+        private static int DeferredDestroyParentIndex(Model m, Command c, int destroyed)
+        {
+            for (int i = 0; i < c.Params.Count; i++)
+                if (i != destroyed && ParamKind(m, c.Params[i]) == "HandleIn")
+                    return i;
+            return -1;
+        }
+
+        private static string DeferredDestroyCall(Model m, Command c)
+        {
+            int destroyed = DestroyedHandleIndex(m, c);
+            if (destroyed < 0 || c.Ret != "void" || !c.Name.StartsWith("vkDestroy", StringComparison.Ordinal)
+                || !ParkedWaitHandleTypes.Contains(c.Params[destroyed].Type))
+                return null;
+
+            int parent = DeferredDestroyParentIndex(m, c, destroyed);
+            List<string> args = new List<string>();
+            for (int i = 0; i < c.Params.Count; i++)
+            {
+                string kind = ParamKind(m, c.Params[i]);
+                if (i == destroyed)
+                    args.Add("handle");
+                else if (i == parent)
+                    args.Add("parent");
+                else if (kind == "AllocatorIn")
+                    args.Add("System.IntPtr.Zero");
+                else
+                    return null;
+            }
+
+            return "BrovVulkApi." + c.Name + "(" + string.Join(", ", args) + ")";
+        }
+
         // A vkGet or vkEnumerate command hands back the same object on every call, so it keeps one id.
         private static string RegisterCall(Model m, Command c, string ptrExpr, string handleType)
         {
@@ -1261,17 +1359,43 @@ namespace Brovan.Generators
             return "st." + (queried ? "RegisterQueried" : "Register") + "(" + ptrExpr + ", \"" + handleType + "\", " + ParentIdExpr(m, c, handleType) + ")";
         }
 
-        // Swapchain images end with their swapchain, not with the device vk.xml names.
         private static string ParentIdExpr(Model m, Command c, string handleType)
         {
+            if (!FindParent(m, c, handleType, out int j, out Member owner))
+                return "0u";
+            if (owner == null)
+                return "p" + j + "Id";
+
+            string structType = c.Params[j].Type;
+            return "(p" + j + " != System.IntPtr.Zero ? st.IdOf(*(System.IntPtr*)(p" + j + " + BrovVulkLayout.MemberOffset[\"" + structType + "." + owner.Name + "\"]), \"" + owner.Type + "\") : 0u)";
+        }
+
+        private static string GuestParentExpr(Model m, Command c, string handleType)
+        {
+            if (!FindParent(m, c, handleType, out int j, out Member owner))
+                return "0u";
+            string name = c.Params[j].Name;
+            return owner == null ? "(uint32_t)(uintptr_t)" + name : "(" + name + " ? (uint32_t)(uintptr_t)" + name + "->" + owner.Name + " : 0u)";
+        }
+
+        // Swapchain images end with their swapchain, not with the device vk.xml names.
+        private static bool FindParent(Model m, Command c, string handleType, out int paramIndex, out Member member)
+        {
+            paramIndex = -1;
+            member = null;
             string parentType = c.Name == "vkGetSwapchainImagesKHR" ? "VkSwapchainKHR"
                 : m.HandleParents.TryGetValue(handleType, out string declared) ? declared : null;
             if (parentType == null)
-                return "0u";
+                return false;
 
             for (int j = 0; j < c.Params.Count; j++)
+            {
                 if (c.Params[j].Type == parentType && ParamKind(m, c.Params[j]) == "HandleIn")
-                    return "p" + j + "Id";
+                {
+                    paramIndex = j;
+                    return true;
+                }
+            }
 
             for (int j = 0; j < c.Params.Count; j++)
             {
@@ -1281,10 +1405,51 @@ namespace Brovan.Generators
 
                 Member owner = s.Members.FirstOrDefault(x => x.Type == parentType && x.PtrDepth == 0 && x.ArrayLen == 1);
                 if (owner != null)
-                    return "(p" + j + " != System.IntPtr.Zero ? st.IdOf(*(System.IntPtr*)(p" + j + " + BrovVulkLayout.MemberOffset[\"" + sp.Type + "." + owner.Name + "\"]), \"" + parentType + "\") : 0u)";
+                {
+                    paramIndex = j;
+                    member = owner;
+                    return true;
+                }
             }
 
-            return "0u";
+            return false;
+        }
+
+        private static bool ReleasesMappings(Command c)
+        {
+            return c.Name == "vkDestroyDevice" || c.Name == "vkDestroyInstance";
+        }
+
+        private static bool ReleasesHandles(Model m, Command c)
+        {
+            return DestroyedHandleIndex(m, c) >= 0 || c.Name.StartsWith("vkFree", StringComparison.Ordinal) || ResetChildrenIndex(m, c) >= 0;
+        }
+
+        // Resetting a descriptor pool frees every set allocated from it.
+        private static int ResetChildrenIndex(Model m, Command c)
+        {
+            return c.Name == "vkResetDescriptorPool" ? c.Params.FindIndex(x => x.Type == "VkDescriptorPool" && ParamKind(m, x) == "HandleIn") : -1;
+        }
+
+        private static int GuestIdOutIndex(Model m, Command c)
+        {
+            return GuestIds.Contains(c.Name) ? c.Params.FindIndex(p => IsStructLenHandleArrayOut(m, p)) : -1;
+        }
+
+        private static HashSet<string> GuestIdTypes(Model m)
+        {
+            HashSet<string> types = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string n in GuestIds)
+            {
+                if (m.Commands.TryGetValue(n, out Command c) && GuestIdOutIndex(m, c) >= 0)
+                    types.Add(c.Params[GuestIdOutIndex(m, c)].Type);
+            }
+            return types;
+        }
+
+        private static string HostIdGuard(string count)
+        {
+            return "                if (!st.HasHostIds(" + count + ")) return BrovVulkConstants.VK_ERROR_OUT_OF_HOST_MEMORY;\n";
         }
 
         private static int ParamLenIndex(Command c, Param p, int i)
@@ -1411,6 +1576,7 @@ namespace Brovan.Generators
                     "                uint viId = r.ReadU32();\n" +
                     "                System.IntPtr vi = st.Lookup(viId, \"VkInstance\");\n" +
                     "                ulong gh = r.Remaining >= 8 ? r.ReadU64() : 0;\n" +
+                    HostIdGuard("1u") +
                     "                System.IntPtr surf = System.IntPtr.Zero;\n" +
                     "                int rr;\n" +
                     "                if (Brovan.Android.AndroidHost.IsActive)\n" +
@@ -1489,6 +1655,8 @@ namespace Brovan.Generators
             bool vkRes = c.Ret == "VkResult";
             string gate = vkRes ? "rr >= 0 && " : "";
             int forgetIdx = DestroyedHandleIndex(m, c);
+            bool replaced = HostReplaced.ContainsKey(c.Name);
+            string guestTimeout = null;
             for (int i = 0; i < c.Params.Count; i++)
             {
                 Param p = c.Params[i];
@@ -1502,6 +1670,8 @@ namespace Brovan.Generators
                     string esz = elemHandle ? "8" : elemStruct ? "BrovVulkLayout.StructSize[\"" + a.Type + "\"]" : ScalarWidth(m, a.Type).ToString();
                     b.Append("                uint ").Append(local).Append("c = r.ReadU32();\n");
                     b.Append("                uint ").Append(local).Append("pr = r.ReadU32();\n");
+                    if (vkRes && elemHandle)
+                        b.Append(HostIdGuard(local + "pr != 0 ? " + local + "c : 0u"));
                     b.Append("                System.IntPtr ").Append(local).Append("a = ").Append(local).Append("pr != 0 ? st.Alloc(BrovVulkGenStruct.CheckedBytes(").Append(local).Append("c, ").Append(esz).Append(")) : System.IntPtr.Zero;\n");
                     if (elemChain)
                         b.Append("                if (").Append(local).Append("pr != 0) for (uint k = 0; k < ").Append(local).Append("c; k++) *(uint*)(").Append(local).Append("a + (int)(k * (uint)(").Append(esz).Append("))) = r.ReadU32();\n");
@@ -1548,7 +1718,12 @@ namespace Brovan.Generators
                     else
                         b.Append("                ").Append(ct).Append(" ").Append(local).Append(" = (").Append(ct).Append(")r.Read").Append(w == 8 ? "U64" : "U32").Append("();\n");
                     if (IsWaitTimeoutParam(m, p))
-                        b.Append("                ").Append(local).Append(" = 0;\n");
+                    {
+                        guestTimeout = local + "t";
+                        b.Append("                ulong ").Append(guestTimeout).Append(" = ").Append(local).Append(";\n");
+                        if (!replaced)
+                            b.Append("                ").Append(local).Append(" = 0;\n");
+                    }
                     callArgs.Add(local);
                 }
                 else if (kind == "ScalarOut")
@@ -1579,6 +1754,7 @@ namespace Brovan.Generators
                     callArgs.Add("(System.IntPtr)(&" + local + ")");
                     if (vkRes)
                     {
+                        b.Append(HostIdGuard("1u"));
                         check.Add("                if (rr >= 0 && " + local + " == System.IntPtr.Zero) rr = -3;");
                         post.Add("                w.WriteU32(rr >= 0 ? " + RegisterCall(m, c, local, p.Type) + " : 0u);");
                     }
@@ -1603,7 +1779,13 @@ namespace Brovan.Generators
                     else
                         b.Append("                System.IntPtr ").Append(local).Append(" = BrovVulkGenStruct.RebuildRequired(").Append(StructId[p.Type]).Append(", r, st, \"").Append(p.Type).Append("\");\n");
                     if (p == WaitTimeoutStructParam(m, c))
-                        b.Append("                if (").Append(local).Append(" != System.IntPtr.Zero) *(ulong*)(").Append(local).Append(" + BrovVulkLayout.MemberOffset[\"").Append(p.Type).Append(".timeout\"]) = 0;\n");
+                    {
+                        string timeout = "*(ulong*)(" + local + " + BrovVulkLayout.MemberOffset[\"" + p.Type + ".timeout\"])";
+                        guestTimeout = local + "t";
+                        b.Append("                ulong ").Append(guestTimeout).Append(" = ").Append(local).Append(" != System.IntPtr.Zero ? ").Append(timeout).Append(" : 0;\n");
+                        if (!replaced)
+                            b.Append("                if (").Append(local).Append(" != System.IntPtr.Zero) ").Append(timeout).Append(" = 0;\n");
+                    }
                     callArgs.Add(local);
                 }
                 else if (kind == "StructOut")
@@ -1668,7 +1850,19 @@ namespace Brovan.Generators
                     callArgs.Add(local);
                     if (vkRes)
                         check.Add("                if (rr >= 0) for (uint k = 0; k < " + local + "n; k++) if (System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8) == System.IntPtr.Zero) { rr = -3; break; }");
-                    post.Add("                " + (vkRes ? "if (rr >= 0) " : "") + "for (uint k = 0; k < " + local + "n; k++) w.WriteU32(" + RegisterCall(m, c, "System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8)", p.Type) + ");");
+                    if (GuestIds.Contains(c.Name))
+                    {
+                        b.Append("                System.IntPtr ").Append(local).Append("ids = ").Append(local).Append("n > 0 ? st.Alloc(BrovVulkGenStruct.CheckedBytes(").Append(local).Append("n, 4)) : System.IntPtr.Zero;\n");
+                        b.Append("                if (").Append(local).Append("n > 0) r.CopyInto(").Append(local).Append("ids, (uint)BrovVulkGenStruct.CheckedBytes(").Append(local).Append("n, 4));\n");
+                        b.Append("                st.CheckGuestIds(").Append(local).Append("ids, ").Append(local).Append("n, \"").Append(p.Type).Append("\");\n");
+                        post.Add("                if (rr >= 0) st.AddGuestIds(" + local + "ids, " + local + ", " + local + "n, \"" + p.Type + "\", " + ParentIdExpr(m, c, p.Type) + ");");
+                    }
+                    else
+                    {
+                        if (vkRes)
+                            b.Append(HostIdGuard(local + "n"));
+                        post.Add("                " + (vkRes ? "if (rr >= 0) " : "") + "for (uint k = 0; k < " + local + "n; k++) w.WriteU32(" + RegisterCall(m, c, "System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8)", p.Type) + ");");
+                    }
                 }
                 else if (kind == "ArrayOut" && m.Handles.ContainsKey(p.Type) && ParamLenIndex(c, p, i) >= 0)
                 {
@@ -1676,7 +1870,10 @@ namespace Brovan.Generators
                     b.Append("                System.IntPtr ").Append(local).Append(" = p").Append(liOut).Append(" > 0 ? st.Alloc(BrovVulkGenStruct.CheckedBytes(p").Append(liOut).Append(", 8)) : System.IntPtr.Zero;\n");
                     callArgs.Add(local);
                     if (vkRes)
+                    {
+                        b.Append(HostIdGuard("p" + liOut));
                         check.Add("                if (rr >= 0) for (uint k = 0; k < p" + liOut + "; k++) if (System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8) == System.IntPtr.Zero) { rr = -3; break; }");
+                    }
                     post.Add("                " + (vkRes ? "if (rr >= 0) " : "") + "for (uint k = 0; k < p" + liOut + "; k++) w.WriteU32(" + RegisterCall(m, c, "System.Runtime.InteropServices.Marshal.ReadIntPtr(" + local + ", (int)k * 8)", p.Type) + ");");
                 }
                 else if (kind == "ArrayOut" && m.Handles.ContainsKey(p.Type))
@@ -1685,6 +1882,7 @@ namespace Brovan.Generators
                     callArgs.Add("(System.IntPtr)(&" + local + ")");
                     if (vkRes)
                     {
+                        b.Append(HostIdGuard("1u"));
                         check.Add("                if (rr >= 0 && " + local + " == System.IntPtr.Zero) rr = -3;");
                         post.Add("                w.WriteU32(rr >= 0 ? " + RegisterCall(m, c, local, p.Type) + " : 0u);");
                     }
@@ -1717,7 +1915,7 @@ namespace Brovan.Generators
                 }
             }
 
-            if (c.Name == "vkDestroyDevice" || c.Name == "vkDestroyInstance")
+            if (ReleasesMappings(c))
                 b.Append("                BrovVulkGenMemory.ReleaseMappings(st, inst);\n");
 
             // The driver indexes its own per-layout descriptor state by firstSet with no bound check of
@@ -1754,13 +1952,9 @@ namespace Brovan.Generators
                 }
             }
 
-            // Resetting a descriptor pool frees every set allocated from it.
-            if (c.Name == "vkResetDescriptorPool")
-            {
-                int poolIdx = c.Params.FindIndex(x => x.Type == "VkDescriptorPool" && ParamKind(m, x) == "HandleIn");
-                if (poolIdx >= 0)
-                    post.Add("                if (rr >= 0) st.ForgetChildren(p" + poolIdx + "Id);");
-            }
+            int resetIdx = ResetChildrenIndex(m, c);
+            if (resetIdx >= 0)
+                post.Add("                if (rr >= 0) st.ForgetChildren(p" + resetIdx + "Id);");
 
             bool early = EmitStandInHooks(c, b, post, out string guard);
 
@@ -1774,6 +1968,13 @@ namespace Brovan.Generators
             string call = HostReplaced.TryGetValue(c.Name, out string replacement)
                 ? replacement + "(st, inst, " + string.Join(", ", callArgs) + ")"
                 : "BrovVulkApi." + c.Name + "(" + string.Join(", ", callArgs) + ")";
+            if (DeferredDestroyCall(m, c) != null)
+            {
+                int parent = DeferredDestroyParentIndex(m, c, forgetIdx);
+                string defer = "st.Waits.TryDeferDestroy(" + id + "u, \"" + c.Params[forgetIdx].Type + "\", " + (parent >= 0 ? "p" + parent : "System.IntPtr.Zero") + ", p" + forgetIdx + ")";
+                guard = guard == null ? defer : "(" + guard + ") || " + defer;
+            }
+
             if (c.Ret == "void")
             {
                 head.Append("                ");
@@ -1793,6 +1994,9 @@ namespace Brovan.Generators
             else
             {
                 head.Append(early ? "                int rr = early < 0 ? early : (int)" : "                int rr = (int)").Append(call).Append(";\n");
+                // A host answer at timeout 0 is a poll, not the end of the guest's timeout.
+                if (guestTimeout != null)
+                    head.Append("                if (rr == BrovVulkConstants.VK_TIMEOUT && ").Append(guestTimeout).Append(" != 0 && !st.Waits.Waited) rr = BrovVulkConstants.VK_NOT_READY;\n");
                 foreach (string s in check) head.Append(s).Append("\n");
                 foreach (string s in post) head.Append(s).Append("\n");
                 head.Append("                return rr;\n            }\n");
@@ -2396,8 +2600,20 @@ namespace Brovan.Generators
                 if (i > 0) sig.Append(", ");
                 sig.Append(CSig(c.Params[i]));
             }
+            int idOut = GuestIdOutIndex(m, c);
+            bool guestIds = idOut >= 0;
+            string ids = guestIds ? c.Params[idOut].Name : null;
             StringBuilder b = new StringBuilder();
-            b.Append("VKAPI_ATTR ").Append(c.Ret).Append(" VKAPI_CALL ").Append(c.Name).Append("(").Append(sig).Append(")\n{\n");
+            if (GuestWrapped.Contains(c.Name) || guestIds)
+                b.Append("static ").Append(c.Ret).Append(" bvk_gen_").Append(c.Name).Append("(").Append(sig).Append(guestIds ? ", int bvk_posted" : "").Append(")\n{\n");
+            else
+                b.Append("VKAPI_ATTR ").Append(c.Ret).Append(" VKAPI_CALL ").Append(c.Name).Append("(").Append(sig).Append(")\n{\n");
+            if (guestIds)
+            {
+                b.Append("    uint32_t bvk_gn = ").Append(ids).Append(" ? ").Append(StructLenGuestExpr(c.Params[idOut].Length)).Append(" : 0;\n");
+                b.Append("    if (bvk_gn && !bvk_id_take(").Append(GuestParentExpr(m, c, c.Params[idOut].Type)).Append(", (uint32_t)(uintptr_t)").Append(c.Params[0].Name)
+                 .Append(", bvk_gn, ").Append(ids).Append(", (int)sizeof(*").Append(ids).Append("))) return VK_ERROR_OUT_OF_HOST_MEMORY;\n");
+            }
             b.Append("    bvk_rq_reset();\n");
             for (int i = 0; i < c.Params.Count; i++)
             {
@@ -2463,6 +2679,8 @@ namespace Brovan.Generators
                 else if (IsStructLenHandleArrayOut(m, p))
                 {
                     b.Append("    bvk_w_u32(").Append(p.Name).Append(" ? ").Append(StructLenGuestExpr(p.Length)).Append(" : 0);\n");
+                    if (guestIds)
+                        b.Append("    if (").Append(p.Name).Append(") for (uint32_t k = 0; k < ").Append(StructLenGuestExpr(p.Length)).Append("; k++) bvk_w_u32((uint32_t)(uintptr_t)").Append(p.Name).Append("[k]);\n");
                 }
                 else if (kind == "ChainOut")
                 {
@@ -2482,6 +2700,17 @@ namespace Brovan.Generators
                     b.Append("    bvk_rec_append(").Append(cb).Append(", BVK_").Append(c.Name).Append(");\n}\n");
                 return b.ToString();
             }
+            string release = GuestIdRelease(m, c);
+            if (PostedCommands.Contains(c.Name))
+            {
+                b.Append("    if (!bvk_post(BVK_").Append(c.Name).Append(")) { unsigned char bvk_out[32]; unsigned int bvk_outLen = 0; bvk_rq_send(BVK_").Append(c.Name).Append(", bvk_out, sizeof(bvk_out), &bvk_outLen); }\n");
+                if (release != null)
+                    b.Append("    ").Append(release).Append("\n");
+                b.Append("}\n");
+                return b.ToString();
+            }
+            if (guestIds)
+                b.Append("    if (bvk_posted && bvk_post(BVK_").Append(c.Name).Append(")) return VK_SUCCESS;\n");
             b.Append("    unsigned char bvk_out[").Append(GuestOutSize(m, c)).Append("]; unsigned int bvk_outLen = 0;\n");
             Param waitStruct = WaitTimeoutStructParam(m, c);
             if (waitStruct != null || c.Params.Any(x => IsWaitTimeoutParam(m, x)))
@@ -2491,7 +2720,7 @@ namespace Brovan.Generators
                 b.Append("    uint64_t bvk_start = GetTickCount64();\n");
                 b.Append("    for (;;)\n    {\n");
                 b.Append("        bvk_r = bvk_rq_send(BVK_").Append(c.Name).Append(", bvk_out, sizeof(bvk_out), &bvk_outLen);\n");
-                b.Append("        if ((bvk_r != VK_TIMEOUT && bvk_r != VK_NOT_READY) || bvk_timeout == 0) break;\n");
+                b.Append("        if (bvk_r != VK_NOT_READY || bvk_timeout == 0) break;\n");
                 b.Append("        if (bvk_timeout != UINT64_MAX && (GetTickCount64() - bvk_start) * 1000000ull >= bvk_timeout)\n");
                 b.Append("        {\n            if (bvk_r == VK_NOT_READY) bvk_r = VK_TIMEOUT;\n            break;\n        }\n");
                 b.Append("        Sleep(0);\n    }\n");
@@ -2532,7 +2761,8 @@ namespace Brovan.Generators
                 }
                 else if (IsStructLenHandleArrayOut(m, p))
                 {
-                    b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(") for (uint32_t k = 0; k < ").Append(StructLenGuestExpr(p.Length)).Append("; k++) { if (bvk_outLen >= bvk_off + 4) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; ").Append(p.Name).Append("[k] = (").Append(p.Type).Append(")(uintptr_t)id; } }\n");
+                    if (!guestIds)
+                        b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(") for (uint32_t k = 0; k < ").Append(StructLenGuestExpr(p.Length)).Append("; k++) { if (bvk_outLen >= bvk_off + 4) { uint32_t id; memcpy(&id, bvk_out + bvk_off, 4); bvk_off += 4; ").Append(p.Name).Append("[k] = (").Append(p.Type).Append(")(uintptr_t)id; } }\n");
                 }
                 else if (kind == "ArrayOut" && m.Handles.ContainsKey(p.Type) && ParamLenIndex(c, p, i) >= 0)
                 {
@@ -2560,6 +2790,11 @@ namespace Brovan.Generators
                     b.Append("    if (bvk_r >= 0 && ").Append(p.Name).Append(" && bvk_outLen >= bvk_off + ").Append(len).Append(") { memcpy(").Append(p.Name).Append(", bvk_out + bvk_off, ").Append(len).Append("); bvk_off += ").Append(len).Append("; }\n");
                 }
             }
+            if (guestIds)
+                b.Append("    if (bvk_r < 0 && bvk_gn) { bvk_id_release_handles(").Append(ids).Append(", bvk_gn, (int)sizeof(*").Append(ids).Append(")); for (uint32_t k = 0; k < bvk_gn; k++) bvk_handle_put(")
+                 .Append(ids).Append(", k, (int)sizeof(*").Append(ids).Append("), 0); }\n");
+            if (release != null)
+                b.Append(c.Ret == "void" ? "    " : "    if (bvk_r >= 0) ").Append(release).Append("\n");
             if (c.Name == "vkGetPhysicalDeviceMemoryProperties")
                 b.Append("    if (bvk_r >= 0 && pMemoryProperties) bvk_note_memprops(pMemoryProperties);\n");
             else if (c.Name == "vkGetPhysicalDeviceMemoryProperties2")
@@ -2573,7 +2808,42 @@ namespace Brovan.Generators
             else if (c.Ret != "void")
                 b.Append("    return (").Append(c.Ret).Append(")bvk_r;\n");
             b.Append("}\n");
+            if (guestIds && !GuestWrapped.Contains(c.Name))
+            {
+                b.Append("VKAPI_ATTR ").Append(c.Ret).Append(" VKAPI_CALL ").Append(c.Name).Append("(").Append(sig).Append(")\n{\n");
+                b.Append("    return bvk_gen_").Append(c.Name).Append("(").Append(string.Join(", ", c.Params.Select(x => x.Name))).Append(", !bvk_post_disabled());\n}\n");
+            }
             return b.ToString();
+        }
+
+        private static string GuestIdRelease(Model m, Command c)
+        {
+            HashSet<string> types = GuestIdTypes(m);
+            if (types.Count == 0)
+                return null;
+
+            int destroyed = DestroyedHandleIndex(m, c);
+            if (destroyed >= 0)
+            {
+                Param p = c.Params[destroyed];
+                if (p.Type == "VkDevice")
+                    return "bvk_id_release_device((uint32_t)(uintptr_t)" + p.Name + ");";
+                if (types.Contains(p.Type))
+                    return "bvk_id_release_handles(&" + p.Name + ", 1, (int)sizeof(" + p.Name + "));";
+                if (types.Any(t => m.HandleParents.TryGetValue(t, out string parent) && parent == p.Type))
+                    return "bvk_id_release_parent((uint32_t)(uintptr_t)" + p.Name + ");";
+                return null;
+            }
+
+            if (c.Name.StartsWith("vkFree", StringComparison.Ordinal))
+            {
+                Param freed = c.Params.FirstOrDefault(x => x.IsConst && x.PtrDepth == 1 && types.Contains(x.Type) && c.Params.Any(y => y.Name == x.Length && y.PtrDepth == 0));
+                if (freed != null)
+                    return "bvk_id_release_handles(" + freed.Name + ", (uint32_t)" + freed.Length + ", (int)sizeof(*" + freed.Name + "));";
+            }
+
+            int reset = ResetChildrenIndex(m, c);
+            return reset >= 0 ? "bvk_id_release_parent((uint32_t)(uintptr_t)" + c.Params[reset].Name + ");" : null;
         }
 
         private static int GuestOutSize(Model m, Command c)
@@ -2816,6 +3086,8 @@ namespace Brovan.Generators
             for (int i = 0; i < cmds.Count; i++)
                 gh.Append("#define BVK_").Append(cmds[i].Name).Append(" ").Append(i).Append("u\n");
             gh.Append("#define BVK_COMMAND_COUNT ").Append(cmds.Count).Append("u\n");
+            gh.Append("#define BVK_POSTED_ID 0x").Append(PostedBatchId.ToString("X")).Append("u\n");
+            gh.Append("#define BVK_GUEST_ID_BASE 0x").Append(GuestIdBase.ToString("X")).Append("u\n");
             gh.Append("#endif\n");
             WriteIfChanged(Path.Combine(GuestGenDir(vkXmlPath), "brovvulk_gen.h"), gh.ToString());
 
@@ -2868,6 +3140,8 @@ namespace Brovan.Generators
             StructId = new Dictionary<string, int>();
             for (int i = 0; i < needed.Count; i++)
                 StructId[needed[i]] = i;
+            foreach ((string Name, string Problem) bad in GuestAnswerProblems(m))
+                spc.ReportDiagnostic(Diagnostic.Create(GuestAnswerGuard, Location.None, bad.Name, bad.Problem));
             HashSet<string> exportedNames = new HashSet<string>(exported.Select(x => x.Name), StringComparer.Ordinal);
 
             StringBuilder sm = new StringBuilder();
@@ -3006,12 +3280,19 @@ namespace Brovan.Generators
             db.AppendLine("{");
             db.AppendLine("    internal static unsafe class BrovVulkGenDispatch");
             db.AppendLine("    {");
+            db.Append("        internal const uint PostedBatchId = 0x").Append(PostedBatchId.ToString("X")).AppendLine(";");
+            db.Append("        internal const uint GuestIdBase = 0x").Append(GuestIdBase.ToString("X")).AppendLine(";");
+            db.AppendLine();
             db.AppendLine("        internal static int Dispatch(uint id, GenReader r, GenBuf w, GenState st, Brovan.Core.Emulation.IGuestMemory inst)");
             db.AppendLine("        {");
             db.AppendLine("            switch (id)");
             db.AppendLine("            {");
             StringBuilder cb = new StringBuilder();
             StringBuilder pb = new StringBuilder();
+            StringBuilder deferB = new StringBuilder();
+            StringBuilder loseB = new StringBuilder();
+            StringBuilder releaseB = new StringBuilder();
+            StringBuilder guestIdB = new StringBuilder();
             StringBuilder procB = new StringBuilder();
             StringBuilder defB = new StringBuilder();
             defB.Append("LIBRARY vulkan-1\nEXPORTS\n");
@@ -3027,6 +3308,15 @@ namespace Brovan.Generators
                 if (hostCase == null)
                     continue;
                 db.Append(hostCase);
+                string deferredDestroy = DeferredDestroyCall(m, c);
+                if (deferredDestroy != null)
+                    deferB.Append("            case ").Append(i).Append("u: ").Append(deferredDestroy).Append("; return;\n");
+                if (c.ErrorCodes != null && c.ErrorCodes.Split(',').Contains("VK_ERROR_DEVICE_LOST"))
+                    loseB.Append(i).Append("u, ");
+                if (ReleasesHandles(m, c))
+                    releaseB.Append(i).Append("u, ");
+                if (GuestIds.Contains(c.Name))
+                    guestIdB.Append(i).Append("u, ");
                 cb.Append(EmitGuestTrampoline(m, c)).Append("\n");
                 if (c.Name == "vkCreateWin32SurfaceKHR")
                     pb.Append("VKAPI_ATTR VkResult VKAPI_CALL vkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32SurfaceCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface);\n");
@@ -3045,6 +3335,18 @@ namespace Brovan.Generators
             }
             pb.Append("#endif\n");
             db.AppendLine("                default: return -3;");
+            db.AppendLine("            }");
+            db.AppendLine("        }");
+            db.AppendLine();
+            db.Append("        internal static readonly System.Collections.Generic.HashSet<uint> MayLoseDevice = new System.Collections.Generic.HashSet<uint> { ").Append(loseB).AppendLine("};");
+            db.Append("        internal static readonly System.Collections.Generic.HashSet<uint> ReleasesHandles = new System.Collections.Generic.HashSet<uint> { ").Append(releaseB).AppendLine("};");
+            db.Append("        internal static readonly System.Collections.Generic.HashSet<uint> CreatesGuestIds = new System.Collections.Generic.HashSet<uint> { ").Append(guestIdB).AppendLine("};");
+            db.AppendLine();
+            db.AppendLine("        internal static void RunDeferredDestroy(uint id, System.IntPtr parent, System.IntPtr handle)");
+            db.AppendLine("        {");
+            db.AppendLine("            switch (id)");
+            db.AppendLine("            {");
+            db.Append(deferB);
             db.AppendLine("            }");
             db.AppendLine("        }");
             db.AppendLine("    }");

@@ -2,9 +2,42 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
+    // The counters are plain fields, so every caller holds BrovVulkDevice.Lock.
+    internal sealed class BrovVulkStats
+    {
+        private const int ReportInterval = 256;
+
+        private readonly string _title;
+        private readonly Action<StringBuilder> _describe;
+        private int _sinceReport;
+
+        internal readonly bool Enabled;
+
+        internal BrovVulkStats(string variable, string title, Action<StringBuilder> describe)
+        {
+            Enabled = string.Equals(Environment.GetEnvironmentVariable(variable), "1", StringComparison.Ordinal);
+            _title = title;
+            _describe = describe;
+        }
+
+        internal void Tick()
+        {
+            if (++_sinceReport < ReportInterval)
+                return;
+
+            _sinceReport = 0;
+            StringBuilder sb = new StringBuilder(_title);
+            _describe(sb);
+            Utils.LogError(sb.ToString());
+            Utils.FlushLog();
+        }
+    }
+
     internal sealed unsafe class GenReader
     {
         private byte[] _data;
@@ -31,6 +64,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public int Remaining => _len - _pos;
+
+        public int Offset => _base + _pos;
+
+        public void Skip(int n) => Take(n);
 
         public uint ReadU32() => BinaryPrimitives.ReadUInt32LittleEndian(Take(4));
 
@@ -346,6 +383,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Stack<uint> _freeKmtSlots = new Stack<uint>();
         private uint _nextKmtSlot;
         private uint _next = 1;
+        private readonly HashSet<uint> _lostDevices = new HashSet<uint>();
+        private readonly HashSet<uint> _guestIdScratch = new HashSet<uint>();
 
         // NT D3DKMT global share handles have this form.
         private const uint KmtTokenBase = 0x40000002;
@@ -354,15 +393,48 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public readonly BrovVulkWsi Wsi = new BrovVulkWsi();
         public readonly VulkanStandInState StandIns = new VulkanStandInState();
+        public readonly BrovVulkWaits Waits = new BrovVulkWaits();
 
         private readonly GenArena _arena = new GenArena();
+
+        // Generated callers check this before the driver call, so the driver makes no object that cannot get an id.
+        public bool HasHostIds(uint count) => (ulong)_next + count <= BrovVulkGenDispatch.GuestIdBase;
 
         // A handle ends with its parent, so forgetting the parent forgets everything under it.
         public uint Register(IntPtr ptr, string type, uint parent)
         {
             if (ptr == IntPtr.Zero)
                 return 0;
+            if (!HasHostIds(1))
+            {
+                Utils.LogError($"[!] BrovVulk(gen): no host handle id is left for a {type}.");
+                return 0;
+            }
+
             uint id = _next++;
+            Add(id, ptr, type, parent);
+            return id;
+        }
+
+        public unsafe void CheckGuestIds(IntPtr ids, uint count, string type)
+        {
+            _guestIdScratch.Clear();
+            for (uint k = 0; k < count; k++)
+            {
+                uint id = ((uint*)ids)[k];
+                if (id < BrovVulkGenDispatch.GuestIdBase || id == uint.MaxValue || _handles.ContainsKey(id) || !_guestIdScratch.Add(id))
+                    throw new InvalidOperationException($"BrovVulk generic: guest id 0x{id:X} for {type} is not free.");
+            }
+        }
+
+        public unsafe void AddGuestIds(IntPtr ids, IntPtr ptrs, uint count, string type, uint parent)
+        {
+            for (uint k = 0; k < count; k++)
+                Add(((uint*)ids)[k], ((IntPtr*)ptrs)[k], type, parent);
+        }
+
+        private void Add(uint id, IntPtr ptr, string type, uint parent)
+        {
             _handles[id] = (ptr, type, parent);
             _ids[(ptr, type)] = id;
 
@@ -375,8 +447,29 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 siblings.Add(id);
             }
+        }
 
-            return id;
+        public bool HasLostDevice => _lostDevices.Count != 0;
+
+        public void MarkDeviceLost(uint deviceId)
+        {
+            if (_handles.TryGetValue(deviceId, out (IntPtr Ptr, string Type, uint Parent) e) && e.Type == "VkDevice")
+                _lostDevices.Add(deviceId);
+        }
+
+        public bool IsDeviceLost(uint handleId)
+        {
+            uint id = handleId;
+            for (int depth = 0; depth < 4 && id != 0; depth++)
+            {
+                if (!_handles.TryGetValue(id, out (IntPtr Ptr, string Type, uint Parent) e))
+                    return false;
+                if (e.Type == "VkDevice")
+                    return _lostDevices.Contains(id);
+                id = e.Parent;
+            }
+
+            return false;
         }
 
         public uint RegisterQueried(IntPtr ptr, string type, uint parent)
@@ -389,6 +482,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public uint IdOf(IntPtr ptr, string type) => ptr != IntPtr.Zero && _ids.TryGetValue((ptr, type), out uint id) ? id : 0;
+
+        public IntPtr InstanceOfDevice(IntPtr device)
+        {
+            uint id = IdOf(device, "VkDevice");
+            for (int depth = 0; depth < 2 && id != 0; depth++)
+                id = _handles.TryGetValue(id, out (IntPtr Ptr, string Type, uint Parent) e) ? e.Parent : 0;
+
+            return id != 0 && _handles.TryGetValue(id, out (IntPtr Ptr, string Type, uint Parent) instance) && instance.Type == "VkInstance"
+                ? instance.Ptr : IntPtr.Zero;
+        }
 
         // A driver may dereference a required handle without checking it.
         public IntPtr LookupRequired(uint id, string type)
@@ -444,6 +547,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     {
                         _devicePhysical.Remove(e.Ptr);
                         _win32MemoryDevices.Remove(e.Ptr);
+                        _lostDevices.Remove(next);
                     }
                     else if (e.Type == "VkSwapchainKHR" || e.Type == "VkSurfaceKHR")
                         Wsi.Forget(e.Ptr, e.Type);

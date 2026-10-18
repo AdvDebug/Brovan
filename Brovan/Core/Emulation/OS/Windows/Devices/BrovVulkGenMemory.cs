@@ -44,6 +44,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (hasCi == 0)
                 return VkErrorInitializationFailed;
             IntPtr ci = BrovVulkGenStruct.Rebuild(createInfoSid, r, st);
+            if (!st.HasHostIds(1))
+                return BrovVulkConstants.VK_ERROR_OUT_OF_HOST_MEMORY;
 
             int standIns = VulkanStandIns.StripDeviceFeatures(st, pd, ci);
             bool win32Memory = EnablesExtension(ci, ExternalMemoryWin32Name);
@@ -165,6 +167,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong bounceSize = r.ReadU64();
             // The import path rewrites allocationSize, so the guest's own size is taken first.
             ulong requested = *(ulong*)(ai + 16);
+            if (!st.HasHostIds(1))
+                return BrovVulkConstants.VK_ERROR_OUT_OF_HOST_MEMORY;
 
             int translated = TranslateExternalMemory(st, inst, device, ai, out bool external, out uint exportTypes, out SafeHandle? shared);
             if (translated < 0)
@@ -580,10 +584,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         private static class ImportStats
         {
-            private const int ReportInterval = 256;
+            private static readonly BrovVulkStats Log = new BrovVulkStats("BROVVULK_IMPORT_STATS", "BrovVulk import stats:", Describe);
 
-            internal static readonly bool Enabled =
-                string.Equals(Environment.GetEnvironmentVariable("BROVVULK_IMPORT_STATS"), "1", StringComparison.Ordinal);
+            internal static bool Enabled => Log.Enabled;
 
             private static readonly int[] Counts = new int[Enum.GetValues<ImportOutcome>().Length];
             private static readonly ulong[] Bytes = new ulong[Enum.GetValues<ImportOutcome>().Length];
@@ -591,7 +594,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             private static long _syncCalls;
             private static long _syncMappings;
             private static ulong _syncBytes;
-            private static int _sinceReport;
 
             internal static void Record(ImportOutcome outcome, ulong size)
             {
@@ -600,7 +602,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Counts[(int)outcome]++;
                 Bytes[(int)outcome] += size;
-                Tick();
+                Log.Tick();
             }
 
             internal static void RecordSync(int mappings, ulong bytes)
@@ -611,21 +613,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 _syncCalls++;
                 _syncMappings += mappings;
                 _syncBytes += bytes;
-                Tick();
+                Log.Tick();
             }
 
-            private static void Tick()
+            private static void Describe(StringBuilder sb)
             {
-                if (++_sinceReport < ReportInterval)
-                    return;
-
-                _sinceReport = 0;
-                Report();
-            }
-
-            private static void Report()
-            {
-                StringBuilder sb = new StringBuilder("BrovVulk import stats:");
                 for (int i = 0; i < Counts.Length; i++)
                 {
                     if (Counts[i] == 0)
@@ -643,9 +635,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (_syncCalls != 0)
                     sb.Append(" avgPerSubmit=").Append((_syncBytes / (ulong)_syncCalls) >> 10).Append(" KB");
-
-                Utils.LogError(sb.ToString());
-                Utils.FlushLog();
             }
         }
     }

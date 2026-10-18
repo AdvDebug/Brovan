@@ -4240,6 +4240,8 @@ namespace Brovan.Core.Emulation
             if (!Disposed)
             {
                 WinHelper?.AfdRequests.Dispose();
+                if (WinHelper != null)
+                    OS.Windows.WinSysHelper.EndBrovVulkWaits();
 
                 if (_emulator != null)
                 {

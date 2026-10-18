@@ -59,15 +59,28 @@ static BVK_TLS unsigned char* bvk_rq;
 static BVK_TLS unsigned int bvk_rqcap;
 static BVK_TLS unsigned int bvk_rqlen;
 
+static int bvk_grow(void** p, uint32_t* cap, uint32_t need, size_t elem, uint32_t first)
+{
+    if (need <= *cap)
+        return 1;
+    uint32_t nc = *cap ? *cap : first;
+    while (nc < need)
+    {
+        if (nc > 0x40000000u)
+            return 0;
+        nc *= 2u;
+    }
+    void* np = realloc(*p, (size_t)nc * elem);
+    if (!np)
+        return 0;
+    *p = np;
+    *cap = nc;
+    return 1;
+}
+
 static void bvk_rq_grow(unsigned int need)
 {
-    if (need <= bvk_rqcap)
-        return;
-    unsigned int nc = bvk_rqcap ? bvk_rqcap : 8192u;
-    while (nc < need)
-        nc *= 2u;
-    unsigned char* nb = (unsigned char*)realloc(bvk_rq, nc);
-    if (nb) { bvk_rq = nb; bvk_rqcap = nc; }
+    bvk_grow((void**)&bvk_rq, &bvk_rqcap, need, 1, 8192u);
 }
 
 static void bvk_rq_reset(void)
@@ -122,11 +135,24 @@ static BVK_INLINE uint32_t bvk_handle_at(const unsigned char* p, uint32_t k, int
     return nsize == 8 ? (uint32_t)(*(const uint64_t*)e) : (uint32_t)(uintptr_t)(*(void* const*)e);
 }
 
+static BVK_INLINE void bvk_handle_put(void* p, uint32_t k, int nsize, uint32_t id)
+{
+    unsigned char* e = (unsigned char*)p + (size_t)k * (size_t)nsize;
+    if (nsize == 8)
+        *(uint64_t*)e = id;
+    else
+        *(void**)e = (void*)(uintptr_t)id;
+}
+
+static void bvk_post_flush(void);
+
 static int bvk_rq_send(uint32_t cmd, void* out, uint32_t outCap, uint32_t* outLen)
 {
     HANDLE h = brov_dev();
     if (h == INVALID_HANDLE_VALUE)
         return VK_ERROR_INITIALIZATION_FAILED;
+
+    bvk_post_flush();
 
     uint32_t plen = bvk_rqlen - BVK_HDR;
     memcpy(bvk_rq + 0, &cmd, 4);
@@ -482,15 +508,9 @@ static bvk_rec_slot* bvk_rec_slot_for(VkCommandBuffer cb)
     return s;
 }
 
-static void bvk_rec_slot_grow(bvk_rec_slot* s, unsigned int need)
+static int bvk_rec_slot_grow(bvk_rec_slot* s, unsigned int need)
 {
-    if (need <= s->cap)
-        return;
-    unsigned int nc = s->cap ? s->cap : 65536u;
-    while (nc < need)
-        nc *= 2u;
-    unsigned char* nb = (unsigned char*)realloc(s->buf, nc);
-    if (nb) { s->buf = nb; s->cap = nc; }
+    return bvk_grow((void**)&s->buf, &s->cap, need, 1, 65536u);
 }
 
 static void bvk_rec_begin(VkCommandBuffer cb)
@@ -506,10 +526,9 @@ static void bvk_rec_begin(VkCommandBuffer cb)
     ReleaseSRWLockExclusive(&bvk_rec_lock);
 }
 
-static int bvk_rec_dispatch_slot(bvk_rec_slot* s)
+static int bvk_slot_send(bvk_rec_slot* s, uint32_t cmd)
 {
     uint32_t plen = s->len - BVK_HDR;
-    uint32_t cmd = BVK_BATCH_ID;
     memcpy(s->buf + 0, &cmd, 4);
     memcpy(s->buf + 4, &plen, 4);
     memcpy(s->buf + BVK_HDR, &s->count, 4);
@@ -528,6 +547,79 @@ static int bvk_rec_dispatch_slot(bvk_rec_slot* s)
     return r;
 }
 
+// A posted sub-command carries its length, so the host can step over one that fails.
+static int bvk_slot_put(bvk_rec_slot* s, uint32_t id, int withLength)
+{
+    unsigned int args = bvk_rqlen - BVK_HDR;
+    if (!bvk_rec_slot_grow(s, s->len + 4 + (withLength ? 4 : 0) + args))
+        return 0;
+    memcpy(s->buf + s->len, &id, 4);
+    s->len += 4;
+    if (withLength)
+    {
+        memcpy(s->buf + s->len, &args, 4);
+        s->len += 4;
+    }
+    memcpy(s->buf + s->len, bvk_rq + BVK_HDR, args);
+    s->len += args;
+    s->count++;
+    return 1;
+}
+
+static SRWLOCK bvk_post_lock = SRWLOCK_INIT;
+static bvk_rec_slot bvk_posted;
+static int bvk_post_off = -1;
+
+static int bvk_env_flag(const char* name, int* cached)
+{
+    if (*cached < 0)
+    {
+        char v[4];
+        DWORD n = GetEnvironmentVariableA(name, v, sizeof(v));
+        *cached = n == 1 && v[0] == '1';
+    }
+    return *cached;
+}
+
+static int bvk_post_disabled(void)
+{
+    return bvk_env_flag("BROVVULK_NO_POST", &bvk_post_off);
+}
+
+// The lock stays held until the posted batch returns, so no ioctl reaches the host ahead of earlier posted work.
+static void bvk_post_flush(void)
+{
+    AcquireSRWLockExclusive(&bvk_post_lock);
+    if (bvk_posted.count != 0)
+        bvk_slot_send(&bvk_posted, BVK_POSTED_ID);
+    ReleaseSRWLockExclusive(&bvk_post_lock);
+}
+
+static int bvk_post(uint32_t id)
+{
+    if (bvk_post_disabled())
+        return 0;
+
+    AcquireSRWLockExclusive(&bvk_post_lock);
+    if (bvk_posted.len < BVK_HDR + 4 && bvk_rec_slot_grow(&bvk_posted, BVK_HDR + 4))
+    {
+        bvk_posted.len = BVK_HDR + 4;
+        bvk_posted.count = 0;
+    }
+    unsigned int args = bvk_rqlen - BVK_HDR;
+    if (bvk_posted.count != 0 && (uint64_t)bvk_posted.len + 8 + args > BVK_BATCH_LIMIT)
+        bvk_slot_send(&bvk_posted, BVK_POSTED_ID);
+    int posted = bvk_posted.len >= BVK_HDR + 4 && bvk_slot_put(&bvk_posted, id, 1);
+    ReleaseSRWLockExclusive(&bvk_post_lock);
+    return posted;
+}
+
+static int bvk_rec_dispatch_slot(bvk_rec_slot* s)
+{
+    bvk_post_flush();
+    return bvk_slot_send(s, BVK_BATCH_ID);
+}
+
 static void bvk_rec_append(VkCommandBuffer cb, uint32_t id)
 {
     AcquireSRWLockExclusive(&bvk_rec_lock);
@@ -537,12 +629,7 @@ static void bvk_rec_append(VkCommandBuffer cb, uint32_t id)
         unsigned int args = bvk_rqlen - BVK_HDR;
         if (s->count != 0 && (uint64_t)s->len + 4 + args > BVK_BATCH_LIMIT)
             bvk_rec_dispatch_slot(s);
-        bvk_rec_slot_grow(s, s->len + 4 + args);
-        memcpy(s->buf + s->len, &id, 4);
-        s->len += 4;
-        memcpy(s->buf + s->len, bvk_rq + BVK_HDR, args);
-        s->len += args;
-        s->count++;
+        bvk_slot_put(s, id, 0);
     }
     ReleaseSRWLockExclusive(&bvk_rec_lock);
 }
@@ -561,7 +648,581 @@ static int bvk_rec_flush(VkCommandBuffer cb)
     return r;
 }
 
+typedef struct
+{
+    uint32_t* keys;
+    void** vals;
+    uint32_t cap, n, reserved;
+} bvk_map;
+
+static uint32_t bvk_map_slot(const bvk_map* m, uint32_t key)
+{
+    return (key * 2654435761u) & (m->cap - 1);
+}
+
+static void* bvk_map_get(const bvk_map* m, uint32_t key)
+{
+    if (!m->cap || !key)
+        return NULL;
+    for (uint32_t i = bvk_map_slot(m, key);; i = (i + 1) & (m->cap - 1))
+    {
+        if (m->keys[i] == key)
+            return m->vals[i];
+        if (!m->keys[i])
+            return NULL;
+    }
+}
+
+static void bvk_map_insert(bvk_map* m, uint32_t key, void* val)
+{
+    uint32_t i = bvk_map_slot(m, key);
+    while (m->keys[i] && m->keys[i] != key)
+        i = (i + 1) & (m->cap - 1);
+    if (!m->keys[i])
+        m->n++;
+    m->keys[i] = key;
+    m->vals[i] = val;
+}
+
+static int bvk_map_grow(bvk_map* m)
+{
+    if ((m->n + m->reserved + 1) * 2 <= m->cap)
+        return 1;
+    bvk_map old = *m;
+    uint32_t nc = old.cap ? old.cap * 2u : 64u;
+    uint32_t* nk = (uint32_t*)calloc(nc, sizeof(uint32_t));
+    void** nv = (void**)calloc(nc, sizeof(void*));
+    if (!nk || !nv)
+    {
+        free(nk);
+        free(nv);
+        return 0;
+    }
+    m->keys = nk;
+    m->vals = nv;
+    m->cap = nc;
+    m->n = 0;
+    for (uint32_t i = 0; i < old.cap; i++)
+    {
+        if (old.keys[i])
+            bvk_map_insert(m, old.keys[i], old.vals[i]);
+    }
+    free(old.keys);
+    free(old.vals);
+    return 1;
+}
+
+static int bvk_map_put(bvk_map* m, uint32_t key, void* val)
+{
+    if (!key || !bvk_map_grow(m))
+        return 0;
+    bvk_map_insert(m, key, val);
+    return 1;
+}
+
+static int bvk_map_reserve(bvk_map* m)
+{
+    if (!bvk_map_grow(m))
+        return 0;
+    m->reserved++;
+    return 1;
+}
+
+static void bvk_map_unreserve(bvk_map* m)
+{
+    m->reserved--;
+}
+
+static int bvk_map_put_reserved(bvk_map* m, uint32_t key, void* val)
+{
+    if (!key)
+        return 0;
+    m->reserved--;
+    bvk_map_insert(m, key, val);
+    return 1;
+}
+
+static void* bvk_map_del(bvk_map* m, uint32_t key)
+{
+    if (!m->cap || !key)
+        return NULL;
+    uint32_t i = bvk_map_slot(m, key);
+    while (m->keys[i] != key)
+    {
+        if (!m->keys[i])
+            return NULL;
+        i = (i + 1) & (m->cap - 1);
+    }
+    void* val = m->vals[i];
+    m->n--;
+    for (uint32_t j = (i + 1) & (m->cap - 1); m->keys[j]; j = (j + 1) & (m->cap - 1))
+    {
+        uint32_t home = bvk_map_slot(m, m->keys[j]);
+        if (((j - home) & (m->cap - 1)) >= ((j - i) & (m->cap - 1)))
+        {
+            m->keys[i] = m->keys[j];
+            m->vals[i] = m->vals[j];
+            i = j;
+        }
+    }
+    m->keys[i] = 0;
+    m->vals[i] = NULL;
+    return val;
+}
+
+#define BVK_GUEST_ID_LIMIT 0x7FFFFFF0u
+#define BVK_NO_ENTRY 0xFFFFFFFFu
+
+// The guest picks ids from BVK_GUEST_ID_BASE up so that it can post a creation. The host keeps its ids below.
+typedef struct
+{
+    uint32_t parent;
+    uint32_t prev, next;
+    uint32_t live;
+} bvk_id_entry;
+
+typedef struct
+{
+    uint32_t device;
+    uint32_t head;
+} bvk_id_chain;
+
+static SRWLOCK bvk_id_lock = SRWLOCK_INIT;
+static bvk_id_entry* bvk_ids;
+static uint32_t bvk_id_count, bvk_id_cap;
+static uint32_t* bvk_id_free;
+static uint32_t bvk_id_nfree, bvk_id_freecap;
+static bvk_map bvk_id_chains;
+
+static void bvk_id_unlink(uint32_t idx)
+{
+    bvk_id_entry* e = &bvk_ids[idx];
+    if (e->prev != BVK_NO_ENTRY)
+        bvk_ids[e->prev].next = e->next;
+    else
+    {
+        bvk_id_chain* c = (bvk_id_chain*)bvk_map_get(&bvk_id_chains, e->parent);
+        if (c)
+            c->head = e->next;
+    }
+    if (e->next != BVK_NO_ENTRY)
+        bvk_ids[e->next].prev = e->prev;
+    e->live = 0;
+    bvk_id_free[bvk_id_nfree++] = idx;
+}
+
+static int bvk_id_take(uint32_t parent, uint32_t device, uint32_t n, void* handles, int nsize)
+{
+    uint32_t key = parent ? parent : device;
+    bvk_id_chain* c = NULL;
+    AcquireSRWLockExclusive(&bvk_id_lock);
+    if (key && n <= BVK_GUEST_ID_LIMIT - bvk_id_count + bvk_id_nfree
+        && bvk_grow((void**)&bvk_ids, &bvk_id_cap, bvk_id_count + n, sizeof(bvk_id_entry), 256u)
+        && bvk_grow((void**)&bvk_id_free, &bvk_id_freecap, bvk_id_count + n, sizeof(uint32_t), 256u))
+    {
+        c = (bvk_id_chain*)bvk_map_get(&bvk_id_chains, key);
+        if (!c && (c = (bvk_id_chain*)malloc(sizeof(bvk_id_chain))) != NULL)
+        {
+            c->device = device;
+            c->head = BVK_NO_ENTRY;
+            if (!bvk_map_put(&bvk_id_chains, key, c))
+            {
+                free(c);
+                c = NULL;
+            }
+        }
+    }
+    if (c)
+    {
+        for (uint32_t k = 0; k < n; k++)
+        {
+            uint32_t idx = bvk_id_nfree != 0 ? bvk_id_free[--bvk_id_nfree] : bvk_id_count++;
+            bvk_id_entry* e = &bvk_ids[idx];
+            e->parent = key;
+            e->prev = BVK_NO_ENTRY;
+            e->next = c->head;
+            e->live = 1;
+            if (c->head != BVK_NO_ENTRY)
+                bvk_ids[c->head].prev = idx;
+            c->head = idx;
+            bvk_handle_put(handles, k, nsize, BVK_GUEST_ID_BASE + idx);
+        }
+    }
+    ReleaseSRWLockExclusive(&bvk_id_lock);
+    return c != NULL;
+}
+
+static void bvk_id_release_handles(const void* handles, uint32_t n, int nsize)
+{
+    if (!handles)
+        return;
+    AcquireSRWLockExclusive(&bvk_id_lock);
+    for (uint32_t k = 0; k < n; k++)
+    {
+        uint32_t id = bvk_handle_at((const unsigned char*)handles, k, nsize);
+        if (id < BVK_GUEST_ID_BASE)
+            continue;
+        uint32_t idx = id - BVK_GUEST_ID_BASE;
+        if (idx < bvk_id_count && bvk_ids[idx].live)
+            bvk_id_unlink(idx);
+    }
+    ReleaseSRWLockExclusive(&bvk_id_lock);
+}
+
+static void bvk_id_drop_chain(uint32_t key, bvk_id_chain* c)
+{
+    for (uint32_t idx = c->head; idx != BVK_NO_ENTRY; idx = bvk_ids[idx].next)
+    {
+        bvk_ids[idx].live = 0;
+        bvk_id_free[bvk_id_nfree++] = idx;
+    }
+    free(bvk_map_del(&bvk_id_chains, key));
+}
+
+static void bvk_id_release_parent(uint32_t parent)
+{
+    AcquireSRWLockExclusive(&bvk_id_lock);
+    bvk_id_chain* c = (bvk_id_chain*)bvk_map_get(&bvk_id_chains, parent);
+    if (c)
+        bvk_id_drop_chain(parent, c);
+    ReleaseSRWLockExclusive(&bvk_id_lock);
+}
+
+static void bvk_id_release_device(uint32_t device)
+{
+    AcquireSRWLockExclusive(&bvk_id_lock);
+    for (uint32_t i = 0; i < bvk_id_chains.cap; i++)
+    {
+        uint32_t key = bvk_id_chains.keys[i];
+        bvk_id_chain* c = key ? (bvk_id_chain*)bvk_id_chains.vals[i] : NULL;
+        if (!c || c->device != device)
+            continue;
+        bvk_id_drop_chain(key, c);
+        i--;
+    }
+    ReleaseSRWLockExclusive(&bvk_id_lock);
+}
+
 #include "obj/generated/brovvulk_gen.c"
+
+// Vulkan does not fail an allocation that fits the totals of a pool made without FREE_DESCRIPTOR_SET_BIT, except
+// for lack of memory, so the guest can post such an allocation.
+#define BVK_PLAIN_TYPES ((uint32_t)VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT + 1u)
+#define BVK_RAISE_FLOOR 4u
+
+typedef struct
+{
+    VkDevice device;
+    uint32_t counts[BVK_PLAIN_TYPES];
+} bvk_layout_rec;
+
+typedef struct
+{
+    VkDevice device;
+    int modelable, modeled;
+    uint32_t maxSets, sets;
+    uint32_t total[BVK_PLAIN_TYPES];
+    uint32_t used[BVK_PLAIN_TYPES];
+    uint64_t extra;
+} bvk_pool_rec;
+
+static SRWLOCK bvk_desc_lock = SRWLOCK_INIT;
+static bvk_map bvk_layouts;
+static bvk_map bvk_pools;
+static uint64_t bvk_raise_left;
+static int bvk_raise_ready;
+static int bvk_raise_off = -1;
+
+static uint32_t bvk_add_sat(uint32_t a, uint64_t b)
+{
+    uint64_t s = (uint64_t)a + b;
+    return s > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)s;
+}
+
+// The shared lock is enough for the pool writes, because Vulkan makes the caller synchronize access to the pool.
+static int bvk_desc_account(const VkDescriptorSetAllocateInfo* info, int charge)
+{
+    uint64_t need[BVK_PLAIN_TYPES] = { 0 };
+    int fits = 0;
+    AcquireSRWLockShared(&bvk_desc_lock);
+    bvk_pool_rec* pool = (bvk_pool_rec*)bvk_map_get(&bvk_pools, (uint32_t)(uintptr_t)info->descriptorPool);
+    if (pool && pool->modeled)
+    {
+        int known = !info->pNext && info->pSetLayouts;
+        for (uint32_t k = 0; known && k < info->descriptorSetCount; k++)
+        {
+            bvk_layout_rec* layout = (bvk_layout_rec*)bvk_map_get(&bvk_layouts, (uint32_t)(uintptr_t)info->pSetLayouts[k]);
+            if (!layout)
+                known = 0;
+            else
+                for (uint32_t t = 0; t < BVK_PLAIN_TYPES; t++)
+                    need[t] += layout->counts[t];
+        }
+
+        fits = known && (uint64_t)pool->sets + info->descriptorSetCount <= pool->maxSets;
+        for (uint32_t t = 0; fits && t < BVK_PLAIN_TYPES; t++)
+            fits = (uint64_t)pool->used[t] + need[t] <= pool->total[t];
+
+        if (charge && !known)
+            pool->modeled = 0;
+        else if (charge)
+        {
+            pool->sets = bvk_add_sat(pool->sets, info->descriptorSetCount);
+            for (uint32_t t = 0; t < BVK_PLAIN_TYPES; t++)
+                pool->used[t] = bvk_add_sat(pool->used[t], need[t]);
+        }
+    }
+    ReleaseSRWLockShared(&bvk_desc_lock);
+    return fits;
+}
+
+static int bvk_raise_disabled(void)
+{
+    return bvk_post_disabled() || bvk_env_flag("BROVVULK_NO_POOL_RAISE", &bvk_raise_off);
+}
+
+static void bvk_raise_init(void)
+{
+    if (bvk_raise_ready)
+        return;
+    MEMORYSTATUSEX ms;
+    ms.dwLength = sizeof(ms);
+    bvk_raise_left = GlobalMemoryStatusEx(&ms) ? (ms.ullTotalPhys >> 20) * 16u : 0;
+    bvk_raise_ready = 1;
+}
+
+static uint64_t bvk_desc_extra(const bvk_pool_rec* pool, const uint32_t* count, uint64_t sets, uint64_t limit)
+{
+    uint64_t extra = 0;
+    for (uint32_t t = 0; t < BVK_PLAIN_TYPES; t++)
+    {
+        uint64_t want = sets * count[t];
+        if (want <= pool->total[t])
+            continue;
+        if (want - pool->total[t] > limit - extra)
+            return limit + 1;
+        extra += want - pool->total[t];
+    }
+    return extra;
+}
+
+// Vulkan allows an allocation past the pool totals to succeed, so the driver gets totals raised to one set count for
+// every type in use. A type sized under one per set gets BVK_RAISE_FLOOR per set for layouts made after the pool.
+static uint64_t bvk_desc_raise(VkDevice device, bvk_pool_rec* pool)
+{
+    uint32_t count[BVK_PLAIN_TYPES] = { 0 };
+    for (uint32_t i = 0; i < bvk_layouts.cap; i++)
+    {
+        bvk_layout_rec* layout = bvk_layouts.keys[i] ? (bvk_layout_rec*)bvk_layouts.vals[i] : NULL;
+        for (uint32_t t = 0; layout && layout->device == device && t < BVK_PLAIN_TYPES; t++)
+            if (layout->counts[t] > count[t])
+                count[t] = layout->counts[t];
+    }
+
+    uint64_t have = pool->maxSets;
+    for (uint32_t t = 0; t < BVK_PLAIN_TYPES; t++)
+    {
+        if (!pool->total[t])
+            count[t] = 0;
+        else if (count[t] && count[t] < BVK_RAISE_FLOOR && pool->total[t] < pool->maxSets)
+            count[t] = BVK_RAISE_FLOOR;
+        if (count[t] && pool->total[t] / count[t] < have)
+            have = pool->total[t] / count[t];
+    }
+
+    bvk_raise_init();
+    uint64_t lo = have, hi = pool->maxSets;
+    while (lo < hi)
+    {
+        uint64_t mid = lo + (hi - lo + 1) / 2;
+        if (bvk_desc_extra(pool, count, mid, bvk_raise_left) <= bvk_raise_left)
+            lo = mid;
+        else
+            hi = mid - 1;
+    }
+    if (lo <= have)
+        return 0;
+
+    uint64_t extra = bvk_desc_extra(pool, count, lo, bvk_raise_left);
+    for (uint32_t t = 0; t < BVK_PLAIN_TYPES; t++)
+        if (lo * count[t] > pool->total[t])
+            pool->total[t] = lo * count[t] > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)(lo * count[t]);
+    bvk_raise_left -= extra;
+    return extra;
+}
+
+static void bvk_desc_drop_device(VkDevice device)
+{
+    AcquireSRWLockExclusive(&bvk_desc_lock);
+    for (uint32_t i = 0; i < bvk_pools.cap; i++)
+    {
+        uint32_t key = bvk_pools.keys[i];
+        bvk_pool_rec* pool = key ? (bvk_pool_rec*)bvk_pools.vals[i] : NULL;
+        if (!pool || pool->device != device)
+            continue;
+        bvk_map_del(&bvk_pools, key);
+        bvk_raise_left += pool->extra;
+        free(pool);
+        i--;
+    }
+    for (uint32_t i = 0; i < bvk_layouts.cap; i++)
+    {
+        uint32_t key = bvk_layouts.keys[i];
+        bvk_layout_rec* layout = key ? (bvk_layout_rec*)bvk_layouts.vals[i] : NULL;
+        if (!layout || layout->device != device)
+            continue;
+        free(bvk_map_del(&bvk_layouts, key));
+        i--;
+    }
+    ReleaseSRWLockExclusive(&bvk_desc_lock);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(VkDevice device, const VkDescriptorSetLayoutCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkDescriptorSetLayout *pSetLayout)
+{
+    VkResult r = bvk_gen_vkCreateDescriptorSetLayout(device, pCreateInfo, pAllocator, pSetLayout);
+    if (r < 0 || !pCreateInfo || !pSetLayout || pCreateInfo->pNext || pCreateInfo->flags)
+        return r;
+
+    bvk_layout_rec* layout = (bvk_layout_rec*)calloc(1, sizeof(bvk_layout_rec));
+    if (!layout)
+        return r;
+    layout->device = device;
+    for (uint32_t i = 0; i < pCreateInfo->bindingCount && pCreateInfo->pBindings; i++)
+    {
+        const VkDescriptorSetLayoutBinding* b = &pCreateInfo->pBindings[i];
+        if ((uint32_t)b->descriptorType >= BVK_PLAIN_TYPES)
+        {
+            free(layout);
+            return r;
+        }
+        layout->counts[b->descriptorType] = bvk_add_sat(layout->counts[b->descriptorType], b->descriptorCount);
+    }
+
+    AcquireSRWLockExclusive(&bvk_desc_lock);
+    if (!bvk_map_put(&bvk_layouts, (uint32_t)(uintptr_t)*pSetLayout, layout))
+        free(layout);
+    ReleaseSRWLockExclusive(&bvk_desc_lock);
+    return r;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorSetLayout(VkDevice device, VkDescriptorSetLayout descriptorSetLayout, const VkAllocationCallbacks *pAllocator)
+{
+    bvk_gen_vkDestroyDescriptorSetLayout(device, descriptorSetLayout, pAllocator);
+    AcquireSRWLockExclusive(&bvk_desc_lock);
+    free(bvk_map_del(&bvk_layouts, (uint32_t)(uintptr_t)descriptorSetLayout));
+    ReleaseSRWLockExclusive(&bvk_desc_lock);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorPool(VkDevice device, const VkDescriptorPoolCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkDescriptorPool *pDescriptorPool)
+{
+    bvk_pool_rec* pool = pCreateInfo && pDescriptorPool ? (bvk_pool_rec*)calloc(1, sizeof(bvk_pool_rec)) : NULL;
+    if (!pool)
+        return bvk_gen_vkCreateDescriptorPool(device, pCreateInfo, pAllocator, pDescriptorPool);
+    pool->device = device;
+    pool->maxSets = pCreateInfo->maxSets;
+    pool->modelable = pCreateInfo->flags == 0 && !pCreateInfo->pNext;
+    for (uint32_t i = 0; pool->modelable && i < pCreateInfo->poolSizeCount && pCreateInfo->pPoolSizes; i++)
+    {
+        const VkDescriptorPoolSize* s = &pCreateInfo->pPoolSizes[i];
+        if ((uint32_t)s->type >= BVK_PLAIN_TYPES)
+            pool->modelable = 0;
+        else
+            pool->total[s->type] = bvk_add_sat(pool->total[s->type], s->descriptorCount);
+    }
+    pool->modeled = pool->modelable;
+
+    uint32_t asked[BVK_PLAIN_TYPES];
+    memcpy(asked, pool->total, sizeof(asked));
+    AcquireSRWLockExclusive(&bvk_desc_lock);
+    int slot = bvk_map_reserve(&bvk_pools);
+    if (slot && pool->modelable && !bvk_raise_disabled())
+        pool->extra = bvk_desc_raise(device, pool);
+    ReleaseSRWLockExclusive(&bvk_desc_lock);
+
+    VkResult r = VK_ERROR_OUT_OF_HOST_MEMORY;
+    if (pool->extra)
+    {
+        VkDescriptorPoolSize sizes[BVK_PLAIN_TYPES];
+        uint32_t n = 0;
+        for (uint32_t t = 0; t < BVK_PLAIN_TYPES; t++)
+            if (pool->total[t])
+            {
+                sizes[n].type = (VkDescriptorType)t;
+                sizes[n++].descriptorCount = pool->total[t];
+            }
+        VkDescriptorPoolCreateInfo raised = *pCreateInfo;
+        raised.poolSizeCount = n;
+        raised.pPoolSizes = sizes;
+        r = bvk_gen_vkCreateDescriptorPool(device, &raised, pAllocator, pDescriptorPool);
+        if (r < 0)
+        {
+            AcquireSRWLockExclusive(&bvk_desc_lock);
+            bvk_raise_left += pool->extra;
+            ReleaseSRWLockExclusive(&bvk_desc_lock);
+            pool->extra = 0;
+            memcpy(pool->total, asked, sizeof(asked));
+        }
+    }
+    if (!pool->extra)
+        r = bvk_gen_vkCreateDescriptorPool(device, pCreateInfo, pAllocator, pDescriptorPool);
+
+    AcquireSRWLockExclusive(&bvk_desc_lock);
+    if (slot && r >= 0 && bvk_map_put_reserved(&bvk_pools, (uint32_t)(uintptr_t)*pDescriptorPool, pool))
+        pool = NULL;
+    else
+    {
+        if (slot)
+            bvk_map_unreserve(&bvk_pools);
+        bvk_raise_left += pool->extra;
+    }
+    ReleaseSRWLockExclusive(&bvk_desc_lock);
+    free(pool);
+    return r;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool, const VkAllocationCallbacks *pAllocator)
+{
+    bvk_gen_vkDestroyDescriptorPool(device, descriptorPool, pAllocator);
+    AcquireSRWLockExclusive(&bvk_desc_lock);
+    bvk_pool_rec* pool = (bvk_pool_rec*)bvk_map_del(&bvk_pools, (uint32_t)(uintptr_t)descriptorPool);
+    if (pool)
+        bvk_raise_left += pool->extra;
+    ReleaseSRWLockExclusive(&bvk_desc_lock);
+    free(pool);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkResetDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool, VkDescriptorPoolResetFlags flags)
+{
+    VkResult r = bvk_gen_vkResetDescriptorPool(device, descriptorPool, flags);
+    if (r < 0)
+        return r;
+
+    AcquireSRWLockShared(&bvk_desc_lock);
+    bvk_pool_rec* pool = (bvk_pool_rec*)bvk_map_get(&bvk_pools, (uint32_t)(uintptr_t)descriptorPool);
+    if (pool)
+    {
+        pool->sets = 0;
+        memset(pool->used, 0, sizeof(pool->used));
+        pool->modeled = pool->modelable;
+    }
+    ReleaseSRWLockShared(&bvk_desc_lock);
+    return r;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateDescriptorSets(VkDevice device, const VkDescriptorSetAllocateInfo *pAllocateInfo, VkDescriptorSet *pDescriptorSets)
+{
+    int posted = pAllocateInfo && !bvk_post_disabled() && bvk_desc_account(pAllocateInfo, 0);
+    VkResult r = bvk_gen_vkAllocateDescriptorSets(device, pAllocateInfo, pDescriptorSets, posted);
+    if (r >= 0 && pAllocateInfo)
+        bvk_desc_account(pAllocateInfo, 1);
+    return r;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator)
+{
+    bvk_gen_vkDestroyDevice(device, pAllocator);
+    bvk_desc_drop_device(device);
+}
 
 typedef struct
 {
