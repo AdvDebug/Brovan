@@ -36,6 +36,9 @@ namespace Brovan.Core.Emulation
         private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
         private readonly List<long> _backingStarts = new();
         private readonly List<IntPtr> _releasedBackings = new();
+
+        // Ranges WHvUnmapGpaRange refused. Their host memory is freed only with the partition.
+        private readonly List<InstalledMap> _stillMappedBacking = new();
         private ulong _backingBytes;
         private readonly Dictionary<ulong, bool> _trappedPages = new();
         private readonly Dictionary<ulong, IntPtr> _pageTableViews = new();
@@ -2025,7 +2028,7 @@ namespace Brovan.Core.Emulation
 
         private void FreeIfUnreferenced(IntPtr backing, BackingAllocation allocation)
         {
-            if (IsReferenced(allocation)) return;
+            if (IsReferenced(allocation) || IsBackingStillMapped(backing, allocation.Size)) return;
 
             FreeAllocation(backing, allocation);
             _backingAllocations.Remove(backing);
@@ -2033,6 +2036,18 @@ namespace Brovan.Core.Emulation
             int index = _backingStarts.BinarySearch(backing.ToInt64());
             if (index >= 0)
                 _backingStarts.RemoveAt(index);
+        }
+
+        private bool IsBackingStillMapped(IntPtr backing, ulong size)
+        {
+            long start = backing.ToInt64();
+            for (int i = 0; i < _stillMappedBacking.Count; i++)
+            {
+                long mapStart = _stillMappedBacking[i].Host.ToInt64();
+                if (mapStart < start + (long)size && start < mapStart + (long)_stillMappedBacking[i].Size)
+                    return true;
+            }
+            return false;
         }
 
         private void FreeAllocation(IntPtr backing, BackingAllocation allocation)
@@ -2430,7 +2445,7 @@ namespace Brovan.Core.Emulation
         unsafe bool IGuestKernelBackend.MapKernelView(IntPtr host, ulong address, ulong size)
             => !WhpNative.Failed(WhpNative.WHvMapGpaRange(_partition, (void*)host, address, size, WhvMapGpaRangeFlags.Read));
 
-        void IGuestKernelBackend.UnmapKernelView(ulong address, ulong size) => UnmapGpaRange(address, size);
+        bool IGuestKernelBackend.UnmapKernelView(ulong address, ulong size) => UnmapGpaRange(address, size);
 
         IntPtr IGuestKernelBackend.EnsureKernelPageDirectory(ulong address)
         {
@@ -2888,7 +2903,8 @@ namespace Brovan.Core.Emulation
                     continue;
                 }
 
-                UnmapGpaRange(kv.Key, kv.Value.Size);
+                if (!UnmapGpaRange(kv.Key, kv.Value.Size))
+                    _stillMappedBacking.Add(kv.Value);
                 _staleMapKeys.Add(kv.Key);
             }
             for (int i = 0; i < _staleMapKeys.Count; i++)
@@ -3158,6 +3174,7 @@ namespace Brovan.Core.Emulation
             // WHvUnmapGpaRange has a large fixed cost per call, so adjacent stale maps go in one call.
             ulong unmapStart = 0;
             ulong unmapEnd = 0;
+            int batchFirstKey = 0;
             int firstIndex = FirstActiveMapIndexAtOrBefore(spanStart);
             for (int i = firstIndex; i < _activeMapStarts.Count; i++)
             {
@@ -3185,8 +3202,9 @@ namespace Brovan.Core.Emulation
                 if (unmapEnd != start)
                 {
                     if (unmapEnd != unmapStart)
-                        UnmapGpaRange(unmapStart, unmapEnd - unmapStart);
+                        UnmapStaleBatch(unmapStart, unmapEnd, batchFirstKey);
                     unmapStart = start;
+                    batchFirstKey = _staleMapKeys.Count;
                 }
 
                 unmapEnd = start + active.Size;
@@ -3194,7 +3212,7 @@ namespace Brovan.Core.Emulation
             }
 
             if (unmapEnd != unmapStart)
-                UnmapGpaRange(unmapStart, unmapEnd - unmapStart);
+                UnmapStaleBatch(unmapStart, unmapEnd, batchFirstKey);
 
             for (int i = 0; i < _staleMapKeys.Count; i++)
                 RemoveActiveMap(_staleMapKeys[i]);
@@ -3211,6 +3229,16 @@ namespace Brovan.Core.Emulation
                 MapGpaRange(kv.Key, kv.Value.Size, kv.Value.Host, kv.Value.Flags);
                 AddActiveMap(kv.Key, kv.Value);
             }
+        }
+
+        // The batch is the stale maps from firstKey to the end of _staleMapKeys.
+        private void UnmapStaleBatch(ulong start, ulong end, int firstKey)
+        {
+            if (UnmapGpaRange(start, end - start))
+                return;
+
+            for (int i = firstKey; i < _staleMapKeys.Count; i++)
+                _stillMappedBacking.Add(_activeMaps[_staleMapKeys[i]]);
         }
 
         // WHP can unmap part of a mapped range. Pages outside the span are clean.
@@ -3309,8 +3337,15 @@ namespace Brovan.Core.Emulation
                 PopulateRange(gpa, size, flags);
         }
 
-        private void UnmapGpaRange(ulong gpa, ulong size)
-            => WhpNative.WHvUnmapGpaRange(_partition, gpa, size);
+        private bool UnmapGpaRange(ulong gpa, ulong size)
+        {
+            int hr = WhpNative.WHvUnmapGpaRange(_partition, gpa, size);
+            if (!WhpNative.Failed(hr))
+                return true;
+
+            Utils.LogError($"[Whp] GPA 0x{gpa:X}+0x{size:X} stays mapped: WHvUnmapGpaRange returned 0x{hr:X8}.");
+            return false;
+        }
 
         private bool TryReadMemoryInternal(ulong address, Span<byte> buffer)
             => IsGuestRange(address, (ulong)buffer.Length) && TryReadPages(address, buffer);
@@ -3768,7 +3803,7 @@ namespace Brovan.Core.Emulation
 
             regs.Rip = frameRip;
             regs.Rsp = frameRsp;
-            regs.Rflags = frameRflags;
+            regs.Rflags = UserModeFlags.Clamp(frameRflags);
             vp.RegsDirty = true;
 
             QueueCsSs(vp, MakeSegment((ushort)(frameCs | 3), true, true), MakeSegment((ushort)(frameSs | 3), false, true));
@@ -3866,7 +3901,7 @@ namespace Brovan.Core.Emulation
                 ulong* frame = spill + GuestSyscallStub.FrameSlot;
                 LoadSpilledRegisters(vp);
                 vp.Regs.Rip = frame[0];
-                vp.Regs.Rflags = frame[2];
+                vp.Regs.Rflags = UserModeFlags.Clamp(frame[2]);
                 vp.Regs.Rsp = frame[3];
             }
 

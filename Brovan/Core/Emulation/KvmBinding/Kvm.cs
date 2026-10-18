@@ -61,6 +61,10 @@ namespace Brovan.Core.Emulation
         private readonly Dictionary<ulong, MappedPage> _mappedPages = new();
         private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
         private readonly List<long> _backingStarts = new();
+        private readonly List<IntPtr> _releasedBackings = new();
+
+        // Slots KVM refused to delete. Their host memory is freed only with the partition.
+        private readonly List<InstalledSlot> _stillMappedBacking = new();
         private ulong _backingBytes;
         // A page watched for writes only keeps a read-only memslot, so its reads run natively.
         private readonly Dictionary<ulong, bool> _trappedPages = new();
@@ -419,6 +423,7 @@ namespace Brovan.Core.Emulation
             if (accessRemoved)
                 ShootDownGuestTlbs();
             RebuildMappings();
+            FreeReleasedBackings();
             _error = KvmErrors.Ok;
             return true;
         }
@@ -610,6 +615,7 @@ namespace Brovan.Core.Emulation
             }
 
             RebuildMappings();
+            FreeReleasedBackings();
             _error = KvmErrors.Ok;
             return true;
         }
@@ -2273,12 +2279,28 @@ namespace Brovan.Core.Emulation
             else
                 allocation.LivePages--;
 
-            FreeIfUnreferenced(page.OwnedBacking, allocation);
+            if (!IsReferenced(allocation))
+                _releasedBackings.Add(page.OwnedBacking);
+        }
+
+        private static bool IsReferenced(BackingAllocation allocation)
+            => allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Held;
+
+        // Only after the rebuild deletes the slots. Until then other processors can reach the backing.
+        private void FreeReleasedBackings()
+        {
+            for (int i = 0; i < _releasedBackings.Count; i++)
+            {
+                if (_backingAllocations.TryGetValue(_releasedBackings[i], out BackingAllocation allocation))
+                    FreeIfUnreferenced(_releasedBackings[i], allocation);
+            }
+
+            _releasedBackings.Clear();
         }
 
         private void FreeIfUnreferenced(IntPtr backing, BackingAllocation allocation)
         {
-            if (allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Held) return;
+            if (IsReferenced(allocation) || IsBackingStillMapped(backing, allocation.Size)) return;
 
             FreeAllocation(backing, allocation);
             _backingAllocations.Remove(backing);
@@ -2286,6 +2308,18 @@ namespace Brovan.Core.Emulation
             int index = _backingStarts.BinarySearch(backing.ToInt64());
             if (index >= 0)
                 _backingStarts.RemoveAt(index);
+        }
+
+        private bool IsBackingStillMapped(IntPtr backing, ulong size)
+        {
+            long start = backing.ToInt64();
+            for (int i = 0; i < _stillMappedBacking.Count; i++)
+            {
+                long slotStart = _stillMappedBacking[i].Host.ToInt64();
+                if (slotStart < start + (long)size && start < slotStart + (long)_stillMappedBacking[i].Size)
+                    return true;
+            }
+            return false;
         }
 
         private void FreeAllocation(IntPtr backing, BackingAllocation allocation)
@@ -2807,10 +2841,16 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        void IGuestKernelBackend.UnmapKernelView(ulong address, ulong size)
+        bool IGuestKernelBackend.UnmapKernelView(ulong address, ulong size)
         {
-            if (_kernelViewSlots.Remove(address, out int slot))
-                DeleteMemslot(slot);
+            if (!_kernelViewSlots.TryGetValue(address, out int slot))
+                return true;
+
+            if (!DeleteMemslot(slot))
+                return false;
+
+            _kernelViewSlots.Remove(address);
+            return true;
         }
 
         IntPtr IGuestKernelBackend.EnsureKernelPageDirectory(ulong address)
@@ -3339,7 +3379,8 @@ namespace Brovan.Core.Emulation
                     || want.Host != kv.Value.Host
                     || want.Flags != kv.Value.Flags)
                 {
-                    DeleteMemslot(kv.Value.Id);
+                    if (!DeleteMemslot(kv.Value.Id))
+                        _stillMappedBacking.Add(kv.Value);
                     _staleSlotKeys.Add(kv.Key);
                     _deletedSlotRanges.Add(new DirtyRange { Start = kv.Key, End = kv.Key + kv.Value.Size });
                 }
@@ -3396,7 +3437,8 @@ namespace Brovan.Core.Emulation
                     || want.Host != active.Host
                     || want.Flags != active.Flags)
                 {
-                    DeleteMemslot(active.Id);
+                    if (!DeleteMemslot(active.Id))
+                        _stillMappedBacking.Add(active);
                     _staleSlotKeys.Add(start);
                     _deletedSlotRanges.Add(new DirtyRange { Start = start, End = start + active.Size });
                 }
@@ -3451,7 +3493,8 @@ namespace Brovan.Core.Emulation
             {
                 ulong start = _staleSlotKeys[i];
                 InstalledSlot stale = _activeSlots[start];
-                DeleteMemslot(stale.Id);
+                if (!DeleteMemslot(stale.Id))
+                    _stillMappedBacking.Add(stale);
                 _deletedSlotRanges.Add(new DirtyRange { Start = start, End = start + stale.Size });
                 RemoveActiveSlot(start);
             }
@@ -3625,15 +3668,22 @@ namespace Brovan.Core.Emulation
                 throw new KvmException("KVM_SET_USER_MEMORY_REGION failed", Marshal.GetLastWin32Error());
         }
 
-        private void DeleteMemslot(int slot)
+        // A slot KVM did not delete still maps its host memory, so its id is never reused.
+        private bool DeleteMemslot(int slot)
         {
             LinuxKvmUserspaceMemoryRegion region = new LinuxKvmUserspaceMemoryRegion
             {
                 Slot = (uint)slot,
                 MemorySize = 0,
             };
-            KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoSetUserMemoryRegion, ref region);
+            if (KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoSetUserMemoryRegion, ref region) < 0)
+            {
+                Utils.LogError($"[Kvm] Memory slot {slot} stays mapped: KVM_SET_USER_MEMORY_REGION failed with errno {Marshal.GetLastWin32Error()}.");
+                return false;
+            }
+
             _freeSlotIds.Add(slot);
+            return true;
         }
 
         private void RefreshMmioBackedRegions()
@@ -4201,7 +4251,7 @@ namespace Brovan.Core.Emulation
 
             run.Regs.Rip = frameRip;
             run.Regs.Rsp = frameRsp;
-            run.Regs.Rflags = frameRflags;
+            run.Regs.Rflags = UserModeFlags.Clamp(frameRflags);
             run.Sregs.Cs = MakeSegment((ushort)(frameCs | 3), true, true);
             run.Sregs.Ss = MakeSegment((ushort)(frameSs | 3), false, true);
             run.DirtyRegs |= KvmConstants.SyncGeneralRegisters | KvmConstants.SyncSpecialRegisters;

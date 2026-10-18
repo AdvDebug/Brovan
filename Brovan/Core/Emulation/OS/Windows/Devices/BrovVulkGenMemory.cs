@@ -369,7 +369,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (st.TryGetMapping(memId, out GenState.MapEntry e))
             {
                 if (e.Shared && !inst.RestoreRegionBacking(e.GuestVa, e.Size) && inst.IsRegionMapped(e.GuestVa, e.Size))
-                    Utils.LogError($"[BrovVulk] guest range 0x{e.GuestVa:X}+0x{e.Size:X} could not be re-backed before vkFreeMemory, it still aliases driver memory.");
+                {
+                    Utils.LogError($"[BrovVulk] guest range 0x{e.GuestVa:X}+0x{e.Size:X} could not be re-backed before vkFreeMemory, the memory is kept.");
+                    return 0;
+                }
                 BrovVulkApi.vkUnmapMemory(device, memory);
                 st.RemoveMapping(memId);
             }

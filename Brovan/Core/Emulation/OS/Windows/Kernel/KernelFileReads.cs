@@ -107,6 +107,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly KernelFileCell[] CellObjects;
         private readonly Stack<int> FreeCells;
         private readonly List<KernelFileCell> Retired = new List<KernelFileCell>(RetiredLimit);
+
+        // The guest can still read these views, so their host memory stays mapped while this object lives.
+        private readonly List<WinImageLayoutCache.View> StillMapped = new List<WinImageLayoutCache.View>();
         private readonly int OwnerThreadId = Environment.CurrentManagedThreadId;
         private long NextSequence;
         private bool MapFailureLogged;
@@ -494,14 +497,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             Span<ulong> Addresses = stackalloc ulong[Retired.Count];
+            Span<bool> Unmapped = stackalloc bool[Retired.Count];
             for (int i = 0; i < Retired.Count; i++)
                 Addresses[i] = Retired[i].ViewAddress;
-            Kernel.UnmapViews(Addresses);
+            Kernel.UnmapViews(Addresses, Unmapped);
 
             for (int i = 0; i < Retired.Count; i++)
             {
                 KernelFileCell Cell = Retired[i];
-                Cell.View.Dispose();
+                if (Unmapped[i])
+                    Cell.View.Dispose();
+                else
+                    StillMapped.Add(Cell.View);
                 CellObjects[Cell.Index] = null;
                 FreeCells.Push(Cell.Index);
             }

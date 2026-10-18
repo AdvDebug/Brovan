@@ -2522,20 +2522,18 @@ namespace Brovan.Core.Emulation
 
         /// <summary>
         /// Puts ordinary pages back behind a range from <see cref="RebackRegionWithHostMemory"/>. The contents
-        /// are lost.
+        /// are lost. The host pages are unmapped even when no region record is left, so the caller can free them.
         /// </summary>
         public bool RestoreRegionBacking(ulong BaseAddress, ulong Size)
         {
             if (Size == 0 || (BaseAddress & (PageSize - 1)) != 0 || (Size & (PageSize - 1)) != 0)
                 return false;
 
-            if (!TryFindMemoryRegion(BaseAddress, out MemoryRegion Region))
-                return false;
-
             if (IsRegionMapped(BaseAddress, Size) && !_emulator.UnmapMemory(BaseAddress, Size))
                 return false;
 
-            return _emulator.MapMemory(BaseAddress, Size, Region.Protections);
+            return TryFindMemoryRegion(BaseAddress, out MemoryRegion Region)
+                && _emulator.MapMemory(BaseAddress, Size, Region.Protections);
         }
 
         /// <summary>

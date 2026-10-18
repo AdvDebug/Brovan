@@ -301,11 +301,14 @@ namespace Brovan.Core.Emulation
 
         bool TryAllocateMemory(ulong size, out ulong address, out IntPtr host);
 
-        /// <summary>The caller keeps the host memory alive until UnmapViews.</summary>
+        /// <summary>The caller keeps the host memory alive until UnmapViews reports the view unmapped.</summary>
         bool TryMapView(IntPtr host, ulong size, out ulong address);
 
-        /// <summary>Returns only after every processor has left the guest.</summary>
-        void UnmapViews(ReadOnlySpan<ulong> addresses);
+        /// <summary>
+        /// Returns only after every processor has left the guest. A false entry in <paramref name="unmapped"/> is a view
+        /// the guest can still read, so its host memory must stay alive.
+        /// </summary>
+        void UnmapViews(ReadOnlySpan<ulong> addresses, Span<bool> unmapped);
 
         bool Enabled { get; set; }
 
@@ -657,7 +660,7 @@ namespace Brovan.Core.Emulation
 
         bool MapKernelView(IntPtr host, ulong address, ulong size);
 
-        void UnmapKernelView(ulong address, ulong size);
+        bool UnmapKernelView(ulong address, ulong size);
 
         IntPtr EnsureKernelPageDirectory(ulong address);
 
@@ -835,39 +838,42 @@ namespace Brovan.Core.Emulation
             if (chunks > ViewChunks || !TryReserveChunks(chunks, out int first))
                 return false;
 
+            // The host memory is mapped last, so no failure here leaves it mapped.
             ulong view = _internalBase + ViewWindowOffset + (ulong)first * ViewChunk;
-            if (_backend.MapKernelView(host, view, mapSize))
+            int mapped = 0;
+            while (mapped < chunks && TryMapChunk(view + (ulong)mapped * ViewChunk))
+                mapped++;
+
+            if (mapped == chunks && _backend.MapKernelView(host, view, mapSize))
             {
-                int mapped = 0;
-                while (mapped < chunks && TryMapChunk(view + (ulong)mapped * ViewChunk))
-                    mapped++;
-
-                if (mapped == chunks)
-                {
-                    _views[view] = mapSize;
-                    address = view;
-                    return true;
-                }
-
-                _backend.UnmapKernelView(view, mapSize);
+                _views[view] = mapSize;
+                address = view;
+                return true;
             }
 
             Array.Clear(_viewChunksUsed, first, chunks);
             return false;
         }
 
-        public void UnmapViews(ReadOnlySpan<ulong> addresses)
+        public void UnmapViews(ReadOnlySpan<ulong> addresses, Span<bool> unmapped)
         {
+            unmapped.Fill(true);
             if (_backend.DisposedCheck() || addresses.IsEmpty)
                 return;
 
             _backend.EvictProcessors();
             for (int i = 0; i < addresses.Length; i++)
             {
-                if (!_views.Remove(addresses[i], out ulong mapSize))
+                if (!_views.TryGetValue(addresses[i], out ulong mapSize))
                     continue;
 
-                _backend.UnmapKernelView(addresses[i], mapSize);
+                if (!_backend.UnmapKernelView(addresses[i], mapSize))
+                {
+                    unmapped[i] = false;
+                    continue;
+                }
+
+                _views.Remove(addresses[i]);
                 Array.Clear(_viewChunksUsed, ChunkIndex(addresses[i]), ChunkCount(mapSize));
             }
         }
