@@ -447,10 +447,4 @@ namespace Brovan.Core.Emulation
         UC_MEM_FETCH_PROT,     // Fetch from non-executable, but mapped, memory
         UC_MEM_READ_AFTER,     // Memory is read from (successful access)
     }
-
-    public enum UcTlbType : int
-    {
-        Cpu = 0,
-        Virtual = 1
-    }
 }

@@ -316,30 +316,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        internal static bool TryReadStartup(uint GuestProcessId, out ulong PebAddress, out ulong ProcessParameters)
-        {
-            PebAddress = 0;
-            ProcessParameters = 0;
-
-            lock (Sync)
-            {
-                if (!TryOpen())
-                    return false;
-
-                using SessionLock Lock = Acquire();
-                if (!Lock.Held || !TryFindLiveSlotLocked(GuestProcessId, out int Slot))
-                    return false;
-
-                int Offset = SlotOffset(Slot);
-                if (_view.ReadUInt32(Offset + ReadyOffset) == 0)
-                    return false;
-
-                PebAddress = _view.ReadUInt64(Offset + PebAddressOffset);
-                ProcessParameters = _view.ReadUInt64(Offset + ProcessParametersOffset);
-                return true;
-            }
-        }
-
         /// <summary>
         /// Everything needed to open a handle to a sibling guest process of the session.
         /// </summary>

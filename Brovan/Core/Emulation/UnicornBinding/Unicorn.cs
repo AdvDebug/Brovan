@@ -1724,18 +1724,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        public bool SetTlbMode(UcTlbType mode)
-        {
-            const int UC_CTL_TLB_TYPE = 12;
-            const int UC_CTL_IO_WRITE = 1;
-
-            int control = UC_CTL_TLB_TYPE | (1 << 26) | (UC_CTL_IO_WRITE << 30);
-
-            _error = uc_ctl1(_uc, control, (int)mode);
-
-            return _error == UCErrors.UC_ERR_OK;
-        }
-
         public bool SetTcgBufferSize(uint Size)
         {
             if (DisposedCheck())
@@ -1982,27 +1970,6 @@ namespace Brovan.Core.Emulation
                 Known = ProbeDirectRegister(Register);
 
             return (Known & Access) != 0 ? (ulong*)_directRegisters[Register] : null;
-        }
-
-        public IntPtr GetCurrentContext()
-        {
-            if (DisposedCheck())
-                return IntPtr.Zero;
-
-            IntPtr Context = IntPtr.Zero;
-            _error = uc_context_save(_uc, out Context);
-            if (_error != UCErrors.UC_ERR_OK)
-                return IntPtr.Zero;
-            return Context;
-        }
-
-        public bool SetCurrentContext(IntPtr Context)
-        {
-            if (DisposedCheck())
-                return false;
-
-            _error = uc_context_restore(_uc, Context);
-            return _error == UCErrors.UC_ERR_OK;
         }
 
         private bool DisposedCheck()

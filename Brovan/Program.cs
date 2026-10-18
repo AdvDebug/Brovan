@@ -155,25 +155,6 @@ namespace Brovan
             return Builder.ToString();
         }
 
-        private static bool TryParseNetworkMode(string Value, out NetworkAccessMode Mode)
-        {
-            switch ((Value ?? string.Empty).Trim().ToLowerInvariant())
-            {
-                case "full":
-                    Mode = NetworkAccessMode.Full;
-                    return true;
-                case "none":
-                    Mode = NetworkAccessMode.None;
-                    return true;
-                case "loopback":
-                    Mode = NetworkAccessMode.Loopback;
-                    return true;
-                default:
-                    Mode = NetworkAccessMode.None;
-                    return false;
-            }
-        }
-
         private const string Base64ArgumentPrefix = "base64:";
 
         private static string DecodeArgumentValue(string Value)
@@ -263,26 +244,6 @@ namespace Brovan
                 Arguments.Add(Current.ToString());
 
             return Arguments.ToArray();
-        }
-
-        private static bool TryParseBackendKind(string Value, out EmulationBackendKind Kind)
-        {
-            switch ((Value ?? string.Empty).Trim().ToLowerInvariant())
-            {
-                case "unicorn":
-                case "":
-                    Kind = EmulationBackendKind.Unicorn;
-                    return true;
-                case "kvm":
-                    Kind = EmulationBackendKind.Kvm;
-                    return true;
-                case "whp":
-                    Kind = EmulationBackendKind.Whp;
-                    return true;
-                default:
-                    Kind = EmulationBackendKind.Unicorn;
-                    return false;
-            }
         }
 
         private static bool TryInstallWindowsSystemFiles(string[] args)

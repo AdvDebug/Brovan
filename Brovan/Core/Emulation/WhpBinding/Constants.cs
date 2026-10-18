@@ -165,6 +165,9 @@ namespace Brovan.Core.Emulation
         public const ulong PageTableEntryUser = 1UL << 2;
         public const ulong PageTableEntryAccessed = 1UL << 5;
         public const ulong PageTableEntryDirty = 1UL << 6;
+        public const ulong PageTableEntryLargePage = 1UL << 7;
+        // A software bit, set on a not-present PDE that still names its page table.
+        public const ulong PageTableEntryWithheld = 1UL << 9;
         public const ulong PageTableEntryNoExecute = 1UL << 63;
         public const ulong PageTableEntryAddressMask = 0x000FFFFFFFFFF000UL;
 

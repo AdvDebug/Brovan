@@ -63,7 +63,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_LOCK_NOT_GRANTED;
             }
 
-            Instance.WinHelper.KernelFileReads?.ReleaseLockedPath(FileObj.Path);
+            Instance.WinHelper.KernelFiles?.ReleaseLockedPath(FileObj.Path);
             FileObj.AddLock((ulong)Offset, Length, Key, ExclusiveLock);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
             Instance.WinHelper.SignalIoEvent(EventHandle, NTSTATUS.STATUS_SUCCESS);

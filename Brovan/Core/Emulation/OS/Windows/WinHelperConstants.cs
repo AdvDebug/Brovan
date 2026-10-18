@@ -1484,7 +1484,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal SharedFilePosition SharedPosition;
 
         internal KernelFileCell KernelCell;
-        internal int SlowReads;
+        internal KernelFileNotes KernelNotes;
 
         public long Position
         {

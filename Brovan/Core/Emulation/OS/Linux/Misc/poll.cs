@@ -1,7 +1,6 @@
 using System;
 using System.Buffers.Binary;
 using System.Diagnostics;
-using System.Net.Sockets;
 using System.Threading;
 
 namespace Brovan.Core.Emulation.OS.Linux.Misc
@@ -10,22 +9,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
     {
         private const int PollfdSize = 8;
 
-        private const short POLLIN = 0x0001;
-        private const short POLLPRI = 0x0002;
-        private const short POLLOUT = 0x0004;
-        private const short POLLERR = 0x0008;
-        private const short POLLHUP = 0x0010;
         private const short POLLNVAL = 0x0020;
-        private const short POLLRDNORM = 0x0040;
-        private const short POLLRDBAND = 0x0080;
-        private const short POLLWRNORM = 0x0100;
-        private const short POLLWRBAND = 0x0200;
-        private const short POLLRDHUP = 0x2000;
-
-        private const short ReadEvents = POLLIN | POLLRDNORM;
-        private const short PriorityReadEvents = POLLPRI | POLLRDBAND;
-        private const short WriteEvents = POLLOUT | POLLWRNORM;
-        private const short PriorityWriteEvents = POLLWRBAND;
 
         public void Handle(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context)
         {
@@ -122,99 +106,6 @@ namespace Brovan.Core.Emulation.OS.Linux.Misc
             }
 
             return ReadyCount;
-        }
-
-        private static short GetRevents(IFileDescriptorObject Object, short Events)
-        {
-            switch (Object)
-            {
-                case FileObject:
-                    return GetFileRevents(Events);
-                case SocketObject SocketDescriptor:
-                    return GetSocketRevents(SocketDescriptor, Events);
-                default:
-                    return POLLNVAL;
-            }
-        }
-
-        private static short GetFileRevents(short Events)
-        {
-            short Revents = 0;
-
-            if ((Events & ReadEvents) != 0)
-                Revents |= (short)(Events & ReadEvents);
-
-            if ((Events & WriteEvents) != 0)
-                Revents |= (short)(Events & WriteEvents);
-
-            return Revents;
-        }
-
-        private static short GetSocketRevents(SocketObject SocketDescriptor, short Events)
-        {
-            short Revents = 0;
-
-            if (SocketDescriptor.PendingConnect != null)
-            {
-                if (!SocketDescriptor.PendingConnectCompleted)
-                    return 0;
-
-                if (SocketDescriptor.PendingConnect.SocketError == SocketError.Success)
-                {
-                    if ((Events & WriteEvents) != 0)
-                        Revents |= (short)(Events & WriteEvents);
-                }
-                else
-                {
-                    Revents |= POLLERR;
-                }
-
-                return Revents;
-            }
-
-            if ((Events & ReadEvents) != 0 && IsSocketReady(SocketDescriptor, SelectMode.SelectRead))
-                Revents |= (short)(Events & ReadEvents);
-
-            if ((Events & PriorityReadEvents) != 0 && IsSocketReady(SocketDescriptor, SelectMode.SelectError))
-                Revents |= (short)(Events & PriorityReadEvents);
-
-            if ((Events & WriteEvents) != 0 && IsSocketReady(SocketDescriptor, SelectMode.SelectWrite))
-                Revents |= (short)(Events & WriteEvents);
-
-            if ((Events & PriorityWriteEvents) != 0 && IsSocketReady(SocketDescriptor, SelectMode.SelectWrite))
-                Revents |= (short)(Events & PriorityWriteEvents);
-
-            if (IsSocketReady(SocketDescriptor, SelectMode.SelectError))
-                Revents |= POLLERR;
-
-            if (IsSocketReady(SocketDescriptor, SelectMode.SelectRead) && IsPeerShutdown(SocketDescriptor))
-                Revents |= POLLHUP | POLLRDHUP;
-
-            return Revents;
-        }
-
-        private static bool IsPeerShutdown(SocketObject SocketDescriptor)
-        {
-            try
-            {
-                return SocketDescriptor.Handle.Available == 0;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static bool IsSocketReady(SocketObject SocketDescriptor, SelectMode Mode)
-        {
-            try
-            {
-                return SocketDescriptor.Handle.Poll(0, Mode);
-            }
-            catch
-            {
-                return true;
-            }
         }
 
         private static void WriteRevents(Span<byte> Pollfds, int Offset, short Revents)

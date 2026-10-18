@@ -1,6 +1,5 @@
 using static Brovan.Core.Helpers.BinaryHelpers;
 using System.Reflection.PortableExecutable;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
 using System.Text;
@@ -947,33 +946,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return PointerSize == 8 ? WriteUInt64(Address, Value) : WriteUInt32(Address, (uint)Value);
         }
 
-        public ulong BuildUnicodeString(string Buffer)
-        {
-            if (Buffer == null)
-                return 0;
-
-            ulong StructSize = (ulong)Unsafe.SizeOf<UNICODE_STRING64>();
-            ulong Address = Emulator.MapUniqueAddress(StructSize, MemoryProtection.ReadWrite);
-            if (Address == 0)
-                return 0;
-
-            int ByteLength = Buffer.Length * 2;
-            int MaxByteLength = ByteLength + 2;
-
-            ulong StringAddress = Emulator.MapUniqueAddress((ulong)MaxByteLength, MemoryProtection.ReadWrite);
-            if (StringAddress == 0)
-                return 0;
-
-            Emulator._emulator.WriteMemory(StringAddress, Buffer, Encoding.Unicode);
-            Emulator._emulator.WriteMemory(StringAddress + (ulong)ByteLength, (ushort)0, 2);
-
-            Emulator._emulator.WriteMemory(Address + 0, (ushort)ByteLength, 2);
-            Emulator._emulator.WriteMemory(Address + 2, (ushort)MaxByteLength, 2);
-            Emulator._emulator.WriteMemory(Address + 8, StringAddress);
-
-            return Address;
-        }
-
         public bool TryReadUnicodeString32(uint UnicodeStringPtr, out string Value, out NTSTATUS Status)
         {
             Value = string.Empty;
@@ -1714,22 +1686,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Path;
         }
 
-        public void WriteUnicodeStringRelative(BinaryEmulator Instance, ulong UnicodeStringAddress, ulong BaseAddress, string Value)
-        {
-            ushort Length = (ushort)(Value.Length * 2);
-            ushort MaximumLength = (ushort)(Length + 2);
-
-            ulong BufferAddress = Instance.MapUniqueAddress((ulong)MaximumLength, MemoryProtection.ReadWrite);
-            Instance._emulator.WriteMemory(BufferAddress, Value, System.Text.Encoding.Unicode);
-            Instance._emulator.WriteMemory(BufferAddress + (ulong)Length, (ushort)0, 2);
-
-            Instance._emulator.WriteMemory(UnicodeStringAddress + 0, Length, 2);
-            Instance._emulator.WriteMemory(UnicodeStringAddress + 2, MaximumLength, 2);
-
-            ulong Relative = BufferAddress - BaseAddress;
-            Instance._emulator.WriteMemory(UnicodeStringAddress + 8, Relative, 8);
-        }
-
         /// <summary>
         /// Writes the process list in the SYSTEM_PROCESS_INFORMATION layout of the guest architecture.
         /// </summary>
@@ -2208,15 +2164,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Windows.User.LocalService;
             else
                 return Windows.User.Standard;
-        }
-
-        public byte[] GenerateRandomData(int Length)
-        {
-            if (Length < 0)
-                return null;
-            byte[] Data = new byte[Length];
-            RandomGen.NextBytes(Data);
-            return Data;
         }
 
         public void InitializeProcessTimes(WinProcess Process, long AgeMilliseconds, bool GenerateCpuTimes)
@@ -2745,7 +2692,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal readonly AfdDevice.HostConnects AfdConnects = new AfdDevice.HostConnects();
         internal readonly AfdDevice.PendingRequests AfdRequests = new AfdDevice.PendingRequests();
         internal readonly PipeRequestQueue PipeRequests = new PipeRequestQueue();
+        internal KernelFileTable KernelFiles;
         internal KernelFileReads KernelFileReads;
+        internal KernelFileInformation KernelFileInformation;
         public List<WinSection> WinSections = new List<WinSection>();
         private readonly Dictionary<ulong, int> WinHandleIndex = new Dictionary<ulong, int>();
         internal void AddWinHandle(WinHandle h)
@@ -2949,7 +2898,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint DpiChangeRectSize = 0x10;
         private ulong DpiChangeRectAddress;
         private ulong UserSharedInfoMirrorAddress;
-        private ulong UserSharedDelta;
         public ulong ActiveWindow;
         public ulong FocusWindow;
         // Ordinal: the result keeps the input's case.
@@ -4355,18 +4303,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return 0;
         }
 
-        private ulong _cachedFnDWORDOPTINLPMSG;
-
-        public ulong GetFnDWORDOPTINLPMSG()
-        {
-            if (_cachedFnDWORDOPTINLPMSG != 0)
-                return _cachedFnDWORDOPTINLPMSG;
-
-            const uint FN_DWORDOPTINLPMSG_INDEX = 4;
-            _cachedFnDWORDOPTINLPMSG = GetKernelCallbackEntry(FN_DWORDOPTINLPMSG_INDEX);
-            return _cachedFnDWORDOPTINLPMSG;
-        }
-
         /// <summary>
         /// Reads one entry of the kernel callback table user32 publishes in the PEB.
         /// </summary>
@@ -4902,37 +4838,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Mask == ProtectionMaskNoAccess || (Mask & 0x02) != 0 ? -1 : Mask | 0x18;
 
             return Mask;
-        }
-
-        public AllocationType ConvertWinAllocType(ulong AllocTypes)
-        {
-            AllocationType Flags = AllocationType.None;
-
-            if ((AllocTypes & 0x1000) != 0) // MEM_COMMIT
-                Flags |= AllocationType.Commited;
-
-            if ((AllocTypes & 0x2000) != 0) // MEM_RESERVE
-                Flags |= AllocationType.Reserved;
-
-            if ((AllocTypes & 0x1000000) != 0) // MEM_IMAGE
-                Flags |= AllocationType.Image;
-
-            return Flags;
-        }
-
-        public ulong ConvertTypeToWinAlloc(AllocationType Type)
-        {
-            switch (Type)
-            {
-                case AllocationType.Image:
-                    return 0x1000000;
-                case AllocationType.Commited:
-                    return 0x1000;
-                case AllocationType.Reserved:
-                    return 0x2000;
-                default:
-                    return 0x00020000;
-            }
         }
 
         public bool IsProtectedStatus(ProtectionStatus Status)
@@ -6070,50 +5975,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return guiManager.GetTextMetrics(Font, out Metrics);
 
             return false;
-        }
-
-        public bool TryBuildUserConnectData(uint Version, uint DispatchCount, uint RequestedSize, out byte[] Data)
-        {
-            Data = null;
-
-            if (!EnsureUserSharedInfo(out ulong ServerInfo, out ulong HandleTable, out _))
-                return false;
-
-            ulong DisplayInfo = EnsureUserDesktopInfo();
-            if (DisplayInfo == 0)
-                return false;
-
-            ulong SharedDelta = ComputeUserSharedDelta(ServerInfo, HandleTable, DisplayInfo);
-            if (SharedDelta == 0)
-                SharedDelta = 0x1000;
-
-            int PointerSize = Emulator._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
-            int HeaderSize = PointerSize == 8 ? 0x10 : 0x0C;
-            int MinimumSize = HeaderSize + (PointerSize * 4);
-            int BufferSize = RequestedSize > (uint)MinimumSize ? (int)RequestedSize : MinimumSize;
-
-            Data = new byte[BufferSize];
-            WriteU32(Data, 0x00, Version);
-            WriteU32(Data, 0x04, 0u);
-            WriteU32(Data, 0x08, DispatchCount);
-
-            if (PointerSize == 8)
-            {
-                WriteU64(Data, 0x10, ServerInfo);
-                WriteU64(Data, 0x18, HandleTable);
-                WriteU64(Data, 0x20, DisplayInfo);
-                WriteU64(Data, 0x28, SharedDelta);
-            }
-            else
-            {
-                WriteU32(Data, 0x0C, (uint)ServerInfo);
-                WriteU32(Data, 0x10, (uint)HandleTable);
-                WriteU32(Data, 0x14, (uint)DisplayInfo);
-                WriteU32(Data, 0x18, (uint)SharedDelta);
-            }
-
-            UserSharedDelta = SharedDelta;
-            return true;
         }
 
         private ulong EnsureUserServerInfo()
@@ -8640,31 +8501,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             DestroyedWindows.Remove(Hwnd);
         }
 
-        public WinHandle OpenFileHandle(string Path, bool FSAccess, AccessMask Permissions)
-        {
-            WinFile hFile = null;
-            if (FSAccess)
-            {
-                if (File.Exists(Path))
-                    hFile = new WinFile { Path = Path, Device = (Path.StartsWith("\\\\.\\") || Path.ToLower().StartsWith("\\device\\")) };
-                else
-                    return null;
-            }
-            else
-            {
-                hFile = WinFiles.FirstOrDefault(f => f.Path.Equals(Path, StringComparison.OrdinalIgnoreCase));
-                if (hFile == null)
-                {
-                    hFile = new WinFile { Path = Path, Device = (Path.StartsWith("\\\\.\\") || Path.ToLower().StartsWith("\\device\\")) };
-                    WinFiles.Add(hFile);
-                }
-            }
-
-            WinHandle Handle = HandleManager.AddHandle(hFile, Permissions);
-            AddWinHandle(Handle);
-            return Handle;
-        }
-
         /// <summary>
         /// Drops the cached host file handles for a guest path so the host name can be renamed or removed.
         /// </summary>
@@ -8677,7 +8513,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IncludeChildren)
                 Prefix = GuestPath.EndsWith("\\", StringComparison.Ordinal) ? GuestPath : GuestPath + "\\";
 
-            KernelFileReads?.ReleasePath(GuestPath, Prefix);
+            KernelFiles?.ReleasePath(GuestPath, Prefix);
 
             foreach (WinFile FileObj in WinFiles)
             {
@@ -8805,22 +8641,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
             return Entry.Object as WinFile;
-        }
-
-        public bool ValidFileHandle(ulong Handle)
-        {
-            if (HandleExists(Handle, HandleType.FileHandle))
-            {
-                WinFile Target = HandleManager.GetObjectByHandle<WinFile>(Handle);
-                if (Target != null)
-                {
-                    if (WinFiles.FirstOrDefault(f => f.Path == Target.Path) != null)
-                    {
-                        return true;
-                    }
-                }
-            }
-            return false;
         }
 
         // The documented way to lock a whole file is a length of -1, so only the offset is signed.
@@ -10689,13 +10509,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Endpoint.Dispose();
                     }
 
-                    KernelFileReads?.ReleaseHandle(Handle);
+                    KernelFiles?.ReleaseHandle(Handle);
 
                     if (Closing != null && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
                     {
                         if (HandleManager.CountHandlesByObjectId(Closing.ObjectId) <= 1)
                         {
-                            KernelFileReads?.ReleaseFile(Closing);
+                            KernelFiles?.ReleaseFile(Closing);
                             Closing.ReleaseLocks();
                             UnregisterOpenFile(Closing);
                             if (Closing.DeletePending)

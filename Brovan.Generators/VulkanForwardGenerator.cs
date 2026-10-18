@@ -824,8 +824,6 @@ namespace Brovan.Generators
             return true;
         }
 
-        private static int ResolveLen(Member mem, Dictionary<string, int> offsets) => ResolveLen(mem, offsets, out _);
-
         private static int ResolveLen(Member mem, Dictionary<string, int> offsets, out string lenName)
         {
             lenName = null;

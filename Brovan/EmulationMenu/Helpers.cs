@@ -275,28 +275,9 @@ namespace Brovan
             return AsmConsoleFormatter.FormatInstructionForDebugger(Instruction);
         }
 
-        internal static void PrintHighlightedInstruction(X86Instruction Instruction, bool Current = false, bool ShowAddress = true)
-        {
-            AsmConsoleRenderer.WriteInstruction(Instruction, Current, ShowAddress);
-        }
-
         internal static void PrintHighlightedDisassembly(X86Instruction[] Instructions, bool HighlightFirst = true, bool ShowAddress = true)
         {
             AsmConsoleRenderer.WriteInstructions(Instructions, HighlightFirst, ShowAddress);
-        }
-
-        internal static void PrintStoppedInstruction(string Prefix, ulong Address)
-        {
-            TryDecodeInstructionAt(Address, out _, out string FormattedInstruction);
-            PrintHighlight($"{Prefix} {FormattedInstruction}", true);
-        }
-
-        internal static void PrintCurrentInstruction(string Prefix)
-        {
-            if (Emulator == null)
-                return;
-
-            PrintStoppedInstruction(Prefix, Emulator.ReadRegister(Emulator.IPRegister));
         }
 
         internal static bool TryDecodeInstructionBlock(ulong Address, int MaxInstructions, out X86Instruction[] Instructions)
@@ -3040,61 +3021,6 @@ namespace Brovan
                 default:
                     return false;
             }
-        }
-
-        public static string ReadGuestAsciiString(ulong Address, int MaxLength = 512)
-        {
-            if (Address == 0)
-                return "NULL";
-
-            if (Emulator == null || !Emulator.IsRegionMapped(Address, 1))
-                return $"0x{Address:X}";
-
-            try
-            {
-                List<byte> Bytes = new List<byte>(Math.Min(MaxLength, 128));
-                for (int Index = 0; Index < MaxLength; Index++)
-                {
-                    byte[] Value = Emulator.ReadMemory(Address + (ulong)Index, 1);
-                    if (Value == null || Value.Length == 0 || Value[0] == 0)
-                        break;
-
-                    Bytes.Add(Value[0]);
-                }
-
-                return EscapeDebuggerString(Encoding.UTF8.GetString(Bytes.ToArray()));
-            }
-            catch
-            {
-                return $"0x{Address:X}";
-            }
-        }
-
-        public static string EscapeDebuggerString(string Value)
-        {
-            if (Value == null)
-                return string.Empty;
-
-            StringBuilder Builder = new StringBuilder(Value.Length + 8);
-            foreach (char Ch in Value)
-            {
-                switch (Ch)
-                {
-                    case '\\': Builder.Append("\\\\"); break;
-                    case '"': Builder.Append("\\\""); break;
-                    case '\r': Builder.Append("\\r"); break;
-                    case '\n': Builder.Append("\\n"); break;
-                    case '\t': Builder.Append("\\t"); break;
-                    default:
-                        if (char.IsControl(Ch))
-                            Builder.Append($"\\x{(int)Ch:X2}");
-                        else
-                            Builder.Append(Ch);
-                        break;
-                }
-            }
-
-            return Builder.ToString();
         }
 
         public static bool IsSyscallFailure(SyscallHistoryEntry Entry)

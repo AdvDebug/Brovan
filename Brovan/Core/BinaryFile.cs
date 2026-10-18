@@ -2322,45 +2322,6 @@ namespace Brovan.Core
             return GetBinaryFormat(Header.Slice(0, Read));
         }
 
-        public static BinaryArchitecture GetBinaryArch(byte[] Data, BinaryFormat Format)
-        {
-            if (Format != BinaryFormat.Unknown)
-            {
-                if (Format == BinaryFormat.PE)
-                {
-                    if (Data.Length < 0x40)
-                        return BinaryArchitecture.Unknown;
-
-                    int PEHeaderOffset = BitConverter.ToInt32(Data, 0x3C);
-                    if (PEHeaderOffset + 6 >= Data.Length)
-                        return BinaryArchitecture.Unknown;
-
-                    ushort Machine = BitConverter.ToUInt16(Data, PEHeaderOffset + 4);
-                    if (Machine == 0x014C)
-                    {
-                        return BinaryArchitecture.x86;
-                    }
-                    else if (Machine == 0x8664)
-                    {
-                        return BinaryArchitecture.x64;
-                    }
-                }
-                else if (Format == BinaryFormat.ELF)
-                {
-                    if (Data.Length < 4)
-                        return BinaryArchitecture.Unknown;
-
-                    byte ElfClass = Data[4];
-                    bool Is64Bit = ElfClass == 2;
-                    if (Is64Bit)
-                        return BinaryArchitecture.x64;
-                    else
-                        return BinaryArchitecture.x86;
-                }
-            }
-            return BinaryArchitecture.Unknown;
-        }
-
         public BinaryFile Clone()
         {
             return new BinaryFile(this);

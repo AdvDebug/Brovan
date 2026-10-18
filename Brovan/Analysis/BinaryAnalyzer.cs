@@ -219,15 +219,6 @@ namespace Brovan.Analysis
             return false;
         }
 
-        public enum SearchSection
-        {
-            All = 0,
-
-            CodeSection = 1,
-
-            DataSection = 2
-        }
-
         public static List<int> IndexOf(byte[] Binary, byte[] Pattern)
         {
             if (Binary == null)
@@ -273,117 +264,9 @@ namespace Brovan.Analysis
             return (Characteristics & SectionCharacteristics.ContainsCode) != 0 || ((Characteristics & SectionCharacteristics.MemExecute) != 0 && (Characteristics & SectionCharacteristics.MemRead) != 0);
         }
 
-        public static bool IsDataSection(SectionCharacteristics Characteristics)
-        {
-            return (Characteristics & SectionCharacteristics.ContainsInitializedData) != 0 || (Characteristics & SectionCharacteristics.ContainsUninitializedData) != 0;
-        }
-
         public static bool IsCodeSection(ElfSectionCharacteristics Characteristics)
         {
             return (Characteristics & ElfSectionCharacteristics.ExecInstr) != 0 && (Characteristics & ElfSectionCharacteristics.Alloc) != 0;
-        }
-
-        public static bool IsDataSection(ElfSectionCharacteristics Characteristics)
-        {
-            return (Characteristics & ElfSectionCharacteristics.Alloc) != 0 && (Characteristics & ElfSectionCharacteristics.ExecInstr) == 0;
-        }
-
-        public static void SearchInSection(byte[] Data, byte[] Pattern, PortableBinarySection Section, List<BinarySearch> Results, ulong ImageBase)
-        {
-            byte[] SectionData = new byte[Section.RawSize];
-            Array.Copy(Data, Section.RawOffset, SectionData, 0, Section.RawSize);
-
-            List<int> Indexes = IndexOf(SectionData, Pattern);
-            foreach (int Index in Indexes)
-            {
-                Results.Add(new BinarySearch
-                {
-                    Match = Pattern,
-                    Address = (ulong)(ImageBase + Section.VirtualAddress + (uint)Index),
-                    Offset = Section.RawOffset + (uint)Index
-                });
-            }
-        }
-
-        public static void SearchInSection(byte[] Data, byte[] Pattern, ElfBinarySection Section, List<BinarySearch> Results)
-        {
-            byte[] SectionData = new byte[Section.RawSize];
-            Array.Copy(Data, Section.RawOffset, SectionData, 0, Section.RawSize);
-
-            List<int> Indexes = IndexOf(SectionData, Pattern);
-            foreach (int Index in Indexes)
-            {
-                Results.Add(new BinarySearch
-                {
-                    Match = Pattern,
-                    Address = Section.VirtualAddress + (uint)Index,
-                    Offset = Section.RawOffset + (uint)Index
-                });
-            }
-        }
-
-        public static BinarySearch[] SearchPatterns(BinaryFile Binary, SearchSection Search, byte[] Pattern)
-        {
-            List<BinarySearch> Results = new List<BinarySearch>();
-            byte[] Data = Binary.GetBinaryData().ToArray();
-
-            if (Search == SearchSection.All)
-            {
-                List<int> Indexes = IndexOf(Data, Pattern);
-                foreach (int Index in Indexes)
-                {
-                    Results.Add(new BinarySearch
-                    {
-                        Match = Pattern,
-                        Address = (uint)Index,
-                        Offset = (uint)Index
-                    });
-                }
-                return Results.ToArray();
-            }
-
-            if (Binary.FileFormat == BinaryFormat.PE)
-            {
-                if (Search.HasFlag(SearchSection.CodeSection))
-                {
-                    var CodeSections = Binary.PE.Sections.Where(s => IsCodeSection(s.Characteristics));
-                    foreach (PortableBinarySection Section in CodeSections)
-                    {
-                        SearchInSection(Data, Pattern, Section, Results, Binary.PE.ImageBase);
-                    }
-                }
-
-                if (Search.HasFlag(SearchSection.DataSection))
-                {
-                    var DataSections = Binary.PE.Sections.Where(s => IsDataSection(s.Characteristics));
-                    foreach (PortableBinarySection Section in DataSections)
-                    {
-                        SearchInSection(Data, Pattern, Section, Results, Binary.PE.ImageBase);
-                    }
-                }
-            }
-            else if (Binary.FileFormat == BinaryFormat.ELF)
-            {
-                if (Search.HasFlag(SearchSection.CodeSection))
-                {
-                    var CodeSections = Binary.ELF.Sections.Where(s => IsCodeSection(s.Characteristics));
-                    foreach (ElfBinarySection Section in CodeSections)
-                    {
-                        SearchInSection(Data, Pattern, Section, Results);
-                    }
-                }
-
-                if (Search.HasFlag(SearchSection.DataSection))
-                {
-                    var DataSections = Binary.ELF.Sections.Where(s => IsDataSection(s.Characteristics));
-                    foreach (ElfBinarySection Section in DataSections)
-                    {
-                        SearchInSection(Data, Pattern, Section, Results);
-                    }
-                }
-            }
-
-            return Results.ToArray();
         }
 
         /// <returns>The branch target, or the pointer slot address for FF 15 and FF 25. 0 on failure.</returns>
@@ -453,30 +336,6 @@ namespace Brovan.Analysis
             }
 
             return TargetAddress;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static ulong GetAddressFast(ulong Address, uint Length, ReadOnlySpan<byte> Bytes, BinaryFile Binary)
-        {
-            if (Bytes.Length >= 5 && (Bytes[0] == 0xE8 || Bytes[0] == 0xE9))
-            {
-                int Rel = BitConverter.ToInt32(Bytes.Slice(1, 4));
-                ulong Next = Address + Length;
-                return (ulong)((long)Next + Rel);
-            }
-
-            if (Bytes.Length >= 6 && Bytes[0] == 0xFF && (Bytes[1] == 0x15 || Bytes[1] == 0x25))
-            {
-                uint Disp = BitConverter.ToUInt32(Bytes.Slice(2, 4));
-                if (Binary.Architecture == BinaryArchitecture.x64)
-                {
-                    ulong Next = Address + Length;
-                    return Next + Disp;
-                }
-                return Disp;
-            }
-
-            return 0;
         }
 
         /// <returns>The resolved function name. Otherwise the operand text when Emu is true, or a "fun_" placeholder.</returns>

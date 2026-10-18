@@ -296,7 +296,17 @@ namespace Brovan.Core.Emulation.Guests
                 Instance.RunMlfqScheduler();
             }
 
-            WinHelper.KernelFileReads?.Dispose();
+            WinHelper.KernelFiles?.Dispose();
+        }
+
+        // SMP workers may still run here, so the release takes KernelLock.
+        public void Shutdown(BinaryEmulator Instance)
+        {
+            if (WinHelper?.KernelFiles is not KernelFileTable Files)
+                return;
+
+            lock (Instance.KernelLock)
+                Files.Dispose();
         }
 
         public void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread)
@@ -2099,7 +2109,11 @@ namespace Brovan.Core.Emulation.Guests
                 EnsureDirectBlobStandardHandles();
 
             WinSyscallTable = HelperFunctions.BuildWinSyscallTable(Instance._binary.Architecture);
-            WinHelper.KernelFileReads = KernelFileReads.TryCreate(Instance, this);
+            WinHelper.KernelFiles = KernelFileTable.TryCreate(Instance);
+            WinHelper.KernelFileReads = KernelFileReads.TryCreate(Instance, this, WinHelper.KernelFiles);
+            WinHelper.KernelFileInformation = KernelFileInformation.TryCreate(Instance, this, WinHelper.KernelFiles);
+            if (WinHelper.KernelFiles != null)
+                Instance.RefreshGuestKernel();
             Win32kDpi.SeedFromImage(Instance, MainModule);
             JoinGuestSession(Instance, MainModule);
 

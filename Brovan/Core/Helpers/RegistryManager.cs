@@ -764,30 +764,6 @@ namespace Brovan.Core.Helpers
             return true;
         }
 
-        public bool TryEnumerateSubKey(HiveKey Key, int Index, out string Name)
-        {
-            Name = null;
-
-            if (Index < 0 || !Refresh(Key))
-                return false;
-
-            if (Key.SubKeyBlockOffset <= 0)
-                return false;
-
-            if (!TryFindSubKeyOffset(Key.SubKeyBlockOffset, ref Index, 0, out int Offset))
-                return false;
-
-            int SubKeyAbs = MainRootOffset + Offset;
-
-            EnsureInBounds(SubKeyAbs, 0x60);
-
-            if (!IsSignature(SubKeyAbs + 4, (byte)'n', (byte)'k'))
-                return false;
-
-            Name = ReadKeyName(SubKeyAbs);
-            return true;
-        }
-
         /// <summary>
         /// Resolves the Index'th "nk" offset in a subkey list, descending through "ri" index roots and
         /// decrementing Index by the size of each sublist it skips.
@@ -870,52 +846,6 @@ namespace Brovan.Core.Helpers
             ValueCount = ReadI32(Abs + 0x28);
 
             Name = ReadKeyName(Abs);
-            return true;
-        }
-
-        public bool TryEnumerateValueBasic(HiveKey Key, int Index, out string Name, out int Type, out int DataLength)
-        {
-            Name = null;
-            Type = 0;
-            DataLength = 0;
-
-            if (Index < 0 || !Refresh(Key))
-                return false;
-
-            int Abs = Key.KeyBlockAbs;
-            EnsureInBounds(Abs, 0x60);
-
-            if (!IsSignature(Abs + 4, (byte)'n', (byte)'k'))
-                return false;
-
-            int ValueCount = ReadI32(Abs + 0x28);
-            int ValueOffsets = ReadI32(Abs + 0x2C);
-
-            if (ValueCount <= 0)
-                return false;
-
-            if (Index >= ValueCount)
-                return false;
-
-            int ListAbs = MainRootOffset + ValueOffsets + 4;
-            EnsureInBounds(ListAbs, ValueCount * 4);
-
-            int RelOffset = ReadI32(ListAbs + (Index * 4));
-            int VkAbs = MainRootOffset + RelOffset;
-
-            EnsureInBounds(VkAbs, 0x20);
-
-            if (!IsSignature(VkAbs + 4, (byte)'v', (byte)'k'))
-                return false;
-
-            int Size = ReadI32(VkAbs + 0x08);
-            int ValueType = ReadI32(VkAbs + 0x10);
-
-            Name = ReadValueName(VkAbs);
-
-            Type = ValueType;
-            DataLength = Size & 0x7FFFFFFF;
-
             return true;
         }
 

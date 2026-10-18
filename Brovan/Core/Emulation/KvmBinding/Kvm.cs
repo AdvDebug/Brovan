@@ -2811,11 +2811,21 @@ namespace Brovan.Core.Emulation
 
         bool IGuestKernelBackend.DisposedCheck() => DisposedCheck();
 
-        ulong IGuestKernelBackend.AllocateKernelRange(ulong size, bool writable, out IntPtr host)
+        bool IGuestKernelBackend.TryAllocateKernelRange(ulong size, bool writable, out ulong address, out IntPtr host)
         {
-            ulong address = AllocateInternalRange(size, writable ? KvmMemoryPermission.ReadWrite : KvmMemoryPermission.Read, out host);
-            RebuildMappings();
-            return address;
+            try
+            {
+                address = AllocateInternalRange(size, writable ? KvmMemoryPermission.ReadWrite : KvmMemoryPermission.Read, out host);
+                RebuildMappings();
+                return true;
+            }
+            catch (KvmException ex)
+            {
+                Utils.LogError($"[Kvm] No guest kernel memory of 0x{size:X} bytes: {ex.Message}");
+                address = 0;
+                host = IntPtr.Zero;
+                return false;
+            }
         }
 
         bool IGuestKernelBackend.MapKernelView(IntPtr host, ulong address, ulong size)

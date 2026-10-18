@@ -776,24 +776,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public bool Decorated;
         public bool Center;
         public WindowState State;
-
-        public WindowOptions ToOptions()
-        {
-            return new WindowOptions
-            {
-                Title = Title ?? string.Empty,
-                AppId = Class ?? string.Empty,
-                Width = Width > 0 ? Width : 800,
-                Height = Height > 0 ? Height : 600,
-                X = X,
-                Y = Y,
-                Visible = Show,
-                Resizable = Resizable,
-                Decorated = Decorated,
-                Center = Center,
-                State = State,
-            };
-        }
     }
 
     public interface ITextRenderSupport

@@ -306,17 +306,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             return Thread?.GuestState as WindowsThreadState;
         }
-
-        public static bool HasState(EmulatedThread Thread)
-        {
-            return Thread?.GuestState is WindowsThreadState;
-        }
-
-        public static bool IsAlertable(EmulatedThread Thread)
-        {
-            WindowsThreadState State = TryGetState(Thread);
-            return State != null && State.ApcAlertable && State.PendingUserApcs != null && State.PendingUserApcs.Count > 0;
-        }
     }
 }
 

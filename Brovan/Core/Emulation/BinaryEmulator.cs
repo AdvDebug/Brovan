@@ -270,7 +270,7 @@ namespace Brovan.Core.Emulation
                 return;
 
             foreach (GuestKernelCallStats Call in Kernel.Stats)
-                Utils.LogError($"[GuestKernel] {Call.Name} served={Call.Served} aborted={Call.Aborted}");
+                Utils.LogError($"[GuestKernel] {Call.Name} served={Call.Served} aborted={Call.Aborted} declined={Call.Declined}");
             Utils.FlushLog();
         }
 
@@ -333,7 +333,6 @@ namespace Brovan.Core.Emulation
         private InstructionBoolHookCallback RDTSCP;
         private MemoryHookCallback InvalidMemory;
         private InstructionHookCallback InvalidInstruction;
-        private MemoryHookCallback SnapMonitor;
         public delegate void MessageHandler(string Message, LogFlags Flags);
         public delegate bool InvalidOperationHandler(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value);
         public delegate void SyscallNotificationDelegate(ulong Address, ulong Syscall, string Name, ulong ReturnValue);
@@ -693,27 +692,6 @@ namespace Brovan.Core.Emulation
             long HostStart = System.Diagnostics.Stopwatch.GetTimestamp() - _wallClock.ElapsedTicks;
             long SkewCounts = Volatile.Read(ref _emulatedTimeSkewMilliseconds) * (QpcFrequency / 1000);
             _emulator.ConfigureEmulatedTimestampCounter(HostStart, System.Diagnostics.Stopwatch.Frequency, QpcFrequency, TscTicksPerQpcTick, SkewCounts);
-        }
-
-        internal void AdvanceEmulatedTimeMilliseconds(long Milliseconds)
-        {
-            if (Milliseconds <= 0)
-                return;
-
-            long Skew = Volatile.Read(ref _emulatedTimeSkewMilliseconds);
-            long AppliedMilliseconds = Skew > long.MaxValue - Milliseconds ? long.MaxValue - Skew : Milliseconds;
-            if (AppliedMilliseconds <= 0)
-                return;
-
-            Interlocked.Add(ref _emulatedTimeSkewMilliseconds, AppliedMilliseconds);
-            PublishTimestampCounterSource();
-
-            // A skew jump has no producer of its own: it can bring every timed wait due at once.
-            WakeSignal.Bump();
-
-            // A skew jump is the one moment the page is guaranteed stale, and the guest usually reads it
-            // immediately afterwards: the wait it was serving has just come due.
-            WinHelper?.KuserSharedData?.RefreshIfUnhooked();
         }
 
         public event MessageHandler OnMessage;
@@ -3999,129 +3977,6 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        /// <summary>
-        /// Saves the general registers and flags. Each memory region is copied on its first write after this call.
-        /// </summary>
-        public EmulatorSnapshot TakeLazySnapshot()
-        {
-            if (Disposed || !IsX86Guest)
-                return null;
-
-            EmulatorSnapshot Snapshot = new EmulatorSnapshot
-            {
-                Registers = new Dictionary<Registers, ulong>(),
-                OriginalRegionAddresses = new HashSet<ulong>(),
-                IsLazy = true
-            };
-
-            Registers[] Essential = _binary.Architecture == BinaryArchitecture.x64 ? EssentialRegistersX64 : EssentialRegistersX86;
-
-            foreach (Registers Reg in Essential)
-            {
-                try { Snapshot.Registers[Reg] = ReadRegister(Reg); }
-                catch { continue; }
-            }
-
-            foreach (MemoryRegion Region in _memory)
-            {
-                Snapshot.OriginalRegionAddresses.Add(Region.BaseAddress);
-            }
-
-            if (SnapMonitor == null)
-                SnapMonitor = SnapMemoryMonitor;
-            RegionSnapshots.Clear();
-            _emulator.AddMemoryHook(0, 0, BackendHookType.MemoryWrite, SnapMonitor);
-            return Snapshot;
-        }
-
-        public void RestoreLazySnapshot(EmulatorSnapshot Snapshot)
-        {
-            if (Snapshot == null || _emulator.Disposed || Disposed || !Snapshot.IsLazy)
-                return;
-
-            List<MemoryRegion> RegionsToDelete = new List<MemoryRegion>();
-
-            foreach (MemoryRegion Region in _memory)
-            {
-                if (!Snapshot.OriginalRegionAddresses.Contains(Region.BaseAddress))
-                    RegionsToDelete.Add(Region);
-            }
-
-            for (int i = 0; i < RegionsToDelete.Count; i++)
-            {
-                UnmapMemoryRegion(RegionsToDelete[i].BaseAddress);
-            }
-
-            if (Snapshot.Registers != null && Snapshot.Registers.Count > 0)
-            {
-                foreach (var kvp in Snapshot.Registers)
-                {
-                    try { WriteRegister(kvp.Key, kvp.Value); }
-                    catch { continue; }
-                }
-            }
-
-            if (RegionSnapshots.Count > 0)
-            {
-                foreach (var kvp in RegionSnapshots)
-                {
-                    try
-                    {
-                        _emulator.WriteMemory(kvp.Key, kvp.Value);
-                    }
-                    catch
-                    {
-                    }
-                }
-            }
-        }
-
-        /// <param name="Timeout">Timeout in microseconds, or 0 for none. Only the Unicorn backend applies it.</param>
-        /// <param name="Count">Instruction count limit, or 0 for none.</param>
-        /// <param name="Snapshot">State restored after the run.</param>
-        public bool EmulateFunction(string FunctionName, ulong[] Arguments = null!, uint Timeout = 0, uint Count = 0, EmulatorSnapshot Snapshot = null, bool LogErrors = true)
-        {
-            if (Disposed)
-                return false;
-
-            BinaryFunction Function = Array.Find(_binary.Functions, f => f.FunctionName == FunctionName);
-            if (Function.FunctionName == null)
-            {
-                Utils.LogError($"Function '{FunctionName}' not found in the binary.");
-                return false;
-            }
-
-            SetupCallArguments(Arguments);
-
-            bool Result = StartEmulation(Function.Address, Function.EndAddress, Timeout, Count, LogErrors);
-            if (Snapshot != null)
-            {
-                if (Snapshot.IsLazy)
-                    RestoreLazySnapshot(Snapshot);
-                else
-                    RestoreSnapshot(Snapshot);
-            }
-            return Result;
-        }
-
-        /// <param name="Timeout">Timeout in microseconds, or 0 for none. Only the Unicorn backend applies it.</param>
-        /// <param name="Count">Instruction count limit, or 0 for none.</param>
-        /// <param name="Snapshot">State restored after the run.</param>
-        public bool EmulateFunction(BinaryFunction Function, ulong[] Arguments = null!, uint Timeout = 0, uint Count = 0, EmulatorSnapshot Snapshot = null, bool LogErrors = true)
-        {
-            if (Disposed)
-                return false;
-
-            SetupCallArguments(Arguments);
-
-            bool Result = StartEmulation(Function.Address, Function.EndAddress, Timeout, Count, LogErrors);
-            if (Snapshot != null)
-            {
-                RestoreSnapshot(Snapshot);
-            }
-            return Result;
-        }
-
         private static readonly Registers[] Win64ArgumentRegisters =
         {
             Registers.UC_X86_REG_RCX, Registers.UC_X86_REG_RDX, Registers.UC_X86_REG_R8, Registers.UC_X86_REG_R9
@@ -4180,61 +4035,6 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        /// <summary>
-        /// Code region that <see cref="ExecuteCode(byte[], bool)"/> maps on first use and reuses.
-        /// </summary>
-        public ulong CodeAddress = 0;
-
-        /// <param name="StartEmulation">True runs the code now. False makes it the next instruction and pushes a return address to the current instruction pointer.</param>
-        public bool ExecuteCode(byte[] Code, bool StartEmulation)
-        {
-            if (Disposed)
-                return false;
-            if (Code == null || Code.Length == 0)
-                throw new NullReferenceException(nameof(Code));
-
-            ulong Size = 2 * 1024 * 1024;
-            if (CodeAddress == 0)
-                CodeAddress = MapUniqueAddress(Size, MemoryProtection.All);
-
-            bool Status;
-            if (StartEmulation)
-            {
-                _emulator.WriteMemory(CodeAddress, Code);
-                Status = this.StartEmulation(CodeAddress, CodeAddress + (ulong)Code.Length, 0, 0);
-            }
-            else
-            {
-                byte[] NewCode = new byte[Code.Length + 1];
-                Buffer.BlockCopy(Code, 0, NewCode, 0, Code.Length);
-                NewCode[NewCode.Length - 1] = 0xC3;
-
-                if (_binary.Architecture == BinaryArchitecture.x64)
-                {
-                    ulong RSP = ReadRegister(Registers.UC_X86_REG_RSP);
-                    ulong RIP = ReadRegister(Registers.UC_X86_REG_RIP);
-                    RSP -= 8;
-                    Status = _emulator.WriteMemory(RSP, RIP);
-                }
-                else
-                {
-                    uint ESP = ReadRegister32(Registers.UC_X86_REG_ESP);
-                    uint EIP = ReadRegister32(Registers.UC_X86_REG_EIP);
-                    ESP -= 4;
-                    Status = _emulator.WriteMemory(ESP, EIP);
-                }
-
-                if (!Status)
-                    return false;
-
-                if (!WriteMemory(CodeAddress, NewCode))
-                    return false;
-
-                Status = _binary.Architecture == BinaryArchitecture.x64 ? WriteRegister(Registers.UC_X86_REG_RIP, CodeAddress) : WriteRegister(Registers.UC_X86_REG_EIP, CodeAddress);
-            }
-            return Status;
-        }
-
         public void Dispose()
         {
             if (!Disposed)
@@ -4246,6 +4046,7 @@ namespace Brovan.Core.Emulation
                 if (_emulator != null)
                 {
                     _emulator.StopEmulation();
+                    Guest?.Shutdown(this);
                     _emulator.PersistCodeCache();
                     _emulator.Dispose();
                 }

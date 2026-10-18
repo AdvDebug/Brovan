@@ -110,6 +110,9 @@ namespace Brovan.Core.Emulation
         void Initialize(BinaryEmulator Instance, BinaryFile Binary);
         void Start(BinaryEmulator Instance);
 
+        // Runs at emulator dispose, after the backend has stopped and before it is disposed.
+        void Shutdown(BinaryEmulator Instance) { }
+
         bool TryHandleSyscall(BinaryEmulator Instance);
         bool TryHandleInterrupt(BinaryEmulator Instance, uint InterruptNumber);
 
@@ -250,7 +253,6 @@ namespace Brovan.Core.Emulation
 
     public class EmulatorSnapshot
     {
-        public bool IsLazy;
         public Dictionary<Registers, ulong> Registers { get; set; }
         public Dictionary<ulong, byte[]> MemoryRegions { get; set; }
         public HashSet<ulong> OriginalRegionAddresses { get; set; }
@@ -1620,30 +1622,6 @@ namespace Brovan.Core.Emulation
                 }
             }
             return uint.MaxValue;
-        }
-
-        /// <summary>
-        /// Clear cached syscalls.
-        /// </summary>
-        public static void ClearCachedSyscalls()
-        {
-            if (CachedSyscallTable != null)
-            {
-                CachedSyscallTable = null;
-            }
-
-            if (CachedSyscallTablex86 != null)
-            {
-                CachedSyscallTablex86 = null;
-            }
-
-            lock (PreParsedImages)
-            {
-                foreach (BinaryFile Image in PreParsedImages.Values)
-                    Image.Dispose();
-
-                PreParsedImages.Clear();
-            }
         }
 
         private static SyscallDispatchTable<WinSyscallEntry> ToDispatchTable(Dictionary<uint, WinSyscallEntry> Source)

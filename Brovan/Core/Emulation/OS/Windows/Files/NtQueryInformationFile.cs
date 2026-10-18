@@ -36,7 +36,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             0x00, 0x00, 0x10, 0x00,
         ];
 
-        private static ReadOnlySpan<byte> QuerySetAlignmentRequirement =>
+        internal static ReadOnlySpan<byte> QuerySetAlignmentRequirement =>
         [
             0x00, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x01, 0x08, 0x04,
             0x04, 0x04, 0x08, 0x08, 0x08, 0x04, 0x08, 0x04, 0x04, 0x04, 0x08, 0x04, 0x08, 0x04, 0x04, 0x04,
@@ -125,7 +125,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FILE_INFORMATION_CLASS.FileNormalizedNameInformation:
                     return HandleFileNameInformation(Instance, File, IoStatusBlock, FileInformation, Length);
                 case FILE_INFORMATION_CLASS.FilePositionInformation:
-                    return HandleFilePositionInformation(Instance, File, IoStatusBlock, FileInformation);
+                    return HandleFilePositionInformation(Instance, FileHandle, File, IoStatusBlock, FileInformation);
                 case FILE_INFORMATION_CLASS.FileModeInformation:
                     return HandleFixedUlong(Instance, IoStatusBlock, FileInformation, Length, FileModeInformationSize, File.Mode);
                 case FILE_INFORMATION_CLASS.FileAlignmentInformation:
@@ -271,11 +271,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS HandleFilePositionInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation)
+        private static NTSTATUS HandleFilePositionInformation(BinaryEmulator Instance, ulong FileHandle, WinFile File, ulong IoStatusBlock, ulong FileInformation)
         {
             ulong Position = File == null || File.Position < 0 ? 0UL : unchecked((ulong)File.Position);
             Instance._emulator.WriteMemory(FileInformation + 0x00, Position, 8);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FilePositionInformationSize);
+            if (File != null)
+                Instance.WinHelper.KernelFileInformation?.NotePosition(FileHandle, File);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

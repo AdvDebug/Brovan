@@ -159,9 +159,6 @@ namespace Brovan
         public static extern unsafe bool EnumDisplaySettingsW(string lpszDeviceName, int iModeNum, byte* lpDevMode);
 
         [DllImport("user32.dll")]
-        public static extern int GetSystemMetricsForDpi(int nIndex, uint dpi);
-
-        [DllImport("user32.dll")]
         public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
 
         [DllImport("user32.dll")]
@@ -2617,12 +2614,6 @@ namespace Brovan
                 return Builder.ToString();
             }
 
-            public static void SetDriveMapping(char DriveLetter, string HostRoot)
-            {
-                EnsureDriveMapping(DriveLetter, HostRoot);
-                RefreshAllowedRoots();
-            }
-
             public static uint GetWindowsDriveMap()
             {
                 uint Map = 1u << ('C' - 'A');
@@ -2668,12 +2659,6 @@ namespace Brovan
                 }
 
                 return Map;
-            }
-
-            public static void SetLinuxMountMapping(string MountPoint, string HostRoot)
-            {
-                EnsureLinuxMountMapping(MountPoint, HostRoot);
-                RefreshAllowedRoots();
             }
 
             public static bool SetWindowsMountMapping(string GuestDirectory, string HostRoot)
@@ -3374,42 +3359,6 @@ namespace Brovan
                 try
                 {
                     Directory.CreateDirectory(HostPath);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-            }
-
-            public static long GetFileLength(string Path, BinaryFormat Format)
-            {
-                string HostPath = ResolveHostPath(Path, Format);
-                if (string.IsNullOrEmpty(HostPath) || !File.Exists(HostPath))
-                    return 0;
-
-                try
-                {
-                    return new FileInfo(HostPath).Length;
-                }
-                catch
-                {
-                    return 0;
-                }
-            }
-
-            public static bool WriteFile(string Path, byte[] Data, BinaryFormat Format)
-            {
-                if (Data == null)
-                    return false;
-
-                string HostPath = ResolveVirtualHostPath(Path, Format, CreateDirectories: true);
-                if (string.IsNullOrEmpty(HostPath))
-                    return false;
-
-                try
-                {
-                    File.WriteAllBytes(HostPath, Data);
                     return true;
                 }
                 catch

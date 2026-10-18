@@ -268,6 +268,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrWhiteSpace(WriteHostPath))
                 return false;
 
+            lock (HandleLock)
+            {
+                if (HoldsWriteHandle && TrySetHandleTimes(CachedHandle, CreationTime, LastAccessTime, LastWriteTime))
+                    return true;
+            }
+
             try
             {
                 bool Directory = ExistsAsDirectory;
@@ -300,6 +306,31 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             catch
             {
+                return false;
+            }
+        }
+
+        private static readonly long MaxHostFileTime = DateTime.MaxValue.ToFileTimeUtc();
+
+        private bool TrySetHandleTimes(SafeFileHandle Handle, long CreationTime, long LastAccessTime, long LastWriteTime)
+        {
+            if (CreationTime > MaxHostFileTime || LastAccessTime > MaxHostFileTime || LastWriteTime > MaxHostFileTime)
+                return false;
+
+            try
+            {
+                if (CreationTime > 0)
+                    File.SetCreationTimeUtc(Handle, DateTime.FromFileTimeUtc(CreationTime));
+                if (LastAccessTime > 0)
+                    File.SetLastAccessTimeUtc(Handle, DateTime.FromFileTimeUtc(LastAccessTime));
+                if (LastWriteTime > 0)
+                    File.SetLastWriteTimeUtc(Handle, DateTime.FromFileTimeUtc(LastWriteTime));
+
+                return true;
+            }
+            catch (Exception Ex) when (Ex is IOException || Ex is UnauthorizedAccessException)
+            {
+                Brovan.Core.Helpers.Utils.LogError($"[WindowsFileStream] times on the open handle of {GuestPath}: {Ex.Message}");
                 return false;
             }
         }
@@ -639,8 +670,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HostPath;
         }
 
+        // A held handle stays on the file it opened, as an NT handle stays on its file object.
         private SafeFileHandle AcquireReadHandle()
         {
+            if (HoldsWriteHandle && CachedHandleReadable)
+                return CachedHandle;
+
             string HostPath = EffectiveReadHostPath;
             if (string.IsNullOrWhiteSpace(HostPath))
             {

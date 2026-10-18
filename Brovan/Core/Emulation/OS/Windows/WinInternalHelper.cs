@@ -35,15 +35,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Buffer.AsSpan(0, (int)Size);
         }
 
-        public ReadOnlySpan<byte> GetReadOnlySpan(ulong Size)
-        {
-            if (Size > int.MaxValue)
-                throw new ArgumentOutOfRangeException(nameof(Size));
-
-            EnsureCapacity((int)Size);
-            return Buffer.AsSpan(0, (int)Size);
-        }
-
         public byte[] GetBuffer(ulong Size)
         {
             if (Size > int.MaxValue)
@@ -253,13 +244,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return null;
         }
 
-        public List<ulong> GetHandlesByObjectId(string ObjectId)
-        {
-            if (ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles))
-                return new List<ulong>(Handles);
-            return new List<ulong>();
-        }
-
         public int CountHandlesByObjectId(string ObjectId)
         {
             return ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles) ? Handles.Count : 0;
@@ -277,20 +261,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return false;
-        }
-
-        public T? GetObjectByObjectId<T>(string ObjectId) where T : class, IHandleObject
-        {
-            if (!ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles))
-                return null;
-
-            for (int Index = 0; Index < Handles.Count; Index++)
-            {
-                if (HandleTable.TryGetValue(Handles[Index], out HandleEntry Entry) && Entry.Object is T Typed)
-                    return Typed;
-            }
-
-            return null;
         }
 
         public AccessMask GetPermissionsByHandle(ulong Handle)
@@ -324,25 +294,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Handles.Count == 0)
                     ObjectIdToHandles.Remove(obj.ObjectId);
             }
-            return true;
-        }
-
-        public bool RemoveHandle(ulong Handle)
-        {
-            if (!TryGetEntry(Handle, out ulong Key, out HandleEntry Entry))
-                return false;
-            IHandleObject obj = Entry.Object;
-            HandleTable.Remove(Key);
-            Version++;
-
-            if (ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
-            {
-                Handles.Remove(Key);
-
-                if (Handles.Count == 0)
-                    ObjectIdToHandles.Remove(obj.ObjectId);
-            }
-
             return true;
         }
 

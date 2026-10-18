@@ -430,27 +430,6 @@ namespace Brovan.Core.Emulation.Guests
             }
         }
 
-        public MemoryProtection TranslateMemoryProtection(ElfSectionCharacteristics Characteristics)
-        {
-            MemoryProtection Protections = MemoryProtection.None;
-            if ((Characteristics & ElfSectionCharacteristics.Write) == 0)
-            {
-                Protections |= MemoryProtection.Write;
-            }
-
-            if ((Characteristics & ElfSectionCharacteristics.Alloc) == 0)
-            {
-                Protections |= MemoryProtection.Read;
-            }
-
-            if ((Characteristics & ElfSectionCharacteristics.ExecInstr) == 0)
-            {
-                Protections |= MemoryProtection.Execute;
-            }
-
-            return Protections;
-        }
-
         private static readonly int[] X64SyscallRegs = new int[]
         {
             (int)Registers.UC_X86_REG_RAX,

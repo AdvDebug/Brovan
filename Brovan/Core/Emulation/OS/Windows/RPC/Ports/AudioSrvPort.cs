@@ -1445,25 +1445,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 && BinaryPrimitives.ReadUInt32LittleEndian(State.Data) == DeviceStateActive;
         }
 
-        public static void DumpConnectionMessage(BinaryEmulator Instance, string TargetPort, ulong ConnectionMessagePtr)
-        {
-            if (ConnectionMessagePtr == 0 || !IsAudioPort(TargetPort))
-                return;
-
-            if (!Instance.IsRegionMapped(ConnectionMessagePtr, LrpcPacket.HeaderSize))
-                return;
-
-            byte[] Header = Instance.ReadMemory(ConnectionMessagePtr, LrpcPacket.HeaderSize);
-            if (Header == null)
-                return;
-
-            ushort TotalLength = (ushort)(Header[0x02] | (Header[0x03] << 8));
-            if (TotalLength < LrpcPacket.HeaderSize || !Instance.IsRegionMapped(ConnectionMessagePtr, TotalLength))
-                return;
-
-            Dump(Instance, "connect", Instance.ReadMemory(ConnectionMessagePtr, TotalLength), LrpcPacket.HeaderSize);
-        }
-
         private static bool IsAudioPort(string Name)
         {
             for (int Index = 0; Index < PortNames.Length; Index++)

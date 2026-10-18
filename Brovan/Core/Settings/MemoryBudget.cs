@@ -55,6 +55,9 @@ namespace Brovan.Core.Settings
 
         public static long KernelReadViewBytes { get; private set; }
 
+        // KernelReadFiles bounds the cells that hold a read view.
+        public static int KernelFileCells { get; private set; }
+
         public static int VulkanWaitThreads { get; private set; }
 
         // The guest Vulkan ICD sizes its descriptor pool raise budget from this figure.
@@ -83,6 +86,7 @@ namespace Brovan.Core.Settings
             HostStreamInputBytes = (int)Kilobytes(Pick(Off: 64, Minimal: 64, Medium: 32, High: 16, Aggressive: 8));
             KernelReadFiles = (int)Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8);
             KernelReadViewBytes = (long)Megabytes(Pick(Off: 256, Minimal: 192, Medium: 128, High: 64, Aggressive: 32));
+            KernelFileCells = (int)Pick(Off: 512, Minimal: 384, Medium: 256, High: 128, Aggressive: 64);
             VulkanWaitThreads = (int)Pick(Off: 8, Minimal: 8, Medium: 6, High: 4, Aggressive: 2);
             ulong PhysicalMegabytes = Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
 

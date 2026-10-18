@@ -17,8 +17,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint SecNoChange = 0x400000;
         internal const uint NumaNodeMask = 0x7F;
 
-        private static ulong AlignDown(ulong v, ulong a) => v & ~(a - 1);
-
         // NT: MmMakeSectionAccess.
         private static ReadOnlySpan<byte> SectionAccessByMask => new byte[] { 0x04, 0x04, 0x08, 0x0C, 0x02, 0x04, 0x0A, 0x0C };
 

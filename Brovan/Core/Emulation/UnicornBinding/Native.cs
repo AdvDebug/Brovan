@@ -121,17 +121,8 @@ namespace Brovan.Core.Emulation
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         public static extern UCErrors uc_hook_del(IntPtr uc, IntPtr hook);
 
-        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
-        public static extern UCErrors uc_context_save(IntPtr uc, out IntPtr context);
-
-        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
-        public static extern UCErrors uc_context_restore(IntPtr uc, IntPtr context);
-
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl, EntryPoint = "uc_ctl")]
         public static extern UCErrors uc_ctl0(IntPtr uc, int control);
-
-        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl, EntryPoint = "uc_ctl")]
-        public static extern UCErrors uc_ctl1(IntPtr uc, int control, int arg1);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl, EntryPoint = "uc_ctl")]
         public static extern UCErrors uc_ctl1_uint(IntPtr uc, int control, uint arg1);

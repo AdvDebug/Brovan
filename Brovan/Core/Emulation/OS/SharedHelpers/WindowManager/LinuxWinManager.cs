@@ -76,9 +76,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial int XResizeWindow(IntPtr display, IntPtr window, uint width, uint height);
 
         [LibraryImport("libX11.so.6")]
-        public static partial int XMoveWindow(IntPtr display, IntPtr window, int x, int y);
-
-        [LibraryImport("libX11.so.6")]
         public static partial int XSelectInput(IntPtr display, IntPtr window, long eventMask);
 
         [LibraryImport("libX11.so.6")]
@@ -216,9 +213,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public const int GrabModeAsync = 1;
 
         [LibraryImport("libX11.so.6")]
-        public static partial int XSync(IntPtr display, [MarshalAs(UnmanagedType.I4)] int discard);
-
-        [LibraryImport("libX11.so.6")]
         public static partial int XCloseDisplay(IntPtr display);
 
         [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
@@ -237,9 +231,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             int mode,
             IntPtr data,
             int elementCount);
-
-        [LibraryImport("libX11.so.6")]
-        public static partial int XDeleteProperty(IntPtr display, IntPtr window, IntPtr property);
 
         [LibraryImport("libX11.so.6")]
         public static partial void XSetWMNormalHints(IntPtr display, IntPtr window, ref XSizeHints hints);
@@ -262,9 +253,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         [LibraryImport("libX11.so.6")]
         public static partial int XSetForeground(IntPtr display, IntPtr gc, nuint foreground);
-
-        [LibraryImport("libX11.so.6")]
-        public static partial int XSetBackground(IntPtr display, IntPtr gc, nuint background);
 
         [LibraryImport("libX11.so.6")]
         public static partial int XSetFunction(IntPtr display, IntPtr gc, int function);

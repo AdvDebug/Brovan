@@ -47,6 +47,7 @@ namespace Brovan.Core.Emulation
         private bool _sortedPageKeysDirty = true;
         private bool _mappingsDirty;
         private bool _populateUnavailable = !WhpNative.HasAdviseGpaRange;
+        private bool _touchPopulateArmed;
         private bool _avxEnabled;
         private ulong _cr4Protection;
         private byte[] _xsaveImage;
@@ -75,6 +76,9 @@ namespace Brovan.Core.Emulation
         private const ulong PopulateLimitBytes = 32UL * 1024 * 1024;
         private const ulong PopulateMinBytes = 64UL * 1024;
         private const int ResidencyQueryPages = 4096;
+        private const ulong TouchBlockSize = 2UL * 1024 * 1024;
+        private const int TouchBlockPages = 512;
+        private const int TouchDensePages = TouchBlockPages / 2;
         private bool _fullRebuildRequired = true;
         private readonly List<DirtyRange> _dirtyRanges = new();
         private const int MaxDirtyRanges = 16;
@@ -508,6 +512,8 @@ namespace Brovan.Core.Emulation
                     Size = size,
                     LivePages = (int)(size / WhpConstants.PageSize),
                 });
+
+                WithholdCoveredBlocks(address, size);
 
                 for (ulong off = 0; off < size; off += WhpConstants.PageSize)
                 {
@@ -2435,11 +2441,21 @@ namespace Brovan.Core.Emulation
 
         bool IGuestKernelBackend.DisposedCheck() => DisposedCheck();
 
-        ulong IGuestKernelBackend.AllocateKernelRange(ulong size, bool writable, out IntPtr host)
+        bool IGuestKernelBackend.TryAllocateKernelRange(ulong size, bool writable, out ulong address, out IntPtr host)
         {
-            ulong address = AllocateInternalRange(size, writable ? WhpMemoryPermission.ReadWrite : WhpMemoryPermission.Read, out host);
-            RebuildMappings();
-            return address;
+            try
+            {
+                address = AllocateInternalRange(size, writable ? WhpMemoryPermission.ReadWrite : WhpMemoryPermission.Read, out host);
+                RebuildMappings();
+                return true;
+            }
+            catch (WhpException ex)
+            {
+                Utils.LogError($"[Whp] No guest kernel memory of 0x{size:X} bytes: {ex.Message}");
+                address = 0;
+                host = IntPtr.Zero;
+                return false;
+            }
         }
 
         unsafe bool IGuestKernelBackend.MapKernelView(IntPtr host, ulong address, ulong size)
@@ -2652,22 +2668,35 @@ namespace Brovan.Core.Emulation
 
         private unsafe ulong* FindLeafTable(ulong pageBase)
         {
+            ulong* directoryEntry = FindDirectoryEntry(pageBase);
+            if (directoryEntry == null || !NamesTable(*directoryEntry))
+                return null;
+
+            return _pageTableViews.TryGetValue(*directoryEntry & WhpConstants.PageTableEntryAddressMask, out IntPtr leaf) && leaf != IntPtr.Zero
+                ? (ulong*)leaf
+                : null;
+        }
+
+        private unsafe ulong* FindDirectoryEntry(ulong pageBase)
+        {
             ulong table = _pml4Gpa;
-            for (int shift = 39; shift >= 21; shift -= 9)
+            for (int shift = 39; shift >= 30; shift -= 9)
             {
                 if (!_pageTableViews.TryGetValue(table, out IntPtr view) || view == IntPtr.Zero)
                     return null;
 
                 ulong entry = ((ulong*)view)[(pageBase >> shift) & 0x1FF];
-                if ((entry & WhpConstants.PageTableEntryPresent) == 0)
+                if (!NamesTable(entry))
                     return null;
                 table = entry & WhpConstants.PageTableEntryAddressMask;
             }
 
-            return _pageTableViews.TryGetValue(table, out IntPtr leaf) && leaf != IntPtr.Zero ? (ulong*)leaf : null;
+            return _pageTableViews.TryGetValue(table, out IntPtr directory) && directory != IntPtr.Zero
+                ? (ulong*)directory + ((pageBase >> 21) & 0x1FF)
+                : null;
         }
 
-        private ulong EnsureChildTable(ulong tableGpa, int index)
+        private ulong EnsureChildTable(ulong tableGpa, int index, ulong newEntryFlags = PageTableEntryDefaultFlags)
         {
             if (!_pageTableViews.TryGetValue(tableGpa, out IntPtr tablePtr) || tablePtr == IntPtr.Zero)
                 return 0;
@@ -2675,13 +2704,50 @@ namespace Brovan.Core.Emulation
             {
                 ulong* entries = (ulong*)tablePtr;
                 ulong entry = entries[index];
-                if ((entry & WhpConstants.PageTableEntryPresent) == 0)
+                if ((entry & (WhpConstants.PageTableEntryPresent | WhpConstants.PageTableEntryWithheld)) == 0)
                 {
                     ulong childGpa = AllocateInternalPage(mapIntoGuest: false);
-                    entries[index] = childGpa | PageTableEntryDefaultFlags;
+                    entries[index] = childGpa | newEntryFlags;
                     return childGpa;
                 }
                 return entry & WhpConstants.PageTableEntryAddressMask;
+            }
+        }
+
+        private static bool NamesTable(ulong entry) =>
+            (entry & WhpConstants.PageTableEntryPresent) != 0
+                ? (entry & WhpConstants.PageTableEntryLargePage) == 0
+                : (entry & WhpConstants.PageTableEntryWithheld) != 0;
+
+        // A withheld PDE turns the first touch of a fully covered 2 MiB block into one guest #PF that populates the block.
+        // The PDE keeps naming its table, so a processor that still caches it keeps a valid translation and needs no flush.
+        private unsafe void WithholdCoveredBlocks(ulong address, ulong size)
+        {
+            if (size <= PopulateLimitBytes || _populateUnavailable)
+                return;
+
+            ulong first = (address + TouchBlockSize - 1) & ~(TouchBlockSize - 1);
+            ulong end = (address + size) & ~(TouchBlockSize - 1);
+
+            for (ulong block = first; block < end; block += TouchBlockSize)
+            {
+                ulong pdptGpa = EnsureChildTable(_pml4Gpa, (int)((block >> 39) & 0x1FF));
+                ulong pdGpa = EnsureChildTable(pdptGpa, (int)((block >> 30) & 0x1FF));
+                if (!_pageTableViews.TryGetValue(pdGpa, out IntPtr pdPtr) || pdPtr == IntPtr.Zero)
+                    return;
+
+                int pdIndex = (int)((block >> 21) & 0x1FF);
+                ulong* directoryEntry = (ulong*)pdPtr + pdIndex;
+                ulong entry = *directoryEntry;
+                if ((entry & (WhpConstants.PageTableEntryWithheld | WhpConstants.PageTableEntryLargePage)) != 0)
+                    continue;
+
+                if (entry == 0)
+                    EnsureChildTable(pdGpa, pdIndex, WhpConstants.PageTableEntryWithheld);
+                else
+                    Volatile.Write(ref *directoryEntry, (entry & WhpConstants.PageTableEntryAddressMask) | WhpConstants.PageTableEntryWithheld);
+
+                _touchPopulateArmed = true;
             }
         }
 
@@ -3331,10 +3397,111 @@ namespace Brovan.Core.Emulation
             if (WhpNative.Failed(hr))
                 throw new WhpException($"WHvMapGpaRange failed (gpa=0x{gpa:X}, size=0x{size:X})", hr);
 
-            if (overLiveRange || IsAdoptedBacking(host))
+            PopulateMapped(gpa, size, host, flags, overLiveRange);
+        }
+
+        private void PopulateMapped(ulong gpa, ulong size, IntPtr host, WhvMapGpaRangeFlags flags, bool residentOnly)
+        {
+            if (residentOnly || IsAdoptedBacking(host))
                 PopulateResidentRange(gpa, size, host, flags);
             else
                 PopulateRange(gpa, size, flags);
+        }
+
+        // A not-present fault with every level present comes from a processor that faulted before another one restored
+        // the block. Upper levels are never cleared, so the retry cannot loop.
+        private unsafe bool TryPopulateOnTouch(ulong errorCode, ulong faultAddress)
+        {
+            const ulong Present = 0x1;
+            if (!_touchPopulateArmed || (errorCode & Present) != 0 || !IsGuestRange(faultAddress & ~WhpConstants.PageMask, WhpConstants.PageSize))
+                return false;
+
+            ulong* directoryEntry = FindDirectoryEntry(faultAddress);
+            if (directoryEntry == null)
+                return false;
+
+            ulong entry = *directoryEntry;
+            if ((entry & WhpConstants.PageTableEntryPresent) != 0)
+            {
+                ulong* table = null;
+                ulong tableRange = ulong.MaxValue;
+                ulong* leaf = FindLeafEntry(faultAddress & ~WhpConstants.PageMask, ref table, ref tableRange);
+                return leaf != null && (*leaf & WhpConstants.PageTableEntryPresent) != 0;
+            }
+
+            if ((entry & WhpConstants.PageTableEntryWithheld) == 0)
+                return false;
+
+            Volatile.Write(ref *directoryEntry, (entry & WhpConstants.PageTableEntryAddressMask) | PageTableEntryDefaultFlags);
+            PopulateTouchedBlock(faultAddress & ~WhpConstants.PageMask);
+            return true;
+        }
+
+        private void PopulateTouchedBlock(ulong faultPage)
+        {
+            if (_mappingsDirty)
+                RebuildMappings();
+
+            if (_populateUnavailable)
+                return;
+
+            ulong blockBase = faultPage & ~(TouchBlockSize - 1);
+            bool dense = blockBase >= TouchBlockSize && IsBlockDense(blockBase - TouchBlockSize);
+
+            // A fresh block usually holds nothing resident. The faulting page stands in for the block-wide query.
+            if (!dense && (!TryLookupPage(faultPage, out MappedPage page) || !IsHostPageResident(page.HostPage)))
+                return;
+
+            ulong blockEnd = blockBase + TouchBlockSize;
+            for (int i = FirstActiveMapIndexAtOrBefore(blockBase); i < _activeMapStarts.Count; i++)
+            {
+                ulong start = _activeMapStarts[i];
+                if (start >= blockEnd) break;
+
+                InstalledMap map = _activeMaps[start];
+                ulong end = start + map.Size;
+                if (end <= blockBase) continue;
+
+                ulong partStart = Math.Max(start, blockBase);
+                ulong partEnd = Math.Min(end, blockEnd);
+                PopulateMapped(partStart, partEnd - partStart, new IntPtr(map.Host.ToInt64() + (long)(partStart - start)), map.Flags, !dense);
+                if (_populateUnavailable) return;
+            }
+        }
+
+        private static unsafe bool IsHostPageResident(IntPtr host)
+        {
+            WorkingSetExInformation entry;
+            entry.VirtualAddress = host;
+            entry.VirtualAttributes = 0;
+            return WhpNative.QueryWorkingSetEx(WhpNative.CurrentProcess, &entry, (uint)sizeof(WorkingSetExInformation)) && entry.Valid;
+        }
+
+        // UnmapMemory leaves PTEs in place, so an accessed bit counts only on a page that is still mapped.
+        private unsafe bool IsBlockDense(ulong blockBase)
+        {
+            ulong* directoryEntry = FindDirectoryEntry(blockBase);
+            if (directoryEntry == null)
+                return false;
+
+            ulong entry = *directoryEntry;
+            if ((entry & WhpConstants.PageTableEntryPresent) == 0 || (entry & WhpConstants.PageTableEntryLargePage) != 0
+                || !_pageTableViews.TryGetValue(entry & WhpConstants.PageTableEntryAddressMask, out IntPtr view) || view == IntPtr.Zero)
+                return false;
+
+            ulong* table = (ulong*)view;
+            int accessed = 0;
+            for (int i = 0; i < TouchBlockPages; i++)
+            {
+                if ((Volatile.Read(ref table[i]) & WhpConstants.PageTableEntryAccessed) == 0)
+                    continue;
+
+                if (TryLookupPage(blockBase + (ulong)i * WhpConstants.PageSize, out MappedPage page)
+                    && page.Permissions != WhpMemoryPermission.None && ++accessed >= TouchDensePages)
+                    return true;
+            }
+
+            return false;
         }
 
         private bool UnmapGpaRange(ulong gpa, ulong size)
@@ -3460,13 +3627,18 @@ namespace Brovan.Core.Emulation
                 bool fromUserMode = ReadExceptionFrame(vp, rip, out uint faultVector, out ulong errorCode);
                 if (!fromUserMode)
                 {
+                    // The kernel call still aborts below, and the next one into the block runs in the guest.
+                    if (faultVector == 14 && _touchPopulateArmed)
+                        TryPopulateOnTouch(errorCode, ReadRegister(Registers.UC_X86_REG_CR2));
+
                     ref WhpRegisters frame = ref GetRegistersRef(vp);
                     if (TryFinishKernelCall(vp, frame.Rip, frame.Rflags, 0, out bool resumed))
                         return resumed;
                     return HandleKernelFault(vp, faultVector);
                 }
                 ulong faultAddress = faultVector == 14 ? ReadRegister(Registers.UC_X86_REG_CR2) : 0;
-                if (faultVector == 14 && (TryTouchWatchedPage(errorCode, faultAddress) || IsStaleWriteFault(vp, errorCode, faultAddress)))
+                if (faultVector == 14 && (TryPopulateOnTouch(errorCode, faultAddress) || TryTouchWatchedPage(errorCode, faultAddress)
+                    || IsStaleWriteFault(vp, errorCode, faultAddress)))
                     return true;
                 if (HandleException(faultVector, (uint)errorCode, faultAddress))
                     return true;

@@ -310,12 +310,15 @@ namespace Brovan.Core.Emulation
         /// </summary>
         void UnmapViews(ReadOnlySpan<ulong> addresses, Span<bool> unmapped);
 
+        /// <summary>Returns only after every processor has left the guest, so no kernel call still runs.</summary>
+        void EvictProcessors();
+
         bool Enabled { get; set; }
 
         IReadOnlyList<GuestKernelCallStats> Stats { get; }
     }
 
-    public readonly record struct GuestKernelCallStats(string Name, ulong Served, ulong Aborted);
+    public readonly record struct GuestKernelCallStats(string Name, ulong Served, ulong Aborted, ulong Declined);
 
     internal sealed class GuestKernelCall
     {
@@ -325,24 +328,32 @@ namespace Brovan.Core.Emulation
         public GuestKernelFinish Finish;
     }
 
+    // A declined call goes to the host on purpose and is counted apart from an aborted one.
     internal enum GuestKernelCallState
     {
         None,
         Aborted,
         Committed,
         Finishing,
+        Declined,
     }
 
     // A kernel call starts with every register saved and only RCX and R11 changed. It must not change RSP.
     public sealed class GuestKernelCallBuilder
     {
+        // NT passes the arguments after the fourth on the user stack, above the return address and shadow space.
+        private const int StackArgumentsOffset = 0x28;
+        private const int GuestPageMask = 0xFFF;
+
         private readonly ulong _spillAddress;
         private readonly bool _smap;
+        private bool _userAccess;
 
-        internal GuestKernelCallBuilder(Assembler asm, Label abort, ulong spillAddress, ulong userEnd, bool smap)
+        internal GuestKernelCallBuilder(Assembler asm, Label abort, Label decline, ulong spillAddress, ulong userEnd, bool smap)
         {
             Asm = asm;
             Abort = abort;
+            Decline = decline;
             _spillAddress = spillAddress;
             UserEnd = userEnd;
             _smap = smap;
@@ -352,7 +363,70 @@ namespace Brovan.Core.Emulation
 
         public Label Abort { get; }
 
+        public Label Decline { get; }
+
         public ulong UserEnd { get; }
+
+        public void CheckStackArguments(int count, AssemblerRegister64 scratch)
+        {
+            Asm.mov(scratch, (long)(UserEnd - (ulong)(StackArgumentsOffset + (count - 4) * 8)));
+            Asm.cmp(rsp, scratch);
+            Asm.ja(Abort);
+        }
+
+        // Arguments count from 0, and CheckStackArguments must cover the index first.
+        public void LoadStackArgument(AssemblerRegister64 target, int index)
+        {
+            RequireUserAccess();
+            Asm.mov(target, __qword_ptr[rsp + StackArgumentsOffset + (index - 4) * 8]);
+        }
+
+        public void LoadStackArgument(AssemblerRegister32 target, int index)
+        {
+            RequireUserAccess();
+            Asm.mov(target, __dword_ptr[rsp + StackArgumentsOffset + (index - 4) * 8]);
+        }
+
+        // Leaves start + length in end.
+        public void CheckUserRange(AssemblerRegister64 start, AssemblerRegister64 length, AssemblerRegister64 end, AssemblerRegister64 scratch)
+        {
+            Asm.mov(end, start);
+            Asm.add(end, length);
+            Asm.jc(Abort);
+            Asm.mov(scratch, (long)UserEnd);
+            Asm.cmp(end, scratch);
+            Asm.ja(Abort);
+        }
+
+        public void CheckUserRange(AssemblerRegister64 start, int length, AssemblerRegister64 scratch)
+        {
+            Asm.mov(scratch, (long)(UserEnd - (ulong)length));
+            Asm.cmp(start, scratch);
+            Asm.ja(Abort);
+        }
+
+        // A locked or of zero write-probes one byte of each page, as the host path does.
+        public void ProbeForWrite(AssemblerRegister64 start, int length)
+        {
+            RequireUserAccess();
+            Asm.@lock.or(__byte_ptr[start], 0);
+            Asm.@lock.or(__byte_ptr[start + (length - 1)], 0);
+        }
+
+        // The range must not be empty.
+        public void ProbeForWrite(AssemblerRegister64 start, AssemblerRegister64 end, AssemblerRegister64 cursor, AssemblerRegister64 last)
+        {
+            RequireUserAccess();
+            Label probe = Asm.CreateLabel();
+            Asm.lea(last, __[end - 1]);
+            Asm.mov(cursor, start);
+            Asm.Label(ref probe);
+            Asm.@lock.or(__byte_ptr[cursor], 0);
+            Asm.or(cursor, GuestPageMask);
+            Asm.add(cursor, 1);
+            Asm.cmp(cursor, last);
+            Asm.jbe(probe);
+        }
 
         internal Label? CommitLabel { get; private set; }
 
@@ -366,16 +440,31 @@ namespace Brovan.Core.Emulation
             GuestSyscallStub.Store(Asm, _spillAddress, GuestSyscallStub.SavedSlot + index, value);
         }
 
+        // One pair covers several emitters, because stac and clac are slow.
         public void BeginUserAccess()
         {
+            if (_userAccess)
+                throw new InvalidOperationException("User access is already open.");
+
+            _userAccess = true;
             if (_smap)
                 Asm.stac();
         }
 
         public void EndUserAccess()
         {
+            RequireUserAccess();
+            _userAccess = false;
             if (_smap)
                 Asm.clac();
+        }
+
+        internal bool UserAccessOpen => _userAccess;
+
+        private void RequireUserAccess()
+        {
+            if (!_userAccess)
+                throw new InvalidOperationException("User memory is touched only between BeginUserAccess and EndUserAccess.");
         }
 
         // Code before the swap must be safe to run again, because an abort hands the whole call to the host. If the code
@@ -425,7 +514,7 @@ namespace Brovan.Core.Emulation
         private static readonly AssemblerRegister64[] SlotRegisters =
             { rax, rbx, rcx, rdx, rsi, rdi, rsp, rbp, r8, r9, r10, r11, r12, r13, r14, r15 };
 
-        private readonly record struct CallLayout(ulong Body, ulong Commit, ulong Served, ulong Abort, ulong End);
+        private readonly record struct CallLayout(ulong Body, ulong Commit, ulong Served, ulong Abort, ulong Decline, ulong End);
 
         public ulong HaltOffset { get; private set; }
         public ulong ResumeOffset { get; private set; }
@@ -436,12 +525,21 @@ namespace Brovan.Core.Emulation
         private ulong _commonAbortOffset;
         private CallLayout[] _calls = Array.Empty<CallLayout>();
 
-        public static int ServedSlot(int call) => CounterSlot + call * 2;
+        private const int CountersPerCall = 3;
 
-        public static int AbortedSlot(int call) => CounterSlot + call * 2 + 1;
+        public static int ServedSlot(int call) => CounterSlot + call * CountersPerCall;
+
+        public static int AbortedSlot(int call) => CounterSlot + call * CountersPerCall + 1;
+
+        public static int DeclinedSlot(int call) => CounterSlot + call * CountersPerCall + 2;
 
         public static unsafe void CountOutcome(IntPtr spill, int call, GuestKernelCallState state)
-            => ((ulong*)spill)[state == GuestKernelCallState.Committed ? ServedSlot(call) : AbortedSlot(call)]++;
+            => ((ulong*)spill)[state switch
+            {
+                GuestKernelCallState.Committed => ServedSlot(call),
+                GuestKernelCallState.Declined => DeclinedSlot(call),
+                _ => AbortedSlot(call),
+            }]++;
 
         public ushort EntryOffset(int call) => (ushort)_calls[call].Body;
 
@@ -499,6 +597,7 @@ namespace Brovan.Core.Emulation
 
             Label[] served = new Label[calls.Count];
             Label[] aborts = new Label[calls.Count];
+            Label[] declines = new Label[calls.Count];
             Label[] bodies = new Label[calls.Count];
             Label[] commits = new Label[calls.Count];
             if (calls.Count != 0)
@@ -531,18 +630,24 @@ namespace Brovan.Core.Emulation
                 {
                     served[i] = a.CreateLabel();
                     aborts[i] = a.CreateLabel();
+                    declines[i] = a.CreateLabel();
                     bodies[i] = a.CreateLabel();
 
                     a.Label(ref bodies[i]);
-                    GuestKernelCallBuilder builder = new GuestKernelCallBuilder(a, aborts[i], spillAddress, userEnd, smap);
+                    GuestKernelCallBuilder builder = new GuestKernelCallBuilder(a, aborts[i], declines[i], spillAddress, userEnd, smap);
                     calls[i].Emit(builder);
                     commits[i] = builder.CommitLabel ?? throw new InvalidOperationException($"Kernel call {calls[i].Name} never commits.");
+                    if (builder.UserAccessOpen)
+                        throw new InvalidOperationException($"Kernel call {calls[i].Name} leaves user access open.");
 
                     a.Label(ref served[i]);
                     Increment(a, spillAddress, ServedSlot(i));
                     a.jmp(fastReturn);
                     a.Label(ref aborts[i]);
                     Increment(a, spillAddress, AbortedSlot(i));
+                    a.jmp(commonAbort);
+                    a.Label(ref declines[i]);
+                    Increment(a, spillAddress, DeclinedSlot(i));
                     a.jmp(commonAbort);
                 }
 
@@ -575,6 +680,7 @@ namespace Brovan.Core.Emulation
                     Commit: result.GetLabelRIP(commits[i]) - codeAddress,
                     Served: result.GetLabelRIP(served[i]) - codeAddress,
                     Abort: result.GetLabelRIP(aborts[i]) - codeAddress,
+                    Decline: result.GetLabelRIP(declines[i]) - codeAddress,
                     End: (i + 1 < calls.Count ? result.GetLabelRIP(bodies[i + 1]) : result.GetLabelRIP(callsEnd)) - codeAddress);
             }
 
@@ -603,6 +709,11 @@ namespace Brovan.Core.Emulation
                 if (offset < layout.Body || offset >= layout.End)
                     continue;
 
+                if (offset >= layout.Decline)
+                {
+                    call = offset == layout.Decline ? i : -1;
+                    return GuestKernelCallState.Declined;
+                }
                 if (offset >= layout.Abort)
                 {
                     call = offset == layout.Abort ? i : -1;
@@ -656,7 +767,7 @@ namespace Brovan.Core.Emulation
     {
         bool DisposedCheck();
 
-        ulong AllocateKernelRange(ulong size, bool writable, out IntPtr host);
+        bool TryAllocateKernelRange(ulong size, bool writable, out ulong address, out IntPtr host);
 
         bool MapKernelView(IntPtr host, ulong address, ulong size);
 
@@ -730,8 +841,9 @@ namespace Brovan.Core.Emulation
                 || _calls.Count >= GuestSyscallStub.MaxCalls || IsCallNumber(number))
                 return false;
 
-            if (_tableAddress == 0)
-                _tableAddress = _backend.AllocateKernelRange(GuestSyscallStub.MaxNumber * sizeof(ushort), false, out _tableHost);
+            if (_tableAddress == 0
+                && !_backend.TryAllocateKernelRange(GuestSyscallStub.MaxNumber * sizeof(ushort), false, out _tableAddress, out _tableHost))
+                return false;
 
             _calls.Add(new GuestKernelCall { Number = number, Name = name, Emit = emit, Finish = finish });
             try
@@ -823,8 +935,7 @@ namespace Brovan.Core.Emulation
             if (_backend.DisposedCheck() || size == 0)
                 return false;
 
-            address = _backend.AllocateKernelRange(size, true, out host);
-            return true;
+            return _backend.TryAllocateKernelRange(size, true, out address, out host);
         }
 
         public bool TryMapView(IntPtr host, ulong size, out ulong address)
@@ -878,6 +989,12 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        public void EvictProcessors()
+        {
+            if (!_backend.DisposedCheck())
+                _backend.EvictProcessors();
+        }
+
         public unsafe IReadOnlyList<GuestKernelCallStats> Stats
         {
             get
@@ -886,15 +1003,16 @@ namespace Brovan.Core.Emulation
                 GuestKernelCallStats[] stats = new GuestKernelCallStats[_calls.Count];
                 for (int call = 0; call < stats.Length; call++)
                 {
-                    ulong served = 0, aborted = 0;
+                    ulong served = 0, aborted = 0, declined = 0;
                     for (int i = 0; i < stubs.Length; i++)
                     {
                         ulong* spill = (ulong*)stubs[i].SpillHost;
                         served += Volatile.Read(ref spill[GuestSyscallStub.ServedSlot(call)]);
                         aborted += Volatile.Read(ref spill[GuestSyscallStub.AbortedSlot(call)]);
+                        declined += Volatile.Read(ref spill[GuestSyscallStub.DeclinedSlot(call)]);
                     }
 
-                    stats[call] = new GuestKernelCallStats(_calls[call].Name, served, aborted);
+                    stats[call] = new GuestKernelCallStats(_calls[call].Name, served, aborted, declined);
                 }
 
                 return stats;

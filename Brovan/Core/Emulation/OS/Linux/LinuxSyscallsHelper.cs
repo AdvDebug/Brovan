@@ -5,7 +5,6 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
 using Brovan;
 using Brovan.Core.Emulation.Guests;
@@ -220,15 +219,6 @@ namespace Brovan.Core.Emulation.OS.Linux
             return _buffer.AsSpan(0, (int)size);
         }
 
-        public ReadOnlySpan<byte> GetReadOnlySpan(ulong size)
-        {
-            if (size > int.MaxValue)
-                throw new ArgumentOutOfRangeException(nameof(size));
-
-            EnsureCapacity((int)size);
-            return _buffer.AsSpan(0, (int)size);
-        }
-
         public byte[] GetBuffer(ulong size)
         {
             if (size > int.MaxValue)
@@ -432,14 +422,6 @@ namespace Brovan.Core.Emulation.OS.Linux
             return false;
         }
 
-        public ulong DuplicateHandle(ulong Descriptor)
-        {
-            if (!DescriptorToEntry.TryGetValue(Descriptor, out FileDescriptorEntry? entry))
-                return ulong.MaxValue;
-
-            return AddHandle(entry.Object, entry.CloseOnExec);
-        }
-
         public bool ContainsHandle(ulong Descriptor)
         {
             return DescriptorToEntry.ContainsKey(Descriptor);
@@ -604,11 +586,6 @@ namespace Brovan.Core.Emulation.OS.Linux
         private const int CLOCK_BOOTTIME = 7;
         private const int CLOCK_TAI = 11;
         private const long NanosecondsPerSecond = 1000000000L;
-
-        public static bool IsValidEventFlags(int Flags)
-        {
-            return (Flags & ~(O_CLOEXEC | O_NONBLOCK)) == 0;
-        }
 
         public static bool IsValidClockId(int ClockId)
         {
@@ -1563,11 +1540,9 @@ namespace Brovan.Core.Emulation.OS.Linux
     public sealed class LinuxX86CpuIdentity
     {
         public uint MaxBasicLeaf { get; set; } = 0x00000019;
-        public uint MaxExtendedLeaf { get; set; } = 0x80000008;
         public string VendorId { get; set; } = "GenuineIntel";
         public string BrandString { get; set; } = "Brovan Virtual CPU";
         public uint Leaf1Eax { get; set; } = 0x000106A5;
-        public uint Leaf1Ebx { get; set; } = (8u << 8) | (1u << 16);
         public uint Leaf1Ecx { get; set; } =
             (1u << 0) |
             (1u << 9) |
@@ -1586,10 +1561,6 @@ namespace Brovan.Core.Emulation.OS.Linux
             (1u << 24) |
             (1u << 25) |
             (1u << 26);
-        public uint Leaf7Subleaf0Eax { get; set; }
-        public uint Leaf7Subleaf0Ebx { get; set; }
-        public uint Leaf7Subleaf0Ecx { get; set; }
-        public uint Leaf7Subleaf0Edx { get; set; }
         public uint Leaf80000001Ecx { get; set; } = 1u << 0;
         public uint Leaf80000001Edx { get; set; } = (1u << 11) | (1u << 20) | (1u << 27);
         public uint Leaf80000007Edx { get; set; } = 1u << 8;
@@ -1664,69 +1635,6 @@ namespace Brovan.Core.Emulation.OS.Linux
             return string.Join(" ", Flags);
         }
 
-        public bool TryGetLeaf(uint Leaf, uint SubLeaf, bool IsX64Guest, out uint Eax, out uint Ebx, out uint Ecx, out uint Edx)
-        {
-            Eax = 0;
-            Ebx = 0;
-            Ecx = 0;
-            Edx = 0;
-
-            switch (Leaf)
-            {
-                case 0:
-                    Eax = MaxBasicLeaf;
-                    WriteVendorRegisters(out Ebx, out Edx, out Ecx);
-                    return true;
-
-                case 1:
-                    Eax = Leaf1Eax;
-                    Ebx = Leaf1Ebx;
-                    Ecx = Leaf1Ecx;
-                    Edx = Leaf1Edx;
-                    return true;
-
-                case 7:
-                    if (SubLeaf != 0)
-                        return false;
-
-                    Eax = Leaf7Subleaf0Eax;
-                    Ebx = Leaf7Subleaf0Ebx;
-                    Ecx = Leaf7Subleaf0Ecx;
-                    Edx = Leaf7Subleaf0Edx;
-                    return true;
-
-                case 0xD:
-                case 0x14:
-                case 0x19:
-                    return true;
-
-                case 0x80000000:
-                    Eax = MaxExtendedLeaf;
-                    return true;
-
-                case 0x80000001:
-                    Ecx = Leaf80000001Ecx;
-                    Edx = GetLeaf80000001Edx(IsX64Guest);
-                    return true;
-
-                case 0x80000002:
-                case 0x80000003:
-                case 0x80000004:
-                    WriteBrandLeaf(Leaf, out Eax, out Ebx, out Ecx, out Edx);
-                    return true;
-
-                case 0x80000007:
-                    Edx = Leaf80000007Edx;
-                    return true;
-
-                case 0x80000008:
-                    Eax = Leaf80000008Eax;
-                    return true;
-            }
-
-            return false;
-        }
-
         private void AddLeaf1EcxFlag(List<string> Flags, int Bit, string Name)
         {
             if ((Leaf1Ecx & (1u << Bit)) != 0)
@@ -1764,30 +1672,6 @@ namespace Brovan.Core.Emulation.OS.Linux
                 Value |= 1u << 29;
 
             return Value;
-        }
-
-        private void WriteVendorRegisters(out uint Ebx, out uint Edx, out uint Ecx)
-        {
-            byte[] VendorBytes = new byte[12];
-            Encoding.ASCII.GetBytes((VendorId ?? string.Empty).PadRight(12, ' ').Substring(0, 12), 0, 12, VendorBytes, 0);
-            Ebx = BinaryPrimitives.ReadUInt32LittleEndian(VendorBytes.AsSpan(0, 4));
-            Edx = BinaryPrimitives.ReadUInt32LittleEndian(VendorBytes.AsSpan(4, 4));
-            Ecx = BinaryPrimitives.ReadUInt32LittleEndian(VendorBytes.AsSpan(8, 4));
-        }
-
-        private void WriteBrandLeaf(uint Leaf, out uint Eax, out uint Ebx, out uint Ecx, out uint Edx)
-        {
-            byte[] BrandBytes = new byte[48];
-            string Brand = GetModelName();
-            int Count = Encoding.ASCII.GetBytes(Brand, 0, Brand.Length > 48 ? 48 : Brand.Length, BrandBytes, 0);
-            if (Count < BrandBytes.Length)
-                Array.Fill(BrandBytes, (byte)' ', Count, BrandBytes.Length - Count);
-
-            int BaseOffset = (int)(Leaf - 0x80000002u) * 16;
-            Eax = BinaryPrimitives.ReadUInt32LittleEndian(BrandBytes.AsSpan(BaseOffset + 0, 4));
-            Ebx = BinaryPrimitives.ReadUInt32LittleEndian(BrandBytes.AsSpan(BaseOffset + 4, 4));
-            Ecx = BinaryPrimitives.ReadUInt32LittleEndian(BrandBytes.AsSpan(BaseOffset + 8, 4));
-            Edx = BinaryPrimitives.ReadUInt32LittleEndian(BrandBytes.AsSpan(BaseOffset + 12, 4));
         }
     }
 
@@ -2240,13 +2124,6 @@ namespace Brovan.Core.Emulation.OS.Linux
 
             Task = null;
             return false;
-        }
-
-
-        public IEnumerable<LinuxTaskInfo> EnumerateThreads()
-        {
-            InitializeCurrentProcess();
-            return CurrentProcess.Threads.Values.OrderBy(Task => Task.ThreadId);
         }
 
         public IEnumerable<LinuxProcessInfo> EnumerateProcesses()

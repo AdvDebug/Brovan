@@ -574,23 +574,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static string NormalizeRegularPath(string Path)
-        {
-            if (string.IsNullOrEmpty(Path))
-                return string.Empty;
-
-            return Path.Replace('/', '\\').TrimEnd('\0');
-        }
-
-        private static string TrimTrailingDirectorySeparators(string Path)
-        {
-            if (string.IsNullOrEmpty(Path))
-                return Path;
-            while (Path.Length > 3 && Path.EndsWith("\\", StringComparison.Ordinal))
-                Path = Path.Substring(0, Path.Length - 1);
-            return Path;
-        }
-
         private static string NormalizeAndTrimPath(string Path)
         {
             if (string.IsNullOrEmpty(Path)) return string.Empty;

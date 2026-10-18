@@ -65,6 +65,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Mask == null)
                 Mask = string.Empty;
 
+            // NT rejects "." and ".." as a search mask.
+            if (Mask == "." || Mask == "..")
+            {
+                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_OBJECT_NAME_INVALID, 0);
+                return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
+            }
+
             bool RestartScan = (QueryFlags & SL_RESTART_SCAN) != 0;
             bool ReturnSingleEntry = (QueryFlags & SL_RETURN_SINGLE_ENTRY) != 0;
             bool NoCursorUpdate = (QueryFlags & SL_NO_CURSOR_UPDATE) != 0;
@@ -72,15 +79,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool MaskProvided = !string.IsNullOrEmpty(Mask);
             bool MaskChanged = MaskProvided && !string.Equals(DirectoryHandle.DirectoryMask ?? string.Empty, Mask, StringComparison.OrdinalIgnoreCase);
 
-            bool FirstQueryOfScan = false;
+            bool FirstQueryOfHandle = false;
             bool Restarting = RestartScan || MaskChanged;
             if (DirectoryHandle.DirectoryEntries == null || Restarting)
             {
                 string GuestDirectory = DirectoryHandle.Path;
                 string EffectiveMask = MaskProvided ? Mask : (DirectoryHandle.DirectoryMask ?? string.Empty);
+                WindowsFileStream DirectoryStream = DirectoryHandle.GetFileStream();
                 List<WinDirectoryEntry> Entries;
                 using (Instance.WinHelper.LeaveKernelLock())
-                    Entries = ListDirectory(GuestDirectory, EffectiveMask);
+                    Entries = ListDirectory(GuestDirectory, EffectiveMask, DirectoryStream);
 
                 if (Entries == null)
                 {
@@ -91,10 +99,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 // A first query continues a scan that another query on the same handle started while the lock was out.
                 if (Restarting || DirectoryHandle.DirectoryEntries == null)
                 {
+                    FirstQueryOfHandle = DirectoryHandle.DirectoryEntries == null;
                     DirectoryHandle.DirectoryEntries = Entries;
                     DirectoryHandle.DirectoryIndex = 0;
                     DirectoryHandle.DirectoryMask = EffectiveMask;
-                    FirstQueryOfScan = true;
                 }
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -103,8 +111,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (DirectoryHandle.DirectoryIndex >= DirectoryHandle.DirectoryEntries.Count)
             {
-                // An empty first query is STATUS_NO_SUCH_FILE, which FindFirstFile maps to ERROR_FILE_NOT_FOUND.
-                NTSTATUS EmptyStatus = FirstQueryOfScan ? NTSTATUS.STATUS_NO_SUCH_FILE : NTSTATUS.STATUS_NO_MORE_FILES;
+                // NT answers STATUS_NO_SUCH_FILE only to the first query on a handle, not to a restarted scan.
+                NTSTATUS EmptyStatus = FirstQueryOfHandle ? NTSTATUS.STATUS_NO_SUCH_FILE : NTSTATUS.STATUS_NO_MORE_FILES;
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, EmptyStatus, 0);
                 Instance.WinHelper.QueueImmediateCompletion(DirectoryHandle, ApcRoutine, ApcContext, IoStatusBlock, EmptyStatus, 0);
                 return EmptyStatus;
@@ -232,8 +240,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : DirectoryPath + "\\" + Name;
         }
 
-        private static List<WinDirectoryEntry> ListDirectory(string GuestPath, string Mask)
+        private static List<WinDirectoryEntry> ListDirectory(string GuestPath, string Mask, WindowsFileStream DirectoryStream)
         {
+            if (IsMissingExactName(GuestPath, Mask, DirectoryStream))
+                return new List<WinDirectoryEntry>();
+
             string HostPath = GeneralHelper.IO.ResolveHostPath(GuestPath, Helpers.BinaryHelpers.BinaryFormat.PE);
             if (string.IsNullOrEmpty(HostPath) || !Directory.Exists(HostPath))
                 return null;
@@ -241,35 +252,89 @@ namespace Brovan.Core.Emulation.OS.Windows
             return ScanDirectory(HostPath, GeneralHelper.IO.ResolveNativeHostPath(GuestPath), Mask, GuestPath);
         }
 
+        private static readonly char[] NotPlainNameCharacters = { '*', '?', '<', '>', '"', '\\', '/', ':' };
+
+        // NT looks a plain name up in the directory index. Only a name that no store holds is answered here, because
+        // the listing gives a found name its stored case.
+        private static bool IsMissingExactName(string GuestPath, string Mask, WindowsFileStream DirectoryStream)
+        {
+            if (DirectoryStream == null || string.IsNullOrEmpty(Mask) || Mask == "." || Mask == ".."
+                || Mask.IndexOfAny(NotPlainNameCharacters) >= 0)
+                return false;
+
+            string WriteDirectory = DirectoryStream.WriteHostPath;
+            string ReadDirectory = DirectoryStream.ReadHostPath;
+            string NativeDirectory = GeneralHelper.IO.ResolveNativeHostPath(GuestPath);
+            bool DirectorySeen = false;
+
+            if (!IsMissingFromStore(WriteDirectory, Mask, ref DirectorySeen))
+                return false;
+
+            if (!IsSameHostPath(ReadDirectory, WriteDirectory) && !IsMissingFromStore(ReadDirectory, Mask, ref DirectorySeen))
+                return false;
+
+            if (!IsSameHostPath(NativeDirectory, WriteDirectory) && !IsSameHostPath(NativeDirectory, ReadDirectory)
+                && !IsMissingFromStore(NativeDirectory, Mask, ref DirectorySeen))
+                return false;
+
+            return DirectorySeen;
+        }
+
+        // False when the store holds the name, or when the host cannot answer by one open.
+        private static bool IsMissingFromStore(string DirectoryHostPath, string Name, ref bool DirectorySeen)
+        {
+            if (string.IsNullOrEmpty(DirectoryHostPath))
+                return true;
+
+            // \\?\ keeps Win32 from reading the name as a device such as COM1 or stripping a trailing dot or space.
+            string Candidate = Path.Combine(DirectoryHostPath, Name);
+            if (GeneralHelper.IsWindows && !Candidate.StartsWith(@"\\", StringComparison.Ordinal))
+                Candidate = @"\\?\" + Candidate;
+
+            GeneralHelper.IO.HostEntryKind Kind = GeneralHelper.IO.TryOpenHostEntry(Candidate, false, out Microsoft.Win32.SafeHandles.SafeFileHandle Handle, out _);
+            Handle?.Dispose();
+
+            if (Kind == GeneralHelper.IO.HostEntryKind.Missing)
+                DirectorySeen = true;
+
+            return Kind == GeneralHelper.IO.HostEntryKind.Missing || Kind == GeneralHelper.IO.HostEntryKind.MissingPath;
+        }
+
+        private static bool IsSameHostPath(string A, string B) =>
+            string.Equals(A, B, GeneralHelper.IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
         private static List<WinDirectoryEntry> ScanDirectory(string HostPath, string NativePath, string Mask, string GuestPath)
         {
             List<WinDirectoryEntry> Entries = new List<WinDirectoryEntry>();
             HashSet<string> Seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            try
+            if (MatchesMask(".", Mask) || MatchesMask("..", Mask))
             {
-                DirectoryInfo Self = new DirectoryInfo(HostPath);
-                long SelfCreation = Self.CreationTimeUtc.ToFileTimeUtc();
-                long SelfAccess = Self.LastAccessTimeUtc.ToFileTimeUtc();
-                long SelfWrite = Self.LastWriteTimeUtc.ToFileTimeUtc();
-                uint DirAttr = (uint)(FileAttributes.Directory);
-                foreach (string Dot in new[] { ".", ".." })
+                try
                 {
-                    if (!MatchesMask(Dot, Mask))
-                        continue;
-                    Entries.Add(new WinDirectoryEntry
+                    DirectoryInfo Self = new DirectoryInfo(HostPath);
+                    long SelfCreation = Self.CreationTimeUtc.ToFileTimeUtc();
+                    long SelfAccess = Self.LastAccessTimeUtc.ToFileTimeUtc();
+                    long SelfWrite = Self.LastWriteTimeUtc.ToFileTimeUtc();
+                    uint DirAttr = (uint)(FileAttributes.Directory);
+                    foreach (string Dot in new[] { ".", ".." })
                     {
-                        Name = Dot,
-                        FileAttributes = DirAttr,
-                        CreationTime = SelfCreation,
-                        LastAccessTime = SelfAccess,
-                        LastWriteTime = SelfWrite,
-                        ChangeTime = SelfWrite,
-                        FileId = WinFile.MakeFileId(CombineGuestPath(GuestPath, Dot))
-                    });
+                        if (!MatchesMask(Dot, Mask))
+                            continue;
+                        Entries.Add(new WinDirectoryEntry
+                        {
+                            Name = Dot,
+                            FileAttributes = DirAttr,
+                            CreationTime = SelfCreation,
+                            LastAccessTime = SelfAccess,
+                            LastWriteTime = SelfWrite,
+                            ChangeTime = SelfWrite,
+                            FileId = WinFile.MakeFileId(CombineGuestPath(GuestPath, Dot))
+                        });
+                    }
                 }
+                catch { }
             }
-            catch { }
 
             AddDirectoryContents(Entries, Seen, HostPath, Mask, GuestPath);
 

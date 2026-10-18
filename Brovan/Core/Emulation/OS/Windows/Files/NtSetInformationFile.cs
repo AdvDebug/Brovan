@@ -22,27 +22,99 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint FILE_DISPOSITION_DELETE = 0x00000001;
         private const uint FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE = 0x00000010;
 
+        // A copy of IopSetOperationLength in ntoskrnl, indexed by information class.
+        private static ReadOnlySpan<byte> SetOperationLength =>
+        [
+            0x00, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x01, 0x08, 0x00,
+            0x04, 0x00, 0x00, 0x08, 0x08, 0x00, 0x00, 0x08, 0x00, 0x10, 0x00, 0x08, 0x00, 0x48, 0x10, 0x18,
+            0x38, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x08, 0x08, 0x04, 0x10, 0x04, 0x14, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+            0x04, 0x18, 0x00, 0x08, 0x00, 0x10, 0x00, 0x04, 0x18, 0x00, 0x04, 0x04, 0x04, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+
+        // The checks and their order follow NtSetInformationFile in ntoskrnl, ahead of its handle reference.
+        private static NTSTATUS ValidateParameters(BinaryEmulator Instance, ulong IoStatusBlock, ulong FileInformation, uint Length, uint FileInformationClass)
+        {
+            if (FileInformationClass >= (uint)SetOperationLength.Length || SetOperationLength[(int)FileInformationClass] == 0)
+                return NTSTATUS.STATUS_INVALID_INFO_CLASS;
+
+            if ((!Instance.IsX86Guest || Wow64KeepsLength(FileInformationClass)) && Length < SetOperationLength[(int)FileInformationClass])
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+            if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlock, out NTSTATUS ProbeStatus))
+                return ProbeStatus;
+
+            // A WOW64 buffer reaches the service realigned by the thunk.
+            if (!Instance.IsX86Guest && Length != 0)
+            {
+                ulong Alignment = NtQueryInformationFile.QuerySetAlignmentRequirement[(int)FileInformationClass];
+                if ((FileInformation & (Alignment - 1)) != 0)
+                    return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // whNtSetInformationFile in wow64.dll copies a misaligned buffer, then reads a position itself.
+        private static NTSTATUS CheckWow64Thunk(BinaryEmulator Instance, ulong FileInformation, uint Length, uint FileInformationClass)
+        {
+            if ((FileInformation & 7) != 0 && Length != 0 && !Instance.IsAccessible(FileInformation, Length, false))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (FileInformationClass == (uint)FILE_INFORMATION_CLASS.FilePositionInformation)
+            {
+                if (Length < FilePositionInformationSize)
+                    return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                return FileInformation == 0 || Instance.IsAccessible(FileInformation, FilePositionInformationSize, false)
+                    ? NTSTATUS.STATUS_SUCCESS
+                    : NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
+
+            return Wow64ForwardsClass(FileInformationClass) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_INFO_CLASS;
+        }
+
+        private static bool Wow64ForwardsClass(uint FileInformationClass) => FileInformationClass switch
+        {
+            4 or 10 or 11 or 13 or 14 or 16 or 19 or 20 or 23 or 25 or 27 or 29 or 30 or 31 or 32 or 36 or 39 or 40 or 41
+                or 42 or 43 or 44 or 61 or 64 or 65 or 67 or 69 or 71 or 72 or 74 or 76 => true,
+            _ => false,
+        };
+
+        // The service sees the caller's length only for these classes, because the thunk converts the others.
+        private static bool Wow64KeepsLength(uint FileInformationClass) => FileInformationClass switch
+        {
+            4 or 13 or 14 or 16 or 23 or 40 or 41 or 43 or 44 or 64 or 67 or 71 or 74 or 76 => true,
+            _ => false,
+        };
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-
             ulong FileHandle = Instance.WinHelper.GetArg(0);
             ulong IoStatusBlock = Instance.WinHelper.GetArg(1);
             ulong FileInformation = Instance.WinHelper.GetArg(2);
             uint Length = (uint)Instance.WinHelper.GetArg(3);
             uint FileInformationClass = (uint)Instance.WinHelper.GetArg(4);
 
-            if (IoStatusBlock == 0 || FileInformation == 0)
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (Instance.IsX86Guest)
+            {
+                NTSTATUS Thunk = CheckWow64Thunk(Instance, FileInformation, Length, FileInformationClass);
+                if (Thunk != NTSTATUS.STATUS_SUCCESS)
+                    return Thunk;
+            }
 
-            if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlock, out NTSTATUS ProbeStatus))
-                return ProbeStatus;
-
-            if (!Instance.IsRegionMapped(FileInformation, Length))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            NTSTATUS Validation = ValidateParameters(Instance, IoStatusBlock, FileInformation, Length, FileInformationClass);
+            if (Validation != NTSTATUS.STATUS_SUCCESS)
+                return Validation;
 
             NTSTATUS Reference = Instance.WinHelper.ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out WinFile FileObj);
             if (Reference != NTSTATUS.STATUS_SUCCESS)
                 return Reference;
+
+            // NT reads the buffer in the class's own code, after the handle.
+            if (!Instance.IsAccessible(FileInformation, Length, false))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             FILE_INFORMATION_CLASS InfoClass = (FILE_INFORMATION_CLASS)FileInformationClass;
 
@@ -73,7 +145,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FILE_INFORMATION_CLASS.FileDispositionInformationEx:
                     return HandleFileDispositionInformationEx(Instance, FileHandle, FileObj, IoStatusBlock, FileInformation, Length);
                 case FILE_INFORMATION_CLASS.FilePositionInformation:
-                    return HandleFilePositionInformation(Instance, FileObj, IoStatusBlock, FileInformation, Length);
+                    return HandleFilePositionInformation(Instance, FileHandle, FileObj, IoStatusBlock, FileInformation);
                 case FILE_INFORMATION_CLASS.FileModeInformation:
                     return HandleFileModeInformation(Instance, FileObj, IoStatusBlock, FileInformation, Length);
                 case FILE_INFORMATION_CLASS.FileAllocationInformation:
@@ -390,23 +462,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS HandleFilePositionInformation(BinaryEmulator Instance, WinFile FileObj, ulong IoStatusBlock, ulong FileInformation, uint Length)
+        // NT moves a file opened without intermediate buffering only to a sector boundary.
+        private static NTSTATUS HandleFilePositionInformation(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong IoStatusBlock, ulong FileInformation)
         {
-            if (Length < FilePositionInformationSize)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
-                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-            }
-
             long Position = ReadInt64(Instance, FileInformation + 0x00);
-            if (Position < 0)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
+            if (Position < 0 || (FileObj.NoIntermediateBuffering && ((ulong)Position & (WindowsStorageDeviceSupport.BytesPerSector - 1)) != 0))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
-            }
 
             FileObj.Position = Position;
-            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FilePositionInformationSize);
+            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
+            Instance.WinHelper.KernelFileInformation?.NotePosition(FileHandle, FileObj);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
