@@ -36,6 +36,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal WinFile File;
         internal WinImageLayoutCache.View View;
 
+        // Guest ring 0 can write Data, so the host keeps its own copy of the view it mapped.
+        internal ulong ViewAddress;
+        internal ulong ViewLength;
+
         internal bool IsLive => File.KernelCell == this;
 
         internal long Offset
@@ -318,6 +322,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Data = Data,
                     File = File,
                     View = View,
+                    ViewAddress = ViewAddress,
+                    ViewLength = (ulong)Length,
                 };
 
                 File.KernelCell = Cell;
@@ -393,7 +399,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // A read that ends inside the view means the host file shrank under it.
         internal void NoteEnd(WinFile File, long End)
         {
-            if (File.KernelCell is not KernelFileCell Cell || (ulong)End >= Cell.Data->ViewLength)
+            if (File.KernelCell is not KernelFileCell Cell || (ulong)End >= Cell.ViewLength)
                 return;
 
             Retire(Cell);
@@ -489,7 +495,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Span<ulong> Addresses = stackalloc ulong[Retired.Count];
             for (int i = 0; i < Retired.Count; i++)
-                Addresses[i] = Retired[i].Data->ViewAddress;
+                Addresses[i] = Retired[i].ViewAddress;
             Kernel.UnmapViews(Addresses);
 
             for (int i = 0; i < Retired.Count; i++)
