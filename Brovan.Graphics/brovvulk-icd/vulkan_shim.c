@@ -2,6 +2,9 @@
 #define _WIN32_WINNT 0x0601
 #endif
 #include <windows.h>
+#include <winternl.h>
+#include <intrin.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -13,11 +16,17 @@
 #define IOCTL_BROVVULK_GEN 0x80002004u
 
 #if defined(_MSC_VER)
-#define BVK_TLS __declspec(thread)
 #define BVK_INLINE __forceinline
 #else
-#define BVK_TLS __thread
 #define BVK_INLINE inline __attribute__((always_inline))
+#endif
+
+#if defined(_M_X64) || defined(__x86_64__)
+#define BVK_TEB_PTR(off) ((void*)__readgsqword((unsigned long)(off)))
+#elif defined(_M_IX86) || defined(__i386__)
+#define BVK_TEB_PTR(off) ((void*)__readfsdword((unsigned long)(off)))
+#else
+#error "BVK_TEB_PTR needs the TEB segment of this architecture"
 #endif
 
 static HANDLE g_dev = INVALID_HANDLE_VALUE;
@@ -55,9 +64,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceLayerProperties(
 
 #define BVK_HDR 8u
 
-static BVK_TLS unsigned char* bvk_rq;
-static BVK_TLS unsigned int bvk_rqcap;
-static BVK_TLS unsigned int bvk_rqlen;
+// A len of 0 marks a request that could not be built.
+typedef struct
+{
+    unsigned char* buf;
+    unsigned int cap;
+    unsigned int len;
+} bvk_request;
+
+static DWORD bvk_rq_tls = TLS_OUT_OF_INDEXES;
 
 static int bvk_grow(void** p, uint32_t* cap, uint32_t need, size_t elem, uint32_t first)
 {
@@ -78,37 +93,115 @@ static int bvk_grow(void** p, uint32_t* cap, uint32_t need, size_t elem, uint32_
     return 1;
 }
 
-static void bvk_rq_grow(unsigned int need)
+// Same result as TlsGetValue, read from the TEB as kernelbase reads it. Unlike TlsGetValue, it leaves LastError alone.
+static BVK_INLINE bvk_request* bvk_rq_current(void)
 {
-    bvk_grow((void**)&bvk_rq, &bvk_rqcap, need, 1, 8192u);
+    DWORD i = bvk_rq_tls;
+    if (i < TLS_MINIMUM_AVAILABLE)
+        return (bvk_request*)BVK_TEB_PTR(offsetof(TEB, TlsSlots) + i * sizeof(void*));
+    void** expansion = (void**)BVK_TEB_PTR(offsetof(TEB, TlsExpansionSlots));
+    return expansion ? (bvk_request*)expansion[i - TLS_MINIMUM_AVAILABLE] : NULL;
+}
+
+static bvk_request* bvk_rq_create(void)
+{
+    bvk_request* rq = (bvk_request*)calloc(1, sizeof(bvk_request));
+    if (rq && !TlsSetValue(bvk_rq_tls, rq))
+    {
+        free(rq);
+        return NULL;
+    }
+    return rq;
+}
+
+static void bvk_rq_release(void)
+{
+    bvk_request* rq = bvk_rq_current();
+    if (!rq)
+        return;
+    TlsSetValue(bvk_rq_tls, NULL);
+    free(rq->buf);
+    free(rq);
+}
+
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
+{
+    (void)instance;
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        bvk_rq_tls = TlsAlloc();
+        return bvk_rq_tls != TLS_OUT_OF_INDEXES;
+    }
+    if (bvk_rq_tls == TLS_OUT_OF_INDEXES)
+        return TRUE;
+    if (reason == DLL_THREAD_DETACH)
+        bvk_rq_release();
+    // NT: reserved is non-NULL at process exit, when the heap can be inconsistent. The OS reclaims the memory.
+    else if (reason == DLL_PROCESS_DETACH && reserved == NULL)
+    {
+        bvk_rq_release();
+        TlsFree(bvk_rq_tls);
+    }
+    return TRUE;
 }
 
 static void bvk_rq_reset(void)
 {
-    bvk_rq_grow(BVK_HDR);
-    bvk_rqlen = BVK_HDR;
+    bvk_request* rq = bvk_rq_current();
+    if (!rq)
+        rq = bvk_rq_create();
+    if (rq)
+        rq->len = bvk_grow((void**)&rq->buf, &rq->cap, BVK_HDR, 1, 8192u) ? BVK_HDR : 0;
+}
+
+static bvk_request* bvk_rq_built(void)
+{
+    bvk_request* rq = bvk_rq_current();
+    return rq && rq->len != 0 ? rq : NULL;
+}
+
+static BVK_INLINE unsigned char* bvk_rq_room(bvk_request* rq, unsigned int len)
+{
+    if (!rq || rq->len == 0)
+        return NULL;
+    uint64_t need = (uint64_t)rq->len + len;
+    if (need > rq->cap && (need > UINT32_MAX || !bvk_grow((void**)&rq->buf, &rq->cap, (uint32_t)need, 1, 8192u)))
+    {
+        rq->len = 0;
+        return NULL;
+    }
+    return rq->buf + rq->len;
 }
 
 static void bvk_w_u32(uint32_t v)
 {
-    bvk_rq_grow(bvk_rqlen + 4);
-    memcpy(bvk_rq + bvk_rqlen, &v, 4);
-    bvk_rqlen += 4;
+    bvk_request* rq = bvk_rq_current();
+    unsigned char* p = bvk_rq_room(rq, 4);
+    if (!p)
+        return;
+    memcpy(p, &v, 4);
+    rq->len += 4;
 }
 
 static void bvk_w_u64(uint64_t v)
 {
-    bvk_rq_grow(bvk_rqlen + 8);
-    memcpy(bvk_rq + bvk_rqlen, &v, 8);
-    bvk_rqlen += 8;
+    bvk_request* rq = bvk_rq_current();
+    unsigned char* p = bvk_rq_room(rq, 8);
+    if (!p)
+        return;
+    memcpy(p, &v, 8);
+    rq->len += 8;
 }
 
 static void bvk_w_bytes(const void* s, unsigned int len)
 {
-    bvk_rq_grow(bvk_rqlen + len);
+    bvk_request* rq = bvk_rq_current();
+    unsigned char* p = bvk_rq_room(rq, len);
+    if (!p)
+        return;
     if (len)
-        memcpy(bvk_rq + bvk_rqlen, s, len);
-    bvk_rqlen += len;
+        memcpy(p, s, len);
+    rq->len += len;
 }
 
 static BVK_INLINE void bvk_w_scalar(const void* field, int nsize, int wsize)
@@ -152,14 +245,18 @@ static int bvk_rq_send(uint32_t cmd, void* out, uint32_t outCap, uint32_t* outLe
     if (h == INVALID_HANDLE_VALUE)
         return VK_ERROR_INITIALIZATION_FAILED;
 
+    bvk_request* rq = bvk_rq_built();
+    if (!rq)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+
     bvk_post_flush();
 
-    uint32_t plen = bvk_rqlen - BVK_HDR;
-    memcpy(bvk_rq + 0, &cmd, 4);
-    memcpy(bvk_rq + 4, &plen, 4);
+    uint32_t plen = rq->len - BVK_HDR;
+    memcpy(rq->buf + 0, &cmd, 4);
+    memcpy(rq->buf + 4, &plen, 4);
 
     DWORD ret = 0;
-    BOOL ok = DeviceIoControl(h, IOCTL_BROVVULK_GEN, bvk_rq, bvk_rqlen, out, outCap, &ret, NULL);
+    BOOL ok = DeviceIoControl(h, IOCTL_BROVVULK_GEN, rq->buf, rq->len, out, outCap, &ret, NULL);
     if (!ok || ret < 4)
         return VK_ERROR_INITIALIZATION_FAILED;
 
@@ -548,9 +645,9 @@ static int bvk_slot_send(bvk_rec_slot* s, uint32_t cmd)
 }
 
 // A posted sub-command carries its length, so the host can step over one that fails.
-static int bvk_slot_put(bvk_rec_slot* s, uint32_t id, int withLength)
+static int bvk_slot_put(bvk_rec_slot* s, const bvk_request* rq, uint32_t id, int withLength)
 {
-    unsigned int args = bvk_rqlen - BVK_HDR;
+    unsigned int args = rq->len - BVK_HDR;
     if (!bvk_rec_slot_grow(s, s->len + 4 + (withLength ? 4 : 0) + args))
         return 0;
     memcpy(s->buf + s->len, &id, 4);
@@ -560,7 +657,7 @@ static int bvk_slot_put(bvk_rec_slot* s, uint32_t id, int withLength)
         memcpy(s->buf + s->len, &args, 4);
         s->len += 4;
     }
-    memcpy(s->buf + s->len, bvk_rq + BVK_HDR, args);
+    memcpy(s->buf + s->len, rq->buf + BVK_HDR, args);
     s->len += args;
     s->count++;
     return 1;
@@ -597,7 +694,8 @@ static void bvk_post_flush(void)
 
 static int bvk_post(uint32_t id)
 {
-    if (bvk_post_disabled())
+    const bvk_request* rq = bvk_rq_built();
+    if (!rq || bvk_post_disabled())
         return 0;
 
     AcquireSRWLockExclusive(&bvk_post_lock);
@@ -606,10 +704,10 @@ static int bvk_post(uint32_t id)
         bvk_posted.len = BVK_HDR + 4;
         bvk_posted.count = 0;
     }
-    unsigned int args = bvk_rqlen - BVK_HDR;
+    unsigned int args = rq->len - BVK_HDR;
     if (bvk_posted.count != 0 && (uint64_t)bvk_posted.len + 8 + args > BVK_BATCH_LIMIT)
         bvk_slot_send(&bvk_posted, BVK_POSTED_ID);
-    int posted = bvk_posted.len >= BVK_HDR + 4 && bvk_slot_put(&bvk_posted, id, 1);
+    int posted = bvk_posted.len >= BVK_HDR + 4 && bvk_slot_put(&bvk_posted, rq, id, 1);
     ReleaseSRWLockExclusive(&bvk_post_lock);
     return posted;
 }
@@ -622,14 +720,18 @@ static int bvk_rec_dispatch_slot(bvk_rec_slot* s)
 
 static void bvk_rec_append(VkCommandBuffer cb, uint32_t id)
 {
+    const bvk_request* rq = bvk_rq_built();
+    if (!rq)
+        return;
+
     AcquireSRWLockExclusive(&bvk_rec_lock);
     bvk_rec_slot* s = bvk_rec_slot_for(cb);
     if (s)
     {
-        unsigned int args = bvk_rqlen - BVK_HDR;
+        unsigned int args = rq->len - BVK_HDR;
         if (s->count != 0 && (uint64_t)s->len + 4 + args > BVK_BATCH_LIMIT)
             bvk_rec_dispatch_slot(s);
-        bvk_slot_put(s, id, 0);
+        bvk_slot_put(s, rq, id, 0);
     }
     ReleaseSRWLockExclusive(&bvk_rec_lock);
 }

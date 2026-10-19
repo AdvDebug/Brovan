@@ -1503,21 +1503,21 @@ namespace Brovan.Generators
         private static string EmitHostCase(Model m, Command c, int id)
         {
             if (c.Name == "vkMapMemory")
-                return "            case " + id + ":\n                return BrovVulkGenMemory.MapMemory(r, st, inst);\n";
+                return "                return BrovVulkGenMemory.MapMemory(r, st, inst);\n";
             if (c.Name == "vkUnmapMemory")
-                return "            case " + id + ":\n                return BrovVulkGenMemory.UnmapMemory(r, st, inst);\n";
+                return "                return BrovVulkGenMemory.UnmapMemory(r, st, inst);\n";
             if (c.Name == "vkAllocateMemory")
-                return "            case " + id + ":\n                return BrovVulkGenMemory.AllocateMemory(r, w, st, inst, " + StructId["VkMemoryAllocateInfo"] + ");\n";
+                return "                return BrovVulkGenMemory.AllocateMemory(r, w, st, inst, " + StructId["VkMemoryAllocateInfo"] + ");\n";
             if (c.Name == "vkFreeMemory")
-                return "            case " + id + ":\n                return BrovVulkGenMemory.FreeMemory(r, st, inst);\n";
+                return "                return BrovVulkGenMemory.FreeMemory(r, st, inst);\n";
             if (c.Name == "vkCreateDevice")
-                return "            case " + id + ":\n                return BrovVulkGenMemory.CreateDevice(r, w, st, " + StructId["VkDeviceCreateInfo"] + ");\n";
+                return "                return BrovVulkGenMemory.CreateDevice(r, w, st, " + StructId["VkDeviceCreateInfo"] + ");\n";
             if (c.Name == "vkFlushMappedMemoryRanges")
-                return "            case " + id + ":\n                return BrovVulkGenMemory.FlushMappedMemoryRanges(r, st, inst);\n";
+                return "                return BrovVulkGenMemory.FlushMappedMemoryRanges(r, st, inst);\n";
             if (c.Name == "vkInvalidateMappedMemoryRanges")
-                return "            case " + id + ":\n                return BrovVulkGenMemory.InvalidateMappedMemoryRanges(r, st, inst);\n";
+                return "                return BrovVulkGenMemory.InvalidateMappedMemoryRanges(r, st, inst);\n";
             if (c.Name == "vkCreateInstance")
-                return "            case " + id + ":\n            {\n" +
+                return "            {\n" +
                     "                uint hasCi = r.ReadU32();\n" +
                     "                System.IntPtr ci = System.IntPtr.Zero;\n" +
                     "                if (hasCi != 0) ci = BrovVulkGenStruct.Rebuild(" + StructId["VkInstanceCreateInfo"] + ", r, st);\n" +
@@ -1570,7 +1570,7 @@ namespace Brovan.Generators
                     "                w.WriteU32(rr >= 0 ? st.Register(vki, \"VkInstance\", 0u) : 0u);\n" +
                     "                return rr;\n            }\n";
             if (c.Name == "vkCreateWin32SurfaceKHR")
-                return "            case " + id + ":\n            {\n" +
+                return "            {\n" +
                     "                uint viId = r.ReadU32();\n" +
                     "                System.IntPtr vi = st.Lookup(viId, \"VkInstance\");\n" +
                     "                ulong gh = r.Remaining >= 8 ? r.ReadU64() : 0;\n" +
@@ -1612,17 +1612,17 @@ namespace Brovan.Generators
                     "                w.WriteU32(rr >= 0 ? st.Register(surf, \"VkSurfaceKHR\", viId) : 0u);\n" +
                     "                return rr;\n            }\n";
             if (c.Name == "vkEnumerateInstanceExtensionProperties")
-                return "            case " + id + ":\n                return BrovVulkGenExt.Instance(w);\n";
+                return "                return BrovVulkGenExt.Instance(w);\n";
             if (c.Name == "vkEnumerateDeviceExtensionProperties")
-                return "            case " + id + ":\n                return BrovVulkGenExt.Device(st.Lookup(r.ReadU32(), \"VkPhysicalDevice\"), w);\n";
+                return "                return BrovVulkGenExt.Device(st.Lookup(r.ReadU32(), \"VkPhysicalDevice\"), w);\n";
             if (c.Name == "vkGetPhysicalDeviceWin32PresentationSupportKHR")
-                return "            case " + id + ":\n            {\n" +
+                return "            {\n" +
                     "                System.IntPtr pd = st.Lookup(r.ReadU32(), \"VkPhysicalDevice\");\n" +
                     "                uint qf = r.ReadU32();\n" +
                     "                return Brovan.GeneralHelper.IsLinux ? 1 : (int)BrovVulkApi.vkGetPhysicalDeviceWin32PresentationSupportKHR(pd, qf);\n" +
                     "            }\n";
             if (c.Name == "vkGetPipelineCacheData")
-                return "            case " + id + ":\n            {\n" +
+                return "            {\n" +
                     "                System.IntPtr dev = st.Lookup(r.ReadU32(), \"VkDevice\");\n" +
                     "                System.IntPtr pc = st.Lookup(r.ReadU32(), \"VkPipelineCache\");\n" +
                     "                uint want = r.ReadU32();\n" +
@@ -1959,7 +1959,7 @@ namespace Brovan.Generators
             EmitWsiHooks(c, b, check, post);
 
             StringBuilder head = new StringBuilder();
-            head.Append("            case ").Append(id).Append(":\n            {\n");
+            head.Append("            {\n");
             if (c.Name == "vkQueueSubmit" || c.Name == "vkQueueSubmit2")
                 head.Append("                BrovVulkGenMemory.SyncAllMappingsToHost(st, inst);\n");
             head.Append(b);
@@ -2000,6 +2000,24 @@ namespace Brovan.Generators
                 head.Append("                return rr;\n            }\n");
             }
             return head.ToString();
+        }
+
+        // A switch that holds every body is past the JIT size limit, so it runs unoptimized and each call zeroes one
+        // frame for the locals of all bodies. A body in braces gets its own method, and NoInlining keeps its locals
+        // out of Dispatch.
+        private static void AppendHostCase(StringBuilder cases, StringBuilder methods, string name, int id, string body)
+        {
+            cases.Append("            case ").Append(id).Append(":\n");
+            if (!body.StartsWith("            {\n", StringComparison.Ordinal))
+            {
+                cases.Append(body);
+                return;
+            }
+
+            cases.Append("                return ").Append(name).Append("(r, w, st, inst);\n");
+            methods.Append("\n        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]\n");
+            methods.Append("        private static int ").Append(name).Append("(GenReader r, GenBuf w, GenState st, Brovan.Core.Emulation.IGuestMemory inst)\n");
+            methods.Append(body.Substring(4).Replace("\n    ", "\n"));
         }
 
         private static string Arg(Command c, string name)
@@ -3286,6 +3304,7 @@ namespace Brovan.Generators
             db.AppendLine("            switch (id)");
             db.AppendLine("            {");
             StringBuilder cb = new StringBuilder();
+            StringBuilder methodB = new StringBuilder();
             StringBuilder pb = new StringBuilder();
             StringBuilder deferB = new StringBuilder();
             StringBuilder loseB = new StringBuilder();
@@ -3305,7 +3324,7 @@ namespace Brovan.Generators
                 string hostCase = EmitHostCase(m, c, i);
                 if (hostCase == null)
                     continue;
-                db.Append(hostCase);
+                AppendHostCase(db, methodB, c.Name, i, hostCase);
                 string deferredDestroy = DeferredDestroyCall(m, c);
                 if (deferredDestroy != null)
                     deferB.Append("            case ").Append(i).Append("u: ").Append(deferredDestroy).Append("; return;\n");
@@ -3335,6 +3354,7 @@ namespace Brovan.Generators
             db.AppendLine("                default: return -3;");
             db.AppendLine("            }");
             db.AppendLine("        }");
+            db.Append(methodB);
             db.AppendLine();
             db.Append("        internal static readonly System.Collections.Generic.HashSet<uint> MayLoseDevice = new System.Collections.Generic.HashSet<uint> { ").Append(loseB).AppendLine("};");
             db.Append("        internal static readonly System.Collections.Generic.HashSet<uint> ReleasesHandles = new System.Collections.Generic.HashSet<uint> { ").Append(releaseB).AppendLine("};");

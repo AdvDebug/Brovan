@@ -336,6 +336,10 @@ namespace Brovan.Generators
             B.AppendLine("            switch (Id)");
             B.AppendLine("            {");
 
+            // A switch that holds every body is past the JIT size limit, so it runs unoptimized and each call zeroes
+            // one frame for the locals of all bodies. Each slot gets its own method, and NoInlining keeps its locals
+            // out of Dispatch.
+            StringBuilder Methods = new StringBuilder(1 << 20);
             foreach (Interface I in Interfaces)
             {
                 foreach (Method M in I.Methods)
@@ -343,11 +347,17 @@ namespace Brovan.Generators
                     if (M.Local)
                         continue;
 
-                    B.AppendLine($"                // {I.Version}::{M.CName} slot {M.Slot}");
+                    string Name = $"{Sanitize(I.Version)}_{M.Slot}_{Sanitize(M.CName)}";
                     B.AppendLine($"                case {M.Id}:");
-                    B.AppendLine("                {");
-                    EmitHostCase(B, I, M, Structs);
-                    B.AppendLine("                }");
+                    B.AppendLine($"                    return {Name}(R, W, S);");
+
+                    Methods.AppendLine();
+                    Methods.AppendLine($"        // {I.Version}::{M.CName} slot {M.Slot}");
+                    Methods.AppendLine("        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]");
+                    Methods.AppendLine($"        private static bool {Name}(GenReader R, GenBuf W, BrovSteamState S)");
+                    Methods.AppendLine("        {");
+                    EmitHostCase(Methods, I, M, Structs);
+                    Methods.AppendLine("        }");
                 }
             }
 
@@ -355,6 +365,7 @@ namespace Brovan.Generators
             B.AppendLine("                    return false;");
             B.AppendLine("            }");
             B.AppendLine("        }");
+            B.Append(Methods);
             B.AppendLine("    }");
             B.AppendLine("}");
             return B.ToString();
@@ -362,7 +373,7 @@ namespace Brovan.Generators
 
         private static void EmitHostCase(StringBuilder B, Interface I, Method M, Dictionary<string, int> Structs)
         {
-            const string Pad = "                    ";
+            const string Pad = "            ";
             B.AppendLine($"{Pad}IntPtr Self = S.Lookup(R.ReadU32(), {I.Index});");
 
             List<string> CallArgs = new List<string>();

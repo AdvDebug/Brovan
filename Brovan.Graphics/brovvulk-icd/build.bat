@@ -51,16 +51,6 @@ if not errorlevel 1 (
     )
 )
 
-for %%T in (gcc clang cc) do (
-    if not defined COMPILER (
-        for /f "delims=" %%C in ('where %%T 2^>nul') do (
-            set "COMPILER=%%~fC"
-            set "MODE=gnu"
-            goto :have_compiler
-        )
-    )
-)
-
 call :init_msvc
 if not errorlevel 1 (
     where cl >nul 2>&1
@@ -77,6 +67,16 @@ if not errorlevel 1 (
         for /f "delims=" %%C in ('where clang-cl 2^>nul') do (
             set "COMPILER=%%~fC"
             set "MODE=msvc"
+            goto :have_compiler
+        )
+    )
+)
+
+for %%T in (gcc clang cc) do (
+    if not defined COMPILER (
+        for /f "delims=" %%C in ('where %%T 2^>nul') do (
+            set "COMPILER=%%~fC"
+            set "MODE=gnu"
             goto :have_compiler
         )
     )
