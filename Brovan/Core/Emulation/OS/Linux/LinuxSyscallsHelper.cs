@@ -1191,6 +1191,11 @@ namespace Brovan.Core.Emulation.OS.Linux
                 Error = TranslateSocketError(Ex.SocketErrorCode);
                 return false;
             }
+            catch (UnauthorizedAccessException)
+            {
+                Error = LinuxErrno.EACCES;
+                return false;
+            }
             catch (ArgumentException)
             {
                 Error = LinuxErrno.EINVAL;
