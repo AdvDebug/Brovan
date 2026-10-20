@@ -60,6 +60,8 @@ namespace Brovan.Core.Settings
 
         public static int VulkanWaitThreads { get; private set; }
 
+        public static int CoreMessagingRegistrations { get; private set; }
+
         // The guest Vulkan ICD sizes its descriptor pool raise budget from this figure.
         public static ulong GuestPhysicalBytes { get; private set; }
 
@@ -88,6 +90,7 @@ namespace Brovan.Core.Settings
             KernelReadViewBytes = (long)Megabytes(Pick(Off: 256, Minimal: 192, Medium: 128, High: 64, Aggressive: 32));
             KernelFileCells = (int)Pick(Off: 512, Minimal: 384, Medium: 256, High: 128, Aggressive: 64);
             VulkanWaitThreads = (int)Pick(Off: 8, Minimal: 8, Medium: 6, High: 4, Aggressive: 2);
+            CoreMessagingRegistrations = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
             ulong PhysicalMegabytes = Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
 
             GuestPhysicalBytes = Megabytes(PhysicalMegabytes);
