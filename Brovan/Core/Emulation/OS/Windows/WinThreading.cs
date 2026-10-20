@@ -116,6 +116,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong AlertByThreadIdAddress { get; set; }
         public bool MsgWaitActive { get; set; }
         public uint MsgWaitMask { get; set; }
+        public long MsgWaitTimeout { get; set; } = -1;
+        internal WinIoCompletion QueuePort;
+        internal ulong QueuePortHandle;
+        internal ulong[] CoreMessagingWindows;
         public ulong ClientThreadInfo { get; set; }
         public ulong ClientFocusInfo { get; set; }
         public bool WaitMessageActive { get; set; }
@@ -205,6 +209,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
     }
 
+    public sealed class WinSendMessageCallback : WinCallbackContinuation
+    {
+        public ulong Hwnd;
+        public uint Message;
+        public ulong Callback;
+        public ulong Data;
+
+        internal override bool Resume(BinaryEmulator Emulator, ref ulong Value)
+        {
+            return Win32k.Win32kHelper.InvokeWindowProc(Emulator, Hwnd, Callback, Message, Data, Value, DeferredSyscallResult: 1);
+        }
+    }
+
     public sealed class WinPaintBegin : WinCallbackContinuation
     {
         public ulong Hwnd;
@@ -247,6 +264,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     public sealed class WinWindowDestruction : WinCallbackContinuation
     {
         public ulong Result;
+        public uint ExitingThreadId;
         public readonly List<WinWindowDestructionStep> Steps = new();
         public readonly HashSet<ulong> Planned = new();
         public int Next;

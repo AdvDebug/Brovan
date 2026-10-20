@@ -40,12 +40,31 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         WndProc = Instance.WinHelper.GetAnsiWindowProc(WndProc, Instance.WinHelper.GetWindowClassFunctionId(Target));
                     }
 
-                    if (Win32kHelper.InvokeWindowProc(Instance, Hwnd, WndProc, Message, WParam, LParam))
+                    if (Win32kHelper.MaskFunctionId(FunctionId) == Win32kHelper.FnidSendMessageCallback)
+                    {
+                        // NT: the call returns TRUE and hands the procedure's result to the callback, if there is one.
+                        if (!Instance.WinHelper.TryReadPointer(XParam, out ulong Callback)
+                            || !Instance.WinHelper.TryReadPointer(XParam + (ulong)Instance.WinHelper.PointerSize, out ulong Data))
+                        {
+                            return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOACCESS);
+                        }
+
+                        WinSendMessageCallback Continuation = Callback == 0 ? null
+                            : new WinSendMessageCallback { Hwnd = Hwnd, Message = Message, Callback = Callback, Data = Data };
+                        if (Win32kHelper.InvokeWindowProc(Instance, Hwnd, WndProc, Message, WParam, LParam, Continuation, DeferredSyscallResult: 1))
+                            return NTSTATUS.STATUS_SUCCESS;
+                    }
+                    else if (Win32kHelper.InvokeWindowProc(Instance, Hwnd, WndProc, Message, WParam, LParam))
+                    {
                         return NTSTATUS.STATUS_SUCCESS;
+                    }
                 }
             }
 
             ulong Result = Win32kHelper.HandleMessageCall(Instance, Hwnd, Message, WParam, LParam, Ansi, out bool Deferred);
+            if (Win32kHelper.MaskFunctionId(FunctionId) == Win32kHelper.FnidSendMessageCallback && Instance.WinHelper.GetWindow(Hwnd) != null)
+                Result = 1;
+
             if (!Deferred)
                 Instance.SetRawSyscallReturn(Result);
 

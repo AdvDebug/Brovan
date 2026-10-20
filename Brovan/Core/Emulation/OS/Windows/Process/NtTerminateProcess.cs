@@ -10,9 +10,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ProcessHandle = Instance.WinHelper.GetArg(0);
             uint ExitCode = (uint)Instance.WinHelper.GetArg(1);
 
-            // NT: NULL ends every thread but the caller.
+            // NT: NULL ends every thread but the caller. A second call ends the caller too, with the first exit status.
             if (ProcessHandle == 0)
             {
+                WinProcess Own = Instance.WinHelper.OwnProcess;
+                if (Own.ExitStatus != (uint)NTSTATUS.STATUS_PENDING)
+                {
+                    TerminateCurrentProcess(Instance, Own.ExitStatus);
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
+                Own.ExitStatus = ExitCode;
                 TerminateThreads(Instance, ExitCode, true);
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -77,6 +85,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Thread.ExitCode = (int)ExitCode;
                 Instance.WinHelper.ClearTerminationState(Thread);
                 Thread.State = EmulatedThreadState.Terminated;
+
+                // Without a spared caller the process ends, and emulator dispose releases its threads.
+                if (SpareCaller)
+                    Instance.WinHelper.ReleaseThreadResources(Thread);
             }
 
             Instance.WakeSignal.Bump();

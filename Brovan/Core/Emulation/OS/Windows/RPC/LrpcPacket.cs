@@ -335,7 +335,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         {
             Client = null;
             WinPort Port = NtConnectPort.FindPortByName(Instance, PortName);
-            if (Port?.Queue == null)
+            if (Port?.IsServer != true)
                 return LrpcPacket.RpcSServerUnavailable;
 
             AlpcHost Host = new AlpcHost

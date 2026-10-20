@@ -427,6 +427,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread == null || Thread.State != EmulatedThreadState.Terminated)
                 return;
 
+            Win32kHelper.DropThreadMessages(Emulator, Thread.ThreadId, DestroyThreadWindows(Thread.ThreadId));
+            Win32kQueuePort.ReleasePort(Emulator, WinEmulatedThread.TryGetState(Thread));
+
             bool Current = Emulator.CurrentThreadId == (int)Thread.ThreadId;
             if (!Current && Thread.HostWorker != -1)
                 return;
@@ -529,15 +532,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Completion == null)
                 return;
 
-            Completion.Post(new WinIoCompletionEntry
+            PostCompletion(Instance, File.CompletionHandle, Completion, new WinIoCompletionEntry
             {
                 KeyContext = File.CompletionKey,
                 ApcContext = ApcContext,
                 IoStatus = Status,
                 IoStatusInformation = Information
             });
+        }
 
-            if (Instance.WakeWorkerFactoryWaitersForObject(File.CompletionHandle))
+        public void PostCompletion(BinaryEmulator Instance, ulong CompletionHandle, WinIoCompletion Completion, WinIoCompletionEntry Entry)
+        {
+            Completion.Post(Entry);
+
+            if (Instance.WakeWorkerFactoryWaitersForObject(CompletionHandle))
                 Instance._emulator.StopEmulation();
         }
 
@@ -744,6 +752,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             Span<byte> Buffer = stackalloc byte[sizeof(ulong)];
             bool Read = Emulator._emulator.ReadMemory(Address, Buffer);
             Value = Read ? BinaryPrimitives.ReadUInt64LittleEndian(Buffer) : 0;
+            return Read;
+        }
+
+        public bool TryReadPointer(ulong Address, out ulong Value)
+        {
+            if (PointerSize == 8)
+                return TryReadUInt64(Address, out Value);
+
+            bool Read = TryReadUInt32(Address, out uint Value32);
+            Value = Value32;
             return Read;
         }
 
@@ -2753,6 +2771,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const uint QueueStatusRawInput = 0x0400;
         private const uint ClientThreadInfoSize = 0x40;
         private const int Win32ClientInfoActiveWindowPointerSlot = 9;
+        private const int Win32ClientInfoCoreMessagingSlot = 61;
         private const ulong UserSharedInfoMirrorSize = 0x1B54;
 
         private const ulong UserServerInfoSize = 0x2000;
@@ -3020,6 +3039,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WinProcesses.Add(new WinProcess { PID = Steam.ClientPid, PPID = ShellPID, Name = "steam.exe", Path = SteamAppContext.GuestExe, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = BinaryArchitecture.x86 });
             }
 
+            uint RegistrarPID = GenerateRandomPID();
+            WinProcesses.Add(new WinProcess { PID = RegistrarPID, PPID = ServicesPID, Name = "svchost.exe", Path = "C:\\Windows\\System32\\svchost.exe", Status = ProtectionStatus.None, RunningUser = User.LocalService, Critical = true, Arch = BinaryArchitecture.x64 });
+
             int RandomSvchostNumber = RandomGen.Next(10, 17);
             for (int i = 0; i < RandomSvchostNumber; i++)
             {
@@ -3139,6 +3161,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Name = RPC.Ports.ActivationManagerPortHandler.PortName,
                 Handler = RPC.Ports.ActivationManagerPortHandler.Handle
             });
+
+            WinPorts.Add(AlpcMessaging.CreateHostPort(RPC.Ports.CoreMessagingRegistrarPort.PortName,
+                new RPC.Ports.CoreMessagingRegistrarPort { ProcessId = RegistrarPID, ThreadId = GenerateRandomPID() }));
 
             // The kernel publishes these under \KernelObjects on every system. ntdll's commit-condition
             // path and CreateMemoryResourceNotification open them by name and expect them to exist.
@@ -6439,6 +6464,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        // NT: CoreMessaging keeps its tagCoreMessagingTebEntry block in this CLIENTINFO slot of the x64 TEB.
+        internal ulong ReadCoreMessagingTebEntry(WindowsThreadState State)
+        {
+            return State.Teb == 0 ? 0 : Emulator.ReadMemoryULong(State.Teb + Win32ClientInfoX64Base + (ulong)Win32ClientInfoCoreMessagingSlot * 8UL);
+        }
+
         private void WriteWin32ClientInfoSlot(WindowsThreadState State, int Slot, ulong Value)
         {
             WriteWin32ClientInfo(State, (ulong)Slot * 8UL, 8, (ulong)Slot * 4UL, 4, Value);
@@ -8280,6 +8311,33 @@ namespace Brovan.Core.Emulation.OS.Windows
             return RunWindowDestruction(Destruction);
         }
 
+        // NT: xxxDestroyThreadInfo destroys the thread's windows from the highest handle index down.
+        private List<ulong> DestroyThreadWindows(uint ThreadId)
+        {
+            List<ulong> Owned = null;
+            foreach (WinWindow Window in WinWindows.Values)
+            {
+                if (Window.OwnerThreadId == ThreadId)
+                    (Owned ??= new List<ulong>()).Add(Window.Hwnd);
+            }
+
+            if (Owned == null)
+                return null;
+
+            Owned.Sort((Left, Right) => ((ushort)Right).CompareTo((ushort)Left));
+            foreach (ulong Hwnd in Owned)
+            {
+                if (!WinWindows.TryGetValue(Hwnd, out WinWindow Window))
+                    continue;
+
+                WinWindowDestruction Destruction = new WinWindowDestruction { ExitingThreadId = ThreadId };
+                PlanWindowDestruction(Destruction, Window, 0);
+                RunWindowDestruction(Destruction);
+            }
+
+            return Owned;
+        }
+
         // xxxDestroyWindow: owned windows first, then WM_DESTROY top down and WM_NCDESTROY bottom up.
         private void PlanWindowDestruction(WinWindowDestruction Destruction, WinWindow Window, int Depth)
         {
@@ -8288,6 +8346,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if ((Window.Style & Win32kHelper.WindowStyleChild) == 0)
             {
+                uint ThreadId = Destruction.ExitingThreadId != 0 ? Destruction.ExitingThreadId : Emulator.CurrentThread?.ThreadId ?? 0;
+
                 // NT starts at the top of the z-order, the end of the list.
                 for (int i = TopLevelWindows.Count - 1; i >= 0; i--)
                 {
@@ -8295,7 +8355,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         continue;
 
                     // NT keeps another thread's window alive and clears its owner.
-                    if (OwnedByCurrentThread(Owned))
+                    if (Win32kHelper.OwnedByThread(Owned, ThreadId))
                     {
                         PlanWindowDestruction(Destruction, Owned, Depth + 1);
                     }
@@ -8373,10 +8433,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                     UnlinkDestroyedWindow(Window);
                 }
 
-                // Another thread's procedure cannot run in this frame.
-                bool Sent = OwnedByCurrentThread(Window) && Win32kHelper.SendWindowDestroyMessage(Emulator, Window, Step.Message, Destruction);
-                if (!Sent)
-                    Win32kHelper.PostMessage(Emulator, Window.Hwnd, Step.Message, 0, 0);
+                // Another thread's procedure cannot run in this frame. A thread that ends runs no window procedure, and
+                // NT drops what it sends to other threads.
+                bool Sent = false;
+                if (Destruction.ExitingThreadId == 0)
+                {
+                    Sent = OwnedByCurrentThread(Window) && Win32kHelper.SendWindowDestroyMessage(Emulator, Window, Step.Message, Destruction);
+                    if (!Sent)
+                        Win32kHelper.PostMessage(Emulator, Window.Hwnd, Step.Message, 0, 0);
+                }
 
                 if (Step.Message == Win32kHelper.WM_NCDESTROY)
                 {
@@ -8451,6 +8516,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Window.Destroyed = true;
             ClearUserWindowHandleEntry(Window);
             ForgetThreadWindowContext(Hwnd);
+            Win32kQueuePort.ForgetWindow(Emulator, Window);
             WinWindows.Remove(Hwnd);
 
             RememberDestroyedWindow(Window);
@@ -9207,7 +9273,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             SetSyntheticRegistryString(PropertyBag, "ThisPCPolicy", 1, "Show");
         }
 
-        // Activating these classes needs CoreMessagingRegistrar, which is not emulated, so their keys read as absent.
+        // Activating these classes needs CoreMessagingRegistrar calls that Brovan does not serve, so their keys read as absent.
         private const string UnclaimedActivatableClassNamespace = "\\WindowsRuntime\\ActivatableClassId\\Windows.Gaming.Input.";
 
         private bool IsRegistryPathDeleted(string NtPath)

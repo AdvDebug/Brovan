@@ -7,15 +7,19 @@ using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
-    internal sealed class AlpcServerQueue
+    internal class AlpcReceiveQueue
     {
         internal readonly Queue<AlpcMessage> Pending = new Queue<AlpcMessage>();
         internal readonly List<AlpcWait> Receivers = new List<AlpcWait>();
+        internal WinIoCompletion CompletionPort;
+        internal ulong CompletionKey;
+    }
+
+    internal sealed class AlpcServerQueue : AlpcReceiveQueue
+    {
         // Received, but not yet accepted or replied to.
         internal readonly Dictionary<uint, AlpcMessage> Delivered = new Dictionary<uint, AlpcMessage>();
         internal readonly HashSet<AlpcConnection> Connections = new HashSet<AlpcConnection>();
-        internal WinIoCompletion CompletionPort;
-        internal ulong CompletionKey;
     }
 
     internal enum AlpcConnectionState : byte
@@ -28,11 +32,16 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal sealed class AlpcConnection
     {
         internal WinPort ConnectionPort;
+        // Null for a client that Brovan runs.
+        internal WinPort ClientPort;
         internal AlpcConnectionState State;
+        // NT: the server communication port can still reach the client after the connection port closes.
+        internal bool ClientReachable;
         internal ulong PortContext;
         internal ulong TokenId;
         internal uint ClosedCallbackId;
         internal uint NextSequence;
+        internal uint NextClientSequence;
         internal AlpcWait ConnectWait;
         internal AlpcHost Host;
         internal readonly List<AlpcMessage> AwaitingReply = new List<AlpcMessage>();
@@ -71,6 +80,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
     // The reply is in the shared scratch buffer, so it is valid only during the call.
     internal delegate void HostReplyHandler(NTSTATUS Status, ReadOnlySpan<byte> Reply);
+
+    // A server that Brovan runs. It answers in the syscall of the guest client, under KernelLock.
+    internal abstract class AlpcHostServer
+    {
+        internal ulong ProcessId { get; init; }
+        internal ulong ThreadId { get; init; }
+
+        internal abstract bool Connect(BinaryEmulator Instance, AlpcConnection Connection, ReadOnlySpan<byte> Data, out byte[] Reply);
+
+        internal abstract NTSTATUS Receive(BinaryEmulator Instance, AlpcConnection Connection, ReadOnlySpan<byte> Data, bool WaitsForReply, out byte[] Reply);
+
+        internal abstract void Disconnected(BinaryEmulator Instance, AlpcConnection Connection);
+    }
 
     internal sealed class AlpcMessage
     {
@@ -186,6 +208,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int OffPortAttributesMaxMessageLength = 0x10;
         private const ulong MaxMessageLengthLimit = 0xFFFF;
         private const uint AllowImpersonationFlag = 0x10000;
+        private const uint AcceptRequestsFlag = 0x20000;
+        private const uint WaitablePortFlag = 0x40000;
         private const uint KernelOnlyPortFlag = 0x100000;
 
         private const int ImpersonateLevelShift = 2;
@@ -224,9 +248,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             SendWaitReceive(Instance, Port, Flags, MessagePtr, 0, 0, 0, 0, 0);
         }
 
-        internal static WinPort CreateConnectionPort(string Name)
+        internal static WinPort CreateConnectionPort(string Name, uint Flags)
         {
-            return new WinPort { Name = Name, Queue = new AlpcServerQueue() };
+            return new WinPort { Name = Name, Queue = new AlpcServerQueue(), WaitSemaphore = WaitSemaphoreFor(Flags) };
+        }
+
+        internal static WinPort CreateHostPort(string Name, AlpcHostServer Server)
+        {
+            return new WinPort { Name = Name, Queue = new AlpcServerQueue(), HostServer = Server };
+        }
+
+        private static WinSemaphore WaitSemaphoreFor(uint Flags)
+        {
+            return (Flags & WaitablePortFlag) != 0 ? new WinSemaphore { MaximumCount = int.MaxValue } : null;
+        }
+
+        internal static NTSTATUS TryReadPortFlags(BinaryEmulator Instance, ulong PortAttributesPtr, out uint Flags)
+        {
+            Flags = 0;
+            return PortAttributesPtr == 0 || Instance.WinHelper.TryReadUInt32(PortAttributesPtr, out Flags) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }
 
         internal static NTSTATUS AssociateCompletionPort(BinaryEmulator Instance, WinPort Port, ulong CompletionKey, ulong CompletionHandle)
@@ -242,10 +282,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS ConnectGuest(BinaryEmulator Instance, WinPort ConnectionPort, ulong PortHandlePtr, ulong PortAttributesPtr, ulong MessagePtr, ulong BufferLengthPtr, ulong TimeoutPtr)
         {
+            // CoreMessaging turns access denied from its registrar into an error and every other failure into a fail-fast.
+            if (!Supported(Instance) && ConnectionPort.HostServer != null)
+            {
+                Utils.LogError($"[-] ALPC: \"{ConnectionPort.Name}\" is served to x64 guests only.");
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+            }
+
             if (!Supported(Instance))
                 return Unsupported(ConnectionPort);
 
-            NTSTATUS CaptureStatus = CaptureConnectingClient(Instance, PortAttributesPtr, out AlpcSecurityContext Client, out bool AllowImpersonation);
+            NTSTATUS CaptureStatus = CaptureConnectingClient(Instance, PortAttributesPtr, out AlpcSecurityContext Client, out bool AllowImpersonation, out uint PortFlags);
             if (CaptureStatus != NTSTATUS.STATUS_SUCCESS)
                 return CaptureStatus;
 
@@ -264,26 +311,62 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? Timeout))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            AlpcServerQueue Queue = ConnectionPort.Queue;
-            if (IsFull(Queue))
+            if (IsFull(ConnectionPort.Queue))
                 return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
 
             AlpcConnection Connection = NewConnection(Instance, ConnectionPort, Client, AllowImpersonation, Host: null);
+            Connection.ClientPort = new WinPort
+            {
+                Connection = Connection,
+                IsClientEnd = true,
+                Queue = new AlpcReceiveQueue(),
+                AcceptsRequests = (PortFlags & AcceptRequestsFlag) != 0,
+                WaitSemaphore = WaitSemaphoreFor(PortFlags),
+            };
+
             AlpcWait Wait = new AlpcWait
             {
                 Kind = AlpcWaitKind.Connect,
                 Thread = Instance.CurrentThread,
-                Port = new WinPort { Connection = Connection, IsClientEnd = true },
+                Port = Connection.ClientPort,
                 PortHandlePtr = PortHandlePtr,
                 MessagePtr = MessagePtr,
                 BufferLength = BufferLength,
                 BufferLengthPtr = BufferLengthPtr,
             };
 
+            AlpcMessage Request = NewMessage(Instance, Connection, LpcConnectionRequest, Data);
+            if (ConnectionPort.HostServer != null)
+                return ConnectHostServer(Instance, ConnectionPort.HostServer, Wait, Request);
+
             Connection.ConnectWait = Wait;
-            Enqueue(Instance, Queue, NewMessage(Instance, Connection, LpcConnectionRequest, Data));
+            Enqueue(Instance, ConnectionPort, Request);
             Instance.WinHelper.ParkForIoRequest(Wait, Instance.WinHelper.ParseRelativeDeadlineMs(Timeout));
             return NTSTATUS.STATUS_PENDING;
+        }
+
+        private static NTSTATUS ConnectHostServer(BinaryEmulator Instance, AlpcHostServer Server, AlpcWait Wait, AlpcMessage Request)
+        {
+            AlpcConnection Connection = Request.Connection;
+            bool Accepted = false;
+            byte[] Reply = null;
+            try
+            {
+                Accepted = Server.Connect(Instance, Connection, Request.Data, out Reply);
+            }
+            catch (Exception Error)
+            {
+                LogServerFailure(Connection, Error);
+            }
+
+            if (!Accepted)
+            {
+                EndConnection(Instance, Connection, NTSTATUS.STATUS_PORT_CONNECTION_REFUSED);
+                return NTSTATUS.STATUS_PORT_CONNECTION_REFUSED;
+            }
+
+            Connection.State = AlpcConnectionState.Connected;
+            return CompleteConnect(Instance, Wait, Request, Reply ?? Array.Empty<byte>(), Server.ProcessId, Server.ThreadId);
         }
 
         // Host.Connected runs when the server accepts or refuses, or when the connection ends first.
@@ -293,12 +376,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Supported(Instance))
                 return Unsupported(ConnectionPort);
 
-            AlpcServerQueue Queue = ConnectionPort.Queue;
-            if (IsFull(Queue))
+            if (ConnectionPort.HostServer != null)
+            {
+                Utils.LogError($"[-] ALPC: Brovan's client cannot connect to \"{ConnectionPort.Name}\", which Brovan serves itself.");
+                return NTSTATUS.STATUS_NOT_SUPPORTED;
+            }
+
+            if (IsFull(ConnectionPort.Queue))
                 return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
 
             Connection = NewConnection(Instance, ConnectionPort, Client, AllowImpersonation: true, Host);
-            Enqueue(Instance, Queue, NewMessage(Instance, Connection, LpcConnectionRequest, Array.Empty<byte>()));
+            Enqueue(Instance, ConnectionPort, NewMessage(Instance, Connection, LpcConnectionRequest, Array.Empty<byte>()));
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -311,15 +399,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Data.Length > MaxDataLength)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            AlpcServerQueue Queue = Connection.ConnectionPort.Queue;
-            if (IsFull(Queue))
+            if (IsFull(Connection.ConnectionPort.Queue))
                 return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
 
             AlpcMessage Message = NewMessage(Instance, Connection, LpcRequest, Data);
             Message.Sequence = ++Connection.NextSequence;
             Message.HostReply = OnReply;
             Connection.AwaitingReply.Add(Message);
-            Enqueue(Instance, Queue, Message);
+            Enqueue(Instance, Connection.ConnectionPort, Message);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -512,7 +599,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                AlpcServerQueue Queue = Port.Queue ?? Port.Connection?.ConnectionPort.Queue;
+                AlpcServerQueue Queue = Port.ServerQueue ?? Port.Connection?.ConnectionPort.ServerQueue;
                 if (Queue == null || !Queue.Delivered.TryGetValue(MessageId, out AlpcMessage Message) || (CallbackId != 0 && Message.CallbackId != CallbackId))
                     return NTSTATUS.STATUS_INVALID_MESSAGE;
 
@@ -545,7 +632,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        internal static NTSTATUS Accept(BinaryEmulator Instance, WinPort ConnectionPort, ulong PortHandlePtr, ulong PortContext, ulong MessagePtr, bool AcceptConnection)
+        internal static NTSTATUS Accept(BinaryEmulator Instance, WinPort ConnectionPort, ulong PortHandlePtr, ulong PortAttributesPtr, ulong PortContext, ulong MessagePtr, bool AcceptConnection)
         {
             if (!Supported(Instance))
                 return Unsupported(ConnectionPort);
@@ -553,11 +640,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (MessagePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
+            NTSTATUS FlagsStatus = TryReadPortFlags(Instance, PortAttributesPtr, out uint PortFlags);
+            if (FlagsStatus != NTSTATUS.STATUS_SUCCESS)
+                return FlagsStatus;
+
             NTSTATUS ReadStatus = TryReadAnswer(Instance, MessagePtr, out uint MessageId, out Span<byte> Data);
             if (ReadStatus != NTSTATUS.STATUS_SUCCESS)
                 return ReadStatus;
 
-            AlpcServerQueue Queue = ConnectionPort.Queue;
+            AlpcServerQueue Queue = ConnectionPort.ServerQueue;
             if (!Queue.Delivered.TryGetValue(MessageId, out AlpcMessage Request) || Request.Type != LpcConnectionRequest)
                 return NTSTATUS.STATUS_INVALID_MESSAGE;
 
@@ -581,7 +672,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_PORT_DISCONNECTED;
             }
 
-            WinHandle Handle = Instance.WinHelper.OpenObjectHandle(new WinPort { Connection = Connection }, AccessMask.StandardRightsAll);
+            WinHandle Handle = Instance.WinHelper.OpenObjectHandle(new WinPort { Connection = Connection, WaitSemaphore = WaitSemaphoreFor(PortFlags) }, AccessMask.StandardRightsAll);
             if (!Instance.WinHelper.WritePointer(PortHandlePtr, Handle.Handle))
             {
                 Instance.WinHelper.CloseHandle(Handle.Handle);
@@ -591,11 +682,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             Queue.Delivered.Remove(MessageId);
             Connection.PortContext = PortContext;
             Connection.State = AlpcConnectionState.Connected;
+            Connection.ClientReachable = Connection.ClientPort != null;
             Connection.ConnectWait = null;
             if (Connection.Host != null)
                 RunConnected(Connection.Host, NTSTATUS.STATUS_SUCCESS);
             else
-                Complete(Instance, Wait, CompleteConnect(Instance, Wait, Request, Data));
+                Complete(Instance, Wait, CompleteConnect(Instance, Wait, Request, Data, Instance.WinHelper.PID, CurrentThreadId(Instance)));
 
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -609,20 +701,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Port.IsClientEnd)
                     CloseClient(Instance, Connection);
                 else
-                    EndConnection(Instance, Connection, NTSTATUS.STATUS_PORT_DISCONNECTED);
+                    CloseServer(Instance, Connection);
                 return;
             }
 
-            AlpcServerQueue Queue = Port.Queue;
+            AlpcServerQueue Queue = Port.ServerQueue;
             if (Queue == null)
                 return;
 
-            bool Woke = false;
-            foreach (AlpcWait Receiver in Queue.Receivers)
-                Woke |= FinishIfLive(Receiver, NTSTATUS.STATUS_PORT_DISCONNECTED);
-
-            foreach (AlpcMessage Queued in Queue.Pending)
-                ReleaseContext(Queued);
+            bool Woke = EndReceivers(Queue);
             foreach (AlpcMessage Received in Queue.Delivered.Values)
                 ReleaseContext(Received);
 
@@ -631,10 +718,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             AlpcConnection[] Open = ArrayPool<AlpcConnection>.Shared.Rent(OpenCount);
             Queue.Connections.CopyTo(Open);
             Queue.Connections.Clear();
-            Queue.Receivers.Clear();
-            Queue.Pending.Clear();
             Queue.Delivered.Clear();
-            Queue.CompletionPort = null;
 
             try
             {
@@ -648,6 +732,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Woke)
                 Instance.WakeSignal.Bump();
+        }
+
+        private static bool EndReceivers(AlpcReceiveQueue Queue)
+        {
+            bool Woke = false;
+            foreach (AlpcWait Receiver in Queue.Receivers)
+                Woke |= FinishIfLive(Receiver, NTSTATUS.STATUS_PORT_DISCONNECTED);
+
+            foreach (AlpcMessage Queued in Queue.Pending)
+                ReleaseContext(Queued);
+
+            Queue.Receivers.Clear();
+            Queue.Pending.Clear();
+            Queue.CompletionPort = null;
+            return Woke;
         }
 
         internal static ulong AttributeOffset(uint Allocated, uint Flag)
@@ -674,10 +773,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             AlpcConnection Connection = ClientPort.Connection;
             if (SendMessagePtr == 0)
-            {
-                Utils.LogError($"[-] ALPC: a client of \"{Connection.ConnectionPort.Name}\" waits for messages from its server, which ports of this process do not send.");
-                return NTSTATUS.STATUS_NOT_SUPPORTED;
-            }
+                return ReceiveMessagePtr == 0 ? NTSTATUS.STATUS_SUCCESS : ReceivePort(Instance, ClientPort, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr);
 
             if (Connection.State != AlpcConnectionState.Connected)
                 return NTSTATUS.STATUS_PORT_DISCONNECTED;
@@ -718,8 +814,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? Timeout))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            AlpcServerQueue Queue = Connection.ConnectionPort.Queue;
-            if (IsFull(Queue))
+            if (IsFull(Connection.ConnectionPort.Queue))
                 return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
 
             AlpcSecurityContext SecurityContext = null;
@@ -746,11 +841,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                     BufferLengthPtr = BufferLengthPtr,
                     AttributesPtr = ReceiveAttributesPtr,
                 };
-
-                Connection.AwaitingReply.Add(Message);
             }
 
-            Enqueue(Instance, Queue, Message);
+            if (Connection.ConnectionPort.HostServer != null)
+                return SendHostServer(Instance, Connection.ConnectionPort.HostServer, Message);
+
+            if (WaitsForReply)
+                Connection.AwaitingReply.Add(Message);
+
+            Enqueue(Instance, Connection.ConnectionPort, Message);
             if (!WaitsForReply)
                 return NTSTATUS.STATUS_SUCCESS;
 
@@ -758,23 +857,103 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_PENDING;
         }
 
-        // NT: a send on a connection port replies to the request with the same message id.
+        private static NTSTATUS SendHostServer(BinaryEmulator Instance, AlpcHostServer Server, AlpcMessage Message)
+        {
+            AlpcWait Wait = Message.ReplyWait;
+            NTSTATUS Status = NTSTATUS.STATUS_UNSUCCESSFUL;
+            byte[] Reply = null;
+            try
+            {
+                Status = Server.Receive(Instance, Message.Connection, Message.Data, Wait != null, out Reply);
+            }
+            catch (Exception Error)
+            {
+                LogServerFailure(Message.Connection, Error);
+            }
+            finally
+            {
+                ReleaseContext(Message);
+            }
+
+            if (Status != NTSTATUS.STATUS_SUCCESS || Wait == null)
+                return Status;
+
+            if (Reply == null)
+            {
+                Utils.LogError($"[-] ALPC: Brovan's server of \"{Message.Connection.ConnectionPort.Name}\" left a request without a reply.");
+                return NTSTATUS.STATUS_UNSUCCESSFUL;
+            }
+
+            return WriteReply(Instance, Wait, LpcReply, Message, Reply, Server.ProcessId, Server.ThreadId);
+        }
+
         private static NTSTATUS ServerSendWaitReceive(BinaryEmulator Instance, WinPort Port, uint Flags, ulong SendMessagePtr, ulong ReceiveMessagePtr, ulong BufferLengthPtr, ulong ReceiveAttributesPtr, ulong TimeoutPtr)
         {
-            AlpcServerQueue Queue = Port.Queue ?? Port.Connection.ConnectionPort.Queue;
             if (SendMessagePtr != 0)
             {
-                NTSTATUS ReplyStatus = Reply(Instance, Queue, Flags, SendMessagePtr);
-                if (ReplyStatus != NTSTATUS.STATUS_SUCCESS)
-                    return ReplyStatus;
+                NTSTATUS SendStatus = ServerSend(Instance, Port, Flags, SendMessagePtr, ReceiveMessagePtr != 0);
+                if (SendStatus != NTSTATUS.STATUS_SUCCESS)
+                    return SendStatus;
             }
 
             if (ReceiveMessagePtr == 0)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            if (Port.Queue == null)
+            if (!Port.IsServer)
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
 
+            return ReceivePort(Instance, Port, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr);
+        }
+
+        // NT: a send replies to the request with the same message id, and a zero id sends the client a new message.
+        private static NTSTATUS ServerSend(BinaryEmulator Instance, WinPort Port, uint Flags, ulong MessagePtr, bool WaitsForReply)
+        {
+            NTSTATUS ReadStatus = TryReadAnswer(Instance, MessagePtr, out uint MessageId, out Span<byte> Data);
+            if (ReadStatus != NTSTATUS.STATUS_SUCCESS)
+                return ReadStatus;
+
+            AlpcConnection Connection = Port.Connection;
+            if (MessageId == 0 && Connection != null)
+                return SendToClient(Instance, Connection, Flags, Data, WaitsForReply);
+
+            return Reply(Instance, Port.ServerQueue ?? Connection.ConnectionPort.ServerQueue, Flags, MessageId, Data);
+        }
+
+        private static NTSTATUS SendToClient(BinaryEmulator Instance, AlpcConnection Connection, uint Flags, ReadOnlySpan<byte> Data, bool WaitsForReply)
+        {
+            WinPort ClientPort = Connection.ClientPort;
+            if (ClientPort == null || WaitsForReply)
+            {
+                Utils.LogError($"[-] ALPC: the server of \"{Connection.ConnectionPort.Name}\" sends {(WaitsForReply ? "a request" : "a message")} to {(ClientPort == null ? "Brovan's client" : "its client")}, which ports of this process do not deliver.");
+                return NTSTATUS.STATUS_NOT_SUPPORTED;
+            }
+
+            if (!Connection.ClientReachable)
+                return NTSTATUS.STATUS_PORT_DISCONNECTED;
+
+            if (!ClientPort.AcceptsRequests)
+                return NTSTATUS.STATUS_LPC_REQUESTS_NOT_ALLOWED;
+
+            if (IsFull(ClientPort.Queue))
+                return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
+
+            Enqueue(Instance, ClientPort, new AlpcMessage
+            {
+                Type = LpcRequest,
+                TypeFlags = (Flags & ReleaseMessageFlag) != 0 ? (ushort)0 : LpcContinuationRequired,
+                Data = Data.ToArray(),
+                ProcessId = Instance.WinHelper.PID,
+                ThreadId = CurrentThreadId(Instance),
+                MessageId = TakeId(ref NextMessageId),
+                CallbackId = TakeId(ref NextCallbackId),
+                Sequence = ++Connection.NextClientSequence,
+                Connection = Connection,
+            });
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS ReceivePort(BinaryEmulator Instance, WinPort Port, ulong ReceiveMessagePtr, ulong BufferLengthPtr, ulong ReceiveAttributesPtr, ulong TimeoutPtr)
+        {
             if (BufferLengthPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -784,17 +963,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? Timeout))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+            AlpcReceiveQueue Queue = Port.Queue;
             if (Queue.Pending.Count > 0)
             {
                 AlpcMessage Message = Queue.Pending.Peek();
-                NTSTATUS Status = WriteReceived(Instance, Queue, Message, ReceiveMessagePtr, BufferLength, BufferLengthPtr, ReceiveAttributesPtr);
+                NTSTATUS Status = WriteReceived(Instance, Port, Message, ReceiveMessagePtr, BufferLength, BufferLengthPtr, ReceiveAttributesPtr);
                 if (Status == NTSTATUS.STATUS_SUCCESS)
                     Queue.Pending.Dequeue();
                 return Status;
             }
 
-            // NT: a port with a completion port never waits in a receive.
-            if (Queue.CompletionPort != null)
+            // NT: a receive never waits on a port that has a completion port or is waitable.
+            if (Queue.CompletionPort != null || Port.WaitSemaphore != null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
             long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(Timeout);
@@ -835,15 +1015,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 AllowImpersonation = AllowImpersonation,
             };
 
-            ConnectionPort.Queue.Connections.Add(Connection);
+            ConnectionPort.ServerQueue.Connections.Add(Connection);
             return Connection;
         }
 
         // NT captures a static client at connect, but not a dynamic one (AlpcpCreateClientPort).
-        private static NTSTATUS CaptureConnectingClient(BinaryEmulator Instance, ulong PortAttributesPtr, out AlpcSecurityContext Client, out bool AllowImpersonation)
+        private static NTSTATUS CaptureConnectingClient(BinaryEmulator Instance, ulong PortAttributesPtr, out AlpcSecurityContext Client, out bool AllowImpersonation, out uint Flags)
         {
             Client = null;
             AllowImpersonation = true;
+            Flags = 0;
             SecurityQos Qos = new SecurityQos(SecurityImpersonationLevel.SecurityAnonymous, DynamicTracking: true, EffectiveOnly: true);
             if (PortAttributesPtr != 0)
             {
@@ -851,7 +1032,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Instance.ReadMemory(PortAttributesPtr, Attributes))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                uint Flags = BinaryPrimitives.ReadUInt32LittleEndian(Attributes);
+                Flags = BinaryPrimitives.ReadUInt32LittleEndian(Attributes);
                 ulong MaxMessageLength = BinaryPrimitives.ReadUInt64LittleEndian(Attributes.Slice(OffPortAttributesMaxMessageLength));
                 if (MaxMessageLength < HeaderSize || MaxMessageLength > MaxMessageLengthLimit || (Flags & KernelOnlyPortFlag) != 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -969,19 +1150,51 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static void CloseClient(BinaryEmulator Instance, AlpcConnection Connection)
         {
             bool NotifyServer = Connection.State == AlpcConnectionState.Connected;
+            Connection.ClientReachable = false;
             EndConnection(Instance, Connection, NTSTATUS.STATUS_PORT_DISCONNECTED);
+            if (Connection.ClientPort != null && EndReceivers(Connection.ClientPort.Queue))
+                Instance.WakeSignal.Bump();
+
             if (!NotifyServer)
                 return;
 
-            Enqueue(Instance, Connection.ConnectionPort.Queue, new AlpcMessage
+            AlpcHostServer Server = Connection.ConnectionPort.HostServer;
+            if (Server == null)
+            {
+                Enqueue(Instance, Connection.ConnectionPort, ClosedMessage(Connection, ++Connection.NextSequence));
+                return;
+            }
+
+            try
+            {
+                Server.Disconnected(Instance, Connection);
+            }
+            catch (Exception Error)
+            {
+                LogServerFailure(Connection, Error);
+            }
+        }
+
+        private static void CloseServer(BinaryEmulator Instance, AlpcConnection Connection)
+        {
+            bool NotifyClient = Connection.ClientReachable;
+            Connection.ClientReachable = false;
+            EndConnection(Instance, Connection, NTSTATUS.STATUS_PORT_DISCONNECTED);
+            if (NotifyClient)
+                Enqueue(Instance, Connection.ClientPort, ClosedMessage(Connection, ++Connection.NextClientSequence));
+        }
+
+        private static AlpcMessage ClosedMessage(AlpcConnection Connection, uint Sequence)
+        {
+            return new AlpcMessage
             {
                 Type = LpcPortClosed,
                 Data = PortClosedData,
                 MessageId = TakeId(ref NextMessageId),
                 CallbackId = Connection.ClosedCallbackId,
-                Sequence = ++Connection.NextSequence,
+                Sequence = Sequence,
                 Connection = Connection,
-            });
+            };
         }
 
         private static void EndConnection(BinaryEmulator Instance, AlpcConnection Connection, NTSTATUS Status)
@@ -989,7 +1202,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Connection.State == AlpcConnectionState.Closed)
                 return;
 
-            AlpcServerQueue Queue = Connection.ConnectionPort.Queue;
+            AlpcServerQueue Queue = Connection.ConnectionPort.ServerQueue;
             Queue.Connections.Remove(Connection);
             int Datagrams = Connection.DeliveredDatagrams;
             if (Datagrams != 0)
@@ -1013,7 +1226,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // A port holds a message from its send until it is received and then accepted, replied to or released.
-        private static bool IsFull(AlpcServerQueue Queue) => Queue.Pending.Count + Queue.Delivered.Count >= MaxQueuedMessages;
+        private static bool IsFull(AlpcReceiveQueue Queue) => Queue.Pending.Count + ((Queue as AlpcServerQueue)?.Delivered.Count ?? 0) >= MaxQueuedMessages;
 
         private static bool IsDatagram(AlpcMessage Message) => Message.Type == LpcRequest && !Message.WaitsForReply;
 
@@ -1040,8 +1253,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Woke;
         }
 
-        private static void Enqueue(BinaryEmulator Instance, AlpcServerQueue Queue, AlpcMessage Message)
+        private static void Enqueue(BinaryEmulator Instance, WinPort Port, AlpcMessage Message)
         {
+            AlpcReceiveQueue Queue = Port.Queue;
             while (Queue.Receivers.Count > 0)
             {
                 AlpcWait Receiver = Queue.Receivers[0];
@@ -1049,7 +1263,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Receiver.IsLive)
                     continue;
 
-                NTSTATUS Status = WriteReceived(Instance, Queue, Message, Receiver.MessagePtr, Receiver.BufferLength, Receiver.BufferLengthPtr, Receiver.AttributesPtr);
+                NTSTATUS Status = WriteReceived(Instance, Port, Message, Receiver.MessagePtr, Receiver.BufferLength, Receiver.BufferLengthPtr, Receiver.AttributesPtr);
                 Complete(Instance, Receiver, Status);
                 if (Status == NTSTATUS.STATUS_SUCCESS)
                     return;
@@ -1057,14 +1271,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Queue.Pending.Enqueue(Message);
             Queue.CompletionPort?.Post(new WinIoCompletionEntry { KeyContext = Queue.CompletionKey, IoStatus = NTSTATUS.STATUS_SUCCESS });
+
+            WinSemaphore Semaphore = Port.WaitSemaphore;
+            if (Semaphore != null && Semaphore.CurrentCount < Semaphore.MaximumCount)
+                Semaphore.CurrentCount++;
         }
 
-        private static NTSTATUS Reply(BinaryEmulator Instance, AlpcServerQueue Queue, uint Flags, ulong MessagePtr)
+        private static NTSTATUS Reply(BinaryEmulator Instance, AlpcServerQueue Queue, uint Flags, uint MessageId, ReadOnlySpan<byte> Data)
         {
-            NTSTATUS ReadStatus = TryReadAnswer(Instance, MessagePtr, out uint MessageId, out Span<byte> Data);
-            if (ReadStatus != NTSTATUS.STATUS_SUCCESS)
-                return ReadStatus;
-
             if (!Queue.Delivered.Remove(MessageId, out AlpcMessage Request))
                 return NTSTATUS.STATUS_INVALID_MESSAGE;
 
@@ -1091,31 +1305,31 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Request.HostReply != null)
                 RunHost(Request.HostReply, NTSTATUS.STATUS_SUCCESS, Data);
             else if (Wait.IsLive)
-                Complete(Instance, Wait, WriteReply(Instance, Wait, LpcReply, Request, Data));
+                Complete(Instance, Wait, WriteReply(Instance, Wait, LpcReply, Request, Data, Instance.WinHelper.PID, CurrentThreadId(Instance)));
 
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS CompleteConnect(BinaryEmulator Instance, AlpcWait Wait, AlpcMessage Request, ReadOnlySpan<byte> Data)
+        private static NTSTATUS CompleteConnect(BinaryEmulator Instance, AlpcWait Wait, AlpcMessage Request, ReadOnlySpan<byte> Data, ulong ProcessId, ulong ThreadId)
         {
             WinHandle Handle = Instance.WinHelper.OpenObjectHandle(Wait.Port, AccessMask.StandardRightsAll);
-            if (!Instance.WinHelper.WritePointer(Wait.PortHandlePtr, Handle.Handle))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            NTSTATUS Status = Instance.WinHelper.WritePointer(Wait.PortHandlePtr, Handle.Handle) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
+            if (Status == NTSTATUS.STATUS_SUCCESS && Wait.MessagePtr != 0)
+                Status = WriteReply(Instance, Wait, LpcConnectionReply, Request, Data, ProcessId, ThreadId);
 
-            if (Wait.MessagePtr == 0)
-                return NTSTATUS.STATUS_SUCCESS;
-
-            return WriteReply(Instance, Wait, LpcConnectionReply, Request, Data);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                Instance.WinHelper.CloseHandle(Handle.Handle);
+            return Status;
         }
 
         // The reply and the connect answer write the length they produce.
-        private static NTSTATUS WriteReply(BinaryEmulator Instance, AlpcWait Wait, ushort Type, AlpcMessage Request, ReadOnlySpan<byte> Data)
+        private static NTSTATUS WriteReply(BinaryEmulator Instance, AlpcWait Wait, ushort Type, AlpcMessage Request, ReadOnlySpan<byte> Data, ulong ProcessId, ulong ThreadId)
         {
             ulong Total = (ulong)(HeaderSize + Data.Length);
             if (Total > Wait.BufferLength)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-            NTSTATUS Status = WriteMessage(Instance, Wait.MessagePtr, Type, 0, Data, Instance.WinHelper.PID, CurrentThreadId(Instance), Request.MessageId, Request.CallbackId);
+            NTSTATUS Status = WriteMessage(Instance, Wait.MessagePtr, Type, 0, Data, ProcessId, ThreadId, Request.MessageId, Request.CallbackId);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -1129,7 +1343,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT: a receive leaves the length alone unless the buffer is too small.
-        private static NTSTATUS WriteReceived(BinaryEmulator Instance, AlpcServerQueue Queue, AlpcMessage Message, ulong MessagePtr, ulong BufferLength, ulong BufferLengthPtr, ulong AttributesPtr)
+        private static NTSTATUS WriteReceived(BinaryEmulator Instance, WinPort Port, AlpcMessage Message, ulong MessagePtr, ulong BufferLength, ulong BufferLengthPtr, ulong AttributesPtr)
         {
             ulong Total = (ulong)(HeaderSize + Message.Data.Length);
             if (Total > BufferLength)
@@ -1139,10 +1353,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
-            if (AttributesPtr != 0 && !WriteReceivedAttributes(Instance, Message, AttributesPtr))
+            AlpcServerQueue Queue = Port.ServerQueue;
+            if (AttributesPtr != 0 && !WriteReceivedAttributes(Instance, Message, AttributesPtr, ToServer: Queue != null))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (Message.Type == LpcConnectionRequest || Message.Type == LpcRequest)
+            if (Queue != null && (Message.Type == LpcConnectionRequest || Message.Type == LpcRequest))
             {
                 Queue.Delivered[Message.MessageId] = Message;
                 Message.Data = Array.Empty<byte>();
@@ -1153,8 +1368,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        // NT: a connection request carries only the token attribute.
-        private static bool WriteReceivedAttributes(BinaryEmulator Instance, AlpcMessage Message, ulong AttributesPtr)
+        // NT: a connection request carries only the token attribute. A client port has no port context.
+        private static bool WriteReceivedAttributes(BinaryEmulator Instance, AlpcMessage Message, ulong AttributesPtr, bool ToServer)
         {
             if (!Instance.WinHelper.TryReadUInt32(AttributesPtr, out uint Allocated))
                 return false;
@@ -1164,7 +1379,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((Allocated & ContextAttribute) != 0 && Message.Type != LpcConnectionRequest)
             {
                 Buffer.Clear();
-                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00), Message.Connection.PortContext);
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00), ToServer ? Message.Connection.PortContext : 0);
                 BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x10), Message.Sequence);
                 BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x14), Message.MessageId);
                 BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x18), Message.CallbackId);
@@ -1173,7 +1388,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Valid |= ContextAttribute;
             }
 
-            if ((Allocated & TokenAttribute) != 0)
+            if ((Allocated & TokenAttribute) != 0 && ToServer)
             {
                 Buffer.Clear();
                 BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00), Message.Connection.TokenId);
@@ -1299,6 +1514,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static void LogHostFailure(NTSTATUS Status, Exception Error)
         {
             Utils.LogError($"[-] ALPC: Brovan's client failed on an answer with status 0x{(uint)Status:X8}: {Error}");
+        }
+
+        private static void LogServerFailure(AlpcConnection Connection, Exception Error)
+        {
+            Utils.LogError($"[-] ALPC: Brovan's server of \"{Connection.ConnectionPort.Name}\" failed: {Error}");
         }
 
         private static ulong CurrentThreadId(BinaryEmulator Instance) => (ulong)(uint)Instance.CurrentThreadId;

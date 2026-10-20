@@ -24,10 +24,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 PortName = FullName ?? string.Empty;
             }
 
+            NTSTATUS FlagsStatus = AlpcMessaging.TryReadPortFlags(Instance, Instance.WinHelper.GetArg(2), out uint PortFlags);
+            if (FlagsStatus != NTSTATUS.STATUS_SUCCESS)
+                return FlagsStatus;
+
             if (PortName.Length != 0 && NtConnectPort.FindPortByName(Instance, PortName) != null)
                 return NTSTATUS.STATUS_OBJECT_NAME_COLLISION;
 
-            WinPort Created = AlpcMessaging.CreateConnectionPort(PortName);
+            WinPort Created = AlpcMessaging.CreateConnectionPort(PortName, PortFlags);
             if (PortName.Length != 0)
                 Instance.WinHelper.WinPorts.Add(Created);
 

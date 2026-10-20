@@ -53,7 +53,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return true;
             }
 
-            if (MessageReady)
+            if (MessageReady || Win32kQueuePort.TryEndMsgWait(Instance, Thread, WinEmulatedThread.GetState(Thread), WakeMask))
             {
                 WaitStatus = (NTSTATUS)(uint)Handles.Count;
                 return true;
@@ -70,11 +70,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return WaitStatus;
             }
 
-            if (Instance.IsEmulatedDeadlineExpired(Thread.WaitDeadline))
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (Instance.IsEmulatedDeadlineExpired(State.MsgWaitTimeout))
             {
                 Instance.WinHelper.ClearWaitState(Thread);
                 return NTSTATUS.STATUS_TIMEOUT;
             }
+
+            Thread.WaitDeadline = Win32kHelper.GetMsgWaitDeadline(Instance, Thread.ThreadId, WakeMask, State.MsgWaitTimeout);
 
             Thread.State = EmulatedThreadState.Waiting;
             WinEmulatedThread.GetState(Thread).ApcAlertable = WinEmulatedThread.GetState(Thread).WaitAlertable;
@@ -146,9 +149,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Thread.WaitActive = true;
             Thread.WaitHandles = Handles;
             Thread.WaitAll = WaitAll;
-            Thread.WaitDeadline = Deadline;
+            Thread.WaitDeadline = Win32kHelper.GetMsgWaitDeadline(Instance, Thread.ThreadId, WakeMask, Deadline);
             State.MsgWaitActive = true;
             State.MsgWaitMask = WakeMask;
+            State.MsgWaitTimeout = Deadline;
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_PENDING;
             State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip();

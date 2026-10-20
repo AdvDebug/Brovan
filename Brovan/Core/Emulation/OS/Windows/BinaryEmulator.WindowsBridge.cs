@@ -174,7 +174,7 @@ namespace Brovan.Core.Emulation
             if (WindowsGuest == null || WinHelper == null)
                 return Guest != null && Guest.IsHandleSignaled(this, Handle);
 
-            IHandleObject Obj = WinHelper.HandleManager.GetObjectByHandle(Handle);
+            IHandleObject Obj = WinHelper.HandleManager.GetWaitObjectByHandle(Handle);
             if (Obj == null)
                 return false;
 
@@ -209,7 +209,7 @@ namespace Brovan.Core.Emulation
         }
 
         internal bool HasHandleWaiters(ulong Handle) =>
-            WinHelper != null && HasHandleWaiters(Handle, WinHelper.HandleManager.GetObjectByHandle(Handle) as WaitableHandleObject);
+            WinHelper != null && HasHandleWaiters(Handle, WinHelper.HandleManager.GetWaitObjectByHandle(Handle) as WaitableHandleObject);
 
         private bool HasHandleWaiters(ulong Handle, WaitableHandleObject? Object)
         {
@@ -251,7 +251,7 @@ namespace Brovan.Core.Emulation
             if (WindowsGuest == null || WinHelper == null)
                 return Guest != null && Guest.IsHandleSignaled(this, Handle);
 
-            IHandleObject Obj = WinHelper.HandleManager.GetObjectByHandle(Handle);
+            IHandleObject Obj = WinHelper.HandleManager.GetWaitObjectByHandle(Handle);
             if (Obj == null)
                 return false;
 
@@ -567,7 +567,7 @@ namespace Brovan.Core.Emulation
             }
 
             int ScanCandidates = Candidates.Count;
-            if (WinHelper.HandleManager.GetObjectByHandle(TargetObjectHandle) is WaitableHandleObject Target)
+            if (WinHelper.HandleManager.GetWaitObjectByHandle(TargetObjectHandle) is WaitableHandleObject Target)
             {
                 for (int i = 0; i < Target.FiledWaiterCount; i++)
                 {
@@ -681,6 +681,14 @@ namespace Brovan.Core.Emulation
                 WorkerFactoryHelper.OnIoCompletionEntryDequeued(this, Taken[i]);
         }
 
+        internal WinIoCompletionEntry TakeIoCompletionEntry(WinIoCompletion Completion)
+        {
+            WinIoCompletionEntry Entry = Completion.Take();
+            ReleaseWaitCompletionPacket(Entry);
+            WorkerFactoryHelper.OnIoCompletionEntryDequeued(this, Entry);
+            return Entry;
+        }
+
         private bool ReserveWorkerFactoryEntries(ulong WorkerFactoryHandle, uint MaxPackets, List<WinIoCompletionEntry> Reserved)
         {
             if (Reserved == null)
@@ -753,7 +761,7 @@ namespace Brovan.Core.Emulation
             WaitableHandleObject[] Objects = new WaitableHandleObject[Handles.Count];
             for (int i = 0; i < Handles.Count; i++)
             {
-                if (WinHelper.HandleManager.GetObjectByHandle(Handles[i]) is not WaitableHandleObject Waitable)
+                if (WinHelper.HandleManager.GetWaitObjectByHandle(Handles[i]) is not WaitableHandleObject Waitable)
                     return;
                 Objects[i] = Waitable;
             }
@@ -1076,6 +1084,7 @@ namespace Brovan.Core.Emulation
 
             if (State != null && State.WaitMessageActive)
             {
+                Win32kQueuePort.TakePackets(this, State);
                 if (!Win32kHelper.HasQueuedInputEvent(this, Win32kHelper.QS_ALLINPUT, Thread.ThreadId))
                     return false;
 
@@ -1095,6 +1104,7 @@ namespace Brovan.Core.Emulation
                     return true;
                 }
 
+                Win32kQueuePort.TakePackets(this, State);
                 if (Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
                 {
                     Win32kHelper.WriteMessage(this, State.GetMessageMessagePtr, Message, State);
@@ -1109,6 +1119,9 @@ namespace Brovan.Core.Emulation
 
             if (State != null && State.MsgWaitActive)
             {
+                if (IsDeadlineExpired(Thread.WaitDeadline, Now) && !IsDeadlineExpired(State.MsgWaitTimeout, Now))
+                    Thread.WaitDeadline = Win32kHelper.GetMsgWaitDeadline(this, Thread.ThreadId, State.MsgWaitMask, State.MsgWaitTimeout);
+
                 bool MessageReady = Win32kHelper.HasQueuedInputEvent(this, State.MsgWaitMask, Thread.ThreadId);
                 bool HasHandles = Thread.WaitHandles != null && Thread.WaitHandles.Count > 0;
 
@@ -1173,7 +1186,7 @@ namespace Brovan.Core.Emulation
                     }
                 }
 
-                if (MessageReady)
+                if (MessageReady || Win32kQueuePort.TryEndMsgWait(this, Thread, State, State.MsgWaitMask))
                 {
                     Thread.WaitSatisfiedIndex = Thread.WaitHandles?.Count ?? 0;
                     State.WaitStatus = NTSTATUS.STATUS_SUCCESS;

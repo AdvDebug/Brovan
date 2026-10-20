@@ -127,6 +127,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<string, List<ulong>> ObjectIdToHandles = new();
         private readonly WakeSignal Signal;
         internal readonly SignalledWaitables Signalled = new();
+        private readonly WinEvent SignalledPortObject = new WinEvent { Signaled = true };
+        private readonly WinEvent UnsignalledPortObject = new WinEvent();
 
         public HandleManager(WakeSignal Signal)
         {
@@ -151,7 +153,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             // Entering the table is the first moment a thread can wait on this object, so it is also the first
             // moment its state changes are worth reporting.
-            if (obj is WaitableHandleObject Waitable && Waitable.WakeSignal == null)
+            WaitableHandleObject Waitable = (DefaultWaitObject(obj) ?? obj) as WaitableHandleObject;
+            if (Waitable != null && Waitable.WakeSignal == null)
             {
                 Waitable.Signalled = Signalled;
                 Volatile.Write(ref Waitable.WakeSignal, Signal);
@@ -242,6 +245,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (TryGetEntry(Handle, out _, out HandleEntry Entry))
                 return Entry.Object;
             return null;
+        }
+
+        public IHandleObject? GetWaitObjectByHandle(ulong Handle)
+        {
+            IHandleObject? Object = GetObjectByHandle(Handle);
+            return DefaultWaitObject(Object) ?? Object;
+        }
+
+        // NT: a wait on a port waits on its default object, which is always signalled when the port is not waitable.
+        // A port that a handler serves never sends its clients a message, so a wait on it never ends.
+        private IHandleObject? DefaultWaitObject(IHandleObject? Object)
+        {
+            if (Object is not WinPort Port)
+                return null;
+
+            if (Port.Handler != null)
+                return UnsignalledPortObject;
+
+            return (IHandleObject?)Port.WaitSemaphore ?? SignalledPortObject;
         }
 
         public int CountHandlesByObjectId(string ObjectId)

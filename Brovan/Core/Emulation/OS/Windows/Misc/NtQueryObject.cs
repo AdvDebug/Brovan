@@ -255,6 +255,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return "TpWorkerFactory";
             if (HandleObject is WinWaitCompletionPacket)
                 return "WaitCompletionPacket";
+            if (HandleObject is WinReserveObject Reserve)
+                return Reserve.Type == ReserveType.IoCompletion ? "IoCompletionReserve" : "UserApcReserve";
             if (HandleObject is WinJob)
                 return "Job";
             return HandleObject.ObjectType.ToString();

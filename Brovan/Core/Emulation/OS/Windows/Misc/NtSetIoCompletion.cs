@@ -17,16 +17,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (HandleStatus != NTSTATUS.STATUS_SUCCESS)
                 return HandleStatus;
 
-            Completion.Post(new WinIoCompletionEntry
+            Instance.WinHelper.PostCompletion(Instance, IoCompletionHandle, Completion, new WinIoCompletionEntry
             {
                 KeyContext = KeyContext,
                 ApcContext = ApcContext,
                 IoStatus = IoStatus,
                 IoStatusInformation = IoStatusInformation
             });
-
-            if (Instance.WakeWorkerFactoryWaitersForObject(IoCompletionHandle))
-                Instance._emulator.StopEmulation();
 
             return NTSTATUS.STATUS_SUCCESS;
         }

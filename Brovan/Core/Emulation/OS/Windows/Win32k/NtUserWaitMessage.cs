@@ -20,6 +20,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return Status;
             }
 
+            Win32kQueuePort.TakePackets(Instance, State);
             if (Win32kHelper.HasQueuedInputEvent(Instance, Win32kHelper.QS_ALLINPUT, Thread.ThreadId))
             {
                 Instance.SetRawSyscallReturn(1);

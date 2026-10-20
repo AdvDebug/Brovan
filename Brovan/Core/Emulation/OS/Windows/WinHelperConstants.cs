@@ -208,6 +208,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_INVALID_DEVICE_REQUEST = 0xC0000010,
         STATUS_FILE_CORRUPT_ERROR = 0xC0000102,
         STATUS_INVALID_MESSAGE = 0xC0000702,
+        STATUS_LPC_REQUESTS_NOT_ALLOWED = 0xC0000707,
         STATUS_ALREADY_REGISTERED = 0xC0000718,
         STATUS_END_OF_FILE = 0xC0000011,
         STATUS_NO_MEMORY = 0xC0000017,
@@ -1049,6 +1050,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         TimerModifyState = 0x00000002,
         TimerAllAccess = StandardRightsRequired | Synchronize | TimerQueryState | TimerModifyState,
         EventAllAccess = StandardRightsRequired | Synchronize | 0x3,
+        IoCompletionAllAccess = StandardRightsRequired | Synchronize | 0x3,
         StandardRightsRequired = Delete | ReadControl | WriteDAC | WriteOwner,
         StandardRightsAll = StandardRightsRequired | Synchronize,
         ProcessTerminate = 0x00000001,
@@ -1163,7 +1165,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         SemaphoreHandle = 15,
         JobHandle = 16,
         DirectoryHandle = 17,
-        SharedGpuMemoryHandle = 18
+        SharedGpuMemoryHandle = 18,
+        ReserveHandle = 19
     }
 
     public sealed class WinToken : IHandleObject
@@ -2167,6 +2170,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong WaitCompletionPacketHandle;
         public ulong WorkerFactoryHandle;
         public bool WorkerFactoryRelease;
+        internal WinReserveObject Reserve;
     }
 
     public sealed class WinIoCompletion : WaitableHandleObject
@@ -2186,12 +2190,31 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinIoCompletionEntry Take()
         {
-            return Queued.Dequeue();
+            WinIoCompletionEntry Entry = Queued.Dequeue();
+            if (Entry.Reserve != null)
+                Entry.Reserve.InUse = false;
+            return Entry;
         }
 
         public override string ObjectId => Name;
 
         public override HandleType ObjectType => HandleType.IoCompletionHandle;
+    }
+
+    internal enum ReserveType : uint
+    {
+        UserApc = 0,
+        IoCompletion = 1,
+    }
+
+    internal sealed class WinReserveObject : IHandleObject
+    {
+        public string Name;
+        internal ReserveType Type;
+        internal bool InUse;
+
+        public string ObjectId => Name;
+        public HandleType ObjectType => HandleType.ReserveHandle;
     }
 
     public sealed class WinWorkerFactory : WaitableHandleObject
@@ -2750,14 +2773,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public string Name;
 
-        // Set on a connection port from NtAlpcCreatePort.
-        internal AlpcServerQueue Queue;
-        public bool IsServer => Queue != null;
+        // Set on a connection port from NtAlpcCreatePort and on the client port of a connection the guest makes.
+        internal AlpcReceiveQueue Queue;
+        public bool IsServer => Queue is AlpcServerQueue;
+        internal AlpcServerQueue ServerQueue => Queue as AlpcServerQueue;
+        internal AlpcHostServer HostServer;
 
         // Both communication ports of a connection share it.
         internal AlpcConnection Connection;
         internal bool IsClientEnd;
         private string UnnamedId;
+
+        internal bool AcceptsRequests;
+        internal WinSemaphore WaitSemaphore;
 
         // NT keeps the security contexts of a port in the ALPC handle table of the port.
         internal Dictionary<ulong, AlpcSecurityContext> SecurityContexts;

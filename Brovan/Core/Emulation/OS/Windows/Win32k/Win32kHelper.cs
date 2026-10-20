@@ -116,6 +116,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint ERROR_INCORRECT_SIZE = 1462;
         internal const uint ERROR_CANNOT_FIND_WND_CLASS = 1407;
         internal const uint ERROR_INVALID_THREAD_ID = 1444;
+        internal const uint ERROR_ALREADY_INITIALIZED = 1247;
+        internal const uint ERROR_NOT_SUPPORTED = 50;
 
         internal const int MaxClassExtraBytes = 0x10000;
 
@@ -2829,8 +2831,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
         }
 
+        // NT posts an event message (PostEventMessageEx), which the owner thread handles when it reads its queue.
+        internal static void PostEventNotification(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam)
+        {
+            PostNotification(Instance, Hwnd, Message, WParam, LParam, WithoutSender: true);
+        }
+
         // NT sends these. One overtaken by the activation or focus state is dropped.
-        private static void PostNotification(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam, bool FromHost)
+        private static void PostNotification(BinaryEmulator Instance, ulong Hwnd, uint Message, ulong WParam, ulong LParam, bool WithoutSender)
         {
             if (Instance.WinHelper.GetWindow(Hwnd) == null)
                 return;
@@ -2841,7 +2849,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Instance.WinHelper.SupportsUserCallbacks)
             {
                 EmulatedThread Thread = Instance.CurrentThread;
-                uint Sender = FromHost ? 0 : Thread?.ThreadId ?? 0;
+                uint Sender = WithoutSender ? 0 : Thread?.ThreadId ?? 0;
                 State.SentNotifications.Add(new Win32kSentNotification(Notification, Sender, GetCallbackDepth(Thread)));
             }
             else
@@ -3162,6 +3170,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Earliest;
         }
 
+        // A timer that is already due counts as a ready message, so only a later one sets the deadline.
+        internal static long GetMsgWaitDeadline(BinaryEmulator Instance, uint ThreadId, uint WakeMask, long Timeout)
+        {
+            long TimerDue = (WakeMask & QS_TIMER) != 0 ? GetNextTimerDue(Instance, 0, ThreadId, 0, 0) : -1;
+            if (TimerDue == -1 || Instance.IsEmulatedDeadlineExpired(TimerDue) || (Timeout != -1 && Timeout <= TimerDue))
+                return Timeout;
+
+            return TimerDue;
+        }
+
         // A parked thread carries the deadline it was given, so each one is re-armed on the timer it can take.
         private static void WakeMessageWaiters(BinaryEmulator Instance)
         {
@@ -3171,12 +3189,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State == null || (!State.GetMessageWaitActive && !State.WaitMessageActive))
+                if (State == null || (!State.GetMessageWaitActive && !State.WaitMessageActive && !State.MsgWaitActive))
                     continue;
 
-                Thread.WaitDeadline = State.GetMessageWaitActive
-                    ? GetNextTimerDue(Instance, State.GetMessageHwndFilter, Thread.ThreadId, State.GetMessageMinMessage, State.GetMessageMaxMessage)
-                    : GetNextTimerDue(Instance, 0, Thread.ThreadId, 0, 0);
+                if (State.MsgWaitActive)
+                    Thread.WaitDeadline = GetMsgWaitDeadline(Instance, Thread.ThreadId, State.MsgWaitMask, State.MsgWaitTimeout);
+                else if (State.GetMessageWaitActive)
+                    Thread.WaitDeadline = GetNextTimerDue(Instance, State.GetMessageHwndFilter, Thread.ThreadId, State.GetMessageMinMessage, State.GetMessageMaxMessage);
+                else
+                    Thread.WaitDeadline = GetNextTimerDue(Instance, 0, Thread.ThreadId, 0, 0);
             }
 
             Instance.WakeSignal.Bump();
@@ -3223,6 +3244,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         // The caller drains host events first.
         internal static bool TryGetMessage(BinaryEmulator Instance, ulong HwndFilter, uint MinMessage, uint MaxMessage, uint WakeMask, bool Remove, uint ThreadId, out Win32kMessage Message)
         {
+            Win32kQueuePort.DrainForMessages(Instance, ThreadId, WakeMask);
             Win32kState State = GetState(Instance);
             if (State.QueuedNotifications != 0)
                 DropOvertakenNotifications(Instance, State);
@@ -3458,6 +3480,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Cache[Character] = Measured + 1;
             return Measured;
+        }
+
+        // The low half should be only what arrived since the last call, which the queue does not record.
+        internal static uint GetQueueStatus(BinaryEmulator Instance, uint Flags)
+        {
+            uint Bits = GetQueuedWakeBits(Instance, Flags, Instance.CurrentThread?.ThreadId ?? 0);
+            return (Bits << 16) | Bits;
         }
 
         // A thread told about work it may not dequeue wakes, finds nothing, and parks again at once.
@@ -6460,6 +6489,24 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
         }
 
+        internal static void DropThreadMessages(BinaryEmulator Instance, uint ThreadId, List<ulong> Windows)
+        {
+            if (!States.TryGetValue(Instance, out Win32kState State) || State.MessageQueue.Count == 0)
+                return;
+
+            Queue<Win32kMessage> Queue = State.MessageQueue;
+            for (int Count = Queue.Count; Count > 0; Count--)
+            {
+                Win32kMessage Message = Queue.Dequeue();
+                if (Message.TargetThreadId == ThreadId || (Windows != null && Windows.Contains(Message.Hwnd)))
+                    continue;
+
+                Queue.Enqueue(Message);
+            }
+
+            State.QueuedWakeBitsValid = false;
+        }
+
         // NT compares message queues, and AttachThreadInput joins the queues of every thread it links.
         internal static bool SharesInputQueue(BinaryEmulator Instance, WinWindow Window, uint ThreadId)
         {
@@ -6573,6 +6620,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const ushort FnidGhost = 0x02AA;
 
         private const ushort FnidSendMessageFirst = 0x02B1;
+        internal const ushort FnidSendMessageCallback = 0x02B8;
         private const ushort FnidSendMessageLast = 0x02B8;
         internal const ushort FnidLast = FnidSendMessageLast;
         internal const int FnidCount = FnidLast - FnidFirst + 1;

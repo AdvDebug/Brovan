@@ -163,7 +163,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
             WinPort Port = FindPortForOpen(Instance, PortName);
-            if (Port?.Queue != null)
+            if (Port?.IsServer == true)
             {
                 Brovan.Core.Helpers.Utils.LogError($"[-] LPC: \"{PortName}\" is an ALPC port of this process, which an LPC client cannot reach.");
                 return NTSTATUS.STATUS_NOT_SUPPORTED;

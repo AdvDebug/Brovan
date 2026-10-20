@@ -27,8 +27,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[!] NtAlpcConnectPortEx: no port \"{PortName}\".", LogFlags.Syscall);
 
-                // Deliberate, not STATUS_OBJECT_NAME_NOT_FOUND. CoreMessaging survives only access denied.
-                return NTSTATUS.STATUS_ACCESS_DENIED;
+                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
             return NtAlpcConnectPort.Connect(Instance, PortHandlePtr, Port);
