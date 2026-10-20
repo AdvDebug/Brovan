@@ -11,10 +11,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint SpiSetScreenSaveActive = 0x0011;
         private const uint SpiGetKeyboardDelay = 0x0016;
         private const uint SpiGetWorkArea = 0x0030;
+        private const uint SpiGetHighContrast = 0x0042;
         private const uint SpiGetScreenReader = 0x0046;
         private const uint SpiGetWheelScrollLines = 0x0068;
         private const uint SpiGetWheelScrollChars = 0x006C;
         private const uint SpiGetMouseSpeed = 0x0070;
+        private const uint SpiGetClientAreaAnimation = 0x1042;
+        private const uint SpiGetMessageDuration = 0x2016;
 
         private const uint DefaultKeyboardSpeed = 31;
         private const uint DefaultKeyboardDelay = 1;
@@ -24,6 +27,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint DefaultMouseThreshold1 = 6;
         private const uint DefaultMouseThreshold2 = 10;
         private const uint DefaultMouseAcceleration = 1;
+        private const uint DefaultClientAreaAnimation = 1;
+        private const uint DefaultMessageDuration = 5;
+
+        // HIGHCONTRAST {cbSize, dwFlags, lpszDefaultScheme}, whose scheme buffer win32k fills with 128 characters.
+        private const ulong HighContrastFlagsOffset = 4;
+        private const ulong HighContrastSchemeOffset = 8;
+        private const uint HighContrastSchemeBytes = 0x100;
+        private const uint DefaultHighContrastFlags = 0x7E;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -72,6 +83,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 case SpiGetWheelScrollLines:
                 case SpiGetWheelScrollChars:
                 case SpiGetMouseSpeed:
+                case SpiGetClientAreaAnimation:
+                case SpiGetMessageDuration:
                 {
                     uint Value = Action switch
                     {
@@ -79,12 +92,29 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         SpiGetKeyboardDelay => DefaultKeyboardDelay,
                         SpiGetWheelScrollLines => DefaultWheelScrollLines,
                         SpiGetWheelScrollChars => DefaultWheelScrollChars,
+                        SpiGetClientAreaAnimation => DefaultClientAreaAnimation,
+                        SpiGetMessageDuration => DefaultMessageDuration,
                         _ => DefaultMouseSpeed,
                     };
 
                     Span<uint> Single = stackalloc uint[1] { Value };
                     if (!TryWriteDwords(Instance, ParameterPtr, Single))
                         break;
+
+                    Instance.SetRawSyscallReturn(1);
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
+                case SpiGetHighContrast:
+                {
+                    Span<uint> Flags = stackalloc uint[1] { DefaultHighContrastFlags };
+                    if (ParameterPtr == 0 || !Instance.WinHelper.TryReadPointer(ParameterPtr + HighContrastSchemeOffset, out ulong SchemePtr)
+                        || SchemePtr == 0 || !Instance.WinHelper.WriteZeroMemory(SchemePtr, HighContrastSchemeBytes)
+                        || !TryWriteDwords(Instance, ParameterPtr + HighContrastFlagsOffset, Flags))
+                    {
+                        Instance.SetLastWinError(Win32kHelper.ERROR_NOACCESS);
+                        break;
+                    }
 
                     Instance.SetRawSyscallReturn(1);
                     return NTSTATUS.STATUS_SUCCESS;
