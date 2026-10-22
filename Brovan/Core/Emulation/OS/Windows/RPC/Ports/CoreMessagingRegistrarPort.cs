@@ -35,26 +35,39 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const ushort UnregisterObjectMethod = 13;
         private const ushort RegisterPortMethod = 14;
         private const ushort UnregisterPortMethod = 15;
+        private const ushort ReleaseConversationClientMethod = 22;
+        private const ushort RegisterConversationClientMethod = 23;
         private const ushort ReplyRegisterThreadMethod = 4;
         private const ushort ReplyRegisterObjectMethod = 14;
         private const ushort ReplyUnregisterObjectMethod = 16;
         private const ushort ReplyRegisterPortMethod = 17;
         private const ushort ReplyUnregisterPortMethod = 18;
+        private const ushort ReplyReleaseConversationClientMethod = 28;
+        private const ushort ReplyRegisterConversationClientMethod = 29;
         private const uint MessagingSuccess = 0;
         private const uint MessagingDuplicateName = 3;
         private const uint MessagingObjectNotFound = 9;
+        private const uint MessagingTooManyConversationClients = 17;
 
         // NT: AlpcAdapter::ValidateString.
         private const int MaxNameLength = 512;
 
         // ScopeID {u32 kind, u32 process id for the process scope, Guid}.
         private const int ScopeIdSize = 0x18;
+        private const uint SessionScope = 1;
         private const uint ProcessScope = 2;
         private const int HIdentitySize = 8;
         private const uint ObjectTypeCount = 2;
         // NT: RegisteredObjectValidator::ValidateRegisteredObjectParams counts the registrations of a process.
         private const int MaxProcessRegistrations = 0x400;
         private const string ReservedKernelPrefix = "Kernel\\";
+
+        // NT: RegisteredConversation::CreateClient counts the conversation clients of a process.
+        private const int MaxConversationClients = 0x2800;
+        // NT: RegisteredConversation::s_lastHint goes back to 1 past this.
+        private const uint MaxConversationHint = 0xFFFF;
+        // ConversationInfo {hint, item owner, server style, connection mode}.
+        private const int ConversationInfoSize = 16;
 
         // IRegistrarServer, in method order (IRegistrarServer_Receive::Type in coremessaging.dll).
         private static readonly string[] RegistrarMethods =
@@ -71,19 +84,66 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private readonly record struct ObjectKey(uint Type, string Name);
 
+        private readonly record struct ConversationPeer(Conversation Conversation, uint PeerId);
+
         private sealed class Client
         {
             internal ulong ClientId;
             internal readonly HashSet<Guid> Ports = new HashSet<Guid>();
             internal readonly HashSet<ObjectKey> Objects = new HashSet<ObjectKey>();
+            internal readonly HashSet<ConversationPeer> ConversationPeers = new HashSet<ConversationPeer>();
+        }
+
+        private sealed class Conversation
+        {
+            internal uint Hint;
+            internal uint ItemOwner;
+            internal uint ServerStyle;
+            internal uint ConnectionMode;
+            internal PeerIds Peers;
+            internal readonly Dictionary<uint, Client> Clients = new Dictionary<uint, Client>();
+        }
+
+        // NT: IDLRUAllocator. ID 0 is reserved, a new ID is the lowest free one, and a released ID is free again
+        // only after 128 later releases.
+        private sealed class PeerIds
+        {
+            private const int RetiredCapacity = 128;
+
+            private readonly SortedSet<uint> Free = new SortedSet<uint>();
+            private readonly Queue<uint> Retired = new Queue<uint>();
+            private uint Next = 1;
+
+            internal uint Allocate()
+            {
+                if (Free.Count == 0)
+                    return Next++;
+
+                uint Id = Free.Min;
+                Free.Remove(Id);
+                return Id;
+            }
+
+            internal void Release(uint Id)
+            {
+                Retired.Enqueue(Id);
+                if (Retired.Count > RetiredCapacity)
+                    Free.Add(Retired.Dequeue());
+            }
         }
 
         private readonly Dictionary<AlpcConnection, Client> Clients = new Dictionary<AlpcConnection, Client>();
         // The process scope of the one guest process the registrar serves, with the thread that registered each name.
         private readonly Dictionary<ObjectKey, Client> ProcessObjects = new Dictionary<ObjectKey, Client>();
+        // The session scope as the one guest process sees it. Peer IDs are shared by the conversations of one eager name.
+        private readonly Dictionary<string, Conversation> SessionConversations = new Dictionary<string, Conversation>(StringComparer.Ordinal);
+        private readonly Dictionary<string, PeerIds> SessionPeerIds = new Dictionary<string, PeerIds>(StringComparer.Ordinal);
         private ulong NextClientId;
         private uint NextGroup;
         private int Registrations;
+        private uint LastConversationHint;
+        private ulong LastConversationUniqueId;
+        private int ConversationClients;
 
         internal override bool Connect(BinaryEmulator Instance, AlpcConnection Connection, ReadOnlySpan<byte> Data, out byte[] Reply)
         {
@@ -121,6 +181,10 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     return RegisterPort(State, ref Parameters, Sequence, out Reply);
                 case UnregisterPortMethod:
                     return UnregisterPort(State, ref Parameters, Sequence, out Reply);
+                case ReleaseConversationClientMethod:
+                    return ReleaseConversationClient(State, ref Parameters, Sequence, out Reply);
+                case RegisterConversationClientMethod:
+                    return RegisterConversationClient(State, ref Parameters, Sequence, out Reply);
                 default:
                     Utils.LogError($"[-] CoreMessaging registrar: {RegistrarMethods[Method]} is not served.");
                     return NTSTATUS.STATUS_NOT_IMPLEMENTED;
@@ -135,6 +199,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Registrations -= State.Ports.Count;
             foreach (ObjectKey Key in State.Objects)
                 ProcessObjects.Remove(Key);
+
+            foreach (ConversationPeer Peer in State.ConversationPeers)
+                ForgetConversationClient(Peer.Conversation, Peer.PeerId);
         }
 
         // NT: RemoteRegistrarServer::RegisterThread reserves a group of the client process for the thread.
@@ -267,6 +334,140 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        // NT: ServerConversationOperations::RegisterConversationClient. With no conversation of that name, an eager
+        // client creates one, and a server that registers later is announced to it.
+        private NTSTATUS RegisterConversationClient(Client State, ref CallReader Parameters, uint Sequence, out byte[] Reply)
+        {
+            Reply = null;
+            if (!Parameters.TryReadString(out ReadOnlySpan<char> Name) || !Parameters.TryReadFixed(ScopeIdSize, out ReadOnlySpan<byte> Scope)
+                || !Parameters.TryReadUInt32(out uint ConnectionMode) || !Parameters.TryReadBool(out bool Eager)
+                || !Parameters.TryReadString(out ReadOnlySpan<char> EagerName) || !Parameters.TryReadUInt32(out uint ItemOwner)
+                || !Parameters.TryReadUInt32(out uint ServerStyle) || !Parameters.AtEnd)
+                return Malformed(RegisterConversationClientMethod);
+
+            uint ScopeKind = BinaryPrimitives.ReadUInt32LittleEndian(Scope);
+            if (!IsValidName(Name))
+                return ProtocolError(RegisterConversationClientMethod);
+
+            if (ScopeKind != SessionScope)
+                return ScopeNotServed(RegisterConversationClientMethod, ScopeKind);
+
+            if (!IsCallerSessionScope(Scope) || Name.StartsWith(ReservedKernelPrefix, StringComparison.Ordinal)
+                || ProcessObjects.Count >= MaxProcessRegistrations)
+                return ProtocolError(RegisterConversationClientMethod);
+
+            // NT: an eager conversation takes only eager clients, and no server registers a conversation here.
+            if (!Eager)
+                return ConversationClientReply(MessagingObjectNotFound, 0, 0, null, Sequence, out Reply);
+
+            if (ConversationClients >= MaxConversationClients)
+                return ConversationClientReply(MessagingTooManyConversationClients, 0, 0, null, Sequence, out Reply);
+
+            string Key = Name.ToString();
+            if (!SessionConversations.TryGetValue(Key, out Conversation Conversation))
+            {
+                if (!IsValidName(EagerName) || EagerName.StartsWith(ReservedKernelPrefix, StringComparison.Ordinal))
+                    return ProtocolError(RegisterConversationClientMethod);
+
+                if (Registrations >= MemoryBudget.CoreMessagingRegistrations)
+                {
+                    Utils.LogError($"[-] CoreMessaging registrar: refused a conversation past the limit of {MemoryBudget.CoreMessagingRegistrations} registrations.");
+                    return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
+                }
+
+                string PeerKey = EagerName.ToString();
+                if (!SessionPeerIds.TryGetValue(PeerKey, out PeerIds Peers))
+                {
+                    Peers = new PeerIds();
+                    SessionPeerIds.Add(PeerKey, Peers);
+                }
+
+                LastConversationHint = LastConversationHint >= MaxConversationHint ? 1 : LastConversationHint + 1;
+                Conversation = new Conversation
+                {
+                    Hint = LastConversationHint,
+                    ItemOwner = ItemOwner,
+                    ServerStyle = ServerStyle,
+                    ConnectionMode = ConnectionMode,
+                    Peers = Peers,
+                };
+                SessionConversations.Add(Key, Conversation);
+                Registrations++;
+            }
+
+            uint PeerId = Conversation.Peers.Allocate();
+            Conversation.Clients.Add(PeerId, State);
+            State.ConversationPeers.Add(new ConversationPeer(Conversation, PeerId));
+            ConversationClients++;
+            return ConversationClientReply(MessagingSuccess, PeerId, ++LastConversationUniqueId, Conversation, Sequence, out Reply);
+        }
+
+        private static NTSTATUS ConversationClientReply(uint Result, uint PeerId, ulong UniqueId, Conversation Conversation, uint Sequence, out byte[] Reply)
+        {
+            Span<byte> Info = stackalloc byte[ConversationInfoSize];
+            Info.Clear();
+            if (Conversation != null)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(Info, Conversation.Hint);
+                BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(4), Conversation.ItemOwner);
+                BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(8), Conversation.ServerStyle);
+                BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(12), Conversation.ConnectionMode);
+            }
+
+            CallWriter Call = new CallWriter(ClientInterface, ReplyRegisterConversationClientMethod);
+            Call.UInt32(Result);
+            Call.UInt32(PeerId);
+            Call.UInt64(UniqueId);
+            Call.Bytes(Info);
+            // The server peers of the conversation, which no server joins here.
+            Call.Bytes(ReadOnlySpan<byte>.Empty);
+            Reply = Call.ToReply(Sequence);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT: ServerConversationOperations::ReleaseConversationClient. A name with no conversation still gets the reply.
+        private NTSTATUS ReleaseConversationClient(Client State, ref CallReader Parameters, uint Sequence, out byte[] Reply)
+        {
+            Reply = null;
+            if (!Parameters.TryReadString(out ReadOnlySpan<char> Name) || !Parameters.TryReadFixed(ScopeIdSize, out ReadOnlySpan<byte> Scope)
+                || !Parameters.TryReadUInt32(out uint PeerId) || !Parameters.AtEnd)
+                return Malformed(ReleaseConversationClientMethod);
+
+            uint ScopeKind = BinaryPrimitives.ReadUInt32LittleEndian(Scope);
+            if (!IsValidName(Name))
+                return ProtocolError(ReleaseConversationClientMethod);
+
+            if (ScopeKind != SessionScope)
+                return ScopeNotServed(ReleaseConversationClientMethod, ScopeKind);
+
+            if (!IsCallerSessionScope(Scope))
+                return ProtocolError(ReleaseConversationClientMethod);
+
+            if (SessionConversations.TryGetValue(Name.ToString(), out Conversation Conversation))
+            {
+                // NT: RegisteredConversation::TryGetClient finds only the clients of the calling thread.
+                if (!Conversation.Clients.TryGetValue(PeerId, out Client Owner) || Owner != State)
+                    return ProtocolError(ReleaseConversationClientMethod);
+
+                State.ConversationPeers.Remove(new ConversationPeer(Conversation, PeerId));
+                ForgetConversationClient(Conversation, PeerId);
+            }
+
+            Reply = new CallWriter(ClientInterface, ReplyReleaseConversationClientMethod).ToReply(Sequence);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private void ForgetConversationClient(Conversation Conversation, uint PeerId)
+        {
+            Conversation.Clients.Remove(PeerId);
+            Conversation.Peers.Release(PeerId);
+            ConversationClients--;
+        }
+
+        // NT: RegisteredObjectValidator::ValidateRegistrarScope. A session scope names no process and no partition.
+        private static bool IsCallerSessionScope(ReadOnlySpan<byte> Scope)
+            => BinaryPrimitives.ReadUInt32LittleEndian(Scope.Slice(4)) == 0 && !Scope.Slice(8).ContainsAnyExcept((byte)0);
+
         private static NTSTATUS Malformed(ushort Method)
         {
             Utils.LogError($"[-] CoreMessaging registrar: the parameters of a {RegistrarMethods[Method]} call do not match its format.");
@@ -332,6 +533,16 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     return false;
 
                 Value = BinaryPrimitives.ReadUInt32LittleEndian(Bytes);
+                return true;
+            }
+
+            internal bool TryReadBool(out bool Value)
+            {
+                Value = false;
+                if (!TryReadFixed(1, out ReadOnlySpan<byte> Bytes))
+                    return false;
+
+                Value = Bytes[0] != 0;
                 return true;
             }
 
