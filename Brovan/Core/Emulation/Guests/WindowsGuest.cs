@@ -302,11 +302,14 @@ namespace Brovan.Core.Emulation.Guests
         // SMP workers may still run here, so the release takes KernelLock.
         public void Shutdown(BinaryEmulator Instance)
         {
-            if (WinHelper?.KernelFiles is not KernelFileTable Files)
+            if (WinHelper == null)
                 return;
 
             lock (Instance.KernelLock)
-                Files.Dispose();
+            {
+                WinHelper.KernelFiles?.Dispose();
+                WinHelper.DxgkProcess.ReleaseAll(Instance);
+            }
         }
 
         public void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread)

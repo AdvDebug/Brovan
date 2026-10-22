@@ -43,6 +43,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IsKnownDllPath(Instance, AttributesRoot, FullName))
             {
                 ResolvedKnownDllBackingPath = ResolveKnownDllBackingPath(Instance, AttributesRoot, FullName, Name);
+                if (ResolvedKnownDllBackingPath == null)
+                    return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+
                 AllocationAttributes = SEC_IMAGE;
                 SectionPageProtection = PAGE_EXECUTE_READ;
             }
@@ -187,10 +190,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Slash >= 0 && Slash + 1 < FullName.Length)
                 Leaf = FullName.Substring(Slash + 1);
 
-            if (string.IsNullOrEmpty(Leaf))
+            if (string.IsNullOrEmpty(Leaf) || !Instance.WinHelper.KnownDlls.Contains(Instance.WinHelper, IsKnownDlls32, Leaf))
                 return null;
 
-            string BaseDir = IsKnownDlls32 ? @"C:\Windows\SysWOW64" : @"C:\Windows\System32";
+            string BaseDir = IsKnownDlls32 ? KnownDlls.Wow64Directory : KnownDlls.NativeDirectory;
             return Path.Combine(BaseDir, Leaf);
         }
     }

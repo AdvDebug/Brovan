@@ -1220,7 +1220,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static bool TryParseVersion(string? Text, out ulong Version)
+        internal static bool TryParseVersion(string? Text, out ulong Version)
         {
             Version = 0;
             if (string.IsNullOrEmpty(Text))

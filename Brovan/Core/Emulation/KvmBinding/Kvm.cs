@@ -62,6 +62,7 @@ namespace Brovan.Core.Emulation
         private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
         private readonly List<long> _backingStarts = new();
         private readonly List<IntPtr> _releasedBackings = new();
+        private readonly HostDiscardRuns _discardRuns = new();
 
         // Slots KVM refused to delete. Their host memory is freed only with the partition.
         private readonly List<InstalledSlot> _stillMappedBacking = new();
@@ -266,8 +267,11 @@ namespace Brovan.Core.Emulation
             public ulong Size;
             public int LivePages;
             public int AliasPages;
+            public int Pins;
             public bool Held;
             public IDisposable Owner;
+            public bool HugePages;
+            public ulong GuestBase;
         }
 
         private struct InstalledSlot
@@ -439,7 +443,7 @@ namespace Brovan.Core.Emulation
             }
 
             // Section offset 0 lands on a 2 MiB boundary.
-            if (!TryAllocateGuestBacking(0, size, out IntPtr backing))
+            if (!TryAllocateGuestBacking(0, size, out IntPtr backing, out _))
             {
                 _error = KvmErrors.NoMemory;
                 return IntPtr.Zero;
@@ -499,7 +503,7 @@ namespace Brovan.Core.Emulation
 
             if (canBatch && size > 0)
             {
-                if (!TryAllocateGuestBacking(address, size, out IntPtr backing))
+                if (!TryAllocateGuestBacking(address, size, out IntPtr backing, out bool hugePages))
                 {
                     _error = KvmErrors.NoMemory;
                     return false;
@@ -510,6 +514,8 @@ namespace Brovan.Core.Emulation
                 {
                     Size = size,
                     LivePages = (int)(size / KvmConstants.PageSize),
+                    HugePages = hugePages,
+                    GuestBase = address,
                 });
 
                 for (ulong off = 0; off < size; off += KvmConstants.PageSize)
@@ -2143,8 +2149,9 @@ namespace Brovan.Core.Emulation
         }
 
         // A 2 MiB second level entry needs host and guest addresses to agree modulo 2 MiB.
-        private bool TryAllocateGuestBacking(ulong guestAddress, ulong size, out IntPtr pointer)
+        private bool TryAllocateGuestBacking(ulong guestAddress, ulong size, out IntPtr pointer, out bool hugePages)
         {
+            hugePages = false;
             ulong huge = KvmConstants.HugePageSize;
             ulong firstBlock = (guestAddress + huge - 1) & ~(huge - 1);
             if (firstBlock + huge > guestAddress + size)
@@ -2163,7 +2170,7 @@ namespace Brovan.Core.Emulation
             KvmNative.munmap((IntPtr)((ulong)pointer + size), (UIntPtr)(huge - head));
             _backingBytes -= huge;
 
-            KvmNative.madvise(pointer, (UIntPtr)size, KvmNative.MADV_HUGEPAGE);
+            hugePages = KvmNative.madvise(pointer, (UIntPtr)size, KvmNative.MADV_HUGEPAGE) == 0;
             return true;
         }
 
@@ -2281,10 +2288,15 @@ namespace Brovan.Core.Emulation
 
             if (!IsReferenced(allocation))
                 _releasedBackings.Add(page.OwnedBacking);
+            else if (!page.IsAlias && IsDiscardable(allocation))
+                _discardRuns.Add(page.OwnedBacking, page.HostPage, KvmConstants.PageSize);
         }
 
         private static bool IsReferenced(BackingAllocation allocation)
-            => allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Held;
+            => allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Pins > 0 || allocation.Held;
+
+        private static bool IsDiscardable(BackingAllocation allocation)
+            => !HostDiscard.Disabled && allocation.AliasPages == 0 && allocation.Pins == 0 && !allocation.Held && allocation.Owner == null;
 
         // Only after the rebuild deletes the slots. Until then other processors can reach the backing.
         private void FreeReleasedBackings()
@@ -2296,6 +2308,79 @@ namespace Brovan.Core.Emulation
             }
 
             _releasedBackings.Clear();
+
+            for (int i = 0; i < _discardRuns.Count; i++)
+            {
+                HostDiscardRuns.Run run = _discardRuns[i];
+                if (!_backingAllocations.TryGetValue(run.Key, out BackingAllocation allocation) || !IsDiscardable(allocation)
+                    || IsBackingStillMapped(run.Start, run.Size))
+                    continue;
+
+                if (allocation.HugePages)
+                    DiscardFreeSpans(run, allocation);
+                else
+                    HostDiscard.Release(run.Start, run.Size);
+            }
+
+            _discardRuns.Clear();
+        }
+
+        // Linux keeps a partly discarded huge page until reclaim.
+        private void DiscardFreeSpans(HostDiscardRuns.Run run, BackingAllocation allocation)
+        {
+            ulong huge = KvmConstants.HugePageSize;
+            ulong blockStart = (ulong)run.Key.ToInt64();
+            ulong blockEnd = blockStart + allocation.Size;
+            ulong cursor = (ulong)run.Start.ToInt64();
+            ulong end = cursor + run.Size;
+
+            while (cursor < end)
+            {
+                ulong spanStart = cursor & ~(huge - 1);
+                ulong spanEnd = spanStart + huge;
+                ulong pieceEnd = Math.Min(end, spanEnd);
+
+                if (spanStart < blockStart || spanEnd > blockEnd)
+                    HostDiscard.Release(new IntPtr((long)cursor), pieceEnd - cursor);
+                else if (!HasLivePage(run.Key, allocation, spanStart - blockStart) && !IsBackingStillMapped(new IntPtr((long)spanStart), huge))
+                    HostDiscard.Release(new IntPtr((long)spanStart), huge);
+
+                cursor = pieceEnd;
+            }
+        }
+
+        private bool HasLivePage(IntPtr backing, BackingAllocation allocation, ulong spanOffset)
+        {
+            ulong guest = allocation.GuestBase + spanOffset;
+            for (ulong off = 0; off < KvmConstants.HugePageSize; off += KvmConstants.PageSize)
+            {
+                if (_mappedPages.TryGetValue(guest + off, out MappedPage page) && page.OwnedBacking == backing && !page.IsAlias)
+                    return true;
+            }
+
+            return false;
+        }
+
+        public IntPtr PinBacking(IntPtr hostPointer, ulong size)
+        {
+            if (DisposedCheck()) return IntPtr.Zero;
+
+            IntPtr backing = FindBackingAllocation(hostPointer);
+            if (backing == IntPtr.Zero || size == 0 || !_backingAllocations.TryGetValue(backing, out BackingAllocation allocation)
+                || size > allocation.Size - (ulong)(hostPointer.ToInt64() - backing.ToInt64()))
+                return IntPtr.Zero;
+
+            allocation.Pins++;
+            return backing;
+        }
+
+        public void UnpinBacking(IntPtr pin)
+        {
+            if (DisposedCheck() || !_backingAllocations.TryGetValue(pin, out BackingAllocation allocation) || allocation.Pins == 0)
+                return;
+
+            allocation.Pins--;
+            FreeIfUnreferenced(pin, allocation);
         }
 
         private void FreeIfUnreferenced(IntPtr backing, BackingAllocation allocation)

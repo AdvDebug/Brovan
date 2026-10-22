@@ -7,7 +7,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     internal class NtUserGetHDevName : IWinSyscall
     {
         private const int CchDeviceName = 32;
-        private const string DeviceName = @"\\.\DISPLAY1";
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -25,7 +24,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(NameBytes);
             Buffer.Clear();
-            Encoding.Unicode.GetBytes(DeviceName, Buffer);
+            Encoding.Unicode.GetBytes(Win32kDisplayConfig.AdapterName, Buffer);
 
             if (!Instance.WriteMemory(NamePtr, Buffer))
             {

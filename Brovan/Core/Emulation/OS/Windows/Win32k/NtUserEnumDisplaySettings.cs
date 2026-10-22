@@ -36,7 +36,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const ushort SpecVersion = 0x0401;
         private const uint BitsPerPixel = 32;
         private const uint LogPixels = 96;
-        private const string DeviceName = @"\\.\DISPLAY1";
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -53,7 +52,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!Instance.WinHelper.TryGetPrimaryMonitorRect(out int Left, out int Top, out int Right, out int Bottom))
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            Instance._emulator.WriteMemory(DevModePtr + OffsetDeviceName, DeviceName + "\0", Encoding.Unicode);
+            Instance._emulator.WriteMemory(DevModePtr + OffsetDeviceName, Win32kDisplayConfig.AdapterName + "\0", Encoding.Unicode);
             Instance._emulator.WriteMemory(DevModePtr + OffsetSpecVersion, SpecVersion, 2);
             Instance._emulator.WriteMemory(DevModePtr + OffsetDriverVersion, SpecVersion, 2);
             Instance._emulator.WriteMemory(DevModePtr + OffsetSize, (ushort)DevModeSize, 2);

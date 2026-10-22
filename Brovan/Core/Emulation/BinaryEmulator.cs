@@ -1600,6 +1600,16 @@ namespace Brovan.Core.Emulation
             return _emulator.GetHostPointer(Address, Size);
         }
 
+        public IntPtr PinBacking(IntPtr HostPointer, ulong Size)
+        {
+            return _emulator.PinBacking(HostPointer, Size);
+        }
+
+        public void UnpinBacking(IntPtr Pin)
+        {
+            _emulator.UnpinBacking(Pin);
+        }
+
         /// <param name="WholeMemory">True matches an address inside a freed range, false only the start of one.</param>
         public bool IsRegionFreed(ulong BaseAddress, bool WholeMemory)
         {

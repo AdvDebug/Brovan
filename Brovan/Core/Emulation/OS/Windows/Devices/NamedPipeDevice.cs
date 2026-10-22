@@ -518,24 +518,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Request.Status;
             }
 
-            if (!Request.Pipe.BlockingMode && Request.Kind != PipeRequestKind.Write)
-            {
-                // Part of a message larger than the ring is already in the buffer.
-                Request.Status = Request.Kind == PipeRequestKind.Listen ? NTSTATUS.STATUS_PIPE_LISTENING :
-                    Request.Offset != 0 ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_PIPE_EMPTY;
-                Request.Information = (ulong)Request.Offset;
-                ReleaseLocks(Request);
-                Request.Completed = true;
-                Finish(Instance, Request, false);
-                return Request.Status;
-            }
-
             if (!Request.Pipe.BlockingMode)
             {
-                Request.Status = NTSTATUS.STATUS_SUCCESS;
-                Request.Information = (ulong)Request.Offset;
-                ReleaseLocks(Request);
-                Request.Completed = true;
+                // Part of a message larger than the ring is already in the buffer.
+                End(Request, Request.Kind == PipeRequestKind.Write ? NTSTATUS.STATUS_SUCCESS :
+                    Request.Kind == PipeRequestKind.Listen ? NTSTATUS.STATUS_PIPE_LISTENING :
+                    Request.Offset != 0 ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_PIPE_EMPTY, (ulong)Request.Offset);
                 Finish(Instance, Request, false);
                 return Request.Status;
             }
@@ -648,9 +636,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static void End(PipeRequest Request, NTSTATUS Status, ulong Information)
         {
-            Request.Status = Status;
+            Request.Finish(Status);
             Request.Information = Information;
-            Request.Completed = true;
             ReleaseLocks(Request);
         }
 

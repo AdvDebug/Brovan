@@ -10,7 +10,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint MemCoalescePlaceholders = 0x1;
         private const uint MemPreservePlaceholder = 0x2;
         private const uint MemDecommit = 0x4000;
-        private const uint MemRelease = 0x8000;
+        internal const uint MemRelease = 0x8000;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -152,14 +152,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Instance.SplitPlaceholder(Start, End, true))
                     return NTSTATUS.STATUS_UNABLE_TO_FREE_VM;
             }
-            else if (Release)
+            else if (Release && WholeAllocation)
             {
-                // The region list cannot split an allocation.
-                if (!WholeAllocation)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
-
                 if (!Instance.ReleaseMemory(AllocationBase) && !Instance.UnmapMemoryRegion(AllocationBase))
                     return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
+            }
+            else if (Release)
+            {
+                if (!Instance.ReleaseMemoryRange(Start, End))
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
             else if (!Instance.DecommitMemory(Start, End - Start))
             {

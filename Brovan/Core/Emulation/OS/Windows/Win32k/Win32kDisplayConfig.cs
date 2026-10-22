@@ -42,6 +42,32 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal const uint DeviceInfoGetSourceName = 1;
         internal const uint DeviceInfoGetTargetName = 2;
+        internal const uint DeviceInfoGetDisplayInfo = 0xFFFFFFEB;
+
+        // An undocumented record that dxgi builds its adapters and outputs from.
+        internal const int DisplayInfoSize = 2056;
+        internal const uint NoSource = 0xFFFFFFFF;
+        private const int DisplayInfoAdapter = 0x14;
+        private const int DisplayInfoRenderAdapter = 0x340;
+        private const int AdapterBlockVendorId = 4;
+        private const int AdapterBlockDeviceId = 8;
+        private const int AdapterBlockDriverVersion = 24;
+        private const int AdapterBlockDescription = 0x1C;
+        private const int AdapterBlockInterface = 0x11C;
+        private const int DescriptionCharacters = 128;
+        private const int InterfaceCharacters = 260;
+        private const int AdapterBlockSize = AdapterBlockInterface + InterfaceCharacters * 2;
+        private const int DisplayInfoModeWidth = 0x674;
+        private const int DisplayInfoDeviceName = 0x67C;
+        private const int DisplayInfoMonitor = 0x77C;
+        private const int DisplayInfoActiveWidth = 0x784;
+        private const int DisplayInfoRefresh = 0x790;
+        private const int DisplayInfoDesktopWidth = 0x7A8;
+        private const int DisplayInfoBitsPerColor = 0x7B8;
+        private const int DisplayInfoPrimaries = 0x7C0;
+        private const uint BitsPerColor = 8;
+        private static readonly int[] SrgbPrimaries = Array.ConvertAll(new[] { 0.64, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290 },
+            Value => (int)Math.Round(Value * (1 << 20)));
 
         internal const uint TopologyInternal = 1;
 
@@ -57,8 +83,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private const uint FriendlyNameForced = 0x00000002;
 
-        private const string AdapterName = @"\\.\DISPLAY1";
-        private const string MonitorFriendlyName = "Generic PnP Monitor";
+        internal const string AdapterName = @"\\.\DISPLAY1";
+        internal const string MonitorFriendlyName = "Generic PnP Monitor";
         private const string MonitorDevicePath =
             @"\\?\DISPLAY#Default_Monitor#1&0&UID0#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
 
@@ -87,7 +113,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         | ModalityTargetAvailable | ModalityTargetInUse | ModalitySourceInUse;
 
             BinaryPrimitives.WriteUInt64LittleEndian(Record.Slice(ModalityFlags, 8), Flags);
-            Win32kDxgk.WriteLuid(Record.Slice(ModalityAdapterId, 8));
+            Win32kDxgk.WriteLuid(Record.Slice(ModalityAdapterId, 8), Win32kDxgk.Display);
             BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalitySourceId, 4), SourceId);
             BinaryPrimitives.WriteUInt32LittleEndian(Record.Slice(ModalityTargetId, 4), TargetId);
 
@@ -145,6 +171,46 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             WriteString(Tail.Slice(144, 256), MonitorDevicePath);
 
             return Instance.WriteMemory(Destination + HeaderSize, Tail);
+        }
+
+        internal static bool WriteDisplayInfo(BinaryEmulator Instance, ulong Destination, DxgkAdapter Adapter, bool WithSource)
+        {
+            // The monitor lookup can use the shared buffer, so it runs first.
+            uint Monitor = WithSource ? (uint)Instance.WinHelper.GetPrimaryMonitorHandle() : 0;
+            Span<byte> Info = Instance.WinHelper.Shared.GetSpan(DisplayInfoSize).Slice(0, DisplayInfoSize);
+            Info.Clear();
+
+            Span<byte> Block = Info.Slice(DisplayInfoAdapter, AdapterBlockSize);
+            BinaryPrimitives.WriteUInt32LittleEndian(Block, Adapter.BusType);
+            BinaryPrimitives.WriteUInt32LittleEndian(Block.Slice(AdapterBlockVendorId), Adapter.VendorId);
+            BinaryPrimitives.WriteUInt32LittleEndian(Block.Slice(AdapterBlockDeviceId), Adapter.DeviceId);
+            BinaryPrimitives.WriteUInt32LittleEndian(Block.Slice(AdapterBlockDriverVersion), Win32kDxgk.WddmVersion);
+            WriteString(Block.Slice(AdapterBlockDescription, DescriptionCharacters * 2), Adapter.Description);
+            WriteString(Block.Slice(AdapterBlockInterface, InterfaceCharacters * 2), Adapter.DeviceInterface);
+            Block.CopyTo(Info.Slice(DisplayInfoRenderAdapter));
+
+            if (WithSource)
+            {
+                uint Width = (uint)HostDisplayMetrics.ScreenWidth;
+                uint Height = (uint)HostDisplayMetrics.ScreenHeight;
+
+                foreach (int Offset in stackalloc int[] { DisplayInfoModeWidth, DisplayInfoActiveWidth, DisplayInfoDesktopWidth })
+                {
+                    BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(Offset), Width);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(Offset + 4), Height);
+                }
+
+                WriteString(Info.Slice(DisplayInfoDeviceName, 64), AdapterName);
+                BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(DisplayInfoMonitor), Monitor);
+                BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(DisplayInfoRefresh), RefreshHz);
+                BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(DisplayInfoRefresh + 4), 1);
+                BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(DisplayInfoBitsPerColor), BitsPerColor);
+
+                for (int Index = 0; Index < SrgbPrimaries.Length; Index++)
+                    BinaryPrimitives.WriteInt32LittleEndian(Info.Slice(DisplayInfoPrimaries + Index * 4), SrgbPrimaries[Index]);
+            }
+
+            return Instance.WriteMemory(Destination + DisplayInfoAdapter, Info.Slice(DisplayInfoAdapter));
         }
 
         private static void WriteString(Span<byte> Field, string Value)

@@ -17,7 +17,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong EtwSetProviderTraitsHandleOffset = 0x00;
         private const ulong EtwSetProviderTraitsPointerOffset = 0x08;
         private const ulong EtwSetProviderTraitsSizeOffset = 0x10;
-        private const uint EventModifyState = 0x0002;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -115,7 +114,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance.WinHelper.EtwNotificationEventHandle != 0)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            WinEvent Event = Instance.WinHelper.GetEventByHandle(EventHandle32, (AccessMask)EventModifyState);
+            WinEvent Event = Instance.WinHelper.GetEventByHandle(EventHandle32, AccessMask.EventModifyState);
             if (Event == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 

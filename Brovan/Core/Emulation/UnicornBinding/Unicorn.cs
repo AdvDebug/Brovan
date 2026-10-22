@@ -37,8 +37,10 @@ namespace Brovan.Core.Emulation
         private readonly List<MappedRegion> _mappedRegions = new List<MappedRegion>();
         private readonly List<IntPtr> _pendingFrees = new List<IntPtr>();
         private readonly Dictionary<IntPtr, nuint> _bufferSizes = new Dictionary<IntPtr, nuint>();
-        private readonly List<IntPtr> _heldBuffers = new List<IntPtr>();
+        private readonly HashSet<IntPtr> _heldBuffers = new HashSet<IntPtr>();
         private readonly Dictionary<IntPtr, IDisposable> _bufferOwners = new Dictionary<IntPtr, IDisposable>();
+        private readonly Dictionary<IntPtr, int> _pinnedBuffers = new Dictionary<IntPtr, int>();
+        private readonly HostDiscardRuns _discardRuns = new HostDiscardRuns();
         private ulong _pendingFreeBytes;
         private readonly List<MappedRegion> _unmapSurvivors = new List<MappedRegion>();
         private ulong[] _regionStarts = Array.Empty<ulong>();
@@ -46,6 +48,7 @@ namespace Brovan.Core.Emulation
         private bool _regionIndexValid;
         private MappedRegion _regionCache;
         private readonly List<IntPtr> _unmapReleasedBuffers = new List<IntPtr>();
+        private readonly HostDiscardRuns _unmapDiscards = new HostDiscardRuns();
         private List<IntPtr> HooksList = new List<IntPtr>();
 
         private sealed class MappedRegion
@@ -161,6 +164,9 @@ namespace Brovan.Core.Emulation
                 if (Aliased && !RegisterAliases(OwnerBuffer, address, size, hostPointer))
                     return false;
 
+                if (Aliased)
+                    _discardRuns.Remove(OwnerBuffer);
+
                 _error = uc_mem_map_ptr(_uc, address, new UIntPtr(size), protection, hostPointer);
                 if (_error != UCErrors.UC_ERR_OK)
                 {
@@ -275,6 +281,42 @@ namespace Brovan.Core.Emulation
                 Munmap((IntPtr)pointer, size);
         }
 
+        private bool IsDiscardable(IntPtr Buffer)
+            => !HostDiscard.Disabled && !_pinnedBuffers.ContainsKey(Buffer) && !_bufferOwners.ContainsKey(Buffer) && !_heldBuffers.Contains(Buffer);
+
+        public IntPtr PinBacking(IntPtr hostPointer, ulong size)
+        {
+            lock (_mapsLock)
+            {
+                if (DisposedCheck())
+                    return IntPtr.Zero;
+
+                IntPtr Buffer = FindBufferBase(hostPointer);
+                if (Buffer == IntPtr.Zero || size == 0 || !_bufferSizes.TryGetValue(Buffer, out nuint BufferSize)
+                    || size > (ulong)BufferSize - (ulong)(hostPointer.ToInt64() - Buffer.ToInt64()))
+                    return IntPtr.Zero;
+
+                CollectionsMarshal.GetValueRefOrAddDefault(_pinnedBuffers, Buffer, out _)++;
+                return Buffer;
+            }
+        }
+
+        public void UnpinBacking(IntPtr pin)
+        {
+            lock (_mapsLock)
+            {
+                if (DisposedCheck())
+                    return;
+
+                ref int Pins = ref CollectionsMarshal.GetValueRefOrNullRef(_pinnedBuffers, pin);
+                if (Unsafe.IsNullRef(ref Pins) || --Pins > 0)
+                    return;
+
+                _pinnedBuffers.Remove(pin);
+                FreeIfUnmapped(pin);
+            }
+        }
+
         private unsafe void ReleaseBacking(IntPtr buffer)
         {
             if (!_bufferSizes.TryGetValue(buffer, out nuint Size))
@@ -353,11 +395,11 @@ namespace Brovan.Core.Emulation
                     return Region.BufferBase;
             }
 
-            for (int i = 0; i < _heldBuffers.Count; i++)
+            foreach (IntPtr Held in _heldBuffers)
             {
-                byte* Start = (byte*)_heldBuffers[i];
-                if (_bufferSizes.TryGetValue(_heldBuffers[i], out nuint Size) && Target >= Start && Target < Start + Size)
-                    return _heldBuffers[i];
+                byte* Start = (byte*)Held;
+                if (_bufferSizes.TryGetValue(Held, out nuint Size) && Target >= Start && Target < Start + Size)
+                    return Held;
             }
 
             return IntPtr.Zero;
@@ -371,6 +413,7 @@ namespace Brovan.Core.Emulation
 
             _unmapSurvivors.Clear();
             _unmapReleasedBuffers.Clear();
+            _unmapDiscards.Clear();
 
             for (int i = _mappedRegions.Count - 1; i >= 0; i--)
             {
@@ -386,6 +429,9 @@ namespace Brovan.Core.Emulation
                 InvalidateRegionIndex();
                 changed = true;
                 aliased |= Region.Aliased;
+
+                if (Region.Ptr != IntPtr.Zero && Region.BufferBase != IntPtr.Zero && !Region.Aliased && IsDiscardable(Region.BufferBase))
+                    _unmapDiscards.Add(Region.BufferBase, (IntPtr)((byte*)Region.Ptr + (OverlapStart - Region.Address)), OverlapEnd - OverlapStart);
 
                 if (OverlapStart > Region.Address)
                 {
@@ -429,24 +475,34 @@ namespace Brovan.Core.Emulation
                 InsertMappedRegion(_unmapSurvivors[i]);
 
             for (int i = 0; i < _unmapReleasedBuffers.Count; i++)
+                FreeIfUnmapped(_unmapReleasedBuffers[i]);
+
+            // A buffer with no mapping left is freed whole instead.
+            for (int i = 0; i < _unmapDiscards.Count; i++)
             {
-                IntPtr Buffer = _unmapReleasedBuffers[i];
-                if (!_heldBuffers.Contains(Buffer))
-                    FreeIfUnmapped(Buffer);
+                HostDiscardRuns.Run Run = _unmapDiscards[i];
+                if (!IsBufferMapped(Run.Key))
+                    continue;
+
+                _discardRuns.Add(Run.Key, Run.Start, Run.Size);
+                AddPendingBytes(Run.Size);
             }
         }
 
         private void FreeIfUnmapped(IntPtr Buffer)
         {
-            if (IsBufferMapped(Buffer))
+            if (_heldBuffers.Contains(Buffer) || _pinnedBuffers.ContainsKey(Buffer) || IsBufferMapped(Buffer))
                 return;
 
             _pendingFrees.Add(Buffer);
             if (_bufferSizes.TryGetValue(Buffer, out nuint Bytes))
-                _pendingFreeBytes += Bytes;
+                AddPendingBytes(Bytes);
+        }
 
-            // Buffers are released at the end of the slice, so a guest that commits and decommits large
-            // blocks inside one slice keeps every dead buffer resident. Cut the slice short instead.
+        // Frees and discards wait for the end of the slice, and the memory stays resident until then.
+        private void AddPendingBytes(ulong Bytes)
+        {
+            _pendingFreeBytes += Bytes;
             if (_pendingFreeBytes >= MemoryBudget.PendingFreeBytes && _uc != IntPtr.Zero)
                 uc_emu_stop(_uc);
         }
@@ -1569,13 +1625,22 @@ namespace Brovan.Core.Emulation
         {
             lock (_mapsLock)
             {
-                if (_pendingFrees.Count == 0)
+                if (_pendingFrees.Count == 0 && _discardRuns.Count == 0)
                     return;
 
                 for (int i = 0; i < _pendingFrees.Count; i++)
                     ReleaseBacking(_pendingFrees[i]);
 
                 _pendingFrees.Clear();
+
+                for (int i = 0; i < _discardRuns.Count; i++)
+                {
+                    HostDiscardRuns.Run Run = _discardRuns[i];
+                    if (_bufferSizes.ContainsKey(Run.Key) && IsDiscardable(Run.Key))
+                        HostDiscard.Release(Run.Start, Run.Size);
+                }
+
+                _discardRuns.Clear();
                 _pendingFreeBytes = 0;
             }
         }
@@ -2228,9 +2293,14 @@ namespace Brovan.Core.Emulation
 
                                 foreach (IntPtr ptr in _heldBuffers)
                                     ReleaseBacking(ptr);
+
+                                foreach (IntPtr ptr in _pinnedBuffers.Keys)
+                                    ReleaseBacking(ptr);
                             }
                             _heldBuffers.Clear();
                             _pendingFrees.Clear();
+                            _discardRuns.Clear();
+                            _pinnedBuffers.Clear();
                             _pendingFreeBytes = 0;
                             _bufferSizes.Clear();
                         }

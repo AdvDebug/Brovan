@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -8,12 +9,27 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             ulong PacketPtr = Instance.WinHelper.GetArg(0);
 
-            if (PacketPtr == 0 || !Instance.IsRegionMapped(PacketPtr, Win32kDisplayConfig.HeaderSize))
+            Span<byte> Header = stackalloc byte[Win32kDisplayConfig.HeaderSize];
+            if (PacketPtr == 0 || !Instance.ReadMemory(PacketPtr, Header))
                 return Win32kDisplayConfig.Complete(Instance, NTSTATUS.STATUS_INVALID_PARAMETER);
 
-            uint Type = Instance.ReadMemoryUInt(PacketPtr);
-            uint Size = Instance.ReadMemoryUInt(PacketPtr + 4);
-            uint Id = Instance.ReadMemoryUInt(PacketPtr + 16);
+            uint Type = BinaryPrimitives.ReadUInt32LittleEndian(Header);
+            uint Size = BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(4));
+            uint Id = BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(16));
+
+            if (Type == Win32kDisplayConfig.DeviceInfoGetDisplayInfo)
+            {
+                DxgkAdapter Adapter = Win32kDxgk.FindByLuid(Header.Slice(8));
+                bool WithSource = Id != Win32kDisplayConfig.NoSource;
+
+                if (Size != Win32kDisplayConfig.DisplayInfoSize || Adapter == null || (WithSource && Id >= Adapter.SourceCount)
+                    || !Win32kDisplayConfig.WriteDisplayInfo(Instance, PacketPtr, Adapter, WithSource))
+                {
+                    return Win32kDisplayConfig.Complete(Instance, NTSTATUS.STATUS_INVALID_PARAMETER);
+                }
+
+                return Win32kDisplayConfig.Complete(Instance, NTSTATUS.STATUS_SUCCESS);
+            }
 
             if (Type == Win32kDisplayConfig.DeviceInfoGetSourceName)
             {

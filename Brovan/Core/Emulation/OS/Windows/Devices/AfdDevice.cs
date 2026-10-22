@@ -2469,10 +2469,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
                 }
 
-                Poll.Status = Status;
-                Poll.Completed = true;
+                Poll.Complete(Instance, Status);
                 Instance.WinHelper.CompletePendingIo(in Poll.Io, Status, (ulong)Length);
-                Instance.WakeSignal.Bump();
             }
 
             private static void End(BinaryEmulator Instance, PendingTransfer Transfer, NTSTATUS Status, ulong Information)
@@ -2480,11 +2478,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (((uint)Status >> 30) == 3)
                     Information = 0;
 
-                Transfer.Status = Status;
-                Transfer.Completed = true;
+                Transfer.Complete(Instance, Status);
                 Transfer.Buffers.Release();
                 Instance.WinHelper.CompletePendingIo(in Transfer.Io, Status, Information);
-                Instance.WakeSignal.Bump();
             }
 
             private static void End(BinaryEmulator Instance, PendingAccept Accept, NTSTATUS Status, ulong Information)
@@ -2495,10 +2491,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Accept.Target != null)
                     Accept.Target._superAcceptTarget = false;
 
-                Accept.Status = Status;
-                Accept.Completed = true;
+                Accept.Complete(Instance, Status);
                 Instance.WinHelper.CompletePendingIo(in Accept.Io, Status, Information);
-                Instance.WakeSignal.Bump();
             }
         }
 

@@ -4,13 +4,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtGdiDdDDIQueryVideoMemoryInfo : IWinSyscall
     {
-        private const int QueryVideoMemoryInfoSize = 56;
-
         // hProcess leads the structure and is a HANDLE, so hAdapter and the segment group sit after it.
         private const int OffsetBudget = 16;
-        private const int OffsetCurrentUsage = 24;
-        private const int OffsetCurrentReservation = 32;
-        private const int OffsetAvailableForReservation = 40;
+        private const int ResultSize = 32;
 
         private const uint SegmentGroupLocal = 0;
 
@@ -18,24 +14,27 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             ulong ArgumentsPtr = Instance.WinHelper.GetArg(0);
 
-            if (ArgumentsPtr == 0 || !Instance.IsRegionMapped(ArgumentsPtr, QueryVideoMemoryInfoSize))
+            int OffsetAdapter = Instance.WinHelper.PointerSize;
+            Span<byte> Arguments = stackalloc byte[OffsetBudget];
+            if (ArgumentsPtr == 0 || !Instance.ReadMemory(ArgumentsPtr, Arguments))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            ulong OffsetAdapter = (ulong)Instance.WinHelper.PointerSize;
-
-            if (!Win32kDxgk.IsAdapter(Instance.ReadMemoryUInt(ArgumentsPtr + OffsetAdapter)))
+            if (!Instance.WinHelper.DxgkProcess.TryGet(BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetAdapter)), out DxgkAdapter Adapter))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            uint SegmentGroup = Instance.ReadMemoryUInt(ArgumentsPtr + OffsetAdapter + 4);
-            ulong Budget = SegmentGroup == SegmentGroupLocal
-                ? Win32kDxgk.DedicatedVideoMemory
-                : Win32kDxgk.SharedSystemMemory;
+            bool Local = BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetAdapter + 4)) == SegmentGroupLocal;
 
-            Instance._emulator.WriteMemory(ArgumentsPtr + OffsetBudget, Budget, 8);
-            Instance._emulator.WriteMemory(ArgumentsPtr + OffsetCurrentUsage, 0UL, 8);
-            Instance._emulator.WriteMemory(ArgumentsPtr + OffsetCurrentReservation, 0UL, 8);
-            Instance._emulator.WriteMemory(ArgumentsPtr + OffsetAvailableForReservation, Budget / 2, 8);
-            return NTSTATUS.STATUS_SUCCESS;
+            // NT: an adapter with no memory of its own reports the shared segment as its local group.
+            bool Dedicated = Adapter.DedicatedVideoMemory != 0;
+            ulong Budget = Local
+                ? (Dedicated ? Adapter.DedicatedVideoMemory : Win32kDxgk.SharedSegmentSize)
+                : (Dedicated ? Win32kDxgk.SharedSegmentSize : 0);
+
+            // Budget, CurrentUsage, CurrentReservation, AvailableForReservation.
+            Span<byte> Result = stackalloc byte[ResultSize];
+            BinaryPrimitives.WriteUInt64LittleEndian(Result, Budget);
+            BinaryPrimitives.WriteUInt64LittleEndian(Result.Slice(24), Budget / 2);
+            return Instance.WriteMemory(ArgumentsPtr + OffsetBudget, Result) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_PARAMETER;
         }
     }
 }

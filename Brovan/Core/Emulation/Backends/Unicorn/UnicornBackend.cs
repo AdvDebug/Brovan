@@ -305,6 +305,12 @@ namespace Brovan.Core.Emulation
         public IntPtr GetHostPointer(ulong address, ulong size)
             => Inner.GetHostPointer(address, size);
 
+        public IntPtr PinBacking(IntPtr hostPointer, ulong size)
+            => Inner.PinBacking(hostPointer, size);
+
+        public void UnpinBacking(IntPtr pin)
+            => Inner.UnpinBacking(pin);
+
         public void Dispose()
         {
             foreach (var thunk in _liveThunks.Values)

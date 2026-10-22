@@ -36,6 +36,7 @@ namespace Brovan.Core.Emulation
         private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
         private readonly List<long> _backingStarts = new();
         private readonly List<IntPtr> _releasedBackings = new();
+        private readonly HostDiscardRuns _discardRuns = new();
 
         // Ranges WHvUnmapGpaRange refused. Their host memory is freed only with the partition.
         private readonly List<InstalledMap> _stillMappedBacking = new();
@@ -234,6 +235,7 @@ namespace Brovan.Core.Emulation
             public ulong Size;
             public int LivePages;
             public int AliasPages;
+            public int Pins;
             public bool Held;
             public IDisposable Owner;
         }
@@ -423,6 +425,7 @@ namespace Brovan.Core.Emulation
             // New pages install lazily, as in MapMemory. Replaced pages must go now, or a processor keeps using them.
             if (replaced)
             {
+                RefreshMmioHostPages(address, size);
                 RebuildMappings();
                 FreeReleasedBackings();
             }
@@ -595,6 +598,7 @@ namespace Brovan.Core.Emulation
                 }
             }
 
+            RefreshMmioHostPages(address, size);
             if (removedRegions != 0)
                 RefreshTrappedPages();
             else
@@ -905,11 +909,7 @@ namespace Brovan.Core.Emulation
                 HostPages = new IntPtr[size / WhpConstants.PageSize],
             };
 
-            for (ulong offset = 0; offset < size; offset += WhpConstants.PageSize)
-            {
-                if (_mappedPages.TryGetValue(address + offset, out MappedPage page) && page != null)
-                    region.HostPages[offset / WhpConstants.PageSize] = page.HostPage;
-            }
+            FillMmioHostPages(region, address, address + size);
 
             lock (_mmioLock)
             {
@@ -932,6 +932,30 @@ namespace Brovan.Core.Emulation
             {
                 for (int i = 0; i < _mmioRegions.Count; i++)
                     RefreshMmioRegion(_mmioRegions[i]);
+            }
+        }
+
+        // The maintenance thread writes through these cached pages, so they must not outlive a remap or an unmap.
+        private void RefreshMmioHostPages(ulong address, ulong size)
+        {
+            if (_mmioRegions.Count == 0) return;
+
+            lock (_mmioLock)
+            {
+                for (int i = 0; i < _mmioRegions.Count; i++)
+                {
+                    MmioRegion region = _mmioRegions[i];
+                    FillMmioHostPages(region, Math.Max(region.Address, address), Math.Min(region.Address + region.Size, address + size));
+                }
+            }
+        }
+
+        private void FillMmioHostPages(MmioRegion region, ulong start, ulong end)
+        {
+            for (ulong guest = start; guest < end; guest += WhpConstants.PageSize)
+            {
+                region.HostPages[(guest - region.Address) / WhpConstants.PageSize] =
+                    _mappedPages.TryGetValue(guest, out MappedPage page) && page != null ? page.HostPage : IntPtr.Zero;
             }
         }
 
@@ -2015,10 +2039,15 @@ namespace Brovan.Core.Emulation
 
             if (!IsReferenced(allocation))
                 _releasedBackings.Add(page.OwnedBacking);
+            else if (!page.IsAlias && IsDiscardable(allocation))
+                _discardRuns.Add(page.OwnedBacking, page.HostPage, WhpConstants.PageSize);
         }
 
         private static bool IsReferenced(BackingAllocation allocation)
-            => allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Held;
+            => allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Pins > 0 || allocation.Held;
+
+        private static bool IsDiscardable(BackingAllocation allocation)
+            => !HostDiscard.Disabled && allocation.AliasPages == 0 && allocation.Pins == 0 && !allocation.Held && allocation.Owner == null;
 
         // Only after the rebuild unmaps the pages. Until then other processors can reach the backing.
         private void FreeReleasedBackings()
@@ -2030,6 +2059,38 @@ namespace Brovan.Core.Emulation
             }
 
             _releasedBackings.Clear();
+
+            for (int i = 0; i < _discardRuns.Count; i++)
+            {
+                HostDiscardRuns.Run run = _discardRuns[i];
+                if (_backingAllocations.TryGetValue(run.Key, out BackingAllocation allocation) && IsDiscardable(allocation)
+                    && !IsBackingStillMapped(run.Start, run.Size))
+                    HostDiscard.Release(run.Start, run.Size);
+            }
+
+            _discardRuns.Clear();
+        }
+
+        public IntPtr PinBacking(IntPtr hostPointer, ulong size)
+        {
+            if (DisposedCheck()) return IntPtr.Zero;
+
+            IntPtr backing = FindBackingAllocation(hostPointer);
+            if (backing == IntPtr.Zero || size == 0 || !_backingAllocations.TryGetValue(backing, out BackingAllocation allocation)
+                || size > allocation.Size - (ulong)(hostPointer.ToInt64() - backing.ToInt64()))
+                return IntPtr.Zero;
+
+            allocation.Pins++;
+            return backing;
+        }
+
+        public void UnpinBacking(IntPtr pin)
+        {
+            if (DisposedCheck() || !_backingAllocations.TryGetValue(pin, out BackingAllocation allocation) || allocation.Pins == 0)
+                return;
+
+            allocation.Pins--;
+            FreeIfUnreferenced(pin, allocation);
         }
 
         private void FreeIfUnreferenced(IntPtr backing, BackingAllocation allocation)

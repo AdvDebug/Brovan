@@ -62,9 +62,27 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal bool Completed;
         internal NTSTATUS Status;
 
+        internal EmulatedThread Thread;
+
         internal abstract WinFile File { get; }
 
         internal abstract string WaitLabel { get; }
+
+        internal bool IsLive => !Completed && Thread != null && Thread.State != EmulatedThreadState.Terminated
+            && WinEmulatedThread.TryGetState(Thread)?.IoRequest == this;
+
+        // The caller bumps WakeSignal once after all the requests it ends.
+        internal void Finish(NTSTATUS Result)
+        {
+            Status = Result;
+            Completed = true;
+        }
+
+        internal void Complete(BinaryEmulator Instance, NTSTATUS Result)
+        {
+            Finish(Result);
+            Instance.WakeSignal.Bump();
+        }
     }
 
     public enum ConsoleObjectKind : byte
@@ -318,6 +336,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_NOT_FOUND = 0xC0000225,
         STATUS_NO_MATCH = 0xC0000272,
         STATUS_INVALID_IMAGE_HASH = 0xC0000428,
+        STATUS_ALREADY_INITIALIZED = 0xC0000510,
+        STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE = 0xC01E0200,
         STATUS_WMI_GUID_NOT_FOUND = 0xC0000295,
         STATUS_NO_MORE_FILES = 0x80000006,
         STATUS_INVALID_CID = 0xC000000B,
@@ -1049,6 +1069,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         TimerQueryState = 0x00000001,
         TimerModifyState = 0x00000002,
         TimerAllAccess = StandardRightsRequired | Synchronize | TimerQueryState | TimerModifyState,
+        EventModifyState = 0x00000002,
         EventAllAccess = StandardRightsRequired | Synchronize | 0x3,
         IoCompletionAllAccess = StandardRightsRequired | Synchronize | 0x3,
         StandardRightsRequired = Delete | ReadControl | WriteDAC | WriteOwner,

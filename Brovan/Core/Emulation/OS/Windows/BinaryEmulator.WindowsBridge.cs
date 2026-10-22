@@ -255,6 +255,14 @@ namespace Brovan.Core.Emulation
             if (Obj == null)
                 return false;
 
+            return TryAcquireWaitObject(Obj, AcquiringThread, out WaitStatus) ?? (Guest != null && Guest.IsHandleSignaled(this, Handle));
+        }
+
+        // Null for an object the guest layer decides by its handle.
+        internal bool? TryAcquireWaitObject(IHandleObject Obj, EmulatedThread AcquiringThread, out NTSTATUS WaitStatus)
+        {
+            WaitStatus = NTSTATUS.STATUS_SUCCESS;
+
             if (Obj is WinEvent Event)
             {
                 if (!Event.Signaled)
@@ -323,7 +331,7 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
-            return Guest != null && Guest.IsHandleSignaled(this, Handle);
+            return null;
         }
 
         private bool RefreshTimerState(WinTimer Timer)
@@ -418,6 +426,9 @@ namespace Brovan.Core.Emulation
                 return false;
 
             WinHelper.AfdConnects.CompleteFinished(this);
+
+            if (WinHelper.DxgkProcess.Gpu.HasBlocked)
+                WinHelper.DxgkProcess.Gpu.Run(this);
 
             long Now = EmulatedTickCount64;
 
@@ -1033,8 +1044,7 @@ namespace Brovan.Core.Emulation
                     if (!IsDeadlineExpired(Thread.WaitDeadline, Now))
                         return false;
 
-                    State.IoRequest.Status = NTSTATUS.STATUS_TIMEOUT;
-                    State.IoRequest.Completed = true;
+                    State.IoRequest.Finish(NTSTATUS.STATUS_TIMEOUT);
                 }
 
                 Thread.WaitSatisfiedIndex = 0;
@@ -3070,6 +3080,71 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        // NT: the part above End becomes an allocation of its own.
+        public bool ReleaseMemoryRange(ulong Start, ulong End)
+        {
+            FindWinRegionWindow(Start, End, out int First, out int Last);
+            if (Last == First)
+                return false;
+
+            for (int i = First; i < Last; i++)
+            {
+                if (!_memory[i].IsReserved)
+                    return false;
+            }
+
+            for (int i = First; i < Last; i++)
+            {
+                MemoryRegion Region = _memory[i];
+                ulong UnmapStart = Math.Max(Region.BaseAddress, Start);
+                ulong UnmapEnd = Math.Min(AlignUp(GetRangeEnd(Region.BaseAddress, Region.Size), PageSize), End);
+                if (Region.IsCommitted && UnmapEnd > UnmapStart && IsRegionMapped(UnmapStart, 1) && !_emulator.UnmapMemory(UnmapStart, UnmapEnd - UnmapStart))
+                {
+                    Utils.LogError($"[ReleaseMemoryRange] Could not unmap 0x{UnmapStart:X}-0x{UnmapEnd:X}.");
+                    return false;
+                }
+            }
+
+            MemoryRegion Head = _memory[First];
+            MemoryRegion Tail = _memory[Last - 1];
+            ulong AllocationBase = Head.AllocationBase;
+            ulong TailEnd = GetRangeEnd(Tail.BaseAddress, Tail.Size);
+
+            int Next = First;
+            if (Head.BaseAddress < Start)
+            {
+                Head.Size = Start - Head.BaseAddress;
+                Head.RequestedSize = Head.Size;
+                Head.PoisonedMemory = default;
+                _memory[Next++] = Head;
+            }
+
+            if (TailEnd > End)
+            {
+                Tail.BaseAddress = End;
+                Tail.Size = TailEnd - End;
+                Tail.RequestedSize = Tail.Size;
+                Tail.AllocationBase = End;
+                if (Next < Last)
+                    _memory[Next++] = Tail;
+                else
+                    _memory.Insert(Next++, Tail);
+            }
+
+            if (Next < Last)
+                _memory.RemoveRange(Next, Last - Next);
+
+            for (int i = Next; i < _memory.Count && _memory[i].AllocationBase == AllocationBase; i++)
+            {
+                MemoryRegion Above = _memory[i];
+                Above.AllocationBase = End;
+                _memory[i] = Above;
+            }
+
+            AddFreedRegion(Start, End - Start);
+            return true;
+        }
+
         public ulong MapWinMemoryRegion(ulong Address, ulong Size, MemoryProtection Protection, SpecialProtections Special, AllocationType Flags, ulong AllocationBase = 0, uint AllocationProtect = 0, uint Protect = 0, IntPtr HostBacking = default)
         {
             ulong AlignedSize = AlignToPageSize(Size);
@@ -3409,6 +3484,107 @@ namespace Brovan.Core.Emulation
         internal static byte[] GetApiSetMapBlob()
         {
             return LazyApiSetMapBlob.Value;
+        }
+
+        private const uint ApiSetSchemaVersion = 6;
+        private const int ApiSetHeaderBytes = 28;
+        private const int ApiSetEntryBytes = 24;
+        private const int ApiSetHashBytes = 8;
+        private const int ApiSetValueBytes = 20;
+
+        // Follows ApiSetResolveToHost in ntdll. An empty Host means the contract has no host.
+        internal static bool TryResolveApiSetHost(string Name, string Importer, out string Host)
+        {
+            Host = null;
+
+            if (!Name.StartsWith("api-", StringComparison.OrdinalIgnoreCase) && !Name.StartsWith("ext-", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            ReadOnlySpan<char> Contract = Name.AsSpan(0, Name.LastIndexOf('-'));
+            ReadOnlySpan<byte> Map = GetApiSetMapBlob();
+            if (!TryFindApiSetEntry(Map, Contract, out ReadOnlySpan<byte> Entry))
+                return false;
+
+            uint ValueOffset = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(16));
+            uint ValueCount = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(20));
+            if (ValueOffset > Map.Length || ValueCount > (Map.Length - ValueOffset) / ApiSetValueBytes)
+                return false;
+
+            ReadOnlySpan<char> HostName = default;
+            for (uint Value = 0; Value < ValueCount; Value++)
+            {
+                ReadOnlySpan<byte> ValueEntry = Map.Slice((int)(ValueOffset + Value * ApiSetValueBytes), ApiSetValueBytes);
+                if (Value != 0 && (Importer == null || !TryReadApiSetString(Map, BinaryPrimitives.ReadUInt32LittleEndian(ValueEntry.Slice(4)),
+                        BinaryPrimitives.ReadUInt32LittleEndian(ValueEntry.Slice(8)), out ReadOnlySpan<char> ValueImporter)
+                    || !ValueImporter.Equals(Importer, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
+                if (!TryReadApiSetString(Map, BinaryPrimitives.ReadUInt32LittleEndian(ValueEntry.Slice(12)),
+                        BinaryPrimitives.ReadUInt32LittleEndian(ValueEntry.Slice(16)), out HostName))
+                    return false;
+            }
+
+            Host = HostName.ToString();
+            return true;
+        }
+
+        private static bool TryFindApiSetEntry(ReadOnlySpan<byte> Map, ReadOnlySpan<char> Contract, out ReadOnlySpan<byte> Entry)
+        {
+            Entry = default;
+            if (Map.Length < ApiSetHeaderBytes || BinaryPrimitives.ReadUInt32LittleEndian(Map) != ApiSetSchemaVersion)
+                return false;
+
+            uint Count = BinaryPrimitives.ReadUInt32LittleEndian(Map.Slice(12));
+            uint EntryOffset = BinaryPrimitives.ReadUInt32LittleEndian(Map.Slice(16));
+            uint HashOffset = BinaryPrimitives.ReadUInt32LittleEndian(Map.Slice(20));
+            uint HashFactor = BinaryPrimitives.ReadUInt32LittleEndian(Map.Slice(24));
+            if (EntryOffset > Map.Length || HashOffset > Map.Length
+                || Count > (Map.Length - EntryOffset) / ApiSetEntryBytes || Count > (Map.Length - HashOffset) / ApiSetHashBytes)
+                return false;
+
+            uint Hash = 0;
+            foreach (char Character in Contract)
+                Hash = Hash * HashFactor + char.ToLowerInvariant(Character);
+
+            int Low = 0;
+            int High = (int)Count - 1;
+            while (Low <= High)
+            {
+                int Middle = Low + (High - Low) / 2;
+                ReadOnlySpan<byte> HashEntry = Map.Slice((int)HashOffset + Middle * ApiSetHashBytes);
+                uint EntryHash = BinaryPrimitives.ReadUInt32LittleEndian(HashEntry);
+                if (EntryHash < Hash)
+                {
+                    Low = Middle + 1;
+                    continue;
+                }
+
+                if (EntryHash > Hash)
+                {
+                    High = Middle - 1;
+                    continue;
+                }
+
+                uint Index = BinaryPrimitives.ReadUInt32LittleEndian(HashEntry.Slice(4));
+                if (Index >= Count)
+                    return false;
+
+                Entry = Map.Slice((int)(EntryOffset + Index * ApiSetEntryBytes), ApiSetEntryBytes);
+                return TryReadApiSetString(Map, BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(4)), BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(12)), out ReadOnlySpan<char> Name)
+                    && Contract.Equals(Name, StringComparison.OrdinalIgnoreCase);
+            }
+
+            return false;
+        }
+
+        private static bool TryReadApiSetString(ReadOnlySpan<byte> Map, uint Offset, uint Length, out ReadOnlySpan<char> Value)
+        {
+            Value = default;
+            if (Offset > Map.Length || Length > Map.Length - Offset || (Length & 1) != 0)
+                return false;
+
+            Value = MemoryMarshal.Cast<byte, char>(Map.Slice((int)Offset, (int)Length));
+            return true;
         }
     }
 }

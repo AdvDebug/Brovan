@@ -80,6 +80,9 @@ namespace Brovan
         public static extern IntPtr VirtualAlloc(IntPtr lpAddress, UIntPtr dwSize, uint flAllocationType, uint flProtect);
 
         [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool VirtualFree(IntPtr lpAddress, UIntPtr dwSize, uint dwFreeType);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
 
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -216,6 +219,9 @@ namespace Brovan
 
         [DllImport("libc", EntryPoint = "memfd_create", SetLastError = true, CharSet = CharSet.Ansi)]
         public static extern int MemfdCreate(string name, uint flags);
+
+        [DllImport("libc", EntryPoint = "madvise", SetLastError = true)]
+        public static extern int Madvise(IntPtr address, UIntPtr length, int advice);
     }
 
     internal class GeneralHelper

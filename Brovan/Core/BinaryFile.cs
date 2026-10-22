@@ -9,6 +9,7 @@ using Brovan.Analysis;
 using System.Runtime.CompilerServices;
 using System.Runtime;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Frozen;
 using System.Collections.Concurrent;
 using Microsoft.Win32.SafeHandles;
@@ -2320,6 +2321,132 @@ namespace Brovan.Core
             }
 
             return GetBinaryFormat(Header.Slice(0, Read));
+        }
+
+        private const int ImportHeaderBytes = 0x1000;
+        private const int ImportWindowBytes = 0x10000;
+        private const int MaxImportNameBytes = 0x100;
+
+        public static bool TryReadImportNames(string FilePath, List<string> Names)
+        {
+            byte[] Window = null;
+            try
+            {
+                using SafeFileHandle Handle = File.OpenHandle(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                Span<byte> Header = stackalloc byte[ImportHeaderBytes];
+                Header = Header.Slice(0, RandomAccess.Read(Handle, Header, 0));
+
+                if (!TryFindImportDirectory(Header, out uint ImportRva, out ReadOnlySpan<byte> Sections))
+                    return false;
+
+                if (ImportRva == 0)
+                    return true;
+
+                if (!TryRvaToRawOffset(Sections, ImportRva, out long WindowOffset, out uint WindowLimit))
+                    return false;
+
+                Window = ArrayPool<byte>.Shared.Rent(ImportWindowBytes);
+                int WindowLength = RandomAccess.Read(Handle, Window.AsSpan(0, (int)Math.Min(WindowLimit, ImportWindowBytes)), WindowOffset);
+                Span<byte> NameBuffer = stackalloc byte[MaxImportNameBytes];
+
+                int DescriptorBytes = Unsafe.SizeOf<IMAGE_IMPORT_DESCRIPTOR>();
+                for (int Offset = 0; Offset + DescriptorBytes <= WindowLength; Offset += DescriptorBytes)
+                {
+                    IMAGE_IMPORT_DESCRIPTOR Descriptor = MemoryMarshal.Read<IMAGE_IMPORT_DESCRIPTOR>(Window.AsSpan(Offset));
+                    if (Descriptor.Name == 0 && Descriptor.FirstThunk == 0 && Descriptor.OriginalFirstThunk == 0)
+                        break;
+
+                    if (!TryRvaToRawOffset(Sections, Descriptor.Name, out long NameOffset, out _))
+                        continue;
+
+                    scoped ReadOnlySpan<byte> Name;
+                    if (NameOffset >= WindowOffset && NameOffset - WindowOffset <= WindowLength - MaxImportNameBytes)
+                        Name = Window.AsSpan((int)(NameOffset - WindowOffset), MaxImportNameBytes);
+                    else
+                        Name = NameBuffer.Slice(0, RandomAccess.Read(Handle, NameBuffer, NameOffset));
+
+                    int End = Name.IndexOf((byte)0);
+                    if (End > 0)
+                        Names.Add(Encoding.ASCII.GetString(Name.Slice(0, End)));
+                }
+
+                return true;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+            finally
+            {
+                if (Window != null)
+                    ArrayPool<byte>.Shared.Return(Window);
+            }
+        }
+
+        private static bool TryFindImportDirectory(ReadOnlySpan<byte> Header, out uint ImportRva, out ReadOnlySpan<byte> Sections)
+        {
+            const ushort DosSignature = 0x5A4D;
+            const uint PeSignature = 0x00004550;
+
+            // The import directory is the second entry after NumberOfRvaAndSizes.
+            const int RvaCountOffset64 = 108;
+            const int RvaCountOffset32 = 92;
+            const int ImportDirectoryOffset = 4 + 8;
+
+            ImportRva = 0;
+            Sections = default;
+
+            int DosHeaderBytes = Unsafe.SizeOf<IMAGE_DOS_HEADER>();
+            if (Header.Length < DosHeaderBytes)
+                return false;
+
+            IMAGE_DOS_HEADER DosHeader = MemoryMarshal.Read<IMAGE_DOS_HEADER>(Header);
+            int PeOffset = DosHeader.e_lfanew;
+            int FileHeaderBytes = Unsafe.SizeOf<IMAGE_FILE_HEADER>();
+            if (DosHeader.e_magic != DosSignature || PeOffset < DosHeaderBytes || PeOffset > Header.Length - 4 - FileHeaderBytes
+                || BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(PeOffset)) != PeSignature)
+                return false;
+
+            IMAGE_FILE_HEADER FileHeader = MemoryMarshal.Read<IMAGE_FILE_HEADER>(Header.Slice(PeOffset + 4));
+            int Optional = PeOffset + 4 + FileHeaderBytes;
+            int SectionTable = Optional + FileHeader.SizeOfOptionalHeader;
+            int SectionBytes = FileHeader.NumberOfSections * Unsafe.SizeOf<IMAGE_SECTION_HEADER>();
+            if (SectionTable + SectionBytes > Header.Length || FileHeader.SizeOfOptionalHeader < 2)
+                return false;
+
+            ushort Magic = BinaryPrimitives.ReadUInt16LittleEndian(Header.Slice(Optional));
+            int CountOffset = Magic == (ushort)PEMagic.PE32Plus ? RvaCountOffset64 : Magic == (ushort)PEMagic.PE32 ? RvaCountOffset32 : -1;
+            if (CountOffset < 0 || CountOffset + ImportDirectoryOffset + 8 > FileHeader.SizeOfOptionalHeader)
+                return false;
+
+            if (BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(Optional + CountOffset)) >= 2)
+                ImportRva = BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(Optional + CountOffset + ImportDirectoryOffset));
+
+            Sections = Header.Slice(SectionTable, SectionBytes);
+            return true;
+        }
+
+        private static bool TryRvaToRawOffset(ReadOnlySpan<byte> Sections, uint Rva, out long RawOffset, out uint RawLimit)
+        {
+            int SectionBytes = Unsafe.SizeOf<IMAGE_SECTION_HEADER>();
+            for (int Offset = 0; Offset + SectionBytes <= Sections.Length; Offset += SectionBytes)
+            {
+                IMAGE_SECTION_HEADER Section = MemoryMarshal.Read<IMAGE_SECTION_HEADER>(Sections.Slice(Offset));
+                if (Rva >= Section.VirtualAddress && Rva - Section.VirtualAddress < Section.SizeOfRawData)
+                {
+                    RawOffset = (long)Section.PointerToRawData + (Rva - Section.VirtualAddress);
+                    RawLimit = Section.SizeOfRawData - (Rva - Section.VirtualAddress);
+                    return true;
+                }
+            }
+
+            RawOffset = 0;
+            RawLimit = 0;
+            return false;
         }
 
         public BinaryFile Clone()

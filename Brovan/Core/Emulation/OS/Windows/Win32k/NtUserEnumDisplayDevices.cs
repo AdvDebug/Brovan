@@ -24,12 +24,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint DisplayDevicePrimaryDevice = 0x00000004;
         private const uint DisplayDeviceVgaCompatible = 0x00000010;
 
-        private const string AdapterName = @"\\.\DISPLAY1";
-        private const string AdapterString = "Brovan Display Adapter";
-        private const string AdapterId = @"PCI\VEN_0000&DEV_0000&SUBSYS_00000000&REV_00";
         private const string AdapterKey = @"\Registry\Machine\System\CurrentControlSet\Control\Video\{00000000-0000-0000-0000-000000000000}\0000";
         private const string MonitorName = @"\\.\DISPLAY1\Monitor0";
-        private const string MonitorString = "Generic PnP Monitor";
         private const string MonitorId = @"MONITOR\Default_Monitor\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001";
         private const string MonitorKey = @"\Registry\Machine\System\CurrentControlSet\Control\Class\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001";
 
@@ -53,7 +49,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!EnumeratingAdapters)
             {
                 if (!Instance.WinHelper.TryReadUnicodeString(DevicePtr, out string Adapter, out _)
-                    || !string.Equals(Adapter, AdapterName, StringComparison.OrdinalIgnoreCase))
+                    || !string.Equals(Adapter, Win32kDisplayConfig.AdapterName, StringComparison.OrdinalIgnoreCase))
                 {
                     return NTSTATUS.STATUS_UNSUCCESSFUL;
                 }
@@ -67,9 +63,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Buffer = Buffer.Slice(0, Written);
             Buffer.Clear();
 
-            WriteField(Buffer, OffsetDeviceName, DeviceNameCharacters, EnumeratingAdapters ? AdapterName : MonitorName);
-            WriteField(Buffer, OffsetDeviceString, DeviceStringCharacters, EnumeratingAdapters ? AdapterString : MonitorString);
-            WriteField(Buffer, OffsetDeviceId, DeviceStringCharacters, EnumeratingAdapters ? AdapterId : MonitorId);
+            WriteField(Buffer, OffsetDeviceName, DeviceNameCharacters, EnumeratingAdapters ? Win32kDisplayConfig.AdapterName : MonitorName);
+            WriteField(Buffer, OffsetDeviceString, DeviceStringCharacters, EnumeratingAdapters ? Win32kDxgk.Display.Description : Win32kDisplayConfig.MonitorFriendlyName);
+            WriteField(Buffer, OffsetDeviceId, DeviceStringCharacters, EnumeratingAdapters ? Win32kDxgk.Display.DeviceInstanceId : MonitorId);
             WriteField(Buffer, OffsetDeviceKey, DeviceStringCharacters, EnumeratingAdapters ? AdapterKey : MonitorKey);
 
             uint StateFlags = EnumeratingAdapters

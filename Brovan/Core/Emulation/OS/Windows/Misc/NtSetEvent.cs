@@ -20,7 +20,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            WinEvent Ev = Instance.WinHelper.GetEventByHandle(EventHandle, (AccessMask)0x0002);
+            WinEvent Ev = Instance.WinHelper.GetEventByHandle(EventHandle, AccessMask.EventModifyState);
             if (Ev == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 

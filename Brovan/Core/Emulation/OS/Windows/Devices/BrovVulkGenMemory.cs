@@ -176,6 +176,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             uint imported = 0;
             IntPtr memory = IntPtr.Zero;
+            IntPtr pin = IntPtr.Zero;
             int rr = -1;
 
             if (bounceVa == 0 || bounceSize == 0)
@@ -204,6 +205,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     ImportStats.Record(ImportOutcome.HostPointerMisaligned, size);
                 else if (!ImportTypeBitsAllow(device, di, host, *(uint*)(ai + 24)))
                     ImportStats.Record(ImportOutcome.MemoryTypeNotImportable, size);
+                else if ((pin = inst.PinBacking(host, aligned)) == IntPtr.Zero)
+                    ImportStats.Record(ImportOutcome.BackingNotPinnable, size);
                 else
                 {
                     byte* import = stackalloc byte[32];
@@ -227,6 +230,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         *(ulong*)(ai + 16) = size;
                         memory = IntPtr.Zero;
                         rr = -1;
+                        inst.UnpinBacking(pin);
+                        pin = IntPtr.Zero;
                         ImportStats.Record(ImportOutcome.DriverRejectedImport, size);
                     }
                 }
@@ -256,7 +261,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             st.SetMemorySize(id, requested);
             st.SetExportTypes(id, exportTypes);
             if (imported != 0)
-                st.MarkImported(id);
+                st.MarkImported(id, inst, pin);
             w.WriteU32(id);
             return rr;
         }
@@ -571,6 +576,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             GuestRangeNotResolvable,
             HostPointerMisaligned,
             MemoryTypeNotImportable,
+            BackingNotPinnable,
             DriverRejectedImport,
             DeviceImportReady,
             DeviceExtensionAbsent,

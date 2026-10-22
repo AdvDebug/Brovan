@@ -1,5 +1,3 @@
-using System.Buffers.Binary;
-
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtGdiDdDDIOpenAdapterFromLuid : IWinSyscall
@@ -11,17 +9,23 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             ulong ArgumentsPtr = Instance.WinHelper.GetArg(0);
 
-            if (ArgumentsPtr == 0 || !Instance.IsRegionMapped(ArgumentsPtr, OpenAdapterFromLuidSize))
+            Span<byte> Arguments = stackalloc byte[OpenAdapterFromLuidSize];
+            if (ArgumentsPtr == 0 || !Instance.ReadMemory(ArgumentsPtr, Arguments))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            uint LowPart = Instance.ReadMemoryUInt(ArgumentsPtr);
-            int HighPart = unchecked((int)Instance.ReadMemoryUInt(ArgumentsPtr + 4));
-
-            if (!Win32kDxgk.MatchesLuid(LowPart, HighPart))
+            DxgkAdapter Adapter = Win32kDxgk.FindByLuid(Arguments);
+            if (Adapter == null)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            Instance._emulator.WriteMemory(ArgumentsPtr + OffsetHandle, Win32kDxgk.AdapterHandle, 4);
-            return NTSTATUS.STATUS_SUCCESS;
+            DxgkProcess Process = Instance.WinHelper.DxgkProcess;
+            if (!Process.TryAdd(Adapter, out uint Handle))
+                return NTSTATUS.STATUS_NO_MEMORY;
+
+            if (Instance.WinHelper.WriteUInt32(ArgumentsPtr + OffsetHandle, Handle))
+                return NTSTATUS.STATUS_SUCCESS;
+
+            Process.TryRemove<DxgkAdapter>(Handle);
+            return NTSTATUS.STATUS_INVALID_PARAMETER;
         }
     }
 }

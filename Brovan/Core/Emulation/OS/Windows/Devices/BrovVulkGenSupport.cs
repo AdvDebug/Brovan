@@ -369,7 +369,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<uint, HashSet<uint>> _children = new Dictionary<uint, HashSet<uint>>();
         private readonly Stack<uint> _forgetting = new Stack<uint>();
         private readonly Dictionary<uint, MapEntry> _mappings = new Dictionary<uint, MapEntry>();
-        private readonly HashSet<uint> _importedMem = new HashSet<uint>();
+        // Pins of the guest backing that the host driver reads.
+        private readonly Dictionary<uint, IntPtr> _importedMem = new();
+        private IGuestMemory? _importMemory;
         private readonly Dictionary<uint, ulong> _memorySizes = new Dictionary<uint, ulong>();
         private readonly Dictionary<IntPtr, DeviceImport> _deviceImports = new Dictionary<IntPtr, DeviceImport>();
         private readonly Dictionary<IntPtr, IntPtr> _devicePhysical = new Dictionary<IntPtr, IntPtr>();
@@ -560,7 +562,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 _mappings.Remove(next);
-                _importedMem.Remove(next);
+                if (_importedMem.Remove(next, out IntPtr pin))
+                    _importMemory!.UnpinBacking(pin);
                 _memorySizes.Remove(next);
                 if (_exportTypes.Count != 0)
                     _exportTypes.Remove(next);
@@ -630,9 +633,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return offset <= allocated && size <= allocated - offset;
         }
 
-        public void MarkImported(uint id) => _importedMem.Add(id);
+        public void MarkImported(uint id, IGuestMemory memory, IntPtr pin)
+        {
+            _importMemory = memory;
+            _importedMem[id] = pin;
+        }
 
-        public bool IsImportedMemory(uint id) => _importedMem.Contains(id);
+        public bool IsImportedMemory(uint id) => _importedMem.ContainsKey(id);
 
         public void EnableWin32Memory(IntPtr device) => _win32MemoryDevices.Add(device);
 

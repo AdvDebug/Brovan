@@ -198,6 +198,12 @@ namespace Brovan.Core.Emulation
         public IntPtr GetHostPointer(ulong address, ulong size)
             => Inner.GetHostPointer(address, size);
 
+        public IntPtr PinBacking(IntPtr hostPointer, ulong size)
+            => Inner.PinBacking(hostPointer, size);
+
+        public void UnpinBacking(IntPtr pin)
+            => Inner.UnpinBacking(pin);
+
         public bool IsRangeMapped(ulong address, ulong size)
             => Inner.IsRangeMapped(address, size);
 

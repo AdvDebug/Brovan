@@ -143,6 +143,10 @@ namespace Brovan.Core.Emulation
 
         IntPtr GetHostPointer(ulong Address, ulong Size);
 
+        IntPtr PinBacking(IntPtr HostPointer, ulong Size) => IntPtr.Zero;
+
+        void UnpinBacking(IntPtr Pin) { }
+
         bool RebackRegionWithHostMemory(ulong BaseAddress, ulong Size, IntPtr HostPointer);
 
         // Contents are lost.

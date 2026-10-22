@@ -377,6 +377,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.WaitAlertable = false;
             State.ApcAlertable = false;
             State.IoRequest = Request;
+            Request.Thread = Thread;
 
             Thread.State = EmulatedThreadState.Waiting;
             Emulator._emulator.WriteRegister(Emulator.IPRegister, State.WaitResumeRIP);
@@ -957,6 +958,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             return PointerSize == 8
                 ? BinaryPrimitives.ReadUInt64LittleEndian(Fields.Slice(Index * 8))
                 : BinaryPrimitives.ReadUInt32LittleEndian(Fields.Slice(Index * 4));
+        }
+
+        internal static void WritePointerField(Span<byte> Fields, int Index, uint PointerSize, ulong Value)
+        {
+            if (PointerSize == 8)
+                BinaryPrimitives.WriteUInt64LittleEndian(Fields.Slice(Index * 8), Value);
+            else
+                BinaryPrimitives.WriteUInt32LittleEndian(Fields.Slice(Index * 4), (uint)Value);
         }
 
         public bool WritePointer(ulong Address, ulong Value)
@@ -2454,6 +2463,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal readonly WinObjectDirectory SessionNamedObjects;
         internal readonly WinObjectDirectory AppContainerNamedObjects;
         internal WinObjectDirectory AppContainerDirectory { get; private set; }
+        internal readonly KnownDlls KnownDlls = new();
+        internal readonly DxgkProcess DxgkProcess = new();
         private readonly WinObjectDirectory[] NamedObjectRoots;
         private BinaryEmulator Emulator;
 
@@ -2824,7 +2835,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint Utf8CodePage = 65001;
         internal const int RegNone = 0;
         internal const int RegSz = 1;
+        internal const int RegExpandSz = 2;
         internal const int RegDword = 4;
+        internal const int RegMultiSz = 7;
         internal const int RegQword = 11;
 
         // aiSysMet, then one block of DPI dependent metrics per DPI plateau.
@@ -6111,9 +6124,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Value.Type != RegSz)
                 return true;
 
-            string Text = Encoding.Unicode.GetString(Value.Data ?? Array.Empty<byte>());
-            int End = Text.IndexOf('\0');
-            return uint.TryParse(Text.AsSpan(0, End < 0 ? Text.Length : End), out CodePage);
+            return uint.TryParse(DecodeRegistryString(Value.Data), out CodePage);
         }
 
         // A guest can declare DPI awareness after user32 is up. That changes the DPI it sees, and the message
@@ -9693,6 +9704,26 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinRegKey RegKey = ResolveRegistryKey(NtPath);
             return RegKey != null && TryGetRegistryValue(RegKey, ValueName, out Value);
+        }
+
+        public bool TryReadRegistryString(string NtPath, string ValueName, out string Text)
+        {
+            Text = null;
+            if (!TryReadRegistryValue(NtPath, ValueName, out ValueNode Value) || Value.Type != RegSz)
+                return false;
+
+            Text = DecodeRegistryString(Value.Data);
+            return true;
+        }
+
+        internal static string DecodeRegistryString(byte[] Data)
+        {
+            if (Data == null)
+                return string.Empty;
+
+            ReadOnlySpan<char> Text = MemoryMarshal.Cast<byte, char>(Data.AsSpan(0, Data.Length & ~1));
+            int End = Text.IndexOf('\0');
+            return (End >= 0 ? Text.Slice(0, End) : Text).ToString();
         }
 
         public bool TryQueryRegistryKeyHeader(WinRegKey RegKey, out int SubKeyCount, out int ValueCount, out string Name)

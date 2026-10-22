@@ -1142,6 +1142,10 @@ namespace Brovan.Core.Emulation
         bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write) => false;
 
         IntPtr GetHostPointer(ulong address, ulong size) => IntPtr.Zero;
+
+        IntPtr PinBacking(IntPtr hostPointer, ulong size) => IntPtr.Zero;
+
+        void UnpinBacking(IntPtr pin) { }
         bool WriteMemory(ulong address, byte[] value, uint length = 0);
         bool WriteMemory(ulong address, byte[] value, int offset, int length);
         bool WriteMemory(ulong address, ReadOnlySpan<byte> value, uint length = 0);

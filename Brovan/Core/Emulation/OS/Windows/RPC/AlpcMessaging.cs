@@ -123,7 +123,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal sealed class AlpcWait : ParkedIoRequest
     {
         internal AlpcWaitKind Kind;
-        internal EmulatedThread Thread;
         internal WinPort Port;
         internal ulong PortHandlePtr;
         internal ulong MessagePtr;
@@ -139,8 +138,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             AlpcWaitKind.Connect => "alpc-connect",
             _ => "alpc-reply",
         };
-
-        internal bool IsLive => !Completed && Thread.State != EmulatedThreadState.Terminated && WinEmulatedThread.TryGetState(Thread)?.IoRequest == this;
     }
 
     // ALPC to guest ports of this process. Messages between the ports use x64 layouts.
@@ -327,7 +324,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             AlpcWait Wait = new AlpcWait
             {
                 Kind = AlpcWaitKind.Connect,
-                Thread = Instance.CurrentThread,
                 Port = Connection.ClientPort,
                 PortHandlePtr = PortHandlePtr,
                 MessagePtr = MessagePtr,
@@ -687,7 +683,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Connection.Host != null)
                 RunConnected(Connection.Host, NTSTATUS.STATUS_SUCCESS);
             else
-                Complete(Instance, Wait, CompleteConnect(Instance, Wait, Request, Data, Instance.WinHelper.PID, CurrentThreadId(Instance)));
+                Wait.Complete(Instance, CompleteConnect(Instance, Wait, Request, Data, Instance.WinHelper.PID, CurrentThreadId(Instance)));
 
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -835,7 +831,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Message.ReplyWait = new AlpcWait
                 {
                     Kind = AlpcWaitKind.Reply,
-                    Thread = Instance.CurrentThread,
                     MessagePtr = ReceiveMessagePtr,
                     BufferLength = BufferLength,
                     BufferLengthPtr = BufferLengthPtr,
@@ -988,7 +983,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             AlpcWait Wait = new AlpcWait
             {
                 Kind = AlpcWaitKind.Receive,
-                Thread = Instance.CurrentThread,
                 MessagePtr = ReceiveMessagePtr,
                 BufferLength = BufferLength,
                 BufferLengthPtr = BufferLengthPtr,
@@ -1264,7 +1258,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
 
                 NTSTATUS Status = WriteReceived(Instance, Port, Message, Receiver.MessagePtr, Receiver.BufferLength, Receiver.BufferLengthPtr, Receiver.AttributesPtr);
-                Complete(Instance, Receiver, Status);
+                Receiver.Complete(Instance, Status);
                 if (Status == NTSTATUS.STATUS_SUCCESS)
                     return;
             }
@@ -1305,7 +1299,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Request.HostReply != null)
                 RunHost(Request.HostReply, NTSTATUS.STATUS_SUCCESS, Data);
             else if (Wait.IsLive)
-                Complete(Instance, Wait, WriteReply(Instance, Wait, LpcReply, Request, Data, Instance.WinHelper.PID, CurrentThreadId(Instance)));
+                Wait.Complete(Instance, WriteReply(Instance, Wait, LpcReply, Request, Data, Instance.WinHelper.PID, CurrentThreadId(Instance)));
 
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -1462,26 +1456,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance.ReadMemory(MessagePtr + HeaderSize, Data) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }
 
-        private static void Complete(BinaryEmulator Instance, AlpcWait Wait, NTSTATUS Status)
-        {
-            Finish(Wait, Status);
-            Instance.WakeSignal.Bump();
-        }
-
         // The caller bumps WakeSignal once after all the waits it ends.
         private static bool FinishIfLive(AlpcWait Wait, NTSTATUS Status)
         {
             if (Wait == null || !Wait.IsLive)
                 return false;
 
-            Finish(Wait, Status);
+            Wait.Finish(Status);
             return true;
-        }
-
-        private static void Finish(AlpcWait Wait, NTSTATUS Status)
-        {
-            Wait.Status = Status;
-            Wait.Completed = true;
         }
 
         // A failure in Brovan's own client is not the guest server's, so its syscall still succeeds.
