@@ -12,6 +12,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal ulong Value;
         internal ulong QueuedValue;
         internal bool OwnedByPagingQueue;
+        internal bool NtSecuritySharing;
         internal bool Released;
 
         internal readonly List<DxgkFenceWaiter> Waiters = new();
@@ -39,6 +40,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static bool TryReadValues(BinaryEmulator Instance, ulong ArrayPtr, Span<ulong> Values)
             => Instance.ReadMemory(ArrayPtr, MemoryMarshal.AsBytes(Values));
+
+        internal static NTSTATUS TryReadGpuArguments(BinaryEmulator Instance, DxgkProcess Process, DxgkDevice Device, ulong HandlesPtr,
+            ulong ValuesPtr, uint Count, out DxgkFence[] Fences, out ulong[] Values)
+        {
+            Fences = new DxgkFence[Count];
+            Values = null;
+            NTSTATUS Status = Process.TryResolve(Instance, Device, HandlesPtr, Fences.AsSpan());
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            Values = new ulong[Count];
+            return TryReadValues(Instance, ValuesPtr, Values) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_PARAMETER;
+        }
 
         // NT returns STATUS_NO_MEMORY when it cannot allocate the arrays of one call.
         internal static bool IsCountBounded(uint Count) => Count <= (uint)MemoryBudget.DxgkFenceReferences;
@@ -96,6 +110,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 else if (Waiter.IsSatisfied)
                     Waiter.Complete(Instance, Process);
             }
+
+            WakeBlockedContexts(Instance, Process);
+        }
+
+        private static void WakeBlockedContexts(BinaryEmulator Instance, DxgkProcess Process)
+        {
+            if (Process.Gpu.HasFenceWaits)
+                Instance.WakeSignal.Bump();
         }
 
         // NT: a destroyed fence sets the events still waiting on it.
@@ -107,6 +129,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Waiters[^1].Complete(Instance, Process);
 
             Process.FencePages.Free(Instance, Page, Slot);
+            WakeBlockedContexts(Instance, Process);
         }
     }
 
@@ -200,11 +223,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal bool IsSatisfied => AreSatisfied(Fences, Values, WaitAny);
 
+        // NT: a destroyed fence ends the wait.
         internal static bool AreSatisfied(ReadOnlySpan<DxgkFence> Fences, ReadOnlySpan<ulong> Values, bool WaitAny)
         {
             for (int Index = 0; Index < Fences.Length; Index++)
             {
-                bool Reached = Fences[Index].Value >= Values[Index];
+                bool Reached = Fences[Index].Released || Fences[Index].Value >= Values[Index];
                 if (Reached == WaitAny)
                     return WaitAny;
             }

@@ -47,13 +47,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (!Process.TryGet(BinaryPrimitives.ReadUInt32LittleEndian(Arguments), out DxgkDevice Device))
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                WinEvent Event = null;
-                if (EventHandle != 0)
-                {
-                    NTSTATUS Referenced = Instance.WinHelper.ReferenceObjectByHandle(EventHandle, AccessMask.EventModifyState, out Event);
-                    if (Referenced != NTSTATUS.STATUS_SUCCESS)
-                        return Referenced;
-                }
+                NTSTATUS Referenced = Instance.WinHelper.ReferenceOptionalObjectByHandle(EventHandle, AccessMask.EventModifyState, out WinEvent Event);
+                if (Referenced != NTSTATUS.STATUS_SUCCESS)
+                    return Referenced;
 
                 NTSTATUS Status = Process.TryResolve(Instance, Device, HandlesPtr, Fences);
                 if (Status != NTSTATUS.STATUS_SUCCESS)

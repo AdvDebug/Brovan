@@ -427,8 +427,8 @@ namespace Brovan.Core.Emulation
 
             WinHelper.AfdConnects.CompleteFinished(this);
 
-            if (WinHelper.DxgkProcess.Gpu.HasBlocked)
-                WinHelper.DxgkProcess.Gpu.Run(this);
+            if (WinHelper.DxgkProcess.NeedsService)
+                WinHelper.DxgkProcess.Service(this);
 
             long Now = EmulatedTickCount64;
 

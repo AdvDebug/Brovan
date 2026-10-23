@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Settings;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -7,11 +8,25 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         internal virtual int FenceReferences => 0;
 
+        internal virtual bool WaitsOnFences => false;
+
         internal abstract bool TryRun(BinaryEmulator Instance);
 
         internal virtual void Retire(BinaryEmulator Instance)
         {
         }
+
+        internal virtual void Discard()
+        {
+        }
+    }
+
+    internal abstract class DxgkFencePacket : DxgkPacket
+    {
+        internal DxgkFence[] Fences;
+        internal ulong[] Values;
+
+        internal override int FenceReferences => Fences.Length;
     }
 
     // NT sets Start when the work begins, and a WARP thread in the guest sets Finish when it ends (WARPGPUCMDSYNC).
@@ -34,13 +49,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
     }
 
-    internal sealed class DxgkSignalPacket : DxgkPacket
+    internal sealed class DxgkSignalPacket : DxgkFencePacket
     {
-        internal DxgkFence[] Fences;
-        internal ulong[] Values;
-
-        internal override int FenceReferences => Fences.Length;
-
         internal override bool TryRun(BinaryEmulator Instance)
         {
             Apply(Instance);
@@ -56,12 +66,40 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
     }
 
+    internal sealed class DxgkWaitPacket : DxgkFencePacket
+    {
+        internal override bool WaitsOnFences => true;
+
+        internal override bool TryRun(BinaryEmulator Instance) => DxgkFenceWaiter.AreSatisfied(Fences, Values, WaitAny: false);
+    }
+
+    // NT: a redirected flip reaches the compositor once the work before it on its context is done.
+    internal sealed class DxgkPresentPacket : DxgkPacket
+    {
+        internal DxgkCompositionBuffer Buffer;
+        internal uint Index;
+        internal ulong FenceValue;
+        internal uint PresentCount;
+        internal int PresentLimitReleases;
+        internal GuiThreadManager.FrameSlot Slot;
+        internal long Serial;
+
+        internal override bool TryRun(BinaryEmulator Instance) => DxgkComposition.TryPresent(Instance, this);
+
+        internal override void Retire(BinaryEmulator Instance) => Drop();
+
+        internal override void Discard() => Drop();
+
+        internal void Drop() => Buffer.ReleasePresentLimit(PresentLimitReleases);
+    }
+
     // The wake scan runs blocked contexts, because any guest path can set a finish event.
     internal sealed class DxgkGpu
     {
         private readonly DxgkProcess Process;
         private readonly List<DxgkContext> Blocked = new();
         private int QueuedPackets;
+        private int QueuedFenceWaits;
 
         internal DxgkGpu(DxgkProcess Owner)
         {
@@ -70,13 +108,25 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal bool HasBlocked => Blocked.Count != 0;
 
+        // Only a fence wait polls fence values, so only it needs a scan when a fence changes.
+        internal bool HasFenceWaits => QueuedFenceWaits != 0;
+
         internal bool TryEnqueue(BinaryEmulator Instance, DxgkContext Context, DxgkPacket Packet)
         {
+            if (Context.Device.Faulted)
+            {
+                Packet.Discard();
+                return true;
+            }
+
             if (QueuedPackets >= MemoryBudget.DxgkQueuedPackets || !Process.TryReserveFenceReferences(Packet.FenceReferences))
                 return false;
 
             Context.Packets.Enqueue(Packet);
             QueuedPackets++;
+            if (Packet.WaitsOnFences)
+                QueuedFenceWaits++;
+
             Advance(Instance, Context);
             return true;
         }
@@ -102,7 +152,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal void Discard(DxgkContext Context)
         {
             while (Context.Packets.Count != 0)
-                Remove(Context);
+                Remove(Context).Discard();
 
             Unblock(Context);
         }
@@ -141,6 +191,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             DxgkPacket Packet = Context.Packets.Dequeue();
             QueuedPackets--;
+            if (Packet.WaitsOnFences)
+                QueuedFenceWaits--;
+
             Process.ReleaseFenceReferences(Packet.FenceReferences);
             return Packet;
         }

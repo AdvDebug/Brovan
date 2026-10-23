@@ -37,14 +37,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!Instance.WinHelper.TryReadUInt32(ContextsPtr, out uint ContextHandle) || !Process.TryGet(ContextHandle, out DxgkContext Context))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            DxgkFence[] Fences = new DxgkFence[Count];
-            NTSTATUS Status = Process.TryResolve(Instance, Context.Device, WinSysHelper.ReadPointerField(Arguments.Slice(OffsetHandles), 0, (uint)PointerSize), Fences.AsSpan());
+            NTSTATUS Status = DxgkFence.TryReadGpuArguments(Instance, Process, Context.Device,
+                WinSysHelper.ReadPointerField(Arguments.Slice(OffsetHandles), 0, (uint)PointerSize),
+                WinSysHelper.ReadPointerField(Arguments.Slice(OffsetValues), 0, (uint)PointerSize), Count, out DxgkFence[] Fences, out ulong[] Values);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
-
-            ulong[] Values = new ulong[Count];
-            if (!DxgkFence.TryReadValues(Instance, WinSysHelper.ReadPointerField(Arguments.Slice(OffsetValues), 0, (uint)PointerSize), Values))
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             if (Context.Device.Faulted)
                 return NTSTATUS.STATUS_SUCCESS;

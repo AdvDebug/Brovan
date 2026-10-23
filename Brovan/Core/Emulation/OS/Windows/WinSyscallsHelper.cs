@@ -5870,9 +5870,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
             }
 
+            guiManager.EnqueueGdiPrimitive(CreateGdiBlit(Hwnd, Hdc, Left, Top, Right, Bottom, Pixels, Pooled, SourceWidth, SourceHeight, Rop));
+        }
+
+        internal GuiThreadManager GuiManager => DesktopDisplay as GuiThreadManager;
+
+        internal GdiPrimitive CreateGdiBlit(ulong Hwnd, ulong Hdc, int Left, int Top, int Right, int Bottom, uint[] Pixels, bool Pooled,
+            int SourceWidth, int SourceHeight, uint Rop)
+        {
             GetDcDrawTarget(Hwnd, Hdc, out int SurfaceX, out int SurfaceY, out ulong Root, out GdiClipRect[] Clip);
 
-            guiManager.EnqueueGdiPrimitive(new GdiPrimitive
+            return new GdiPrimitive
             {
                 Hwnd = Root,
                 Clip = Clip,
@@ -5886,7 +5894,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 PixelsPooled = Pooled,
                 SourceWidth = SourceWidth,
                 SourceHeight = SourceHeight,
-            });
+            };
         }
 
         // Client coordinates. The pixel at x, y comes from x - Dx, y - Dy.
@@ -8528,6 +8536,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ClearUserWindowHandleEntry(Window);
             ForgetThreadWindowContext(Hwnd);
             Win32kQueuePort.ForgetWindow(Emulator, Window);
+            (DesktopDisplay as GuiThreadManager)?.ReleaseFrameSlot(Hwnd);
             WinWindows.Remove(Hwnd);
 
             RememberDestroyedWindow(Window);
@@ -10171,6 +10180,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return ReferenceObjectByHandle(Handle, RequiredAccess, out Object, out _, out _);
         }
 
+        internal NTSTATUS ReferenceOptionalObjectByHandle<T>(ulong Handle, AccessMask RequiredAccess, out T Object) where T : class, IHandleObject
+        {
+            Object = null;
+            return Handle == 0 ? NTSTATUS.STATUS_SUCCESS : ReferenceObjectByHandle(Handle, RequiredAccess, out Object);
+        }
+
         internal NTSTATUS ReferenceObjectByHandle<T>(ulong Handle, AccessMask RequiredAccess, out T Object, out AccessMask GrantedAccess) where T : class, IHandleObject
         {
             return ReferenceObjectByHandle(Handle, RequiredAccess, out Object, out _, out GrantedAccess);
@@ -10688,6 +10703,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case WinSharedGpuMemory SharedGpuMemory:
                     SharedGpuMemory.Host.Dispose();
+                    break;
+
+                case DxgkNtObject DxgkObject:
+                    DxgkProcess.ReleaseNtObject(Emulator, DxgkObject);
                     break;
             }
         }

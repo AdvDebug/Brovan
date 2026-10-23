@@ -2,6 +2,7 @@
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Brovan.Core.Helpers;
@@ -125,6 +126,22 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private int _parked;
 
         private const int MaxOwnerDepth = 16;
+
+        public sealed class FrameSlot
+        {
+            internal GdiPrimitive Frame;
+            internal bool HasFrame;
+            internal long Submitted;
+            private long _consumed;
+
+            public long Consumed => Volatile.Read(ref _consumed);
+
+            internal void Consume(long serial) => Volatile.Write(ref _consumed, Math.Max(_consumed, serial));
+        }
+
+        private readonly Dictionary<ulong, FrameSlot> _frameSlots = new();
+        private readonly List<FrameSlot> _pendingFrameSlots = new();
+        private readonly List<(FrameSlot Slot, GdiPrimitive Frame, long Serial)> _drawingFrames = new();
 
         private readonly Dictionary<ulong, TopLevelEntry> _topLevels = new();
         private List<TopLevelEntry> _dirtyTopLevels = new();
@@ -454,6 +471,120 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             Submit(new GuiCommand { Kind = GuiCommandKind.GdiPrimitive, Primitive = primitive });
         }
 
+        /// <summary>
+        /// Replaces the undrawn frame of the window. The manager owns the pixels whatever this returns.
+        /// </summary>
+        public bool TrySubmitFrame(ulong window, in GdiPrimitive frame, out FrameSlot slot, out long serial)
+        {
+            slot = null;
+            serial = 0;
+            if (_disposed || !WaitForInitialization())
+            {
+                ReturnPixels(frame);
+                return false;
+            }
+
+            lock (_presentSync)
+            {
+                ref FrameSlot entry = ref CollectionsMarshal.GetValueRefOrAddDefault(_frameSlots, window, out _);
+                slot = entry ??= new FrameSlot();
+                if (slot.HasFrame)
+                    ReturnPixels(slot.Frame);
+                else
+                    _pendingFrameSlots.Add(slot);
+
+                slot.Frame = frame;
+                slot.HasFrame = true;
+                serial = ++slot.Submitted;
+            }
+
+            WakeGuiThread();
+            return true;
+        }
+
+        public void ReleaseFrameSlot(ulong window)
+        {
+            // Presenters add slots under the guest kernel lock, which window destruction holds too.
+            if (_frameSlots.Count == 0)
+                return;
+
+            lock (_presentSync)
+            {
+                if (!_frameSlots.Remove(window, out FrameSlot slot))
+                    return;
+
+                slot.Consume(long.MaxValue);
+                if (slot.HasFrame)
+                {
+                    ReturnPixels(slot.Frame);
+                    slot.HasFrame = false;
+                    slot.Frame = default;
+                    _pendingFrameSlots.Remove(slot);
+                }
+            }
+
+            HostEventQueue.WakeSignal?.Bump();
+        }
+
+        private static void ReturnPixels(in GdiPrimitive primitive)
+        {
+            if (primitive.PixelsPooled)
+                ArrayPool<uint>.Shared.Return(primitive.Pixels);
+        }
+
+        private void DrawPrimitive(in GdiPrimitive primitive)
+        {
+            try
+            {
+                IWindow window = ResolveWindow(primitive.Hwnd);
+                if (window != null && _gdiRender != null)
+                    _gdiRender.ExecuteGdiPrimitive(window.NativeHandle, primitive);
+            }
+            finally
+            {
+                ReturnPixels(primitive);
+            }
+        }
+
+        private bool DrawFrames()
+        {
+            // HasWork checks again under the lock before the thread parks.
+            if (_pendingFrameSlots.Count == 0)
+                return false;
+
+            lock (_presentSync)
+            {
+                foreach (FrameSlot slot in _pendingFrameSlots)
+                {
+                    _drawingFrames.Add((slot, slot.Frame, slot.Submitted));
+                    slot.HasFrame = false;
+                    slot.Frame = default;
+                }
+
+                _pendingFrameSlots.Clear();
+            }
+
+            Span<(FrameSlot Slot, GdiPrimitive Frame, long Serial)> drawing = CollectionsMarshal.AsSpan(_drawingFrames);
+            try
+            {
+                foreach (ref readonly (FrameSlot Slot, GdiPrimitive Frame, long Serial) entry in drawing)
+                    DrawPrimitive(in entry.Frame);
+            }
+            finally
+            {
+                lock (_presentSync)
+                {
+                    foreach (ref readonly (FrameSlot Slot, GdiPrimitive Frame, long Serial) entry in drawing)
+                        entry.Slot.Consume(entry.Serial);
+                }
+
+                _drawingFrames.Clear();
+                HostEventQueue.WakeSignal?.Bump();
+            }
+
+            return true;
+        }
+
         public bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character)
         {
             character = '\0';
@@ -563,6 +694,18 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             catch
             {
             }
+
+            lock (_presentSync)
+            {
+                foreach (FrameSlot slot in _pendingFrameSlots)
+                    ReturnPixels(slot.Frame);
+
+                foreach (FrameSlot slot in _frameSlots.Values)
+                    slot.Consume(long.MaxValue);
+
+                _pendingFrameSlots.Clear();
+                _frameSlots.Clear();
+            }
         }
 
         private void Submit(in GuiCommand command)
@@ -600,7 +743,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return true;
 
             lock (_presentSync)
-                return _hasPendingPresent || HasPendingTopLevels();
+                return _hasPendingPresent || _pendingFrameSlots.Count != 0 || HasPendingTopLevels();
         }
 
         private bool HasPendingTopLevels()
@@ -635,6 +778,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     bool worked = ApplyPendingPresent();
                     worked |= ApplyPendingTopLevels();
                     worked |= DrainCommands();
+                    worked |= DrawFrames();
 
                     _display.PumpEvents();
 
@@ -674,18 +818,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             switch (command.Kind)
             {
                 case GuiCommandKind.GdiPrimitive:
-                    try
-                    {
-                        window = ResolveWindow(command.Primitive.Hwnd);
-                        if (window != null && _gdiRender != null)
-                            _gdiRender.ExecuteGdiPrimitive(window.NativeHandle, command.Primitive);
-                    }
-                    finally
-                    {
-                        if (command.Primitive.PixelsPooled)
-                            ArrayPool<uint>.Shared.Return(command.Primitive.Pixels);
-                    }
-
+                    DrawPrimitive(in command.Primitive);
                     return;
 
                 case GuiCommandKind.RenderText:

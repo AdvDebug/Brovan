@@ -16,6 +16,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal DxgkDevice Device;
     }
 
+    internal abstract class DxgkNtObject : IHandleObject
+    {
+        internal string Name;
+
+        public string ObjectId => Name;
+
+        public abstract HandleType ObjectType { get; }
+
+        internal abstract string TypeName { get; }
+
+        internal abstract void Release(BinaryEmulator Instance, DxgkProcess Process);
+    }
+
     // DXGPROCESS in dxgkrnl. A handle of the wrong type fails as an unknown handle.
     internal sealed class DxgkProcess
     {
@@ -33,6 +46,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private readonly List<object> Values = new();
         private readonly List<byte> Instances = new();
         private readonly Queue<int> FreeIndices = new();
+        private readonly HashSet<DxgkNtObject> NtObjects = new();
+        private readonly HashSet<DxgkCompositionBuffer> PendingBuffers = new();
 
         internal readonly DxgkFencePages FencePages = new();
         internal readonly DxgkGpu Gpu;
@@ -82,6 +97,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Value != null;
         }
 
+        internal bool TryGet<T>(uint Handle, DxgkDevice Device, out T Object) where T : DxgkDeviceObject
+        {
+            if (TryGet(Handle, out Object) && Object.Device == Device)
+                return true;
+
+            Object = null;
+            return false;
+        }
+
         internal NTSTATUS TryResolve<T>(BinaryEmulator Instance, DxgkDevice Device, ulong ArrayPtr, Span<T> Objects) where T : DxgkDeviceObject
         {
             Span<byte> Handles = Instance.WinHelper.ReadMemorySpan(ArrayPtr, (uint)Objects.Length * sizeof(uint));
@@ -90,7 +114,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             for (int Index = 0; Index < Objects.Length; Index++)
             {
-                if (!TryGet(BinaryPrimitives.ReadUInt32LittleEndian(Handles.Slice(Index * sizeof(uint))), out T Object) || Object.Device != Device)
+                if (!TryGet(BinaryPrimitives.ReadUInt32LittleEndian(Handles.Slice(Index * sizeof(uint))), Device, out T Object))
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
                 Objects[Index] = Object;
@@ -118,6 +142,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Object.Release(Instance, this);
         }
 
+        // Handles are not closed at dispose, so the NT objects still open are released here.
         internal void ReleaseAll(BinaryEmulator Instance)
         {
             for (int Index = 0; Index < Values.Count; Index++)
@@ -125,6 +150,51 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (Values[Index] is DxgkObject Object)
                     Destroy(Instance, Object);
             }
+
+            foreach (DxgkNtObject Object in NtObjects)
+                Object.Release(Instance, this);
+
+            NtObjects.Clear();
+        }
+
+        // On failure the handle close releases the object.
+        internal NTSTATUS InsertNtObject(BinaryEmulator Instance, DxgkNtObject Object, AccessMask DesiredAccess, ulong HandlePtr)
+        {
+            Object.Name = $"{Object.TypeName}_{Instance.WinHelper.GenerateAnonymousObjectId()}";
+            NtObjects.Add(Object);
+            WinHandle Handle = Instance.WinHelper.OpenObjectHandle(Object, DesiredAccess);
+            if (Instance.WinHelper.WritePointer(HandlePtr, Handle.Handle))
+                return NTSTATUS.STATUS_SUCCESS;
+
+            Instance.WinHelper.CloseHandle(Handle.Handle);
+            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+        }
+
+        internal bool NeedsService => PendingBuffers.Count != 0 || Gpu.HasBlocked;
+
+        // Buffers retire first, because a retire can free room for a present that holds up its context.
+        // A HashSet allows Remove while it is enumerated.
+        internal void Service(BinaryEmulator Instance)
+        {
+            foreach (DxgkCompositionBuffer Buffer in PendingBuffers)
+            {
+                Buffer.RetireConsumed(Instance);
+                if (Buffer.Pending.Count == 0)
+                    PendingBuffers.Remove(Buffer);
+            }
+
+            if (Gpu.HasBlocked)
+                Gpu.Run(Instance);
+        }
+
+        internal void AddPendingBuffer(DxgkCompositionBuffer Buffer) => PendingBuffers.Add(Buffer);
+
+        internal void RemovePendingBuffer(DxgkCompositionBuffer Buffer) => PendingBuffers.Remove(Buffer);
+
+        internal void ReleaseNtObject(BinaryEmulator Instance, DxgkNtObject Object)
+        {
+            if (NtObjects.Remove(Object))
+                Object.Release(Instance, this);
         }
 
         // A wait whose thread gave up keeps its references until a fence changes, so a full budget forgets those first.

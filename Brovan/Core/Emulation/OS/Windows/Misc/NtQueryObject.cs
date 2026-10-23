@@ -1,5 +1,6 @@
 using System;
 using System.Text;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -241,6 +242,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return "Semaphore";
             if (HandleObject is WinSection || HandleObject is WinSharedGpuMemory)
                 return "Section";
+            if (HandleObject is DxgkNtObject DxgkObject)
+                return DxgkObject.TypeName;
             if (HandleObject is EmulatedThread)
                 return "Thread";
             if (HandleObject is WinTimer)

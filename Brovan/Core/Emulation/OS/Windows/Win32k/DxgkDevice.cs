@@ -8,6 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal readonly List<DxgkContext> Contexts = new();
         internal readonly List<DxgkPagingQueue> PagingQueues = new();
+        internal readonly HashSet<DxgkResource> Resources = new();
         internal readonly HashSet<DxgkAllocation> Allocations = new();
         internal readonly HashSet<DxgkFence> Fences = new();
 
@@ -33,10 +34,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             foreach (DxgkPagingQueue Queue in PagingQueues.ToArray())
                 Process.Destroy(Instance, Queue);
 
-            foreach (DxgkAllocation Allocation in new List<DxgkAllocation>(Allocations))
+            // Each release removes the object from its HashSet, which the enumeration allows.
+            foreach (DxgkResource Resource in Resources)
+                Process.Destroy(Instance, Resource);
+
+            foreach (DxgkAllocation Allocation in Allocations)
                 Process.Destroy(Instance, Allocation);
 
-            foreach (DxgkFence Fence in new List<DxgkFence>(Fences))
+            foreach (DxgkFence Fence in Fences)
                 Process.Destroy(Instance, Fence);
         }
     }
@@ -81,10 +86,30 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
     }
 
+    internal sealed class DxgkResource : DxgkDeviceObject
+    {
+        internal bool Shared;
+        internal bool NtSecuritySharing;
+        internal readonly List<DxgkAllocation> Allocations = new();
+
+        internal override void Release(BinaryEmulator Instance, DxgkProcess Process)
+        {
+            Device.Resources.Remove(this);
+            foreach (DxgkAllocation Allocation in Allocations)
+            {
+                Allocation.Resource = null;
+                Process.Destroy(Instance, Allocation);
+            }
+
+            Allocations.Clear();
+        }
+    }
+
     internal sealed class DxgkAllocation : DxgkDeviceObject
     {
-        internal ulong Size;
-        internal IntPtr Storage;
+        internal DxgkStorage Storage;
+        internal DxgkResource Resource;
+        internal bool SwapChainBackBuffer;
 
         // NT: the first Lock maps the allocation, and the view stays until the allocation goes.
         internal ulong View;
@@ -93,9 +118,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal override void Release(BinaryEmulator Instance, DxgkProcess Process)
         {
             Device.Allocations.Remove(this);
-            DxgkProcess.UnmapStorage(Instance, View, Storage);
-            Instance._emulator.ReleaseSharedStorage(Storage);
-            Process.AllocatedBytes -= Size;
+            Resource?.Allocations.Remove(this);
+            DxgkProcess.UnmapStorage(Instance, View, Storage.Memory);
+            Storage.Release(Instance, Process);
         }
     }
 }

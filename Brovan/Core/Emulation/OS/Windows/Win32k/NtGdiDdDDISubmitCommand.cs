@@ -8,6 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const int OffsetContextCount = 24;
         private const int OffsetContexts = 28;
         private const uint MaxBroadcastContexts = 64;
+        private const uint MaxWrittenPrimaries = 16;
 
         // The checks follow WarpKMValidateSubmitCommand and WarpKMSubmitCommandVirtual.
         private const uint WarpSyncSize = 304;
@@ -25,7 +26,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int OffsetPrivate = PointerSize == 8 ? 288 : 284;
             int OffsetPrivateSize = OffsetPrivate + PointerSize;
             int OffsetPrimaries = OffsetPrivateSize + 4;
-            int OffsetHistory = OffsetPrimaries + 4 + 64;
+            int OffsetHistory = OffsetPrimaries + 4 + (int)MaxWrittenPrimaries * 4;
 
             Span<byte> Arguments = stackalloc byte[372];
             Arguments = Arguments.Slice(0, OffsetHistory + 4);
@@ -40,8 +41,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!Process.TryGet(BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetContexts)), out DxgkContext Context))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
+            uint PrimaryCount = BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetPrimaries));
+            if (PrimaryCount > MaxWrittenPrimaries)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
             if (ContextCount != 1 || BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetFlags)) != 0
-                || BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetPrimaries)) != 0
                 || BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetHistory)) != 0)
                 return Instance.WinUnimplemented;
 
@@ -58,6 +62,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_INVALID_USER_BUFFER;
 
             DxgkDevice Device = Context.Device;
+
+            ReadOnlySpan<byte> Primaries = Arguments.Slice(OffsetPrimaries + 4);
+            for (int Index = 0; Index < (int)PrimaryCount; Index++)
+            {
+                if (!Process.TryGet(BinaryPrimitives.ReadUInt32LittleEndian(Primaries.Slice(Index * 4)), Device, out DxgkAllocation Primary)
+                    || !Primary.SwapChainBackBuffer)
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+            }
+
             if (Device.Faulted)
                 return NTSTATUS.STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE;
 
@@ -77,10 +90,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         // The SYNC block keeps 64-bit handles for a 32-bit caller too.
         private static bool TryReferenceEvent(BinaryEmulator Instance, ReadOnlySpan<byte> Private, int Offset, out WinEvent Event)
-        {
-            Event = null;
-            ulong Handle = BinaryPrimitives.ReadUInt64LittleEndian(Private.Slice(Offset));
-            return Handle == 0 || Instance.WinHelper.ReferenceObjectByHandle(Handle, AccessMask.EventModifyState, out Event) == NTSTATUS.STATUS_SUCCESS;
-        }
+            => Instance.WinHelper.ReferenceOptionalObjectByHandle(BinaryPrimitives.ReadUInt64LittleEndian(Private.Slice(Offset)), AccessMask.EventModifyState,
+                out Event) == NTSTATUS.STATUS_SUCCESS;
     }
 }

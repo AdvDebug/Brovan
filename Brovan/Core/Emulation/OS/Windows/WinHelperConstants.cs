@@ -337,6 +337,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_NO_MATCH = 0xC0000272,
         STATUS_INVALID_IMAGE_HASH = 0xC0000428,
         STATUS_ALREADY_INITIALIZED = 0xC0000510,
+        STATUS_GRAPHICS_PRESENT_INVALID_WINDOW = 0xC01E000F,
+        STATUS_GRAPHICS_PRESENT_BUFFER_NOT_BOUND = 0xC01E0010,
         STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE = 0xC01E0200,
         STATUS_WMI_GUID_NOT_FOUND = 0xC0000295,
         STATUS_NO_MORE_FILES = 0x80000006,
@@ -1151,6 +1153,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         SymbolicLinkQuery = 0x0001,
         SymbolicLinkAllAccess = StandardRightsRequired | SymbolicLinkQuery,
 
+        CompositionSurfaceQuery = 0x0001,
+        CompositionSurfaceBind = 0x0002,
+
         /// <summary>
         /// Access check sentinel. As the required access it skips the check. Granted to a handle, it allows
         /// every access.
@@ -1187,7 +1192,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         JobHandle = 16,
         DirectoryHandle = 17,
         SharedGpuMemoryHandle = 18,
-        ReserveHandle = 19
+        ReserveHandle = 19,
+        DxgkSharedResourceHandle = 20,
+        DxgkSharedSyncObjectHandle = 21,
+        DxgkCompositionObjectHandle = 22
     }
 
     public sealed class WinToken : IHandleObject
@@ -1893,6 +1901,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Signal();
             }
         }
+
+        public void ReleaseUpToMaximum(int ReleaseCount) => CurrentCount = (int)Math.Min((long)Count + ReleaseCount, MaximumCount);
 
         public override string ObjectId => Name;
         public override HandleType ObjectType => HandleType.SemaphoreHandle;

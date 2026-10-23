@@ -22,8 +22,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             DxgkProcess Process = Instance.WinHelper.DxgkProcess;
             if (!Process.TryGet(BinaryPrimitives.ReadUInt32LittleEndian(Arguments), out DxgkDevice Device)
-                || !Process.TryGet(BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetAllocation)), out DxgkAllocation Allocation)
-                || Allocation.Device != Device || Allocation.LockCount == uint.MaxValue)
+                || !Process.TryGet(BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetAllocation)), Device, out DxgkAllocation Allocation)
+                || Allocation.LockCount == uint.MaxValue)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             if (BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetNumPages)) != 0)
@@ -31,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (Allocation.View == 0)
             {
-                if (!DxgkProcess.TryMapStorage(Instance, Allocation.Storage, Allocation.Size, out ulong View))
+                if (!DxgkProcess.TryMapStorage(Instance, Allocation.Storage.Memory, Allocation.Storage.Size, out ulong View))
                     return NTSTATUS.STATUS_NO_MEMORY;
 
                 Allocation.View = View;

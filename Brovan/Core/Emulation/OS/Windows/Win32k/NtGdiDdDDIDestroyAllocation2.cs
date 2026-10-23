@@ -24,10 +24,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!Process.TryGet(BinaryPrimitives.ReadUInt32LittleEndian(Arguments), out DxgkDevice Device))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetResource)) != 0)
-                return Instance.WinUnimplemented;
-
             uint Count = BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetCount));
+            uint ResourceHandle = BinaryPrimitives.ReadUInt32LittleEndian(Arguments.Slice(OffsetResource));
+            if (ResourceHandle != 0)
+            {
+                if (Count != 0)
+                    return Instance.WinUnimplemented;
+
+                if (!Process.TryGet(ResourceHandle, Device, out DxgkResource Resource))
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                Process.Destroy(Instance, Resource);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
             if (Count == 0 || Count > MemoryBudget.DxgkHandles)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -39,6 +49,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 NTSTATUS Status = Process.TryResolve(Instance, Device, ListPtr, Allocations);
                 if (Status != NTSTATUS.STATUS_SUCCESS)
                     return Status;
+
+                foreach (DxgkAllocation Allocation in Allocations)
+                {
+                    if (Allocation.Resource != null)
+                        return NTSTATUS.STATUS_INVALID_PARAMETER;
+                }
 
                 foreach (DxgkAllocation Allocation in Allocations)
                     Process.Destroy(Instance, Allocation);

@@ -66,6 +66,9 @@ namespace Brovan.Core.Settings
 
         public static int DxgkQueuedPackets { get; private set; }
 
+        // Presents of one swapchain that the GUI thread has not drawn yet.
+        public static int DxgkPendingPresents { get; private set; }
+
         // Fence references held by D3DKMT waits and queued signals, and the fence count of one call.
         public static int DxgkFenceReferences { get; private set; }
 
@@ -100,6 +103,7 @@ namespace Brovan.Core.Settings
             CoreMessagingRegistrations = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
             DxgkHandles = (int)Pick(Off: 65536, Minimal: 49152, Medium: 32768, High: 16384, Aggressive: 8192);
             DxgkQueuedPackets = (int)Pick(Off: 16384, Minimal: 12288, Medium: 8192, High: 4096, Aggressive: 2048);
+            DxgkPendingPresents = (int)Pick(Off: 64, Minimal: 64, Medium: 48, High: 32, Aggressive: 16);
             DxgkFenceReferences = (int)Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
             ulong PhysicalMegabytes = Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
 

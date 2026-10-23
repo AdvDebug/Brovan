@@ -1266,9 +1266,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Queue.Pending.Enqueue(Message);
             Queue.CompletionPort?.Post(new WinIoCompletionEntry { KeyContext = Queue.CompletionKey, IoStatus = NTSTATUS.STATUS_SUCCESS });
 
-            WinSemaphore Semaphore = Port.WaitSemaphore;
-            if (Semaphore != null && Semaphore.CurrentCount < Semaphore.MaximumCount)
-                Semaphore.CurrentCount++;
+            Port.WaitSemaphore?.ReleaseUpToMaximum(1);
         }
 
         private static NTSTATUS Reply(BinaryEmulator Instance, AlpcServerQueue Queue, uint Flags, uint MessageId, ReadOnlySpan<byte> Data)
