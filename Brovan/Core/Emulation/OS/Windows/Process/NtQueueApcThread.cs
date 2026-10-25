@@ -14,17 +14,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS Queue(BinaryEmulator Instance, EmulatedThread Thread, uint ApcFlags, ulong ApcRoutine, ulong ApcArgument1, ulong ApcArgument2, ulong ApcArgument3)
         {
-            if (Thread == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            if (Thread.State == EmulatedThreadState.Terminated)
-                return NTSTATUS.STATUS_UNSUCCESSFUL;
-
-            if (WinEmulatedThread.GetState(Thread).PendingUserApcs == null)
-                WinEmulatedThread.GetState(Thread).PendingUserApcs = new List<WinPendingUserApc>();
-
-            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
-            State.PendingUserApcs.Add(new WinPendingUserApc
+            return Queue(Instance, Thread, new WinPendingUserApc
             {
                 Flags = ApcFlags,
                 ApcRoutine = ApcRoutine,
@@ -32,11 +22,23 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ApcArgument2 = ApcArgument2,
                 ApcArgument3 = ApcArgument3
             });
+        }
+
+        internal static NTSTATUS Queue(BinaryEmulator Instance, EmulatedThread Thread, WinPendingUserApc Apc)
+        {
+            if (Thread == null)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            if (Thread.State == EmulatedThreadState.Terminated)
+                return NTSTATUS.STATUS_UNSUCCESSFUL;
+
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            State.PendingUserApcs.Add(Apc);
 
             // A queued APC makes the target runnable through HasPendingGuestWork even when it stays Waiting.
             Instance.WakeSignal.Bump();
 
-            bool SpecialApc = (ApcFlags & WinPendingUserApc.SpecialUserApc) != 0;
+            bool SpecialApc = Apc.IsSpecial;
             bool AlertableWait = Thread.WaitActive && State.WaitAlertable;
 
             if (AlertableWait)

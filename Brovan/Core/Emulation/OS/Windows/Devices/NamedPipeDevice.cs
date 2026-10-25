@@ -293,8 +293,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Timeout >= 0)
                 return BlockingIoMilliseconds;
 
-            long Milliseconds = -Timeout / 10000;
-            return Milliseconds <= 0 ? 0 : (int)Math.Min(Milliseconds, BlockingIoMilliseconds);
+            return (int)Math.Min(WinSysHelper.RelativeTimeToMilliseconds(Timeout), BlockingIoMilliseconds);
         }
 
         private NTSTATUS Disconnect(BinaryEmulator Instance, WinFile File)

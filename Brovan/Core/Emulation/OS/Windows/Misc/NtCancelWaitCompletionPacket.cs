@@ -6,37 +6,29 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong WaitCompletionPacketHandle = Instance.WinHelper.GetArg(0);
-                ulong RemoveSignaledPacket = Instance.WinHelper.GetArg(1);
+            ulong WaitCompletionPacketHandle = Instance.WinHelper.GetArg(0);
+            bool RemoveSignaledPacket = (byte)Instance.WinHelper.GetArg(1) != 0;
 
-                if (!Instance.WinHelper.HandleExists(WaitCompletionPacketHandle, HandleType.WaitCompletionPacketHandle))
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-
-                WinWaitCompletionPacket Packet = Instance.WinHelper.HandleManager.GetObjectByHandle<WinWaitCompletionPacket>(WaitCompletionPacketHandle);
-                if (Packet != null)
-                {
-                    Packet.Associated = false;
-                    Packet.QueuedCompletion = false;
-                }
-                _ = RemoveSignaledPacket;
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
-            uint WaitCompletionPacketHandle32 = (uint)Instance.WinHelper.GetArg(0);
-            uint RemoveSignaledPacket32 = (uint)Instance.WinHelper.GetArg(1);
-
-            if (!Instance.WinHelper.HandleExists(WaitCompletionPacketHandle32, HandleType.WaitCompletionPacketHandle))
+            WinWaitCompletionPacket Packet = Instance.WinHelper.HandleManager.GetObjectByHandle<WinWaitCompletionPacket>(WaitCompletionPacketHandle);
+            if (Packet == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            WinWaitCompletionPacket Packet32 = Instance.WinHelper.HandleManager.GetObjectByHandle<WinWaitCompletionPacket>(WaitCompletionPacketHandle32);
-            if (Packet32 != null)
+            if (!Packet.Associated)
+                return NTSTATUS.STATUS_CANCELLED;
+
+            WinIoCompletion Completion = Instance.WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(Packet.IoCompletionHandle);
+            if (Completion != null)
+                Instance.MaterializeSignaledWaitPackets(Packet.IoCompletionHandle, Completion);
+
+            if (Packet.QueuedCompletion)
             {
-                Packet32.Associated = false;
-                Packet32.QueuedCompletion = false;
+                if (!RemoveSignaledPacket)
+                    return NTSTATUS.STATUS_PENDING;
+
+                Completion?.Remove(Packet.QueuedEntry);
             }
-            _ = RemoveSignaledPacket32;
+
+            Packet.Disassociate();
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

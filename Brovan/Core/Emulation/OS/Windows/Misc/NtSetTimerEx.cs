@@ -1,3 +1,4 @@
+using System;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -6,82 +7,59 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-            if (Instance._binary.Architecture == BinaryArchitecture.x64)
-            {
-                ulong TimerHandle = Instance.WinHelper.GetArg(0);
-                ulong TimerSetInformationClass = Instance.WinHelper.GetArg(1);
-                ulong TimerSetInformation = Instance.WinHelper.GetArg(2);
-                ulong TimerSetInformationLength = Instance.WinHelper.GetArg(3);
+            WinSysHelper Helper = Instance.WinHelper;
+            ulong TimerHandle = Helper.GetArg(0);
+            uint TimerSetInformationClass = (uint)Helper.GetArg(1);
+            ulong TimerSetInformation = Helper.GetArg(2);
+            uint TimerSetInformationLength = (uint)Helper.GetArg(3);
 
-                return HandleSetTimerEx64(Instance, TimerHandle, TimerSetInformationClass, TimerSetInformation, TimerSetInformationLength);
-            }
+            int PointerSize = Helper.PointerSize;
+            ulong ApcRoutineOffset = 8;
+            ulong PeriodOffset = ApcRoutineOffset + 3 * (ulong)PointerSize;
+            ulong PreviousStateOffset = PeriodOffset + 8;
+            uint InfoSize = (uint)(PreviousStateOffset + (ulong)PointerSize + 7) & ~7u;
 
+            // The WOW64 thunk copies the input to an aligned buffer, so only a native caller can misalign it.
+            if (PointerSize == 8 && TimerSetInformationLength != 0 && (TimerSetInformation & 3) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
 
-            uint TimerHandle32 = (uint)Instance.WinHelper.GetArg(0);
-            uint TimerSetInformationClass32 = (uint)Instance.WinHelper.GetArg(1);
-            uint TimerSetInformation32 = (uint)Instance.WinHelper.GetArg(2);
-            uint TimerSetInformationLength32 = (uint)Instance.WinHelper.GetArg(3);
-
-            return HandleSetTimerEx32(Instance, TimerHandle32, TimerSetInformationClass32, TimerSetInformation32, TimerSetInformationLength32);
-        }
-
-        private static NTSTATUS HandleSetTimerEx64(BinaryEmulator Instance, ulong TimerHandle, ulong TimerSetInformationClass, ulong TimerSetInformation, ulong TimerSetInformationLength)
-        {
-            if (TimerSetInformationClass != (ulong)TIMER_SET_INFORMATION_CLASS.TimerSetCoalescableTimer)
-                return NTSTATUS.STATUS_INVALID_INFO_CLASS;
-
-            if (TimerSetInformation == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (TimerSetInformationLength < 0x30)
-                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-
-            if (!Instance.IsRegionMapped(TimerSetInformation, 0x30))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            WinTimer Timer = Instance.WinHelper.GetTimerByHandle(TimerHandle, AccessMask.TimerModifyState);
-            if (Timer == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            Instance.CanSatisfyWaitHandle(TimerHandle);
-            long DueTime = unchecked((long)Instance._emulator.ReadMemoryULong(TimerSetInformation + 0x00));
-            uint PeriodRaw = Instance._emulator.ReadMemoryUInt(TimerSetInformation + 0x20);
-            ulong PreviousStatePtr = Instance._emulator.ReadMemoryULong(TimerSetInformation + 0x28);
-
-            long DueMilliseconds = NtTimerHelpers.ConvertDueTimeToMilliseconds(Instance, DueTime);
-            long PeriodMilliseconds = PeriodRaw == 0 ? 0 : PeriodRaw;
-
-            NtTimerHelpers.ArmTimer(Instance, Timer, TimerHandle, DueMilliseconds, PeriodMilliseconds, out bool WasSignaled);
-            return NtTimerHelpers.WritePreviousState(Instance, PreviousStatePtr, WasSignaled);
-        }
-
-        private static NTSTATUS HandleSetTimerEx32(BinaryEmulator Instance, uint TimerHandle, uint TimerSetInformationClass, uint TimerSetInformation, uint TimerSetInformationLength)
-        {
             if (TimerSetInformationClass != (uint)TIMER_SET_INFORMATION_CLASS.TimerSetCoalescableTimer)
                 return NTSTATUS.STATUS_INVALID_INFO_CLASS;
 
-            if (TimerSetInformation == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (TimerSetInformationLength < 0x20)
+            // NT takes exactly the native size, and the WOW64 thunk any length from the 32-bit size up.
+            if (PointerSize == 8 ? TimerSetInformationLength != InfoSize : TimerSetInformationLength < InfoSize)
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
-            if (!Instance.IsRegionMapped(TimerSetInformation, 0x20))
+            if (!Instance.IsRegionMapped(TimerSetInformation, InfoSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            WinTimer Timer = Instance.WinHelper.GetTimerByHandle(TimerHandle, AccessMask.TimerModifyState);
+            long DueTime = unchecked((long)Instance._emulator.ReadMemoryULong(TimerSetInformation));
+            Helper.TryReadPointer(TimerSetInformation + ApcRoutineOffset, out ulong ApcRoutine);
+            Helper.TryReadPointer(TimerSetInformation + ApcRoutineOffset + (ulong)PointerSize, out ulong ApcContext);
+            Helper.TryReadPointer(TimerSetInformation + ApcRoutineOffset + 2 * (ulong)PointerSize, out ulong WakeContext);
+            uint Period = Instance._emulator.ReadMemoryUInt(TimerSetInformation + PeriodOffset);
+            uint TolerableDelay = Instance._emulator.ReadMemoryUInt(TimerSetInformation + PeriodOffset + 4);
+            Helper.TryReadPointer(TimerSetInformation + PreviousStateOffset, out ulong PreviousStatePtr);
+
+            if (Period > int.MaxValue)
+                return NTSTATUS.STATUS_INVALID_PARAMETER_3;
+
+            WinTimer Timer = Helper.GetTimerByHandle(TimerHandle, AccessMask.TimerModifyState);
             if (Timer == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            if (Timer is WinIRTimer IRTimer)
+            {
+                if (ApcRoutine != 0 || ApcContext != 0 || WakeContext != 0 || TolerableDelay != 0 || PreviousStatePtr != 0)
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                return NtTimerHelpers.SetTimer2(Instance, IRTimer, TimerHandle, DueTime, Period * NtTimerHelpers.IntervalsPerMillisecond, ReadOnlySpan<byte>.Empty);
+            }
+
             Instance.CanSatisfyWaitHandle(TimerHandle);
-            long DueTime = unchecked((long)Instance._emulator.ReadMemoryULong(TimerSetInformation + 0x00));
-            uint PeriodRaw = Instance._emulator.ReadMemoryUInt(TimerSetInformation + 0x14);
-            uint PreviousStatePtr = Instance._emulator.ReadMemoryUInt(TimerSetInformation + 0x1C);
-
-            long DueMilliseconds = NtTimerHelpers.ConvertDueTimeToMilliseconds(Instance, DueTime);
-            long PeriodMilliseconds = PeriodRaw == 0 ? 0 : PeriodRaw;
-
-            NtTimerHelpers.ArmTimer(Instance, Timer, TimerHandle, DueMilliseconds, PeriodMilliseconds, out bool WasSignaled);
+            long DueMilliseconds = Helper.TimeoutToMilliseconds(DueTime);
+            NtTimerHelpers.SetTimerApc(Instance, Timer, ApcRoutine, ApcContext);
+            NtTimerHelpers.ArmTimer(Instance, Timer, TimerHandle, DueMilliseconds, Period, out bool WasSignaled);
             return NtTimerHelpers.WritePreviousState(Instance, PreviousStatePtr, WasSignaled);
         }
     }

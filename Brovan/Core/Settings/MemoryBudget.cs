@@ -62,6 +62,12 @@ namespace Brovan.Core.Settings
 
         public static int CoreMessagingRegistrations { get; private set; }
 
+        // Connections, endpoints and references of one CoreMessaging server the host runs.
+        public static int HostMessagingObjects { get; private set; }
+
+        // Interfaces one COM apartment the host runs has exported at a time.
+        public static int HostObjects { get; private set; }
+
         public static int DxgkHandles { get; private set; }
 
         public static int DxgkQueuedPackets { get; private set; }
@@ -71,6 +77,9 @@ namespace Brovan.Core.Settings
 
         // Fence references held by D3DKMT waits and queued signals, and the fence count of one call.
         public static int DxgkFenceReferences { get; private set; }
+
+        // Application hives one process holds loaded.
+        public static int AppHives { get; private set; }
 
         // The guest Vulkan ICD sizes its descriptor pool raise budget from this figure.
         public static ulong GuestPhysicalBytes { get; private set; }
@@ -101,10 +110,13 @@ namespace Brovan.Core.Settings
             KernelFileCells = (int)Pick(Off: 512, Minimal: 384, Medium: 256, High: 128, Aggressive: 64);
             VulkanWaitThreads = (int)Pick(Off: 8, Minimal: 8, Medium: 6, High: 4, Aggressive: 2);
             CoreMessagingRegistrations = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
+            HostMessagingObjects = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
+            HostObjects = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
             DxgkHandles = (int)Pick(Off: 65536, Minimal: 49152, Medium: 32768, High: 16384, Aggressive: 8192);
             DxgkQueuedPackets = (int)Pick(Off: 16384, Minimal: 12288, Medium: 8192, High: 4096, Aggressive: 2048);
             DxgkPendingPresents = (int)Pick(Off: 64, Minimal: 64, Medium: 48, High: 32, Aggressive: 16);
             DxgkFenceReferences = (int)Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
+            AppHives = (int)Pick(Off: 256, Minimal: 192, Medium: 128, High: 96, Aggressive: 64);
             ulong PhysicalMegabytes = Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
 
             GuestPhysicalBytes = Megabytes(PhysicalMegabytes);

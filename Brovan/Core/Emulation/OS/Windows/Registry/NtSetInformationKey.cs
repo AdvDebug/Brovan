@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -11,13 +12,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong KeySetInformation = Instance.WinHelper.GetArg(2);
             uint KeySetInformationLength = (uint)Instance.WinHelper.GetArg(3);
 
-            WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
-            if (RegKey == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                Instance.TriggerEventMessage($"[+] NtSetInformationKey Running with the FullPath: {RegKey.FullPath}, Class: {KeySetInformationClass}", LogFlags.Syscall);
-
             uint RequiredLength = GetRequiredLength(KeySetInformationClass);
             if (RequiredLength == 0)
                 return NTSTATUS.STATUS_INVALID_INFO_CLASS;
@@ -25,36 +19,43 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (KeySetInformationLength != RequiredLength)
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
 
-            if (KeySetInformation == 0)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            if (!Instance.IsRegionMapped(KeySetInformation, KeySetInformationLength))
+            Span<byte> Input = stackalloc byte[8];
+            if (KeySetInformation == 0 || !Instance.ReadMemory(KeySetInformation, Input.Slice(0, (int)RequiredLength)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+            AccessMask Required = KeySetInformationClass == KEY_SET_INFORMATION_CLASS.KeySetHandleTagsInformation ? AccessMask.None : AccessMask.KeySetValue;
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(KeyHandle, Required, out WinRegKey RegKey);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
+                Instance.TriggerEventMessage($"[+] NtSetInformationKey Running with the FullPath: {RegKey.FullPath}, Class: {KeySetInformationClass}", LogFlags.Syscall);
+
+            uint Value = BinaryPrimitives.ReadUInt32LittleEndian(Input);
             switch (KeySetInformationClass)
             {
                 case KEY_SET_INFORMATION_CLASS.KeyWriteTimeInformation:
-                    RegKey.LastWriteTime = (long)Instance._emulator.ReadMemoryULong(KeySetInformation);
+                    RegKey.LastWriteTime = BinaryPrimitives.ReadInt64LittleEndian(Input);
                     break;
 
                 case KEY_SET_INFORMATION_CLASS.KeyWow64FlagsInformation:
-                    RegKey.Wow64Flags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
+                    RegKey.Wow64Flags = Value;
                     break;
 
                 case KEY_SET_INFORMATION_CLASS.KeyControlFlagsInformation:
-                    RegKey.ControlFlags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
+                    RegKey.ControlFlags = Value;
                     break;
 
                 case KEY_SET_INFORMATION_CLASS.KeySetVirtualizationInformation:
-                    RegKey.VirtualizationFlags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
+                    RegKey.VirtualizationFlags = Value;
                     break;
 
                 case KEY_SET_INFORMATION_CLASS.KeySetDebugInformation:
-                    RegKey.DebugInformation = Instance._emulator.ReadMemoryUInt(KeySetInformation);
+                    RegKey.DebugInformation = Value;
                     break;
 
                 case KEY_SET_INFORMATION_CLASS.KeySetHandleTagsInformation:
-                    RegKey.HandleTags = Instance._emulator.ReadMemoryUInt(KeySetInformation);
+                    RegKey.HandleTags = Value;
                     break;
             }
 

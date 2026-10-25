@@ -246,6 +246,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return DxgkObject.TypeName;
             if (HandleObject is EmulatedThread)
                 return "Thread";
+            if (HandleObject is WinIRTimer)
+                return "IRTimer";
             if (HandleObject is WinTimer)
                 return "Timer";
             if (HandleObject is WinToken)

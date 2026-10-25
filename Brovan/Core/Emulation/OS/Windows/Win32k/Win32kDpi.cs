@@ -18,6 +18,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal const uint MonitorDpiTypeEffective = 0;
 
+        internal const int DpiInformationSize = 0x60;
+        private const int DpiInfoUnscaledOffset = 0x00;
+        private const int DpiInfoScaleOffset = 0x08;
+        private const int DpiInfoPhysicalSizeOffset = 0x18;
+        private const int DpiInfoResolutionOffset = 0x20;
+        private const int DpiInfoRawDpiOffset = 0x28;
+        private const int DpiInfoOverrideDpiOffset = 0x30;
+        private const uint UnscaledPercent = 100;
+        private const uint TenthsOfMillimetrePerInch = 254;
+
         private const uint SystemAwareFlags = 0x11;
         private const uint AwarenessMask = 0xF;
         private const uint DpiFieldMask = 0x1FF;
@@ -98,6 +108,35 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Top = ScalePositionToProcess(Instance, HostTop);
             Right = ScalePositionToProcess(Instance, HostRight);
             Bottom = ScalePositionToProcess(Instance, HostBottom);
+        }
+
+        // NT _DPI_INFORMATION. The view distance and the override range stay zero.
+        internal static void FillDpiInformation(Span<byte> Info)
+        {
+            Info.Slice(0, DpiInformationSize).Clear();
+
+            uint Scale = (UnscaledPercent * HostDisplayMetrics.SystemDpi + HostDisplayMetrics.DefaultDpi / 2) / HostDisplayMetrics.DefaultDpi;
+            uint RawDpi = HostDisplayMetrics.RawDpi;
+            uint Width = (uint)Math.Max(HostDisplayMetrics.ScreenWidth, 0);
+            uint Height = (uint)Math.Max(HostDisplayMetrics.ScreenHeight, 0);
+
+            WritePair(Info, DpiInfoUnscaledOffset, UnscaledPercent, UnscaledPercent);
+            WritePair(Info, DpiInfoScaleOffset, Scale, Scale);
+            WritePair(Info, DpiInfoPhysicalSizeOffset, MillimetresAt(Width, RawDpi), MillimetresAt(Height, RawDpi));
+            WritePair(Info, DpiInfoResolutionOffset, Width, Height);
+            WritePair(Info, DpiInfoRawDpiOffset, RawDpi, RawDpi);
+            WritePair(Info, DpiInfoOverrideDpiOffset, RawDpi, RawDpi);
+        }
+
+        private static uint MillimetresAt(uint Pixels, uint Dpi)
+        {
+            return Dpi == 0 ? 0 : (Pixels * TenthsOfMillimetrePerInch + Dpi * 5) / (Dpi * 10);
+        }
+
+        private static void WritePair(Span<byte> Info, int Offset, uint First, uint Second)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(Offset), First);
+            BinaryPrimitives.WriteUInt32LittleEndian(Info.Slice(Offset + 4), Second);
         }
 
         internal static bool TryGetHostCursorPosition(BinaryEmulator Instance, out int X, out int Y)

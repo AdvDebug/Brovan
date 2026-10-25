@@ -9,12 +9,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong KeyHandle = Instance.WinHelper.GetArg(0);
             ulong ValueNamePtr = Instance.WinHelper.GetArg(1);
 
-            if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out NTSTATUS Status))
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(KeyHandle, AccessMask.KeySetValue, out WinRegKey RegKey);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
-            WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
-            if (RegKey == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
+            if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out Status))
+                return Status;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtDeleteValueKey Running with the FullPath: {RegKey.FullPath}, ValueName: {ValueName}", LogFlags.Syscall);

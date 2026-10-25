@@ -3,7 +3,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtQueryTimerResolution : IWinSyscall
     {
         private const uint CoarsestResolution = 156250;
-        private const uint FinestResolution = 5000;
+        internal const uint FinestResolution = 5000;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {

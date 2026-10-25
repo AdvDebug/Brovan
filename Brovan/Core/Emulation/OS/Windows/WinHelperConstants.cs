@@ -290,6 +290,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_INVALID_PARAMETER_4 = 0xC00000F2,
         STATUS_INVALID_PARAMETER_5 = 0xC00000F3,
         STATUS_INVALID_PARAMETER_6 = 0xC00000F4,
+        STATUS_INVALID_PARAMETER_7 = 0xC00000F5,
+        STATUS_REGISTRY_IO_FAILED = 0xC000014D,
         STATUS_BAD_WORKING_SET_LIMIT = 0xC000004C,
         STATUS_INSUFFICIENT_RESOURCES = 0xC000009A,
         STATUS_INVALID_IMAGE_FORMAT = 0xC000007B,
@@ -1122,6 +1124,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         KeyNotify = 0x00000010,
         KeyCreateLink = 0x00000020,
         KeyAllAccess = StandardRightsRequired | 0x3F,
+        KeyRead = ReadControl | KeyQueryValue | KeyEnumerateSubKeys | KeyNotify,
+        KeyWrite = ReadControl | KeySetValue | KeyCreateSubKey,
+        KeyExecute = KeyRead | KeyCreateLink,
         FileReadData = 0x00000001,
         FileWriteData = 0x00000002,
         FileAppendData = 0x00000004,
@@ -1793,6 +1798,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public string FullPath;
         public Hive Hive;
+        public AppHive AppHive;
         public KeyNode Key;
         public long LastWriteTime;
         public uint Wow64Flags;
@@ -2227,6 +2233,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Entry;
         }
 
+        public bool Remove(WinIoCompletionEntry Entry)
+        {
+            bool Found = false;
+            for (int Remaining = Queued.Count; Remaining > 0; Remaining--)
+            {
+                WinIoCompletionEntry Next = Queued.Dequeue();
+                if (!Found && ReferenceEquals(Next, Entry))
+                {
+                    Found = true;
+                    continue;
+                }
+
+                Queued.Enqueue(Next);
+            }
+
+            if (Found && Entry.Reserve != null)
+                Entry.Reserve.InUse = false;
+            return Found;
+        }
+
         public override string ObjectId => Name;
 
         public override HandleType ObjectType => HandleType.IoCompletionHandle;
@@ -2276,6 +2302,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong LastInfoValue;
         public bool ReleasePending;
         public List<ulong> WorkerThreads = new List<ulong>();
+        public List<ulong> StartingWorkers = new List<ulong>();
 
         private bool ShutdownState;
         private uint PendingReleases;
@@ -2345,11 +2372,46 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance == null || Factory == null || Factory.WorkerThreads == null)
                 return;
 
-            Factory.WorkerThreads.RemoveAll(Handle =>
+            RemoveGoneWorkers(Instance, Factory.WorkerThreads);
+            RemoveGoneWorkers(Instance, Factory.StartingWorkers);
+        }
+
+        private static void RemoveGoneWorkers(BinaryEmulator Instance, List<ulong> Workers)
+        {
+            int Kept = 0;
+            for (int i = 0; i < Workers.Count; i++)
             {
-                EmulatedThread Thread = Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(Handle);
-                return Thread == null || Thread.State == EmulatedThreadState.Terminated;
-            });
+                EmulatedThread Thread = Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(Workers[i]);
+                if (Thread != null && Thread.State != EmulatedThreadState.Terminated)
+                    Workers[Kept++] = Workers[i];
+            }
+
+            Workers.RemoveRange(Kept, Workers.Count - Kept);
+        }
+
+        private static bool HasWaitingWorker(BinaryEmulator Instance, WinWorkerFactory Factory)
+        {
+            for (int i = 0; i < Factory.WorkerThreads.Count; i++)
+            {
+                EmulatedThread Thread = Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(Factory.WorkerThreads[i]);
+                if (Thread == null || Thread.State != EmulatedThreadState.Waiting)
+                    continue;
+
+                WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+                if (State != null && State.WorkerFactoryWaitActive && GetFactory(Instance, State.WorkerFactoryHandle) == Factory)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static bool HasUntakenWork(BinaryEmulator Instance, WinWorkerFactory Factory)
+        {
+            if (Factory.ReleasePending || Factory.PendingReleaseCount != 0)
+                return true;
+
+            WinIoCompletion Completion = GetIoCompletion(Instance, Factory.IoCompletionHandle);
+            return Completion != null && Completion.PendingCount != 0;
         }
 
         internal static NTSTATUS MarkWorkerReady(BinaryEmulator Instance, ulong WorkerFactoryHandle)
@@ -2357,6 +2419,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinWorkerFactory Factory = GetFactory(Instance, WorkerFactoryHandle);
             if (Factory == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            for (int i = 0; i < Factory.StartingWorkers.Count; i++)
+            {
+                if (Instance.WinHelper.HandleManager.GetObjectByHandle<EmulatedThread>(Factory.StartingWorkers[i]) == Instance.CurrentThread)
+                {
+                    Factory.StartingWorkers.RemoveAt(i);
+                    break;
+                }
+            }
 
             EnsureWorkerThreads(Instance, Factory);
             return NTSTATUS.STATUS_SUCCESS;
@@ -2424,8 +2495,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint Desired = Factory.ThreadMinimum;
             if (Factory.BindingCount > Desired)
                 Desired = Factory.BindingCount;
-            if (Factory.ReleasePending || Factory.PendingReleaseCount != 0)
-                Desired = Math.Max(Desired, 1u);
+            // NT starts one more worker for work no worker waits for, and none while one has not reported ready.
+            if (Factory.StartingWorkers.Count == 0 && HasUntakenWork(Instance, Factory) && !HasWaitingWorker(Instance, Factory))
+                Desired = Math.Max(Desired, (uint)Factory.WorkerThreads.Count + 1);
             if (Desired > Limit)
                 Desired = Limit;
 
@@ -2451,6 +2523,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Thread, AccessMask.GiveTemp);
                 Instance.WinHelper.AddWinHandle(Handle);
                 Factory.WorkerThreads.Add(Handle.Handle);
+                Factory.StartingWorkers.Add(Handle.Handle);
             }
         }
     }
@@ -2466,17 +2539,25 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong IoStatusInformation;
         public bool Associated;
 
-        private bool QueuedCompletionState;
+        private WinIoCompletionEntry QueuedEntryState;
 
-        public bool QueuedCompletion
+        public WinIoCompletionEntry QueuedEntry
         {
-            get => QueuedCompletionState;
+            get => QueuedEntryState;
             set
             {
-                QueuedCompletionState = value;
-                if (value)
+                QueuedEntryState = value;
+                if (value != null)
                     Signal();
             }
+        }
+
+        public bool QueuedCompletion => QueuedEntryState != null;
+
+        public void Disassociate()
+        {
+            Associated = false;
+            QueuedEntry = null;
         }
 
         public override string ObjectId => Name;
@@ -2527,6 +2608,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         public long DueTick;
         public long PeriodMilliseconds;
 
+        public EmulatedThread ApcThread;
+        public ulong ApcRoutine;
+        public ulong ApcContext;
+        public WinPendingUserApc QueuedApc;
+
         private bool SignaledState;
 
         public bool Signaled
@@ -2542,6 +2628,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public override string ObjectId => Name;
         public override HandleType ObjectType => HandleType.TimerHandle;
+    }
+
+    // NT: a separate object type, IRTimer, that most of the classic timer calls refuse.
+    public sealed class WinIRTimer : WinTimer
+    {
+        public const uint IRTimerAttribute = 2;
+        public const uint NotificationAttribute = 0x80000000;
     }
 
     public class WinSymbolicLink : IHandleObject

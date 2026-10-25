@@ -345,6 +345,7 @@ namespace Brovan.Core.Emulation
 
             bool WasSignaled = Timer.Signaled;
             Timer.Signaled = true;
+            QueueTimerApc(Timer);
 
             if (Timer.PeriodMilliseconds > 0)
             {
@@ -364,6 +365,42 @@ namespace Brovan.Core.Emulation
             }
 
             return !WasSignaled;
+        }
+
+        internal bool RefreshTimer(WinTimer Timer) => RefreshTimerState(Timer);
+
+        // NT queues the APC with the system time of the expiry, and not again while it is still queued.
+        internal void QueueTimerApc(WinTimer Timer)
+        {
+            if (Timer.ApcThread == null || (Timer.QueuedApc != null && WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Contains(Timer.QueuedApc)))
+                return;
+
+            ulong SystemTime = unchecked((ulong)GetEmulatedSystemTimeFileTimeUtc());
+            Timer.QueuedApc = new WinPendingUserApc
+            {
+                ApcRoutine = Timer.ApcRoutine,
+                ApcArgument1 = Timer.ApcContext,
+                ApcArgument2 = (uint)SystemTime,
+                ApcArgument3 = SystemTime >> 32
+            };
+            NtQueueApcThread.Queue(this, Timer.ApcThread, Timer.QueuedApc);
+        }
+
+        // NT drops a one-shot timer's APC once it has run, which here is when the timer is idle and the APC is not queued.
+        private long RefreshApcTimers(long NextDue)
+        {
+            List<WinTimer> Timers = WinHelper.ApcTimers;
+            for (int i = Timers.Count - 1; i >= 0; i--)
+            {
+                WinTimer Timer = Timers[i];
+                RefreshTimerState(Timer);
+                if (Timer.Active)
+                    NextDue = Math.Min(NextDue, Timer.DueTick);
+                else if (Timer.QueuedApc == null || !WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Contains(Timer.QueuedApc))
+                    NtTimerHelpers.ClearTimerApc(this, Timer);
+            }
+
+            return NextDue;
         }
 
         private long WindowsTimerSnapshotVersion = -1;
@@ -451,7 +488,7 @@ namespace Brovan.Core.Emulation
                     NextDue = Timer.DueTick;
             }
 
-            EarliestWindowsTimerDue = NextDue;
+            EarliestWindowsTimerDue = RefreshApcTimers(NextDue);
 
             return WokeThread;
         }
@@ -527,6 +564,10 @@ namespace Brovan.Core.Emulation
                 if (Delta > 0 && Delta < BestDelta)
                     BestDelta = Delta;
             }
+
+            long ApcDue = RefreshApcTimers(long.MaxValue);
+            if (ApcDue != long.MaxValue)
+                BestDelta = Math.Min(BestDelta, Math.Max(ApcDue - Now, 1));
 
             if (BestDelta == long.MaxValue)
                 return false;
@@ -611,13 +652,13 @@ namespace Brovan.Core.Emulation
 
         internal void MaterializeSignaledWaitPackets(ulong IoCompletionHandle)
         {
-            if (WinHelper == null)
-                return;
+            WinIoCompletion Completion = WinHelper?.HandleManager.GetObjectByHandle<WinIoCompletion>(IoCompletionHandle);
+            if (Completion != null)
+                MaterializeSignaledWaitPackets(IoCompletionHandle, Completion);
+        }
 
-            WinIoCompletion Completion = WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(IoCompletionHandle);
-            if (Completion == null)
-                return;
-
+        internal void MaterializeSignaledWaitPackets(ulong IoCompletionHandle, WinIoCompletion Completion)
+        {
             List<KeyValuePair<ulong, IHandleObject>> Packets = GetWaitCompletionPacketView();
             for (int i = 0; i < Packets.Count; i++)
             {
@@ -635,16 +676,16 @@ namespace Brovan.Core.Emulation
                 if (!TryAcquireWaitHandle(Packet.TargetObjectHandle, null, out _))
                     continue;
 
-                Completion.Post(new WinIoCompletionEntry
+                WinIoCompletionEntry Entry = new WinIoCompletionEntry
                 {
                     KeyContext = Packet.KeyContext,
                     ApcContext = Packet.ApcContext,
                     IoStatus = Packet.IoStatus,
                     IoStatusInformation = Packet.IoStatusInformation,
                     WaitCompletionPacketHandle = PacketHandle
-                });
-
-                Packet.QueuedCompletion = true;
+                };
+                Completion.Post(Entry);
+                Packet.QueuedEntry = Entry;
             }
         }
 
@@ -654,11 +695,7 @@ namespace Brovan.Core.Emulation
                 return;
 
             WinWaitCompletionPacket Packet = WinHelper.HandleManager.GetObjectByHandle<WinWaitCompletionPacket>(Entry.WaitCompletionPacketHandle);
-            if (Packet == null)
-                return;
-
-            Packet.Associated = false;
-            Packet.QueuedCompletion = false;
+            Packet?.Disassociate();
         }
 
         private bool TryReserveIoCompletionEntries(WindowsThreadState State)

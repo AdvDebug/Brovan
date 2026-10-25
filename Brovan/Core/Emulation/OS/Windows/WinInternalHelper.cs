@@ -595,13 +595,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
         }
 
+        internal ulong CurrentInterruptTime => InterruptTimeAt(Emulator.EmulatedTickCount64);
+
+        private ulong InterruptTimeAt(long Now) => BaseInterruptTime + unchecked((ulong)Math.Max(0, Now)) * 10_000UL;
+
         private void ComputeDynamicFields(out ulong SystemTime, out ulong InterruptTime, out ulong TickCountQuad)
         {
             long Now = Emulator.EmulatedTickCount64;
-            ulong Elapsed100Ns = unchecked((ulong)Math.Max(0, Now)) * 10_000UL;
-
             SystemTime = unchecked((ulong)Emulator.GetEmulatedSystemTimeFileTimeUtc());
-            InterruptTime = BaseInterruptTime + Elapsed100Ns;
+            InterruptTime = InterruptTimeAt(Now);
             TickCountQuad = InterruptTime / HundredNsPerDefaultTick;
         }
 

@@ -14,7 +14,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong DataPtr = Instance.WinHelper.GetArg(4);
             uint DataSize = (uint)Instance.WinHelper.GetArg(5);
 
-            if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out NTSTATUS Status))
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(KeyHandle, AccessMask.KeySetValue, out WinRegKey RegKey);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            if (!Instance.WinHelper.TryReadUnicodeString(ValueNamePtr, out string ValueName, out Status))
                 return Status;
 
             byte[] Data = Array.Empty<byte>();
@@ -28,10 +32,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Data = Instance._emulator.ReadMemory(DataPtr, DataSize);
             }
-
-            WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
-            if (RegKey == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtSetValueKey Running with the FullPath: {RegKey.FullPath}, ValueName: {ValueName}", LogFlags.Syscall);

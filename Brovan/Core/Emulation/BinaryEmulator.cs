@@ -840,7 +840,7 @@ namespace Brovan.Core.Emulation
             _binary = Binary;
             BackendArch = Arch.X86;
             BackendMode = Binary.Architecture == BinaryArchitecture.x64 ? Mode.MODE_64 : Mode.MODE_32;
-            GeneralHelper.IO.Wow64FileRedirectDefault = Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86;
+            GeneralHelper.IO.BeginGuest(Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86);
             GuestImagePath = ResolveGuestImagePath(Binary);
             _emulator = BackendFactory.Create(Settings.BackendKind, BackendArch, BackendMode, Settings.NoHooks, GuestImagePath, Binary.Location);
             _emulator.NoHooks = Settings.NoHooks;
@@ -873,7 +873,7 @@ namespace Brovan.Core.Emulation
             _binary = Binary;
             BackendArch = arch;
             BackendMode = mode;
-            GeneralHelper.IO.Wow64FileRedirectDefault = Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86;
+            GeneralHelper.IO.BeginGuest(Binary.FileFormat == BinaryFormat.PE && Binary.Architecture == BinaryArchitecture.x86);
             GuestImagePath = ResolveGuestImagePath(_binary, Guest);
             _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks, GuestImagePath, _binary.Location);
             this.Settings = Settings;

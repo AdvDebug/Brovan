@@ -212,26 +212,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Timeout == 0)
                 return 0;
 
-            long Delta100Ns;
             if (Timeout < 0)
-            {
-                Delta100Ns = Timeout == long.MinValue ? long.MaxValue : -Timeout;
-            }
-            else
-            {
-                long NowFileTime = Emulator.GetEmulatedSystemTimeFileTimeUtc();
-                if (Timeout <= NowFileTime)
-                    return 0;
+                return RelativeTimeToMilliseconds(Timeout);
 
-                Delta100Ns = Timeout - NowFileTime;
-            }
-
-            long Ms = Delta100Ns / 10000;
-            if ((Delta100Ns % 10000) != 0 && Ms < long.MaxValue)
-                Ms++;
-
-            return Ms;
+            long NowFileTime = Emulator.GetEmulatedSystemTimeFileTimeUtc();
+            return Timeout <= NowFileTime ? 0 : IntervalToMilliseconds(Timeout - NowFileTime);
         }
+
+        // Rounds up, so that a wait never ends early.
+        internal static long IntervalToMilliseconds(long Interval100Ns)
+        {
+            if (Interval100Ns <= 0)
+                return 0;
+
+            long Ms = Interval100Ns / 10000;
+            return Interval100Ns % 10000 != 0 ? Ms + 1 : Ms;
+        }
+
+        internal static long RelativeTimeToMilliseconds(long Relative100Ns)
+            => IntervalToMilliseconds(Relative100Ns == long.MinValue ? long.MaxValue : -Relative100Ns);
 
         public uint ReadSyscallNumber()
         {
@@ -430,6 +429,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Win32kHelper.DropThreadMessages(Emulator, Thread.ThreadId, DestroyThreadWindows(Thread.ThreadId));
             Win32kQueuePort.ReleasePort(Emulator, WinEmulatedThread.TryGetState(Thread));
+            NtTimerHelpers.RundownTimers(Emulator, Thread);
 
             bool Current = Emulator.CurrentThreadId == (int)Thread.ThreadId;
             if (!Current && Thread.HostWorker != -1)
@@ -1512,7 +1512,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Directory,
             SymbolicLink,
-            File
+            File,
+            Key
         }
 
         internal static bool TryGrantObjectAccess(AccessMask DesiredAccess, ObjectAccessKind Kind, AccessMask Grantable, out AccessMask Granted)
@@ -1530,6 +1531,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     (uint)AccessMask.ReadControl,
                     (uint)(AccessMask.ReadControl | AccessMask.SymbolicLinkQuery),
                     (uint)AccessMask.SymbolicLinkAllAccess),
+                ObjectAccessKind.Key => NtAccessCheck.ApplyGenericMapping(Requested,
+                    (uint)AccessMask.KeyRead, (uint)AccessMask.KeyWrite, (uint)AccessMask.KeyExecute, (uint)AccessMask.KeyAllAccess),
                 _ => NtAccessCheck.ApplyGenericMapping(Requested,
                     (uint)(AccessMask.ReadControl | AccessMask.Synchronize | AccessMask.FileReadData | AccessMask.FileReadAttributes | AccessMask.FileReadEA),
                     (uint)(AccessMask.ReadControl | AccessMask.Synchronize | AccessMask.FileWriteData | AccessMask.FileWriteAttributes | AccessMask.FileWriteEA | AccessMask.FileAppendData),
@@ -1652,6 +1655,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
+            bool ThroughAppHive = false;
             if (RootDirectory != 0)
             {
                 WinRegKey ParentKey = HandleManager.GetObjectByHandle<WinRegKey>(RootDirectory);
@@ -1676,11 +1680,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                     string ParentPath = ParentKey.FullPath.TrimEnd('\\', '\0');
                     string Relative = KeyPath.TrimStart('\\');
                     KeyPath = string.IsNullOrEmpty(Relative) ? ParentPath : ParentPath + "\\" + Relative;
+                    ThroughAppHive = RegistryManager.IsAppHivePath(ParentPath);
                 }
             }
             else if (string.IsNullOrEmpty(KeyPath))
             {
                 Status = EmptyPathStatus;
+                return false;
+            }
+
+            // NT: an application hive is reached only through a handle into it, never by name.
+            if (!ThroughAppHive && RegistryManager.IsAppHivePath(KeyPath))
+            {
+                Status = NTSTATUS.STATUS_ACCESS_DENIED;
                 return false;
             }
 
@@ -2424,6 +2436,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<WinProcess> WinProcesses = new List<WinProcess>();
         internal WinProcess ShellProcess { get; private set; }
         internal WinProcess OwnProcess { get; private set; }
+        internal readonly Dictionary<Guid, RPC.Ports.RpcssPortHandler.HostClass> HostClasses = new();
+        // NT keeps a timer with an APC alive, and firing, after its last handle closes.
+        internal readonly List<WinTimer> ApcTimers = new List<WinTimer>();
+        internal RPC.Shell.ActivatableApplicationRegistrar ShellRegistrar { get; private set; }
         public List<WinFile> WinFiles = new List<WinFile>();
 
         private readonly Dictionary<string, List<WinFile>> OpenFilesByPath = new Dictionary<string, List<WinFile>>(StringComparer.OrdinalIgnoreCase);
@@ -2437,7 +2453,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal HandleManager HandleManager;
         private static string WinRegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
         public RegistryManager RegManager = new RegistryManager(WinRegPath);
-        public Hive[] RegHives;
         /// <summary>
         /// Bumped by every registry change, so a reader can cache what it derived from the registry and notice
         /// when that result is stale.
@@ -3087,27 +3102,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             hConsoleHandle.ConsoleKind = ConsoleObjectKind.Connect;
             hConsoleHandle.Handler = ConsoleServer.Handle;
             ConsoleHandle = HandleManager.AddHandle(hConsoleHandle, AccessMask.GenericRead | AccessMask.GenericWrite);
-            List<Hive> Hives = new List<Hive>();
-            if (Directory.Exists(WinRegPath))
-            {
-                RegManager.EnsureUserHive("NTUSER.DAT");
-
-                foreach (string HiveFile in Directory.GetFiles(WinRegPath))
-                {
-                    try
-                    {
-                        string Name = Path.GetFileName(HiveFile);
-                        Hive Loaded = RegManager.LoadHive(Name);
-                        if (Loaded == null)
-                            continue;
-                        Hives.Add(Loaded);
-                    }
-                    catch
-                    {
-                    }
-                }
-            }
-            RegHives = Hives.ToArray();
+            RegManager.LoadBootHives();
             InitializeSyntheticRegistryDefaults();
 
             const ulong PreAllocSharedSectionSize = 0x10000;
@@ -3169,14 +3164,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Handler = RPC.Ports.DnsResolverPortHandler.Handle
             });
 
+            RPC.HostApartment ShellApartment = new RPC.HostApartment(ShellProcess.PID, GenerateRandomPID());
             WinPorts.Add(new WinPort
             {
-                Name = RPC.Ports.ActivationManagerPortHandler.PortName,
-                Handler = RPC.Ports.ActivationManagerPortHandler.Handle
+                Name = ShellApartment.PortName,
+                Handler = ShellApartment.Handle
             });
+            ShellRegistrar = new RPC.Shell.ActivatableApplicationRegistrar(ShellApartment);
+            RPC.Ports.RpcssPortHandler.RegisterClass(this, RPC.Shell.ActivatableApplicationRegistrar.Class, ShellApartment, ShellRegistrar);
+            RPC.Ports.RpcssPortHandler.RegisterClass(this, RPC.Shell.ServiceHostBrokerProvider.Class, ShellApartment, new RPC.Shell.ServiceHostBrokerProvider());
 
-            WinPorts.Add(AlpcMessaging.CreateHostPort(RPC.Ports.CoreMessagingRegistrarPort.PortName,
-                new RPC.Ports.CoreMessagingRegistrarPort { ProcessId = RegistrarPID, ThreadId = GenerateRandomPID() }));
+            RPC.Ports.CoreMessagingRegistrarPort CoreMessagingRegistrar = new RPC.Ports.CoreMessagingRegistrarPort { ProcessId = RegistrarPID, ThreadId = GenerateRandomPID() };
+            WinPorts.Add(AlpcMessaging.CreateHostPort(RPC.Ports.CoreMessagingRegistrarPort.PortName, CoreMessagingRegistrar));
+            RPC.CoreUI.NavigationServer.Create(this, CoreMessagingRegistrar, ShellProcess.PID, GenerateRandomPID());
 
             // The kernel publishes these under \KernelObjects on every system. ntdll's commit-condition
             // path and CreateMemoryResourceNotification open them by name and expect them to exist.
@@ -3849,10 +3849,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinEmulatedThread.GetState(Thread).WaitResumeRIP = 0;
             WinEmulatedThread.GetState(Thread).WaitReturnRIP = 0;
             if (Emulator.CurrentThread == Thread)
-            {
-                Emulator.WriteRegister(Registers.UC_X86_REG_RIP, Thread.Context.RIP);
-                Emulator.WriteRegister(Registers.UC_X86_REG_RAX, Thread.Context.RAX);
-            }
+                WindowsGuest.WriteWaitReturn(Emulator, Thread.Context, false);
         }
 
         // NT checks for a queued user APC before the wait objects and the timeout.
@@ -8825,7 +8822,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private Hive GetHiveByNtPath(string NtPath)
         {
-            return RegManager.GetHiveByNtPath(RegHives, NtPath);
+            return RegManager.GetHiveByNtPath(NtPath);
         }
 
         private string FixupNtRegistryPath(string NtPath)
@@ -9397,11 +9394,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (Hive == null)
             {
+                if (RegistryManager.IsAppHivePath(NtPath))
+                    return false;
+
                 if (!IsVolatile)
                     return false;
 
                 TempOnly = true;
-                Hive = Volatile.Hive ?? (RegHives != null && RegHives.Length != 0 ? RegHives[0] : null);
+                Hive = Volatile.Hive ?? RegManager.DefaultHive;
                 return true;
             }
 
@@ -9819,6 +9819,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             Hive Hive = GetHiveByNtPath(NtPath);
+            if (Hive == null && RegistryManager.IsAppHivePath(NtPath))
+                return false;
 
             bool ParentVolatile = VolatileRegistryKeys.TryGetValue(ParentPath, out WinVolatileRegKey ParentEntry) && !ParentEntry.Shadow;
 
@@ -10063,9 +10065,148 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RegKey == null)
                 return null;
 
-            WinHandle Handle = HandleManager.AddHandle(RegKey, Permissions);
+            // A key open grants every right it asks for, with the generic rights mapped to key rights.
+            TryGrantObjectAccess(Permissions, ObjectAccessKind.Key, AccessMask.KeyAllAccess, out AccessMask Granted);
+            WinHandle Handle = HandleManager.AddHandle(RegKey, Granted);
             AddWinHandle(Handle);
+
+            RegKey.AppHive = RegKey.Hive?.App;
+            if (RegKey.AppHive != null)
+                RegKey.AppHive.LiveKeys++;
+
             return Handle;
+        }
+
+        internal NTSTATUS LoadAppHive(string FilePath, string MountName, bool ReadOnly, bool Private, AccessMask DesiredAccess, out WinHandle Root)
+        {
+            Root = null;
+            FilePath = FilePath.Replace('/', '\\').TrimEnd('\0');
+
+            AppHive Existing = RegManager.FindAppHiveByFile(FilePath);
+            if (Existing != null)
+            {
+                if (Existing.Private || Private || (!ReadOnly && Existing.ReadOnly))
+                    return NTSTATUS.STATUS_SHARING_VIOLATION;
+
+                Root = OpenRegistryKey(Existing.MountName, DesiredAccess);
+                return Root != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_REGISTRY_IO_FAILED;
+            }
+
+            if (RegManager.IsAppHiveMounted(MountName))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            AccessMask FileAccess = ReadOnly ? AccessMask.GenericRead : AccessMask.GenericRead | AccessMask.GenericWrite;
+            NTSTATUS Status = NtOpenFile.PrepareExisting(Emulator, ref FilePath, FileAccess, 0, NtOpenFile.FILE_NON_DIRECTORY_FILE,
+                out WindowsFileStream Stream, out _);
+
+            bool Created = false;
+            if (Status == NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND && !ReadOnly && Stream != null)
+            {
+                try
+                {
+                    Stream.WriteAllBytes(RegistryManager.BuildAppHive(GeneralHelper.IO.GetWindowsFileName(FilePath), MountName));
+                    Created = true;
+                    Status = NTSTATUS.STATUS_SUCCESS;
+                }
+                catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+                {
+                    Utils.LogError($"[-] Could not create the application hive \"{FilePath}\": {Error.Message}");
+                    Status = NTSTATUS.STATUS_ACCESS_DENIED;
+                }
+            }
+
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+            {
+                Stream?.Dispose();
+                return Status;
+            }
+
+            // A file this load created goes away again unless the load completes.
+            WinFile Record = new WinFile
+            {
+                Path = FilePath,
+                Real = true,
+                FileStream = Stream,
+                GrantedAccess = FileAccess,
+                ShareAccess = 0,
+                DeletePending = Created
+            };
+            RegisterOpenFile(Record);
+
+            string HostPath;
+            try
+            {
+                if (!ReadOnly)
+                    Stream.MaterializeWriteStore();
+
+                HostPath = ReadOnly ? Stream.EffectiveReadHostPath : Stream.WriteHostPath;
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[-] Could not copy the application hive \"{FilePath}\" up: {Error.Message}");
+                ReleaseFileObject(Record);
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+            }
+
+            if (!RegManager.TryMount(HostPath, MountName, FilePath, ReadOnly, Private, out AppHive Entry, out bool Full))
+            {
+                ReleaseFileObject(Record);
+                return Full ? NTSTATUS.STATUS_INSUFFICIENT_RESOURCES : NTSTATUS.STATUS_REGISTRY_IO_FAILED;
+            }
+
+            Entry.FileRecord = Record;
+            RegistryGeneration++;
+
+            Root = OpenRegistryKey(MountName, DesiredAccess);
+            if (Root == null)
+            {
+                UnloadAppHive(Entry);
+                return NTSTATUS.STATUS_REGISTRY_IO_FAILED;
+            }
+
+            Record.DeletePending = false;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal void UnloadAppHives()
+        {
+            foreach (AppHive Entry in RegManager.MountedAppHives)
+                UnloadAppHive(Entry);
+        }
+
+        private void ReleaseAppHiveKey(WinRegKey Key)
+        {
+            AppHive Entry = Key.AppHive;
+            if (Entry == null)
+                return;
+
+            Key.AppHive = null;
+            if (--Entry.LiveKeys == 0)
+                UnloadAppHive(Entry);
+        }
+
+        private void UnloadAppHive(AppHive Entry)
+        {
+            string MountName = Entry.MountName;
+            if (!RegManager.Unmount(Entry))
+                return;
+
+            if (Entry.FileRecord is WinFile Record)
+                ReleaseFileObject(Record);
+
+            foreach (string KeyPath in VolatileRegistryKeys.Keys)
+            {
+                if (RegistryManager.IsUnderKey(KeyPath, MountName))
+                    VolatileRegistryKeys.Remove(KeyPath);
+            }
+
+            for (int Index = RegistryNotifications.Count - 1; Index >= 0; Index--)
+            {
+                if (RegistryManager.IsUnderKey(RegistryNotifications[Index].KeyPath, MountName))
+                    RegistryNotifications.RemoveAt(Index);
+            }
+
+            RegistryGeneration++;
         }
 
         public WinHandle CreateEventHandle(string? Name, uint EventType, bool InitialState, AccessMask Permissions)
@@ -10089,6 +10230,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (!string.IsNullOrEmpty(Name))
                 AddNamedObject(Timer);
+
+            return OpenObjectHandle(Timer, Permissions);
+        }
+
+        public WinHandle CreateIRTimerHandle(uint Attributes, AccessMask Permissions)
+        {
+            WinIRTimer Timer = new WinIRTimer
+            {
+                Name = GenerateAnonymousObjectName("Timer_"),
+                Attributes = Attributes,
+                TimerType = (Attributes & WinIRTimer.NotificationAttribute) != 0 ? TIMER_TYPE.NotificationTimer : TIMER_TYPE.SynchronizationTimer,
+            };
 
             return OpenObjectHandle(Timer, Permissions);
         }
@@ -10626,17 +10779,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Closing != null && !Closing.Device && !string.IsNullOrEmpty(Closing.Path))
                     {
                         if (HandleManager.CountHandlesByObjectId(Closing.ObjectId) <= 1)
-                        {
-                            KernelFiles?.ReleaseFile(Closing);
-                            Closing.ReleaseLocks();
-                            UnregisterOpenFile(Closing);
-                            if (Closing.DeletePending)
-                                ApplyDeleteOnClose(Closing);
-                            else
-                                Closing.ReleaseFileStream();
-
-                            Closing.ReleaseSharedPosition();
-                        }
+                            ReleaseFileObject(Closing);
                     }
                 }
                 else if (Entry.Object != null && Entry.Object.ObjectType == HandleType.SectionHandle)
@@ -10661,6 +10804,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 RemoveNamedObject(Entry.Object);
                 if (Entry.Object is WinFile ClosedFile)
                     WinFiles.Remove(ClosedFile);
+                else if (Entry.Object is WinRegKey ClosedKey)
+                    ReleaseAppHiveKey(ClosedKey);
             }
 
             if (ClosingSyncObject is WinJob ClosingJob && (ClosingJob.LimitFlags & NtTerminateJobObject.JobLimitKillOnJobClose) != 0 && !HandleManager.HasHandleToObject(ClosingJob))
@@ -10670,6 +10815,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (ClosingSection != null)
                 ReleaseSectionIfUnreferenced(ClosingSection);
+        }
+
+        private void ReleaseFileObject(WinFile Closing)
+        {
+            KernelFiles?.ReleaseFile(Closing);
+            Closing.ReleaseLocks();
+            UnregisterOpenFile(Closing);
+            if (Closing.DeletePending)
+                ApplyDeleteOnClose(Closing);
+            else
+                Closing.ReleaseFileStream();
+
+            Closing.ReleaseSharedPosition();
         }
 
         private void ForgetNamedSyncObjectIfUnreferenced(IHandleObject? Object)

@@ -88,6 +88,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public string LoaderSearchPath;
         public byte[] DependencyMiniRepository;
         public WinTokenSecurityAttribute[] SecurityAttributes;
+        public ulong HostId;
     }
 
     internal static class AppxPackageModel
@@ -268,7 +269,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Identity.LoaderSearchPath = BuildLoaderSearchPath(Graph, Flags, Graph.Count);
             Identity.CapabilitySids = Identity.IsAppContainer ? BuildCapabilitySids(Package, Identity.AppContainerSid) : Array.Empty<byte[]>();
-            Identity.SecurityAttributes = BuildSecurityAttributes(Package, Application, Identity.IsAppContainer);
+            Identity.HostId = PackageHostIdBase | (ulong)System.Threading.Interlocked.Increment(ref PackageHostSequence);
+            Identity.SecurityAttributes = BuildSecurityAttributes(Package, Application, Identity.IsAppContainer, Identity.HostId);
             Identity.DependencyMiniRepository = BuildDependencyMiniRepository(Identity, Flags);
 
             if ((Instance.Settings.Flags & LogFlags.General) != 0)
@@ -1148,14 +1150,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Sids.ToArray();
         }
 
-        private static WinTokenSecurityAttribute[] BuildSecurityAttributes(AppxPackage Package, AppxApplication Application, bool IsAppContainer)
+        private static WinTokenSecurityAttribute[] BuildSecurityAttributes(AppxPackage Package, AppxApplication Application, bool IsAppContainer, ulong HostId)
         {
             List<string> AppIdentity = new List<string> { Package.FullName, Application.Id, Package.FamilyName };
             if (Application.SupportsMultipleInstances)
                 AppIdentity.Add(Guid.NewGuid().ToString("B"));
 
             ulong Claims = ((ulong)Package.Origin << 32) | ClaimPackagedApplication | (IsAppContainer ? ClaimAppContainer : ClaimFullTrust);
-            ulong HostId = PackageHostIdBase | (ulong)System.Threading.Interlocked.Increment(ref PackageHostSequence);
 
             return new[]
             {

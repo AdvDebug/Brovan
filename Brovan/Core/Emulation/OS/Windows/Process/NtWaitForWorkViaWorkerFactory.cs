@@ -33,29 +33,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance._emulator.WriteMemory(MiniPackets + (ulong)Index * 0x10, Packet32);
         }
 
-        private static long ParseTimeoutDeadline(BinaryEmulator Instance, long Timeout)
-        {
-            if (Timeout == 0)
-                return -1;
-
-            long Milliseconds;
-            if (Timeout < 0)
-                Milliseconds = ((-Timeout) + 9999) / 10000;
-            else
-            {
-                long NowFileTime = Instance.GetEmulatedSystemTimeFileTimeUtc();
-                if (Timeout <= NowFileTime)
-                    return Instance.EmulatedTickCount64;
-
-                Milliseconds = ((Timeout - NowFileTime) + 9999) / 10000;
-            }
-
-            if (Milliseconds < 0)
-                Milliseconds = 0;
-
-            return Instance.CreateEmulatedDeadlineMilliseconds(Milliseconds);
-        }
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 
@@ -139,7 +116,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Removed > 0)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            long Deadline = ParseTimeoutDeadline(Instance, Factory.Timeout);
+            long Deadline = Factory.Timeout == 0 ? -1 : Instance.WinHelper.ParseRelativeDeadlineMs(Factory.Timeout);
             if (Factory.Timeout != 0 && Deadline == Instance.EmulatedTickCount64)
                 return NTSTATUS.STATUS_TIMEOUT;
 

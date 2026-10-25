@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -46,24 +47,73 @@ namespace Brovan.Core.Emulation.OS.Windows
 
     internal static class NtTimerHelpers
     {
-        public static long ConvertDueTimeToMilliseconds(BinaryEmulator Instance, long Value)
+        public const long IntervalsPerMillisecond = 10000;
+
+        public static NTSTATUS SetTimer2(BinaryEmulator Instance, WinIRTimer Timer, ulong TimerHandle, long? DueTime, long Period, ReadOnlySpan<byte> Parameters)
         {
-            if (Value < 0)
-                return ConvertIntervalToMilliseconds(-Value);
+            if (Period != 0 && (Timer.Attributes & WinIRTimer.IRTimerAttribute) != 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            long Now = Instance.GetEmulatedSystemTimeFileTimeUtc();
-            if (Value <= Now)
-                return 0;
+            if (!Parameters.IsEmpty && (BinaryPrimitives.ReadUInt32LittleEndian(Parameters) != 0 || BinaryPrimitives.ReadInt64LittleEndian(Parameters.Slice(8)) < -1))
+                return NTSTATUS.STATUS_INVALID_PARAMETER_3;
 
-            return ConvertIntervalToMilliseconds(Value - Now);
+            if (DueTime is not long Due)
+            {
+                CancelTimer(Instance, Timer);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            if (Period != 0 && Period < NtQueryTimerResolution.FinestResolution)
+                Period = NtQueryTimerResolution.FinestResolution;
+
+            ArmTimer(Instance, Timer, TimerHandle, Instance.WinHelper.TimeoutToMilliseconds(Due), WinSysHelper.IntervalToMilliseconds(Period), out _);
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
-        public static long ConvertIntervalToMilliseconds(long Value)
+        // A timer that came due before the cancel keeps its signal, as on NT.
+        public static void CancelTimer(BinaryEmulator Instance, WinTimer Timer)
         {
-            if (Value <= 0)
-                return 0;
+            Instance.RefreshTimer(Timer);
+            Timer.Active = false;
+            ClearTimerApc(Instance, Timer);
+            Instance.InvalidateWindowsTimerDue();
+        }
 
-            return (Value + 9999) / 10000;
+        public static void SetTimerApc(BinaryEmulator Instance, WinTimer Timer, ulong ApcRoutine, ulong ApcContext)
+        {
+            ClearTimerApc(Instance, Timer);
+            if (ApcRoutine == 0)
+                return;
+
+            Timer.ApcThread = Instance.CurrentThread;
+            Timer.ApcRoutine = ApcRoutine;
+            Timer.ApcContext = ApcContext;
+            Instance.WinHelper.ApcTimers.Add(Timer);
+        }
+
+        public static void ClearTimerApc(BinaryEmulator Instance, WinTimer Timer)
+        {
+            if (Timer.ApcThread == null)
+                return;
+
+            if (Timer.QueuedApc != null)
+                WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Remove(Timer.QueuedApc);
+
+            Instance.WinHelper.ApcTimers.Remove(Timer);
+            Timer.ApcThread = null;
+            Timer.ApcRoutine = 0;
+            Timer.ApcContext = 0;
+            Timer.QueuedApc = null;
+        }
+
+        public static void RundownTimers(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            List<WinTimer> Timers = Instance.WinHelper.ApcTimers;
+            for (int i = Timers.Count - 1; i >= 0; i--)
+            {
+                if (Timers[i].ApcThread == Thread)
+                    CancelTimer(Instance, Timers[i]);
+            }
         }
 
         public static void ArmTimer(BinaryEmulator Instance, WinTimer Timer, ulong TimerHandle, long DueMilliseconds, long PeriodMilliseconds, out bool WasSignaled)
@@ -78,6 +128,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DueMilliseconds == 0)
             {
                 Timer.Signaled = true;
+                Instance.QueueTimerApc(Timer);
                 if (Timer.PeriodMilliseconds == 0)
                     Timer.Active = false;
                 else

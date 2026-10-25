@@ -850,6 +850,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             base.Dispose(disposing);
         }
 
+        // Copies the file into the write store, so a writer that opens the host file itself writes the copy.
+        public void MaterializeWriteStore()
+        {
+            EnsureWriteStore(true);
+        }
+
         private void EnsureWriteStore(bool CopyExisting)
         {
             if (string.IsNullOrWhiteSpace(WriteHostPath))

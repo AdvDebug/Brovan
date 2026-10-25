@@ -33,6 +33,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
     {
         private const uint ObjRefSignature = 0x574F454D;
         private const uint ObjRefStandard = 1;
+        private const uint ObjRefHandler = 2;
         private const uint ObjRefCustom = 4;
         private const int OffObjRefIid = 8;
         private const int ObjRefHeaderSize = 0x18;
@@ -48,7 +49,19 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public const uint UserMarshalMarker = 0x72657355;
         private const uint WdtRemoteCall = 0x50746457;
         public const uint SOk = 0;
+        public const uint SFalse = 1;
         public const uint ENoInterface = 0x80004002;
+        public const uint ENotImpl = 0x80004001;
+        public const uint EOutOfMemory = 0x8007000E;
+        public const uint EInvalidArg = 0x80070057;
+
+        public static readonly Guid RemUnknownInterface = new Guid("00000131-0000-0000-c000-000000000046");
+        public static readonly Guid RemUnknown2Interface = new Guid("00000143-0000-0000-c000-000000000046");
+        public static readonly Guid RundownInterface = new Guid("00000134-0000-0000-c000-000000000046");
+        public const uint ProcRemQueryInterface = 3;
+        public const uint ProcRemAddRef = 4;
+        public const uint ProcRemRelease = 5;
+        public const uint ProcRemQueryInterface2 = 6;
 
         public const uint MaxRequestedInterfaces = 0x8000;
         private const uint ReservedOrpcFlags = 0xFFFFFF90;
@@ -67,8 +80,16 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         private const int EmptyDualStringArraySize = 4;
 
         public static readonly Guid IUnknownId = new Guid("00000000-0000-0000-c000-000000000046");
+        public static readonly Guid IInspectableId = new Guid("af86e2e0-b12d-4c6a-9c5a-d7aa65101e90");
+
+        public static readonly Guid StandardMarshal = new Guid("00000017-0000-0000-c000-000000000046");
+        public static readonly Guid AggregatedStandardMarshal = new Guid("00000027-0000-0008-c000-000000000046");
+        public const int StandardObjRefSize = ObjRefHeaderSize + StdObjRef.Size + EmptyDualStringArraySize;
+        public const int HandlerObjRefSize = ObjRefHeaderSize + StdObjRef.Size + InterfaceIdSize + EmptyDualStringArraySize;
 
         public static ulong NewId() => (ulong)Random.Shared.NextInt64(1, long.MaxValue);
+
+        public static Guid InterfaceAt(ReadOnlySpan<byte> Interfaces, int Index) => new Guid(Interfaces.Slice(Index * InterfaceIdSize, InterfaceIdSize));
 
         // The headers are checked as combase checks them (ValidateAndCalculateSizeOfIncomingLocalThis).
         public static bool TryGetRequestParameters(ReadOnlySpan<byte> Stub, out int Offset)
@@ -227,14 +248,26 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public static void WriteEmptyLocalThat(ref Ndr20Writer Writer) => Writer.WriteZeros(LocalThatSize);
 
         // An OBJREF_STANDARD that names no resolver bindings, as every OBJREF between processes of one machine does.
-        public static void WriteStandardInterfacePointer(ref Ndr20Writer Writer, Guid Iid, in StdObjRef Std)
+        // ObjRef must be zero on entry.
+        public static void WriteStandardObjRef(Span<byte> ObjRef, Guid Iid, in StdObjRef Std)
         {
-            const int Length = ObjRefHeaderSize + StdObjRef.Size + EmptyDualStringArraySize;
-            Writer.WriteUInt32(Length);
-            Writer.WriteUInt32(Length);
-            Span<byte> ObjRef = Writer.Take(Length);
             WriteObjRefHeader(ObjRef, ObjRefStandard, Iid);
             Std.Write(ObjRef.Slice(ObjRefHeaderSize));
+        }
+
+        // ObjRef must be zero on entry.
+        public static void WriteHandlerObjRef(Span<byte> ObjRef, Guid Iid, in StdObjRef Std, Guid Handler)
+        {
+            WriteObjRefHeader(ObjRef, ObjRefHandler, Iid);
+            Std.Write(ObjRef.Slice(ObjRefHeaderSize));
+            Handler.TryWriteBytes(ObjRef.Slice(ObjRefHeaderSize + StdObjRef.Size, InterfaceIdSize));
+        }
+
+        public static void WriteInterfacePointerData(ref Ndr20Writer Writer, ReadOnlySpan<byte> Data)
+        {
+            Writer.WriteUInt32((uint)Data.Length);
+            Writer.WriteUInt32((uint)Data.Length);
+            Writer.WriteBytes(Data);
             Writer.AlignTo(4);
         }
 

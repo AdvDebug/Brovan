@@ -10,6 +10,7 @@ using System.Text;
 using Brovan.Core.Emulation.OS.Windows;
 using Brovan.Core.Emulation.OS.Windows.Win32k;
 using Brovan.Core.Helpers;
+using Brovan.Core.Helpers.WindowsImage;
 using static Brovan.Core.Emulation.OS.Windows.WinSysHelper;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -307,8 +308,10 @@ namespace Brovan.Core.Emulation.Guests
 
             lock (Instance.KernelLock)
             {
+                WinHelper.UnloadAppHives();
                 WinHelper.KernelFiles?.Dispose();
                 WinHelper.DxgkProcess.ReleaseAll(Instance);
+                WinHelper.RegManager.Dispose();
             }
         }
 
@@ -808,11 +811,19 @@ namespace Brovan.Core.Emulation.Guests
             (int)Registers.UC_X86_REG_RDX, (int)Registers.UC_X86_REG_R8, (int)Registers.UC_X86_REG_R9, (int)Registers.UC_X86_REG_R10,
         };
 
-        private static void WriteWaitReturn(BinaryEmulator Instance, CpuContext Context, bool ExitRegisters)
+        private static readonly int[] WaitReturnRegisters32 = { (int)Registers.UC_X86_REG_EIP, (int)Registers.UC_X86_REG_EAX };
+
+        internal static void WriteWaitReturn(BinaryEmulator Instance, CpuContext Context, bool ExitRegisters)
         {
             ulong[] Values = Instance.RegisterScratch;
             Values[0] = Context.RIP;
             Values[1] = Context.RAX;
+            if (Instance.IsX86Guest)
+            {
+                Instance._emulator.WriteRegisterBatch(WaitReturnRegisters32, Values, WaitReturnRegisters32.Length);
+                return;
+            }
+
             Values[2] = Context.RCX;
             Values[3] = Context.R11;
             Values[4] = Context.RDX;
@@ -2083,7 +2094,21 @@ namespace Brovan.Core.Emulation.Guests
             }
 
             AppxPackageModel.PublishRegistration(Instance, WinHelper, Identity);
+            UseSystemGraphicsLibraries();
             return Identity;
+        }
+
+        private static void UseSystemGraphicsLibraries()
+        {
+            HashSet<string> DxvkNames = DxvkImporter.ReadInstalledNames(AppContext.BaseDirectory);
+            if (DxvkNames == null)
+            {
+                if (DxvkImporter.IsInstalled(AppContext.BaseDirectory))
+                    Utils.LogError("[-] AppX: DXVK is installed without dxvk.files, so its DLLs in VirtualFS System32 still load in this packaged process. Run --install-dxvk to write the list.");
+                return;
+            }
+
+            GeneralHelper.IO.SystemCopyNames = DxvkNames;
         }
 
         private static string ResolveStartupDirectory(BinaryEmulator Instance, string ImagePath)

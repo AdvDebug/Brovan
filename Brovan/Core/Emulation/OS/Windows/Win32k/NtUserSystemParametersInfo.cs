@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -13,10 +14,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint SpiGetWorkArea = 0x0030;
         private const uint SpiGetHighContrast = 0x0042;
         private const uint SpiGetScreenReader = 0x0046;
+        private const uint SpiGetFontSmoothing = 0x004A;
         private const uint SpiGetWheelScrollLines = 0x0068;
         private const uint SpiGetWheelScrollChars = 0x006C;
         private const uint SpiGetMouseSpeed = 0x0070;
         private const uint SpiGetClientAreaAnimation = 0x1042;
+        private const uint SpiGetFontSmoothingType = 0x200A;
+        private const uint SpiGetFontSmoothingContrast = 0x200C;
+        private const uint SpiGetFontSmoothingOrientation = 0x2012;
         private const uint SpiGetMessageDuration = 0x2016;
 
         private const uint DefaultKeyboardSpeed = 31;
@@ -27,8 +32,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint DefaultMouseThreshold1 = 6;
         private const uint DefaultMouseThreshold2 = 10;
         private const uint DefaultMouseAcceleration = 1;
-        private const uint DefaultClientAreaAnimation = 1;
+        // Animations are off, so XAML starts no composition animations.
+        private const uint ClientAreaAnimation = 0;
         private const uint DefaultMessageDuration = 5;
+        private const uint DefaultFontSmoothing = 1;
+        private const uint FontSmoothingClearType = 2;
+        private const uint DefaultFontSmoothingContrast = 1200;
+        private const uint FontSmoothingOrientationRgb = 1;
 
         // HIGHCONTRAST {cbSize, dwFlags, lpszDefaultScheme}, whose scheme buffer win32k fills with 128 characters.
         private const ulong HighContrastFlagsOffset = 4;
@@ -85,6 +95,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 case SpiGetMouseSpeed:
                 case SpiGetClientAreaAnimation:
                 case SpiGetMessageDuration:
+                case SpiGetFontSmoothing:
+                case SpiGetFontSmoothingType:
+                case SpiGetFontSmoothingContrast:
+                case SpiGetFontSmoothingOrientation:
                 {
                     uint Value = Action switch
                     {
@@ -92,8 +106,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         SpiGetKeyboardDelay => DefaultKeyboardDelay,
                         SpiGetWheelScrollLines => DefaultWheelScrollLines,
                         SpiGetWheelScrollChars => DefaultWheelScrollChars,
-                        SpiGetClientAreaAnimation => DefaultClientAreaAnimation,
+                        SpiGetClientAreaAnimation => ClientAreaAnimation,
                         SpiGetMessageDuration => DefaultMessageDuration,
+                        SpiGetFontSmoothing => DefaultFontSmoothing,
+                        SpiGetFontSmoothingType => FontSmoothingClearType,
+                        SpiGetFontSmoothingContrast => DefaultFontSmoothingContrast,
+                        SpiGetFontSmoothingOrientation => FontSmoothingOrientationRgb,
                         _ => DefaultMouseSpeed,
                     };
 
@@ -137,13 +155,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static bool TryWriteDwords(BinaryEmulator Instance, ulong Address, ReadOnlySpan<uint> Values)
         {
-            if (Address == 0 || !Instance.IsRegionMapped(Address, (ulong)(Values.Length * sizeof(uint))))
-                return false;
+            if (Address != 0 && Instance.WriteMemory(Address, MemoryMarshal.AsBytes(Values)))
+                return true;
 
-            for (int i = 0; i < Values.Length; i++)
-                Instance._emulator.WriteMemory(Address + (ulong)(i * sizeof(uint)), Values[i], sizeof(uint));
-
-            return true;
+            Instance.SetLastWinError(Win32kHelper.ERROR_NOACCESS);
+            return false;
         }
     }
 }

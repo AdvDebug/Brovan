@@ -1,4 +1,5 @@
-﻿using static Brovan.Core.Helpers.BinaryHelpers;
+﻿using Brovan.Core.Emulation.Guests;
+using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -43,10 +44,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 TargetThread.State = EmulatedThreadState.Ready;
 
                 if (Instance.CurrentThread == TargetThread)
-                {
-                    Instance.WriteRegister(Registers.UC_X86_REG_RIP, TargetThread.Context.RIP);
-                    Instance.WriteRegister(Registers.UC_X86_REG_RAX, TargetThread.Context.RAX);
-                }
+                    WindowsGuest.WriteWaitReturn(Instance, TargetThread.Context, false);
                 else
                 {
                     Instance.YieldSliceAfterWake(TargetThread);

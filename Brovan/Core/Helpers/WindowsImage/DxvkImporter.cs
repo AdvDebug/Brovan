@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Formats.Tar;
 using System.IO;
 using System.IO.Compression;
@@ -13,6 +14,34 @@ namespace Brovan.Core.Helpers.WindowsImage
         private const string LatestRelease = "https://api.github.com/repos/doitsujin/dxvk/releases/latest";
         private const string TaggedRelease = "https://api.github.com/repos/doitsujin/dxvk/releases/tags/";
         private const string VersionFile = "dxvk.version";
+        private const string NamesFile = "dxvk.files";
+
+        public static bool IsInstalled(string BaseDirectory) => File.Exists(Path.Combine(BaseDirectory, VersionFile));
+
+        public static HashSet<string>? ReadInstalledNames(string BaseDirectory)
+        {
+            string NamesPath = Path.Combine(BaseDirectory, NamesFile);
+            if (!File.Exists(NamesPath))
+                return null;
+
+            try
+            {
+                HashSet<string> Names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string Line in File.ReadLines(NamesPath))
+                {
+                    string Name = Line.Trim();
+                    if (Name.Length != 0)
+                        Names.Add(Name);
+                }
+
+                return Names;
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Utils.LogError($"[-] Could not read {NamesFile}: {Error.Message}");
+                return null;
+            }
+        }
 
         public static bool Import(string BaseDirectory, string? Version, Action<string> Report, Action<long, long, long, long>? Progress = null)
         {
@@ -43,7 +72,8 @@ namespace Brovan.Core.Helpers.WindowsImage
                 Report($"[*] Downloading DXVK {Tag} ({Size / (1024 * 1024)} MB)...");
 
                 long Done = 0;
-                int Installed = Extract(Client, ArchiveAddress, System32, SysWow64,
+                SortedSet<string> Names = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+                int Installed = Extract(Client, ArchiveAddress, System32, SysWow64, Names,
                     Count => Progress?.Invoke(0, 1, Done += Count, Size));
 
                 if (Installed == 0)
@@ -52,6 +82,7 @@ namespace Brovan.Core.Helpers.WindowsImage
                     return false;
                 }
 
+                File.WriteAllLines(Path.Combine(BaseDirectory, NamesFile), Names);
                 File.WriteAllText(Path.Combine(BaseDirectory, VersionFile), Tag);
                 Progress?.Invoke(1, 1, Size, Size);
 
@@ -103,7 +134,7 @@ namespace Brovan.Core.Helpers.WindowsImage
             return false;
         }
 
-        private static int Extract(HttpClient Client, string Address, string System32, string SysWow64, Action<long> Advanced)
+        private static int Extract(HttpClient Client, string Address, string System32, string SysWow64, ISet<string> Names, Action<long> Advanced)
         {
             using HttpRequestMessage Request = new HttpRequestMessage(HttpMethod.Get, Address);
             using HttpResponseMessage Response = Client.Send(Request, HttpCompletionOption.ResponseHeadersRead);
@@ -131,8 +162,10 @@ namespace Brovan.Core.Helpers.WindowsImage
                 if (Target == null)
                     continue;
 
+                string Name = Path.GetFileName(EntryPath);
                 Directory.CreateDirectory(Target);
-                Entry.ExtractToFile(Path.Combine(Target, Path.GetFileName(EntryPath)), overwrite: true);
+                Entry.ExtractToFile(Path.Combine(Target, Name), overwrite: true);
+                Names.Add(Name);
                 Count++;
             }
 

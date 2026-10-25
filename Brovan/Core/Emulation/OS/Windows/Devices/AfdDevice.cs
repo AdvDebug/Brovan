@@ -1558,15 +1558,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static int PollTimeoutMs(BinaryEmulator Instance, long Timeout)
         {
-            long Delta = Timeout < 0
-                ? (Timeout == long.MinValue ? long.MaxValue : -Timeout)
-                : Timeout - Instance.GetEmulatedSystemTimeFileTimeUtc();
-
-            if (Delta <= 0)
-                return 0;
-
-            long Milliseconds = Delta / 10000 + (Delta % 10000 != 0 ? 1 : 0);
-            return Milliseconds > int.MaxValue ? int.MaxValue : (int)Milliseconds;
+            return (int)Math.Min(Instance.WinHelper.TimeoutToMilliseconds(Timeout), int.MaxValue);
         }
 
         public NTSTATUS Handle(uint Ioctl, ref DeviceData Data, BinaryEmulator Instance)

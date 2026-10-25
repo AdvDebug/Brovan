@@ -27,6 +27,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint ProcAllocateReservedIds = 3;
         private const uint ProcBulkUpdateOIDs = 4;
         private const uint ProcServerAllocateOXIDAndOIDs = 6;
+        private const uint ProcServerAllocateOIDs = 7;
         private const uint ProcServerFreeOXIDAndOIDs = 8;
         private const uint ProcDisconnect = 10;
         private const uint ProcRegisterWindowPropInterface = 6;
@@ -82,9 +83,19 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         internal readonly record struct ServerOxid(string Endpoint, Guid RemUnknownIpid);
 
+        internal readonly record struct HostClass(HostApartment Apartment, HostObject Object);
+
         private static readonly Dictionary<ulong, ServerOxid> ServerOxids = new Dictionary<ulong, ServerOxid>();
+
+        // rpcss makes one primary OXID per process at its first registration and returns it from every one.
+        private static ulong PrimaryOxid;
         private static ulong NextId = 0x1000;
         private static uint NextCookie = 1;
+
+        internal static void RegisterClass(WinSysHelper Helper, Guid Class, HostApartment Apartment, HostObject Object)
+        {
+            Helper.HostClasses[Class] = new HostClass(Apartment, Object);
+        }
 
         public static bool TryHandle(WinPort Port, PortReply Served, in LrpcMessage Message, BinaryEmulator Instance, out byte[] Reply)
         {
@@ -134,6 +145,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 case ProcServerAllocateOXIDAndOIDs:
                     return ServerAllocateOXIDAndOIDs(Stub);
 
+                case ProcServerAllocateOIDs:
+                    return ServerAllocateOIDs(Stub);
+
                 case ProcServerFreeOXIDAndOIDs:
                     return ServerFreeOXIDAndOIDs(Stub);
 
@@ -170,12 +184,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (!TryReadActivationRequest(Message.StubData, ProcNumber == ProcCreateInstance, out Guid Class, out ReadOnlySpan<byte> Interfaces))
                 return null;
 
-            if (Class == ActivationManagerPortHandler.RegistrarClass)
+            if (Instance.WinHelper.HostClasses.TryGetValue(Class, out HostClass Host))
             {
                 if (ProcNumber == ProcCreateInstance)
-                    return BuildActivationReply(Message, Instance, Interfaces);
+                    return BuildActivationReply(Message, Instance, Host, Interfaces);
 
-                Utils.LogError("[-] RPCSS: the class object of the ActivatableApplicationRegistrar is not served.");
+                Utils.LogError($"[-] RPCSS: the class object of {Class} is not served.");
             }
 
             return LrpcPacket.BuildResponse(Message, ClassNotRegisteredReply);
@@ -253,7 +267,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return Info.TryReadBytes((int)InterfaceCount * Orpc.InterfaceIdSize, out Interfaces);
         }
 
-        private static byte[] BuildActivationReply(in LrpcMessage Message, BinaryEmulator Instance, ReadOnlySpan<byte> Interfaces)
+        private static byte[] BuildActivationReply(in LrpcMessage Message, BinaryEmulator Instance, HostClass Host, ReadOnlySpan<byte> Interfaces)
         {
             // Each interface takes at least 24 bytes of PropsOutInfo, so a long list needs a view and can only fault.
             int Count = Interfaces.Length / Orpc.InterfaceIdSize;
@@ -263,20 +277,21 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return LrpcPacket.BuildFault(Message, LrpcPacket.RpcSCannotSupport);
             }
 
-            byte[] Properties = BuildActivationPropertiesOut(Instance, Interfaces);
+            HostCall Call = new HostCall(Host.Apartment, Instance);
+            byte[] Properties = BuildActivationPropertiesOut(Instance, Call, Host.Object, Interfaces);
             Ndr20Writer Writer = new Ndr20Writer(0xB0 + Properties.Length);
             Orpc.WriteResponseHeader(ref Writer);
             Writer.WriteUniqueReferent();
             Orpc.WriteCustomInterfacePointer(ref Writer, ActivationPropertiesOutInterface, ActivationPropertiesOut, (uint)Properties.Length, Properties);
             Writer.WriteUInt32(Orpc.SOk);
-            return LrpcPacket.BuildResponse(Message, Writer.Written);
+            return Host.Apartment.Respond(Message, Call, Writer.Written);
         }
 
-        private static byte[] BuildActivationPropertiesOut(BinaryEmulator Instance, ReadOnlySpan<byte> Interfaces)
+        private static byte[] BuildActivationPropertiesOut(BinaryEmulator Instance, HostCall Call, HostObject Object, ReadOnlySpan<byte> Interfaces)
         {
             const uint PropertyCount = 2;
-            byte[] PropsOut = Serialize(BuildPropsOutInfo(Instance, Interfaces).Written);
-            byte[] ScmReply = Serialize(BuildScmReplyInfo(Instance).Written);
+            byte[] PropsOut = Serialize(BuildPropsOutInfo(Call, Object, Interfaces).Written);
+            byte[] ScmReply = Serialize(BuildScmReplyInfo(Instance, Call.Apartment).Written);
 
             Ndr20Writer Writer = new Ndr20Writer(0x60);
             Writer.WriteUInt32(0);
@@ -308,13 +323,14 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return Blob;
         }
 
-        // BuildActivationReply bounds the interface count, so the stackalloc stays small.
-        private static Ndr20Writer BuildPropsOutInfo(BinaryEmulator Instance, ReadOnlySpan<byte> Interfaces)
+        // BuildActivationReply bounds the interface count, so the stackallocs stay small.
+        private static Ndr20Writer BuildPropsOutInfo(HostCall Call, HostObject Object, ReadOnlySpan<byte> Interfaces)
         {
             int Count = Interfaces.Length / Orpc.InterfaceIdSize;
-            Span<bool> Supported = stackalloc bool[Count];
+            Span<uint> Results = stackalloc uint[Count];
+            Span<StdObjRef> Objects = stackalloc StdObjRef[Count];
             for (int i = 0; i < Count; i++)
-                Supported[i] = ActivationManagerPortHandler.IsRegistrarInterface(InterfaceAt(Interfaces, i));
+                Results[i] = Call.Query(Object, Orpc.InterfaceAt(Interfaces, i), HostObject.PublicRefs, out Objects[i]);
 
             Ndr20Writer Writer = new Ndr20Writer(0x40 + Count * 0x70);
             Writer.WriteUInt32((uint)Count);
@@ -325,13 +341,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.WriteBytes(Interfaces);
 
             Writer.WriteUInt32((uint)Count);
-            foreach (bool Found in Supported)
-                Writer.WriteUInt32(Found ? Orpc.SOk : Orpc.ENoInterface);
+            foreach (uint Result in Results)
+                Writer.WriteUInt32(Result);
 
             Writer.WriteUInt32((uint)Count);
-            foreach (bool Found in Supported)
+            foreach (uint Result in Results)
             {
-                if (Found)
+                if (Result == Orpc.SOk)
                     Writer.WriteUniqueReferent();
                 else
                     Writer.WriteUInt32(0);
@@ -339,23 +355,18 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             for (int i = 0; i < Count; i++)
             {
-                if (!Supported[i])
-                    continue;
-
-                Guid Interface = InterfaceAt(Interfaces, i);
-                Orpc.WriteStandardInterfacePointer(ref Writer, Interface, ActivationManagerPortHandler.GetRegistrar(Instance, Interface));
+                if (Results[i] == Orpc.SOk)
+                    Object.WriteInterfacePointer(ref Writer, Orpc.InterfaceAt(Interfaces, i), Objects[i]);
             }
 
             return Writer;
         }
 
-        private static Guid InterfaceAt(ReadOnlySpan<byte> Interfaces, int Index) => new Guid(Interfaces.Slice(Index * Orpc.InterfaceIdSize, Orpc.InterfaceIdSize));
-
         // _PRIV_RESOLVER_INFO carries the server's OXID_INFO, so the client never asks the resolver.
-        private static Ndr20Writer BuildScmReplyInfo(BinaryEmulator Instance)
+        private static Ndr20Writer BuildScmReplyInfo(BinaryEmulator Instance, HostApartment Apartment)
         {
-            Guid RemUnknownIpid = ActivationManagerPortHandler.GetRemUnknownIpid(Instance);
-            ulong Oxid = ActivationManagerPortHandler.Oxid;
+            Guid RemUnknownIpid = Apartment.RemUnknownIpid;
+            ulong Oxid = Apartment.Oxid;
 
             Ndr20Writer Writer = new Ndr20Writer(0x180);
             Writer.WriteUniqueReferent();
@@ -365,7 +376,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             Writer.AlignTo(8);
             Writer.WriteUInt32(MultithreadedApartmentTid);
-            Writer.WriteUInt32(Instance.WinHelper.ShellProcess.PID);
+            Writer.WriteUInt32(Apartment.ProcessId);
             Writer.WriteUInt32(AuthnLevelConnect);
             Writer.WriteUInt16(Orpc.ComVersionMajor);
             Writer.WriteUInt16(Orpc.ComVersionMinor);
@@ -375,7 +386,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.WriteGuid(RemUnknownIpid);
             Writer.WriteUInt32(OxidInfoFlags);
             Writer.WriteUniqueReferent();
-            Writer.WriteGuid(ActivationManagerPortHandler.ProcessIdentifier);
+            Writer.WriteGuid(Apartment.ProcessIdentifier);
             Writer.WriteUInt64(0);
             Writer.WriteUInt32(0);
             for (int i = 0; i < OxidInfoHstringCount; i++)
@@ -385,7 +396,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.WriteUInt64(LocalMachineId);
             Writer.WriteUInt32(0);
 
-            WriteResolverBindings(ref Writer, ActivationManagerPortHandler.Endpoint, ActivationManagerPortHandler.GetPrincipal(Instance));
+            WriteResolverBindings(ref Writer, Apartment.Endpoint, HostApartment.GetPrincipal(Instance));
 
             for (int i = 0; i < OxidInfoHstringCount; i++)
                 Orpc.WriteHstringBody(ref Writer, default);
@@ -496,7 +507,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             Writer.AlignTo(4);
             Writer.WriteUInt32(IdCount);
-            Writer.AlignTo(8);
+            Writer.AlignArray(IdCount, 8);
             for (uint i = 0; i < IdCount; i++)
                 Writer.WriteUInt64(NextId++);
 
@@ -585,14 +596,38 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (!TryReadIdCount(Stub, out uint Count))
                 return null;
 
-            Ndr20Writer Writer = new Ndr20Writer(32 + (int)Count * 8);
-            Writer.WriteUInt32(Count);
-            Writer.AlignTo(8);
-            for (uint i = 0; i < Count; i++)
+            return BuildNewIds(Count, Count, OrOk);
+        }
+
+        // The resolver keeps no OID state, so the OIDs the apartment gives back are skipped.
+        private static byte[] ServerAllocateOIDs(ReadOnlySpan<byte> Stub)
+        {
+            Ndr20Reader Reader = new Ndr20Reader(Stub);
+            if (!Reader.TryReadContextHandle(out _) || !Reader.TryReadUInt64(out ulong Oxid))
+                return null;
+
+            if (!Reader.TryReadUInt32(out uint ReturnCount) || ReturnCount > MaximumIds
+                || !Reader.TryReadUInt32(out uint Conformance) || Conformance != ReturnCount)
+                return null;
+
+            Reader.AlignArray(ReturnCount, 8);
+            if (!Reader.TrySkip((int)ReturnCount * sizeof(ulong)) || !Reader.TryReadUInt32(out uint Count) || Count > MaximumIds)
+                return null;
+
+            return ServerOxids.ContainsKey(Oxid) ? BuildNewIds(Count, Count, OrOk) : BuildNewIds(Count, 0, OrBadOxid);
+        }
+
+        private static byte[] BuildNewIds(uint Size, uint Allocated, uint Status)
+        {
+            Ndr20Writer Writer = new Ndr20Writer(32 + (int)Size * 8);
+            Writer.WriteUInt32(Size);
+            Writer.AlignArray(Size, 8);
+            for (uint i = 0; i < Allocated; i++)
                 Writer.WriteUInt64(NextId++);
 
-            Writer.WriteUInt32(Count);
-            Writer.WriteUInt32(OrOk);
+            Writer.WriteZeros((int)(Size - Allocated) * sizeof(ulong));
+            Writer.WriteUInt32(Allocated);
+            Writer.WriteUInt32(Status);
             return Writer.ToArray();
         }
 
@@ -615,19 +650,25 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (!TryReadIdCount(Stub, out uint Count))
                 return null;
 
-            if (!TryReadServerOxid(Stub, out ServerOxid Server))
+            if (!TryReadServerOxid(Stub, out ServerOxid Server, out ServerOxid Primary))
                 Utils.LogError("[-] RPCSS: the OXID_INFO of a server apartment could not be read; its endpoint is unknown.");
+
+            if (PrimaryOxid == 0)
+            {
+                PrimaryOxid = NextId++;
+                ServerOxids[PrimaryOxid] = Primary;
+            }
 
             Ndr20Writer Writer = new Ndr20Writer(64 + (int)Count * 8);
             ulong Oxid = NextId++;
             ServerOxids[Oxid] = Server;
             Writer.WriteUInt64(Oxid);
-            Writer.WriteUInt64(NextId++);
+            Writer.WriteUInt64(PrimaryOxid);
 
             Writer.WriteUInt32(Count);
             Writer.WriteUInt32(0);
             Writer.WriteUInt32(Count);
-            Writer.AlignTo(8);
+            Writer.AlignArray(Count, 8);
             for (uint i = 0; i < Count; i++)
                 Writer.WriteUInt64(NextId++);
 
@@ -640,10 +681,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return Writer.ToArray();
         }
 
-        private static bool TryReadServerOxid(ReadOnlySpan<byte> Stub, out ServerOxid Server)
+        private static bool TryReadServerOxid(ReadOnlySpan<byte> Stub, out ServerOxid Server, out ServerOxid Primary)
         {
             const int OxidInfoFixedSize = 0x80;
             Server = default;
+            Primary = default;
 
             Ndr20Reader Reader = new Ndr20Reader(Stub);
             if (!Reader.TryReadContextHandle(out _) || !Reader.TryReadUInt32(out _))
@@ -673,6 +715,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return false;
 
             Server = new ServerOxid(Endpoint, new Guid(Info.Slice(0x24, 16)));
+
+            // The RemUnknown IPID that rpcss gives the primary OXID.
+            Primary = new ServerOxid(Endpoint, new Guid(Info.Slice(0x70, 16)));
             return true;
         }
 
@@ -752,13 +797,20 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return null;
 
             ulong Oxid = BinaryPrimitives.ReadUInt64LittleEndian(Stub.Slice(FreeOxidOffset, sizeof(ulong)));
-            return BuildStatus(ServerOxids.Remove(Oxid) ? OrOk : OrBadOxid);
+            if (!ServerOxids.Remove(Oxid))
+                return BuildStatus(OrBadOxid);
+
+            if (Oxid == PrimaryOxid)
+                PrimaryOxid = 0;
+
+            return BuildStatus(OrOk);
         }
 
         // rpcss runs down the process context, which frees every OXID it registered, and returns a NULL handle.
         private static byte[] Disconnect()
         {
             ServerOxids.Clear();
+            PrimaryOxid = 0;
 
             Ndr20Writer Writer = new Ndr20Writer(Ndr20Writer.ContextHandleSize + 4);
             Writer.WriteContextHandle(ReadOnlySpan<byte>.Empty);

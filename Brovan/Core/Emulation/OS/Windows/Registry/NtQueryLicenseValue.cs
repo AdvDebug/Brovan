@@ -15,10 +15,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             SystemHive = null;
 
-            if (Instance?.WinHelper?.RegHives == null)
+            if (Instance?.WinHelper == null)
                 return false;
 
-            foreach (Hive Hive in Instance.WinHelper.RegHives)
+            foreach (Hive Hive in Instance.WinHelper.RegManager.MachineHives)
             {
                 if (Hive == null || Hive.Reader == null || string.IsNullOrEmpty(Hive.NtMountPoint))
                     continue;

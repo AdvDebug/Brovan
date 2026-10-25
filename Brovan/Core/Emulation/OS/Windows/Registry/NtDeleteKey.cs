@@ -8,9 +8,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             ulong KeyHandle = Instance.WinHelper.GetArg(0);
 
-            WinRegKey RegKey = Instance.WinHelper.HandleManager.GetObjectByHandle<WinRegKey>(KeyHandle);
-            if (RegKey == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(KeyHandle, AccessMask.Delete, out WinRegKey RegKey);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtDeleteKey Running with the FullPath: {RegKey.FullPath}", LogFlags.Syscall);

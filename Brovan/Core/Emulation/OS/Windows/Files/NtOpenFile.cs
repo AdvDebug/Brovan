@@ -7,7 +7,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal class NtOpenFile : IWinSyscall
     {
         private const uint FILE_DIRECTORY_FILE = 0x00000001;
-        private const uint FILE_NON_DIRECTORY_FILE = 0x00000040;
+        internal const uint FILE_NON_DIRECTORY_FILE = 0x00000040;
         private const uint FILE_OPEN = 1;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -88,18 +88,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Handle = 0;
 
-            bool IsDirectory = (OpenOptions & FILE_DIRECTORY_FILE) != 0 || Path.EndsWith("\\", StringComparison.Ordinal);
-
-            if ((OpenOptions & FILE_NON_DIRECTORY_FILE) != 0 && IsDirectory)
-                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
-
-            Path = Path.Replace('/', '\\').TrimEnd('\0');
-
-            WindowsFileStream Stream = NtCreateFile.OpenLookupStream(Instance, Path, WinFile.AllowsRead(DesiredAccess), out bool ParentExists);
-            NTSTATUS Status = CheckExistingPath(Instance, Stream, Path, DesiredAccess, ShareAccess, OpenOptions, ParentExists, ref IsDirectory);
+            NTSTATUS Status = PrepareExisting(Instance, ref Path, DesiredAccess, ShareAccess, OpenOptions, out WindowsFileStream Stream, out bool IsDirectory);
             if (Status != NTSTATUS.STATUS_SUCCESS)
             {
-                Stream.Dispose();
+                Stream?.Dispose();
                 return Status;
             }
 
@@ -129,6 +121,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Handle = Added.Handle;
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // The stream comes back on failure too, for a caller that creates the file.
+        internal static NTSTATUS PrepareExisting(BinaryEmulator Instance, ref string Path, AccessMask DesiredAccess, uint ShareAccess, uint OpenOptions, out WindowsFileStream Stream, out bool IsDirectory)
+        {
+            Stream = null;
+            IsDirectory = (OpenOptions & FILE_DIRECTORY_FILE) != 0 || Path.EndsWith("\\", StringComparison.Ordinal);
+
+            if ((OpenOptions & FILE_NON_DIRECTORY_FILE) != 0 && IsDirectory)
+                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+
+            Path = Path.Replace('/', '\\').TrimEnd('\0');
+
+            Stream = NtCreateFile.OpenLookupStream(Instance, Path, WinFile.AllowsRead(DesiredAccess), out bool ParentExists);
+            return CheckExistingPath(Instance, Stream, Path, DesiredAccess, ShareAccess, OpenOptions, ParentExists, ref IsDirectory);
         }
 
         private static NTSTATUS CheckExistingPath(BinaryEmulator Instance, WindowsFileStream Stream, string Path, AccessMask DesiredAccess, uint ShareAccess, uint OpenOptions, bool ParentExists, ref bool IsDirectory)

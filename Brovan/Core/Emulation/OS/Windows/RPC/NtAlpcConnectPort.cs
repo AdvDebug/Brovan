@@ -37,11 +37,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Connect(Instance, PortHandlePtr, Port);
         }
 
-        // NtAlpcConnectPort and NtAlpcConnectPortEx share the arguments in slots 3, 6, 7 and 10.
+        // NtAlpcConnectPort and NtAlpcConnectPortEx share the arguments in slots 3, 4, 6, 7 and 10.
         internal static NTSTATUS Connect(BinaryEmulator Instance, ulong PortHandlePtr, WinPort Port)
         {
             if (Port.IsServer)
-                return AlpcMessaging.ConnectGuest(Instance, Port, PortHandlePtr, Instance.WinHelper.GetArg(3), Instance.WinHelper.GetArg(6), Instance.WinHelper.GetArg(7), Instance.WinHelper.GetArg(10));
+                return AlpcMessaging.ConnectGuest(Instance, Port, PortHandlePtr, Instance.WinHelper.GetArg(3), (uint)Instance.WinHelper.GetArg(4), Instance.WinHelper.GetArg(6), Instance.WinHelper.GetArg(7), Instance.WinHelper.GetArg(10));
 
             WinHandle Handle = Instance.WinHelper.OpenObjectHandle(Port, AccessMask.StandardRightsAll);
 

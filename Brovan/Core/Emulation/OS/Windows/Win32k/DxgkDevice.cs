@@ -54,6 +54,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal ulong CommandBuffer;
         internal bool DmaBufferReady;
         internal bool IsBlocked;
+        internal uint InProcessPriority;
         internal readonly Queue<DxgkPacket> Packets = new();
 
         internal override void Release(BinaryEmulator Instance, DxgkProcess Process)

@@ -1853,6 +1853,15 @@ namespace Brovan
                 set => t_wow64FileRedirect = value ? (byte)1 : (byte)2;
             }
 
+            // System32 and SysWOW64 file names this process never reads from VirtualFS.
+            public static HashSet<string> SystemCopyNames;
+
+            public static void BeginGuest(bool Wow64Redirect)
+            {
+                Wow64FileRedirectDefault = Wow64Redirect;
+                SystemCopyNames = null;
+            }
+
             private const string System32WindowsPath = "C:\\Windows\\System32";
             private const string SysWow64WindowsPath = "C:\\Windows\\SysWOW64";
             private const string SysnativeWindowsPath = "C:\\Windows\\Sysnative";
@@ -2846,7 +2855,7 @@ namespace Brovan
                 if (!NativeSystemView)
                     WinPath = ApplyWow64FileRedirect(WinPath);
 
-                string VirtualPath = ResolveVirtualHostPathInternal(WinPath, CreateDirectories, PreserveFinalLink);
+                string VirtualPath = ReadsSystemCopy(WinPath) ? null : ResolveVirtualHostPathInternal(WinPath, CreateDirectories, PreserveFinalLink);
                 if (!string.IsNullOrEmpty(VirtualPath))
                 {
                     if (CreateDirectories || HostPathExists(VirtualPath))
@@ -2895,7 +2904,7 @@ namespace Brovan
                     return null;
 
                 WinPath = ApplyWow64FileRedirect(WinPath);
-                return ResolveVirtualHostPathInternal(WinPath, CreateDirectories);
+                return ReadsSystemCopy(WinPath) ? null : ResolveVirtualHostPathInternal(WinPath, CreateDirectories);
             }
 
             private static string NormalizeWindowsEmulatedPath(string Raw)
@@ -2983,6 +2992,22 @@ namespace Brovan
                 }
 
                 return CanonicalizeWindowsAbsolutePath(WinPath);
+            }
+
+            private static bool ReadsSystemCopy(string WinPath)
+            {
+                HashSet<string> Names = SystemCopyNames;
+                if (Names == null)
+                    return false;
+
+                int Separator = WinPath.LastIndexOf('\\');
+                if (Separator <= 0)
+                    return false;
+
+                ReadOnlySpan<char> Parent = WinPath.AsSpan(0, Separator);
+                return (Parent.Equals(System32WindowsPath, StringComparison.OrdinalIgnoreCase) ||
+                        Parent.Equals(SysWow64WindowsPath, StringComparison.OrdinalIgnoreCase))
+                    && Names.GetAlternateLookup<ReadOnlySpan<char>>().Contains(WinPath.AsSpan(Separator + 1));
             }
 
             /// <summary>

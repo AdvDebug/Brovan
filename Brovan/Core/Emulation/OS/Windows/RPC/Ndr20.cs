@@ -165,6 +165,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             Position = Padded;
         }
 
+        // rpcrt4 pads before the elements of an array only when it has any.
+        public void AlignArray(uint Count, int Alignment)
+        {
+            if (Count != 0)
+                AlignTo(Alignment);
+        }
+
         public void WriteUniqueWideString(string Value)
         {
             if (Value == null)
@@ -274,6 +281,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public void Align(int Alignment)
         {
             Position = (Position + Alignment - 1) & ~(Alignment - 1);
+        }
+
+        public void AlignArray(uint Count, int Alignment)
+        {
+            if (Count != 0)
+                Align(Alignment);
         }
 
         public bool TrySkip(int Count) => TryReadBytes(Count, out _);

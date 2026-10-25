@@ -126,6 +126,7 @@ namespace Brovan.Core.Helpers
         internal string NtMountPoint;
         internal RegistryHiveReader Reader;
         internal RegistryHiveWriter Writer;
+        internal AppHive App;
 
         internal FileStream Stream;
         internal SafeFileHandle Handle;
@@ -178,7 +179,19 @@ namespace Brovan.Core.Helpers
                 Writer.ReloadHeader();
                 Length = Writer.FileLength;
             }
+            else
+            {
+                try
+                {
+                    Length = Stream.Length;
+                }
+                catch (IOException)
+                {
+                    return;
+                }
+            }
 
+            Remap();
             Reader.Invalidate(Length);
         }
 
@@ -2560,13 +2573,56 @@ namespace Brovan.Core.Helpers
         }
     }
 
-    public class RegistryManager
+    // NT unloads an application hive when the last key opened in it closes.
+    public sealed class AppHive
     {
+        internal string FileKey;
+        internal Hive Hive;
+        internal bool Private;
+        internal int LiveKeys;
+        internal object FileRecord;
+
+        internal string MountName => Hive.NtMountPoint;
+
+        internal bool ReadOnly => !Hive.Writable;
+    }
+
+    public class RegistryManager : IDisposable
+    {
+        internal const string AppHiveRoot = @"\REGISTRY\A";
+
         private readonly string RootPath;
+        private Hive[] BootHives = Array.Empty<Hive>();
+        private readonly Dictionary<string, AppHive> AppHivesByFile = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, AppHive> AppHivesByMount = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, AppHive>.AlternateLookup<ReadOnlySpan<char>> AppHivesByMountSpan;
 
         public RegistryManager(string RootPath)
         {
             this.RootPath = RootPath;
+            AppHivesByMountSpan = AppHivesByMount.GetAlternateLookup<ReadOnlySpan<char>>();
+        }
+
+        internal ReadOnlySpan<Hive> MachineHives => BootHives;
+
+        internal Hive DefaultHive => BootHives.Length != 0 ? BootHives[0] : null;
+
+        public void LoadBootHives()
+        {
+            if (!Directory.Exists(RootPath))
+                return;
+
+            EnsureUserHive("NTUSER.DAT");
+
+            List<Hive> Hives = new List<Hive>();
+            foreach (string HiveFile in Directory.GetFiles(RootPath))
+            {
+                Hive Loaded = LoadHive(Path.GetFileName(HiveFile));
+                if (Loaded != null)
+                    Hives.Add(Loaded);
+            }
+
+            BootHives = Hives.ToArray();
         }
 
         public Hive LoadHive(string HiveFileName)
@@ -2582,19 +2638,98 @@ namespace Brovan.Core.Helpers
             if (!File.Exists(HivePath))
                 return null;
 
+            return OpenHive(HivePath, NtMountPoint, true, true, FileShare.ReadWrite);
+        }
+
+        internal static bool IsAppHivePath(string NtPath)
+        {
+            return IsUnderKey(NtPath, AppHiveRoot);
+        }
+
+        internal static bool IsUnderKey(string NtPath, string KeyPath)
+        {
+            return NtPath != null && NtPath.StartsWith(KeyPath, StringComparison.OrdinalIgnoreCase)
+                && (NtPath.Length == KeyPath.Length || NtPath[KeyPath.Length] == '\\');
+        }
+
+        internal static int AppHiveMountLength(string NtPath) => IsAppHivePath(NtPath) ? MountLengthUnderAppHiveRoot(NtPath) : -1;
+
+        private static int MountLengthUnderAppHiveRoot(string NtPath)
+        {
+            if (NtPath.Length <= AppHiveRoot.Length + 1)
+                return -1;
+
+            int End = NtPath.IndexOf('\\', AppHiveRoot.Length + 1);
+            return End < 0 ? NtPath.Length : End;
+        }
+
+        internal AppHive FindAppHiveByFile(string FileKey)
+        {
+            return AppHivesByFile.TryGetValue(FileKey, out AppHive Entry) ? Entry : null;
+        }
+
+        internal bool IsAppHiveMounted(string MountName) => AppHivesByMount.ContainsKey(MountName);
+
+        internal bool TryMount(string HostPath, string MountName, string FileKey, bool ReadOnly, bool Private, out AppHive Entry, out bool Full)
+        {
+            Entry = null;
+            Full = AppHivesByMount.Count >= Settings.MemoryBudget.AppHives;
+            if (Full || AppHivesByMount.ContainsKey(MountName) || AppHivesByFile.ContainsKey(FileKey))
+                return false;
+
+            Hive Loaded = OpenHive(HostPath, MountName, !ReadOnly, false, FileShare.ReadWrite | FileShare.Delete);
+            if (Loaded == null)
+                return false;
+
+            Entry = new AppHive { FileKey = FileKey, Hive = Loaded, Private = Private };
+            Loaded.App = Entry;
+            AppHivesByMount[Entry.MountName] = Entry;
+            AppHivesByFile[FileKey] = Entry;
+            return true;
+        }
+
+        // Dictionary.Remove keeps an enumerator valid, so an unload during a walk of this collection is safe.
+        internal Dictionary<string, AppHive>.ValueCollection MountedAppHives => AppHivesByMount.Values;
+
+        internal bool Unmount(AppHive Entry)
+        {
+            if (Entry == null || !AppHivesByMount.Remove(Entry.MountName))
+                return false;
+
+            AppHivesByFile.Remove(Entry.FileKey);
+            Entry.Hive.App = null;
+            Entry.Hive.Dispose();
+            return true;
+        }
+
+        public void Dispose()
+        {
+            foreach (AppHive Entry in AppHivesByMount.Values)
+                Entry.Hive.Dispose();
+
+            AppHivesByMount.Clear();
+            AppHivesByFile.Clear();
+
+            foreach (Hive Loaded in BootHives)
+                Loaded.Dispose();
+
+            BootHives = Array.Empty<Hive>();
+        }
+
+        private static Hive OpenHive(string HivePath, string NtMountPoint, bool Writable, bool FallBackToRead, FileShare Share)
+        {
             FileStream Stream = null;
-            bool Writable = true;
 
             try
             {
                 try
                 {
-                    Stream = new FileStream(HivePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, 4096, FileOptions.RandomAccess);
+                    Stream = new FileStream(HivePath, FileMode.Open, Writable ? FileAccess.ReadWrite : FileAccess.Read, Share, 4096, FileOptions.RandomAccess);
                 }
-                catch (Exception)
+                catch (Exception) when (Writable && FallBackToRead)
                 {
                     Writable = false;
-                    Stream = new FileStream(HivePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, FileOptions.RandomAccess);
+                    Stream = new FileStream(HivePath, FileMode.Open, FileAccess.Read, Share, 4096, FileOptions.RandomAccess);
                 }
 
                 Hive Loaded = new Hive
@@ -2648,7 +2783,7 @@ namespace Brovan.Core.Helpers
             try
             {
                 Directory.CreateDirectory(RootPath);
-                File.WriteAllBytes(HivePath, BuildEmptyHive(HiveFileName));
+                File.WriteAllBytes(HivePath, BuildEmptyHive(Path.GetFileName(HiveFileName), "CMI-CreateHive{00000000-0000-0000-0000-000000000000}", 5));
                 return true;
             }
             catch (Exception)
@@ -2657,7 +2792,13 @@ namespace Brovan.Core.Helpers
             }
         }
 
-        private static byte[] BuildEmptyHive(string HiveFileName)
+        // NT names the root of a new application hive after its mount and writes format 1.3.
+        internal static byte[] BuildAppHive(string FileName, string MountName)
+        {
+            return BuildEmptyHive(FileName, MountName.Substring(MountName.LastIndexOf('\\') + 1), 3);
+        }
+
+        private static byte[] BuildEmptyHive(string Label, string RootName, int MinorVersion)
         {
             const int HeaderSize = 0x1000;
             const int BinSize = 0x1000;
@@ -2671,14 +2812,13 @@ namespace Brovan.Core.Helpers
             BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x08), 1);
             BinaryPrimitives.WriteInt64LittleEndian(Header.Slice(0x0C), DateTime.UtcNow.ToFileTimeUtc());
             BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x14), 1);
-            BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x18), 5);
+            BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x18), MinorVersion);
             BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x1C), 0);
             BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x20), 1);
             BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x24), RootCell);
             BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x28), BinSize);
             BinaryPrimitives.WriteInt32LittleEndian(Header.Slice(0x2C), 1);
 
-            string Label = Path.GetFileName(HiveFileName);
             Encoding.Unicode.GetBytes(Label.Length > 31 ? Label.Substring(0, 31) : Label, Header.Slice(0x30, 64));
 
             Span<byte> Bin = Hive.AsSpan(HeaderSize, BinSize);
@@ -2687,7 +2827,6 @@ namespace Brovan.Core.Helpers
             BinaryPrimitives.WriteInt32LittleEndian(Bin.Slice(0x08), BinSize);
             BinaryPrimitives.WriteInt64LittleEndian(Bin.Slice(0x14), DateTime.UtcNow.ToFileTimeUtc());
 
-            string RootName = "CMI-CreateHive{00000000-0000-0000-0000-000000000000}";
             int RootPayload = 0x4C + RootName.Length;
             int RootSize = (RootPayload + 4 + 7) & ~7;
             int SecurityCell = RootCell + RootSize;
@@ -2746,20 +2885,23 @@ namespace Brovan.Core.Helpers
             return "BrovanHive_" + Hash.ToString("x16");
         }
 
-        internal Hive GetHiveByNtPath(Hive[] RegHives, string NtPath)
+        internal Hive GetHiveByNtPath(string NtPath)
         {
             if (string.IsNullOrEmpty(NtPath))
                 return null;
 
-            if (RegHives == null || RegHives.Length == 0)
-                return null;
-
             NtPath = NtPath.TrimEnd('\0');
+
+            if (IsAppHivePath(NtPath))
+            {
+                int MountLength = MountLengthUnderAppHiveRoot(NtPath);
+                return MountLength > 0 && AppHivesByMountSpan.TryGetValue(NtPath.AsSpan(0, MountLength), out AppHive Entry) ? Entry.Hive : null;
+            }
 
             Hive BestHive = null;
             int BestLen = -1;
 
-            foreach (Hive h in RegHives)
+            foreach (Hive h in BootHives)
             {
                 if (h == null || h.Reader == null)
                     continue;
@@ -2769,8 +2911,7 @@ namespace Brovan.Core.Helpers
 
                 string Mount = h.NtMountPoint.TrimEnd('\\');
 
-                if (NtPath.Equals(Mount, StringComparison.OrdinalIgnoreCase) ||
-                    NtPath.StartsWith(Mount + "\\", StringComparison.OrdinalIgnoreCase))
+                if (IsUnderKey(NtPath, Mount))
                 {
                     if (Mount.Length > BestLen)
                     {
