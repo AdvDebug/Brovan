@@ -31,6 +31,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             Packet.IoStatus = IoStatus;
             Packet.IoStatusInformation = IoStatusInformation;
             Packet.Associated = true;
+            if (Instance.WinHelper.PendingConnectReplies.Count != 0 && Instance.WinHelper.HandleManager.GetObjectByHandle<WinPort>(TargetObjectHandle) is WinPort Port)
+                AlpcMessaging.DeliverConnectReplyForRoute(Instance, Port, Completion);
             Instance.MaterializeSignaledWaitPackets(IoCompletionHandle, Completion);
 
             if (AlreadySignaledPtr != 0 && !Instance.WinHelper.WriteByte(AlreadySignaledPtr, Packet.QueuedCompletion ? (byte)1 : (byte)0))

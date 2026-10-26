@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.RPC
@@ -54,6 +55,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public const uint ENotImpl = 0x80004001;
         public const uint EOutOfMemory = 0x8007000E;
         public const uint EInvalidArg = 0x80070057;
+        public const uint EElementNotFound = 0x80070490;
 
         public static readonly Guid RemUnknownInterface = new Guid("00000131-0000-0000-c000-000000000046");
         public static readonly Guid RemUnknown2Interface = new Guid("00000143-0000-0000-c000-000000000046");
@@ -236,6 +238,18 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         {
             Reader.Align(8);
             return Reader.TryReadUInt32(out _) && Reader.TryReadUInt32(out uint Length) && Reader.TrySkip((int)Math.Min(Length, int.MaxValue));
+        }
+
+        public static bool TryReadHstringBody(scoped ref Ndr20Reader Reader, out ReadOnlySpan<char> Value)
+        {
+            Value = default;
+            Reader.Align(8);
+            if (!Reader.TryReadUInt32(out uint Marker) || Marker != WdtRemoteCall || !Reader.TryReadUInt32(out uint Length) || (Length & 1) != 0
+                || !Reader.TryReadBytes((int)Math.Min(Length, int.MaxValue), out ReadOnlySpan<byte> Chars))
+                return false;
+
+            Value = MemoryMarshal.Cast<byte, char>(Chars);
+            return true;
         }
 
         public static void WriteResponseHeader(ref Ndr20Writer Writer)

@@ -35,29 +35,35 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int DaclField = 3;
         private const int FieldCount = 4;
 
-        internal const byte AclRevision = 2;
+        private const byte AclRevision = 2;
         private const byte AclRevisionDs = 4;
-        internal const int AclHeaderSize = 8;
+        private const int AclHeaderSize = 8;
         private const int AceHeaderSize = 4;
-        internal const int AceSidOffset = 8;
+        private const int AceSidOffset = 8;
         private const int ObjectAceFlagsSize = 4;
         private const int ObjectTypeSize = 16;
 
         private const byte AccessAllowedAce = 0;
         private const byte AccessDeniedAce = 1;
+        private const byte SystemAuditAce = 2;
+        private const byte SystemAlarmAce = 3;
         private const byte AccessAllowedObjectAce = 5;
         private const byte AccessDeniedObjectAce = 6;
+        private const byte SystemAuditObjectAce = 7;
+        private const byte SystemAlarmObjectAce = 8;
         private const byte AccessAllowedCallbackAce = 9;
         private const byte AccessDeniedCallbackAce = 0x0A;
         private const byte AccessAllowedCallbackObjectAce = 0x0B;
         private const byte AccessDeniedCallbackObjectAce = 0x0C;
+        private const byte SystemAuditCallbackAce = 0x0D;
+        private const byte SystemAlarmCallbackAce = 0x0E;
         private const byte SystemMandatoryLabelAce = 0x11;
         private const byte InheritOnlyAce = 0x08;
         private const uint AceObjectTypePresent = 1;
         private const uint AceInheritedObjectTypePresent = 2;
 
         private const uint MandatoryNoWriteUp = 1;
-        private const uint MandatoryNoReadUp = 2;
+        internal const uint MandatoryNoReadUp = 2;
         private const uint MandatoryNoExecuteUp = 4;
 
         private const uint AllowGroups = SeGroupEnabled;
@@ -199,17 +205,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_SECURITY_DESCR;
 
             WinProcess OwnerProcess = OwnerOf(Instance, Token);
-            uint IntegrityRid = IntegrityRidOf(Token, OwnerProcess);
-
-            uint Requested = Desired & ~MaximumAllowed;
-            bool Maximum = (Desired & MaximumAllowed) != 0;
-            uint IntegrityMask = IntegrityAllowedMask(Captured.Sacl, IntegrityRid, Mapping, out uint ObjectRid);
-            bool IntegrityRestricts = IntegrityRid < ObjectRid;
-            bool IntegrityDenies = (IntegrityMask & Requested) != Requested;
-
-            // NT lets a package or capability ACE override the label of an object at medium or below.
-            bool PackageMayOverrideLabel = Token.IsAppContainer && ObjectRid <= MediumIntegrityRid && (IntegrityDenies || Maximum);
-            if (IntegrityDenies && !PackageMayOverrideLabel)
+            Label Integrity = CheckLabel(Captured, Token, OwnerProcess, Desired, Mapping);
+            if (Integrity.DeniesAll)
                 return Finish(Helper, GrantedAccessPtr, AccessStatusPtr, 0, NTSTATUS.STATUS_ACCESS_DENIED);
 
             // SeSecurityPrivilege is never enabled in a token Brovan hands out.
@@ -230,34 +227,79 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return Status;
             }
 
+            NTSTATUS AccessStatus = Grant(Captured, Token, OwnerProcess, Self, Desired, Mapping, Integrity, out uint Granted);
+            if (AccessStatus == NTSTATUS.STATUS_NOT_IMPLEMENTED)
+                return AccessStatus;
+
+            return Finish(Helper, GrantedAccessPtr, AccessStatusPtr, Granted, AccessStatus);
+        }
+
+        internal static NTSTATUS CheckHost(ReadOnlySpan<byte> SelfRelative, WinToken Token, WinProcess OwnerProcess, ReadOnlySpan<byte> Self, uint Desired,
+            in GENERIC_MAPPING Mapping, out uint Granted)
+        {
+            Granted = 0;
+            if (!TryParseSelfRelative(SelfRelative, out Descriptor Captured) || Captured.Owner.IsEmpty || Captured.Group.IsEmpty)
+                return NTSTATUS.STATUS_INVALID_SECURITY_DESCR;
+
+            Label Integrity = CheckLabel(Captured, Token, OwnerProcess, Desired, Mapping);
+            if (Integrity.DeniesAll)
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            if ((Desired & AccessSystemSecurity) != 0)
+                return NTSTATUS.STATUS_PRIVILEGE_NOT_HELD;
+
+            return Grant(Captured, Token, OwnerProcess, Self, Desired, Mapping, Integrity, out Granted);
+        }
+
+        private readonly record struct Label(uint Mask, bool Restricts, bool Denies, bool PackageMayOverride)
+        {
+            internal bool DeniesAll => Denies && !PackageMayOverride;
+        }
+
+        private static Label CheckLabel(in Descriptor Captured, WinToken Token, WinProcess OwnerProcess, uint Desired, in GENERIC_MAPPING Mapping)
+        {
+            uint IntegrityRid = IntegrityRidOf(Token, OwnerProcess);
+            uint Requested = Desired & ~MaximumAllowed;
+            bool Maximum = (Desired & MaximumAllowed) != 0;
+            uint IntegrityMask = IntegrityAllowedMask(Captured.Sacl, IntegrityRid, Mapping, out uint ObjectRid);
+            bool IntegrityDenies = (IntegrityMask & Requested) != Requested;
+
+            // NT lets a package or capability ACE override the label of an object at medium or below.
+            bool PackageMayOverrideLabel = Token.IsAppContainer && ObjectRid <= MediumIntegrityRid && (IntegrityDenies || Maximum);
+            return new Label(IntegrityMask, IntegrityRid < ObjectRid, IntegrityDenies, PackageMayOverrideLabel);
+        }
+
+        private static NTSTATUS Grant(in Descriptor Captured, WinToken Token, WinProcess OwnerProcess, scoped ReadOnlySpan<byte> Self, uint Desired,
+            in GENERIC_MAPPING Mapping, in Label Integrity, out uint Granted)
+        {
+            bool Maximum = (Desired & MaximumAllowed) != 0;
             Identity Client = new Identity(UserSidOf(Token, OwnerProcess), GroupsOf(Token, OwnerProcess), Token, Captured.Owner);
-            uint Granted = 0;
+            Granted = 0;
             if ((Desired & (MaximumAllowed | OwnerImpliedRights)) != 0 && Client.IsOwner() && !OwnerRightsAcePresent(Captured.Dacl))
             {
                 Granted = Maximum ? OwnerImpliedRights : Desired & OwnerImpliedRights;
                 Desired &= ~OwnerImpliedRights;
                 if (Desired == 0 && !Token.IsAppContainer)
-                    return Finish(Helper, GrantedAccessPtr, AccessStatusPtr, Granted, NTSTATUS.STATUS_SUCCESS);
+                    return NTSTATUS.STATUS_SUCCESS;
             }
 
             NTSTATUS AccessStatus = EvaluateDacl(Captured, ref Client, Self, Desired, Mapping.GenericAll, ref Granted, out bool PackageMatched);
-            if (AccessStatus == NTSTATUS.STATUS_NOT_IMPLEMENTED)
-                return AccessStatus;
-
             if (AccessStatus == NTSTATUS.STATUS_SUCCESS)
             {
-                bool LabelOverridden = PackageMayOverrideLabel && PackageMatched;
-                if (!Maximum && IntegrityDenies && !LabelOverridden)
+                bool LabelOverridden = Integrity.PackageMayOverride && PackageMatched;
+                if (!Maximum && Integrity.Denies && !LabelOverridden)
                     AccessStatus = NTSTATUS.STATUS_ACCESS_DENIED;
-                else if (Maximum && IntegrityRestricts && !LabelOverridden)
+                else if (Maximum && Integrity.Restricts && !LabelOverridden)
                 {
-                    Granted &= IntegrityMask;
+                    Granted &= Integrity.Mask;
                     if (Granted == 0)
                         AccessStatus = NTSTATUS.STATUS_ACCESS_DENIED;
                 }
             }
 
-            return Finish(Helper, GrantedAccessPtr, AccessStatusPtr, AccessStatus == NTSTATUS.STATUS_SUCCESS ? Granted : 0, AccessStatus);
+            if (AccessStatus != NTSTATUS.STATUS_SUCCESS)
+                Granted = 0;
+            return AccessStatus;
         }
 
         private static NTSTATUS Finish(WinSysHelper Helper, ulong GrantedAccessPtr, ulong AccessStatusPtr, uint Granted, NTSTATUS AccessStatus)
@@ -368,7 +410,63 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        internal static void WriteSelfRelativeHeader(Span<byte> Descriptor, ushort Control, int OwnerOffset, int GroupOffset, int DaclOffset)
+        private static bool TryParseSelfRelative(ReadOnlySpan<byte> Bytes, out Descriptor Captured)
+        {
+            Captured = default;
+            if (Bytes.Length < SelfRelativeHeaderSize || Bytes[0] != SecurityDescriptorRevision)
+                return false;
+
+            ushort Control = BinaryPrimitives.ReadUInt16LittleEndian(Bytes.Slice(OffControl));
+            if ((Control & SeSelfRelative) == 0)
+                return false;
+
+            if (!TrySliceField(Bytes, OwnerField, out ReadOnlySpan<byte> Owner) || !TrySliceField(Bytes, GroupField, out ReadOnlySpan<byte> Group)
+                || !TrySliceField(Bytes, SaclField, out ReadOnlySpan<byte> Sacl) || !TrySliceField(Bytes, DaclField, out ReadOnlySpan<byte> Dacl))
+                return false;
+
+            if ((Control & SeSaclPresent) == 0)
+                Sacl = default;
+            if ((Control & SeDaclPresent) == 0)
+                Dacl = default;
+
+            if (!AclIsValid(Sacl) || !AclIsValid(Dacl))
+                return false;
+
+            Captured = new Descriptor(Owner, Group, Dacl, Sacl);
+            return true;
+        }
+
+        private static bool TrySliceField(ReadOnlySpan<byte> Bytes, int Field, out ReadOnlySpan<byte> Part)
+        {
+            Part = default;
+            uint Offset = BinaryPrimitives.ReadUInt32LittleEndian(Bytes.Slice(FieldOffset(Field)));
+            if (Offset == 0)
+                return true;
+
+            int Size;
+            if (Field <= GroupField)
+            {
+                if (Offset > (uint)(Bytes.Length - 2) || Bytes[(int)Offset] != SidRevision || Bytes[(int)Offset + 1] > MaxSubAuthorities)
+                    return false;
+                Size = SidLength(Bytes[(int)Offset + 1]);
+            }
+            else
+            {
+                if (Offset > (uint)(Bytes.Length - AclHeaderSize))
+                    return false;
+                Size = BinaryPrimitives.ReadUInt16LittleEndian(Bytes.Slice((int)Offset + 2));
+                if (Size < AclHeaderSize)
+                    return false;
+            }
+
+            if (Size > Bytes.Length - (int)Offset)
+                return false;
+
+            Part = Bytes.Slice((int)Offset, Size);
+            return true;
+        }
+
+        internal static void WriteSelfRelativeHeader(Span<byte> Descriptor, ushort Control, int OwnerOffset, int GroupOffset, int DaclOffset, int SaclOffset = 0)
         {
             Span<byte> Header = Descriptor.Slice(0, SelfRelativeHeaderSize);
             Header.Clear();
@@ -376,7 +474,106 @@ namespace Brovan.Core.Emulation.OS.Windows
             BinaryPrimitives.WriteUInt16LittleEndian(Header.Slice(OffControl), (ushort)(Control | SeSelfRelative));
             BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(FieldOffset(OwnerField)), (uint)OwnerOffset);
             BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(FieldOffset(GroupField)), (uint)GroupOffset);
+            BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(FieldOffset(SaclField)), (uint)SaclOffset);
             BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(FieldOffset(DaclField)), (uint)DaclOffset);
+        }
+
+        internal readonly record struct AceEntry(byte Type, byte[] Sid, uint Mask)
+        {
+            internal static AceEntry Allow(byte[] Sid, uint Mask) => new AceEntry(AccessAllowedAce, Sid, Mask);
+
+            internal static AceEntry MandatoryLabel(byte[] Sid, uint Policy) => new AceEntry(SystemMandatoryLabelAce, Sid, Policy);
+        }
+
+        internal static byte[] BuildAcl(params ReadOnlySpan<AceEntry> Entries)
+        {
+            int Size = AclHeaderSize;
+            foreach (AceEntry Entry in Entries)
+                Size += AceSidOffset + Entry.Sid.Length;
+
+            byte[] Acl = new byte[Size];
+            Acl[0] = AclRevision;
+            BinaryPrimitives.WriteUInt16LittleEndian(Acl.AsSpan(2, 2), (ushort)Size);
+            BinaryPrimitives.WriteUInt16LittleEndian(Acl.AsSpan(4, 2), (ushort)Entries.Length);
+
+            int Offset = AclHeaderSize;
+            foreach (AceEntry Entry in Entries)
+            {
+                Span<byte> Ace = Acl.AsSpan(Offset);
+                int AceSize = AceSidOffset + Entry.Sid.Length;
+                Ace[0] = Entry.Type;
+                BinaryPrimitives.WriteUInt16LittleEndian(Ace.Slice(2, 2), (ushort)AceSize);
+                BinaryPrimitives.WriteUInt32LittleEndian(Ace.Slice(4, 4), Entry.Mask);
+                Entry.Sid.CopyTo(Ace.Slice(AceSidOffset));
+                Offset += AceSize;
+            }
+
+            return Acl;
+        }
+
+        internal static byte[] BuildSelfRelative(ReadOnlySpan<byte> Owner, ReadOnlySpan<byte> Group, ReadOnlySpan<byte> Dacl, ReadOnlySpan<byte> Sacl)
+        {
+            int OwnerOffset = SelfRelativeHeaderSize;
+            int GroupOffset = OwnerOffset + Owner.Length;
+            int SaclOffset = GroupOffset + Group.Length;
+            int DaclOffset = SaclOffset + Sacl.Length;
+
+            byte[] Buffer = new byte[DaclOffset + Dacl.Length];
+            Span<byte> Span = Buffer;
+            ushort Control = (ushort)((Dacl.IsEmpty ? 0 : SeDaclPresent) | (Sacl.IsEmpty ? 0 : SeSaclPresent));
+            WriteSelfRelativeHeader(Span, Control, Owner.IsEmpty ? 0 : OwnerOffset, Group.IsEmpty ? 0 : GroupOffset,
+                Dacl.IsEmpty ? 0 : DaclOffset, Sacl.IsEmpty ? 0 : SaclOffset);
+            Owner.CopyTo(Span.Slice(OwnerOffset));
+            Group.CopyTo(Span.Slice(GroupOffset));
+            Sacl.CopyTo(Span.Slice(SaclOffset));
+            Dacl.CopyTo(Span.Slice(DaclOffset));
+            return Buffer;
+        }
+
+        internal static byte[] BuildSingleAllowDescriptor(ReadOnlySpan<byte> Owner, ReadOnlySpan<byte> Group, ReadOnlySpan<byte> Allowed, uint Mask)
+        {
+            return BuildSelfRelative(Owner, Group, BuildAcl(AceEntry.Allow(Allowed.ToArray(), Mask)), ReadOnlySpan<byte>.Empty);
+        }
+
+        // NT maps generic rights and drops rights the type does not define (RtlpApplyAclToObject).
+        internal static bool MapGenericRights(Span<byte> SelfRelative, in GENERIC_MAPPING Mapping)
+        {
+            if (!TryParseSelfRelative(SelfRelative, out _))
+                return false;
+
+            MapAclRights(SelfRelative, DaclField, Mapping);
+            MapAclRights(SelfRelative, SaclField, Mapping);
+            return true;
+        }
+
+        private static void MapAclRights(Span<byte> SelfRelative, int Field, in GENERIC_MAPPING Mapping)
+        {
+            uint Offset = BinaryPrimitives.ReadUInt32LittleEndian(SelfRelative.Slice(FieldOffset(Field)));
+            ushort Control = BinaryPrimitives.ReadUInt16LittleEndian(SelfRelative.Slice(OffControl));
+            ushort Present = Field == DaclField ? SeDaclPresent : SeSaclPresent;
+            if (Offset == 0 || (Control & Present) == 0)
+                return;
+
+            Span<byte> Acl = SelfRelative.Slice((int)Offset);
+            Acl = Acl.Slice(0, BinaryPrimitives.ReadUInt16LittleEndian(Acl.Slice(2)));
+            int AceCount = BinaryPrimitives.ReadUInt16LittleEndian(Acl.Slice(4));
+            int Position = AclHeaderSize;
+            for (int Index = 0; Index < AceCount; Index++)
+            {
+                Span<byte> Ace = Acl.Slice(Position);
+                byte Type = Ace[0];
+                int AceSize = BinaryPrimitives.ReadUInt16LittleEndian(Ace.Slice(2));
+                Position += AceSize;
+                if (AceSize < AceSidOffset || (Ace[1] & InheritOnlyAce) != 0
+                    || Type is not (<= AccessDeniedCallbackAce or SystemAuditCallbackAce or SystemAlarmCallbackAce))
+                    continue;
+
+                uint Mapped = ApplyGenericMapping(BinaryPrimitives.ReadUInt32LittleEndian(Ace.Slice(4)), Mapping.GenericRead, Mapping.GenericWrite,
+                    Mapping.GenericExecute, Mapping.GenericAll) & ~GenericBits;
+                bool AuditOrAlarm = Type is SystemAuditAce or SystemAlarmAce or SystemAuditObjectAce or SystemAlarmObjectAce
+                    or SystemAuditCallbackAce or SystemAlarmCallbackAce;
+                BinaryPrimitives.WriteUInt32LittleEndian(Ace.Slice(4), Mapped & (AuditOrAlarm ? Mapping.GenericAll | AccessSystemSecurity : Mapping.GenericAll));
+            }
         }
 
         private static int FieldOffset(int Field) => sizeof(uint) * (1 + Field);
@@ -582,17 +779,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         // NT matches both package groups for an AppContainer that is not less privileged (SepMatchPackage).
         private static bool PackageMatches(ReadOnlySpan<byte> AceSid, WinToken Token)
         {
-            if (AceSid.SequenceEqual(AllApplicationPackagesSid) || AceSid.SequenceEqual(AllRestrictedApplicationPackagesSid)
-                || AceSid.SequenceEqual(Token.AppContainerSid))
-                return true;
-
-            foreach (byte[] Capability in Token.CapabilitySids)
-            {
-                if (AceSid.SequenceEqual(Capability))
-                    return true;
-            }
-
-            return false;
+            return AceSid.SequenceEqual(AllApplicationPackagesSid) || AceSid.SequenceEqual(AllRestrictedApplicationPackagesSid)
+                || AceSid.SequenceEqual(Token.AppContainerSid) || Token.HasCapability(AceSid);
         }
 
         private static bool Matches(scoped ReadOnlySpan<byte> AceSid, ref Identity Client, scoped ReadOnlySpan<byte> Self, uint GroupAttributes)

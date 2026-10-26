@@ -25,7 +25,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (!Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, WakeMask, Win32kHelper.RemoveFlagSet(Flags), Instance.CurrentThread?.ThreadId ?? 0, out Win32kMessage Message))
+            bool Remove = Win32kHelper.RemoveFlagSet(Flags);
+            if (!Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, WakeMask, Remove, Instance.CurrentThread?.ThreadId ?? 0, out Win32kMessage Message))
             {
                 Instance.SetLastWinError(0);
                 if (Win32kHelper.TryDeliverWindowPosChanged(Instance, 0))
@@ -36,11 +37,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             WindowsThreadState Reader = WinEmulatedThread.TryGetState(Instance.CurrentThread);
-            if (MessagePtr == 0 || !Win32kHelper.WriteMessage(Instance, MessagePtr, Message, Reader))
+            if (MessagePtr == 0 || !Win32kHelper.TryCompleteRead(Instance, MessagePtr, Message, Reader, Remove, out bool CallbackEntered))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            Instance.SetLastWinError(0);
-            if (Win32kHelper.TryDeliverWindowPosChanged(Instance, 1))
+            if (CallbackEntered || Win32kHelper.TryDeliverWindowPosChanged(Instance, 1))
                 return NTSTATUS.STATUS_SUCCESS;
 
             Instance.SetBooleanSyscallReturn(true);

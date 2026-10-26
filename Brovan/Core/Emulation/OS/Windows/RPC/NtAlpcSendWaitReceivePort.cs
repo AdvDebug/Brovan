@@ -29,6 +29,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (AlpcMessaging.Owns(Port))
                 return AlpcMessaging.SendWaitReceive(Instance, Port, Flags, SendMessagePtr, SendMessageAttributesPtr, ReceiveMessagePtr, BufferLengthPtr, ReceiveMessageAttributesPtr, TimeoutPtr);
 
+            if (SendMessagePtr == 0 && ReceiveMessagePtr != 0 && ServedQueueOf(Port, PortKey) is AlpcReceiveQueue Answers)
+                return ReceiveFrom(Instance, Answers, null, ReceiveMessagePtr, BufferLengthPtr, ReceiveMessageAttributesPtr, TimeoutPtr);
+
             if (SendMessagePtr != 0 && !Instance.IsRegionMapped(SendMessagePtr, (ulong)HeaderSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
@@ -93,10 +96,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 PortReply Reply = null;
                 if (SendBytes != null && Port.Handler != null)
                 {
-                    Reply = new PortReply { Port = Port, HandleKey = PortKey };
-                    Port.ReceivedHandles = ReadHandleAttribute(Instance, SendMessageAttributesPtr);
-                    Port.Handler(Port, SendBytes, Reply, Instance);
-                    ReplyBytes = Reply.Data ?? SendBytes;
+                    Reply = RunHandler(Instance, Port, PortKey, SendBytes, SendMessageAttributesPtr);
+                    ReplyBytes = Reply.Data;
 
                     long Delay = Reply.NotBeforeTick - Instance.EmulatedTickCount64;
                     if (Delay > 0 && Instance.WinHelper.TryContinuePipeWait(PortHandle, (int)Delay, (int)Delay))
@@ -143,6 +144,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (SendBytes != null)
             {
+                if (AlpcMessaging.Supported(Instance) && CsrssPortHandler.AnswersAsync(Port, SendBytes) && ServedQueueOf(Port, PortKey) is AlpcReceiveQueue Queued
+                    && HasAnswerRoute(Queued, null))
+                    return AnswerAfterSend(Instance, Port, PortKey, Queued, SendMessageAttributesPtr, SendBytes);
+
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtAlpcSendWaitReceivePort: Port=\"{Port.Name}\", Flags=0x{Flags:X}, SentLength=0x{SendBytes.Length:X}", LogFlags.Syscall);
 
@@ -156,6 +161,38 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_TIMEOUT;
 
             return NTSTATUS.STATUS_TIMEOUT;
+        }
+
+        private static NTSTATUS AnswerAfterSend(BinaryEmulator Instance, WinPort Port, ulong PortKey, AlpcReceiveQueue Answers, ulong SendAttributesPtr, byte[] SendBytes)
+        {
+            if (IsFull(Answers))
+                return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
+
+            ulong AttributeHeader = 0;
+            if (SendAttributesPtr != 0 && !Instance.WinHelper.TryReadUInt64(SendAttributesPtr, out AttributeHeader))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            NTSTATUS ContextStatus = ReadMessageContext(Instance, SendAttributesPtr, AttributeHeader, out ulong MessageContext);
+            if (ContextStatus != NTSTATUS.STATUS_SUCCESS)
+                return ContextStatus;
+
+            PortReply Reply = RunHandler(Instance, Port, PortKey, SendBytes, SendAttributesPtr);
+            if (Reply.HostWork != null || Reply.NotBeforeTick != 0 || Reply.Handles != null)
+            {
+                Brovan.Core.Helpers.Utils.LogError($"[-] ALPC: the handler of \"{Port.Name}\" defers or carries handles in an answer to a send that does not wait.");
+                return NTSTATUS.STATUS_NOT_SUPPORTED;
+            }
+
+            return QueueHandlerReply(Instance, Port, Answers, new AlpcRequestFacts(TypeFlagsOf(SendBytes), NewCallbackId(), MessageContext), Reply.Data);
+        }
+
+        private static PortReply RunHandler(BinaryEmulator Instance, WinPort Port, ulong PortKey, byte[] SendBytes, ulong SendAttributesPtr)
+        {
+            PortReply Reply = new PortReply { Port = Port, HandleKey = PortKey };
+            Port.ReceivedHandles = ReadHandleAttribute(Instance, SendAttributesPtr);
+            Port.Handler(Port, SendBytes, Reply, Instance);
+            Reply.Data ??= SendBytes;
+            return Reply;
         }
 
         /// <summary>

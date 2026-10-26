@@ -6,7 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         // NT: win32k posts this to a CoreMessaging window when its list of completed waits stops being empty.
         internal const uint DispatchMessage = 0x60;
-        private const ulong DispatchWParam = 0x80000001;
+        private const ulong DispatchWParam = 1;
         internal const int SlotCount = 2;
         private const ulong InputContext = 0x80000000;
 

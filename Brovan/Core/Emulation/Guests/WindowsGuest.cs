@@ -310,6 +310,7 @@ namespace Brovan.Core.Emulation.Guests
             {
                 WinHelper.UnloadAppHives();
                 WinHelper.KernelFiles?.Dispose();
+                WinHelper.Composition.ReleaseAll(Instance);
                 WinHelper.DxgkProcess.ReleaseAll(Instance);
                 WinHelper.RegManager.Dispose();
             }
@@ -671,23 +672,27 @@ namespace Brovan.Core.Emulation.Guests
 
                 ThreadState.ReleaseHeldContext();
                 State = Instance._emulator.Emulate(Instance.ReadRegister(Instance.IPRegister), 0, 0, QuantumInstructions);
-                return true;
             }
-
-            ThreadState.ReleaseHeldContext();
-            State = Instance._emulator.Emulate(Thread.Context.RIP, 0, 0, QuantumInstructions);
-            if (!State && Instance._emulator.GetLastError() == BackendError.Exception)
+            else
             {
-                ulong EFlags = Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS);
-                if ((EFlags & (ulong)CPUFlags.TF) != 0 && !ThreadState.DispatchException)
+                ThreadState.ReleaseHeldContext();
+                State = Instance._emulator.Emulate(Thread.Context.RIP, 0, 0, QuantumInstructions);
+                if (!State && Instance._emulator.GetLastError() == BackendError.Exception)
                 {
-                    QueueUserModeException(Instance, NTSTATUS.STATUS_SINGLE_STEP, CurrentEFlags: EFlags);
-                    State = true;
+                    ulong EFlags = Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS);
+                    if ((EFlags & (ulong)CPUFlags.TF) != 0 && !ThreadState.DispatchException)
+                    {
+                        QueueUserModeException(Instance, NTSTATUS.STATUS_SINGLE_STEP, CurrentEFlags: EFlags);
+                        State = true;
+                    }
                 }
+
+                if (Instance.CurrentThread != null && WinEmulatedThread.GetState(Instance.CurrentThread).DispatchException)
+                    State = true;
             }
 
-            if (Instance.CurrentThread != null && WinEmulatedThread.GetState(Instance.CurrentThread).DispatchException)
-                State = true;
+            if (Thread.State == EmulatedThreadState.Waiting && WinHelper != null && WinHelper.PendingConnectReplies.Count != 0)
+                AlpcMessaging.DeliverConnectRepliesTo(Instance, Thread);
             return true;
         }
 

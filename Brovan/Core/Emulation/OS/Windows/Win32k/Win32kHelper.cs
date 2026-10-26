@@ -3312,6 +3312,56 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return false;
         }
 
+        private const ulong SentPostedFlag = 0x80000000;
+
+        // DispatchMessage is the one message whose MessageTable entry makes a removing read run the window procedure first.
+        // The reader then gets it with bit 31 of wParam set (xxxSendPostedMessage).
+        internal static bool IsSentWhenRemoved(BinaryEmulator Instance, in Win32kMessage Message, out WinWindow Window)
+        {
+            Window = null;
+            if (Message.Message != Win32kQueuePort.DispatchMessage || Message.Notification || !Instance.WinHelper.SupportsUserCallbacks)
+                return false;
+
+            Window = Instance.WinHelper.GetWindow(Message.Hwnd);
+            return Window is { WndProc: not 0 };
+        }
+
+        internal static bool TryCompleteRead(BinaryEmulator Instance, ulong MessagePtr, in Win32kMessage Message, WindowsThreadState Reader, bool Removed,
+            out bool CallbackEntered)
+        {
+            CallbackEntered = false;
+            WinWindow Window = null;
+            bool SendFirst = Removed && IsSentWhenRemoved(Instance, Message, out Window);
+            if (!SendFirst)
+            {
+                if (!WriteMessage(Instance, MessagePtr, Message, Reader))
+                    return false;
+
+                Instance.SetLastWinError(0);
+                return true;
+            }
+
+            // NT copies the message out only after the window procedure returns (NtUserPeekMessage).
+            if (MessagePtr == 0 || !Instance.IsAccessible(MessagePtr, (ulong)(Is64(Instance) ? MSG64_SIZE : MSG32_SIZE), Write: true))
+                return false;
+
+            Instance.SetLastWinError(0);
+            WinPostedMessageRead CopyOut = new WinPostedMessageRead(MessagePtr, AsSentPosted(Message), Reader);
+            CallbackEntered = InvokeWindowProc(Instance, Message.Hwnd, Window.WndProc, Message.Message, Message.WParam, Message.LParam, CopyOut,
+                DeferredSyscallResult: 1);
+            if (CallbackEntered)
+                return true;
+
+            Brovan.Core.Helpers.Utils.LogError($"[-] win32k: the window procedure of 0x{Message.Hwnd:X} cannot run for a posted 0x{Message.Message:X}, so the reader gets it as posted.");
+            return WriteMessage(Instance, MessagePtr, Message, Reader);
+        }
+
+        private static Win32kMessage AsSentPosted(in Win32kMessage Message)
+        {
+            return new Win32kMessage(Message.Hwnd, Message.Message, Message.WParam | SentPostedFlag, Message.LParam, Message.Time, Message.X, Message.Y,
+                Message.TargetThreadId);
+        }
+
         private static Win32kMessage SynthesizeMessage(BinaryEmulator Instance, Win32kState State, ulong Hwnd, uint Message, ulong WParam, ulong LParam)
         {
             return new Win32kMessage(Hwnd, Message, WParam, LParam, unchecked((uint)Instance.EmulatedTickCount64), State.CursorScreenX, State.CursorScreenY);
@@ -6620,6 +6670,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const ushort FnidGhost = 0x02AA;
 
         private const ushort FnidSendMessageFirst = 0x02B1;
+        internal const ushort FnidSendNotifyMessage = 0x02B7;
         internal const ushort FnidSendMessageCallback = 0x02B8;
         private const ushort FnidSendMessageLast = 0x02B8;
         internal const ushort FnidLast = FnidSendMessageLast;

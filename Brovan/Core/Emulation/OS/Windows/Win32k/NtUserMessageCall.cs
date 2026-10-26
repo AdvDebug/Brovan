@@ -12,7 +12,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ulong WParam = Instance.WinHelper.GetArg(2);
             ulong LParam = Instance.WinHelper.GetArg(3);
             ulong XParam = Instance.WinHelper.GetArg(4);
-            uint FunctionId = (uint)Instance.WinHelper.GetArg(5);
+            ushort FunctionId = Win32kHelper.MaskFunctionId((uint)Instance.WinHelper.GetArg(5));
             ulong Flags = (uint)Instance.WinHelper.GetArg(6);
             bool Ansi = (XParam & 1) != 0 || (Flags & 1) != 0;
 
@@ -40,7 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         WndProc = Instance.WinHelper.GetAnsiWindowProc(WndProc, Instance.WinHelper.GetWindowClassFunctionId(Target));
                     }
 
-                    if (Win32kHelper.MaskFunctionId(FunctionId) == Win32kHelper.FnidSendMessageCallback)
+                    if (FunctionId == Win32kHelper.FnidSendMessageCallback)
                     {
                         // NT: the call returns TRUE and hands the procedure's result to the callback, if there is one.
                         if (!Instance.WinHelper.TryReadPointer(XParam, out ulong Callback)
@@ -54,7 +54,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         if (Win32kHelper.InvokeWindowProc(Instance, Hwnd, WndProc, Message, WParam, LParam, Continuation, DeferredSyscallResult: 1))
                             return NTSTATUS.STATUS_SUCCESS;
                     }
-                    else if (Win32kHelper.InvokeWindowProc(Instance, Hwnd, WndProc, Message, WParam, LParam))
+                    // NT: SendNotifyMessage is SendMessageCallback with no callback, so it returns TRUE too.
+                    else if (Win32kHelper.InvokeWindowProc(Instance, Hwnd, WndProc, Message, WParam, LParam,
+                        DeferredSyscallResult: FunctionId == Win32kHelper.FnidSendNotifyMessage ? 1UL : null))
                     {
                         return NTSTATUS.STATUS_SUCCESS;
                     }
@@ -62,7 +64,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             ulong Result = Win32kHelper.HandleMessageCall(Instance, Hwnd, Message, WParam, LParam, Ansi, out bool Deferred);
-            if (Win32kHelper.MaskFunctionId(FunctionId) == Win32kHelper.FnidSendMessageCallback && Instance.WinHelper.GetWindow(Hwnd) != null)
+            if ((FunctionId == Win32kHelper.FnidSendMessageCallback || FunctionId == Win32kHelper.FnidSendNotifyMessage) && Instance.WinHelper.GetWindow(Hwnd) != null)
                 Result = 1;
 
             if (!Deferred)

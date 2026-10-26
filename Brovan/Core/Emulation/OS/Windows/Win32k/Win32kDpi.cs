@@ -39,13 +39,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const ulong WindowDpiOffset = 0x11C;
         private const ulong WindowDpiAlternateOffset = 0x11E;
 
-        private const int ResourceDataDirectoryIndex = 2;
-        private const uint ResourceTypeManifest = 24;
         private const uint ResourceIdCreateProcessManifest = 1;
-        private const int ResourceDirectoryHeaderSize = 0x10;
-        private const int ResourceDirectoryEntrySize = 8;
-        private const int ResourceDataEntrySize = 0x10;
-        private const int MaxResourceDirectoryEntries = 0x1000;
         private const int MaxManifestBytes = 0x100000;
 
         private static readonly ConditionalWeakTable<BinaryEmulator, DpiState> States = new();
@@ -296,7 +290,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return null;
 
             // NT: an embedded manifest wins over image.manifest.
-            return ReadEmbeddedManifest(new MappedImage(Instance, Module.MappedBase), GetResourceDirectoryRva(Instance._binary)) ?? ReadExternalManifest(Module.Path);
+            return ReadEmbeddedManifest(new MappedImage(Instance, Module.MappedBase)) ?? ReadExternalManifest(Module.Path);
         }
 
         internal static byte[] ReadImageManifest(BinaryFile Image, string HostPath)
@@ -304,45 +298,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Image == null || Image.FileFormat != BinaryFormat.PE)
                 return null;
 
-            return ReadEmbeddedManifest(new ImageFile(Image), GetResourceDirectoryRva(Image)) ?? ReadExternalManifest(HostPath);
-        }
-
-        private interface IImageReader
-        {
-            bool TryRead(uint Rva, Span<byte> Destination);
-        }
-
-        private readonly struct MappedImage : IImageReader
-        {
-            private readonly BinaryEmulator Instance;
-            private readonly ulong Base;
-
-            public MappedImage(BinaryEmulator Instance, ulong Base)
-            {
-                this.Instance = Instance;
-                this.Base = Base;
-            }
-
-            public bool TryRead(uint Rva, Span<byte> Destination) => Instance._emulator.ReadMemory(Base + Rva, Destination);
-        }
-
-        private readonly struct ImageFile : IImageReader
-        {
-            private readonly BinaryFile Image;
-
-            public ImageFile(BinaryFile Image)
-            {
-                this.Image = Image;
-            }
-
-            public bool TryRead(uint Rva, Span<byte> Destination) => Image.TryReadImageBytes(Rva, Destination);
-        }
-
-        private static uint GetResourceDirectoryRva(BinaryFile Image)
-        {
-            return Image.Architecture == BinaryArchitecture.x64
-                ? Image.PE.OptionalHeader64.DataDirectory[ResourceDataDirectoryIndex].VirtualAddress
-                : Image.PE.OptionalHeader32.DataDirectory[ResourceDataDirectoryIndex].VirtualAddress;
+            return ReadEmbeddedManifest(new ImageFile(Image)) ?? ReadExternalManifest(HostPath);
         }
 
         private static byte[] ReadExternalManifest(string ImagePath)
@@ -353,66 +309,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return GeneralHelper.IO.TryReadHostFile(ImagePath + ".manifest", MaxManifestBytes, out byte[] Manifest) ? Manifest : null;
         }
 
-        private static byte[] ReadEmbeddedManifest<TImage>(TImage Image, uint DirectoryRva) where TImage : struct, IImageReader
+        private static byte[] ReadEmbeddedManifest<TImage>(TImage Image) where TImage : struct, IImageReader
         {
-            if (DirectoryRva == 0)
-                return null;
-
-            if (!TryFindDirectoryEntry(Image, DirectoryRva, DirectoryRva, ResourceTypeManifest, out uint TypeDirectory, out bool IsDirectory) || !IsDirectory)
-                return null;
-
-            if (!TryFindDirectoryEntry(Image, DirectoryRva, TypeDirectory, ResourceIdCreateProcessManifest, out uint NameDirectory, out IsDirectory) || !IsDirectory)
-                return null;
-
-            if (!TryFindDirectoryEntry(Image, DirectoryRva, NameDirectory, uint.MaxValue, out uint DataEntry, out IsDirectory) || IsDirectory)
-                return null;
-
-            Span<byte> Entry = stackalloc byte[ResourceDataEntrySize];
-            if (!Image.TryRead(DataEntry, Entry))
-                return null;
-
-            uint DataRva = BinaryPrimitives.ReadUInt32LittleEndian(Entry);
-            uint DataSize = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(4));
-            if (DataRva == 0 || DataSize == 0 || DataSize > MaxManifestBytes)
+            if (!ImageResources.TryFindResource(Image, ImageResources.TypeManifest, ResourceIdCreateProcessManifest, out uint DataRva, out uint DataSize)
+                || DataSize > MaxManifestBytes)
                 return null;
 
             byte[] Manifest = new byte[DataSize];
             return Image.TryRead(DataRva, Manifest) ? Manifest : null;
-        }
-
-        private static bool TryFindDirectoryEntry<TImage>(TImage Image, uint Root, uint Directory, uint Id, out uint Target, out bool IsDirectory) where TImage : struct, IImageReader
-        {
-            Target = 0;
-            IsDirectory = false;
-
-            Span<byte> Header = stackalloc byte[ResourceDirectoryHeaderSize];
-            if (!Image.TryRead(Directory, Header))
-                return false;
-
-            int NamedEntries = BinaryPrimitives.ReadUInt16LittleEndian(Header.Slice(0x0C));
-            int IdEntries = BinaryPrimitives.ReadUInt16LittleEndian(Header.Slice(0x0E));
-            int TotalEntries = NamedEntries + IdEntries;
-            if (TotalEntries <= 0 || TotalEntries > MaxResourceDirectoryEntries)
-                return false;
-
-            Span<byte> Entry = stackalloc byte[ResourceDirectoryEntrySize];
-            uint EntryBase = Directory + ResourceDirectoryHeaderSize;
-            for (int i = NamedEntries; i < TotalEntries; i++)
-            {
-                if (!Image.TryRead(EntryBase + (uint)(i * ResourceDirectoryEntrySize), Entry))
-                    return false;
-
-                uint EntryId = BinaryPrimitives.ReadUInt32LittleEndian(Entry);
-                if (Id != uint.MaxValue && EntryId != Id)
-                    continue;
-
-                uint OffsetToData = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(4));
-                IsDirectory = (OffsetToData & 0x80000000u) != 0;
-                Target = Root + (OffsetToData & 0x7FFFFFFFu);
-                return true;
-            }
-
-            return false;
         }
 
         private static bool TryParseManifestAwareness(byte[] Manifest, out uint Awareness, out bool GdiScaled)

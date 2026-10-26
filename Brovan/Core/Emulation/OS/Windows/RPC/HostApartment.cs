@@ -25,22 +25,43 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         // False for a method the object does not serve, and a null Stub when the parameters do not match the method.
         internal abstract bool TryCall(HostCall Call, Guid Interface, uint ProcNumber, ReadOnlySpan<byte> Parameters, out byte[] Stub);
 
+        internal virtual Guid? HandlerClass => null;
+
         internal virtual Guid UnmarshalClass => Orpc.StandardMarshal;
 
-        internal virtual byte[] GetMarshalData(Guid Interface, in StdObjRef Std)
+        internal int StandardObjRefSize => HandlerClass == null ? Orpc.StandardObjRefSize : Orpc.HandlerObjRefSize;
+
+        internal void WriteStandardObjRef(Span<byte> ObjRef, Guid Interface, in StdObjRef Std)
         {
-            byte[] ObjRef = new byte[Orpc.StandardObjRefSize];
-            Orpc.WriteStandardObjRef(ObjRef, Interface, Std);
+            if (HandlerClass is Guid Handler)
+                Orpc.WriteHandlerObjRef(ObjRef, Interface, Std, Handler);
+            else
+                Orpc.WriteStandardObjRef(ObjRef, Interface, Std);
+        }
+
+        internal byte[] GetStandardObjRef(Guid Interface, in StdObjRef Std)
+        {
+            byte[] ObjRef = new byte[StandardObjRefSize];
+            WriteStandardObjRef(ObjRef, Interface, Std);
             return ObjRef;
         }
 
+        internal virtual byte[] GetMarshalData(Guid Interface, in StdObjRef Std) => GetStandardObjRef(Interface, Std);
+
+        // NT asks the object for IMarshal only when it aggregates the standard marshaler (CStdIdentity::QueryInterface).
+        internal byte[] GetIdentityMarshalData(Guid Interface, in StdObjRef Std) =>
+            UnmarshalClass == Orpc.AggregatedStandardMarshal ? GetMarshalData(Interface, Std) : GetStandardObjRef(Interface, Std);
+
         internal void WriteInterfacePointer(ref Ndr20Writer Writer, Guid Interface, in StdObjRef Std)
         {
-            byte[] Data = GetMarshalData(Interface, Std);
             if (UnmarshalClass == Orpc.StandardMarshal)
-                Orpc.WriteInterfacePointerData(ref Writer, Data);
-            else
-                Orpc.WriteCustomInterfacePointer(ref Writer, Interface, UnmarshalClass, (uint)Data.Length, Data);
+            {
+                Orpc.WriteInterfacePointerData(ref Writer, GetStandardObjRef(Interface, Std));
+                return;
+            }
+
+            byte[] Data = GetMarshalData(Interface, Std);
+            Orpc.WriteCustomInterfacePointer(ref Writer, Interface, UnmarshalClass, (uint)Data.Length, Data);
         }
 
         protected static byte[] BuildResult(uint Result)
@@ -96,7 +117,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
     }
 
     // Its handlers run in the client's syscall, under KernelLock.
-    internal sealed class HostApartment
+    internal sealed class HostApartment : AlpcHostServer
     {
         private const ushort MultithreadedApartment = 0xFFFF;
         private const int RemUnknownIpidSequence = 0x1401;
@@ -126,8 +147,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         internal string PortName { get; }
         internal ulong Oxid { get; } = Orpc.NewId();
         internal Guid ProcessIdentifier { get; } = Guid.NewGuid();
-        internal uint ProcessId { get; }
-        internal uint ThreadId { get; }
         internal Guid RemUnknownIpid { get; }
 
         private readonly Dictionary<Guid, InterfaceEntry> Interfaces = new Dictionary<Guid, InterfaceEntry>();
@@ -234,30 +253,63 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
 
         public NTSTATUS Handle(WinPort Port, byte[] SendData, PortReply Reply, BinaryEmulator Instance)
         {
-            if (!LrpcPacket.TryParse(SendData, out LrpcMessage Message))
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            Reply.Data = Serve(SendData, Reply.Client.Bindings, Instance);
+            return Reply.Data == null ? NTSTATUS.STATUS_INVALID_PARAMETER : NTSTATUS.STATUS_SUCCESS;
+        }
 
+        internal byte[] Serve(byte[] SendData, LrpcBindingTable Bindings, BinaryEmulator Instance)
+        {
+            if (!LrpcPacket.TryParse(SendData, out LrpcMessage Message))
+                return null;
+
+            byte[] Reply = null;
             if (Message.Type == LrpcMessageType.Bind)
             {
-                if (!LrpcBindings.TryAccept(Reply.Client, Message, CollectionsMarshal.AsSpan(Registered), out Guid Interface, out Reply.Data))
+                if (!LrpcBindings.TryAccept(Bindings, Message, CollectionsMarshal.AsSpan(Registered), out Guid Interface, out Reply))
                 {
                     if ((Instance.Settings.Flags & LogFlags.General) != 0)
                         Instance.TriggerEventMessage($"[!] Host COM: process {ProcessId} serves no interface {Interface}; refusing the bind.", LogFlags.General);
-                    Reply.Data = LrpcPacket.BuildFault(Message, LrpcPacket.RpcSUnknownIf);
+                    Reply = LrpcPacket.BuildFault(Message, LrpcPacket.RpcSUnknownIf);
                 }
             }
             else if (Message.Type == LrpcMessageType.Request)
             {
-                Reply.Data = HandleRequest(Message, Reply.Client, Instance);
+                Reply = HandleRequest(Message, Bindings, Instance);
             }
 
-            Reply.Data ??= LrpcPacket.EchoHeader(SendData);
+            return Reply ?? LrpcPacket.EchoHeader(SendData);
+        }
+
+        internal override bool Connect(BinaryEmulator Instance, AlpcConnection Connection, ReadOnlySpan<byte> Data, out byte[] Reply, out object State)
+        {
+            Reply = Array.Empty<byte>();
+            State = new LrpcBindingTable();
+            return true;
+        }
+
+        internal override NTSTATUS Receive(BinaryEmulator Instance, AlpcConnection Connection, ReadOnlySpan<byte> Data, bool WaitsForReply, out byte[] Reply)
+        {
+            Reply = null;
+            byte[] Message = new byte[LrpcPacket.HeaderSize + Data.Length];
+            Data.CopyTo(Message.AsSpan(LrpcPacket.HeaderSize));
+            if (!WaitsForReply && !LrpcPacket.ExpectsAnswer(Message))
+                return NTSTATUS.STATUS_SUCCESS;
+
+            byte[] Whole = Serve(Message, (LrpcBindingTable)Connection.HostServerState, Instance);
+            if (Whole == null)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            Reply = Whole.AsSpan(LrpcPacket.HeaderSize).ToArray();
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private byte[] HandleRequest(in LrpcMessage Message, ServedClient Client, BinaryEmulator Instance)
+        internal override void Disconnected(BinaryEmulator Instance, AlpcConnection Connection)
         {
-            if (!LrpcBindings.TryResolve(Client, Message, out Guid Interface, out Guid Ipid))
+        }
+
+        private byte[] HandleRequest(in LrpcMessage Message, LrpcBindingTable Bindings, BinaryEmulator Instance)
+        {
+            if (!LrpcBindings.TryResolve(Bindings, Message, out Guid Interface, out Guid Ipid))
                 return LrpcPacket.BuildFault(Message, LrpcPacket.RpcSUnknownIf);
 
             ReadOnlySpan<byte> Stub = Message.StubData;
@@ -410,7 +462,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             for (int i = 0; i < Count && Known; i++)
             {
                 if (Results[i] == Orpc.SOk)
-                    Orpc.WriteInterfacePointerData(ref Writer, Entry.Object.GetMarshalData(Orpc.InterfaceAt(Iids, i), Objects[i]));
+                    Orpc.WriteInterfacePointerData(ref Writer, Entry.Object.GetIdentityMarshalData(Orpc.InterfaceAt(Iids, i), Objects[i]));
             }
 
             Writer.WriteUInt32(Count == 0 ? Orpc.EInvalidArg : !Known ? RpcEInvalidObject : QueryResult(Failed, Count));

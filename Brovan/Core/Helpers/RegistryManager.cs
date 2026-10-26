@@ -221,15 +221,24 @@ namespace Brovan.Core.Helpers
             return Mutate(RelativePath, Name, 0, null, MutationKind.DeleteValue, ref Created);
         }
 
+        // Changes gets every change Update made, also when it fails.
+        internal bool TryUpdate(Func<HiveUpdate, bool> Update, List<HiveChange> Changes)
+        {
+            bool Created = false;
+            return Mutate(null, null, 0, null, MutationKind.Update, ref Created, Update, Changes);
+        }
+
         private enum MutationKind
         {
             CreateKey,
             DeleteKey,
             SetValue,
-            DeleteValue
+            DeleteValue,
+            Update
         }
 
-        private bool Mutate(string RelativePath, string Name, int Type, byte[] Data, MutationKind Kind, ref bool CreatedNew)
+        private bool Mutate(string RelativePath, string Name, int Type, byte[] Data, MutationKind Kind, ref bool CreatedNew,
+            Func<HiveUpdate, bool> Update = null, List<HiveChange> Changes = null)
         {
             if (Writer == null)
                 return false;
@@ -262,8 +271,12 @@ namespace Brovan.Core.Helpers
                             return Writer.TryDeleteKey(RelativePath);
                         case MutationKind.SetValue:
                             return Writer.TrySetValue(RelativePath, Name, Type, Data);
-                        default:
+                        case MutationKind.DeleteValue:
                             return Writer.TryDeleteValue(RelativePath, Name);
+                        case MutationKind.Update:
+                            return Update(new HiveUpdate(this, Changes));
+                        default:
+                            return false;
                     }
                 }
                 finally
@@ -273,14 +286,12 @@ namespace Brovan.Core.Helpers
 
                     SeenSequence = Writer.CurrentSequence;
                     SeenSecondSequence = Writer.CurrentSequence;
-                    Length = Writer.FileLength;
-                    Remap();
-
-                    Reader.NoteWrite(Length, Kind == MutationKind.DeleteKey ? RelativePath : null);
+                    RefreshAfterWrite(Kind == MutationKind.DeleteKey ? RelativePath : null);
                 }
             }
-            catch (Exception)
+            catch (Exception Error)
             {
+                Utils.LogError($"[-] A registry write to {NtMountPoint} failed: {Error.Message}");
                 return false;
             }
             finally
@@ -290,6 +301,19 @@ namespace Brovan.Core.Helpers
                     try { WriteLock.ReleaseMutex(); } catch { }
                 }
             }
+        }
+
+        internal bool TryGetValue(string RelativePath, string Name, out ValueNode Value)
+        {
+            Value = null;
+            return Reader.TryOpenPath(RelativePath, out RegistryHiveReader.HiveKey Key) && Reader.TryGetValue(Key, Name, out Value);
+        }
+
+        internal void RefreshAfterWrite(string RemovedPath)
+        {
+            Length = Writer.FileLength;
+            Remap();
+            Reader.NoteWrite(Length, RemovedPath);
         }
 
         // A new hive bin lands past the end of the mapping.
@@ -352,6 +376,56 @@ namespace Brovan.Core.Helpers
         }
     }
 
+    public readonly record struct HiveChange(string RelativePath, uint Filter);
+
+    public sealed class HiveUpdate
+    {
+        // NT: REG_NOTIFY_CHANGE_NAME and REG_NOTIFY_CHANGE_LAST_SET.
+        private const uint NameChanged = 0x1;
+        private const uint ValueChanged = 0x4;
+
+        private readonly Hive Owner;
+        private readonly List<HiveChange> Changes;
+
+        internal HiveUpdate(Hive Owner, List<HiveChange> Changes)
+        {
+            this.Owner = Owner;
+            this.Changes = Changes;
+        }
+
+        public bool TryGetValue(string RelativePath, string Name, out ValueNode Value) => Owner.TryGetValue(RelativePath, Name, out Value);
+
+        public bool TrySetValue(string RelativePath, string Name, int Type, byte[] Data)
+        {
+            bool Written = Owner.Writer.TrySetValue(RelativePath, Name, Type, Data);
+            Owner.RefreshAfterWrite(null);
+            if (Written)
+                Changes.Add(new HiveChange(RelativePath, ValueChanged));
+            return Written;
+        }
+
+        // One level at a time, so each created key reports a name change on its parent as NtCreateKey does.
+        public bool TryCreateKey(string RelativePath)
+        {
+            string Parent = string.Empty;
+            foreach (string Part in RelativePath.Split('\\', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string Path = Parent + "\\" + Part;
+                bool Created = Owner.Writer.TryCreateKey(Path, out bool CreatedNew);
+                if (!Created || CreatedNew)
+                    Owner.RefreshAfterWrite(null);
+                if (!Created)
+                    return false;
+
+                if (CreatedNew)
+                    Changes.Add(new HiveChange(Parent.Length == 0 ? "\\" : Parent, NameChanged));
+                Parent = Path;
+            }
+
+            return true;
+        }
+    }
+
     public class KeyNode
     {
         public string FullPath;
@@ -366,6 +440,13 @@ namespace Brovan.Core.Helpers
         public string Name;
         public int Type;
         public byte[] Data;
+
+        public bool TryGetUInt64(out ulong Number)
+        {
+            bool Exact = Data?.Length == sizeof(ulong);
+            Number = Exact ? BinaryPrimitives.ReadUInt64LittleEndian(Data) : 0;
+            return Exact;
+        }
     }
 
     public sealed class RegistryHiveReader

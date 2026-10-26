@@ -222,6 +222,27 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
     }
 
+    internal sealed class WinPostedMessageRead : WinCallbackContinuation
+    {
+        private readonly ulong MessagePtr;
+        private readonly Win32k.Win32kMessage Message;
+        private readonly WindowsThreadState Reader;
+
+        internal WinPostedMessageRead(ulong MessagePtr, in Win32k.Win32kMessage Message, WindowsThreadState Reader)
+        {
+            this.MessagePtr = MessagePtr;
+            this.Message = Message;
+            this.Reader = Reader;
+        }
+
+        internal override bool Resume(BinaryEmulator Emulator, ref ulong Value)
+        {
+            if (!Win32k.Win32kHelper.WriteMessage(Emulator, MessagePtr, Message, Reader))
+                Brovan.Core.Helpers.Utils.LogError($"[-] win32k: the message buffer at 0x{MessagePtr:X} could not take its message after the window procedure ran.");
+            return false;
+        }
+    }
+
     public sealed class WinPaintBegin : WinCallbackContinuation
     {
         public ulong Hwnd;

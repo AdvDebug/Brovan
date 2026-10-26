@@ -12,6 +12,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Shell
         private static readonly Dictionary<Guid, Func<HostObject>> Services = new Dictionary<Guid, Func<HostObject>>
         {
             [ApplicationActivationBroker.Interface] = () => new ApplicationActivationBroker(),
+            [PresenterBroker.Interface] = () => new PresenterBroker(),
         };
 
         internal override bool Permanent => true;

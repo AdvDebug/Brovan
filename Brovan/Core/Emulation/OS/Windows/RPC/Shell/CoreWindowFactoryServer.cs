@@ -8,7 +8,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Shell
     // this object for the rest.
     internal sealed class CoreWindowFactoryServer : HostObject
     {
-        private static readonly Guid HandlerClass = new Guid("b243a9fd-c57a-4d3e-a7cf-21caed64cb5a");
+        private static readonly Guid HandlerClassId = new Guid("b243a9fd-c57a-4d3e-a7cf-21caed64cb5a");
 
         private static readonly Guid ConfigureWindowFactoryInterface = new Guid("601d51e3-801e-49c9-bbfa-fe29a662aead");
         private static readonly Guid PrivateInterface = new Guid("087ca5a4-8cfc-4264-b39d-da2bb2583a11");
@@ -56,6 +56,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Shell
             return true;
         }
 
+        internal override Guid? HandlerClass => HandlerClassId;
+
         // NT: the factory aggregates its standard marshaler (CoGetStdMarshalEx with SMEXF_SERVER).
         internal override Guid UnmarshalClass => Orpc.AggregatedStandardMarshal;
 
@@ -74,8 +76,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Shell
             const int UserDataSize = 2 * sizeof(ulong);
 
             int Size = FixedConfigurationSize + (SplashScreenImage.Length + View.ContractId.Length + ExperienceId.Length) * sizeof(char);
-            Ndr20Writer Writer = new Ndr20Writer(Orpc.HandlerObjRefSize + sizeof(uint) + Size);
-            Orpc.WriteHandlerObjRef(Writer.Take(Orpc.HandlerObjRefSize), Interface, Std, HandlerClass);
+            Ndr20Writer Writer = new Ndr20Writer(StandardObjRefSize + sizeof(uint) + Size);
+            WriteStandardObjRef(Writer.Take(StandardObjRefSize), Interface, Std);
             Writer.WriteUInt32((uint)Size);
             Writer.WriteByte(AllowReuse);
             Writer.WriteUInt32(WindowAttributes);

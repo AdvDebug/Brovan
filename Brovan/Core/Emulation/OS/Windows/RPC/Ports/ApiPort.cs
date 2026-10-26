@@ -118,18 +118,28 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            if (RoutesToGenericRpc(Port))
+            {
+                Reply.Data = HandleGenericRpcPort(Port, SendData, Reply, Instance);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
             if (IsCsrApiPort(Port?.Name))
             {
                 Reply.Data = HandleCsrPort(Port, SendData, Instance);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (DwmApiPortHandler.TryHandle(Port?.Name, SendData, Reply, Instance))
-                return NTSTATUS.STATUS_SUCCESS;
-
-            Reply.Data = HandleGenericRpcPort(Port, SendData, Reply, Instance);
+            if (!DwmApiPortHandler.TryHandle(Port?.Name, SendData, Reply, Instance))
+                Reply.Data = HandleGenericRpcPort(Port, SendData, Reply, Instance);
             return NTSTATUS.STATUS_SUCCESS;
         }
+
+        internal static bool RoutesToGenericRpc(WinPort Port) => !IsCsrApiPort(Port?.Name) && !string.Equals(Port?.Name, DwmApiPortHandler.PortName, StringComparison.OrdinalIgnoreCase);
+
+        internal static bool QueuesAnswers(WinPort Port) => Port.Handler == Handle && RoutesToGenericRpc(Port);
+
+        internal static bool AnswersAsync(WinPort Port, byte[] Message) => QueuesAnswers(Port) && LrpcPacket.ExpectsAnswer(Message);
 
         private static byte[] HandleCsrPort(WinPort Port, byte[] SendData, BinaryEmulator Instance)
         {

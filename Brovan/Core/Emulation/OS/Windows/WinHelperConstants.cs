@@ -195,6 +195,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         public Dictionary<ulong, PortableBinarySection> Sections = new Dictionary<ulong, PortableBinarySection>();
     }
 
+    internal readonly struct MappedImage : IImageReader
+    {
+        private readonly BinaryEmulator Instance;
+        private readonly ulong Base;
+
+        public MappedImage(BinaryEmulator Instance, ulong Base)
+        {
+            this.Instance = Instance;
+            this.Base = Base;
+        }
+
+        public bool TryRead(uint Rva, Span<byte> Destination) => Instance._emulator.ReadMemory(Base + Rva, Destination);
+    }
+
     public enum NTSTATUS : uint
     {
         STATUS_SUCCESS = 0x00000000,
@@ -1210,6 +1224,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const ulong InteractiveLogonId = 0x2F1B4;
         public const ulong InteractiveSourceId = 0x2F0C9;
         public const uint InteractiveSessionId = 1;
+        public const uint InteractiveUserId = 0x3F01A;
+        public const ulong InteractiveUserContext = 0x2F1D2;
         public static readonly string InteractiveSessionDirectory = $"\\Sessions\\{InteractiveSessionId}";
 
         public TokenType Type;
@@ -1231,6 +1247,32 @@ namespace Brovan.Core.Emulation.OS.Windows
         public HandleType ObjectType => HandleType.TokenHandle;
 
         public bool IsAppContainer => AppContainerSid != null;
+
+        // NT: WIN://SYSAPPID holds the package full name, the application id and the package family name.
+        public string PackageFamilyName
+        {
+            get
+            {
+                foreach (WinTokenSecurityAttribute Attribute in SecurityAttributes)
+                {
+                    if (Attribute.Name == WinTokenSecurityAttribute.SysAppIdName && Attribute.StringValues.Length > 2)
+                        return Attribute.StringValues[2];
+                }
+
+                return null;
+            }
+        }
+
+        public bool HasCapability(ReadOnlySpan<byte> Sid)
+        {
+            foreach (byte[] Capability in CapabilitySids)
+            {
+                if (Sid.SequenceEqual(Capability))
+                    return true;
+            }
+
+            return false;
+        }
 
         public WinToken()
         {

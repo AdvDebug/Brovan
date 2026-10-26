@@ -60,6 +60,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.CoreUI
             Server.ReleaseObject();
         }
 
+        // InstanceId is the low 32 bits of the window handle.
+        internal bool HasWindow(uint InstanceId) => Windows.ContainsKey(InstanceId);
+
         internal void WindowReleased(NavigationServerWindow Window)
         {
             if (Windows.TryGetValue(Window.InstanceId, out NavigationServerWindow Found) && Found == Window)

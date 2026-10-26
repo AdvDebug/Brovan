@@ -30,6 +30,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const ushort UnregisterReverseConnectionPortMethod = 17;
         private const ushort ReleaseConversationClientMethod = 22;
         private const ushort RegisterConversationClientMethod = 23;
+        private const ushort RegisterPendingConversationClientForServerMethod = 24;
         private const ushort ReplyRegisterThreadMethod = 4;
         private const ushort ReplyPrepareConnectionMethod = 6;
         private const ushort ReplyCloseConnectionMethod = 9;
@@ -43,6 +44,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const ushort ReplyUnregisterReverseConnectionPortMethod = 20;
         private const ushort ReplyReleaseConversationClientMethod = 28;
         private const ushort ReplyRegisterConversationClientMethod = 29;
+        private const ushort ReplyRegisterPendingConversationClientForServerMethod = 30;
         internal const uint MessagingSuccess = 0;
         private const uint MessagingDuplicateName = 3;
         private const uint MessagingClientNotFound = 5;
@@ -79,6 +81,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint MaxConversationHint = 0xFFFF;
         // ConversationInfo {hint, item owner, server style, connection mode}.
         private const int ConversationInfoSize = 16;
+        // ConversationPeerInfo {RoutingInfo, item table, peer id}.
+        private const int ConversationPeerInfoSize = 56;
+        private const int OffPeerItemTable = 40;
+        private const int OffPeerId = 48;
+        // NT calls a conversation with both of these a single persistent manual server (get_IsSinglePersistentManualServer).
+        private const uint SinglePersistentServerStyle = 1;
+        private const uint ManualConnectionMode = 1;
 
         // IRegistrarServer, in method order (IRegistrarServer_Receive::Type in coremessaging.dll).
         private static readonly string[] RegistrarMethods =
@@ -141,6 +150,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             internal uint ConnectionMode;
             internal PeerIds Peers;
             internal readonly Dictionary<uint, Client> Clients = new Dictionary<uint, Client>();
+
+            internal bool ClientsHoldItems => ItemOwner is 1 or 3;
+
+            // NT: RegisteredConversation::TryGetClient finds only the clients of the calling thread.
+            internal bool HasClient(uint PeerId, Client Caller) => Clients.TryGetValue(PeerId, out Client Owner) && Owner == Caller;
         }
 
         // NT: IDLRUAllocator. ID 0 is reserved, a new ID is the lowest free one, and a released ID is free again
@@ -240,6 +254,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     return ReleaseConversationClient(Caller, ref Parameters, Sequence, out Reply);
                 case RegisterConversationClientMethod:
                     return RegisterConversationClient(Caller, ref Parameters, Sequence, out Reply);
+                case RegisterPendingConversationClientForServerMethod:
+                    return RegisterPendingConversationClientForServer(Caller, ref Parameters, Sequence, out Reply);
                 default:
                     Utils.LogError($"[-] CoreMessaging registrar: {RegistrarMethods[Method]} is not served.");
                     return NTSTATUS.STATUS_NOT_IMPLEMENTED;
@@ -529,6 +545,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return true;
         }
 
+        private static bool TryCheckSessionScope(ReadOnlySpan<byte> Scope, ushort Method, out NTSTATUS Failure)
+        {
+            uint ScopeKind = BinaryPrimitives.ReadUInt32LittleEndian(Scope);
+            Failure = ScopeKind != SessionScope ? ScopeNotServed(Method, ScopeKind) : !IsCallerSessionScope(Scope) ? ProtocolError(Method) : NTSTATUS.STATUS_SUCCESS;
+            return Failure == NTSTATUS.STATUS_SUCCESS;
+        }
+
         private NTSTATUS RegisterObject(BinaryEmulator Instance, Client Caller, ref CoreMessagingReader Parameters, uint Sequence, out byte[] Reply)
         {
             Reply = null;
@@ -550,10 +573,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (!TryRegisterObject(Caller, Name.ToString(), ScopeKind, Identity, Port, Type, out uint Result))
                 return ScopeKind == ProcessScope ? ProtocolError(RegisterObjectMethod) : NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
 
-            CoreMessagingWriter Call = BeginReply();
-            Call.UInt32(Result);
-            Reply = CoreMessagingCall.ToReply(ClientInterface, ReplyRegisterObjectMethod, Sequence, Call);
-            return NTSTATUS.STATUS_SUCCESS;
+            return ResultReply(ReplyRegisterObjectMethod, Result, Sequence, out Reply);
         }
 
         // NT sets the bool only for a type 1 object of a container thread, and there are none here.
@@ -611,10 +631,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 Result = MessagingSuccess;
             }
 
-            CoreMessagingWriter Call = BeginReply();
-            Call.UInt32(Result);
-            Reply = CoreMessagingCall.ToReply(ClientInterface, ReplyUnregisterObjectMethod, Sequence, Call);
-            return NTSTATUS.STATUS_SUCCESS;
+            return ResultReply(ReplyUnregisterObjectMethod, Result, Sequence, out Reply);
         }
 
         private static bool IsValidName(ReadOnlySpan<char> Name) => !Name.IsEmpty && Name.Length <= MaxNameLength;
@@ -716,15 +733,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 || !Parameters.TryReadUInt32(out uint ServerStyle) || !Parameters.AtEnd)
                 return Malformed(RegisterConversationClientMethod);
 
-            uint ScopeKind = BinaryPrimitives.ReadUInt32LittleEndian(Scope);
             if (!IsValidName(Name))
                 return ProtocolError(RegisterConversationClientMethod);
 
-            if (ScopeKind != SessionScope)
-                return ScopeNotServed(RegisterConversationClientMethod, ScopeKind);
+            if (!TryCheckSessionScope(Scope, RegisterConversationClientMethod, out NTSTATUS Failure))
+                return Failure;
 
-            if (!IsCallerSessionScope(Scope) || Name.StartsWith(ReservedKernelPrefix, StringComparison.Ordinal)
-                || ProcessObjects.Count >= MaxProcessRegistrations)
+            if (Name.StartsWith(ReservedKernelPrefix, StringComparison.Ordinal) || ProcessObjects.Count >= MaxProcessRegistrations)
                 return ProtocolError(RegisterConversationClientMethod);
 
             // NT: an eager conversation takes only eager clients, and no server registers a conversation here.
@@ -801,20 +816,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 || !Parameters.TryReadUInt32(out uint PeerId) || !Parameters.AtEnd)
                 return Malformed(ReleaseConversationClientMethod);
 
-            uint ScopeKind = BinaryPrimitives.ReadUInt32LittleEndian(Scope);
             if (!IsValidName(Name))
                 return ProtocolError(ReleaseConversationClientMethod);
 
-            if (ScopeKind != SessionScope)
-                return ScopeNotServed(ReleaseConversationClientMethod, ScopeKind);
-
-            if (!IsCallerSessionScope(Scope))
-                return ProtocolError(ReleaseConversationClientMethod);
+            if (!TryCheckSessionScope(Scope, ReleaseConversationClientMethod, out NTSTATUS Failure))
+                return Failure;
 
             if (SessionConversations.TryGetValue(Name.ToString(), out Conversation Conversation))
             {
-                // NT: RegisteredConversation::TryGetClient finds only the clients of the calling thread.
-                if (!Conversation.Clients.TryGetValue(PeerId, out Client Owner) || Owner != Caller)
+                if (!Conversation.HasClient(PeerId, Caller))
                     return ProtocolError(ReleaseConversationClientMethod);
 
                 Caller.ConversationPeers.Remove(new ConversationPeer(Conversation, PeerId));
@@ -822,6 +832,48 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             }
 
             Reply = CoreMessagingCall.ToReply(ClientInterface, ReplyReleaseConversationClientMethod, Sequence, null);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // Server 0 stands for the server that a single persistent manual server conversation gets later.
+        private NTSTATUS RegisterPendingConversationClientForServer(Client Caller, ref CoreMessagingReader Parameters, uint Sequence, out byte[] Reply)
+        {
+            Reply = null;
+            if (!Parameters.TryReadString(out ReadOnlySpan<char> Name) || !Parameters.TryReadFixed(ScopeIdSize, out ReadOnlySpan<byte> Scope)
+                || !Parameters.TryReadUInt32(out uint ServerId) || !Parameters.TryReadFixed(ConversationPeerInfoSize, out ReadOnlySpan<byte> Peer)
+                || !Parameters.AtEnd)
+                return Malformed(RegisterPendingConversationClientForServerMethod);
+
+            uint PeerId = BinaryPrimitives.ReadUInt32LittleEndian(Peer.Slice(OffPeerId));
+            if (!Peer.Slice(0, CoreMessagingRouting.Size).ContainsAnyExcept((byte)0) || PeerId == 0 || !IsValidName(Name))
+                return ProtocolError(RegisterPendingConversationClientForServerMethod);
+
+            if (!TryCheckSessionScope(Scope, RegisterPendingConversationClientForServerMethod, out NTSTATUS Failure))
+                return Failure;
+
+            const ushort ReplyMethod = ReplyRegisterPendingConversationClientForServerMethod;
+            if (!SessionConversations.TryGetValue(Name.ToString(), out Conversation Conversation))
+                return ResultReply(ReplyMethod, MessagingObjectNotFound, Sequence, out Reply);
+
+            if (!Conversation.HasClient(PeerId, Caller)
+                || Conversation.ClientsHoldItems != (BinaryPrimitives.ReadUInt64LittleEndian(Peer.Slice(OffPeerItemTable)) != 0))
+                return ProtocolError(RegisterPendingConversationClientForServerMethod);
+
+            // No server registers a conversation here, so a named server is never found.
+            if (ServerId != 0)
+                return ResultReply(ReplyMethod, MessagingObjectNotFound, Sequence, out Reply);
+
+            if (Conversation.ServerStyle != SinglePersistentServerStyle || Conversation.ConnectionMode != ManualConnectionMode)
+                return ProtocolError(RegisterPendingConversationClientForServerMethod);
+
+            return ResultReply(ReplyMethod, MessagingSuccess, Sequence, out Reply);
+        }
+
+        private NTSTATUS ResultReply(ushort ReplyMethod, uint Result, uint Sequence, out byte[] Reply)
+        {
+            CoreMessagingWriter Call = BeginReply();
+            Call.UInt32(Result);
+            Reply = CoreMessagingCall.ToReply(ClientInterface, ReplyMethod, Sequence, Call);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

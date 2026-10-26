@@ -160,6 +160,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong GuestUserId = 1;
 
         private const string AppContainerProfiles = "\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer";
+        private const string SystemAppDataProfiles = "\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\SystemAppData";
+        private const string AppxPackageState = AppxRoot + "\\PackageState";
+        private const string StateNameValue = "WnfStateName";
         private static readonly string[] AppContainerFolders = { "Temp" };
         private static readonly string[] AppContainerHiddenFolders = { "INetCache", "INetCookies", "INetHistory" };
         private static readonly string[] PackageDataFolders = { "AppData", "LocalCache", "LocalState", "RoamingState", "Settings", "SystemAppData", "TempState" };
@@ -284,6 +287,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             PublishStateRepositoryCache(Helper, Identity);
             PublishUserDependencyMiniRepository(Instance, Helper, Identity);
             PublishUserProfile(Helper, Identity);
+            PublishStateChangeNotification(Helper, Identity);
         }
 
         // NT: the deployment creates the AppContainer profile of the package and its data folders for the user.
@@ -311,15 +315,74 @@ namespace Brovan.Core.Emulation.OS.Windows
                 CreateUserFolder(Root + "\\" + Name, false);
         }
 
-        private static bool SetUserString(WinSysHelper Helper, string KeyPath, string Name, string Value)
+        // NT registers a permanent WNF name in PSR and in the PackageState list (StateCreation).
+        private static void PublishStateChangeNotification(WinSysHelper Helper, AppxProcessIdentity Identity)
         {
-            byte[] Data = Encoding.Unicode.GetBytes(Value + "\0");
-            WinRegKey Key = Helper.ResolveRegistryKey(KeyPath);
-            if (Key != null && Helper.TryGetRegistryValue(Key, Name, out ValueNode Existing) && Existing.Type == WinSysHelper.RegSz &&
+            string FamilyName = Identity.Package.FamilyName;
+            string Psr = "\\Registry\\User\\" + Helper.CurrentUserSid + SystemAppDataProfiles + "\\" + FamilyName + "\\PSR";
+            Hive Store = WnfStateNames.GetStoreHive(Helper);
+
+            if (Helper.TryReadRegistryValue(Psr, StateNameValue, out ValueNode Current) && Current.TryGetUInt64(out ulong CurrentName)
+                && WnfStateNames.HasPermanent(Store, CurrentName))
+                return;
+
+            Hive User = Helper.RegManager.GetHiveByNtPath(Psr);
+            string List = Helper.RegManager.NormalizeNtRegistryPath(Store, AppxPackageState + "\\" + Helper.CurrentUserSid + "\\" + FamilyName);
+            if (Store == null || !Store.Writable || User == null || !User.Writable || List == null)
+            {
+                Utils.LogError($"[-] AppX: the state change name of {FamilyName} cannot be registered, its registry hives are not writable.");
+                return;
+            }
+
+            byte[] Descriptor = NtAccessCheck.BuildSelfRelative(default, default, NtAccessCheck.BuildAcl(
+                NtAccessCheck.AceEntry.Allow(NtQueryInformationToken.LocalSystemSid, (uint)AccessMask.GenericAll),
+                NtAccessCheck.AceEntry.Allow(Identity.AppContainerSid, (uint)AccessMask.GenericAll),
+                NtAccessCheck.AceEntry.Allow(NtQueryInformationToken.InteractiveUserSid, (uint)AccessMask.GenericAll)), default);
+
+            byte[] StateName = null;
+            bool Listed = false;
+            Helper.TryUpdateHive(Store, Update =>
+            {
+                if (Update.TryGetValue(List, StateNameValue, out ValueNode Existing) && Existing.TryGetUInt64(out ulong ListedName)
+                    && WnfStateNames.HasPermanent(Update, ListedName))
+                {
+                    StateName = Existing.Data;
+                    Listed = true;
+                    return true;
+                }
+
+                if (!WnfStateNames.TryCreatePermanent(Update, WnfStateNames.DataScope.User, Descriptor, out ulong Created))
+                    return false;
+
+                StateName = new byte[sizeof(ulong)];
+                BinaryPrimitives.WriteUInt64LittleEndian(StateName, Created);
+                Listed = Update.TryCreateKey(List) && Update.TrySetValue(List, StateNameValue, WinSysHelper.RegBinary, StateName);
+                return true;
+            });
+
+            if (StateName == null)
+            {
+                Utils.LogError($"[-] AppX: no state change name could be created for {FamilyName}.");
+                return;
+            }
+
+            if (!Listed)
+                Utils.LogError($"[-] AppX: the state change name of {FamilyName} is not in the PackageState list.");
+
+            if (!Helper.CreateRegistryKeyPath(Psr, false, out _) || !SetUserValue(Helper, Psr, StateNameValue, WinSysHelper.RegBinary, StateName))
+                Utils.LogError($"[-] AppX: the state change name of {FamilyName} cannot be written to the user hive.");
+        }
+
+        private static bool SetUserString(WinSysHelper Helper, string KeyPath, string Name, string Value) =>
+            SetUserValue(Helper, KeyPath, Name, WinSysHelper.RegSz, Encoding.Unicode.GetBytes(Value + "\0"));
+
+        private static bool SetUserValue(WinSysHelper Helper, string KeyPath, string Name, int Type, byte[] Data)
+        {
+            if (Helper.TryReadRegistryValue(KeyPath, Name, out ValueNode Existing) && Existing.Type == Type &&
                 Existing.Data != null && Existing.Data.AsSpan().SequenceEqual(Data))
                 return true;
 
-            return Helper.SetRegistryValue(KeyPath, Name, WinSysHelper.RegSz, Data);
+            return Helper.SetRegistryValue(KeyPath, Name, Type, Data);
         }
 
         private static void CreateUserFolder(string GuestPath, bool Hidden)

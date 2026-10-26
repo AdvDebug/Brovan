@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.RPC
@@ -36,11 +37,24 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
                 : ReadOnlySpan<byte>.Empty;
     }
 
+    internal sealed class LrpcBindingTable
+    {
+        private Dictionary<uint, Guid> Interfaces;
+
+        internal void Bind(uint Context, Guid Interface) => (Interfaces ??= new Dictionary<uint, Guid>())[Context] = Interface;
+
+        internal bool TryGetInterface(uint Context, out Guid Interface)
+        {
+            Interface = Guid.Empty;
+            return Interfaces != null && Interfaces.TryGetValue(Context, out Interface);
+        }
+    }
+
     internal static class LrpcBindings
     {
         // The checks and their order follow LRPC_SASSOCIATION::AddBinding in rpcrt4.
         // False means the interface is not served here.
-        public static bool TryAccept(ServedClient Client, in LrpcMessage Request, ReadOnlySpan<Guid> Interfaces, out Guid Interface, out byte[] Answer)
+        public static bool TryAccept(LrpcBindingTable Bindings, in LrpcMessage Request, ReadOnlySpan<Guid> Interfaces, out Guid Interface, out byte[] Answer)
         {
             Answer = null;
             uint Offered = Request.SyntaxMask & LrpcPacket.OfferedSyntaxes;
@@ -59,17 +73,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
                 return true;
             }
 
-            Client.Bindings ??= new Dictionary<uint, Guid>();
-            Client.Bindings[Context] = Interface;
+            Bindings.Bind(Context, Interface);
             Answer = LrpcPacket.BuildBindAccept(Request, out _);
             return true;
         }
 
-        public static bool TryResolve(ServedClient Client, in LrpcMessage Request, out Guid Interface, out Guid ObjectId)
+        public static bool TryResolve(LrpcBindingTable Bindings, in LrpcMessage Request, out Guid Interface, out Guid ObjectId)
         {
             Interface = Guid.Empty;
-            return LrpcPacket.TryReadRequestTarget(Request, out uint Context, out ObjectId) && Client.Bindings != null
-                && Client.Bindings.TryGetValue(Context, out Interface);
+            return LrpcPacket.TryReadRequestTarget(Request, out uint Context, out ObjectId) && Bindings.TryGetInterface(Context, out Interface);
         }
     }
 
@@ -134,6 +146,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
 
             return true;
         }
+
+        public static bool ExpectsAnswer(byte[] Message) =>
+            TryParse(Message, out LrpcMessage Parsed) && (Parsed.Type == LrpcMessageType.Bind || Parsed.Type == LrpcMessageType.Request);
 
         public static byte[] BuildBindAccept(in LrpcMessage Request, out uint AcceptedSyntax)
         {
@@ -314,6 +329,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             string Name = Endpoint.Contains('\\') ? Unescape(Endpoint) : Endpoint;
             return Name.StartsWith('\\') ? Name : "\\RPC Control\\" + Name;
         }
+
+        // rpcrt4 names dynamic endpoints the same way (LRPC_ADDRESS::ServerSetupAddress).
+        internal static string NewDynamicEndpoint() => "LRPC-" + RandomNumberGenerator.GetHexString(18, lowercase: true);
 
         private static string Unescape(string Endpoint)
         {

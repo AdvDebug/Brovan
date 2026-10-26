@@ -31,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (Allocation.View == 0)
             {
-                if (!DxgkProcess.TryMapStorage(Instance, Allocation.Storage.Memory, Allocation.Storage.Size, out ulong View))
+                if (!Instance.WinHelper.TryMapStorage(Allocation.Storage.Memory, Allocation.Storage.Size, out ulong View))
                     return NTSTATUS.STATUS_NO_MEMORY;
 
                 Allocation.View = View;

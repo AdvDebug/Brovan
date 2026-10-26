@@ -215,17 +215,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal void ReleaseFenceReferences(int Count) => FenceReferences -= Count;
 
-        internal static bool TryMapStorage(BinaryEmulator Instance, IntPtr Storage, ulong Size, out ulong Base)
-            => Instance.TryFindFreeBaseAddress(Size, WinSysHelper.AllocationGranularity, Instance.BaseAddress, Instance.MaxAddress, out Base)
-                && Instance.MapSharedMemoryRegion(Base, Size, MemoryProtection.ReadWrite, Storage, WinSysHelper.PAGE_READWRITE, Base);
-
-        // A guest that freed the view may have put its own memory at the address.
-        internal static void UnmapStorage(BinaryEmulator Instance, ulong Base, IntPtr Storage)
-        {
-            if (Base != 0 && Instance.GetHostPointer(Base, StoragePageSize) == Storage)
-                Instance.UnmapMemoryRegion(Base);
-        }
-
         private void Free(int Index)
         {
             Values[Index] = null;

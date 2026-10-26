@@ -175,7 +175,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 Span<Translation> Translations = Rented.AsSpan(0, (int)Count);
                 for (int i = 0; i < Count; i++)
                 {
-                    if (!TryReadSid(ref Reader, out ReadOnlySpan<byte> Sid))
+                    if (!Reader.TryReadSid(out ReadOnlySpan<byte> Sid))
                         return false;
                     Translations[i] = TranslateSid(Sid);
                 }
@@ -336,16 +336,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             Name = $"LogonSessionId_{SubAuthority(Sid, 1)}_{SubAuthority(Sid, 2)}";
             return true;
-        }
-
-        private static bool TryReadSid(ref Ndr20Reader Reader, out ReadOnlySpan<byte> Sid)
-        {
-            Sid = default;
-            if (!Reader.TryReadUInt32(out uint SubAuthorityCount) || SubAuthorityCount > MaxSubAuthorities
-                || !Reader.TryReadBytes(SidLength((int)SubAuthorityCount), out Sid))
-                return false;
-
-            return Sid[1] == SubAuthorityCount;
         }
 
         // lsass lists well-known authorities, then BUILTIN, then the account domain, each group in order of first use.

@@ -177,14 +177,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Storage == IntPtr.Zero)
                 return false;
 
-            if (!DxgkProcess.TryMapStorage(Instance, Storage, PageSize, out ulong Base))
+            // NT lets the guest unmap this view. Here the unmap fails, because later fences take free slots on the page.
+            if (!Instance.WinHelper.TryMapSystemView(Storage, PageSize, GuestUnmaps: false, NoChange: false, out ulong Base))
             {
                 Instance._emulator.ReleaseSharedStorage(Storage);
                 return false;
             }
 
-            // NT lets the guest unmap this view. Here the unmap fails, because the page must outlive its fences.
-            Instance.WinHelper.TrackSectionRange(Base, PageSize);
             Page = new DxgkFencePage { Base = Base, Storage = Storage, Handed = 1, Live = 1 };
             Pages.Add(Page);
             return true;
@@ -205,8 +204,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static void Release(BinaryEmulator Instance, DxgkFencePage Page)
         {
-            DxgkProcess.UnmapStorage(Instance, Page.Base, Page.Storage);
-            Instance.WinHelper.UntrackSectionRange(Page.Base);
+            Instance.WinHelper.UnmapSystemView(Page.Base, Page.Storage);
             Instance._emulator.ReleaseSharedStorage(Page.Storage);
         }
     }

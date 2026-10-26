@@ -78,6 +78,16 @@ namespace Brovan.Core.Settings
         // Fence references held by D3DKMT waits and queued signals, and the fence count of one call.
         public static int DxgkFenceReferences { get; private set; }
 
+        // DirectComposition channels of one process, the batch page of one channel, and all batch pages of one process.
+        public static int CompositionChannels { get; private set; }
+
+        public static uint CompositionBatchBytes { get; private set; }
+
+        public static ulong CompositionBatchTotalBytes { get; private set; }
+
+        // DirectComposition resources of one process: live resources, and the slots of all resource tables.
+        public static int CompositionResources { get; private set; }
+
         // Application hives one process holds loaded.
         public static int AppHives { get; private set; }
 
@@ -116,6 +126,10 @@ namespace Brovan.Core.Settings
             DxgkQueuedPackets = (int)Pick(Off: 16384, Minimal: 12288, Medium: 8192, High: 4096, Aggressive: 2048);
             DxgkPendingPresents = (int)Pick(Off: 64, Minimal: 64, Medium: 48, High: 32, Aggressive: 16);
             DxgkFenceReferences = (int)Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
+            CompositionChannels = (int)Pick(Off: 1024, Minimal: 768, Medium: 512, High: 256, Aggressive: 128);
+            CompositionBatchBytes = (uint)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 128));
+            CompositionBatchTotalBytes = Megabytes(Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8));
+            CompositionResources = (int)Pick(Off: 1048576, Minimal: 786432, Medium: 524288, High: 262144, Aggressive: 131072);
             AppHives = (int)Pick(Off: 256, Minimal: 192, Medium: 128, High: 96, Aggressive: 64);
             ulong PhysicalMegabytes = Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
 

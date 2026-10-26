@@ -430,6 +430,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Win32kHelper.DropThreadMessages(Emulator, Thread.ThreadId, DestroyThreadWindows(Thread.ThreadId));
             Win32kQueuePort.ReleasePort(Emulator, WinEmulatedThread.TryGetState(Thread));
             NtTimerHelpers.RundownTimers(Emulator, Thread);
+            AlpcMessaging.DeliverConnectReplies(Emulator, Thread.ThreadId);
 
             bool Current = Emulator.CurrentThreadId == (int)Thread.ThreadId;
             if (!Current && Thread.HostWorker != -1)
@@ -2205,6 +2206,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Windows.User.Standard;
         }
 
+        private WinProcess AddHostService(uint ServicesPID, User RunningUser)
+        {
+            WinProcess Service = new WinProcess { PID = GenerateRandomPID(), PPID = ServicesPID, Name = "svchost.exe", Path = "C:\\Windows\\System32\\svchost.exe", Status = ProtectionStatus.None, RunningUser = RunningUser, Critical = true, Arch = BinaryArchitecture.x64 };
+            WinProcesses.Add(Service);
+            return Service;
+        }
+
+        private void AddHostApartmentPort(RPC.HostApartment Apartment)
+        {
+            if (AlpcMessaging.Supported(this))
+                WinPorts.Add(AlpcMessaging.CreateHostPort(Apartment.PortName, Apartment));
+            else
+                WinPorts.Add(new WinPort { Name = Apartment.PortName, Handler = Apartment.Handle });
+        }
+
         public void InitializeProcessTimes(WinProcess Process, long AgeMilliseconds, bool GenerateCpuTimes)
         {
             if (Process == null)
@@ -2437,9 +2453,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal WinProcess ShellProcess { get; private set; }
         internal WinProcess OwnProcess { get; private set; }
         internal readonly Dictionary<Guid, RPC.Ports.RpcssPortHandler.HostClass> HostClasses = new();
+        internal readonly Dictionary<string, RPC.Ports.RpcssPortHandler.HostClass> HostActivatableClasses = new(StringComparer.OrdinalIgnoreCase);
+        internal readonly Dictionary<(Guid Interface, ushort Major), RPC.Ports.EndpointMapper.Entry> HostEndpoints = new();
         // NT keeps a timer with an APC alive, and firing, after its last handle closes.
         internal readonly List<WinTimer> ApcTimers = new List<WinTimer>();
         internal RPC.Shell.ActivatableApplicationRegistrar ShellRegistrar { get; private set; }
+        internal RPC.CoreUI.NavigationServer ShellNavigation { get; private set; }
+        internal RPC.UserManager.UserManagerService UserManager { get; private set; }
         public List<WinFile> WinFiles = new List<WinFile>();
 
         private readonly Dictionary<string, List<WinFile>> OpenFilesByPath = new Dictionary<string, List<WinFile>>(StringComparer.OrdinalIgnoreCase);
@@ -2480,6 +2500,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal WinObjectDirectory AppContainerDirectory { get; private set; }
         internal readonly KnownDlls KnownDlls = new();
         internal readonly DxgkProcess DxgkProcess = new();
+        internal readonly CompositionProcess Composition = new();
         private readonly WinObjectDirectory[] NamedObjectRoots;
         private BinaryEmulator Emulator;
 
@@ -2495,6 +2516,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 return CachedDriveMap;
             }
+        }
+
+        internal bool TryGetSystemFileVersion(string Name, out ushort Build, out ushort Revision)
+        {
+            Build = 0;
+            Revision = 0;
+            string HostPath = GeneralHelper.IO.ResolveHostPath(WindowsVersionInfo.SystemRoot + @"\System32\" + Name, BinaryFormat.PE, NativeSystemView: true);
+            return HostPath != null && ImageResources.TryReadFileVersion(HostPath, out Build, out Revision);
         }
 
         private struct SyscallArgCache
@@ -2756,6 +2785,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public List<WinPort> WinPorts = new List<WinPort>();
+        internal readonly List<AlpcConnection> PendingConnectReplies = new List<AlpcConnection>();
         public ulong EtwNotificationEventHandle;
         internal PebLdrTracker LdrTracker;
         public readonly Dictionary<ulong, WinWindow> WinWindows = new();
@@ -2851,6 +2881,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const int RegNone = 0;
         internal const int RegSz = 1;
         internal const int RegExpandSz = 2;
+        internal const int RegBinary = 3;
         internal const int RegDword = 4;
         internal const int RegMultiSz = 7;
         internal const int RegQword = 11;
@@ -3067,8 +3098,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 WinProcesses.Add(new WinProcess { PID = Steam.ClientPid, PPID = ShellPID, Name = "steam.exe", Path = SteamAppContext.GuestExe, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = BinaryArchitecture.x86 });
             }
 
-            uint RegistrarPID = GenerateRandomPID();
-            WinProcesses.Add(new WinProcess { PID = RegistrarPID, PPID = ServicesPID, Name = "svchost.exe", Path = "C:\\Windows\\System32\\svchost.exe", Status = ProtectionStatus.None, RunningUser = User.LocalService, Critical = true, Arch = BinaryArchitecture.x64 });
+            uint RegistrarPID = AddHostService(ServicesPID, User.LocalService).PID;
+            WinProcess UserManagerProcess = AddHostService(ServicesPID, User.System);
 
             int RandomSvchostNumber = RandomGen.Next(10, 17);
             for (int i = 0; i < RandomSvchostNumber; i++)
@@ -3165,18 +3196,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             });
 
             RPC.HostApartment ShellApartment = new RPC.HostApartment(ShellProcess.PID, GenerateRandomPID());
-            WinPorts.Add(new WinPort
-            {
-                Name = ShellApartment.PortName,
-                Handler = ShellApartment.Handle
-            });
+            AddHostApartmentPort(ShellApartment);
             ShellRegistrar = new RPC.Shell.ActivatableApplicationRegistrar(ShellApartment);
             RPC.Ports.RpcssPortHandler.RegisterClass(this, RPC.Shell.ActivatableApplicationRegistrar.Class, ShellApartment, ShellRegistrar);
             RPC.Ports.RpcssPortHandler.RegisterClass(this, RPC.Shell.ServiceHostBrokerProvider.Class, ShellApartment, new RPC.Shell.ServiceHostBrokerProvider());
 
             RPC.Ports.CoreMessagingRegistrarPort CoreMessagingRegistrar = new RPC.Ports.CoreMessagingRegistrarPort { ProcessId = RegistrarPID, ThreadId = GenerateRandomPID() };
             WinPorts.Add(AlpcMessaging.CreateHostPort(RPC.Ports.CoreMessagingRegistrarPort.PortName, CoreMessagingRegistrar));
-            RPC.CoreUI.NavigationServer.Create(this, CoreMessagingRegistrar, ShellProcess.PID, GenerateRandomPID());
+            ShellNavigation = RPC.CoreUI.NavigationServer.Create(this, CoreMessagingRegistrar, ShellProcess.PID, GenerateRandomPID());
+
+            RPC.HostApartment UserManagerApartment = new RPC.HostApartment(UserManagerProcess.PID, GenerateRandomPID());
+            AddHostApartmentPort(UserManagerApartment);
+            UserManager = RPC.UserManager.UserManagerService.Create(this, UserManagerProcess, UserManagerApartment);
 
             // The kernel publishes these under \KernelObjects on every system. ntdll's commit-condition
             // path and CreateMemoryResourceNotification open them by name and expect them to exist.
@@ -3251,7 +3282,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             internal static readonly ulong[] SingleZeroParameter = new ulong[1];
         }
 
-        private readonly record struct SectionRange(ulong Base, ulong End);
+        private readonly record struct SectionRange(ulong Base, ulong End, bool GuestUnmaps);
 
         // Sorted by base and disjoint.
         private readonly List<SectionRange> SectionRanges = new();
@@ -3279,13 +3310,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Found;
         }
 
-        internal void TrackSectionRange(ulong Base, ulong Size)
+        internal void TrackSectionRange(ulong Base, ulong Size, bool GuestUnmaps = false)
         {
             int Index = FindSectionRangeIndex(Base);
             if (Index >= 0 && SectionRanges[Index].Base == Base)
                 return;
 
-            SectionRanges.Insert(Index + 1, new SectionRange(Base, Base + Size));
+            SectionRanges.Insert(Index + 1, new SectionRange(Base, Base + Size, GuestUnmaps));
         }
 
         internal void UntrackSectionRange(ulong Base)
@@ -3293,6 +3324,45 @@ namespace Brovan.Core.Emulation.OS.Windows
             int Index = FindSectionRangeIndex(Base);
             if (Index >= 0 && SectionRanges[Index].Base == Base)
                 SectionRanges.RemoveAt(Index);
+        }
+
+        internal bool TryMapStorage(IntPtr Storage, ulong Size, out ulong Base)
+            => Emulator.TryFindFreeBaseAddress(Size, AllocationGranularity, Emulator.BaseAddress, Emulator.MaxAddress, out Base)
+                && Emulator.MapSharedMemoryRegion(Base, Size, MemoryProtection.ReadWrite, Storage, PAGE_READWRITE, Base);
+
+        // A guest that freed the view may have put its own memory at the address.
+        internal void UnmapStorage(ulong Base, IntPtr Storage)
+        {
+            if (Base != 0 && Emulator.GetHostPointer(Base, PageSize) == Storage)
+                Emulator.UnmapMemoryRegion(Base);
+        }
+
+        // The caller keeps the storage, also after the guest unmaps the view.
+        internal bool TryMapSystemView(IntPtr Storage, ulong Size, bool GuestUnmaps, bool NoChange, out ulong Base)
+        {
+            if (!TryMapStorage(Storage, Size, out Base))
+                return false;
+
+            TrackSectionRange(Base, Size, GuestUnmaps);
+            if (NoChange)
+                Emulator.MarkNoChangeView(Base);
+            return true;
+        }
+
+        // The guest may have unmapped the view and put another one at its address.
+        internal void UnmapSystemView(ulong Base, IntPtr Storage)
+        {
+            int Index = FindSectionRangeIndex(Base);
+            if (Base != 0 && Index >= 0 && SectionRanges[Index].Base == Base && Emulator.GetHostPointer(Base, PageSize) == Storage)
+                RemoveSystemView(Index);
+        }
+
+        private void RemoveSystemView(int Index)
+        {
+            SectionRange Range = SectionRanges[Index];
+            SectionRanges.RemoveAt(Index);
+            ForgetLockedPages(Range.Base, Range.End);
+            Emulator.UnmapMemoryRuns(Range.Base, Range.End - Range.Base);
         }
 
         public bool IsSectionViewAddress(ulong Address)
@@ -3420,6 +3490,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 ForgetLockedPages(ViewSection.BackingAddress, ViewSection.BackingAddress + ViewSection.Size);
                 ReleaseSectionIfUnreferenced(ViewSection);
+                return true;
+            }
+
+            int RangeIndex = FindSectionRangeIndex(BaseAddress);
+            if (RangeIndex >= 0 && BaseAddress < SectionRanges[RangeIndex].End && SectionRanges[RangeIndex].GuestUnmaps)
+            {
+                RemoveSystemView(RangeIndex);
                 return true;
             }
 
@@ -4640,7 +4717,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ushort Index = (ushort)(Handle & 0xFFFF);
             ushort Uniq = (ushort)((Handle >> 16) & 0x7FFF);
 
-            ulong ThreadInfo = EnsureCurrentUserThreadInfo();
+            ulong ThreadInfo = EnsureUserThreadInfo(Emulator.CurrentThread);
 
             ulong Entry = HandleTable + (ulong)Index * EntrySize;
             Span<byte> Data = Shared.GetSpan(0x20);
@@ -6763,10 +6840,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             ulong ClientWindow = EnsureUserWindowObject(Window);
-            ulong ThreadInfo = EnsureCurrentUserThreadInfo();
             ulong DesktopInfo = EnsureUserDesktopInfo();
-            if (ClientWindow == 0 || ThreadInfo == 0 || DesktopInfo == 0)
+            if (ClientWindow == 0 || DesktopInfo == 0)
                 return false;
+
+            // NT: user32 reads the window itself only when the owner here is its own TEB->Win32ThreadInfo.
+            ulong ThreadInfo = 0;
+            if (Emulator.Threads.TryGetValue(Window.OwnerThreadId, out EmulatedThread Owner))
+            {
+                ThreadInfo = EnsureUserThreadInfo(Owner);
+                if (ThreadInfo == 0)
+                    return false;
+            }
 
             ulong Entry = HandleTable + (ulong)Index * EntrySize;
             Window.UserHandleEntryAddress = Entry;
@@ -6794,9 +6879,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             Window.UserHandleEntryAddress = 0;
         }
 
-        private ulong EnsureCurrentUserThreadInfo()
+        private ulong EnsureUserThreadInfo(EmulatedThread Thread)
         {
-            EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null)
                 return 0;
 
@@ -9931,6 +10015,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
+        // Update must take no other lock and make no registry call through this helper, so no two hive locks nest.
+        internal bool TryUpdateHive(Hive Hive, Func<HiveUpdate, bool> Update)
+        {
+            if (Hive == null || !Hive.Writable)
+                return false;
+
+            List<HiveChange> Changes = new List<HiveChange>();
+            bool Updated = Hive.TryUpdate(Update, Changes);
+            if (Changes.Count == 0)
+                return Updated;
+
+            RegistryGeneration++;
+            foreach ((string RelativePath, uint Filter) in Changes)
+                CompleteRegistryNotifications(RelativePath == "\\" ? Hive.NtMountPoint : Hive.NtMountPoint + RelativePath, Filter);
+            return Updated;
+        }
+
         public bool DeleteRegistryValue(string NtPath, string ValueName)
         {
             NtPath = NormalizeNtRegistryPath(NtPath);
@@ -10790,7 +10891,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     ClosingSyncObject = Entry.Object;
                     if (Entry.Object is WinPort Served)
-                        AlpcMessaging.ReleaseServedClient(Served, Key);
+                        AlpcMessaging.ReleaseServedClient(Emulator, Served, Key);
                 }
             }
 

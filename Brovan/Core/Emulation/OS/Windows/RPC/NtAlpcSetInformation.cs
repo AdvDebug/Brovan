@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using static Brovan.Core.Helpers.BinaryHelpers;
+using Brovan.Core.Emulation.OS.Windows.RPC.Ports;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -14,18 +15,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong InformationPtr = Instance.WinHelper.GetArg(2);
             uint Length = (uint)Instance.WinHelper.GetArg(3);
 
-            WinPort Port = Instance.WinHelper.HandleManager.GetObjectByHandle<WinPort>(PortHandle);
-            if (Port == null)
+            if (!Instance.WinHelper.HandleManager.TryGetHandle(PortHandle, out ulong PortKey, out HandleEntry PortEntry) || PortEntry.Object is not WinPort Port)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            if (!Port.IsServer)
+            bool ClientAssociation = InformationClass == NtAlpcQueryInformation.AlpcAssociateCompletionPortInformation
+                && (AlpcMessaging.QueuesAnswers(Port) || CsrssPortHandler.QueuesAnswers(Port));
+            if (!Port.IsServer && !ClientAssociation)
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
 
             if (InformationPtr != 0 && Length != 0 && !Instance.IsRegionMapped(InformationPtr, Length))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (!AlpcMessaging.Supported(Instance))
-                return NTSTATUS.STATUS_SUCCESS;
+            {
+                if (Port.IsServer)
+                    return NTSTATUS.STATUS_SUCCESS;
+
+                Brovan.Core.Helpers.Utils.LogError($"[-] ALPC: \"{Port.Name}\" answers after the syscall to x64 guests only, so an STA call to it fails.");
+                return NTSTATUS.STATUS_NOT_SUPPORTED;
+            }
 
             if (InformationClass == NtAlpcQueryInformation.AlpcRegisterCompletionListInformation)
             {
@@ -44,7 +52,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.ReadMemory(InformationPtr, Association))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            return AlpcMessaging.AssociateCompletionPort(Instance, Port, BinaryPrimitives.ReadUInt64LittleEndian(Association), BinaryPrimitives.ReadUInt64LittleEndian(Association.Slice(8)));
+            ulong CompletionKey = BinaryPrimitives.ReadUInt64LittleEndian(Association);
+            ulong CompletionHandle = BinaryPrimitives.ReadUInt64LittleEndian(Association.Slice(8));
+            return Port.Handler != null
+                ? AlpcMessaging.AssociateCompletionPort(Instance, AlpcMessaging.EnsureServedQueue(Port, PortKey), CompletionKey, CompletionHandle)
+                : AlpcMessaging.AssociateCompletionPort(Instance, Port, CompletionKey, CompletionHandle);
         }
     }
 }

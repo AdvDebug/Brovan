@@ -20,7 +20,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private static readonly Guid ActivationPropertiesOutInterface = new Guid("000001a3-0000-0000-c000-000000000046");
         private static readonly Guid InstantiationInfo = new Guid("000001ab-0000-0000-c000-000000000046");
         private static readonly Guid ScmReplyInfo = new Guid("000001b6-0000-0000-c000-000000000046");
-        private static readonly Guid[] ServedInterfaces = { LocalObjectExporter, Scm, ScmLocalActivator };
+        private static readonly Guid WinRtActivationProperties = new Guid("9fc104cb-0379-43b5-a1a0-ce1260700e0a");
+        private static readonly Guid[] ServedInterfaces = { LocalObjectExporter, Scm, ScmLocalActivator, EndpointMapper.Interface };
+
+        // The flat part of ComWinRTActivationProperties on the wire. The class id is the first pointee after it.
+        private const int WinRtPropertiesFlatSize = 64;
 
         // Opnums from this build's combase lclor and scm format strings.
         private const uint ProcConnect = 0;
@@ -97,6 +101,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Helper.HostClasses[Class] = new HostClass(Apartment, Object);
         }
 
+        internal static void RegisterActivatableClass(WinSysHelper Helper, string ClassId, HostApartment Apartment, HostObject Factory)
+        {
+            Helper.HostActivatableClasses[ClassId] = new HostClass(Apartment, Factory);
+        }
+
         public static bool TryHandle(WinPort Port, PortReply Served, in LrpcMessage Message, BinaryEmulator Instance, out byte[] Reply)
         {
             Reply = null;
@@ -105,14 +114,20 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return false;
 
             if (Message.Type == LrpcMessageType.Bind)
-                return LrpcBindings.TryAccept(Served.Client, Message, ServedInterfaces, out _, out Reply);
+                return LrpcBindings.TryAccept(Served.Client.Bindings, Message, ServedInterfaces, out _, out Reply);
 
-            if (Message.Type != LrpcMessageType.Request || !LrpcBindings.TryResolve(Served.Client, Message, out Guid Target, out _))
+            if (Message.Type != LrpcMessageType.Request || !LrpcBindings.TryResolve(Served.Client.Bindings, Message, out Guid Target, out _))
                 return false;
 
             if (Target == ScmLocalActivator)
             {
                 Reply = HandleScmLocalActivator(Message, Instance);
+                return Reply != null;
+            }
+
+            if (Target == EndpointMapper.Interface)
+            {
+                Reply = EndpointMapper.Handle(Message, Instance);
                 return Reply != null;
             }
 
@@ -181,24 +196,38 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (ProcNumber != ProcGetClassObject && ProcNumber != ProcCreateInstance)
                 return null;
 
-            if (!TryReadActivationRequest(Message.StubData, ProcNumber == ProcCreateInstance, out Guid Class, out ReadOnlySpan<byte> Interfaces))
+            if (!TryReadActivationBlob(Message.StubData, ProcNumber == ProcCreateInstance, out ReadOnlySpan<byte> Blob)
+                || !TryFindProperty(Blob, InstantiationInfo, out ReadOnlySpan<byte> Info) || !TryReadInstantiationInfo(Info, out Guid Class, out ReadOnlySpan<byte> Interfaces))
                 return null;
 
-            if (Instance.WinHelper.HostClasses.TryGetValue(Class, out HostClass Host))
-            {
-                if (ProcNumber == ProcCreateInstance)
-                    return BuildActivationReply(Message, Instance, Host, Interfaces);
-
-                Utils.LogError($"[-] RPCSS: the class object of {Class} is not served.");
-            }
+            if (TryResolveHostClass(Instance.WinHelper, ProcNumber, Class, Blob, out HostClass Host))
+                return BuildActivationReply(Message, Instance, Host, Interfaces);
 
             return LrpcPacket.BuildResponse(Message, ClassNotRegisteredReply);
         }
 
-        private static bool TryReadActivationRequest(ReadOnlySpan<byte> Stub, bool HasOuter, out Guid Class, out ReadOnlySpan<byte> Interfaces)
+        // combase asks for the class object of a WinRT class with CLSID GUID_NULL.
+        private static bool TryResolveHostClass(WinSysHelper Helper, uint ProcNumber, Guid Class, ReadOnlySpan<byte> Blob, out HostClass Host)
         {
-            Class = Guid.Empty;
-            Interfaces = default;
+            if (ProcNumber == ProcCreateInstance)
+                return Helper.HostClasses.TryGetValue(Class, out Host);
+
+            Host = default;
+            if (Class == Guid.Empty)
+            {
+                return TryFindProperty(Blob, WinRtActivationProperties, out ReadOnlySpan<byte> WinRt) && TryReadActivatableClassId(WinRt, out ReadOnlySpan<char> ClassId)
+                    && Helper.HostActivatableClasses.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(ClassId, out Host);
+            }
+
+            if (Helper.HostClasses.ContainsKey(Class))
+                Utils.LogError($"[-] RPCSS: the class object of {Class} is not served.");
+            return false;
+        }
+
+        // dwSize and a reserved DWORD, then the serialized CustomHeader and the properties it lists.
+        private static bool TryReadActivationBlob(ReadOnlySpan<byte> Stub, bool HasOuter, out ReadOnlySpan<byte> Blob)
+        {
+            Blob = default;
             if (!Orpc.TryGetRequestParameters(Stub, out int Offset))
                 return false;
 
@@ -206,13 +235,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (HasOuter && (!Orpc.TryReadUniqueInterfacePointer(ref Reader, out ReadOnlySpan<byte> Outer) || !Outer.IsEmpty))
                 return false;
 
-            // dwSize and a reserved DWORD, then the serialized CustomHeader and the properties it lists.
-            if (!Orpc.TryReadUniqueInterfacePointer(ref Reader, out ReadOnlySpan<byte> ObjRef) || !Orpc.TryGetCustomObjRefData(ObjRef, out ReadOnlySpan<byte> Blob))
-                return false;
+            return Orpc.TryReadUniqueInterfacePointer(ref Reader, out ReadOnlySpan<byte> ObjRef) && Orpc.TryGetCustomObjRefData(ObjRef, out Blob)
+                && Blob.Length >= ActivationBlobPrefixSize + SerializationHeaderSize;
+        }
 
-            if (Blob.Length < ActivationBlobPrefixSize + SerializationHeaderSize)
-                return false;
-
+        private static bool TryFindProperty(ReadOnlySpan<byte> Blob, Guid PropertyClass, out ReadOnlySpan<byte> Property)
+        {
+            Property = default;
             Ndr20Reader Header = new Ndr20Reader(Blob.Slice(ActivationBlobPrefixSize + SerializationHeaderSize));
             if (!Header.TryReadUInt32(out _) || !Header.TryReadUInt32(out uint HeaderSize) || !Header.TrySkip(8) || !Header.TryReadUInt32(out uint Count)
                 || !Header.TrySkip(16) || !Header.TryReadUInt32(out uint ClassesReferent) || !Header.TryReadUInt32(out uint SizesReferent) || !Header.TryReadUInt32(out _))
@@ -224,37 +253,44 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (!Header.TryReadUInt32(out uint ClassCount) || ClassCount != Count)
                 return false;
 
-            int InfoIndex = -1;
+            int Index = -1;
             for (int i = 0; i < Count; i++)
             {
-                if (!Header.TryReadGuid(out Guid PropertyClass))
+                if (!Header.TryReadGuid(out Guid Each))
                     return false;
-                if (InfoIndex < 0 && PropertyClass == InstantiationInfo)
-                    InfoIndex = i;
+                if (Index < 0 && Each == PropertyClass)
+                    Index = i;
             }
 
-            if (InfoIndex < 0 || !Header.TryReadUInt32(out uint SizeCount) || SizeCount != Count)
+            if (Index < 0 || !Header.TryReadUInt32(out uint SizeCount) || SizeCount != Count)
                 return false;
 
             int Position = ActivationBlobPrefixSize + (int)HeaderSize;
-            ReadOnlySpan<byte> Property = default;
-            for (int i = 0; i < Count; i++)
+            for (int i = 0; i <= Index; i++)
             {
-                if (!Header.TryReadUInt32(out uint Size))
-                    return false;
-                if (i > InfoIndex)
-                    continue;
-                if (Size > (uint)(Blob.Length - Position))
+                if (!Header.TryReadUInt32(out uint Size) || Size > (uint)(Blob.Length - Position))
                     return false;
 
-                if (i == InfoIndex)
+                if (i == Index)
                     Property = Blob.Slice(Position, (int)Size);
                 Position += (int)Size;
             }
 
-            if (Property.Length < SerializationHeaderSize)
-                return false;
+            return Property.Length >= SerializationHeaderSize;
+        }
 
+        private static bool TryReadActivatableClassId(ReadOnlySpan<byte> Property, out ReadOnlySpan<char> ClassId)
+        {
+            ClassId = default;
+            Ndr20Reader Reader = new Ndr20Reader(Property.Slice(SerializationHeaderSize));
+            return Reader.TryReadUInt32(out uint Referent) && Referent != 0 && Reader.TrySkip(WinRtPropertiesFlatSize - sizeof(uint))
+                && Orpc.TryReadHstringBody(ref Reader, out ClassId) && !ClassId.IsEmpty;
+        }
+
+        private static bool TryReadInstantiationInfo(ReadOnlySpan<byte> Property, out Guid Class, out ReadOnlySpan<byte> Interfaces)
+        {
+            Class = Guid.Empty;
+            Interfaces = default;
             Ndr20Reader Info = new Ndr20Reader(Property.Slice(SerializationHeaderSize));
             if (!Info.TryReadGuid(out Class) || !Info.TrySkip(12) || !Info.TryReadUInt32(out uint InterfaceCount) || !Info.TrySkip(4)
                 || !Info.TryReadUInt32(out uint InterfacesReferent) || !Info.TrySkip(8) || !Info.TryReadUInt32(out uint InterfaceConformance))
@@ -376,7 +412,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             Writer.AlignTo(8);
             Writer.WriteUInt32(MultithreadedApartmentTid);
-            Writer.WriteUInt32(Apartment.ProcessId);
+            Writer.WriteUInt32((uint)Apartment.ProcessId);
             Writer.WriteUInt32(AuthnLevelConnect);
             Writer.WriteUInt16(Orpc.ComVersionMajor);
             Writer.WriteUInt16(Orpc.ComVersionMinor);
@@ -853,31 +889,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         {
             const uint ComRightsExecuteAll = 0x1F;
             byte[] Administrators = NtQueryInformationToken.AdministratorsSid;
-            byte[] Everyone = NtQueryInformationToken.EveryoneSid;
-            int AceSize = NtAccessCheck.AceSidOffset + Everyone.Length;
-            int DaclSize = NtAccessCheck.AclHeaderSize + AceSize;
-            int OwnerOffset = NtAccessCheck.SelfRelativeHeaderSize;
-            int GroupOffset = OwnerOffset + Administrators.Length;
-            int DaclOffset = GroupOffset + Administrators.Length;
-
-            byte[] Buffer = new byte[DaclOffset + DaclSize];
-            Span<byte> Span = Buffer;
-
-            NtAccessCheck.WriteSelfRelativeHeader(Span, NtAccessCheck.SeDaclPresent, OwnerOffset, GroupOffset, DaclOffset);
-            Administrators.CopyTo(Span.Slice(OwnerOffset));
-            Administrators.CopyTo(Span.Slice(GroupOffset));
-
-            Span<byte> Acl = Span.Slice(DaclOffset);
-            Acl[0] = NtAccessCheck.AclRevision;
-            BinaryPrimitives.WriteUInt16LittleEndian(Acl.Slice(2, 2), (ushort)DaclSize);
-            BinaryPrimitives.WriteUInt16LittleEndian(Acl.Slice(4, 2), 1);
-
-            Span<byte> Ace = Acl.Slice(NtAccessCheck.AclHeaderSize);
-            BinaryPrimitives.WriteUInt16LittleEndian(Ace.Slice(2, 2), (ushort)AceSize);
-            BinaryPrimitives.WriteUInt32LittleEndian(Ace.Slice(4, 4), ComRightsExecuteAll);
-
-            Everyone.CopyTo(Ace.Slice(NtAccessCheck.AceSidOffset));
-            return Buffer;
+            return NtAccessCheck.BuildSingleAllowDescriptor(Administrators, Administrators, NtQueryInformationToken.EveryoneSid, ComRightsExecuteAll);
         }
     }
 }

@@ -120,7 +120,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             Device.Allocations.Remove(this);
             Resource?.Allocations.Remove(this);
-            DxgkProcess.UnmapStorage(Instance, View, Storage.Memory);
+            Instance.WinHelper.UnmapStorage(View, Storage.Memory);
             Storage.Release(Instance, Process);
         }
     }

@@ -1038,6 +1038,55 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        internal WinIoCompletion CompletionTakenBy(EmulatedThread Thread)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State == null || WinHelper == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                return null;
+
+            if (State.WorkerFactoryWaitActive)
+            {
+                WinWorkerFactory Factory = WinHelper.HandleManager.GetObjectByHandle<WinWorkerFactory>(State.WorkerFactoryHandle);
+                return Factory == null ? null : WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(Factory.IoCompletionHandle);
+            }
+
+            if (State.IoCompletionWaitActive)
+                return WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(State.IoCompletionHandle);
+
+            return State.WaitMessageActive || State.GetMessageWaitActive || State.MsgWaitActive ? State.QueuePort : null;
+        }
+
+        // Completion and message waits are never filed, so the scan list holds every thread parked on a completion port.
+        internal bool HasParkedTaker(WinIoCompletion Completion)
+        {
+            for (int i = 0; i < WakeScanList.Count; i++)
+            {
+                if (CompletionTakenBy(WakeScanList[i]) == Completion)
+                    return true;
+            }
+
+            return false;
+        }
+
+        internal bool HasWaitPacketOn(IHandleObject Target, WinIoCompletion Completion)
+        {
+            if (WinHelper == null)
+                return false;
+
+            List<KeyValuePair<ulong, IHandleObject>> Packets = GetWaitCompletionPacketView();
+            for (int i = 0; i < Packets.Count; i++)
+            {
+                if (Packets[i].Value is not WinWaitCompletionPacket Packet || !Packet.Associated || Packet.QueuedCompletion)
+                    continue;
+
+                if (WinHelper.HandleManager.GetObjectByHandle(Packet.TargetObjectHandle) == Target
+                    && WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(Packet.IoCompletionHandle) == Completion)
+                    return true;
+            }
+
+            return false;
+        }
+
         internal bool TrySatisfyThreadWait(EmulatedThread Thread, long Now)
         {
             if (Thread == null || !Thread.WaitActive)
@@ -1152,6 +1201,16 @@ namespace Brovan.Core.Emulation
                 }
 
                 Win32kQueuePort.TakePackets(this, State);
+                if (!Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, false, Thread.ThreadId, out Win32kMessage Next))
+                    return false;
+
+                if (Win32kHelper.IsSentWhenRemoved(this, Next, out _))
+                {
+                    State.GetMessageWaitActive = false;
+                    State.RetrySyscallActive = true;
+                    return true;
+                }
+
                 if (Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
                 {
                     Win32kHelper.WriteMessage(this, State.GetMessageMessagePtr, Message, State);
@@ -1530,6 +1589,7 @@ namespace Brovan.Core.Emulation
                    Left.IsCommitted == Right.IsCommitted &&
                    Left.IsReset == Right.IsReset &&
                    Left.IsSecured == Right.IsSecured &&
+                   Left.IsNoChange == Right.IsNoChange &&
                    Left.IsWriteWatch == Right.IsWriteWatch &&
                    Left.IsPlaceholder == Right.IsPlaceholder &&
                    Left.FromPlaceholder == Right.FromPlaceholder &&
@@ -2338,7 +2398,11 @@ namespace Brovan.Core.Emulation
         }
 
         // The process cannot free a secured allocation or change its protection (MmSecureVirtualMemory).
-        internal void SecureMemoryRegion(ulong AllocationBase)
+        internal void SecureMemoryRegion(ulong AllocationBase) => MarkAllocation(AllocationBase, NoChange: false);
+
+        internal void MarkNoChangeView(ulong AllocationBase) => MarkAllocation(AllocationBase, NoChange: true);
+
+        private void MarkAllocation(ulong AllocationBase, bool NoChange)
         {
             if (!TryFindMemoryRegionByBase(AllocationBase, out int Index, out MemoryRegion Region) || Region.AllocationBase != AllocationBase)
                 return;
@@ -2346,7 +2410,10 @@ namespace Brovan.Core.Emulation
             for (; Index < _memory.Count && _memory[Index].AllocationBase == AllocationBase; Index++)
             {
                 Region = _memory[Index];
-                Region.IsSecured = true;
+                if (NoChange)
+                    Region.IsNoChange = true;
+                else
+                    Region.IsSecured = true;
                 _memory[Index] = Region;
             }
         }
@@ -2481,14 +2548,16 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        internal NTSTATUS CheckSecuredRange(ulong BaseAddress, ulong Size, NTSTATUS Refusal)
+        internal NTSTATUS CheckSecuredRange(ulong BaseAddress, ulong Size, NTSTATUS Refusal, bool RefuseNoChange = false)
         {
             ulong End = GetRangeEnd(BaseAddress, Size);
             FindWinRegionWindow(BaseAddress, End, out int First, out int Last);
 
+            bool NoChange = false;
             for (int i = First; i < Last; i++)
             {
                 MemoryRegion Region = _memory[i];
+                NoChange |= Region.IsNoChange;
                 if (!Region.IsSecured)
                     continue;
 
@@ -2497,7 +2566,7 @@ namespace Brovan.Core.Emulation
                     : Refusal;
             }
 
-            return NTSTATUS.STATUS_SUCCESS;
+            return RefuseNoChange && NoChange ? Refusal : NTSTATUS.STATUS_SUCCESS;
         }
 
         /// <summary>

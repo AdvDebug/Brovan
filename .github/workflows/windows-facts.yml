@@ -1,0 +1,147 @@
+name: Windows version facts
+
+on:
+  schedule:
+    # Wednesdays, the day after the monthly and the optional preview updates come out.
+    - cron: '0 5 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: windows-facts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore the Unicorn build
+        uses: actions/cache@v4
+        with:
+          path: Brovan/.cache/unicorn
+          key: brovan-unicorn-${{ runner.os }}-${{ hashFiles('Brovan/Brovan.Unicorn.targets', 'Brovan/native/unicorn/**') }}
+
+      # The tool runs small kernel functions on the same patched Unicorn that Brovan ships.
+      - name: Build Unicorn
+        run: dotnet msbuild Brovan/Brovan.csproj -restore -t:EnsureUnicornArtifact -p:Configuration=Release -v:m
+
+      - name: Build the tool
+        run: dotnet build Brovan.WinFacts/Brovan.WinFacts.csproj -c Release
+
+      # A run reuses the files read so far, and the facts until the tool changes. The cache is saved below only when it
+      # changed, so it holds one copy at a time.
+      - name: Restore the symbol store and the extracted facts
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .winfacts-store
+            .winfacts-cache
+          key: winfacts-none
+          restore-keys: |
+            winfacts-
+
+      - name: Update each group and its pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          unicorn=$(find Brovan/.cache/unicorn -path '*/build-*' -name libunicorn.so | head -1)
+          [ -n "$unicorn" ] || { echo "error: the Unicorn build produced no libunicorn.so" >&2; exit 1; }
+          tool=Brovan.WinFacts/bin/Release/net10.0/Brovan.WinFacts.dll
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          head=$(git rev-parse HEAD)
+          mkdir -p winfacts-out
+
+          mapfile -t groups < <(dotnet "$tool" groups)
+          [ "${#groups[@]}" -gt 0 ] || { echo "error: the tool listed no fact groups" >&2; exit 1; }
+          for entry in "${groups[@]}"; do
+            read -r group path <<< "$entry"
+            git checkout -q --detach "$head"
+            git reset -q --hard "$head"
+            dotnet "$tool" update --group "$group" --unicorn "$unicorn" --store .winfacts-store --cache .winfacts-cache \
+              --report "winfacts-out/report-$group.md"
+            # Staged by name, so the first file of a new group counts as a change too.
+            git add -- "$path"
+
+            # A dispatch from another branch only shows its result. The bot branches follow the default branch alone.
+            if [ "$GITHUB_REF" != "refs/heads/$BASE" ]; then
+              cp "$path" winfacts-out/
+              continue
+            fi
+
+            branch="bot/windows-facts/$group"
+            open=$(gh pr list --head "$branch" --base "$BASE" --state open --json number --jq '.[0].number // empty')
+
+            if git diff --cached --quiet; then
+              if [ -n "$open" ]; then
+                gh pr close "$open" --delete-branch --comment "The default branch has these tables already."
+              fi
+              continue
+            fi
+
+            git checkout -q -B "$branch"
+            git commit -q -m "Update the $group Windows version facts"
+
+            # Push only when the open pull request does not already hold these tables, so an unchanged week leaves it alone.
+            if [ -n "$open" ] && git fetch -q origin "$branch" 2>/dev/null && git diff --quiet FETCH_HEAD HEAD; then
+              continue
+            fi
+
+            git push -q --force origin "$branch"
+            {
+              echo "The weekly run of Brovan.WinFacts found changes in the \`$group\` tables."
+              echo
+              cat "winfacts-out/report-$group.md"
+              echo "Review the diff of the generated file. A set marked \"extracted, not run\" has no Brovan run behind it yet."
+            } > winfacts-out/body.md
+
+            if [ -n "$open" ]; then
+              gh pr edit "$open" --body-file winfacts-out/body.md
+            else
+              gh pr create --base "$BASE" --head "$branch" --title "Update the $group Windows version facts" \
+                --body-file winfacts-out/body.md
+            fi
+          done
+
+      # The store's file list and the facts' contents name the copy.
+      - name: Key the symbol store and the extracted facts
+        id: store
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          set -euo pipefail
+          key=$({ find .winfacts-store -type f | sort; find .winfacts-cache -type f -print0 | sort -z | xargs -0 -r cat; } | sha256sum | cut -c1-32)
+          echo "key=winfacts-$key" >> "$GITHUB_OUTPUT"
+
+      - name: Save the symbol store and the extracted facts
+        if: steps.store.outputs.key != '' && steps.store.outputs.key != steps.restore.outputs.cache-matched-key
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .winfacts-store
+            .winfacts-cache
+          key: ${{ steps.store.outputs.key }}
+
+      - name: Upload the tables of a dispatch from another branch
+        if: github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-facts-run${{ github.run_number }}
+          path: winfacts-out/
+          retention-days: 14

@@ -15,6 +15,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS Yield(BinaryEmulator Instance, EmulatedThread Thread)
         {
+            if (Instance.WinHelper.PendingConnectReplies.Count != 0)
+                AlpcMessaging.DeliverConnectReplies(Instance, Thread.ThreadId);
+
             NTSTATUS Status = Instance.HasThreadReadyForYield() ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_NO_YIELD_PERFORMED;
 
             // The slice ends also when no thread is ready, because host I/O is served only between slices.

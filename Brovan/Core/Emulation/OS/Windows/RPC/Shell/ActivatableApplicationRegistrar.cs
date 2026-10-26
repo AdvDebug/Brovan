@@ -311,7 +311,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Shell
                 Writer.WriteUInt32(PropertyCount);
                 WriteProperty(ref Writer, "ActivationKind", PropertyTypeUInt32, ActivationKindLaunch);
                 WriteProperty(ref Writer, "PreviousExecutionState", PropertyTypeUInt32, ExecutionStateNotRunning);
-                WriteProperty(ref Writer, "UserContext", 0UL);
+                WriteProperty(ref Writer, "UserContext", WinToken.InteractiveUserContext);
                 WriteProperty(ref Writer, "IsForeground", true);
                 WriteProperty(ref Writer, "IsHolographic", false);
                 WriteProperty(ref Writer, "IsInitialized", false);

@@ -11,18 +11,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Win32kHelper.DrainHostEvents(Instance);
             if (Win32kHelper.TryGetMessage(Instance, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
             {
-                bool Written = Win32kHelper.WriteMessage(Instance, State.GetMessageMessagePtr, Message, State);
+                ulong MessagePtr = State.GetMessageMessagePtr;
                 Instance.WinHelper.ClearWaitState(Thread);
-
-                if (!Written)
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                Instance.SetLastWinError(0);
-                if (Message.Message != Win32kHelper.WM_QUIT && Win32kHelper.TryDeliverWindowPosChanged(Instance, 1))
-                    return NTSTATUS.STATUS_SUCCESS;
-
-                Instance.SetRawSyscallReturn(Message.Message == Win32kHelper.WM_QUIT ? 0ul : 1ul);
-                return NTSTATUS.STATUS_SUCCESS;
+                return CompleteRead(Instance, MessagePtr, Message, State);
             }
 
             Thread.WaitDeadline = Win32kHelper.GetNextTimerDue(Instance, State.GetMessageHwndFilter, Thread.ThreadId, State.GetMessageMinMessage, State.GetMessageMaxMessage);
@@ -31,6 +22,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance._emulator.WriteRegister(Instance.IPRegister, WinEmulatedThread.GetState(Thread).WaitResumeRIP);
             Instance._emulator.StopEmulation();
             return NTSTATUS.STATUS_PENDING;
+        }
+
+        private static NTSTATUS CompleteRead(BinaryEmulator Instance, ulong MessagePtr, in Win32kMessage Message, WindowsThreadState State)
+        {
+            if (!Win32kHelper.TryCompleteRead(Instance, MessagePtr, Message, State, Removed: true, out bool CallbackEntered))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            if (CallbackEntered || (Message.Message != Win32kHelper.WM_QUIT && Win32kHelper.TryDeliverWindowPosChanged(Instance, 1)))
+                return NTSTATUS.STATUS_SUCCESS;
+
+            Instance.SetRawSyscallReturn(Message.Message == Win32kHelper.WM_QUIT ? 0ul : 1ul);
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -71,17 +74,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
 
             if (Win32kHelper.TryGetMessage(Instance, HwndFilter, MinMessage, MaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
-            {
-                if (!Win32kHelper.WriteMessage(Instance, MessagePtr, Message, State))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-                Instance.SetLastWinError(0);
-                if (Message.Message != Win32kHelper.WM_QUIT && Win32kHelper.TryDeliverWindowPosChanged(Instance, 1))
-                    return NTSTATUS.STATUS_SUCCESS;
-
-                Instance.SetRawSyscallReturn(Message.Message == Win32kHelper.WM_QUIT ? 0ul : 1ul);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
+                return CompleteRead(Instance, MessagePtr, Message, State);
 
             if (Win32kHelper.TryDeliverWindowPosChanged(Instance, 0, SyscallRip))
                 return NTSTATUS.STATUS_SUCCESS;

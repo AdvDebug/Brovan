@@ -893,14 +893,21 @@ namespace Brovan.Core
 
         public bool TryReadImageBytes(uint Rva, Span<byte> Destination)
         {
+            ReadOnlySpan<byte> Bytes = DataSpan;
             if (!TryFindPESectionByRvaFast(Rva, out PortableBinarySection Section))
-                return false;
+            {
+                ulong End = (ulong)Rva + (ulong)Destination.Length;
+                if (PE == null || End > PE.SizeOfHeaders || End > (ulong)Bytes.Length)
+                    return false;
+
+                Bytes.Slice((int)Rva, Destination.Length).CopyTo(Destination);
+                return true;
+            }
 
             ulong Delta = Rva - Section.VirtualAddress;
             if (Delta + (ulong)Destination.Length > Section.RawSize)
                 return false;
 
-            ReadOnlySpan<byte> Bytes = DataSpan;
             ulong FileOffset = Section.RawOffset + Delta;
             if (FileOffset + (ulong)Destination.Length > (ulong)Bytes.Length)
                 return false;
@@ -2705,5 +2712,17 @@ namespace Brovan.Core
         }
 
         ~BinaryFile() => Dispose();
+    }
+
+    internal readonly struct ImageFile : IImageReader
+    {
+        private readonly BinaryFile Image;
+
+        public ImageFile(BinaryFile Image)
+        {
+            this.Image = Image;
+        }
+
+        public bool TryRead(uint Rva, Span<byte> Destination) => Image.TryReadImageBytes(Rva, Destination);
     }
 }

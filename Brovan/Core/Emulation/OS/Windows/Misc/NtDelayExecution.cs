@@ -59,6 +59,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Interval == 0 ? Status : NTSTATUS.STATUS_SUCCESS;
             }
 
+            if (Instance.WinHelper.PendingConnectReplies.Count != 0)
+                AlpcMessaging.DeliverConnectReplies(Instance, Thread.ThreadId);
+
             ulong SyscallRip = Instance.WinHelper.GetSyscallRip();
             Thread.WaitActive = true;
             Thread.WaitHandles = null;

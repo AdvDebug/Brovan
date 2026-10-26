@@ -5,6 +5,7 @@ using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Brovan.Core;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 using Microsoft.Win32.SafeHandles;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -24,6 +25,8 @@ namespace Brovan.Core.Helpers.WindowsImage
         private const string DefaultUserHive = "Users/Default/NTUSER.DAT";
 
         private static readonly string[] RegistryHives = { "SOFTWARE", "SYSTEM", "DEFAULT", "SAM", "SECURITY" };
+
+        private static readonly string[] VersionKeyFiles = { CompositionTableSet.KeyFile };
 
         private const int CopyBufferSize = 1 << 20;
 
@@ -206,6 +209,9 @@ namespace Brovan.Core.Helpers.WindowsImage
             {
                 CollectDirectory(Contents, System32Path, string.Empty, Files, Report);
                 CollectDirectory(Contents, SysWow64Path, "SysWOW64/", Files, Report);
+
+                foreach (string Name in VersionKeyFiles)
+                    CollectFile(Contents, System32Path + "/" + Name, Name, Files, Report);
 
                 foreach (string Hive in RegistryHives)
                     CollectFile(Contents, ConfigPath + "/" + Hive, RegistryDirectory + "/" + Hive, Files, Report);

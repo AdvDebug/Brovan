@@ -7,7 +7,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Shell
         internal static readonly Guid Interface = new Guid("d98fd14a-522a-4d59-b875-811e83919a9e");
 
         private const uint ProcGetViewActivationResult = 5;
-        private const uint ElementNotFound = 0x80070490;
         private const uint HostIdNotFound = 0xD0000225;
         private const int ViewActivationResultSize = 28;
 
@@ -38,7 +37,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Shell
             Writer.AlignTo(8);
             Writer.WriteZeros(ViewActivationResultSize);
             uint Written = WriteOutInterface(ref Writer, Call, View?.WindowFactory, Orpc.IInspectableId);
-            uint Result = HostId == 0 ? HostIdNotFound : View == null ? ElementNotFound : Written;
+            uint Result = HostId == 0 ? HostIdNotFound : View == null ? Orpc.EElementNotFound : Written;
 
             Writer.AlignTo(4);
             Writer.WriteUInt32(Result);

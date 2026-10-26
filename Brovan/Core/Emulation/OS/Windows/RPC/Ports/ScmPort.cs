@@ -28,8 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private const uint UniquePointerReferent = 0x20000;
 
-        // WNF state name: version 1, temporary lifetime, system scope. Nothing ever publishes it.
-        private const ulong ServiceStateName = (1UL | (3UL << 4) | (1UL << 11)) ^ 0x41C64E6DA3BC0074UL;
+        private static readonly ulong ServiceStateName = WnfStateNames.Encode(1, WnfStateNames.NameLifetime.Temporary, WnfStateNames.DataScope.System);
 
         private static readonly string[] KnownServices =
         {

@@ -37,12 +37,14 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.CoreUI
         private const ushort ShowMethod = 2;
         private const ushort NavigateToMethod = 4;
         private const ushort ActivateMethod = 14;
+        private const ushort ActivateViewCompleteMethod = 17;
 
         // The app calls these IRemoteClientTask methods on the server.
         private const ushort ReadyToNavigateMethod = 111;
         private const ushort ShowCompleteMethod = 112;
         private const ushort NavigateToCompleteMethod = 114;
         private const ushort ActivateCompleteMethod = 116;
+        private const ushort RequestActivateViewMethod = 189;
 
         private readonly NavigationServer Navigation;
         private readonly HostMessagingServer Server;
@@ -166,6 +168,18 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.CoreUI
                 case ActivateCompleteMethod:
                     Complete(Call, StateActivating, "ActivateComplete");
                     break;
+                // NT answers with the request id once the view's window is active, and Brovan's shell activates windows at once.
+                case RequestActivateViewMethod:
+                    if (!Parameters.TryReadUInt64(out ulong Request) || !Parameters.AtEnd)
+                    {
+                        CoreUIMessage.Refuse("RequestActivateView with parameters that do not match it");
+                        return;
+                    }
+
+                    CoreMessagingWriter Answer = new CoreMessagingWriter();
+                    Answer.UInt64(Request);
+                    Proxy?.Invoke(Call, ActivateViewCompleteMethod, Answer);
+                    return;
                 default:
                     CoreUIMessage.Refuse($"IRemoteClientTask method {Method}");
                     return;

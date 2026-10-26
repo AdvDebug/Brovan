@@ -43,6 +43,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Port.IsServer)
                 return AlpcMessaging.ConnectGuest(Instance, Port, PortHandlePtr, Instance.WinHelper.GetArg(3), (uint)Instance.WinHelper.GetArg(4), Instance.WinHelper.GetArg(6), Instance.WinHelper.GetArg(7), Instance.WinHelper.GetArg(10));
 
+            if (CsrssPortHandler.QueuesAnswers(Port) && ((uint)Instance.WinHelper.GetArg(4) & AlpcMessaging.SyncRequestFlag) == 0)
+                Brovan.Core.Helpers.Utils.LogError($"[-] ALPC: \"{Port.Name}\" gets an asynchronous connect, which Brovan's handler ports answer with no connection reply.");
+
             WinHandle Handle = Instance.WinHelper.OpenObjectHandle(Port, AccessMask.StandardRightsAll);
 
             if (!Instance.WinHelper.WritePointer(PortHandlePtr, Handle.Handle))
