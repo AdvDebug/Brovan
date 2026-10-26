@@ -31,7 +31,8 @@ namespace Brovan.WinFacts.Sources
     internal sealed class RemoteFile : IByteSource
     {
         private const int BlockSize = 0x80000;
-        private const int Attempts = 4;
+        private const int Attempts = 8;
+        private const int MaxRetryDelaySeconds = 60;
 
         private readonly HttpClient Client;
         private readonly Uri Location;
@@ -122,6 +123,7 @@ namespace Brovan.WinFacts.Sources
             return Data;
         }
 
+        // The symbol server answers a long run of downloads with 503 for a while, so each retry waits twice as long.
         private static T WithRetries<T>(Func<T> Body)
         {
             for (int Attempt = 1; ; Attempt++)
@@ -130,9 +132,9 @@ namespace Brovan.WinFacts.Sources
                 {
                     return Body();
                 }
-                catch (HttpRequestException) when (Attempt < Attempts)
+                catch (Exception Error) when (Attempt < Attempts && Error is HttpRequestException or HttpIOException or TaskCanceledException)
                 {
-                    Thread.Sleep(1000 * Attempt);
+                    Thread.Sleep(TimeSpan.FromSeconds(Math.Min(MaxRetryDelaySeconds, 1 << Attempt)));
                 }
             }
         }

@@ -120,17 +120,22 @@ jobs:
             fi
           done
 
-      # The store's file list and the facts' contents name the copy.
+      # A failed run saves what it fetched too, so the next run goes on from there. An empty store is never saved,
+      # because the next run would restore it instead of the older full one.
       - name: Key the symbol store and the extracted facts
         id: store
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        if: always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         run: |
           set -euo pipefail
+          [ -d .winfacts-store ] || exit 0
+          find .winfacts-store -name '*.part' -delete
+          [ -n "$(find .winfacts-store -type f -print -quit)" ] || exit 0
+          mkdir -p .winfacts-cache
           key=$({ find .winfacts-store -type f | sort; find .winfacts-cache -type f -print0 | sort -z | xargs -0 -r cat; } | sha256sum | cut -c1-32)
           echo "key=winfacts-$key" >> "$GITHUB_OUTPUT"
 
       - name: Save the symbol store and the extracted facts
-        if: steps.store.outputs.key != '' && steps.store.outputs.key != steps.restore.outputs.cache-matched-key
+        if: always() && steps.store.outputs.key != '' && steps.store.outputs.key != steps.restore.outputs.cache-matched-key
         uses: actions/cache/save@v4
         with:
           path: |
