@@ -24,6 +24,11 @@ namespace Brovan.WinFacts.Readers
         private const int ImportDirectoryIndex = 1;
         private const int DelayImportDirectoryIndex = 13;
         private const int MaxNameBytes = 128;
+        // Unicorn's UC_CTL_WRITE(UC_CTL_TB_REMOVE_CACHE, 2), a write control with two arguments.
+        private const int ControlRemoveCache = 9;
+        private const int ControlWrite = 1;
+        private const int TbRemoveCache = ControlRemoveCache | (2 << 26) | (ControlWrite << 30);
+        private static readonly byte[] Halt = { 0xF4 };
         private static readonly Registers[] ArgumentRegisters = { Registers.UC_X86_REG_RCX, Registers.UC_X86_REG_RDX, Registers.UC_X86_REG_R8, Registers.UC_X86_REG_R9 };
 
         private readonly IntPtr Uc;
@@ -48,6 +53,7 @@ namespace Brovan.WinFacts.Readers
             StubCursor = StubBase + 0x10;
             CursorSlot = Alloc(8);
             ZeroStub = Emit(Asm => { Asm.xor(eax, eax); Asm.ret(); });
+            Write(Sentinel, Halt);
         }
 
         internal static void UseLibrary(string Path)
@@ -178,6 +184,39 @@ namespace Brovan.WinFacts.Readers
 
         internal ulong Call(uint Rva, params ulong[] Args)
         {
+            UCErrors Error = Run(Rva, Sentinel, Args);
+            ulong Pc = ReadRegister(Registers.UC_X86_REG_RIP);
+            if (Error != UCErrors.UC_ERR_OK || Pc != Sentinel)
+                throw Stopped(Rva, Error, Pc);
+
+            return ReadRegister(Registers.UC_X86_REG_RAX);
+        }
+
+        // Unicorn checks the stop address only in code translated while it was the stop, so the run drops the cached code
+        // at Address and at the return address. The hlt at the return address ends a run that returns first.
+        internal bool Reaches(uint Rva, ulong Address, params ulong[] Args)
+        {
+            DropTranslations(Address);
+            UCErrors Error = Run(Rva, Address, Args);
+            ulong Pc = ReadRegister(Registers.UC_X86_REG_RIP);
+            DropTranslations(Address);
+            DropTranslations(Sentinel);
+            if (Error == UCErrors.UC_ERR_OK && Pc == Address)
+                return true;
+
+            if (Error == UCErrors.UC_ERR_OK && (Pc == Sentinel || Pc == Sentinel + (ulong)Halt.Length))
+                return false;
+
+            throw Stopped(Rva, Error, Pc);
+        }
+
+        private static FactException Stopped(uint Rva, UCErrors Error, ulong Pc)
+            => new(Error != UCErrors.UC_ERR_OK ? $"run of 0x{Rva:X} stopped at 0x{Pc:X}: {Error}" : $"run of 0x{Rva:X} did not return within the budget (at 0x{Pc:X})");
+
+        private void DropTranslations(ulong Address) => Check(uc_ctl(Uc, TbRemoveCache, Address, Address + 1), "drop translations");
+
+        private UCErrors Run(uint Rva, ulong Until, ulong[] Args)
+        {
             ulong Stack = StackBase + StackSize - 0x1000;
             ulong StackArgs = (ulong)Math.Max(0, Args.Length - 4) * 8;
             Stack -= StackArgs + 0x20 + 8;
@@ -192,15 +231,7 @@ namespace Brovan.WinFacts.Readers
 
             WriteRegister(Registers.UC_X86_REG_RSP, Stack);
             WriteRegister(Registers.UC_X86_REG_RAX, 0);
-            UCErrors Error = uc_emu_start(Uc, Va(Rva), Sentinel, UIntPtr.Zero, (UIntPtr)InstructionBudget);
-            ulong Pc = ReadRegister(Registers.UC_X86_REG_RIP);
-            if (Error != UCErrors.UC_ERR_OK)
-                throw new FactException($"run of 0x{Rva:X} stopped at 0x{Pc:X}: {Error}");
-
-            if (Pc != Sentinel)
-                throw new FactException($"run of 0x{Rva:X} did not return within the budget (at 0x{Pc:X})");
-
-            return ReadRegister(Registers.UC_X86_REG_RAX);
+            return uc_emu_start(Uc, Va(Rva), Until, UIntPtr.Zero, (UIntPtr)InstructionBudget);
         }
 
         // The memory a run can change: the writable sections of the image and the used part of the heap.
@@ -360,6 +391,9 @@ namespace Brovan.WinFacts.Readers
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         private static extern UCErrors uc_reg_read(IntPtr Uc, int Register, ulong* Value);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        private static extern UCErrors uc_ctl(IntPtr Uc, int Control, ulong Begin, ulong End);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         private static extern UCErrors uc_emu_start(IntPtr Uc, ulong Begin, ulong Until, UIntPtr Timeout, UIntPtr Count);

@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text.Json;
 using Brovan.WinFacts.Readers;
 using Iced.Intel;
@@ -27,6 +28,7 @@ namespace Brovan.WinFacts.Rules
         private const string IsDerived = "?IsDerivedResourceType@CResourceMarshaler@DirectComposition@@";
         private const string SessionState = "W32GetUserSessionState";
         private const string ChannelWrapper = "?SetResource";
+        private const string InlinedInputSink = "?EnsureWriteableInteraction@CVisualMarshaler@DirectComposition@@";
         private const string LeakTrackingAllocator = "?gpLeakTrackingAllocator@@";
         private const string BaseClass = "CResourceMarshaler";
         private const string PropertyChangeClass = "CPropertyChangeResourceMarshaler";
@@ -39,7 +41,11 @@ namespace Brovan.WinFacts.Rules
         private const ulong UnmappedTarget = 0x500000000000;
         private const int SessionStateBytes = 0x20000;
         private const int ObjectBytes = 0x4000;
-        private const int MaxPathInstructions = 600;
+        private const int MaxLoadDistance = 16;
+        private const int MaxSizeCheckDistance = 16;
+        private const int OpcodeBytes = 4;
+        private const int CreateHandle = 1;
+        private const int MaxWrapperDepth = 2;
         private const int MaxVtableBytes = 0x800;
         private const uint MaxScanProperty = 0x10000;
         private const uint WideMaskProperty = 0xFFFF;
@@ -55,14 +61,16 @@ namespace Brovan.WinFacts.Rules
         // The record fields (offset, bytes) must match what Brovan.Core's CompositionBatchParser reads.
         private static readonly CommandRule[] Commands =
         {
-            new("CreateResource", Factory, 16, new[] { (4, 4), (8, 4), (12, 4) }, null),
-            new("ReleaseResource", "?ReleaseResource@CApplicationChannel@DirectComposition@@", 8, new[] { (4, 4) }, null),
-            new("SetCallbackId", "?" + SetCallbackId + "@", 12, new[] { (4, 4), (8, 4) }, SetCallbackId),
-            new("SetInteger", "?" + SetInteger + "@", 24, new[] { (4, 4), (8, 4), (16, 8) }, SetInteger),
-            new("SetBuffer", "?" + SetBuffer + "@", 16, new[] { (4, 4), (8, 4), (12, 4) }, SetBuffer),
-            new("SetReference", "?" + SetReference + "@", 16, new[] { (4, 4), (8, 4), (12, 4) }, SetReference),
-            new("SetVisualInputSink", "?SetVisualInputSink@CApplicationChannel@DirectComposition@@", 16, new[] { (4, 4), (8, 8) }, null),
+            new("CreateResource", new[] { Factory }, 16, new[] { (4, 4), (8, 4), (12, 4) }, null),
+            new("ReleaseResource", new[] { "?ReleaseResource@CApplicationChannel@DirectComposition@@" }, 8, new[] { (4, 4) }, null),
+            new("SetCallbackId", new[] { "?" + SetCallbackId + "@" }, 12, new[] { (4, 4), (8, 4) }, SetCallbackId),
+            new("SetInteger", new[] { "?" + SetInteger + "@" }, 24, new[] { (4, 4), (8, 4), (16, 8) }, SetInteger),
+            new("SetBuffer", new[] { "?" + SetBuffer + "@" }, 16, new[] { (4, 4), (8, 4), (12, 4) }, SetBuffer),
+            new("SetReference", new[] { "?" + SetReference + "@" }, 16, new[] { (4, 4), (8, 4), (12, 4) }, SetReference),
+            new("SetVisualInputSink", new[] { "?SetVisualInputSink@CApplicationChannel@DirectComposition@@", InlinedInputSink }, 16, new[] { (4, 4), (8, 8) }, null),
         };
+
+        private static readonly CommandRule CreateRule = Commands[0];
 
         // Each setter slot holds CResourceMarshaler's stub (Base), any other function (Own), or the named function.
         private static readonly ClassRule[] Classes =
@@ -81,7 +89,9 @@ namespace Brovan.WinFacts.Rules
         private const string VisualTransform = "VisualTransform";
         private static readonly string[] Properties = { PropertyChangeMask, VisualTransform };
 
-        private sealed record CommandRule(string Name, string Marker, int Size, (int Offset, int Bytes)[] Fields, string Method);
+        private sealed record CommandRule(string Name, string[] Markers, int Size, (int Offset, int Bytes)[] Fields, string Method);
+
+        private sealed record CreateCase(uint Opcode, ulong Call, uint MaxType);
 
         private sealed record ClassRule(string Name, string NtClass, string Integer, string Buffer, string Reference, string CallbackId);
 
@@ -101,8 +111,12 @@ namespace Brovan.WinFacts.Rules
 
         internal override string Extract(VersionInputs Inputs)
         {
+            if (!Inputs.Publics.TryFind(Factory, "", out _))
+                throw new FactException("no CApplicationChannel::CreatePrivateMarshaler to run");
+
             Dictionary<string, uint> Slots = ReadSlots(Inputs);
-            (string[] CommandMap, int[] Sizes, uint MaxType) = ReadCommands(Inputs, Slots);
+            (string[] CommandMap, int[] Sizes, CreateCase Create) = ReadCommands(Inputs, Slots);
+            uint MaxType = Create.MaxType;
             int[] Parents = ReadParents(Inputs);
             if (MaxType + 1 != Parents.Length)
                 throw new FactException($"create accepts types up to 0x{MaxType:X} but the parent table ends at 0x{Parents.Length:X}");
@@ -165,93 +179,28 @@ namespace Brovan.WinFacts.Rules
             return Slots;
         }
 
-        // The opcode selects a case through a jump table with compare-and-branch fast paths in front of it. Each case checks
-        // its size against the remaining length, reads its fields and calls the function that names the command.
-        private static (string[] Commands, int[] Sizes, uint MaxType) ReadCommands(VersionInputs Inputs, Dictionary<string, uint> Slots)
+        private static (string[] Commands, int[] Sizes, CreateCase Create) ReadCommands(VersionInputs Inputs, Dictionary<string, uint> Slots)
         {
-            Function Iterator = Function.Decode(Inputs.Image, Inputs.Publics, Inputs.Publics.Find(CompositionGroup.Iterator));
-            if (Iterator.Tables.Count != 1)
-                throw new FactException($"command switch: {Iterator.Tables.Count} jump tables");
+            uint IteratorRva = Inputs.Publics.Find(CompositionGroup.Iterator);
+            Function Iterator = Function.Decode(Inputs.Image, Inputs.Publics, IteratorRva);
+            (Instruction Load, Register Remaining, HashSet<Register> Aliases) = ReadOpcodeLoad(Iterator);
+            Switch Dispatch = Switch.Read(Iterator, Load.NextIP, Load.Op0Register);
+            Aliases.ExceptWith(Dispatch.Written);
 
-            JumpTable Table = Iterator.Tables[0];
-            IList<Instruction> Code = Iterator.Instructions;
-            Register Opcode = Table.Case.GetFullRegister();
-            int JumpIndex = IndexOf(Iterator, Table.Jump);
-            int Load = -1;
-            for (int i = JumpIndex - 1; i >= Math.Max(0, JumpIndex - 32) && Load < 0; i--)
-            {
-                Instruction Candidate = Code[i];
-                if (Candidate.Mnemonic == Mnemonic.Mov && Candidate.Op0Kind == OpKind.Register && Candidate.Op0Register.GetFullRegister() == Opcode &&
-                    Candidate.Op1Kind == OpKind.Memory && Candidate.MemoryIndex == Register.None && Candidate.MemoryDisplacement64 == 0)
-                    Load = i;
-            }
-
-            if (Load < 0)
-                throw new FactException("command switch: no opcode load");
-
-            Register Cursor = Code[Load].MemoryBase.GetFullRegister();
-            Register Remaining = Register.None;
-            for (int i = Load - 1; i >= Math.Max(0, Load - 16) && Remaining == Register.None; i--)
-            {
-                if (IsCompare(Code[i], 4) && Iterator.TryGet(Code[i].NextIP, out Instruction Next) && Next.Mnemonic == Mnemonic.Jb)
-                    Remaining = Code[i].Op0Register.GetFullRegister();
-            }
-
-            if (Remaining == Register.None)
-                throw new FactException("command switch: no remaining-length check");
-
-            List<ulong> Targets = new(Table.Targets);
-            ulong Default = 0;
-            for (int i = Load + 1; i < JumpIndex; i++)
-            {
-                if (Code[i].Mnemonic != Mnemonic.Cmp || Code[i].Op0Kind != OpKind.Register || Code[i].Op0Register.GetFullRegister() != Opcode ||
-                    !Code[i].Op1Kind.IsImmediate() || !Iterator.TryGet(Code[i].NextIP, out Instruction Branch))
-                    continue;
-
-                uint Value = (uint)Code[i].GetImmediate(1);
-                if (Branch.Mnemonic == Mnemonic.Je && Value < Targets.Count)
-                    Targets[(int)Value] = Branch.NearBranchTarget;
-                else if (Branch.Mnemonic == Mnemonic.Ja && Value + 1 == Targets.Count)
-                    Default = Branch.NearBranchTarget;
-            }
-
-            if (Default == 0)
-                throw new FactException("command switch: no default case");
-
-            List<Instruction>[] Paths = new List<Instruction>[Targets.Count];
-            Dictionary<ulong, int> Runs = new();
-            for (int Wire = 0; Wire < Targets.Count; Wire++)
-            {
-                if (Targets[Wire] == Default)
-                    continue;
-
-                Paths[Wire] = SuccessPath(Iterator, Targets[Wire]);
-                foreach (Instruction Instruction in Paths[Wire])
-                    Runs[Instruction.IP] = Runs.GetValueOrDefault(Instruction.IP) + 1;
-            }
-
-            string[] Names = new string[Targets.Count];
-            int[] Sizes = new int[Targets.Count];
-            uint MaxType = 0;
-            for (int Wire = 0; Wire < Targets.Count; Wire++)
+            string[] Names = new string[Dispatch.Cases.Count];
+            int[] Sizes = new int[Dispatch.Cases.Count];
+            CreateCase Create = null;
+            for (int Wire = 0; Wire < Dispatch.Cases.Count; Wire++)
             {
                 Names[Wire] = "";
-                if (Paths[Wire] == null)
+                ulong Target = Dispatch.Cases[Wire];
+                if (Target == Dispatch.Default)
                     continue;
 
-                // Only the instructions this case alone runs describe it. The shared tail after every case does not.
-                List<Instruction> Own = Paths[Wire].Where(Instruction => Runs[Instruction.IP] == 1).ToList();
-                Sizes[Wire] = ReadSizeCheck(Own, Remaining, Wire);
-                int MarkerIndex = -1;
-                CommandRule Rule = null;
-                bool Wrapped = false;
-                uint?[] Virtual = VirtualSlots(Own);
-                for (int i = 0; i < Own.Count && Rule == null; i++)
-                {
-                    (Rule, Wrapped) = CommandAt(Inputs, Own, Virtual, i, Slots);
-                    MarkerIndex = i;
-                }
-
+                // The tail that every case shares says nothing about this case.
+                HashSet<ulong> Own = Iterator.Dominated(Target);
+                Sizes[Wire] = ReadSizeCheck(Iterator, Own, Target, Remaining, Wire);
+                (List<Instruction> Path, CommandRule Rule, bool Wrapped) = FindCommand(Inputs, Iterator, Own, Target, Slots);
                 if (Rule == null)
                     continue;
 
@@ -262,16 +211,19 @@ namespace Brovan.WinFacts.Rules
                 if (Sizes[Wire] != Rule.Size)
                     throw new FactException($"{Rule.Name} (opcode {Wire}): record size {Sizes[Wire]}, Brovan reads {Rule.Size}");
 
-                string Fields = FormatFields(ReadRecordFields(Own, MarkerIndex, Cursor));
+                if (!PassesSizeCheck(Path, Remaining, Sizes[Wire]))
+                    throw new FactException($"{Rule.Name} (opcode {Wire}): the path to its function does not pass the size check");
+
+                string Fields = FormatFields(ReadRecordFields(Path, Aliases));
                 string Expected = FormatFields(Rule.Fields);
                 if (Fields != Expected)
                     throw new FactException($"{Rule.Name} (opcode {Wire}): reads fields {Fields}, Brovan reads {Expected}");
 
-                if (Rule.Method != null && !Wrapped && !Virtual.Contains(Slots[Rule.Method]))
+                if (Rule.Method != null && !Wrapped && !VirtualSlots(Path).Contains(Slots[Rule.Method]))
                     throw new FactException($"{Rule.Name} (opcode {Wire}): no call through vtable slot 0x{Slots[Rule.Method]:X}");
 
-                if (Rule.Marker == Factory)
-                    MaxType = ReadTypeRangeCheck(Own, Wire);
+                if (Rule == CreateRule)
+                    Create = new CreateCase((uint)Wire, Path[^1].IP, ReadTypeRangeCheck(Path, Wire));
             }
 
             foreach (CommandRule Rule in Commands)
@@ -280,93 +232,188 @@ namespace Brovan.WinFacts.Rules
                     throw new FactException($"{Rule.Name}: no opcode");
             }
 
-            return (Names, Sizes, MaxType);
+            CheckRuns(Inputs, IteratorRva, Dispatch, Create);
+            return (Names, Sizes, Create);
         }
 
-        // From a case target: the fall-through of each conditional branch and the target of each jump inside the
-        // function, which is the path a well-formed record takes in MSVC's layout.
-        private static List<Instruction> SuccessPath(Function Function, ulong Start)
+        private static (Instruction Load, Register Remaining, HashSet<Register> Aliases) ReadOpcodeLoad(Function Iterator)
         {
-            List<Instruction> Path = new();
-            HashSet<ulong> Seen = new();
-            ulong Ip = Start;
-            while (Path.Count < MaxPathInstructions && Seen.Add(Ip) && Function.TryGet(Ip, out Instruction Instruction))
+            List<(Instruction, Register, HashSet<Register>)> Found = new();
+            InstructionInfoFactory Info = new();
+            foreach (Instruction Check in Iterator.Instructions)
             {
-                Path.Add(Instruction);
-                switch (Instruction.FlowControl)
+                if (!IsCompare(Check, 4) || !Iterator.TryGet(Check.NextIP, out Instruction Branch) || Branch.Mnemonic != Mnemonic.Jb)
+                    continue;
+
+                List<Instruction> Line = new();
+                ulong Ip = Branch.NextIP;
+                while (Line.Count < MaxLoadDistance && Iterator.TryGet(Ip, out Instruction Next) && Next.FlowControl == FlowControl.Next)
                 {
-                    case FlowControl.Next:
-                    case FlowControl.Call:
-                    case FlowControl.IndirectCall:
-                    case FlowControl.ConditionalBranch:
-                        Ip = Instruction.NextIP;
-                        break;
-                    case FlowControl.UnconditionalBranch:
-                        Ip = Instruction.NearBranchTarget;
-                        break;
-                    default:
-                        return Path;
+                    Line.Add(Next);
+                    Ip = Next.NextIP;
+                }
+
+                int Load = Line.FindIndex(Instruction => Instruction.Mnemonic == Mnemonic.Mov && Instruction.Op0Kind == OpKind.Register &&
+                                                         Instruction.Op0Register.IsGPR32() && Instruction.Op1Kind == OpKind.Memory &&
+                                                         Instruction.MemoryBase.IsGPR64() && Instruction.MemoryBase is not (Register.RSP or Register.RBP) &&
+                                                         Instruction.MemoryIndex == Register.None && Instruction.MemoryDisplacement64 == 0);
+                if (Load < 0)
+                    continue;
+
+                HashSet<Register> Aliases = new() { Line[Load].MemoryBase };
+                foreach (Instruction Instruction in Line.Take(Load + 1))
+                    TrackCopies(Aliases, Info, Instruction);
+
+                Found.Add((Line[Load], Check.Op0Register.GetFullRegister(), Aliases));
+            }
+
+            return Found.Count == 1 ? Found[0] : throw new FactException($"command switch: {Found.Count} opcode loads");
+        }
+
+        private static void CheckRuns(VersionInputs Inputs, uint Iterator, Switch Dispatch, CreateCase Create)
+        {
+            uint[] Opcodes = Enumerable.Range(0, Dispatch.Cases.Count + 1).Select(Opcode => (uint)Opcode).Append(uint.MaxValue).ToArray();
+            ulong CaseOf(uint Opcode) => Opcode < Dispatch.Cases.Count ? Dispatch.Cases[(int)Opcode] : Dispatch.Default;
+            for (int Feature = 0; Feature < 2; Feature++)
+            {
+                using Session Session = new(Inputs, Feature);
+                Machine Machine = Session.Machine;
+                ulong FactoryEntry = Machine.Va(Inputs.Publics.Find(Factory));
+                ulong Record = Machine.Alloc(CreateRule.Size);
+                ulong Processed = Machine.Alloc(8);
+                Machine.Snapshot Start = Machine.Save();
+                ulong[] Arguments(uint Opcode, int Length, uint Type = 0, uint Sharing = 0)
+                {
+                    Machine.Restore(Start);
+                    byte[] Bytes = new byte[CreateRule.Size];
+                    BinaryPrimitives.WriteUInt32LittleEndian(Bytes, Opcode);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Bytes.AsSpan(4), CreateHandle);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Bytes.AsSpan(8), Type);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Bytes.AsSpan(12), Sharing);
+                    Machine.Write(Record, Bytes);
+                    return new[] { Session.Channel, Record, (ulong)Length, 0UL, Processed };
+                }
+
+                // A case whose size check fails also ends at the default, so the default is not checked.
+                foreach (ulong Target in Dispatch.Cases.Distinct().Where(Target => Target != Dispatch.Default))
+                {
+                    foreach (uint Opcode in Opcodes)
+                    {
+                        if (Machine.Reaches(Iterator, Target, Arguments(Opcode, OpcodeBytes)) != (CaseOf(Opcode) == Target))
+                            throw new FactException($"command switch: a run of opcode 0x{Opcode:X} disagrees about the case at 0x{Target - Inputs.Image.ImageBase:X}");
+                    }
+                }
+
+                foreach (uint Opcode in Opcodes)
+                {
+                    if (Machine.Reaches(Iterator, FactoryEntry, Arguments(Opcode, CreateRule.Size, 1)) != (Opcode == Create.Opcode))
+                        throw new FactException($"a create record with opcode 0x{Opcode:X} {(Opcode == Create.Opcode ? "does not reach" : "reaches")} the factory");
+                }
+
+                foreach (uint Type in new[] { 1u, Create.MaxType })
+                {
+                    if (!Machine.Reaches(Iterator, Create.Call, Arguments(Create.Opcode, CreateRule.Size, Type)))
+                        throw new FactException($"a create record of type 0x{Type:X} does not reach the factory call the case was read from");
+                }
+
+                foreach (uint Type in new[] { 0u, Create.MaxType + 1, uint.MaxValue })
+                {
+                    foreach (uint Sharing in new uint[] { 0, 1 })
+                    {
+                        if (Machine.TryCall(Iterator, Arguments(Create.Opcode, CreateRule.Size, Type, Sharing)) is not ulong Status || (uint)Status != StatusInvalidParameter)
+                            throw new FactException($"a create record of type 0x{Type:X}, sharing {Sharing}, does not get STATUS_INVALID_PARAMETER");
+                    }
                 }
             }
-
-            return Path;
         }
 
-        private static int ReadSizeCheck(List<Instruction> Own, Register Remaining, int Wire)
+        private static (List<Instruction> Path, CommandRule Rule, bool Wrapped) FindCommand(VersionInputs Inputs, Function Iterator, HashSet<ulong> Own,
+            ulong Target, Dictionary<string, uint> Slots)
         {
-            for (int i = 0; i + 1 < Math.Min(Own.Count, 16); i++)
+            CommandRule Rule = null;
+            bool Wrapped = false;
+            List<Instruction> Path = Iterator.FindPath(Target, Own, int.MaxValue, Candidate =>
             {
-                if (Own[i].Mnemonic == Mnemonic.Cmp && Own[i].Op0Kind == OpKind.Register && Own[i].Op0Register.GetFullRegister() == Remaining &&
-                    Own[i].Op1Kind.IsImmediate() && Own[i + 1].Mnemonic is Mnemonic.Jb or Mnemonic.Jae)
-                    return (int)Own[i].GetImmediate(1);
+                (Rule, Wrapped) = CommandAt(Inputs, Candidate, Slots);
+                return Rule != null;
+            });
+
+            return (Path, Rule, Wrapped);
+        }
+
+        private static int ReadSizeCheck(Function Iterator, HashSet<ulong> Own, ulong Target, Register Remaining, int Wire)
+        {
+            List<Instruction> Path = Iterator.FindPath(Target, Own, MaxSizeCheckDistance, Candidate => IsSizeCheck(Iterator, Candidate[^1], Remaining));
+            return Path != null ? (int)Path[^1].GetImmediate(1) : throw new FactException($"opcode {Wire}: no size check");
+        }
+
+        private static bool IsSizeCheck(Function Iterator, in Instruction Instruction, Register Remaining)
+            => Instruction.Mnemonic == Mnemonic.Cmp && Instruction.Op0Kind == OpKind.Register && Instruction.Op0Register.GetFullRegister() == Remaining &&
+               Instruction.Op1Kind.IsImmediate() && Iterator.TryGet(Instruction.NextIP, out Instruction Branch) && Branch.Mnemonic is Mnemonic.Jb or Mnemonic.Jae;
+
+        private static bool PassesSizeCheck(List<Instruction> Path, Register Remaining, int Size)
+        {
+            for (int i = 0; i + 2 < Path.Count; i++)
+            {
+                if (Path[i].Mnemonic != Mnemonic.Cmp || Path[i].Op0Kind != OpKind.Register || Path[i].Op0Register.GetFullRegister() != Remaining ||
+                    !Path[i].Op1Kind.IsImmediate() || (int)Path[i].GetImmediate(1) != Size)
+                    continue;
+
+                return Path[i + 1].Mnemonic switch
+                {
+                    Mnemonic.Jb => Path[i + 2].IP == Path[i + 1].NextIP,
+                    Mnemonic.Jae => Path[i + 2].IP == Path[i + 1].NearBranchTarget,
+                    _ => false,
+                };
             }
 
-            throw new FactException($"opcode {Wire}: no size check");
+            return false;
         }
 
         // NT: the create case refuses a type outside 1..MaxType with lea t, [type-1] / cmp t, MaxType-1 / ja.
-        private static uint ReadTypeRangeCheck(List<Instruction> Own, int Wire)
+        private static uint ReadTypeRangeCheck(List<Instruction> Path, int Wire)
         {
-            for (int i = 0; i + 2 < Own.Count; i++)
+            for (int i = 0; i + 3 < Path.Count; i++)
             {
-                if (Own[i].Mnemonic == Mnemonic.Lea && Own[i].Op0Register.IsGPR32() && (long)Own[i].MemoryDisplacement64 == -1 &&
-                    Own[i + 1].Mnemonic == Mnemonic.Cmp && Own[i + 1].Op0Kind == OpKind.Register && Own[i + 1].Op0Register == Own[i].Op0Register &&
-                    Own[i + 1].Op1Kind.IsImmediate() && Own[i + 2].Mnemonic == Mnemonic.Ja)
-                    return (uint)Own[i + 1].GetImmediate(1) + 1;
+                if (Path[i].Mnemonic == Mnemonic.Lea && Path[i].Op0Register.IsGPR32() && (long)Path[i].MemoryDisplacement64 == -1 &&
+                    Path[i + 1].Mnemonic == Mnemonic.Cmp && Path[i + 1].Op0Kind == OpKind.Register && Path[i + 1].Op0Register == Path[i].Op0Register &&
+                    Path[i + 1].Op1Kind.IsImmediate() && Path[i + 2].Mnemonic == Mnemonic.Ja && Path[i + 3].IP == Path[i + 2].NextIP)
+                    return (uint)Path[i + 1].GetImmediate(1) + 1;
             }
 
             throw new FactException($"CreateResource (opcode {Wire}): no type range check");
         }
 
-        // The record fields a case reads before it reaches its command's function, through any register copied from the
-        // record cursor and not written since.
-        private static SortedSet<(int Offset, int Bytes)> ReadRecordFields(List<Instruction> Own, int MarkerIndex, Register Cursor)
+        private static SortedSet<(int Offset, int Bytes)> ReadRecordFields(List<Instruction> Path, HashSet<Register> Cursors)
         {
             InstructionInfoFactory Info = new();
-            HashSet<Register> Aliases = new() { Cursor };
+            HashSet<Register> Aliases = new(Cursors);
             SortedSet<(int, int)> Fields = new();
-            for (int i = 0; i <= MarkerIndex; i++)
+            foreach (Instruction Instruction in Path)
             {
-                Instruction Instruction = Own[i];
-                InstructionInfo Used = Info.GetInfo(Instruction);
-                foreach (UsedMemory Memory in Used.GetUsedMemory())
+                foreach (UsedMemory Memory in Info.GetInfo(Instruction).GetUsedMemory())
                 {
                     if (Memory.Access is OpAccess.Read or OpAccess.ReadWrite or OpAccess.CondRead or OpAccess.ReadCondWrite &&
                         Aliases.Contains(Memory.Base.GetFullRegister()) && Memory.Index == Register.None)
                         Fields.Add(((int)Memory.Displacement, Memory.MemorySize.GetSize()));
                 }
 
-                if (Instruction.Mnemonic == Mnemonic.Mov && Instruction.Op0Kind == OpKind.Register && Instruction.Op1Kind == OpKind.Register &&
-                    Instruction.Op0Register.IsGPR64() && Aliases.Contains(Instruction.Op1Register.GetFullRegister()))
-                {
-                    Aliases.Add(Instruction.Op0Register);
-                    continue;
-                }
-
-                ForgetClobbered(Aliases, Used, Instruction);
+                TrackCopies(Aliases, Info, Instruction);
             }
 
             return Fields;
+        }
+
+        private static void TrackCopies(HashSet<Register> Aliases, InstructionInfoFactory Info, in Instruction Instruction)
+        {
+            if (Instruction.Mnemonic == Mnemonic.Mov && Instruction.Op0Kind == OpKind.Register && Instruction.Op1Kind == OpKind.Register &&
+                Instruction.Op0Register.IsGPR64() && Aliases.Contains(Instruction.Op1Register.GetFullRegister()))
+            {
+                Aliases.Add(Instruction.Op0Register);
+                return;
+            }
+
+            ForgetClobbered(Aliases, Info.GetInfo(Instruction), Instruction);
         }
 
         private static void ForgetClobbered(HashSet<Register> Registers, in InstructionInfo Used, in Instruction Instruction)
@@ -384,24 +431,34 @@ namespace Brovan.WinFacts.Rules
         private static string FormatFields(IEnumerable<(int Offset, int Bytes)> Fields)
             => string.Join(" ", Fields.OrderBy(Field => Field.Offset).Select(Field => $"+{Field.Offset}:{Field.Bytes}"));
 
-        // The command whose case reaches instruction i: a call of the function that names it, a virtual call through its
-        // setter's slot, or a call of a CApplicationChannel::SetResource* function that makes that virtual call.
-        private static (CommandRule Rule, bool Wrapped) CommandAt(VersionInputs Inputs, List<Instruction> Own, uint?[] Virtual, int i,
-            Dictionary<string, uint> Slots)
+        private static (CommandRule Rule, bool Wrapped) CommandAt(VersionInputs Inputs, List<Instruction> Path, Dictionary<string, uint> Slots)
         {
-            string Callee = CalleeName(Inputs, Own[i]);
+            Instruction Last = Path[^1];
+            string Callee = CalleeName(Inputs, Last);
             if (Callee == null)
-                return (Commands.FirstOrDefault(Command => Command.Method != null && Virtual[i] == Slots[Command.Method]), false);
+            {
+                uint? Slot = IsPlainLoad(Last) ? VirtualSlots(Path)[^1] : null;
+                return (Commands.FirstOrDefault(Command => Command.Method != null && Slot == Slots[Command.Method]), false);
+            }
 
-            CommandRule Named = Commands.FirstOrDefault(Command => Callee.StartsWith(Command.Marker, StringComparison.Ordinal));
-            if (Named != null || Own[i].FlowControl != FlowControl.Call || !Callee.StartsWith(ChannelWrapper, StringComparison.Ordinal) ||
-                !Callee.Contains("@CApplicationChannel@" + NtNamespace + "@@", StringComparison.Ordinal))
+            CommandRule Named = Commands.FirstOrDefault(Command => Names(Command, Callee));
+            if (Named != null || Last.FlowControl != FlowControl.Call || !IsChannelFunction(Callee, false))
                 return (Named, false);
 
-            Function Wrapper = Function.Decode(Inputs.Image, Inputs.Publics, (uint)(Own[i].NearBranchTarget - Inputs.Image.ImageBase));
-            uint?[] Loads = VirtualSlots(Wrapper.Instructions.ToList());
-            List<CommandRule> Dispatched = Commands.Where(Command => Command.Method != null && Loads.Contains(Slots[Command.Method])).ToList();
-            return Dispatched.Count == 1 ? (Dispatched[0], true) : (null, false);
+            Function Wrapper = Function.Decode(Inputs.Image, Inputs.Publics, (uint)(Last.NearBranchTarget - Inputs.Image.ImageBase));
+            HashSet<CommandRule> Called = new();
+            if (ChannelCalls(Inputs, Wrapper, MaxWrapperDepth, false).Any(Function => Function.Instructions.Any(Instruction =>
+                    Instruction.FlowControl is FlowControl.Call or FlowControl.UnconditionalBranch && CalleeName(Inputs, Instruction) is string Name &&
+                    Names(CreateRule, Name))))
+                Called.Add(CreateRule);
+
+            if (Callee.StartsWith(ChannelWrapper, StringComparison.Ordinal))
+            {
+                HashSet<uint?> Loads = ChannelCalls(Inputs, Wrapper, MaxWrapperDepth, true).SelectMany(Function => VirtualSlots(Function.Instructions.ToList())).ToHashSet();
+                Called.UnionWith(Commands.Where(Command => Command.Method != null && Loads.Contains(Slots[Command.Method])));
+            }
+
+            return Called.Count == 1 ? (Called.First(), true) : (null, false);
         }
 
         // For each instruction that loads a function from a vtable, the slot it loads: mov v, [object] puts a vtable in v
@@ -429,6 +486,29 @@ namespace Brovan.WinFacts.Rules
         private static bool IsPlainLoad(in Instruction Instruction)
             => Instruction.Mnemonic == Mnemonic.Mov && Instruction.Op0Kind == OpKind.Register && Instruction.Op0Register.IsGPR64() &&
                Instruction.Op1Kind == OpKind.Memory && Instruction.MemoryIndex == Register.None && !Instruction.IsIPRelativeMemoryOperand;
+
+        private static IEnumerable<Function> ChannelCalls(VersionInputs Inputs, Function Function, int Depth, bool SetResourceOnly)
+        {
+            yield return Function;
+            if (Depth <= 1)
+                yield break;
+
+            foreach (Instruction Instruction in Function.Instructions)
+            {
+                if (Instruction.FlowControl != FlowControl.Call || CalleeName(Inputs, Instruction) is not string Name || !IsChannelFunction(Name, SetResourceOnly))
+                    continue;
+
+                Function Callee = Function.Decode(Inputs.Image, Inputs.Publics, (uint)(Instruction.NearBranchTarget - Inputs.Image.ImageBase));
+                foreach (Function Reached in ChannelCalls(Inputs, Callee, Depth - 1, SetResourceOnly))
+                    yield return Reached;
+            }
+        }
+
+        private static bool IsChannelFunction(string Name, bool SetResourceOnly)
+            => (!SetResourceOnly || Name.StartsWith(ChannelWrapper, StringComparison.Ordinal)) && !Name.StartsWith(Iterator, StringComparison.Ordinal) &&
+               Name.Contains("@CApplicationChannel@" + NtNamespace + "@@", StringComparison.Ordinal);
+
+        private static bool Names(CommandRule Command, string Function) => Command.Markers.Any(Marker => Function.StartsWith(Marker, StringComparison.Ordinal));
 
         private static string CalleeName(VersionInputs Inputs, in Instruction Instruction)
         {
@@ -723,12 +803,6 @@ namespace Brovan.WinFacts.Rules
                 throw new FactException($"{Class}: {TypeClasses.Count(Name => Name == Class)} types");
 
             return (uint)Type;
-        }
-
-        private static int IndexOf(Function Function, ulong Address)
-        {
-            int Index = Function.IndexOf(Address);
-            return Index >= 0 ? Index : throw new FactException($"0x{Address:X} is not in {Function.Name}");
         }
 
         private static string MemberName(string Class, string Method) => $"?{Method}@{Class}@{NtNamespace}@@";

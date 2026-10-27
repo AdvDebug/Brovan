@@ -10,6 +10,7 @@ namespace Brovan.WinFacts.Readers
         private const int MaxTableEntries = 1024;
 
         private readonly SortedList<ulong, Instruction> ByAddress = new();
+        private readonly Dictionary<ulong, ulong[]> Next = new();
 
         internal ulong Address { get; }
         internal string Name { get; }
@@ -44,6 +45,7 @@ namespace Brovan.WinFacts.Readers
                         throw new FactException($"{Function.Name}: invalid instruction at 0x{Ip - Image.ImageBase:X}");
 
                     Function.ByAddress.Add(Ip, Instruction);
+                    Function.Next[Ip] = Array.Empty<ulong>();
                     Ip = Instruction.NextIP;
                     FlowControl Flow = Instruction.FlowControl;
                     if (Flow is FlowControl.Return or FlowControl.Interrupt or FlowControl.Exception)
@@ -51,6 +53,7 @@ namespace Brovan.WinFacts.Readers
 
                     if (Flow == FlowControl.ConditionalBranch)
                     {
+                        Function.Next[Instruction.IP] = new[] { Instruction.NextIP, Instruction.NearBranchTarget };
                         Pending.Push(Instruction.NearBranchTarget);
                         continue;
                     }
@@ -61,6 +64,7 @@ namespace Brovan.WinFacts.Readers
                         if (Target != Function.Address && Publics.NameAt((uint)(Target - Image.ImageBase)) != null)
                             break;
 
+                        Function.Next[Instruction.IP] = new[] { Target };
                         Ip = Target;
                         continue;
                     }
@@ -70,6 +74,7 @@ namespace Brovan.WinFacts.Readers
                         if (Instruction.Op0Kind == OpKind.Register && Function.TryReadTable(Image, Instruction, out JumpTable Table))
                         {
                             Function.Tables.Add(Table);
+                            Function.Next[Instruction.IP] = Table.Targets.Distinct().ToArray();
                             foreach (ulong Target in Table.Targets)
                                 Pending.Push(Target);
                         }
@@ -79,6 +84,8 @@ namespace Brovan.WinFacts.Readers
 
                     if (Instruction.Mnemonic == Mnemonic.Int3)
                         break;
+
+                    Function.Next[Instruction.IP] = new[] { Instruction.NextIP };
                 }
             }
 
@@ -87,7 +94,66 @@ namespace Brovan.WinFacts.Readers
 
         internal bool TryGet(ulong Address, out Instruction Instruction) => ByAddress.TryGetValue(Address, out Instruction);
 
-        internal int IndexOf(ulong Address) => ByAddress.IndexOfKey(Address);
+        internal IReadOnlyList<ulong> Successors(ulong Address) => Next[Address];
+
+        internal HashSet<ulong> Dominated(ulong Start)
+        {
+            HashSet<ulong> Avoiding = Reach(Address, Start);
+            HashSet<ulong> Region = Reach(Start, null);
+            Region.ExceptWith(Avoiding);
+            return Region;
+        }
+
+        internal List<Instruction> FindPath(ulong Start, IReadOnlySet<ulong> Region, int MaxLength, Func<List<Instruction>, bool> Found)
+        {
+            Dictionary<ulong, ulong> From = new() { [Start] = Start };
+            Queue<ulong> Pending = new();
+            Pending.Enqueue(Start);
+            while (Pending.Count > 0)
+            {
+                ulong Ip = Pending.Dequeue();
+                List<Instruction> Path = new();
+                for (ulong Step = Ip; ; Step = From[Step])
+                {
+                    Path.Add(ByAddress[Step]);
+                    if (Step == Start)
+                        break;
+                }
+
+                Path.Reverse();
+                if (Found(Path))
+                    return Path;
+
+                if (Path.Count == MaxLength)
+                    continue;
+
+                foreach (ulong Successor in Next[Ip])
+                {
+                    if (Region.Contains(Successor) && From.TryAdd(Successor, Ip))
+                        Pending.Enqueue(Successor);
+                }
+            }
+
+            return null;
+        }
+
+        private HashSet<ulong> Reach(ulong From, ulong? Excluded)
+        {
+            HashSet<ulong> Seen = new();
+            Stack<ulong> Pending = new();
+            Pending.Push(From);
+            while (Pending.Count > 0)
+            {
+                ulong Ip = Pending.Pop();
+                if (Ip == Excluded || !Next.ContainsKey(Ip) || !Seen.Add(Ip))
+                    continue;
+
+                foreach (ulong Successor in Next[Ip])
+                    Pending.Push(Successor);
+            }
+
+            return Seen;
+        }
 
         // MSVC x64: cmp idx, n / ja default / lea base, [__ImageBase] / mov r32, [base + idx*4 + table] / add r, base / jmp r.
         private bool TryReadTable(PeImage Image, in Instruction Jump, out JumpTable Table)
