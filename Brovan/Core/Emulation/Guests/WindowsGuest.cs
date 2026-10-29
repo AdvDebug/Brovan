@@ -2145,6 +2145,7 @@ namespace Brovan.Core.Emulation.Guests
             WinHelper.KernelFiles = KernelFileTable.TryCreate(Instance);
             WinHelper.KernelFileReads = KernelFileReads.TryCreate(Instance, this, WinHelper.KernelFiles);
             WinHelper.KernelFileInformation = KernelFileInformation.TryCreate(Instance, this, WinHelper.KernelFiles);
+            WinHelper.KernelFileVolumeInformation = KernelFileVolumeInformation.TryCreate(Instance, this, WinHelper.KernelFiles);
             if (WinHelper.KernelFiles != null)
                 Instance.RefreshGuestKernel();
             Win32kDpi.SeedFromImage(Instance, MainModule);

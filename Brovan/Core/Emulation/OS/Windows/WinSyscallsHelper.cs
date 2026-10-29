@@ -2738,6 +2738,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal KernelFileTable KernelFiles;
         internal KernelFileReads KernelFileReads;
         internal KernelFileInformation KernelFileInformation;
+        internal KernelFileVolumeInformation? KernelFileVolumeInformation;
         public List<WinSection> WinSections = new List<WinSection>();
         private readonly Dictionary<ulong, int> WinHandleIndex = new Dictionary<ulong, int>();
         internal void AddWinHandle(WinHandle h)

@@ -1,10 +1,10 @@
-using static Brovan.Core.Helpers.BinaryHelpers;
+using System.Buffers.Binary;
+using System.Text;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtQueryVolumeInformationFile : IWinSyscall
     {
-        // FS_INFORMATION_CLASS
         private const uint FileFsVolumeInformation = 1;
         private const uint FileFsSizeInformation = 3;
         internal const uint FileFsDeviceInformation = 4;
@@ -13,8 +13,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint FileFsObjectIdInformation = 8;
         private const uint FileFsSectorSizeInformation = 11;
 
-        private const uint FileFsVolumeInformationFixedSize = 0x18;
-        private const uint FileFsVolumeInformationLabelOffset = 0x12;
+        internal const int MaximumInformationClass = (int)FileFsSectorSizeInformation;
+        internal const int MaximumInformationBytes = 64;
 
         private const uint FILE_DEVICE_DISK = 0x00000007;
         private const uint FILE_DEVICE_CONSOLE = 0x00000050;
@@ -25,7 +25,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint FILE_CASE_PRESERVED_NAMES = 0x00000002;
         private const uint FILE_UNICODE_ON_DISK = 0x00000004;
         private const uint FILE_PERSISTENT_ACLS = 0x00000008;
-        private const uint SyntheticVolumeSerial = (uint)WindowsStorageDeviceSupport.VolumeSerialNumber;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -41,179 +40,107 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.TryProbeIoStatusBlock(IoStatusBlockPtr, out NTSTATUS ProbeStatus))
                 return ProbeStatus;
 
-            if (!Instance.IsRegionMapped(FsInfoBuffer, Math.Max(Length, 1u)))
-                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
+            NTSTATUS BufferStatus = Instance.WinHelper.ProbeForWrite(FsInfoBuffer, Math.Max(Length, 1u));
+            if (BufferStatus != NTSTATUS.STATUS_SUCCESS)
+                return BufferStatus;
 
             NTSTATUS Reference = Instance.WinHelper.ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out WinFile FileObj);
             if (Reference != NTSTATUS.STATUS_SUCCESS)
                 return Reference;
 
-            return FsInfoClass switch
-            {
-                FileFsVolumeInformation => QueryVolumeLabelInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length),
-                FileFsSizeInformation => QuerySizeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length),
-                FileFsDeviceInformation => QueryDeviceInformation(Instance, FileObj, IoStatusBlockPtr, FsInfoBuffer, Length),
-                FileFsAttributeInformation => QueryAttributeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length),
-                FileFsFullSizeInformation => QueryFullSizeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length),
-                FileFsObjectIdInformation => QueryObjectIdInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length),
-                FileFsSectorSizeInformation => QuerySectorSizeInformation(Instance, IoStatusBlockPtr, FsInfoBuffer, Length),
-                _ => WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0)
-            };
-        }
+            Span<byte> Data = stackalloc byte[MaximumInformationBytes];
+            int Required = BuildInformation(Instance, FileObj, FsInfoClass, Data);
+            if (Required == 0)
+                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
 
-        private static NTSTATUS QueryVolumeLabelInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length)
-        {
-            const string VolumeLabel = "Brovan";
-            int LabelBytes = System.Text.Encoding.Unicode.GetByteCount(VolumeLabel);
-
-            if (Length < FileFsVolumeInformationFixedSize)
+            uint Minimum = FsInfoClass == FileFsVolumeInformation ? 0x18u : (uint)Required;
+            if (Length < Minimum)
             {
-                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
+                NTSTATUS Status = FsInfoClass == FileFsVolumeInformation ? NTSTATUS.STATUS_INFO_LENGTH_MISMATCH
+                    : FsInfoClass == FileFsAttributeInformation ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+                return WriteStatusBlock(Instance, IoStatusBlockPtr, Status, FsInfoClass == FileFsAttributeInformation ? (ulong)Required : 0);
             }
 
-            Span<byte> LabelBuffer = LabelBytes == 0 ? Span<byte>.Empty : Instance.WinHelper.Shared.GetSpan((uint)LabelBytes);
-            if (LabelBytes != 0)
-                System.Text.Encoding.Unicode.GetBytes(VolumeLabel.AsSpan(), LabelBuffer);
+            uint Written = Math.Min(Length, (uint)Required);
+            if (!Instance.WriteMemory(FsInfoBuffer, Data.Slice(0, (int)Written)))
+                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, 0);
 
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x00, 0UL, 8);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x08, SyntheticVolumeSerial, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x0C, (uint)LabelBytes, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x10, (byte)0, 1);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x11, (byte)0, 1);
-
-            uint WritableLabelBytes = Length > FileFsVolumeInformationLabelOffset ? Length - FileFsVolumeInformationLabelOffset : 0;
-            uint LabelBytesToWrite = Math.Min((uint)LabelBytes, WritableLabelBytes);
-            if (LabelBytesToWrite != 0)
-                Instance._emulator.WriteMemory(FsInfoBuffer + FileFsVolumeInformationLabelOffset, LabelBuffer, LabelBytesToWrite);
-
-            ulong BytesWritten = FileFsVolumeInformationLabelOffset + LabelBytesToWrite;
-            if (LabelBytesToWrite < (uint)LabelBytes)
-            {
-                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_OVERFLOW, BytesWritten);
-            }
-
-            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, BytesWritten);
+            NTSTATUS Result = Written < Required ? NTSTATUS.STATUS_BUFFER_OVERFLOW : NTSTATUS.STATUS_SUCCESS;
+            Result = WriteStatusBlock(Instance, IoStatusBlockPtr, Result, Written);
+            if (Result == NTSTATUS.STATUS_SUCCESS)
+                Instance.WinHelper.KernelFileVolumeInformation?.NoteQuery(FileHandle, FileObj);
+            return Result;
         }
 
-        private static NTSTATUS QuerySizeInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length)
+        internal static int BuildInformation(BinaryEmulator Instance, WinFile? FileObj, uint InformationClass, Span<byte> Data)
         {
-            const uint RequiredSize = 24;
-            if (Length < RequiredSize)
+            Data.Clear();
+            switch (InformationClass)
             {
-                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_TOO_SMALL, 0);
+                case FileFsVolumeInformation:
+                    const string VolumeLabel = "Brovan";
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(8), (uint)WindowsStorageDeviceSupport.VolumeSerialNumber);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(12), (uint)Encoding.Unicode.GetByteCount(VolumeLabel));
+                    return 0x12 + Encoding.Unicode.GetBytes(VolumeLabel.AsSpan(), Data.Slice(0x12));
+
+                case FileFsSizeInformation:
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data, WindowsStorageDeviceSupport.TotalClusters);
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(8), WindowsStorageDeviceSupport.FreeClusters);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(16), (uint)WindowsStorageDeviceSupport.SectorsPerCluster);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(20), (uint)WindowsStorageDeviceSupport.BytesPerSector);
+                    return 24;
+
+                case FileFsDeviceInformation:
+                    uint DeviceType = FILE_DEVICE_DISK;
+                    uint Characteristics = 0;
+                    if (FileObj != null)
+                    {
+                        if (IsConsoleHandle(FileObj))
+                            DeviceType = FILE_DEVICE_CONSOLE;
+                        else if (FileObj.Device && FileObj.Path != null && FileObj.Path.StartsWith("\\Device\\NamedPipe", StringComparison.OrdinalIgnoreCase))
+                            DeviceType = FILE_DEVICE_NAMED_PIPE;
+                        else if (FileObj.IsNullDevice)
+                        {
+                            DeviceType = FILE_DEVICE_NULL;
+                            Characteristics = FILE_DEVICE_SECURE_OPEN;
+                        }
+                    }
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data, DeviceType);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(4), Characteristics);
+                    return 8;
+
+                case FileFsAttributeInformation:
+                    const string FileSystemName = "NTFS";
+                    uint Attributes = FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK | FILE_PERSISTENT_ACLS;
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data, Attributes);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(4), 255);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(8), (uint)Encoding.Unicode.GetByteCount(FileSystemName));
+                    return 12 + Encoding.Unicode.GetBytes(FileSystemName.AsSpan(), Data.Slice(12));
+
+                case FileFsFullSizeInformation:
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data, WindowsStorageDeviceSupport.TotalClusters);
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(8), WindowsStorageDeviceSupport.FreeClusters);
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(16), WindowsStorageDeviceSupport.FreeClusters);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(24), (uint)WindowsStorageDeviceSupport.SectorsPerCluster);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(28), (uint)WindowsStorageDeviceSupport.BytesPerSector);
+                    return 32;
+
+                case FileFsObjectIdInformation:
+                    if (!Guid.TryParse(Instance.WinHelper.SyntheticVolumeGuid, out Guid VolumeId))
+                        VolumeId = Guid.Empty;
+                    VolumeId.TryWriteBytes(Data);
+                    return 64;
+
+                case FileFsSectorSizeInformation:
+                    uint SectorSize = (uint)WindowsStorageDeviceSupport.BytesPerSector;
+                    for (int Offset = 0; Offset < 16; Offset += 4)
+                        BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(Offset), SectorSize);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(16), 3);
+                    return 28;
+
+                default:
+                    return 0;
             }
-
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x00, WindowsStorageDeviceSupport.TotalClusters, 8);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x08, WindowsStorageDeviceSupport.FreeClusters, 8);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x10, (uint)WindowsStorageDeviceSupport.SectorsPerCluster, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x14, (uint)WindowsStorageDeviceSupport.BytesPerSector, 4);
-
-            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize);
-        }
-
-        // No quota, so the caller available count is the free count.
-        private static NTSTATUS QueryFullSizeInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length)
-        {
-            const uint RequiredSize = 32;
-            if (Length < RequiredSize)
-                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_TOO_SMALL, 0);
-
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x00, WindowsStorageDeviceSupport.TotalClusters, 8);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x08, WindowsStorageDeviceSupport.FreeClusters, 8);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x10, WindowsStorageDeviceSupport.FreeClusters, 8);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x18, (uint)WindowsStorageDeviceSupport.SectorsPerCluster, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x1C, (uint)WindowsStorageDeviceSupport.BytesPerSector, 4);
-
-            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize);
-        }
-
-        private static NTSTATUS QueryObjectIdInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length)
-        {
-            const uint RequiredSize = 64;
-            if (Length < RequiredSize)
-                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_TOO_SMALL, 0);
-
-            Span<byte> ObjectId = stackalloc byte[16];
-            if (!Guid.TryParse(Instance.WinHelper.SyntheticVolumeGuid, out Guid VolumeId))
-                VolumeId = Guid.Empty;
-            VolumeId.TryWriteBytes(ObjectId);
-
-            Instance._emulator.WriteMemory(FsInfoBuffer, ObjectId);
-            Instance.WinHelper.WriteZeroMemory(FsInfoBuffer + 0x10, 48);
-
-            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize);
-        }
-
-        private static NTSTATUS QuerySectorSizeInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length)
-        {
-            const uint RequiredSize = 28;
-            const uint AlignedDeviceAndPartition = 0x00000003;
-            if (Length < RequiredSize)
-                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_TOO_SMALL, 0);
-
-            uint SectorSize = (uint)WindowsStorageDeviceSupport.BytesPerSector;
-
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x00, SectorSize, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x04, SectorSize, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x08, SectorSize, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x0C, SectorSize, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x10, AlignedDeviceAndPartition, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x14, 0u, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x18, 0u, 4);
-
-            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize);
-        }
-
-        private static NTSTATUS QueryDeviceInformation(BinaryEmulator Instance, WinFile FileObj, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length)
-        {
-            const uint RequiredSize = 8;
-            if (Length < RequiredSize)
-            {
-                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_TOO_SMALL, 0);
-            }
-
-            uint DeviceType = FILE_DEVICE_DISK;
-            uint Characteristics = 0;
-            if (IsConsoleHandle(FileObj))
-                DeviceType = FILE_DEVICE_CONSOLE;
-            else if (FileObj.Device && FileObj.Path != null && FileObj.Path.StartsWith("\\Device\\NamedPipe", System.StringComparison.OrdinalIgnoreCase))
-                DeviceType = FILE_DEVICE_NAMED_PIPE;
-            else if (FileObj.IsNullDevice)
-            {
-                DeviceType = FILE_DEVICE_NULL;
-                Characteristics = FILE_DEVICE_SECURE_OPEN;
-            }
-
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x0, DeviceType);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x4, Characteristics);
-
-            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize);
-        }
-
-        private static NTSTATUS QueryAttributeInformation(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong FsInfoBuffer, uint Length)
-        {
-            const string FileSystemName = "NTFS";
-            int NameBytes = System.Text.Encoding.Unicode.GetByteCount(FileSystemName);
-            ulong RequiredSize = 0x0CUL + (ulong)NameBytes;
-
-            if (Length < RequiredSize)
-            {
-                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_BUFFER_OVERFLOW, RequiredSize);
-            }
-
-            uint Attributes = FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK | FILE_PERSISTENT_ACLS;
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x00, Attributes, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x04, 255u, 4);
-            Instance._emulator.WriteMemory(FsInfoBuffer + 0x08, (uint)NameBytes, 4);
-
-            if (NameBytes != 0)
-            {
-                Span<byte> NameBuffer = Instance.WinHelper.Shared.GetSpan((uint)NameBytes);
-                System.Text.Encoding.Unicode.GetBytes(FileSystemName.AsSpan(), NameBuffer);
-                Instance._emulator.WriteMemory(FsInfoBuffer + 0x0C, NameBuffer, (uint)NameBytes);
-            }
-
-            return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, RequiredSize);
         }
 
         private static NTSTATUS WriteStatusBlock(BinaryEmulator Instance, ulong IoStatusBlockPtr, NTSTATUS Status, ulong Information)
@@ -223,11 +150,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         private static bool IsConsoleHandle(WinFile FileObj)
-        {
-            if (FileObj.ConsoleKind != ConsoleObjectKind.None)
-                return true;
-
-            return FileObj.Device && FileObj.Path != null && FileObj.Path.StartsWith("\\Device\\ConDrv", System.StringComparison.OrdinalIgnoreCase);
-        }
+            => FileObj.ConsoleKind != ConsoleObjectKind.None
+               || (FileObj.Device && FileObj.Path != null && FileObj.Path.StartsWith("\\Device\\ConDrv", StringComparison.OrdinalIgnoreCase));
     }
 }
