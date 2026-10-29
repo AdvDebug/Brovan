@@ -24,6 +24,10 @@
             android:name=".SetupActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".ProfileActivity"
+            android:exported="false" />
+
         <!-- Landscape like the player, so a layout is placed on the screen shape it will be used on. -->
         <activity
             android:name=".ControlsActivity"

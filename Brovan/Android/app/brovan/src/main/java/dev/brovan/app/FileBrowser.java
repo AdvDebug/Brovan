@@ -509,6 +509,11 @@ final class FileBrowser {
             }
 
             if (target.renameTo(renamed)) {
+                try {
+                    new Library(activity).renamed(target, renamed);
+                } catch (IOException failure) {
+                    snack(failure.getMessage());
+                }
                 load();
             } else {
                 snack(activity.getString(R.string.files_rename_failed, target.getName()));
@@ -549,14 +554,24 @@ final class FileBrowser {
                     worker.execute(() -> {
                         Library.delete(target);
                         boolean gone = !target.exists();
+                        String problem = null;
+                        if (gone) {
+                            try {
+                                new Library(activity).filesRemoved(target);
+                            } catch (IOException failure) {
+                                problem = failure.getMessage();
+                            }
+                        }
+                        String libraryProblem = problem;
 
                         activity.runOnUiThread(() -> {
                             if (activity.isDestroyed()) {
                                 return;
                             }
 
-                            snack(activity.getString(gone ? R.string.files_deleted : R.string.files_delete_failed,
-                                    target.getName()));
+                            snack(libraryProblem == null
+                                    ? activity.getString(gone ? R.string.files_deleted : R.string.files_delete_failed,
+                                        target.getName()) : libraryProblem);
                             load();
                         });
                     });

@@ -31,7 +31,7 @@ final class GuestSpawner {
     private GuestSpawner() {
     }
 
-    static boolean spawn(Context context, String image, String arguments, String guestDirectory,
+    static boolean spawn(Context context, Intent parent, String image, String arguments, String guestDirectory,
                          String sessionId, int spawnToken, int depth) {
         if (context == null || image == null || image.isEmpty()) {
             return false;
@@ -48,7 +48,7 @@ final class GuestSpawner {
             return false;
         }
 
-        Intent intent = PlayerActivity.spawnIntent(context, target, new Settings(context), program,
+        Intent intent = PlayerActivity.spawnIntent(context, target, parent, program,
                 new File(image), arguments, guestDirectory, sessionId, spawnToken, depth);
 
         // The caller is an emulator thread with its own timeout, so the start can wait for the main thread.

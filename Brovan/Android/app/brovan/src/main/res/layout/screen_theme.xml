@@ -12,6 +12,10 @@
         android:paddingEnd="20dp"
         android:paddingBottom="32dp">
 
+        <LinearLayout style="@style/SettingsChoiceRow">
+            <TextView style="@style/SettingsChoiceLabel" android:text="@string/library_style" />
+            <TextView android:id="@+id/library_style" style="@style/SettingsChoiceValue" />
+        </LinearLayout>
         <TextView style="@style/SectionLabel" android:text="@string/theme_presets" />
 
         <HorizontalScrollView
@@ -30,11 +34,6 @@
 
         <TextView style="@style/SectionLabel" android:text="@string/theme_colours" />
 
-        <com.google.android.material.card.MaterialCardView
-            style="@style/Widget.Brovan.Card"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp">
 
             <LinearLayout
                 android:id="@+id/theme_roles"
@@ -43,15 +42,8 @@
                 android:orientation="vertical"
                 android:paddingTop="6dp"
                 android:paddingBottom="6dp" />
-        </com.google.android.material.card.MaterialCardView>
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:text="@string/theme_summary"
-            android:textColor="@color/text_secondary"
-            android:textSize="13sp" />
+
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/theme_reset"

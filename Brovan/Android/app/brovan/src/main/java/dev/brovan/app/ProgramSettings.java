@@ -1,88 +1,111 @@
 package dev.brovan.app;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.util.Collections;
 import java.util.Properties;
+
+import dev.brovan.BrovanSurfaceView;
+import dev.brovan.input.ControlOverlay;
 
 final class ProgramSettings {
 
-    private static final String MANIFEST = "program.properties";
-    private static final String KEY_CONTROLS = "controls";
-    private static final String KEY_POINTER = "pointer";
-    private static final String KEY_POINTER_SPEED = "pointer_speed";
+    static final String EXTRA_PROFILE_ID = "program_id";
 
-    private final File manifest;
-    private final Properties properties = new Properties();
+    static final String[] OVERRIDE_KEYS = {
+            "controls", "pointer", "pointer_speed", "layout", "network", "jit_cache",
+            "relax_vulkan", "low_memory", "render_scale", "sustained", "developer"
+    };
+
+    private final Library library;
+    private final String id;
+    private final Properties values;
     private final Settings defaults;
 
-    ProgramSettings(File directory, Settings defaults) {
-        this.manifest = new File(directory, MANIFEST);
+    ProgramSettings(Library library, Program program, Settings defaults) {
+        this.library = library;
+        this.id = program.id();
+        this.values = program.values();
         this.defaults = defaults;
-
-        try (InputStream stream = new FileInputStream(manifest)) {
-            properties.load(stream);
-        } catch (IOException failure) {
-            // A program with no manifest yet answers with the global settings.
-        }
     }
 
     int controlScheme() {
-        return integer(KEY_CONTROLS, defaults.controlScheme());
+        return integer("controls", defaults.controlScheme(), ControlOverlay.Scheme.values().length);
     }
 
-    void setControlScheme(int value) {
-        write(KEY_CONTROLS, Integer.toString(value));
+    void setControlScheme(int value) throws IOException {
+        write("controls", Integer.toString(value));
     }
 
     int pointerMode() {
-        return integer(KEY_POINTER, defaults.pointerMode());
+        return integer("pointer", defaults.pointerMode(), BrovanSurfaceView.PointerMode.values().length);
     }
 
-    void setPointerMode(int value) {
-        write(KEY_POINTER, Integer.toString(value));
+    void setPointerMode(int value) throws IOException {
+        write("pointer", Integer.toString(value));
     }
 
     float pointerSpeed() {
-        String value = properties.getProperty(KEY_POINTER_SPEED);
-        if (value == null) {
-            return defaults.pointerSpeed();
-        }
-
+        float storedDefault = defaults.pointerSpeed();
+        float fallback = Float.isFinite(storedDefault) ? Math.max(0.4f, Math.min(storedDefault, 3f)) : 1f;
         try {
-            return Float.parseFloat(value);
-        } catch (NumberFormatException malformed) {
-            return defaults.pointerSpeed();
-        }
-    }
-
-    void setPointerSpeed(float value) {
-        write(KEY_POINTER_SPEED, Float.toString(value));
-    }
-
-    private int integer(String key, int fallback) {
-        String value = properties.getProperty(key);
-        if (value == null) {
-            return fallback;
-        }
-
-        try {
-            return Integer.parseInt(value);
+            float value = Float.parseFloat(values.getProperty("pointer_speed", Float.toString(fallback)));
+            return Float.isFinite(value) ? Math.max(0.4f, Math.min(value, 3f)) : fallback;
         } catch (NumberFormatException malformed) {
             return fallback;
         }
     }
 
-    private void write(String key, String value) {
-        properties.setProperty(key, value);
+    void setPointerSpeed(float value) throws IOException {
+        write("pointer_speed", Float.toString(value));
+    }
 
-        try (OutputStream stream = new FileOutputStream(manifest)) {
-            properties.store(stream, null);
-        } catch (IOException failure) {
-            // The program still runs with the setting applied; only remembering it failed.
+    String controlLayout() { return values.getProperty("layout", defaults.controlLayout()); }
+    int network() { return integer("network", defaults.network(), Settings.NETWORK_MODES.length); }
+    int renderScale() { return integer("render_scale", defaults.renderScale(), Settings.RENDER_SCALES.length); }
+    int lowMemory() { return integer("low_memory", defaults.lowMemory(), Settings.LOW_MEMORY_LEVELS.length); }
+    boolean jitCache() { return bool("jit_cache", defaults.jitCache()); }
+    boolean relaxVulkan() { return bool("relax_vulkan", defaults.relaxVulkan()); }
+    boolean sustainedPerformance() { return bool("sustained", defaults.sustainedPerformance()); }
+    boolean developerMode() { return bool("developer", defaults.developerMode()); }
+
+    String emulatorSettings() {
+        JSONObject result = new JSONObject();
+        try {
+            result.put("net.mode", new String[]{"none", "loopback", "full"}[network()]);
+            result.put("jit.cache", jitCache());
+            result.put("graphics.relax-vulkan", relaxVulkan());
+            result.put("graphics.render-scale", Math.round(Settings.RENDER_SCALES[renderScale()] * 100f) / 100.0);
+            result.put("platform.low-memory", Settings.LOW_MEMORY_LEVELS[lowMemory()]);
+            result.put("log.silent", !developerMode());
+        } catch (JSONException failure) {
+            throw new IllegalStateException("Could not build launch settings.", failure);
         }
+        return result.toString();
+    }
+
+    private boolean bool(String key, boolean fallback) {
+        String value = values.getProperty(key);
+        return "true".equals(value) ? true : "false".equals(value) ? false : fallback;
+    }
+
+    private int integer(String key, int fallback, int count) {
+        int value = fallback;
+        try {
+            value = Integer.parseInt(values.getProperty(key, Integer.toString(fallback)));
+        } catch (NumberFormatException malformed) {
+            value = fallback;
+        }
+        if (value < 0 || value >= count) {
+            value = fallback;
+        }
+        return value < 0 || value >= count ? 0 : value;
+    }
+
+    private void write(String key, String value) throws IOException {
+        library.update(id, Collections.singletonMap(key, value));
+        values.setProperty(key, value);
     }
 }

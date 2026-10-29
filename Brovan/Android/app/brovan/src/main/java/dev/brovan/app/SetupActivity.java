@@ -22,7 +22,6 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import com.google.android.material.button.MaterialButton;
-import com.google.android.material.materialswitch.MaterialSwitch;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.android.material.snackbar.Snackbar;
 
@@ -187,12 +186,11 @@ public class SetupActivity extends AppCompatActivity {
 
     private void bindWindows(View target) {
         TextView state = target.findViewById(R.id.windows_state);
-        MaterialSwitch licensed = target.findViewById(R.id.windows_licensed);
 
         showWindowsState(state);
 
         target.findViewById(R.id.windows_iso_pick).setOnClickListener(button -> {
-            if (!busy && licensed(licensed)) {
+            if (!busy) {
                 pick(new Intent(Intent.ACTION_OPEN_DOCUMENT)
                         .addCategory(Intent.CATEGORY_OPENABLE)
                         .setType("*/*"), REQUEST_ISO);
@@ -200,15 +198,7 @@ public class SetupActivity extends AppCompatActivity {
         });
     }
 
-    private boolean licensed(MaterialSwitch licensed) {
-        if (licensed.isChecked()) {
-            return true;
-        }
 
-        shake(licensed);
-        snack(getString(R.string.windows_needs_license));
-        return false;
-    }
 
     private void installWindows(Uri isoFile) {
         View target = page;
@@ -290,7 +280,7 @@ public class SetupActivity extends AppCompatActivity {
     private void bindReady(View target) {
         boolean windows = WindowsInstall.filesPresent(this);
         boolean runtimes = WindowsInstall.runtimesPresent(this);
-        boolean programs = !library.list().isEmpty();
+        boolean programs = librarySize() != 0;
         boolean ready = windows && runtimes && programs;
 
         ((TextView) target.findViewById(R.id.ready_title))
@@ -340,7 +330,7 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     private void showProgramState(TextView chip) {
-        int count = library.list().size();
+        int count = librarySize();
         chip.setText(count == 0
                 ? getString(R.string.setup_program_none)
                 : getString(R.string.setup_program_count, count));
@@ -595,13 +585,13 @@ public class SetupActivity extends AppCompatActivity {
                 .setInterpolator(new DecelerateInterpolator()).start();
     }
 
-    private void shake(View target) {
-        float distance = dp(8);
-        target.animate().translationX(distance).setDuration(60)
-                .withEndAction(() -> target.animate().translationX(-distance).setDuration(120)
-                        .withEndAction(() -> target.animate().translationX(0f).setDuration(60).start())
-                        .start())
-                .start();
+    private int librarySize() {
+        try {
+            return library.list().size();
+        } catch (java.io.IOException failure) {
+            snack(failure.getMessage());
+            return 0;
+        }
     }
 
     private int color(int id) {

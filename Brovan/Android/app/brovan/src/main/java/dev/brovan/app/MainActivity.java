@@ -1,6 +1,7 @@
 package dev.brovan.app;
 
 import android.content.ActivityNotFoundException;
+import android.app.ActivityManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
@@ -44,8 +45,13 @@ import com.google.android.material.progressindicator.CircularProgressIndicator;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.android.material.snackbar.Snackbar;
 import com.google.android.material.textfield.MaterialAutoCompleteTextView;
+import com.google.android.material.textfield.TextInputLayout;
 
 import java.io.File;
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.function.IntConsumer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -217,14 +223,18 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
+            public void onSettings(Program program) {
+                openProfile(program);
+            }
+
+            @Override
             public void onLongPress(Program program) {
-                confirmRemoval(program);
+                showProgramActions(program);
             }
         });
         programList.setAdapter(adapter);
         applyLibraryStyle(ProgramAdapter.Style.of(settings.libraryStyle()));
 
-        view.findViewById(R.id.library_style).setOnClickListener(button -> showStyles());
         view.findViewById(R.id.add).setOnClickListener(this::showAddOptions);
         bindSearch(view);
 
@@ -269,8 +279,12 @@ public class MainActivity extends AppCompatActivity {
             int index = i;
             View option = styleOption(styles[i]);
             option.setOnClickListener(view -> {
-                applyLibraryStyle(styles[index]);
                 settings.setLibraryStyle(index);
+                if (currentScreen == R.id.nav_library) {
+                    applyLibraryStyle(styles[index]);
+                } else if (currentScreen == R.id.nav_theme) {
+                    ((TextView) content.findViewById(R.id.library_style)).setText(styles[index].labelId());
+                }
                 dialog[0].dismiss();
             });
 
@@ -378,12 +392,10 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /// Windows system files screen: the only place the emulator is allowed to fetch Microsoft's files.
     private View createWindows() {
         View view = LayoutInflater.from(this).inflate(R.layout.screen_windows, content, false);
 
         TextView status = view.findViewById(R.id.windows_status);
-        MaterialSwitch licensed = view.findViewById(R.id.windows_licensed);
         MaterialButton install = view.findViewById(R.id.windows_install);
         LinearProgressIndicator bar = view.findViewById(R.id.windows_progress);
         TextView detail = view.findViewById(R.id.windows_progress_text);
@@ -410,13 +422,9 @@ public class MainActivity extends AppCompatActivity {
         status.setText(windowsFilesPresent() ? R.string.windows_installed : R.string.windows_missing);
 
         showRuntimeState(runtimesStatus, runtimes);
+        bindDxvk(view);
 
         runtimes.setOnClickListener(button -> {
-            if (!licensed.isChecked()) {
-                snack(getString(R.string.windows_needs_license));
-                return;
-            }
-
             startInstall(bar, detail, R.string.windows_runtimes_working, install, runtimes);
             WindowsInstall.runtimes(this, worker, new WindowsInstall.Listener() {
                 @Override
@@ -441,17 +449,11 @@ public class MainActivity extends AppCompatActivity {
         });
 
         install.setOnClickListener(button -> {
-            if (!licensed.isChecked()) {
-                snack(getString(R.string.windows_needs_license));
-                return;
-            }
-
             if (selectedIso == null) {
                 snack(getString(R.string.windows_needs_media));
                 return;
             }
 
-            licensed.setEnabled(false);
             startInstall(bar, detail, R.string.windows_working, install, runtimes);
             WindowsInstall.windows(this, worker, selectedIso, new WindowsInstall.Listener() {
                 @Override
@@ -467,7 +469,6 @@ public class MainActivity extends AppCompatActivity {
 
                 @Override
                 public void onFinished(int result) {
-                    licensed.setEnabled(true);
                     finishInstall(bar, detail, result, R.string.windows_done, install, runtimes);
                     status.setText(windowsFilesPresent() ? R.string.windows_installed : R.string.windows_missing);
                     showRuntimeState(runtimesStatus, runtimes);
@@ -484,6 +485,7 @@ public class MainActivity extends AppCompatActivity {
             action.setEnabled(false);
         }
 
+        setRuntimeActions(false);
         bar.setIndeterminate(true);
         bar.setVisibility(View.VISIBLE);
         detail.setVisibility(View.VISIBLE);
@@ -496,8 +498,21 @@ public class MainActivity extends AppCompatActivity {
             action.setEnabled(true);
         }
 
+        setRuntimeActions(true);
         bar.setVisibility(View.GONE);
         detail.setText(result == BrovanNative.STATUS_OK ? getString(doneId) : getString(R.string.windows_failed));
+    }
+
+    private void setRuntimeActions(boolean enabled) {
+        if (currentScreen != R.id.nav_windows) {
+            return;
+        }
+        for (int id : new int[]{R.id.windows_install, R.id.windows_runtimes, R.id.dxvk_install}) {
+            View action = content.findViewById(id);
+            if (action != null) {
+                action.setEnabled(enabled);
+            }
+        }
     }
 
     private void advance(LinearProgressIndicator bar, long done, long total) {
@@ -550,8 +565,23 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void refresh() {
-        adapter.submit(library.list());
-        showEmptyState();
+        try {
+            ActivityManager manager = getSystemService(ActivityManager.class);
+            List<ActivityManager.RunningAppProcessInfo> running = manager == null ? null : manager.getRunningAppProcesses();
+            if (running != null) {
+                Set<Integer> active = new HashSet<>();
+                for (ActivityManager.RunningAppProcessInfo process : running) {
+                    if ((getPackageName() + ":guest").equals(process.processName)) {
+                        active.add(process.pid);
+                    }
+                }
+                library.checkRuns(active);
+            }
+            adapter.submit(library.list());
+            showEmptyState();
+        } catch (IOException failure) {
+            snack(failure.getMessage());
+        }
     }
 
     private void showEmptyState() {
@@ -672,86 +702,97 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void confirmRemoval(Program program) {
+    private void openProfile(Program program) {
+        startActivity(new Intent(this, ProfileActivity.class)
+                .putExtra(ProgramSettings.EXTRA_PROFILE_ID, program.id()));
+    }
+
+    private void showProgramActions(Program program) {
+        boolean failed = !program.lastFailure().isEmpty();
+        CharSequence[] actions = failed
+                ? new CharSequence[]{getString(R.string.program_settings), getString(R.string.program_last_run),
+                    getString(R.string.library_remove)}
+                : new CharSequence[]{getString(R.string.program_settings), getString(R.string.library_remove)};
         Theming.dialog(this)
                 .setTitle(program.name())
-                .setItems(new CharSequence[]{getString(R.string.library_remove)}, (dialog, index) -> {
-                    library.remove(program);
-                    refresh();
-                })
-                .show();
+                .setItems(actions, (dialog, index) -> {
+                    if (index == 0) {
+                        openProfile(program);
+                    } else if (failed && index == 1) {
+                        Theming.dialog(this).setTitle(R.string.program_last_run)
+                                .setMessage(program.lastFailure())
+                                .setPositiveButton(android.R.string.ok, null).show();
+                    } else {
+                        worker.execute(() -> {
+                            try {
+                                library.remove(program);
+                                runOnUiThread(() -> {
+                                    if (!isDestroyed() && currentScreen == R.id.nav_library) {
+                                        refresh();
+                                    }
+                                });
+                            } catch (IOException failure) {
+                                runOnUiThread(() -> snack(failure.getMessage()));
+                            }
+                        });
+                    }
+                }).show();
     }
 
     private void launch(Program program) {
-        startActivity(PlayerActivity.intentFor(this, program, settings));
+        try {
+            startActivity(PlayerActivity.intentFor(this, program, settings));
+        } catch (IOException failure) {
+            snack(failure.getMessage());
+        }
     }
 
     private View createSettings() {
         View view = LayoutInflater.from(this).inflate(R.layout.screen_settings, content, false);
-
-        MaterialAutoCompleteTextView network = view.findViewById(R.id.network);
-        network.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, Settings.NETWORK_MODES));
-        network.setText(Settings.NETWORK_MODES[settings.network()], false);
-        network.setOnItemClickListener((parent, item, position, id) -> settings.setNetwork(position));
-
-        ControlOverlay.Scheme[] schemes = ControlOverlay.Scheme.values();
-        String[] schemeLabels = new String[schemes.length];
-        for (int i = 0; i < schemes.length; i++) {
-            schemeLabels[i] = schemes[i].label();
+        choice(view, R.id.network, Settings.NETWORK_MODES, settings.network(), settings::setNetwork);
+        String[] schemes = new String[ControlOverlay.Scheme.values().length];
+        for (int index = 0; index < schemes.length; index++) {
+            schemes[index] = ControlOverlay.Scheme.values()[index].label();
         }
-
-        MaterialAutoCompleteTextView controls = view.findViewById(R.id.controls);
-        controls.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, schemeLabels));
-        controls.setText(schemeLabels[settings.controlScheme()], false);
-        controls.setOnItemClickListener((parent, item, position, id) -> settings.setControlScheme(position));
-
-        BrovanSurfaceView.PointerMode[] pointers = BrovanSurfaceView.PointerMode.values();
-        String[] pointerLabels = new String[pointers.length];
-        for (int i = 0; i < pointers.length; i++) {
-            pointerLabels[i] = pointers[i].label();
+        String[] pointers = new String[BrovanSurfaceView.PointerMode.values().length];
+        for (int index = 0; index < pointers.length; index++) {
+            pointers[index] = BrovanSurfaceView.PointerMode.values()[index].label();
         }
-
-        MaterialAutoCompleteTextView renderScale = view.findViewById(R.id.render_scale);
-        renderScale.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, Settings.RENDER_SCALE_LABELS));
-        renderScale.setText(Settings.RENDER_SCALE_LABELS[settings.renderScale()], false);
-        renderScale.setOnItemClickListener((parent, item, position, id) -> settings.setRenderScale(position));
-
-        MaterialAutoCompleteTextView pointer = view.findViewById(R.id.pointer);
-        pointer.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, pointerLabels));
-        pointer.setText(pointerLabels[settings.pointerMode()], false);
-        pointer.setOnItemClickListener((parent, item, position, id) -> settings.setPointerMode(position));
-
+        choice(view, R.id.controls, schemes, settings.controlScheme(), settings::setControlScheme);
+        choice(view, R.id.pointer, pointers, settings.pointerMode(), settings::setPointerMode);
+        choice(view, R.id.render_scale, Settings.RENDER_SCALE_LABELS, settings.renderScale(), settings::setRenderScale);
+        choice(view, R.id.low_memory, Settings.LOW_MEMORY_LABELS, settings.lowMemory(), settings::setLowMemory);
         view.findViewById(R.id.edit_controls).setOnClickListener(button ->
                 startActivity(new Intent(this, ControlsActivity.class)));
-
-        MaterialSwitch jitCache = view.findViewById(R.id.jit_cache);
-        jitCache.setChecked(settings.jitCache());
-        jitCache.setOnCheckedChangeListener((button, checked) -> settings.setJitCache(checked));
-
-        MaterialSwitch relaxVulkan = view.findViewById(R.id.relax_vulkan);
-        relaxVulkan.setChecked(settings.relaxVulkan());
-        relaxVulkan.setOnCheckedChangeListener((button, checked) -> settings.setRelaxVulkan(checked));
-
+        MaterialSwitch jit = view.findViewById(R.id.jit_cache);
+        jit.setChecked(settings.jitCache());
+        jit.setOnCheckedChangeListener((button, checked) -> settings.setJitCache(checked));
+        MaterialSwitch vulkan = view.findViewById(R.id.relax_vulkan);
+        vulkan.setChecked(settings.relaxVulkan());
+        vulkan.setOnCheckedChangeListener((button, checked) -> settings.setRelaxVulkan(checked));
         MaterialSwitch sustained = view.findViewById(R.id.sustained);
         sustained.setChecked(settings.sustainedPerformance());
         sustained.setOnCheckedChangeListener((button, checked) -> settings.setSustainedPerformance(checked));
-
-        MaterialAutoCompleteTextView lowMemory = view.findViewById(R.id.low_memory);
-        lowMemory.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, Settings.LOW_MEMORY_LABELS));
-        lowMemory.setText(Settings.LOW_MEMORY_LABELS[settings.lowMemory()], false);
-        lowMemory.setOnItemClickListener((parent, item, position, id) -> settings.setLowMemory(position));
-
         MaterialSwitch developer = view.findViewById(R.id.developer);
         developer.setChecked(settings.developerMode());
         developer.setOnCheckedChangeListener((button, checked) -> settings.setDeveloperMode(checked));
-
-        MaterialSwitch fit = view.findViewById(R.id.keep_aspect);
-        fit.setChecked(settings.fitWindow());
-        fit.setOnCheckedChangeListener((button, checked) -> settings.setFitWindow(checked));
-
-        bindDxvk(view);
-
         return view;
+    }
+
+    private void choice(View view, int id, String[] labels, int selected, IntConsumer onChange) {
+        TextView value = view.findViewById(id);
+        int initial = Math.max(0, Math.min(selected, labels.length - 1));
+        value.setText(labels[initial]);
+        value.setTag(initial);
+        View row = (View) value.getParent();
+        row.setFocusable(true);
+        row.setOnClickListener(clicked -> Theming.dialog(this)
+                .setSingleChoiceItems(labels, (int) value.getTag(), (dialog, position) -> {
+                    value.setText(labels[position]);
+                    value.setTag(position);
+                    onChange.accept(position);
+                    dialog.dismiss();
+                }).setNegativeButton(android.R.string.cancel, null).show());
     }
 
     private void bindDxvk(View view) {
@@ -764,20 +805,30 @@ public class MainActivity extends AppCompatActivity {
         showDxvkState(status, install);
         showDxvkVersions(version, Collections.emptyList());
 
-        // The release list needs the network, so the picker starts with the stored choice and grows once
-        // GitHub answers. Picking nothing still works: an empty version installs the newest release.
-        worker.execute(() -> {
-            List<String> tags = Dxvk.versions();
-            runOnUiThread(() -> {
-                if (version.isAttachedToWindow()) {
+        boolean[] requested = {false};
+        View.OnClickListener openVersions = button -> {
+            version.showDropDown();
+            if (requested[0]) {
+                return;
+            }
+            requested[0] = true;
+            worker.execute(() -> {
+                List<String> tags = Dxvk.versions();
+                runOnUiThread(() -> {
+                    if (!version.isAttachedToWindow()) {
+                        return;
+                    }
                     showDxvkVersions(version, tags);
                     if (tags.isEmpty()) {
                         detail.setVisibility(View.VISIBLE);
                         detail.setText(R.string.settings_dxvk_offline);
                     }
-                }
+                    version.showDropDown();
+                });
             });
-        });
+        };
+        version.setOnClickListener(openVersions);
+        ((TextInputLayout) view.findViewById(R.id.dxvk_version_layout)).setEndIconOnClickListener(openVersions);
 
         install.setOnClickListener(button -> {
             startInstall(bar, detail, R.string.settings_dxvk_working, install);
@@ -796,6 +847,7 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public void onFinished(int result) {
                     install.setEnabled(true);
+                    setRuntimeActions(true);
                     bar.setVisibility(View.GONE);
                     detail.setText(result == BrovanNative.STATUS_OK
                             ? getString(R.string.settings_dxvk_done)
@@ -833,6 +885,10 @@ public class MainActivity extends AppCompatActivity {
 
     private View createTheme() {
         View view = LayoutInflater.from(this).inflate(R.layout.screen_theme, content, false);
+
+        TextView style = view.findViewById(R.id.library_style);
+        style.setText(ProgramAdapter.Style.of(settings.libraryStyle()).labelId());
+        ((View) style.getParent()).setOnClickListener(button -> showStyles());
 
         LinearLayout roles = view.findViewById(R.id.theme_roles);
         Palette.Role[] all = Palette.Role.values();

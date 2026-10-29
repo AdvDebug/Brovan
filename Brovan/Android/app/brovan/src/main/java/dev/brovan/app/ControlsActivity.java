@@ -1,6 +1,9 @@
 package dev.brovan.app;
 
 import android.os.Bundle;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 import android.view.View;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -20,7 +23,11 @@ import dev.brovan.input.VirtualKey;
 /** Lays out the touch controls: drag to place, tap to select, and every control binds to a key of its own. */
 public class ControlsActivity extends AppCompatActivity implements ControlOverlay.EditListener {
 
+    static final String EXTRA_LAYOUT = "initial_layout";
+
     private Settings settings;
+    private Library library;
+    private Program program;
     private Palette palette;
     private ControlOverlay overlay;
     private ControlLayout layout;
@@ -54,7 +61,22 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
         strokeSwatch = findViewById(R.id.controls_colour_stroke);
         labelSwatch = findViewById(R.id.controls_colour_label);
 
-        layout = ControlLayout.fromJson(settings.controlLayout());
+        library = new Library(this);
+        String profileId = getIntent().getStringExtra(ProgramSettings.EXTRA_PROFILE_ID);
+        String initial = getIntent().getStringExtra(EXTRA_LAYOUT);
+        if (profileId != null) {
+            try {
+                program = library.find(profileId);
+                if (initial == null) {
+                    initial = new ProgramSettings(library, program, settings).controlLayout();
+                }
+            } catch (IOException failure) {
+                Toast.makeText(this, failure.getMessage(), Toast.LENGTH_LONG).show();
+                finish();
+                return;
+            }
+        }
+        layout = ControlLayout.fromJson(initial == null ? settings.controlLayout() : initial);
         if (layout.items().isEmpty()) {
             layout = ControlLayout.forScheme(ControlOverlay.Scheme.WASD);
         }
@@ -382,8 +404,22 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
     }
 
     private void save() {
-        settings.setControlLayout(layout.toJson());
-        settings.setControlScheme(ControlOverlay.Scheme.CUSTOM.ordinal());
+        if (program == null) {
+            settings.setControlLayout(layout.toJson());
+            settings.setControlScheme(ControlOverlay.Scheme.CUSTOM.ordinal());
+        } else {
+            Map<String, String> changes = new HashMap<>();
+            changes.put("layout", layout.toJson());
+            changes.put("controls", Integer.toString(ControlOverlay.Scheme.CUSTOM.ordinal()));
+            try {
+                library.update(program.id(), changes);
+            } catch (IOException failure) {
+                Toast.makeText(this, getString(R.string.program_save_failed, failure.getMessage()),
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+        }
+        setResult(RESULT_OK);
         finish();
     }
 

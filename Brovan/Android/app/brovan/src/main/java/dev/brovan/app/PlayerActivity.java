@@ -16,12 +16,9 @@ import android.text.SpannableStringBuilder;
 import android.text.style.ForegroundColorSpan;
 import android.view.View;
 
-import org.json.JSONException;
-import org.json.JSONObject;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
-import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -35,12 +32,15 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.google.android.material.sidesheet.SideSheetDialog;
 import com.google.android.material.slider.Slider;
-import com.google.android.material.textfield.MaterialAutoCompleteTextView;
 
 import java.io.File;
+import java.io.IOException;
+import android.util.Log;
+import android.widget.Toast;
 import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import dev.brovan.BrovanNative;
 import dev.brovan.BrovanSurfaceView;
@@ -63,19 +63,14 @@ public class PlayerActivity extends AppCompatActivity
     private static final String EXTRA_EXECUTABLE = "executable";
     private static final String EXTRA_NAME = "name";
     /** Same order as Settings.NETWORK_MODES. */
-    private static final String[] NETWORK_KEYS = {"none", "loopback", "full"};
-
-    private static final String EXTRA_NETWORK = "network";
     private static final String EXTRA_DEVELOPER = "developer";
     private static final String EXTRA_CONTROLS = "controls";
-    private static final String EXTRA_JIT_CACHE = "jit_cache";
-    private static final String EXTRA_RELAX_VULKAN = "relax_vulkan";
-    private static final String EXTRA_LOW_MEMORY = "low_memory";
-    private static final String EXTRA_RENDER_SCALE = "render_scale";
     private static final String EXTRA_SUSTAINED = "sustained";
     private static final String EXTRA_LAYOUT = "layout";
     private static final String EXTRA_POINTER = "pointer";
     private static final String EXTRA_ARGUMENTS = "arguments";
+    private static final String EXTRA_SETTINGS = "settings_json";
+    private static final String EXTRA_POINTER_SPEED = "pointer_speed";
     private static final String EXTRA_GUEST_DIRECTORY = "guest_directory";
     private static final String EXTRA_SESSION = "session";
     private static final String EXTRA_TOKEN = "token";
@@ -118,6 +113,10 @@ public class PlayerActivity extends AppCompatActivity
     private ControlOverlay controls;
     private Settings settings;
     private ProgramSettings program;
+    private Library library;
+    private String programId;
+    private String runToken;
+    private final AtomicBoolean runFinished = new AtomicBoolean();
     private DebuggerView debugger;
     private TextView status;
     private TextView log;
@@ -135,30 +134,31 @@ public class PlayerActivity extends AppCompatActivity
     private int logColorCommand;
     private int logColorText;
 
-    static Intent intentFor(Context context, Program program, Settings settings) {
-        ProgramSettings own = new ProgramSettings(program.directory(), settings);
+    static Intent intentFor(Context context, Program program, Settings settings) throws IOException {
+        Library library = new Library(context);
+        Program current = library.find(program.id());
+        ProgramSettings own = new ProgramSettings(library, current, settings);
         return new Intent(context, PlayerActivity.class)
-                .putExtra(EXTRA_DIRECTORY, program.directory().getAbsolutePath())
-                .putExtra(EXTRA_EXECUTABLE, program.executable().getAbsolutePath())
-                .putExtra(EXTRA_NAME, program.name())
-                .putExtra(EXTRA_NETWORK, settings.network())
-                .putExtra(EXTRA_DEVELOPER, settings.developerMode())
+                .putExtra(ProgramSettings.EXTRA_PROFILE_ID, current.id())
+                .putExtra(EXTRA_DIRECTORY, current.directory().getAbsolutePath())
+                .putExtra(EXTRA_EXECUTABLE, current.executable().getAbsolutePath())
+                .putExtra(EXTRA_NAME, current.name())
+                .putExtra(EXTRA_ARGUMENTS, current.arguments())
+                .putExtra(EXTRA_GUEST_DIRECTORY, current.startDirectory())
+                .putExtra(EXTRA_SETTINGS, own.emulatorSettings())
+                .putExtra(EXTRA_DEVELOPER, own.developerMode())
                 .putExtra(EXTRA_CONTROLS, own.controlScheme())
-                .putExtra(EXTRA_JIT_CACHE, settings.jitCache())
-                .putExtra(EXTRA_RELAX_VULKAN, settings.relaxVulkan())
-                .putExtra(EXTRA_LOW_MEMORY, settings.lowMemoryLevel())
-                .putExtra(EXTRA_RENDER_SCALE, settings.renderScaleValue())
-                .putExtra(EXTRA_SUSTAINED, settings.sustainedPerformance())
-                .putExtra(EXTRA_LAYOUT, settings.controlLayout())
-                .putExtra(EXTRA_POINTER, own.pointerMode());
+                .putExtra(EXTRA_SUSTAINED, own.sustainedPerformance())
+                .putExtra(EXTRA_LAYOUT, own.controlLayout())
+                .putExtra(EXTRA_POINTER, own.pointerMode())
+                .putExtra(EXTRA_POINTER_SPEED, own.pointerSpeed());
     }
 
-    /** The session and token are what let the two emulator processes find each other. */
-    static Intent spawnIntent(Context context, Class<?> target, Settings settings, File directory, File image,
+    static Intent spawnIntent(Context context, Class<?> target, Intent parent, File directory, File image,
                               String arguments, String guestDirectory, String sessionId, int spawnToken,
                               int depth) {
-        ProgramSettings own = new ProgramSettings(directory, settings);
         return new Intent(context, target)
+                .putExtras(parent)
                 .putExtra(EXTRA_DIRECTORY, directory.getAbsolutePath())
                 .putExtra(EXTRA_EXECUTABLE, image.getAbsolutePath())
                 .putExtra(EXTRA_NAME, image.getName())
@@ -166,17 +166,7 @@ public class PlayerActivity extends AppCompatActivity
                 .putExtra(EXTRA_GUEST_DIRECTORY, guestDirectory)
                 .putExtra(EXTRA_SESSION, sessionId)
                 .putExtra(EXTRA_TOKEN, spawnToken)
-                .putExtra(EXTRA_DEPTH, depth)
-                .putExtra(EXTRA_NETWORK, settings.network())
-                .putExtra(EXTRA_DEVELOPER, settings.developerMode())
-                .putExtra(EXTRA_CONTROLS, own.controlScheme())
-                .putExtra(EXTRA_JIT_CACHE, settings.jitCache())
-                .putExtra(EXTRA_RELAX_VULKAN, settings.relaxVulkan())
-                .putExtra(EXTRA_LOW_MEMORY, settings.lowMemoryLevel())
-                .putExtra(EXTRA_RENDER_SCALE, settings.renderScaleValue())
-                .putExtra(EXTRA_SUSTAINED, settings.sustainedPerformance())
-                .putExtra(EXTRA_LAYOUT, settings.controlLayout())
-                .putExtra(EXTRA_POINTER, own.pointerMode());
+                .putExtra(EXTRA_DEPTH, depth);
     }
 
     private void goFullscreen() {
@@ -214,7 +204,15 @@ public class PlayerActivity extends AppCompatActivity
         goFullscreen();
 
         settings = new Settings(this);
-        program = new ProgramSettings(new File(getIntent().getStringExtra(EXTRA_DIRECTORY)), settings);
+        library = new Library(this);
+        programId = getIntent().getStringExtra(ProgramSettings.EXTRA_PROFILE_ID);
+        try {
+            program = new ProgramSettings(library, library.find(programId), settings);
+        } catch (IOException failure) {
+            Toast.makeText(this, failure.getMessage(), Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
         surface = findViewById(R.id.surface);
         terminal = findViewById(R.id.terminal);
         terminalPanel = findViewById(R.id.terminal_panel);
@@ -233,7 +231,7 @@ public class PlayerActivity extends AppCompatActivity
 
         surface.setPointerMode(BrovanSurfaceView.PointerMode.values()[
                 getIntent().getIntExtra(EXTRA_POINTER, 0)]);
-        PointerState.setSpeed(snapSpeed(program.pointerSpeed()));
+        PointerState.setSpeed(snapSpeed(getIntent().getFloatExtra(EXTRA_POINTER_SPEED, 1f)));
         status = findViewById(R.id.status);
         log = findViewById(R.id.log);
         logScroll = findViewById(R.id.log_scroll);
@@ -279,6 +277,13 @@ public class PlayerActivity extends AppCompatActivity
 
         BrovanNative.setListener(this);
         BrovanNative.setPlayerListener(this);
+        if (getIntent().getStringExtra(EXTRA_SESSION) == null) {
+            try {
+                runToken = library.beginRun(programId, android.os.Process.myPid());
+            } catch (IOException failure) {
+                showSaveFailure(failure);
+            }
+        }
         start();
     }
 
@@ -299,7 +304,7 @@ public class PlayerActivity extends AppCompatActivity
         }
 
         BrovanNative.setSpawnHandler((image, arguments, workingDirectory, sessionId, spawnToken, depth) ->
-                GuestSpawner.spawn(this, image, arguments, workingDirectory, sessionId, spawnToken, depth));
+                GuestSpawner.spawn(this, getIntent(), image, arguments, workingDirectory, sessionId, spawnToken, depth));
 
         // Developer mode leaves the guest at the debugger prompt instead of running it, so the debugger has
         // to be up for the "start" that gets it going to be reachable.
@@ -319,36 +324,28 @@ public class PlayerActivity extends AppCompatActivity
                 getIntent().getStringExtra(EXTRA_ARGUMENTS),
                 directory,
                 null,
-                buildSettings(developerMode));
+                getIntent().getStringExtra(EXTRA_SETTINGS));
 
         if (result != BrovanNative.STATUS_OK) {
             fail(describe(result));
         }
     }
 
-    private String buildSettings(boolean developerMode) {
-        JSONObject settings = new JSONObject();
-        try {
-            settings.put("net.mode", NETWORK_KEYS[clampNetwork(getIntent().getIntExtra(EXTRA_NETWORK, 1))]);
-            settings.put("jit.cache", getIntent().getBooleanExtra(EXTRA_JIT_CACHE, true));
-            settings.put("graphics.relax-vulkan", getIntent().getBooleanExtra(EXTRA_RELAX_VULKAN, false));
-            // Widening the float straight to a double would write 0.6000000238418579 into the JSON.
-            settings.put("graphics.render-scale",
-                    Math.round(getIntent().getFloatExtra(EXTRA_RENDER_SCALE, 1f) * 100f) / 100.0);
-            String lowMemory = getIntent().getStringExtra(EXTRA_LOW_MEMORY);
-            settings.put("platform.low-memory", lowMemory == null ? "off" : lowMemory);
-
-            // The debugger prompt needs the emulator's own output.
-            settings.put("log.silent", !developerMode);
-        } catch (JSONException malformed) {
-            return "{}";
+    private void finishRun(String failure) {
+        if (runToken == null || !runFinished.compareAndSet(false, true)) {
+            return;
         }
-
-        return settings.toString();
+        try {
+            library.finishRun(programId, runToken, failure);
+        } catch (IOException error) {
+            showSaveFailure(error);
+        }
     }
 
-    private static int clampNetwork(int value) {
-        return value < 0 || value >= NETWORK_KEYS.length ? 1 : value;
+    private void showSaveFailure(IOException failure) {
+        Log.e("Brovan", "Could not save the program profile", failure);
+        runOnUiThread(() -> Toast.makeText(this,
+                getString(R.string.program_save_failed, failure.getMessage()), Toast.LENGTH_LONG).show());
     }
 
     private void applySustainedPerformance() {
@@ -387,6 +384,7 @@ public class PlayerActivity extends AppCompatActivity
     }
 
     private void bindMenu(View view) {
+        view.findViewById(R.id.resume).setOnClickListener(button -> dismissMenu());
         ((TextView) view.findViewById(R.id.title)).setText(getIntent().getStringExtra(EXTRA_NAME));
 
         BrovanSurfaceView.PointerMode[] modes = BrovanSurfaceView.PointerMode.values();
@@ -395,14 +393,24 @@ public class PlayerActivity extends AppCompatActivity
             modeLabels[i] = modes[i].label();
         }
 
-        MaterialAutoCompleteTextView pointer = view.findViewById(R.id.pointer);
-        pointer.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, modeLabels));
-        pointer.setText(modeLabels[getIntent().getIntExtra(EXTRA_POINTER, 0)], false);
-        pointer.setOnItemClickListener((parent, item, position, id) -> {
-            surface.setPointerMode(modes[position]);
-            program.setPointerMode(position);
-            getIntent().putExtra(EXTRA_POINTER, position);
-        });
+        TextView pointer = view.findViewById(R.id.pointer);
+        pointer.setText(modeLabels[getIntent().getIntExtra(EXTRA_POINTER, 0)]);
+        pointer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        View pointerRow = (View) pointer.getParent();
+        pointerRow.setFocusable(true);
+        pointerRow.setOnClickListener(button -> Theming.dialog(this)
+                .setTitle(R.string.player_pointer)
+                .setSingleChoiceItems(modeLabels, getIntent().getIntExtra(EXTRA_POINTER, 0), (dialog, position) -> {
+                    surface.setPointerMode(modes[position]);
+                    pointer.setText(modeLabels[position]);
+                    try {
+                        program.setPointerMode(position);
+                    } catch (IOException failure) {
+                        showSaveFailure(failure);
+                    }
+                    getIntent().putExtra(EXTRA_POINTER, position);
+                    dialog.dismiss();
+                }).setNegativeButton(android.R.string.cancel, null).show());
 
         ControlOverlay.Scheme[] schemes = ControlOverlay.Scheme.values();
         String[] schemeLabels = new String[schemes.length];
@@ -410,13 +418,24 @@ public class PlayerActivity extends AppCompatActivity
             schemeLabels[i] = schemes[i].label();
         }
 
-        MaterialAutoCompleteTextView scheme = view.findViewById(R.id.controls);
-        scheme.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, schemeLabels));
-        scheme.setText(schemeLabels[controls.scheme().ordinal()], false);
-        scheme.setOnItemClickListener((parent, item, position, id) -> {
-            controls.apply(schemes[position]);
-            program.setControlScheme(position);
-        });
+        TextView scheme = view.findViewById(R.id.controls);
+        scheme.setText(schemeLabels[controls.scheme().ordinal()]);
+        scheme.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        View schemeRow = (View) scheme.getParent();
+        schemeRow.setFocusable(true);
+        schemeRow.setOnClickListener(button -> Theming.dialog(this)
+                .setTitle(R.string.settings_controls)
+                .setSingleChoiceItems(schemeLabels, controls.scheme().ordinal(), (dialog, position) -> {
+                    controls.apply(schemes[position]);
+                    scheme.setText(schemeLabels[position]);
+                    getIntent().putExtra(EXTRA_CONTROLS, position);
+                    try {
+                        program.setControlScheme(position);
+                    } catch (IOException failure) {
+                        showSaveFailure(failure);
+                    }
+                    dialog.dismiss();
+                }).setNegativeButton(android.R.string.cancel, null).show());
 
         TextView speedValue = view.findViewById(R.id.sensitivity_value);
         Slider speed = view.findViewById(R.id.sensitivity);
@@ -435,7 +454,12 @@ public class PlayerActivity extends AppCompatActivity
 
             @Override
             public void onStopTrackingTouch(Slider slider) {
-                program.setPointerSpeed(slider.getValue());
+                getIntent().putExtra(EXTRA_POINTER_SPEED, slider.getValue());
+                try {
+                    program.setPointerSpeed(slider.getValue());
+                } catch (IOException failure) {
+                    showSaveFailure(failure);
+                }
             }
         });
 
@@ -640,6 +664,7 @@ public class PlayerActivity extends AppCompatActivity
      * is the last resort. A second press skips straight to it.
      */
     private void quit() {
+        finishRun(null);
         if (quitting || !BrovanNative.isRunning()) {
             finish();
             return;
@@ -673,6 +698,7 @@ public class PlayerActivity extends AppCompatActivity
     }
 
     private void fail(String message) {
+        finishRun(message);
         append("[-] " + message);
         debugger.setVisibility(View.VISIBLE);
         setStatus(message);
@@ -793,6 +819,7 @@ public class PlayerActivity extends AppCompatActivity
 
     @Override
     public void onExit(int reason) {
+        finishRun(reason == 0 ? null : getString(R.string.program_stopped));
         append(reason == 0 ? "[*] The program closed." : "[-] The program stopped unexpectedly.");
         setStatus(reason == 0 ? "Finished" : "Stopped");
         runOnUiThread(() -> {
@@ -817,6 +844,7 @@ public class PlayerActivity extends AppCompatActivity
 
         // The emulator refuses a second guest in the same process, so the process goes with the activity.
         if (isFinishing()) {
+            finishRun(null);
             android.os.Process.killProcess(android.os.Process.myPid());
         }
     }

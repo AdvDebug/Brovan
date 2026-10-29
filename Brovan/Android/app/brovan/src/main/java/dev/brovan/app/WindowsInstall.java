@@ -4,14 +4,16 @@ import android.app.Activity;
 import android.content.Context;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
+import android.util.Log;
 
 import java.io.File;
 import java.util.concurrent.Executor;
 
 import dev.brovan.BrovanNative;
 
-/** The prerequisite downloads, shared by the setup wizard, the Windows files screen and settings. */
 final class WindowsInstall {
+
+    private static final Object INSTALL_GATE = new Object();
 
     interface Listener {
         void onProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal);
@@ -39,15 +41,16 @@ final class WindowsInstall {
             ParcelFileDescriptor descriptor = null;
 
             try {
-                int handle = -1;
-
-                if (iso != null) {
-                    descriptor = activity.getContentResolver().openFileDescriptor(iso, "r");
-                    handle = descriptor == null ? -1 : descriptor.getFd();
+                if (iso == null) {
+                    return BrovanNative.STATUS_INVALID_ARGUMENT;
                 }
-
-                return BrovanNative.installWindows(handle, true, 1);
+                descriptor = activity.getContentResolver().openFileDescriptor(iso, "r");
+                if (descriptor == null) {
+                    return BrovanNative.STATUS_INVALID_ARGUMENT;
+                }
+                return BrovanNative.installWindows(descriptor.getFd(), true, 1);
             } catch (Exception failure) {
+                Log.e("Brovan", "Could not import Windows media", failure);
                 return BrovanNative.STATUS_FAILED;
             } finally {
                 close(descriptor);
@@ -64,22 +67,23 @@ final class WindowsInstall {
     }
 
     private static void run(Activity activity, Executor worker, Listener listener, Step step) {
-        BrovanNative.setInstallListener((filesDone, filesTotal, bytesDone, bytesTotal) ->
-                activity.runOnUiThread(() -> listener.onProgress(filesDone, filesTotal, bytesDone, bytesTotal)));
-
         worker.execute(() -> {
-            int status = BrovanNative.init(activity.getFilesDir().getAbsolutePath());
-
-            if (status == BrovanNative.STATUS_OK || status == BrovanNative.STATUS_MISSING_WINDOWS_LIBS
-                    || status == BrovanNative.STATUS_MISSING_REGISTRY) {
-                status = step.run();
+            int status;
+            synchronized (INSTALL_GATE) {
+                BrovanNative.setInstallListener((filesDone, filesTotal, bytesDone, bytesTotal) ->
+                        activity.runOnUiThread(() -> listener.onProgress(filesDone, filesTotal, bytesDone, bytesTotal)));
+                try {
+                    status = BrovanNative.init(activity.getFilesDir().getAbsolutePath());
+                    if (status == BrovanNative.STATUS_OK || status == BrovanNative.STATUS_MISSING_WINDOWS_LIBS
+                            || status == BrovanNative.STATUS_MISSING_REGISTRY) {
+                        status = step.run();
+                    }
+                } finally {
+                    BrovanNative.setInstallListener(null);
+                }
             }
-
             int outcome = status;
-            activity.runOnUiThread(() -> {
-                BrovanNative.setInstallListener(null);
-                listener.onFinished(outcome);
-            });
+            activity.runOnUiThread(() -> listener.onFinished(outcome));
         });
     }
 
@@ -90,7 +94,8 @@ final class WindowsInstall {
 
         try {
             descriptor.close();
-        } catch (java.io.IOException ignored) {
+        } catch (java.io.IOException failure) {
+            Log.e("Brovan", "Could not close Windows media", failure);
         }
     }
 }

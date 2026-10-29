@@ -33,6 +33,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executor;
 
 final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
@@ -41,6 +43,8 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         void onLaunch(Program program);
 
         void onLongPress(Program program);
+
+        void onSettings(Program program);
     }
 
     enum Style {
@@ -190,8 +194,13 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
 
         holder.name.setText(program.name());
         holder.name.setTextSize(style.nameSize);
-        holder.detail.setText(program.executableName());
-        holder.detail.setVisibility(style.detail ? View.VISIBLE : View.GONE);
+        boolean failed = !program.lastFailure().isEmpty();
+        holder.detail.setText(failed ? holder.itemView.getContext().getString(R.string.program_last_run_failed)
+                : program.executableName());
+        holder.detail.setTextColor(failed ? holder.itemView.getContext().getColor(R.color.log_error)
+                : Theming.color(holder.itemView.getContext(), Palette.Role.TEXT_SECONDARY));
+        holder.detail.setVisibility(style.detail || failed ? View.VISIBLE : View.GONE);
+        holder.itemView.findViewById(R.id.app_settings).setOnClickListener(view -> listener.onSettings(program));
 
         if (style.artDp > 0) {
             int size = Math.round(style.artDp * holder.art.getResources().getDisplayMetrics().density);
@@ -204,7 +213,7 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
             }
         }
 
-        Integer tint = tints.get(program.directory().getName());
+        Integer tint = tints.get(iconKey(program));
         holder.art.setBackground(backdrop(tint != null ? tint : monogramColor(program.name())));
 
         holder.itemView.setOnClickListener(view -> listener.onLaunch(program));
@@ -225,8 +234,13 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         return visible.size();
     }
 
+    private static String iconKey(Program program) {
+        return program.id() + "-" + UUID.nameUUIDFromBytes(
+                program.executableName().getBytes(StandardCharsets.UTF_8));
+    }
+
     private void bindIcon(Holder holder, Program program) {
-        String key = program.directory().getName();
+        String key = iconKey(program);
         holder.key = key;
 
         Bitmap ready = icons.get(key);
@@ -259,7 +273,7 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         }
 
         for (int position = 0; position < visible.size(); position++) {
-            if (key.equals(visible.get(position).directory().getName())) {
+            if (key.equals(iconKey(visible.get(position)))) {
                 notifyItemChanged(position);
                 return;
             }

@@ -18,7 +18,6 @@ final class Settings {
     private static final String FILE = "brovan";
     private static final String KEY_NETWORK = "network";
     private static final String KEY_DEVELOPER = "developer";
-    private static final String KEY_FIT_WINDOW = "fit_window";
     private static final String KEY_CONTROLS = "controls";
     private static final String KEY_JIT_CACHE = "jit_cache";
     private static final String KEY_RELAX_VULKAN = "relax_vulkan";
@@ -62,13 +61,7 @@ final class Settings {
         preferences.edit().putInt(KEY_CONTROLS, value).apply();
     }
 
-    boolean fitWindow() {
-        return preferences.getBoolean(KEY_FIT_WINDOW, true);
-    }
 
-    void setFitWindow(boolean value) {
-        preferences.edit().putBoolean(KEY_FIT_WINDOW, value).apply();
-    }
 
     boolean relaxVulkan() {
         return preferences.getBoolean(KEY_RELAX_VULKAN, false);
