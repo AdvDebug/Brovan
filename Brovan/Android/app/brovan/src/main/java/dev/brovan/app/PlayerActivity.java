@@ -3,6 +3,7 @@ package dev.brovan.app;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -45,6 +46,8 @@ import dev.brovan.BrovanNative;
 import dev.brovan.BrovanSurfaceView;
 
 import dev.brovan.GuestWindow;
+import dev.brovan.TerminalKeysView;
+import dev.brovan.TerminalView;
 import dev.brovan.input.ControlLayout;
 import dev.brovan.input.ControlOverlay;
 import dev.brovan.input.PointerState;
@@ -53,7 +56,8 @@ import dev.brovan.input.PointerState;
  * Runs one program full screen. It lives in its own process, so quitting reclaims everything the emulator
  * allocated and the next launch starts from a clean state.
  */
-public class PlayerActivity extends AppCompatActivity implements BrovanNative.Listener, DebuggerView.Listener {
+public class PlayerActivity extends AppCompatActivity
+        implements BrovanNative.Listener, BrovanNative.PlayerListener, DebuggerView.Listener {
 
     private static final String EXTRA_DIRECTORY = "directory";
     private static final String EXTRA_EXECUTABLE = "executable";
@@ -98,6 +102,18 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private BrovanSurfaceView surface;
+    private TerminalView terminal;
+    private View terminalPanel;
+    private TextView terminalStatus;
+    private boolean consoleAttached;
+    private boolean consoleShown;
+    private boolean windowCreated;
+    private boolean viewChosen;
+    private boolean programEnded;
+    private boolean keyboardOffered;
+    private int surfaceSoftInputMode;
+    private final Rect visibleFrame = new Rect();
+    private final int[] panelOrigin = new int[2];
     private SideSheetDialog menu;
     private ControlOverlay controls;
     private Settings settings;
@@ -179,6 +195,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
 
         if (hasFocus) {
             goFullscreen();
+            offerKeyboard();
         }
     }
 
@@ -199,6 +216,13 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         settings = new Settings(this);
         program = new ProgramSettings(new File(getIntent().getStringExtra(EXTRA_DIRECTORY)), settings);
         surface = findViewById(R.id.surface);
+        terminal = findViewById(R.id.terminal);
+        terminalPanel = findViewById(R.id.terminal_panel);
+        terminalStatus = findViewById(R.id.terminal_status);
+        ((TerminalKeysView) findViewById(R.id.terminal_keys)).attach(terminal);
+        surfaceSoftInputMode = getWindow().getAttributes().softInputMode;
+
+        getWindow().getDecorView().getViewTreeObserver().addOnGlobalLayoutListener(this::fitTerminalAboveKeyboard);
         controls = findViewById(R.id.controls);
         debugger = findViewById(R.id.debugger);
         debugger.setListener(this);
@@ -244,11 +268,17 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                     return;
                 }
 
+                if (programEnded) {
+                    finish();
+                    return;
+                }
+
                 showMenu();
             }
         });
 
         BrovanNative.setListener(this);
+        BrovanNative.setPlayerListener(this);
         start();
     }
 
@@ -350,7 +380,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         resize((View) view.getParent());
         menu.setOnDismissListener(dialog -> {
             menu = null;
-            surface.requestFocus();
+            focusShownView();
         });
 
         menu.show();
@@ -412,6 +442,19 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         view.findViewById(R.id.windows).setOnClickListener(button -> {
             dismissMenu();
             showWindows();
+        });
+
+        TextView consoleButton = view.findViewById(R.id.console);
+        consoleButton.setVisibility(consoleAttached ? View.VISIBLE : View.GONE);
+        consoleButton.setText(consoleShown ? R.string.player_show_window : R.string.player_show_console);
+        consoleButton.setOnClickListener(button -> {
+            dismissMenu();
+            viewChosen = true;
+            if (consoleShown) {
+                showSurface();
+            } else {
+                showConsole();
+            }
         });
 
         view.findViewById(R.id.escape).setOnClickListener(button -> {
@@ -487,7 +530,12 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
                 .setItems(labels, (dialog, index) -> {
                     BrovanNative.selectWindow(windows.get(index).hwnd());
                     debugger.setVisibility(View.GONE);
-                    surface.requestFocus();
+                    if (consoleShown) {
+                        viewChosen = true;
+                        showSurface();
+                    } else {
+                        surface.requestFocus();
+                    }
                 })
                 .show();
     }
@@ -496,7 +544,7 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         boolean visible = debugger.getVisibility() == View.VISIBLE;
         debugger.setVisibility(visible ? View.GONE : View.VISIBLE);
         if (visible) {
-            surface.requestFocus();
+            focusShownView();
             BrovanNative.requestRepaint();
             return;
         }
@@ -505,6 +553,78 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
             rebuildLog();
             logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         }
+    }
+
+    @Override
+    public void onConsoleAttached() {
+        runOnUiThread(() -> {
+            consoleAttached = true;
+            if (!windowCreated && !viewChosen) {
+                showConsole();
+            }
+        });
+    }
+
+    @Override
+    public void onScreenChanged() {
+        terminal.requestFrame();
+    }
+
+    @Override
+    public void onWindowCreated() {
+        runOnUiThread(() -> {
+            windowCreated = true;
+            if (consoleShown && !viewChosen) {
+                showSurface();
+            }
+        });
+    }
+
+    private void showConsole() {
+        consoleShown = true;
+        terminalPanel.setVisibility(View.VISIBLE);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
+        terminal.post(this::offerKeyboard);
+    }
+
+    private void offerKeyboard() {
+        if (keyboardOffered || !consoleShown || !hasWindowFocus()) {
+            return;
+        }
+
+        keyboardOffered = true;
+        terminal.showKeyboard();
+    }
+
+    // The app consumes IME insets. Size the terminal from the visible frame.
+    private void fitTerminalAboveKeyboard() {
+        if (terminalPanel.getVisibility() != View.VISIBLE) {
+            return;
+        }
+
+        getWindow().getDecorView().getWindowVisibleDisplayFrame(visibleFrame);
+        terminalPanel.getLocationOnScreen(panelOrigin);
+        int covered = Math.max(0, panelOrigin[1] + terminalPanel.getHeight() - visibleFrame.bottom);
+        if (terminalPanel.getPaddingBottom() != covered) {
+            terminalPanel.setPadding(0, 0, 0, covered);
+        }
+    }
+
+    private void focusShownView() {
+        if (consoleShown) {
+            terminal.requestFocus();
+        } else {
+            surface.requestFocus();
+        }
+    }
+
+    private void showSurface() {
+        consoleShown = false;
+        terminal.hideKeyboard();
+        terminalPanel.setVisibility(View.GONE);
+        getWindow().setSoftInputMode(surfaceSoftInputMode);
+        surface.requestFocus();
+        BrovanNative.requestRepaint();
     }
 
     @Override
@@ -533,6 +653,11 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         // has stopped and the cache is saved, and it takes the process with it.
         if (developerMode) {
             BrovanNative.sendCommand("exit");
+        }
+
+        if (consoleAttached && !windowCreated) {
+            forceStop();
+            return;
         }
 
         ui.postDelayed(this::forceStop, CLOSE_GRACE_MS);
@@ -671,8 +796,16 @@ public class PlayerActivity extends AppCompatActivity implements BrovanNative.Li
         append(reason == 0 ? "[*] The program closed." : "[-] The program stopped unexpectedly.");
         setStatus(reason == 0 ? "Finished" : "Stopped");
         runOnUiThread(() -> {
-            if (!developerMode || quitting) {
+            if (quitting || (!developerMode && !consoleShown)) {
                 finish();
+                return;
+            }
+
+            if (consoleShown) {
+                programEnded = true;
+                terminal.setInputEnabled(false);
+                terminalStatus.setText(reason == 0 ? R.string.terminal_closed : R.string.terminal_stopped);
+                terminalStatus.setVisibility(View.VISIBLE);
             }
         });
     }

@@ -847,9 +847,9 @@ namespace Brovan
             try
             {
                 int ReadCount = 0;
-                while (GeneralHelper.HostConsoleInput.KeyAvailable && ReadCount < 4096)
+                while (Core.Emulation.OS.SharedHelpers.SystemConsoleTerminal.PromptKeyAvailable && ReadCount < 4096)
                 {
-                    GeneralHelper.HostConsoleInput.ReadKey();
+                    Core.Emulation.OS.SharedHelpers.SystemConsoleTerminal.ReadPromptKey();
                     ReadCount++;
                 }
             }
@@ -866,7 +866,7 @@ namespace Brovan
                 Console.ForegroundColor = ConsoleColor.Cyan;
                 Console.Write(Prompt);
                 Console.ForegroundColor = ConsoleColor.White;
-                string? Line = GeneralHelper.HostConsoleInput.ReadLine();
+                string? Line = Core.Emulation.OS.SharedHelpers.SystemConsoleTerminal.ReadPromptLine();
                 if (Line == null)
                     return null;
 
@@ -887,7 +887,7 @@ namespace Brovan
                 ConsoleKeyInfo Key;
                 try
                 {
-                    Key = GeneralHelper.HostConsoleInput.ReadKey();
+                    Key = Core.Emulation.OS.SharedHelpers.SystemConsoleTerminal.ReadPromptKey();
                 }
                 catch (InvalidOperationException)
                 {

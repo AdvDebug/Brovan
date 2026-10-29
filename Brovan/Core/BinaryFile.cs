@@ -32,6 +32,8 @@ namespace Brovan.Core
 
         public PortableExecutable PE { get; private set; }
 
+        public bool IsConsoleImage => FileFormat == BinaryFormat.PE && PE != null && PE.Subsystem == Subsystem.WindowsCui;
+
         public DotNet DotNet { get; private set; }
 
         public ELF ELF { get; private set; }

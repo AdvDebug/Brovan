@@ -31,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Length != 0 && !Instance.IsAccessible(BufferPtr, Length, false))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                Status = HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length, FileObj.HostStream == HostStreamKind.Error);
+                Status = HandleStdOut(Instance, IoStatusBlockPtr, BufferPtr, Length, FileObj.ConsoleKind == ConsoleObjectKind.Output, FileObj.HostStream == HostStreamKind.Error);
                 Instance.WinHelper.QueueImmediateCompletion(FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, Status, Length);
             }
             else
@@ -160,7 +160,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance.WinHelper.PipeRequests.Submit(Instance, Request);
         }
 
-        private static NTSTATUS HandleStdOut(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, bool StandardError)
+        private static NTSTATUS HandleStdOut(BinaryEmulator Instance, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, bool ToConsole, bool StandardError)
         {
             if (Length == 0)
             {
@@ -178,8 +178,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
                 }
 
-                Instance.WinHelper.ConsoleState.TrackOutput(Data);
-                GeneralHelper.ConsoleWrite(Data, Instance.Settings.ConsoleOutputMode, StandardError);
+                if (ToConsole)
+                    SharedHelpers.HostTerminal.Current.Write(Data, Instance.Settings.ConsoleOutputMode, Instance.WinHelper.ConsoleState.OutputMode);
+                else
+                    GeneralHelper.ConsoleWrite(Data, Instance.Settings.ConsoleOutputMode, StandardError);
+
                 Done += Step;
             }
 

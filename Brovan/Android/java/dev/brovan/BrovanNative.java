@@ -54,6 +54,19 @@ public final class BrovanNative {
         void onExit(int reason);
     }
 
+    // Callbacks may run on any thread.
+    public interface PlayerListener {
+        void onConsoleAttached();
+
+        void onScreenChanged();
+
+        void onWindowCreated();
+    }
+
+    private static final int PLAYER_CONSOLE_ATTACHED = 1;
+    private static final int PLAYER_SCREEN_CHANGED = 2;
+    private static final int PLAYER_WINDOW_CREATED = 3;
+
     /** Progress of {@link #installWindows}. Reported from a worker thread, not the main thread. */
     public interface InstallListener {
         void onInstallProgress(long filesDone, long filesTotal, long bytesDone, long bytesTotal);
@@ -87,6 +100,7 @@ public final class BrovanNative {
     private static volatile Listener listener;
     private static volatile InstallListener installListener;
     private static volatile SpawnHandler spawnHandler;
+    private static volatile PlayerListener playerListener;
 
     static {
         // .NET's crypto shim dlopens libssl.so, and Android provides none. Loading our bundled pair up front
@@ -115,6 +129,10 @@ public final class BrovanNative {
 
     public static void setSpawnHandler(SpawnHandler value) {
         spawnHandler = value;
+    }
+
+    public static void setPlayerListener(PlayerListener value) {
+        playerListener = value;
     }
 
     /** Must be called before {@link #start}. */
@@ -213,6 +231,20 @@ public final class BrovanNative {
         nativeInjectFocus(focused ? 1 : 0);
     }
 
+    // A zero VK asks the emulator to map the character.
+    public static void terminalKey(boolean down, int virtualKey, int character, int controlKeyState) {
+        nativeTerminalKey(down ? 1 : 0, virtualKey, character, controlKeyState);
+    }
+
+    public static void terminalResize(int columns, int rows) {
+        nativeTerminalResize(columns, rows);
+    }
+
+    // UI thread only. Returns ints written, -size needed, or 0 if busy.
+    public static int terminalSnapshot(int[] buffer, int scrollBack) {
+        return nativeTerminalSnapshot(buffer, scrollBack);
+    }
+
     /** Marks the guest window dirty so it repaints. */
     public static void requestRepaint() {
         nativeRequestRepaint();
@@ -294,6 +326,28 @@ public final class BrovanNative {
                                          String sessionId, int spawnToken, int depth) {
         SpawnHandler current = spawnHandler;
         return current != null && current.onSpawn(image, arguments, workingDirectory, sessionId, spawnToken, depth);
+    }
+
+    @SuppressWarnings("unused")
+    private static void onNativePlayer(int event) {
+        PlayerListener current = playerListener;
+        if (current == null) {
+            return;
+        }
+
+        switch (event) {
+            case PLAYER_CONSOLE_ATTACHED:
+                current.onConsoleAttached();
+                break;
+            case PLAYER_SCREEN_CHANGED:
+                current.onScreenChanged();
+                break;
+            case PLAYER_WINDOW_CREATED:
+                current.onWindowCreated();
+                break;
+            default:
+                break;
+        }
     }
 
     @SuppressWarnings("unused")
@@ -419,6 +473,12 @@ public final class BrovanNative {
     private static native void nativeInjectKey(int down, int virtualKey, int scanCode);
 
     private static native void nativeInjectFocus(int focused);
+
+    private static native void nativeTerminalKey(int down, int virtualKey, int character, int controlKeyState);
+
+    private static native void nativeTerminalResize(int columns, int rows);
+
+    private static native int nativeTerminalSnapshot(int[] buffer, int scrollBack);
 
     private static native void nativeRequestRepaint();
 

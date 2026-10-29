@@ -10,6 +10,12 @@ namespace Brovan.Android
         private const int SurfaceWaitMilliseconds = 30000;
         private const int MaximumCores = 64;
 
+        public const int PlayerConsoleAttached = 1;
+        public const int PlayerScreenChanged = 2;
+        public const int PlayerWindowCreated = 3;
+
+        private static IntPtr _playerSink;
+
         private static readonly object SurfaceSync = new();
         private static readonly ManualResetEventSlim SurfaceReady = new(false);
 
@@ -47,6 +53,17 @@ namespace Brovan.Android
         public static void MarkActive()
         {
             _active = true;
+        }
+
+        public static bool HasPlayer => Volatile.Read(ref _playerSink) != IntPtr.Zero;
+
+        public static void SetPlayerSink(IntPtr sink) => Volatile.Write(ref _playerSink, sink);
+
+        public static unsafe void NotifyPlayer(int playerEvent)
+        {
+            IntPtr sink = Volatile.Read(ref _playerSink);
+            if (sink != IntPtr.Zero)
+                ((delegate* unmanaged<int, void>)sink)(playerEvent);
         }
 
         public static void SetSurface(IntPtr window, int width, int height, int densityDpi)

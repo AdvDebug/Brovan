@@ -4,6 +4,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -91,18 +92,18 @@ namespace Brovan.Core.Emulation.OS.Windows
     public sealed class ConsoleState
     {
         internal const ushort KeyEvent = 0x0001;
+        internal const ushort WindowBufferSizeEvent = 0x0004;
         internal const uint EnableProcessedInput = 0x0001;
         internal const uint EnableLineInput = 0x0002;
         internal const uint EnableEchoInput = 0x0004;
+        internal const uint EnableWindowInput = 0x0008;
         internal const uint EnableVirtualTerminalInput = 0x0200;
-        private const uint EnableVirtualTerminalProcessing = 0x0004;
 
-        private const uint RightAltPressed = 0x0001;
-        private const uint LeftAltPressed = 0x0002;
-        private const uint RightCtrlPressed = 0x0004;
-        private const uint LeftCtrlPressed = 0x0008;
-        private const uint ShiftPressed = 0x0010;
-        private const uint EnhancedKey = 0x0100;
+        private const uint RightAltPressed = HostInputEvent.RightAltPressed;
+        private const uint LeftAltPressed = HostInputEvent.LeftAltPressed;
+        private const uint RightCtrlPressed = HostInputEvent.RightCtrlPressed;
+        private const uint LeftCtrlPressed = HostInputEvent.LeftCtrlPressed;
+        private const uint ShiftPressed = HostInputEvent.ShiftPressed;
 
         private const ushort VkBack = 0x08;
         private const ushort VkTab = 0x09;
@@ -136,11 +137,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public uint InputMode { get; private set; } = 0x01F7;
         public uint OutputMode = 0x0003;
-        public ushort Attributes = 0x0007;
-        public ushort CursorX;
-        public ushort CursorY;
-        public uint CursorSize = 25;
-        public bool CursorVisible = true;
 
         private readonly Queue<ConsoleInputRecord> Records = new Queue<ConsoleInputRecord>();
         private int HeadRepeatsTaken;
@@ -157,19 +153,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private byte[] PendingBytes = Array.Empty<byte>();
         private int PendingBytesOffset;
 
-        private enum OutputParse
-        {
-            Ground,
-            Escape,
-            CsiStart,
-            PrivateParameters
-        }
-
-        private bool CursorKeysApplication;
-        private OutputParse OutputState;
-        private int OutputParameter;
-        private bool OutputParameterHasOne;
-
         public int PendingRecords => Records.Count;
 
         public bool InputExhausted => EndDelivered && Records.Count == 0;
@@ -177,17 +160,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void SetInputMode(BinaryEmulator Instance, uint Mode)
         {
             InputMode = Mode;
-            GeneralHelper.HostConsoleInput.SetControlCAsInput((Mode & EnableProcessedInput) == 0);
+            HostTerminal.Current.SetControlCAsInput((Mode & EnableProcessedInput) == 0);
         }
 
         // Call under the kernel lock before reading the buffer. The host thread never touches it.
         public void Poll(BinaryEmulator Instance)
         {
-            GeneralHelper.HostConsoleInput.EnsureStarted(Instance.WakeSignal);
+            HostTerminal.Current.StartInput();
 
             bool Ended = GeneralHelper.HostConsoleInput.Ended;
-            while (GeneralHelper.HostConsoleInput.TryTake(out ConsoleKeyInfo Key))
-                AppendHostKey(Key);
+            while (GeneralHelper.HostConsoleInput.TryTake(out HostInputEvent Event))
+                AppendHostEvent(in Event);
 
             if (Ended && !EndDelivered)
             {
@@ -205,7 +188,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Records.Count != 0)
                 return true;
 
-            GeneralHelper.HostConsoleInput.Request(true, NextInput);
+            HostTerminal.Current.RequestInput(true, NextInput);
             return false;
         }
 
@@ -265,60 +248,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             HeadRepeatsTaken = 0;
             return Prepended;
-        }
-
-        // DECCKM (CSI ? 1 h / l) changes how cursor keys are encoded.
-        public void TrackOutput(ReadOnlySpan<byte> Data)
-        {
-            if ((OutputMode & EnableVirtualTerminalProcessing) == 0)
-                return;
-
-            for (int i = 0; i < Data.Length; i++)
-            {
-                if (OutputState == OutputParse.Ground)
-                {
-                    int Escape = Data.Slice(i).IndexOf((byte)0x1B);
-                    if (Escape < 0)
-                        return;
-
-                    i += Escape;
-                    OutputState = OutputParse.Escape;
-                    continue;
-                }
-
-                byte Value = Data[i];
-                switch (OutputState)
-                {
-                    case OutputParse.Escape:
-                        OutputState = Value == (byte)'[' ? OutputParse.CsiStart : Value == 0x1B ? OutputParse.Escape : OutputParse.Ground;
-                        break;
-
-                    case OutputParse.CsiStart:
-                        OutputParameter = 0;
-                        OutputParameterHasOne = false;
-                        OutputState = Value == (byte)'?' ? OutputParse.PrivateParameters : Value == 0x1B ? OutputParse.Escape : OutputParse.Ground;
-                        break;
-
-                    case OutputParse.PrivateParameters:
-                        if (Value >= (byte)'0' && Value <= (byte)'9')
-                        {
-                            OutputParameter = Math.Min(OutputParameter * 10 + (Value - '0'), 100000);
-                        }
-                        else if (Value == (byte)';')
-                        {
-                            OutputParameterHasOne |= OutputParameter == 1;
-                            OutputParameter = 0;
-                        }
-                        else
-                        {
-                            if ((Value == (byte)'h' || Value == (byte)'l') && (OutputParameterHasOne || OutputParameter == 1))
-                                CursorKeysApplication = Value == (byte)'h';
-
-                            OutputState = Value == 0x1B ? OutputParse.Escape : OutputParse.Ground;
-                        }
-                        break;
-                }
-            }
         }
 
         internal ConsoleReadResult Read(BinaryEmulator Instance, Span<byte> Output, bool Unicode, bool ProcessControlZ,
@@ -707,21 +636,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             HeadRepeatsTaken = 0;
         }
 
-        private void AppendHostKey(ConsoleKeyInfo Key)
+        private void AppendHostEvent(in HostInputEvent Event)
         {
-            uint State = 0;
-            if ((Key.Modifiers & ConsoleModifiers.Control) != 0)
-                State |= LeftCtrlPressed;
-            if ((Key.Modifiers & ConsoleModifiers.Alt) != 0)
-                State |= LeftAltPressed;
-            if ((Key.Modifiers & ConsoleModifiers.Shift) != 0)
-                State |= ShiftPressed;
+            int Limit = Settings.MemoryBudget.ConsoleInputRecords;
+            if (Event.Kind == HostInputKind.Resize)
+            {
+                if ((InputMode & EnableWindowInput) != 0)
+                    AppendRecord(new ConsoleInputRecord { EventType = WindowBufferSizeEvent, PayloadLow = Event.Columns | ((ulong)Event.Rows << 16) }, Limit);
+                return;
+            }
 
-            ushort VirtualKey = (ushort)Key.Key;
-            if ((VirtualKey >= VkPrior && VirtualKey <= VkDown) || VirtualKey == VkInsert || VirtualKey == VkDelete)
-                State |= EnhancedKey;
-
-            AppendKeyPress(VirtualKey, Key.KeyChar, State);
+            ConsoleInputRecord Record = ConsoleInputRecord.Key(Event.KeyDown, Event.VirtualKey, Event.ScanCode, Event.Character, Event.ControlKeyState);
+            Record.RepeatCount = Math.Max(Event.RepeatCount, (ushort)1);
+            AppendRecord(Record, Limit);
         }
 
         private void AppendKeyPress(ushort VirtualKey, char Character, uint State)
@@ -821,7 +748,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return WriteCsi(1, Modifier, Final, Output);
 
             Output[0] = (char)0x1B;
-            Output[1] = CursorKeysApplication ? 'O' : '[';
+            Output[1] = HostTerminal.Current.CursorKeysApplication ? 'O' : '[';
             Output[2] = Final;
             return 3;
         }
@@ -918,9 +845,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint MaxReadBytes = 1 << 16;
         private const uint FillAnsiCharacter = 1;
         private const uint FillUnicodeCharacter = 2;
-
-        private const ushort DefaultBufferWidth = 120;
-        private const ushort DefaultBufferHeight = 30;
 
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
         {
@@ -1047,7 +971,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Task NextInput = GeneralHelper.HostConsoleInput.NextInput;
                     State.Poll(Instance);
                     if (State.PendingRecords == 0)
-                        GeneralHelper.HostConsoleInput.Request(false, NextInput);
+                        HostTerminal.Current.RequestInput(false, NextInput);
                     if (Descriptor.Length >= 4)
                         BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, (uint)State.PendingRecords);
                     return NTSTATUS.STATUS_SUCCESS;
@@ -1094,7 +1018,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case ApiGetConsoleScreenBufferInfo:
                     if (Kind != ConsoleObjectKind.Output)
                         return NTSTATUS.STATUS_INVALID_HANDLE;
-                    WriteScreenBufferInfo(Descriptor, State);
+                    WriteScreenBufferInfo(Descriptor);
                     return NTSTATUS.STATUS_SUCCESS;
 
                 case ApiGetLargestConsoleWindowSize:
@@ -1102,9 +1026,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_INVALID_HANDLE;
                     if (Descriptor.Length >= 4)
                     {
-                        ReadHostGeometry(out ushort Width, out ushort Height, out _, out _);
-                        ReadHostWindow(Width, Height, out _, out _, out _, out _, out ushort LargestWidth, out ushort LargestHeight);
-                        WriteCoord(Descriptor, LargestWidth, LargestHeight);
+                        TerminalGeometry Geometry = HostTerminal.Current.Geometry;
+                        WriteCoord(Descriptor, Geometry.LargestWidth, Geometry.LargestHeight);
                     }
                     return NTSTATUS.STATUS_SUCCESS;
 
@@ -1113,8 +1036,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_INVALID_HANDLE;
                     if (Descriptor.Length >= 8)
                     {
-                        BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, State.CursorSize);
-                        BinaryPrimitives.WriteUInt32LittleEndian(Descriptor.Slice(4), State.CursorVisible ? 1u : 0u);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, HostTerminal.Current.CursorSize);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Descriptor.Slice(4), HostTerminal.Current.CursorVisible ? 1u : 0u);
                     }
                     return NTSTATUS.STATUS_SUCCESS;
 
@@ -1123,8 +1046,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_INVALID_HANDLE;
                     if (Descriptor.Length >= 8)
                     {
-                        State.CursorSize = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor);
-                        State.CursorVisible = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(4)) != 0;
+                        HostTerminal.Current.CursorSize = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor);
+                        HostTerminal.Current.CursorVisible = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(4)) != 0;
                     }
                     return NTSTATUS.STATUS_SUCCESS;
 
@@ -1132,18 +1055,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Kind != ConsoleObjectKind.Output)
                         return NTSTATUS.STATUS_INVALID_HANDLE;
                     if (Descriptor.Length >= 4)
-                    {
-                        State.CursorX = BinaryPrimitives.ReadUInt16LittleEndian(Descriptor);
-                        State.CursorY = BinaryPrimitives.ReadUInt16LittleEndian(Descriptor.Slice(2));
-                        MoveHostCursor(State.CursorX, State.CursorY);
-                    }
+                        HostTerminal.Current.MoveCursor(BinaryPrimitives.ReadUInt16LittleEndian(Descriptor), BinaryPrimitives.ReadUInt16LittleEndian(Descriptor.Slice(2)));
                     return NTSTATUS.STATUS_SUCCESS;
 
                 case ApiSetConsoleTextAttribute:
                     if (Kind != ConsoleObjectKind.Output)
                         return NTSTATUS.STATUS_INVALID_HANDLE;
                     if (Descriptor.Length >= 2)
-                        State.Attributes = BinaryPrimitives.ReadUInt16LittleEndian(Descriptor);
+                        HostTerminal.Current.Attributes = BinaryPrimitives.ReadUInt16LittleEndian(Descriptor);
                     return NTSTATUS.STATUS_SUCCESS;
 
                 case ApiFillConsoleOutput:
@@ -1187,7 +1106,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             bool Unicode = Descriptor[4] != 0;
             uint Total = Unicode ? TextSize & ~1u : TextSize;
-            Encoding Output = HostEncoding;
+            IHostTerminal Terminal = HostTerminal.Current;
+            uint OutputMode = Instance.WinHelper.ConsoleState.OutputMode;
+            Encoding Output = Terminal.Encoding;
             Encoder Split = Unicode && Total > NtReadFile.IoChunkBytes ? Output.GetEncoder() : null;
 
             for (uint Done = 0; Done < Total;)
@@ -1200,8 +1121,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Done += Step;
                 if (!Unicode)
                 {
-                    Instance.WinHelper.ConsoleState.TrackOutput(Text);
-                    GeneralHelper.ConsoleWrite(Text, Instance.Settings.ConsoleOutputMode);
+                    Terminal.Write(Text, Instance.Settings.ConsoleOutputMode, OutputMode);
                     continue;
                 }
 
@@ -1210,8 +1130,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 try
                 {
                     int Written = Split != null ? Split.GetBytes(Characters, Encoded, Done == Total) : Output.GetBytes(Characters, Encoded);
-                    Instance.WinHelper.ConsoleState.TrackOutput(Encoded.AsSpan(0, Written));
-                    GeneralHelper.ConsoleWrite(Encoded.AsSpan(0, Written), Instance.Settings.ConsoleOutputMode);
+                    Terminal.Write(Encoded.AsSpan(0, Written), Instance.Settings.ConsoleOutputMode, OutputMode);
                 }
                 finally
                 {
@@ -1333,7 +1252,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return ParkUntilInput(Instance, NextInput, in Io);
                 }
 
-                GeneralHelper.HostConsoleInput.Request(false, NextInput);
+                HostTerminal.Current.RequestInput(false, NextInput);
                 BinaryPrimitives.WriteUInt32LittleEndian(Descriptor, 0);
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -1409,7 +1328,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS ParkUntilInput(BinaryEmulator Instance, Task NextInput, in WinPendingIo Io)
         {
-            GeneralHelper.HostConsoleInput.Request(true, NextInput);
+            HostTerminal.Current.RequestInput(true, NextInput);
             return Instance.WinHelper.TryRetrySyscallWhenDone(NextInput, Io) ? NTSTATUS.STATUS_PENDING : NTSTATUS.STATUS_UNSUCCESSFUL;
         }
 
@@ -1423,125 +1342,32 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void EchoText(BinaryEmulator Instance, StringBuilder Text)
         {
-            byte[] Encoded = HostEncoding.GetBytes(Text.ToString());
-            GeneralHelper.ConsoleWrite(Encoded, Instance.Settings.ConsoleOutputMode);
+            IHostTerminal Terminal = HostTerminal.Current;
+            byte[] Encoded = Terminal.Encoding.GetBytes(Text.ToString());
+            Terminal.Write(Encoded, Instance.Settings.ConsoleOutputMode, Instance.WinHelper.ConsoleState.OutputMode);
         }
 
-        internal static Encoding HostEncoding
-        {
-            get
-            {
-                try
-                {
-                    return Console.OutputEncoding ?? Encoding.UTF8;
-                }
-                catch
-                {
-                    return Encoding.UTF8;
-                }
-            }
-        }
+        internal static Encoding HostEncoding => HostTerminal.Current.Encoding;
 
         private static uint HostCodePage => (uint)HostEncoding.CodePage;
 
-        private static void WriteScreenBufferInfo(Span<byte> Descriptor, ConsoleState State)
+        private static void WriteScreenBufferInfo(Span<byte> Descriptor)
         {
             if (Descriptor.Length < 0x19)
                 return;
 
-            ReadHostGeometry(out ushort Width, out ushort Height, out ushort CursorX, out ushort CursorY);
-            if (!HostConsoleUsable)
-            {
-                CursorX = State.CursorX;
-                CursorY = State.CursorY;
-            }
+            IHostTerminal Terminal = HostTerminal.Current;
+            TerminalGeometry Geometry = Terminal.Geometry;
+            ushort Attributes = Terminal.Attributes;
 
-            ReadHostWindow(Width, Height, out ushort Left, out ushort Top, out ushort WindowWidth, out ushort WindowHeight, out ushort LargestWidth, out ushort LargestHeight);
-
-            WriteCoord(Descriptor, Width, Height);
-            WriteCoord(Descriptor.Slice(0x04), CursorX, CursorY);
-            WriteCoord(Descriptor.Slice(0x08), Left, Top);
-            BinaryPrimitives.WriteUInt16LittleEndian(Descriptor.Slice(0x0C), State.Attributes);
-            WriteCoord(Descriptor.Slice(0x0E), WindowWidth, WindowHeight);
-            WriteCoord(Descriptor.Slice(0x12), Math.Min(Width, LargestWidth), Math.Min(Height, LargestHeight));
-            BinaryPrimitives.WriteUInt16LittleEndian(Descriptor.Slice(0x16), State.Attributes);
+            WriteCoord(Descriptor, Geometry.BufferWidth, Geometry.BufferHeight);
+            WriteCoord(Descriptor.Slice(0x04), Geometry.CursorX, Geometry.CursorY);
+            WriteCoord(Descriptor.Slice(0x08), Geometry.WindowLeft, Geometry.WindowTop);
+            BinaryPrimitives.WriteUInt16LittleEndian(Descriptor.Slice(0x0C), Attributes);
+            WriteCoord(Descriptor.Slice(0x0E), Geometry.WindowWidth, Geometry.WindowHeight);
+            WriteCoord(Descriptor.Slice(0x12), Math.Min(Geometry.BufferWidth, Geometry.LargestWidth), Math.Min(Geometry.BufferHeight, Geometry.LargestHeight));
+            BinaryPrimitives.WriteUInt16LittleEndian(Descriptor.Slice(0x16), Attributes);
             Descriptor[0x18] = 0;
-        }
-
-        private static void ReadHostWindow(ushort BufferWidth, ushort BufferHeight, out ushort Left, out ushort Top, out ushort Width, out ushort Height,
-            out ushort LargestWidth, out ushort LargestHeight)
-        {
-            Left = 0;
-            Top = 0;
-            Width = BufferWidth;
-            Height = BufferHeight;
-            LargestWidth = BufferWidth;
-            LargestHeight = BufferHeight;
-
-            if (!HostConsoleUsable)
-                return;
-
-            try
-            {
-                int HostLeft = Math.Clamp(Console.WindowLeft, 0, BufferWidth - 1);
-                int HostTop = Math.Clamp(Console.WindowTop, 0, BufferHeight - 1);
-                int HostWidth = Math.Clamp(Console.WindowWidth, 1, BufferWidth - HostLeft);
-                int HostHeight = Math.Clamp(Console.WindowHeight, 1, BufferHeight - HostTop);
-                int HostLargestWidth = Math.Clamp(Console.LargestWindowWidth, 1, ushort.MaxValue);
-                int HostLargestHeight = Math.Clamp(Console.LargestWindowHeight, 1, ushort.MaxValue);
-
-                Left = (ushort)HostLeft;
-                Top = (ushort)HostTop;
-                Width = (ushort)HostWidth;
-                Height = (ushort)HostHeight;
-                LargestWidth = (ushort)HostLargestWidth;
-                LargestHeight = (ushort)HostLargestHeight;
-            }
-            catch (Exception Error) when (Error is IOException || Error is PlatformNotSupportedException)
-            {
-            }
-        }
-
-        /// <summary>
-        /// The guest's screen buffer is the host console, so a program that positions its cursor from the
-        /// reported geometry only lands where it means to if both come from the same place.
-        /// </summary>
-        private static void ReadHostGeometry(out ushort Width, out ushort Height, out ushort CursorX, out ushort CursorY)
-        {
-            Width = DefaultBufferWidth;
-            Height = DefaultBufferHeight;
-            CursorX = 0;
-            CursorY = 0;
-
-            if (!HostConsoleUsable)
-                return;
-
-            try
-            {
-                Width = (ushort)Math.Max(1, Console.BufferWidth);
-                Height = (ushort)Math.Max(1, Console.BufferHeight);
-                CursorX = (ushort)Math.Max(0, Console.CursorLeft);
-                CursorY = (ushort)Math.Max(0, Console.CursorTop);
-            }
-            catch (IOException)
-            {
-            }
-        }
-
-        private static bool HostConsoleUsable => !Console.IsOutputRedirected;
-
-        private static void MoveHostCursor(int X, int Y)
-        {
-            if (!HostConsoleUsable)
-                return;
-
-            try
-            {
-                Console.SetCursorPosition(Math.Clamp(X, 0, Console.BufferWidth - 1), Math.Clamp(Y, 0, Console.BufferHeight - 1));
-            }
-            catch (IOException)
-            {
-            }
         }
 
         private static NTSTATUS FillConsoleOutput(BinaryEmulator Instance, Span<byte> Descriptor)
@@ -1554,48 +1380,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
 
             uint Length = BinaryPrimitives.ReadUInt32LittleEndian(Descriptor.Slice(0x0C));
-            if (Length == 0 || !HostConsoleUsable)
+            if (Length == 0)
                 return NTSTATUS.STATUS_SUCCESS;
 
             ushort X = BinaryPrimitives.ReadUInt16LittleEndian(Descriptor);
             ushort Y = BinaryPrimitives.ReadUInt16LittleEndian(Descriptor.Slice(0x02));
             char Element = (char)BinaryPrimitives.ReadUInt16LittleEndian(Descriptor.Slice(0x08));
-
-            try
-            {
-                int SavedX = Console.CursorLeft;
-                int SavedY = Console.CursorTop;
-                int Cells = (int)Math.Min(Length, (uint)(Console.BufferWidth * Console.BufferHeight));
-
-                MoveHostCursor(X, Y);
-                WriteRepeated(Instance, Element, Cells);
-                MoveHostCursor(SavedX, SavedY);
-            }
-            catch (IOException)
-            {
-            }
-
+            int Cells = HostTerminal.Current.Fill(X, Y, Element, (int)Math.Min(Length, int.MaxValue), Instance.Settings.ConsoleOutputMode);
+            BinaryPrimitives.WriteUInt32LittleEndian(Descriptor.Slice(0x0C), (uint)Cells);
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private static void WriteRepeated(BinaryEmulator Instance, char Element, int Count)
-        {
-            Encoding Output = HostEncoding;
-            int Stride = Output.GetMaxByteCount(1);
-            byte[] Buffer = ArrayPool<byte>.Shared.Rent(Count * Stride);
-            try
-            {
-                Span<char> Single = stackalloc char[1] { Element };
-                int Written = 0;
-                for (int i = 0; i < Count; i++)
-                    Written += Output.GetBytes(Single, Buffer.AsSpan(Written));
-
-                GeneralHelper.ConsoleWrite(Buffer.AsSpan(0, Written), Instance.Settings.ConsoleOutputMode);
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(Buffer);
-            }
         }
 
         private static void WriteCoord(Span<byte> Destination, ushort X, ushort Y)

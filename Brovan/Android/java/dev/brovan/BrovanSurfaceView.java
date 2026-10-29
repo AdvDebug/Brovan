@@ -7,6 +7,7 @@ import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 
+import dev.brovan.input.KeyMap;
 import dev.brovan.input.PointerState;
 
 /**
@@ -233,7 +234,7 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        int virtualKey = toVirtualKey(keyCode);
+        int virtualKey = KeyMap.toVirtualKey(keyCode);
         if (virtualKey == 0) {
             return super.onKeyDown(keyCode, event);
         }
@@ -244,76 +245,12 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        int virtualKey = toVirtualKey(keyCode);
+        int virtualKey = KeyMap.toVirtualKey(keyCode);
         if (virtualKey == 0) {
             return super.onKeyUp(keyCode, event);
         }
 
         BrovanNative.injectKey(false, virtualKey, event.getScanCode());
         return true;
-    }
-
-    /** Android keycodes are positional; the guest speaks Win32 virtual-key codes. */
-    public static int toVirtualKey(int keyCode) {
-        if (keyCode >= KeyEvent.KEYCODE_A && keyCode <= KeyEvent.KEYCODE_Z) {
-            return 0x41 + (keyCode - KeyEvent.KEYCODE_A);
-        }
-
-        if (keyCode >= KeyEvent.KEYCODE_0 && keyCode <= KeyEvent.KEYCODE_9) {
-            return 0x30 + (keyCode - KeyEvent.KEYCODE_0);
-        }
-
-        if (keyCode >= KeyEvent.KEYCODE_F1 && keyCode <= KeyEvent.KEYCODE_F12) {
-            return 0x70 + (keyCode - KeyEvent.KEYCODE_F1);
-        }
-
-        if (keyCode >= KeyEvent.KEYCODE_NUMPAD_0 && keyCode <= KeyEvent.KEYCODE_NUMPAD_9) {
-            return 0x60 + (keyCode - KeyEvent.KEYCODE_NUMPAD_0);
-        }
-
-        switch (keyCode) {
-            case KeyEvent.KEYCODE_DEL: return 0x08;
-            case KeyEvent.KEYCODE_TAB: return 0x09;
-            case KeyEvent.KEYCODE_ENTER:
-            case KeyEvent.KEYCODE_NUMPAD_ENTER: return 0x0D;
-            case KeyEvent.KEYCODE_SHIFT_LEFT: return 0xA0;
-            case KeyEvent.KEYCODE_SHIFT_RIGHT: return 0xA1;
-            case KeyEvent.KEYCODE_CTRL_LEFT: return 0xA2;
-            case KeyEvent.KEYCODE_CTRL_RIGHT: return 0xA3;
-            case KeyEvent.KEYCODE_ALT_LEFT: return 0x12;
-            case KeyEvent.KEYCODE_ALT_RIGHT: return 0xA5;
-            case KeyEvent.KEYCODE_CAPS_LOCK: return 0x14;
-            case KeyEvent.KEYCODE_ESCAPE: return 0x1B;
-            case KeyEvent.KEYCODE_SPACE: return 0x20;
-            case KeyEvent.KEYCODE_PAGE_UP: return 0x21;
-            case KeyEvent.KEYCODE_PAGE_DOWN: return 0x22;
-            case KeyEvent.KEYCODE_MOVE_END: return 0x23;
-            case KeyEvent.KEYCODE_MOVE_HOME: return 0x24;
-            case KeyEvent.KEYCODE_DPAD_LEFT: return 0x25;
-            case KeyEvent.KEYCODE_DPAD_UP: return 0x26;
-            case KeyEvent.KEYCODE_DPAD_RIGHT: return 0x27;
-            case KeyEvent.KEYCODE_DPAD_DOWN: return 0x28;
-            case KeyEvent.KEYCODE_INSERT: return 0x2D;
-            case KeyEvent.KEYCODE_FORWARD_DEL: return 0x2E;
-            case KeyEvent.KEYCODE_NUMPAD_MULTIPLY: return 0x6A;
-            case KeyEvent.KEYCODE_NUMPAD_ADD: return 0x6B;
-            case KeyEvent.KEYCODE_NUMPAD_SUBTRACT: return 0x6D;
-            case KeyEvent.KEYCODE_NUMPAD_DOT: return 0x6E;
-            case KeyEvent.KEYCODE_NUMPAD_DIVIDE: return 0x6F;
-            case KeyEvent.KEYCODE_NUM_LOCK: return 0x90;
-            case KeyEvent.KEYCODE_SCROLL_LOCK: return 0x91;
-            case KeyEvent.KEYCODE_SEMICOLON: return 0xBA;
-            case KeyEvent.KEYCODE_EQUALS: return 0xBB;
-            case KeyEvent.KEYCODE_COMMA: return 0xBC;
-            case KeyEvent.KEYCODE_MINUS: return 0xBD;
-            case KeyEvent.KEYCODE_PERIOD: return 0xBE;
-            case KeyEvent.KEYCODE_SLASH: return 0xBF;
-            case KeyEvent.KEYCODE_GRAVE: return 0xC0;
-            case KeyEvent.KEYCODE_LEFT_BRACKET: return 0xDB;
-            case KeyEvent.KEYCODE_BACKSLASH: return 0xDC;
-            case KeyEvent.KEYCODE_RIGHT_BRACKET: return 0xDD;
-            case KeyEvent.KEYCODE_APOSTROPHE: return 0xDE;
-            default: return 0;
-        }
     }
 }

@@ -257,6 +257,10 @@
     <string name="player_sensitivity">Drag sensitivity</string>
     <string name="player_sensitivity_summary">How far the pointer travels for the same finger movement.</string>
     <string name="player_escape">Send Esc</string>
+    <string name="player_show_console">Show console</string>
+    <string name="player_show_window">Show window</string>
+    <string name="terminal_closed">The program closed. Press Back to leave.</string>
+    <string name="terminal_stopped">The program stopped unexpectedly. Press Back to leave.</string>
     <string name="player_resume">Resume</string>
 
     <string name="debug_run">Run</string>

@@ -2234,7 +2234,7 @@ namespace Brovan.Core.Emulation.Guests
 
                     Instance._emulator.WriteMemory(ProcessParams + 0x8, 0x6001u, 4);
                     WriteInlineUnicodeString(0x38, CurrentDir, ForcedMax: 1024);
-                    bool ConsoleApp = UsesDirectBlobStartup || (IsPeImage && Instance._binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui));
+                    bool ConsoleApp = UsesDirectBlobStartup || Instance._binary.IsConsoleImage;
                     if (ConsoleApp)
                     {
                         ulong Handle = WinHelper.ConsoleHandle.Handle;
@@ -2387,7 +2387,7 @@ namespace Brovan.Core.Emulation.Guests
 
             Instance._emulator.WriteMemory(Params + 0x08, 0x6001u, 4);
             WriteInlineUnicodeString(0x24, CurrentDir, ForcedMax: 1024);
-            bool ConsoleApp = Instance._binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui);
+            bool ConsoleApp = Instance._binary.IsConsoleImage;
             if (ConsoleApp)
                 Instance._emulator.WriteMemory(Params + 0x10, (uint)WinHelper.ConsoleHandle.Handle);
 

@@ -47,6 +47,10 @@ extern int brovan_list_windows(char *buffer, int capacity);
 extern void brovan_select_window(unsigned long long hwnd);
 extern int brovan_debug_query(const char *request, char *buffer, int capacity);
 extern void brovan_debug_pause(void);
+extern void brovan_set_player_sink(void *sink);
+extern void brovan_terminal_key(int down, int virtualKey, int character, int controlKeyState);
+extern void brovan_terminal_resize(int columns, int rows);
+extern int brovan_terminal_snapshot(int *buffer, int capacity, int scrollBack);
 
 static JavaVM *g_vm;
 static jclass g_callbacks;
@@ -56,6 +60,7 @@ static jmethodID g_onInstallProgress;
 static jmethodID g_onTextMetrics;
 static jmethodID g_onTextBitmap;
 static jmethodID g_onSpawn;
+static jmethodID g_onPlayer;
 static pthread_key_t g_attachment_key;
 static int g_attachment_key_ready;
 
@@ -203,6 +208,27 @@ static int on_spawn(const char *image, const char *arguments, const char *workin
 
     detach(attachment);
     return accepted == JNI_TRUE ? 1 : 0;
+}
+
+/* Attached threads carry pending exceptions into later JNI calls. */
+static void on_player(int event) {
+    if (g_callbacks == NULL || g_onPlayer == NULL) {
+        return;
+    }
+
+    Attachment attachment = attach();
+    JNIEnv *env = attachment.env;
+    if (env == NULL) {
+        return;
+    }
+
+    (*env)->CallStaticVoidMethod(env, g_callbacks, g_onPlayer, (jint)event);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+
+    detach(attachment);
 }
 
 #define TEXT_FIELD_COUNT 8
@@ -451,6 +477,7 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
                                                    "(Ljava/lang/String;)Landroid/graphics/Bitmap;");
         g_onSpawn = (*env)->GetStaticMethodID(env, clazz, "onNativeSpawn",
                                               "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;II)Z");
+        g_onPlayer = (*env)->GetStaticMethodID(env, clazz, "onNativePlayer", "(I)V");
         (*env)->ExceptionClear(env);
     }
 
@@ -470,6 +497,7 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
         brovan_set_install_progress_sink((void *)&on_install_progress);
         brovan_set_text_sink((void *)&on_text);
         brovan_set_spawn_sink((void *)&on_spawn);
+        brovan_set_player_sink((void *)&on_player);
         trap_sigill();
     } else {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "brovan_init failed: %d", status);
@@ -637,6 +665,49 @@ JNIEXPORT void JNICALL METHOD(InjectFocus)(JNIEnv *env, jclass clazz, jint focus
     (void)env;
     (void)clazz;
     brovan_inject_focus(focused);
+}
+
+JNIEXPORT void JNICALL METHOD(TerminalKey)(JNIEnv *env, jclass clazz, jint down, jint virtualKey, jint character,
+                                           jint controlKeyState) {
+    (void)env;
+    (void)clazz;
+    brovan_terminal_key(down, virtualKey, character, controlKeyState);
+}
+
+JNIEXPORT void JNICALL METHOD(TerminalResize)(JNIEnv *env, jclass clazz, jint columns, jint rows) {
+    (void)env;
+    (void)clazz;
+    brovan_terminal_resize(columns, rows);
+}
+
+/* UI thread only. */
+JNIEXPORT jint JNICALL METHOD(TerminalSnapshot)(JNIEnv *env, jclass clazz, jintArray buffer, jint scrollBack) {
+    (void)clazz;
+
+    static int *scratch;
+    static jsize scratch_length;
+
+    jsize length = buffer == NULL ? 0 : (*env)->GetArrayLength(env, buffer);
+    if (length <= 0) {
+        return -3;
+    }
+
+    if (scratch_length < length) {
+        int *grown = realloc(scratch, (size_t)length * sizeof(int));
+        if (grown == NULL) {
+            return -8;
+        }
+
+        scratch = grown;
+        scratch_length = length;
+    }
+
+    int written = brovan_terminal_snapshot(scratch, length, scrollBack);
+    if (written > 0) {
+        (*env)->SetIntArrayRegion(env, buffer, 0, written, (const jint *)scratch);
+    }
+
+    return written;
 }
 
 JNIEXPORT void JNICALL METHOD(SelectWindow)(JNIEnv *env, jclass clazz, jlong hwnd) {

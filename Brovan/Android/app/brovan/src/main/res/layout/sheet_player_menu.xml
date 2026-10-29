@@ -137,6 +137,13 @@
                     app:icon="@drawable/ic_window" />
 
                 <com.google.android.material.button.MaterialButton
+                    android:id="@+id/console"
+                    style="@style/Widget.Brovan.SheetAction"
+                    android:text="@string/player_show_console"
+                    android:visibility="gone"
+                    app:icon="@drawable/ic_keyboard" />
+
+                <com.google.android.material.button.MaterialButton
                     android:id="@+id/escape"
                     style="@style/Widget.Brovan.SheetAction"
                     android:text="@string/player_escape"

@@ -60,6 +60,7 @@ namespace Brovan.Android
             _publishedWidth = 0;
             _publishedHeight = 0;
             AndroidInput.ReplayFocus();
+            AndroidHost.NotifyPlayer(AndroidHost.PlayerWindowCreated);
             return _window;
         }
 

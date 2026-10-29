@@ -20,6 +20,39 @@
             android:layout_height="match_parent" />
     </dev.brovan.input.ControlOverlay>
 
+    <!-- Keep the SurfaceView visible so later guest windows can use its surface. -->
+    <LinearLayout
+        android:id="@+id/terminal_panel"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#FF0C0C0C"
+        android:clickable="true"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <dev.brovan.TerminalView
+            android:id="@+id/terminal"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <TextView
+            android:id="@+id/terminal_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#FF1A1A1A"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="6dp"
+            android:textColor="#FFE6E6E6"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
+        <dev.brovan.TerminalKeysView
+            android:id="@+id/terminal_keys"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
     <dev.brovan.app.DebuggerView
         android:id="@+id/debugger"
         android:layout_width="match_parent"

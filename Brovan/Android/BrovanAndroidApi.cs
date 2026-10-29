@@ -315,6 +315,41 @@ namespace Brovan.Android
             Guard(() => AndroidInput.Focus(focused != 0), nameof(InjectFocus));
         }
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_set_player_sink")]
+        public static void SetPlayerSink(IntPtr sink) => AndroidHost.SetPlayerSink(sink);
+
+        [UnmanagedCallersOnly(EntryPoint = "brovan_terminal_key")]
+        public static void TerminalKey(int down, int virtualKey, int character, int controlKeyState)
+        {
+            if ((uint)virtualKey > byte.MaxValue || (uint)character > char.MaxValue)
+                return;
+
+            Guard(() => AndroidTerminal.Shared.Key(down != 0, (ushort)virtualKey, (char)character, (uint)controlKeyState), nameof(TerminalKey));
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "brovan_terminal_resize")]
+        public static void TerminalResize(int columns, int rows)
+        {
+            Guard(() => AndroidTerminal.Shared.Resize(columns, rows), nameof(TerminalResize));
+        }
+
+        [UnmanagedCallersOnly(EntryPoint = "brovan_terminal_snapshot")]
+        public static int TerminalSnapshot(int* buffer, int capacity, int scrollBack)
+        {
+            if (buffer == null || capacity <= 0)
+                return StatusInvalidArgument;
+
+            try
+            {
+                return AndroidTerminal.Shared.Snapshot(new Span<int>(buffer, capacity), scrollBack);
+            }
+            catch (Exception exception)
+            {
+                AndroidLog.Write(AndroidNative.LogError, $"[brovan_terminal_snapshot] {exception}");
+                return StatusFailed;
+            }
+        }
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_list_windows")]
         public static int ListWindows(byte* buffer, int capacity)
         {

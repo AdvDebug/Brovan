@@ -235,7 +235,7 @@ namespace Brovan.EmulationMenu
 
         private static int PromptMenuOption(int DefaultValue, params int[] ValidOptions)
         {
-            string Input = GeneralHelper.HostConsoleInput.ReadLine()?.Trim() ?? string.Empty;
+            string Input = Core.Emulation.OS.SharedHelpers.SystemConsoleTerminal.ReadPromptLine()?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(Input))
                 return DefaultValue;
 
@@ -254,7 +254,7 @@ namespace Brovan.EmulationMenu
         private static ulong PromptHexOrDefault(string Prompt, ulong DefaultValue)
         {
             Console.Write($"{Prompt} [default: 0x{DefaultValue:X}]: ");
-            string Input = GeneralHelper.HostConsoleInput.ReadLine()?.Trim() ?? string.Empty;
+            string Input = Core.Emulation.OS.SharedHelpers.SystemConsoleTerminal.ReadPromptLine()?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(Input))
                 return DefaultValue;
 
@@ -2319,7 +2319,7 @@ namespace Brovan.EmulationMenu
                 if (Binary.IsCorruptedBinary(out string CorruptionReason) != BinaryCorruptionStatus.Clean)
                 {
                     PrintHighlight($"[!] The binary might be corrupted {(!string.IsNullOrEmpty(CorruptionReason) ? $"(reason: {CorruptionReason}) " : string.Empty)}do you want to try to load it anyway (Y/N)? ");
-                    string Response = GeneralHelper.HostConsoleInput.ReadLine()?.ToLowerInvariant() ?? string.Empty;
+                    string Response = Core.Emulation.OS.SharedHelpers.SystemConsoleTerminal.ReadPromptLine()?.ToLowerInvariant() ?? string.Empty;
                     if (Response != "y" && Response != "yes")
                     {
                         Binary.Dispose();
@@ -2588,7 +2588,7 @@ namespace Brovan.EmulationMenu
                         Console.ForegroundColor = ConsoleColor.DarkMagenta;
                         Console.Write("> ");
                         Console.ForegroundColor = ConsoleColor.White;
-                        Input = GeneralHelper.HostConsoleInput.ReadLine()?.Trim();
+                        Input = Core.Emulation.OS.SharedHelpers.SystemConsoleTerminal.ReadPromptLine()?.Trim();
                     }
 
                     if (Input == null)

@@ -12,6 +12,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Threading.Tasks;
 using Brovan.Core.Emulation;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Helpers;
 using Brovan.Core;
 using Microsoft.Win32.SafeHandles;
@@ -1448,333 +1449,139 @@ namespace Brovan
             }
         }
 
-        // Once started, the only host keyboard reader. Brovan's own prompts must read through here too, or the
-        // thread takes their keys.
         public static class HostConsoleInput
         {
-            private const int MaxQueuedKeys = 1 << 16;
-            private const int ForcedExitPresses = 3;
-            private const long ForcedExitWindowMilliseconds = 2000;
-
-            private static readonly object Gate = new object();
-            private static readonly System.Collections.Concurrent.ConcurrentQueue<ConsoleKeyInfo> Keys = new();
+            private static readonly System.Collections.Concurrent.ConcurrentQueue<HostInputEvent> Events = new();
             private static readonly SemaphoreSlim Available = new SemaphoreSlim(0);
             private static TaskCompletionSource InputSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            private static WakeSignal Wake;
-            private static Thread Reader;
+            private static volatile bool Producing;
             private static volatile bool InputEnded;
-            private static bool ControlCSaved;
-            private static bool SavedControlCAsInput;
-            private static int ControlCPresses;
-            private static long FirstControlCTick;
             private static bool OverflowReported;
 
-            private const int DemandNone = 0;
-            private const int DemandIfReady = 1;
-            private const int DemandBlocking = 2;
-            private static int Demand;
-            private static Task DemandFor;
-            private static readonly SemaphoreSlim DemandSignal = new SemaphoreSlim(0);
-
-            public static bool Active => Volatile.Read(ref Reader) != null;
+            public static bool Active => Producing;
 
             public static bool Ended => InputEnded;
 
             // Read before checking for input, so input that arrives before the park still completes this task.
             public static Task NextInput => Volatile.Read(ref InputSignal).Task;
 
-            public static void EnsureStarted(WakeSignal Signal)
+            public static void MarkProducing() => Producing = true;
+
+            public static bool TryTake(out HostInputEvent Event)
             {
-                Volatile.Write(ref Wake, Signal);
-                if (Active)
-                    return;
-
-                lock (Gate)
-                {
-                    if (Reader != null)
-                        return;
-
-                    Thread Worker = new Thread(Console.IsInputRedirected ? ReadLines : ReadKeys)
-                    {
-                        IsBackground = true,
-                        Name = "Brovan console input"
-                    };
-                    Worker.Start();
-                    Volatile.Write(ref Reader, Worker);
-                }
-            }
-
-            public static bool TryTake(out ConsoleKeyInfo Key)
-            {
-                Key = default;
+                Event = default;
                 if (!Available.Wait(0))
                     return false;
 
-                if (Keys.TryDequeue(out Key))
+                if (Events.TryDequeue(out Event))
                     return true;
 
                 Available.Release();
                 return false;
             }
 
-            // Every producer of console input must call this, guest writes to the input buffer included.
+            public static bool Take(out HostInputEvent Event)
+            {
+                Available.Wait();
+                if (Events.TryDequeue(out Event))
+                    return true;
+
+                Available.Release();
+                return false;
+            }
+
+            public static bool TryPeek(out HostInputEvent Event) => Events.TryPeek(out Event);
+
+            public static bool Post(in HostInputEvent Event)
+            {
+                if (!HasRoom(1))
+                    return false;
+
+                Enqueue(in Event);
+                Publish(1);
+                return true;
+            }
+
+            // Reserve room for key-up so a press is never split.
+            public static bool PostKey(HostInputEvent Key)
+            {
+                if (!HasRoom(Key.KeyDown ? 2 : 1))
+                    return false;
+
+                Core.Emulation.OS.Windows.Win32k.Win32kHelper.CompleteHostKey(ref Key);
+                Enqueue(in Key);
+                Publish(1);
+                return true;
+            }
+
+            public static bool PostKeyPress(ushort VirtualKey, char Character, uint ControlKeyState)
+            {
+                if (!HasRoom(2))
+                    return false;
+
+                EnqueuePress(VirtualKey, Character, ControlKeyState);
+                Publish(2);
+                return true;
+            }
+
+            public static bool PostText(ReadOnlySpan<char> Text)
+            {
+                if (Text.IsEmpty || !HasRoom(Text.Length * 2))
+                    return false;
+
+                foreach (char Character in Text)
+                    EnqueuePress(0, Character, 0);
+
+                Publish(Text.Length * 2);
+                return true;
+            }
+
+            private static void EnqueuePress(ushort VirtualKey, char Character, uint ControlKeyState)
+            {
+                HostInputEvent Down = HostInputEvent.Key(true, VirtualKey, Character, ControlKeyState);
+                Core.Emulation.OS.Windows.Win32k.Win32kHelper.CompleteHostKey(ref Down);
+                HostInputEvent Up = Down;
+                Up.KeyDown = false;
+
+                Enqueue(in Down);
+                Enqueue(in Up);
+            }
+
+            private static void Publish(int Count)
+            {
+                Available.Release(Count);
+                SignalInput();
+            }
+
+            private static bool HasRoom(int Count)
+            {
+                int Limit = Core.Settings.MemoryBudget.ConsoleInputRecords;
+                if (Events.Count + Count <= Limit)
+                    return true;
+
+                if (!OverflowReported)
+                {
+                    OverflowReported = true;
+                    LogError($"Host console input dropped events, the guest has not read {Limit} queued events.");
+                }
+
+                return false;
+            }
+
+            private static void Enqueue(in HostInputEvent Event) => Events.Enqueue(Event);
+
             public static void SignalInput()
             {
                 TaskCompletionSource Previous = Interlocked.Exchange(ref InputSignal, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
                 Previous.TrySetResult();
-                Volatile.Read(ref Wake)?.Bump();
+                HostEventQueue.WakeSignal?.Bump();
             }
 
-            // Processes on one console share its input, so read the host only when a guest read asks, one key per request.
-            // A non-blocking request takes only a ready key. Seen is NextInput from before the caller polled.
-            public static void Request(bool Blocking, Task Seen)
-            {
-                if (Seen.IsCompleted)
-                    return;
-
-                Volatile.Write(ref DemandFor, Seen);
-                int Wanted = Blocking ? DemandBlocking : DemandIfReady;
-                int Current = Volatile.Read(ref Demand);
-                while (Current < Wanted)
-                {
-                    int Previous = Interlocked.CompareExchange(ref Demand, Wanted, Current);
-                    if (Previous == Current)
-                    {
-                        if (Current == DemandNone)
-                            DemandSignal.Release();
-                        return;
-                    }
-
-                    Current = Previous;
-                }
-            }
-
-            // A redirected stream has no KeyAvailable.
-            private static bool WaitForDemand(bool CanCheck)
-            {
-                DemandSignal.Wait();
-                int Level = Interlocked.Exchange(ref Demand, DemandNone);
-                if (Volatile.Read(ref DemandFor).IsCompleted)
-                    return false;
-
-                return Level == DemandBlocking || !CanCheck || Console.KeyAvailable;
-            }
-
-            public static bool KeyAvailable => Active ? !Keys.IsEmpty || (!Console.IsInputRedirected && Console.KeyAvailable) : Console.KeyAvailable;
-
-            public static ConsoleKeyInfo ReadKey()
-            {
-                if (!Active)
-                    return Console.ReadKey(true);
-
-                Task Seen = NextInput;
-                if (!Available.Wait(0))
-                {
-                    Request(true, Seen);
-                    Available.Wait();
-                }
-
-                if (Keys.TryDequeue(out ConsoleKeyInfo Key))
-                    return Key;
-
-                Available.Release();
-                throw new InvalidOperationException("The host console input has ended.");
-            }
-
-            public static string ReadLine()
-            {
-                if (!Active)
-                    return Console.ReadLine();
-
-                StringBuilder Line = new StringBuilder();
-                while (true)
-                {
-                    ConsoleKeyInfo Key;
-                    try
-                    {
-                        Key = ReadKey();
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        return Line.Length == 0 ? null : Line.ToString();
-                    }
-
-                    if (Key.Key == ConsoleKey.Enter || Key.KeyChar == '\r' || Key.KeyChar == '\n')
-                    {
-                        Console.WriteLine();
-                        return Line.ToString();
-                    }
-
-                    if (Key.KeyChar == '\b')
-                    {
-                        if (Line.Length != 0)
-                        {
-                            Line.Length--;
-                            Console.Write("\b \b");
-                        }
-                        continue;
-                    }
-
-                    if (Key.KeyChar >= ' ')
-                    {
-                        Line.Append(Key.KeyChar);
-                        Console.Write(Key.KeyChar);
-                    }
-                }
-            }
-
-            public static void SetControlCAsInput(bool Value)
-            {
-                if (Console.IsInputRedirected)
-                    return;
-
-                lock (Gate)
-                {
-                    try
-                    {
-                        if (!ControlCSaved)
-                        {
-                            SavedControlCAsInput = Console.TreatControlCAsInput;
-                            ControlCSaved = true;
-                            AppDomain.CurrentDomain.ProcessExit += RestoreControlC;
-                            AppDomain.CurrentDomain.UnhandledException += RestoreControlC;
-                        }
-
-                        if (Console.TreatControlCAsInput != Value)
-                            Console.TreatControlCAsInput = Value;
-                    }
-                    catch (IOException Ex)
-                    {
-                        LogError($"Host console Ctrl+C mode could not be changed: {Ex.Message}");
-                    }
-                }
-            }
-
-            private static void RestoreControlC(object Sender, EventArgs Args)
-            {
-                try
-                {
-                    Console.TreatControlCAsInput = SavedControlCAsInput;
-                }
-                catch (IOException Ex)
-                {
-                    LogError($"Host console Ctrl+C mode could not be restored: {Ex.Message}");
-                }
-            }
-
-            private static void Publish(ConsoleKeyInfo Key)
-            {
-                if (Keys.Count >= MaxQueuedKeys)
-                {
-                    if (!OverflowReported)
-                    {
-                        OverflowReported = true;
-                        LogError($"Host console input dropped keys, the guest has not read {MaxQueuedKeys} queued keys.");
-                    }
-
-                    return;
-                }
-
-                Keys.Enqueue(Key);
-                Available.Release();
-                SignalInput();
-            }
-
-            private static bool IsForcedExit(ConsoleKeyInfo Key)
-            {
-                if (Key.KeyChar != (char)0x03)
-                {
-                    ControlCPresses = 0;
-                    return false;
-                }
-
-                long Now = Environment.TickCount64;
-                if (ControlCPresses == 0 || Now - FirstControlCTick > ForcedExitWindowMilliseconds)
-                {
-                    ControlCPresses = 0;
-                    FirstControlCTick = Now;
-                }
-
-                return ++ControlCPresses >= ForcedExitPresses;
-            }
-
-            private static void EndInput()
+            public static void End()
             {
                 InputEnded = true;
                 Available.Release();
                 SignalInput();
-            }
-
-            private static void ReadKeys()
-            {
-                try
-                {
-                    while (true)
-                    {
-                        if (!WaitForDemand(CanCheck: true))
-                            continue;
-
-                        ConsoleKeyInfo Key = Console.ReadKey(true);
-                        if (IsForcedExit(Key))
-                        {
-                            Console.ResetColor();
-                            Environment.Exit(0);
-                        }
-
-                        Publish(Key);
-                    }
-                }
-                catch (Exception Ex) when (Ex is InvalidOperationException || Ex is IOException)
-                {
-                    LogError($"Host console input stopped: {Ex.Message}");
-                }
-
-                EndInput();
-            }
-
-            private static void ReadLines()
-            {
-                try
-                {
-                    while (true)
-                    {
-                        if (!WaitForDemand(CanCheck: false))
-                            continue;
-
-                        string Line = Console.In.ReadLine();
-                        if (Line == null)
-                            break;
-
-                        foreach (char Character in Line)
-                            Publish(new ConsoleKeyInfo(Character, KeyFor(Character), false, false, false));
-
-                        Publish(new ConsoleKeyInfo('\r', ConsoleKey.Enter, false, false, false));
-                    }
-                }
-                catch (IOException Ex)
-                {
-                    LogError($"Host console input stopped: {Ex.Message}");
-                }
-
-                EndInput();
-            }
-
-            private static ConsoleKey KeyFor(char Character)
-            {
-                if (Character >= 'a' && Character <= 'z')
-                    return (ConsoleKey)(Character - 'a' + 'A');
-
-                if ((Character >= 'A' && Character <= 'Z') || (Character >= '0' && Character <= '9'))
-                    return (ConsoleKey)Character;
-
-                switch (Character)
-                {
-                    case '\b': return ConsoleKey.Backspace;
-                    case '\t': return ConsoleKey.Tab;
-                    case (char)0x1B: return ConsoleKey.Escape;
-                    case ' ': return ConsoleKey.Spacebar;
-                    default: return 0;
-                }
             }
         }
 

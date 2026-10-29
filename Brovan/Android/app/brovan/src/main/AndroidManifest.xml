@@ -38,7 +38,7 @@
             android:process=":guest"
             android:exported="false"
             android:theme="@style/Theme.Brovan.Player"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
             android:screenOrientation="landscape"
             android:launchMode="singleTask" />
 
@@ -48,7 +48,7 @@
             android:process=":guest1"
             android:exported="false"
             android:theme="@style/Theme.Brovan.Player"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
             android:screenOrientation="landscape"
             android:launchMode="singleTask" />
 
@@ -57,7 +57,7 @@
             android:process=":guest2"
             android:exported="false"
             android:theme="@style/Theme.Brovan.Player"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
             android:screenOrientation="landscape"
             android:launchMode="singleTask" />
 
@@ -66,7 +66,7 @@
             android:process=":guest3"
             android:exported="false"
             android:theme="@style/Theme.Brovan.Player"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
             android:screenOrientation="landscape"
             android:launchMode="singleTask" />
 
@@ -75,7 +75,7 @@
             android:process=":guest4"
             android:exported="false"
             android:theme="@style/Theme.Brovan.Player"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
             android:screenOrientation="landscape"
             android:launchMode="singleTask" />
     </application>

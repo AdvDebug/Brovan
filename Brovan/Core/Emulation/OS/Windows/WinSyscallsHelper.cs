@@ -2311,45 +2311,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static WinFile CreateStandardHandleFile(HostStreamKind Stream)
         {
-            bool Redirected = Stream switch
+            return HostTerminal.Current.Stream(Stream) switch
             {
-                HostStreamKind.Input => Console.IsInputRedirected,
-                HostStreamKind.Error => Console.IsErrorRedirected,
-                _ => Console.IsOutputRedirected,
+                HostStreamTarget.Null => CreateNullDeviceFile(),
+                HostStreamTarget.Pipe => CreateHostStreamFile(Stream),
+                _ => CreateConsoleObject(Stream == HostStreamKind.Input ? ConsoleObjectKind.Input : ConsoleObjectKind.Output),
             };
-
-            if (Redirected)
-                return IsHostNullDevice(Stream) ? CreateNullDeviceFile() : CreateHostStreamFile(Stream);
-
-            return CreateConsoleObject(Stream == HostStreamKind.Input ? ConsoleObjectKind.Input : ConsoleObjectKind.Output);
-        }
-
-        private static unsafe bool IsHostNullDevice(HostStreamKind Stream)
-        {
-            (int StdHandle, int Descriptor) = Stream switch
-            {
-                HostStreamKind.Input => (NativeWinImports.StdInputHandle, 0),
-                HostStreamKind.Error => (NativeWinImports.StdErrorHandle, 2),
-                _ => (NativeWinImports.StdOutputHandle, 1),
-            };
-
-            if (GeneralHelper.IsWindows)
-            {
-                uint* Information = stackalloc uint[2];
-                ulong* IoStatus = stackalloc ulong[2];
-                IntPtr Handle = NativeWinImports.GetStdHandle(StdHandle);
-                return NativeWinImports.NtQueryVolumeInformationFile(Handle, IoStatus, Information, sizeof(uint) * 2, (int)NtQueryVolumeInformationFile.FileFsDeviceInformation) >= 0 && Information[0] == NtQueryVolumeInformationFile.FILE_DEVICE_NULL;
-            }
-
-            const int AtEmptyPath = 0x1000;
-            const uint StatxType = 0x1;
-            const ushort FileTypeMask = 0xF000, CharacterDevice = 0x2000;
-            byte* Buffer = stackalloc byte[256];
-            if (!GeneralHelper.IO.TryStatx(Descriptor, string.Empty, AtEmptyPath, StatxType, Buffer))
-                return false;
-
-            // Linux: /dev/null is character device 1:3.
-            return (*(ushort*)(Buffer + 0x1C) & FileTypeMask) == CharacterDevice && *(uint*)(Buffer + 0x80) == 1 && *(uint*)(Buffer + 0x84) == 3;
         }
 
         private static WinFile CreateNullDeviceFile()
@@ -2366,6 +2333,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static WinFile CreateConsoleObject(ConsoleObjectKind Kind)
         {
+            if (Kind != ConsoleObjectKind.Connect)
+                HostTerminal.Current.Attach();
+
             return new WinFile()
             {
                 Device = true,
@@ -3057,7 +3027,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             STD_OUT = InheritedStandardHandle(InheritedStd[1]);
             STD_ERR = InheritedStandardHandle(InheritedStd[2]);
 
-            if (Binary.PE.Subsystem.HasFlag(Subsystem.WindowsCui))
+            if (Binary.IsConsoleImage)
             {
                 AddConsoleStandardHandles();
             }
@@ -3127,12 +3097,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     InitializeProcessTimes(Process, RandomGen.Next(60 * 1000, 2 * 60 * 60 * 1000), true);
             }
 
-            WinFile hConsoleHandle = new WinFile();
-            hConsoleHandle.Device = true;
-            hConsoleHandle.Path = "\\Device\\ConDrv\\Connect";
-            hConsoleHandle.ConsoleKind = ConsoleObjectKind.Connect;
-            hConsoleHandle.Handler = ConsoleServer.Handle;
-            ConsoleHandle = HandleManager.AddHandle(hConsoleHandle, AccessMask.GenericRead | AccessMask.GenericWrite);
+            ConsoleHandle = HandleManager.AddHandle(CreateConsoleObject(ConsoleObjectKind.Connect), AccessMask.GenericRead | AccessMask.GenericWrite);
             RegManager.LoadBootHives();
             InitializeSyntheticRegistryDefaults();
 

@@ -1385,6 +1385,44 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return true;
         }
 
+        // Console records use generic VKs and ENHANCED_KEY for right Ctrl/Alt.
+        internal static void CompleteHostKey(ref HostInputEvent Key)
+        {
+            if (Key.VirtualKey == 0 && Key.Character != '\0' && TryFindCharacterKey(Key.Character, out Win32kKeyMapping Typed, out bool Shifted))
+            {
+                Key.VirtualKey = Typed.VirtualKey;
+                if (Shifted)
+                    Key.ControlKeyState |= HostInputEvent.ShiftPressed;
+            }
+
+            if (Key.VirtualKey == 0 || !TryGetKeyMapping(Key.VirtualKey, out Win32kKeyMapping Mapping))
+                return;
+
+            Key.VirtualKey = Mapping.VirtualKey;
+            if (Key.ScanCode == 0)
+                Key.ScanCode = Mapping.ScanCode;
+
+            if (Mapping.Extended)
+                Key.ControlKeyState |= HostInputEvent.EnhancedKey;
+        }
+
+        private static bool TryFindCharacterKey(char Character, out Win32kKeyMapping Mapping, out bool Shifted)
+        {
+            for (int i = 0; i < KeyMappings.Length; i++)
+            {
+                Mapping = KeyMappings[i];
+                if (Mapping.Character == Character || Mapping.ShiftedCharacter == Character)
+                {
+                    Shifted = Mapping.Character != Character;
+                    return true;
+                }
+            }
+
+            Mapping = default;
+            Shifted = false;
+            return false;
+        }
+
         private static bool TryGetKeyMapping(uint VirtualKey, out Win32kKeyMapping Mapping)
         {
             for (int i = 0; i < KeyMappings.Length; i++)
