@@ -114,7 +114,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FILE_INFORMATION_CLASS.FileBasicInformation:
                     return HandleFileBasicInformation(Instance, File, IoStatusBlock, FileInformation);
                 case FILE_INFORMATION_CLASS.FileStandardInformation:
-                    return HandleFileStandardInformation(Instance, File, IoStatusBlock, FileInformation);
+                    return HandleFileStandardInformation(Instance, FileHandle, File, IoStatusBlock, FileInformation);
                 case FILE_INFORMATION_CLASS.FileInternalInformation:
                     return HandleFileInternalInformation(Instance, File, IoStatusBlock, FileInformation);
                 case FILE_INFORMATION_CLASS.FileEaInformation:
@@ -218,18 +218,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS HandleFileStandardInformation(BinaryEmulator Instance, WinFile File, ulong IoStatusBlock, ulong FileInformation)
+        private static NTSTATUS HandleFileStandardInformation(BinaryEmulator Instance, ulong FileHandle, WinFile File, ulong IoStatusBlock, ulong FileInformation)
         {
             GetFileMetadata(File, out FileAttributes Attributes, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long ChangeTime, out ulong EndOfFile, out ulong AllocationSize, out bool IsDirectory);
+            bool DeletePending = Instance.WinHelper.IsFileDeletePending(File);
 
             Instance._emulator.WriteMemory(FileInformation + 0x00, AllocationSize, 8);
             Instance._emulator.WriteMemory(FileInformation + 0x08, EndOfFile, 8);
-            Instance._emulator.WriteMemory(FileInformation + 0x10, 1u, 4);
-            Instance.WinHelper.WriteByte(FileInformation + 0x14, 0x00);
+            Instance._emulator.WriteMemory(FileInformation + 0x10, DeletePending ? 0u : 1u, 4);
+            Instance.WinHelper.WriteByte(FileInformation + 0x14, DeletePending ? (byte)1 : (byte)0);
             Instance.WinHelper.WriteByte(FileInformation + 0x15, IsDirectory ? (byte)0x01 : (byte)0x00);
             Instance._emulator.WriteMemory(FileInformation + 0x16, 0u, 2);
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileStandardInformationSize);
+            Instance.WinHelper.KernelFileInformation?.NoteStandard(FileHandle, File);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -434,6 +436,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS HandleFileAllInformation(BinaryEmulator Instance, WinFile File, AccessMask Granted, ulong IoStatusBlock, ulong FileInformation, uint Length)
         {
+            bool DeletePending = Instance.WinHelper.IsFileDeletePending(File);
             string RelativePath = BuildQueryName(File.Path);
             int NameByteLength = System.Text.Encoding.Unicode.GetByteCount(RelativePath);
             Span<byte> NameBytes = NameByteLength == 0 ? Span<byte>.Empty : Instance.WinHelper.Shared.GetSpan((uint)NameByteLength);
@@ -456,7 +459,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x20), (uint)Attributes);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Fixed.Slice(0x28), AllocationSize);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Fixed.Slice(0x30), EndOfFile);
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x38), 1u);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x38), DeletePending ? 0u : 1u);
+            Fixed[0x3C] = DeletePending ? (byte)0x01 : (byte)0x00;
             Fixed[0x3D] = IsDirectory ? (byte)0x01 : (byte)0x00;
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Fixed.Slice(0x40), WinFile.MakeFileId(File.Path));
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x4C), (uint)Granted);
@@ -519,7 +523,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Stream == null)
                 return;
 
-            if (Stream.TryGetHandleMetadata(out Attributes, out CreationTime, out LastAccessTime, out LastWriteTime, out long HandleLength))
+            if (Stream.TryGetHandleMetadata(out Attributes, out CreationTime, out LastAccessTime, out LastWriteTime, out long HandleLength, out long HandleAllocation))
             {
                 ChangeTime = LastWriteTime;
                 if ((Attributes & FileAttributes.Directory) != 0)
@@ -529,7 +533,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 EndOfFile = (ulong)Math.Max(HandleLength, 0);
-                AllocationSize = AlignUp(EndOfFile, 0x1000);
+                AllocationSize = HandleAllocation >= 0 ? (ulong)HandleAllocation : AlignUp(EndOfFile, 0x1000);
                 if (Attributes == 0)
                     Attributes = FileAttributes.Normal;
                 return;
@@ -557,7 +561,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                     EndOfFile = (ulong)Math.Max(Info.Length, 0);
-                    AllocationSize = AlignUp(EndOfFile, 0x1000);
+                    AllocationSize = GeneralHelper.IO.TryGetHostAllocationSize(HostPath, out long HostAllocation)
+                        ? (ulong)HostAllocation : AlignUp(EndOfFile, 0x1000);
                     if (Attributes == 0)
                         Attributes = FileAttributes.Normal;
                     return;

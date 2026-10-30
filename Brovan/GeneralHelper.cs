@@ -74,6 +74,12 @@ namespace Brovan
 
     internal class NativeWinImports
     {
+        public const int ErrorHandleEof = 38;
+        public const int ErrorIoPending = 997;
+        public const int StatusPending = 0x103;
+        public const uint GenericRead = 0x80000000;
+        public const uint FileFlagOverlapped = 0x40000000;
+
         [DllImport("winmm.dll")]
         public static extern uint timeBeginPeriod(uint uPeriod);
 
@@ -147,6 +153,9 @@ namespace Brovan
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern SafeFileHandle CreateFileW(string FileName, uint DesiredAccess, FileShare ShareMode, IntPtr SecurityAttributes, FileMode CreationDisposition, uint FlagsAndAttributes, IntPtr TemplateFile);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern SafeFileHandle ReOpenFile(SafeFileHandle OriginalFile, uint DesiredAccess, FileShare ShareMode, uint FlagsAndAttributes);
+
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
 
@@ -155,6 +164,18 @@ namespace Brovan
 
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool DeviceIoControl(SafeFileHandle Handle, uint IoControlCode, byte[] InBuffer, int InBufferSize, IntPtr OutBuffer, int OutBufferSize, out int BytesReturned, IntPtr Overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool DeviceIoControl(IntPtr Handle, uint IoControlCode, IntPtr InBuffer, int InBufferSize, IntPtr OutBuffer, int OutBufferSize, IntPtr BytesReturned, IntPtr Overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern unsafe bool ReadFile(SafeFileHandle Handle, byte* Buffer, uint Length, IntPtr BytesRead, NativeOverlapped* Overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool CancelIoEx(IntPtr Handle, IntPtr Overlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool GetOverlappedResult(IntPtr Handle, IntPtr Overlapped, out uint BytesTransferred, bool Wait);
 
         [DllImport("user32.dll")]
         public static extern int GetSystemMetrics(int nIndex);
@@ -195,6 +216,9 @@ namespace Brovan
 
     internal class NativeUnixImports
     {
+        [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+        public static extern int Fcntl(int Descriptor, int Command, int Argument);
+
         [DllImport("libc", EntryPoint = "link", SetLastError = true, CharSet = CharSet.Ansi)]
         public static extern int Link(string oldpath, string newpath);
 
@@ -3730,6 +3754,10 @@ namespace Brovan
                 PendingCloseSignal.Set();
             }
 
+            // NT skips IOCP delivery when the event's low bit is set.
+            public static IntPtr OverlappedEvent(EventWaitHandle Event)
+                => new IntPtr(Event.SafeWaitHandle.DangerousGetHandle().ToInt64() | 1);
+
             /// <summary>
             /// Closes every queued host handle before it returns. A file system without POSIX delete keeps a removed
             /// name until its last handle closes.
@@ -3944,15 +3972,17 @@ namespace Brovan
             }
 
             /// <summary>
-            /// Reads the attributes, the FILETIME timestamps and the length of an open host file or directory.
+            /// Reads the attributes, the FILETIME timestamps, the length and the allocation size of an open host
+            /// file or directory. The allocation size is -1 when the host does not report it.
             /// </summary>
-            public static unsafe bool TryGetHandleMetadata(SafeFileHandle Handle, out FileAttributes Attributes, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long Length)
+            public static unsafe bool TryGetHandleMetadata(SafeFileHandle Handle, out FileAttributes Attributes, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long Length, out long AllocationSize)
             {
                 Attributes = 0;
                 CreationTime = 0;
                 LastAccessTime = 0;
                 LastWriteTime = 0;
                 Length = 0;
+                AllocationSize = -1;
 
                 if (IsWindows)
                 {
@@ -3968,6 +3998,7 @@ namespace Brovan
                     LastAccessTime = NetworkOpen[1];
                     LastWriteTime = NetworkOpen[2];
                     Length = NetworkOpen[5];
+                    AllocationSize = NetworkOpen[4];
                     Attributes = (FileAttributes)(uint)NetworkOpen[6];
                     return true;
                 }
@@ -3976,7 +4007,7 @@ namespace Brovan
                 {
                     // .NET's ReadOnly and Hidden rules depend on the caller and the name.
                     FileAttributes HandleAttributes = File.GetAttributes(Handle);
-                    if (!TryGetHandleTimes(Handle, out long Creation, out long LastAccess, out long LastWrite, out long FileLength))
+                    if (!TryGetHandleTimes(Handle, out long Creation, out long LastAccess, out long LastWrite, out long FileLength, out AllocationSize))
                     {
                         Creation = File.GetCreationTimeUtc(Handle).ToFileTimeUtc();
                         LastAccess = File.GetLastAccessTimeUtc(Handle).ToFileTimeUtc();
@@ -4019,15 +4050,16 @@ namespace Brovan
             }
 
             // .NET's rule: the creation time is the older of ctime and mtime, not the birth time.
-            private static unsafe bool TryGetHandleTimes(SafeFileHandle Handle, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long Length)
+            private static unsafe bool TryGetHandleTimes(SafeFileHandle Handle, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long Length, out long AllocationSize)
             {
                 const int AtEmptyPath = 0x1000;
-                const uint StatxBasicStats = 0x7FF, StatxNeeded = 0x2E0;
+                const uint StatxBasicStats = 0x7FF, StatxNeeded = 0x6E0;
 
                 CreationTime = 0;
                 LastAccessTime = 0;
                 LastWriteTime = 0;
                 Length = 0;
+                AllocationSize = -1;
                 if (StatxMissing)
                     return false;
 
@@ -4053,7 +4085,49 @@ namespace Brovan
 
                 CreationTime = Math.Min(ChangeTime, LastWriteTime);
                 Length = *(long*)(Buffer + 40);
-                return true;
+                return TryGetBlockBytes(*(ulong*)(Buffer + 48), out AllocationSize);
+            }
+
+            private static bool TryGetBlockBytes(ulong Blocks, out long Bytes)
+            {
+                bool Fits = Blocks <= long.MaxValue / 512;
+                Bytes = Fits ? (long)Blocks * 512 : -1;
+                return Fits;
+            }
+
+            public static unsafe bool TryGetHostAllocationSize(string Path, out long AllocationSize)
+            {
+                AllocationSize = -1;
+                if (IsWindows)
+                {
+                    HostEntryKind Kind = TryOpenHostEntry(Path, false, out SafeFileHandle Handle, out _);
+                    if (Handle == null)
+                        return false;
+                    try
+                    {
+                        return Kind == HostEntryKind.File
+                            && TryGetHandleMetadata(Handle, out _, out _, out _, out _, out _, out AllocationSize)
+                            && AllocationSize >= 0;
+                    }
+                    finally
+                    {
+                        CloseHandleLater(Handle);
+                    }
+                }
+
+                const int AtFdCwd = -100;
+                const uint StatxBlocks = 0x400;
+                byte* Buffer = stackalloc byte[256];
+                if (TryStatx(AtFdCwd, Path, 0, StatxBlocks, Buffer))
+                    return (*(uint*)Buffer & StatxBlocks) != 0 && TryGetBlockBytes(*(ulong*)(Buffer + 48), out AllocationSize);
+
+                if (!StatxMissing)
+                    return false;
+
+                // x86_64 and arm64 place st_blocks at the same offset.
+                Architecture Arch = RuntimeInformation.ProcessArchitecture;
+                return (Arch == Architecture.X64 || Arch == Architecture.Arm64) && NativeUnixImports.Stat(Path, Buffer) == 0
+                    && TryGetBlockBytes(*(ulong*)(Buffer + 64), out AllocationSize);
             }
 
             public static bool TryGetHostAttributes(FileInfo Info, out FileAttributes Attributes)

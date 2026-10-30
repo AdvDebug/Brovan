@@ -105,7 +105,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Position = 0,
                 Handler = null,
                 FileStream = Stream,
-                DeletePending = DeleteOnClose,
+                DeleteOnClose = DeleteOnClose,
                 GrantedAccess = DesiredAccess,
                 ShareAccess = ShareAccess,
                 Mode = NtCreateFile.ModeFromCreateOptions(OpenOptions)

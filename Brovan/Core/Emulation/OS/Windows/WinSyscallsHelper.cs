@@ -8731,6 +8731,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             Opens.Add(File);
         }
 
+        internal bool IsFileDeletePending(WinFile File)
+        {
+            if (File.DeletePending)
+                return true;
+            if (File.Path == null || !OpenFilesByPath.TryGetValue(File.Path, out List<WinFile> Opens))
+                return false;
+            for (int i = 0; i < Opens.Count; i++)
+            {
+                if (Opens[i].DeletePending)
+                    return true;
+            }
+            return false;
+        }
+
+        internal void SetFileDeletePending(WinFile File, bool Pending)
+        {
+            if (File.DeletePending == Pending)
+                return;
+            KernelFiles?.ReleasePath(File.Path, null);
+            File.DeletePending = Pending;
+        }
+
         private void UnregisterOpenFile(WinFile File)
         {
             if (File == null || string.IsNullOrEmpty(File.Path))
@@ -10196,7 +10218,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 FileStream = Stream,
                 GrantedAccess = FileAccess,
                 ShareAccess = 0,
-                DeletePending = Created
+                DeleteOnClose = Created
             };
             RegisterOpenFile(Record);
 
@@ -10231,7 +10253,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_REGISTRY_IO_FAILED;
             }
 
-            Record.DeletePending = false;
+            Record.DeleteOnClose = false;
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -10889,7 +10911,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             KernelFiles?.ReleaseFile(Closing);
             Closing.ReleaseLocks();
             UnregisterOpenFile(Closing);
-            if (Closing.DeletePending)
+            if (Closing.DeletePending || Closing.DeleteOnClose)
                 ApplyDeleteOnClose(Closing);
             else
                 Closing.ReleaseFileStream();

@@ -299,7 +299,7 @@ namespace Brovan.Core.Emulation
         /// <summary>Registration closes when the guest first runs.</summary>
         bool RegisterSyscall(uint number, string name, Action<GuestKernelCallBuilder> emit, GuestKernelFinish finish);
 
-        bool TryAllocateMemory(ulong size, out ulong address, out IntPtr host);
+        bool TryAllocateMemory(ulong size, out ulong address, out IntPtr host, bool readOnly = false);
 
         /// <summary>The caller keeps the host memory alive until UnmapViews reports the view unmapped.</summary>
         bool TryMapView(IntPtr host, ulong size, out ulong address);
@@ -430,6 +430,8 @@ namespace Brovan.Core.Emulation
 
         internal Label? CommitLabel { get; private set; }
 
+        internal bool CommitChecksZero { get; private set; }
+
         public void LoadAddress(AssemblerRegister64 target, ulong address) => GuestSyscallStub.Lea(Asm, target, address);
 
         public void Save(int index, AssemblerRegister64 value)
@@ -479,6 +481,17 @@ namespace Brovan.Core.Emulation
             Asm.Label(ref commit);
             Asm.jnz(lost);
             CommitLabel = commit;
+            CommitChecksZero = true;
+        }
+
+        public void CommitReadOnly()
+        {
+            if (CommitLabel != null)
+                throw new InvalidOperationException("A kernel call commits once.");
+
+            Label commit = Asm.CreateLabel();
+            Asm.Label(ref commit);
+            CommitLabel = commit;
         }
     }
 
@@ -501,7 +514,7 @@ namespace Brovan.Core.Emulation
         private const int FrameRspSlot = FrameSlot + 3;
         private const int FrameSlots = 5;
         public const int SavedSlot = FrameSlot + FrameSlots;
-        public const int SavedSlots = 3;
+        public const int SavedSlots = 6;
         private const int CounterSlot = SavedSlot + SavedSlots;
 
         private const int FastReturnSlots = 1 << RaxSlot | 1 << RcxSlot | 1 << RdxSlot | 1 << RspSlot | 1 << R8Slot | 1 << R9Slot
@@ -514,7 +527,7 @@ namespace Brovan.Core.Emulation
         private static readonly AssemblerRegister64[] SlotRegisters =
             { rax, rbx, rcx, rdx, rsi, rdi, rsp, rbp, r8, r9, r10, r11, r12, r13, r14, r15 };
 
-        private readonly record struct CallLayout(ulong Body, ulong Commit, ulong Served, ulong Abort, ulong Decline, ulong End);
+        private readonly record struct CallLayout(ulong Body, ulong Commit, bool CommitChecksZero, ulong Served, ulong Abort, ulong Decline, ulong End);
 
         public ulong HaltOffset { get; private set; }
         public ulong ResumeOffset { get; private set; }
@@ -600,6 +613,7 @@ namespace Brovan.Core.Emulation
             Label[] declines = new Label[calls.Count];
             Label[] bodies = new Label[calls.Count];
             Label[] commits = new Label[calls.Count];
+            bool[] commitChecksZero = new bool[calls.Count];
             if (calls.Count != 0)
             {
                 a.Label(ref fastReturn);
@@ -637,6 +651,7 @@ namespace Brovan.Core.Emulation
                     GuestKernelCallBuilder builder = new GuestKernelCallBuilder(a, aborts[i], declines[i], spillAddress, userEnd, smap);
                     calls[i].Emit(builder);
                     commits[i] = builder.CommitLabel ?? throw new InvalidOperationException($"Kernel call {calls[i].Name} never commits.");
+                    commitChecksZero[i] = builder.CommitChecksZero;
                     if (builder.UserAccessOpen)
                         throw new InvalidOperationException($"Kernel call {calls[i].Name} leaves user access open.");
 
@@ -678,6 +693,7 @@ namespace Brovan.Core.Emulation
                 stub._calls[i] = new CallLayout(
                     Body: result.GetLabelRIP(bodies[i]) - codeAddress,
                     Commit: result.GetLabelRIP(commits[i]) - codeAddress,
+                    CommitChecksZero: commitChecksZero[i],
                     Served: result.GetLabelRIP(served[i]) - codeAddress,
                     Abort: result.GetLabelRIP(aborts[i]) - codeAddress,
                     Decline: result.GetLabelRIP(declines[i]) - codeAddress,
@@ -729,7 +745,8 @@ namespace Brovan.Core.Emulation
 
                 // A stop between the cmpxchg and its jnz has the result of the swap only in ZF.
                 if (offset == layout.Commit)
-                    return (rflags & ZeroFlag) != 0 ? GuestKernelCallState.Finishing : GuestKernelCallState.Aborted;
+                    return !layout.CommitChecksZero || (rflags & ZeroFlag) != 0
+                        ? GuestKernelCallState.Finishing : GuestKernelCallState.Aborted;
 
                 return offset > layout.Commit ? GuestKernelCallState.Finishing : GuestKernelCallState.Aborted;
             }
@@ -928,14 +945,14 @@ namespace Brovan.Core.Emulation
                 table[_calls[i].Number] = _enabled ? Layout.EntryOffset(i) : (ushort)0;
         }
 
-        public bool TryAllocateMemory(ulong size, out ulong address, out IntPtr host)
+        public bool TryAllocateMemory(ulong size, out ulong address, out IntPtr host, bool readOnly = false)
         {
             address = 0;
             host = IntPtr.Zero;
             if (_backend.DisposedCheck() || size == 0)
                 return false;
 
-            return _backend.TryAllocateKernelRange(size, true, out address, out host);
+            return _backend.TryAllocateKernelRange(size, !readOnly, out address, out host);
         }
 
         public bool TryMapView(IntPtr host, ulong size, out ulong address)

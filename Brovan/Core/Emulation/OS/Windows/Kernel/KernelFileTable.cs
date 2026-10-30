@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using Brovan.Core.Helpers;
 using Brovan.Core.Settings;
@@ -17,17 +19,26 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const int ViewAddressField = 8;
         internal const int ViewLengthField = 16;
         internal const int UsedField = 24;
+        internal const int MetadataGuardField = 32;
+        internal const int MetadataEndField = 40;
+        internal const int MetadataAllocationField = 48;
+        internal const int MetadataDeadlineField = 56;
 
         [FieldOffset(OffsetField)] internal long Offset;
         [FieldOffset(ViewAddressField)] internal ulong ViewAddress;
         [FieldOffset(ViewLengthField)] internal ulong ViewLength;
         [FieldOffset(UsedField)] internal byte Used;
+        [FieldOffset(MetadataGuardField)] internal ulong MetadataGuard;
+        [FieldOffset(MetadataEndField)] internal ulong MetadataEnd;
+        [FieldOffset(MetadataAllocationField)] internal ulong MetadataAllocation;
+        [FieldOffset(MetadataDeadlineField)] internal ulong MetadataDeadline;
     }
 
     internal struct KernelFileNotes
     {
         internal int Reads;
         internal int PositionCalls;
+        internal int StandardQueries;
     }
 
     // While bit 63 of the offset is set, the host owns it and guest ring 0 sends every call on the file to the host.
@@ -41,6 +52,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal KernelCellData* Data;
         internal WinFile File;
         internal WinImageLayoutCache.View View;
+        internal HostFileReadLease? MetadataLease;
+        internal ulong MetadataDeadline;
 
         // Guest ring 0 can write Data, so the host keeps its own copy of the view it mapped.
         internal ulong ViewAddress;
@@ -49,6 +62,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal bool IsLive => File.KernelCell == this;
 
         internal bool HasView => View != null;
+        [MemberNotNullWhen(true, nameof(MetadataLease))]
+        internal bool HasMetadata => MetadataLease != null;
 
         internal long Offset
         {
@@ -110,9 +125,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly int OwnerThreadId = Environment.CurrentManagedThreadId;
         private int ClockHand;
         private int LiveViews;
+        private int LiveMetadata;
         private int RetiredViews;
         private bool MapFailureLogged;
         private bool Disposed;
+        private int* MetadataGuards;
+        private ulong MetadataGuardsAddress;
+        private static readonly bool InvariantCounter = X86Base.IsSupported
+            && (uint)X86Base.CpuId(unchecked((int)0x80000000), 0).Eax >= 0x80000007
+            && (X86Base.CpuId(unchecked((int)0x80000007), 0).Edx & (1 << 8)) != 0;
 
         private KernelFileTable(BinaryEmulator Emulator, IGuestKernel Kernel, ulong Address, IntPtr Host, int CellCount)
         {
@@ -130,6 +151,89 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal IGuestKernel Kernel { get; }
 
         internal bool Enabled => !Disposed && Kernel.Enabled;
+
+        private bool IsMetadataCurrent(KernelFileCell Cell)
+            => Cell.HasMetadata && Cell.MetadataLease.IsValid
+               && (Cell.MetadataDeadline == 0
+                   || (Emulator._emulator.TryReadTimestampCounter(out ulong Now) && Now < Cell.MetadataDeadline));
+
+        internal bool TryPublishMetadata(WinFile File, [NotNullWhen(true)] out KernelFileCell? Cell)
+        {
+            Cell = File.KernelCell;
+            if (!Enabled || !CanHoldCell(File) || File.AllowsWrite(File.GrantedAccess))
+                return false;
+            if (Cell is { HasMetadata: true })
+            {
+                if (IsMetadataCurrent(Cell) || TryRenewMetadata(Cell))
+                    return true;
+                ReleaseCell(Cell);
+            }
+
+            ulong Start = 0;
+            if (!GeneralHelper.IsWindows
+                && (!InvariantCounter || Emulator._emulator.TimestampCounterFrequency == 0
+                    || !Emulator._emulator.TryReadTimestampCounter(out Start)))
+                return false;
+            if (MetadataGuards == null && !TryAllocateMetadataGuards())
+                return false;
+
+            Cell = File.KernelCell;
+            bool Created = Cell == null;
+            if (Cell == null && !TryCreateCell(File, out Cell))
+                return false;
+
+            WindowsFileStream Stream = File.GetFileStream();
+            if (Stream == null || !Stream.TryAcquireReadLease(MetadataGuards + Cell.Index, out HostFileReadLease? Lease, out long End, out long Allocation))
+                return false;
+
+            if (!TryGetMetadataDeadline(Lease, Start, out ulong Deadline))
+            {
+                Lease.Dispose();
+                return false;
+            }
+
+            AttachMetadata(Cell, Lease, (ulong)End, (ulong)Allocation, Deadline, Created);
+            return true;
+        }
+
+        // A lease the host still holds gets a new deadline. The counter is read before the check, so the deadline is early.
+        private bool TryRenewMetadata(KernelFileCell Cell)
+        {
+            HostFileReadLease Lease = Cell.MetadataLease!;
+            if (Cell.MetadataDeadline == 0 || !Emulator._emulator.TryReadTimestampCounter(out ulong Start)
+                || !TryGetMetadataDeadline(Lease, Start, out ulong Deadline) || !Lease.IsHeldByHost())
+                return false;
+
+            Cell.MetadataDeadline = Deadline;
+            Volatile.Write(ref Cell.Data->MetadataDeadline, Deadline);
+            return true;
+        }
+
+        private bool TryGetMetadataDeadline(HostFileReadLease Lease, ulong Start, out ulong Deadline)
+        {
+            Deadline = 0;
+            ulong Milliseconds = (ulong)Lease.MaximumDurationMilliseconds;
+            if (Milliseconds == 0)
+                return true;
+
+            ulong Frequency = Emulator._emulator.TimestampCounterFrequency;
+            ulong Duration = Frequency <= ulong.MaxValue / Milliseconds ? Frequency * Milliseconds / 1000 : 0;
+            if (Duration == 0 || Start > ulong.MaxValue - Duration)
+                return false;
+
+            Deadline = Start + Duration;
+            return true;
+        }
+
+        private bool TryAllocateMetadataGuards()
+        {
+            if (!Kernel.TryAllocateMemory((ulong)(CellObjects.Length * sizeof(int)), out ulong Address, out IntPtr Host, true))
+                return false;
+
+            MetadataGuards = (int*)Host;
+            MetadataGuardsAddress = Address;
+            return true;
+        }
 
         internal static KernelFileTable TryCreate(BinaryEmulator Instance)
         {
@@ -222,38 +326,73 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal bool TryCreateCell(WinFile File, out KernelFileCell Cell)
         {
             Cell = null;
-            if (Disposed || File.KernelCell != null || !CanHoldCell(File) || !TryTakeIndex(false, out int Index))
+            if (Disposed || File.KernelCell != null || !CanHoldCell(File) || !TryTakeIndex(out int Index))
                 return false;
 
-            Cell = Install(File, Index, null, 0, 0);
+            Cell = Install(File, Index);
             return true;
         }
 
         // Maps the view and takes it over on success. On failure the caller still owns it.
         internal bool TryCreateViewCell(WinFile File, WinImageLayoutCache.View View, ulong Length)
         {
-            if (Disposed || File.KernelCell != null || !CanHoldCell(File) || !TryTakeIndex(true, out int Index))
+            if (Disposed || !CanHoldCell(File) || File.KernelCell is { HasView: true })
+                return false;
+
+            if (LiveViews >= MemoryBudget.KernelReadFiles)
+            {
+                RetireUnused(true);
+                Flush();
+            }
+
+            KernelFileCell Cell = File.KernelCell;
+            int Index = -1;
+            if (Cell == null && !TryTakeIndex(out Index))
                 return false;
 
             if (!Kernel.TryMapView(View.Pointer, Length, out ulong ViewAddress))
             {
-                FreeCells.Push(Index);
+                if (Index >= 0)
+                    FreeCells.Push(Index);
                 LogMapFailure(File, "no kernel view could be mapped");
                 return false;
             }
 
-            Install(File, Index, View, ViewAddress, Length);
+            Cell ??= Install(File, Index);
+            Cell.View = View;
+            Cell.ViewAddress = ViewAddress;
+            Cell.ViewLength = Length;
+            Cell.Data->ViewAddress = ViewAddress;
+            Volatile.Write(ref Cell.Data->ViewLength, Length);
             LiveViews++;
             return true;
         }
 
-        private KernelFileCell Install(WinFile File, int Index, WinImageLayoutCache.View View, ulong ViewAddress, ulong ViewLength)
+        private void AttachMetadata(KernelFileCell Cell, HostFileReadLease Lease, ulong EndOfFile, ulong AllocationSize, ulong Deadline, bool Created)
+        {
+            Cell.MetadataLease = Lease;
+            Cell.MetadataDeadline = Deadline;
+            LiveMetadata++;
+            Cell.Claim();
+            try
+            {
+                if (!Created)
+                    Kernel.EvictProcessors();
+                Cell.Data->MetadataEnd = EndOfFile;
+                Cell.Data->MetadataAllocation = AllocationSize;
+                Cell.Data->MetadataDeadline = Deadline;
+                Volatile.Write(ref Cell.Data->MetadataGuard, MetadataGuardsAddress + (ulong)Cell.Index * sizeof(int));
+            }
+            finally
+            {
+                Cell.Release();
+            }
+        }
+
+        private KernelFileCell Install(WinFile File, int Index)
         {
             KernelCellData* Data = Cells + Index;
-            Data->Offset = File.Position;
-            Data->ViewAddress = ViewAddress;
-            Data->ViewLength = ViewLength;
-            Data->Used = 1;
+            *Data = new KernelCellData { Offset = File.Position, Used = 1 };
 
             KernelFileCell Cell = new KernelFileCell
             {
@@ -261,9 +400,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Index = Index,
                 Data = Data,
                 File = File,
-                View = View,
-                ViewAddress = ViewAddress,
-                ViewLength = ViewLength,
             };
 
             File.KernelCell = Cell;
@@ -280,14 +416,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             Utils.LogError($"[KernelFileTable] {File.Path}: {Reason}. The file stays on the host path.");
         }
 
-        private bool TryTakeIndex(bool View, out int Index)
+        private bool TryTakeIndex(out int Index)
         {
-            if (View && LiveViews >= MemoryBudget.KernelReadFiles)
-            {
-                RetireUnused(true);
-                Flush();
-            }
-
             if (FreeCells.Count == 0 && Retired.Count == 0)
                 RetireUnused(false);
 
@@ -337,7 +467,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             Retire(Cell);
-            if (Cell.HasView)
+            if (Cell.HasView || Cell.HasMetadata)
                 Flush();
         }
 
@@ -352,34 +482,37 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private bool HasViews => LiveViews != 0;
 
+        private bool HasMetadata => LiveMetadata != 0;
+
         // A lock changes no byte, so the views can wait for a later flush.
         internal void ReleaseLockedPath(string GuestPath)
         {
             if (!HasViews)
                 return;
 
-            RetireViewsOf(GuestPath, null);
+            RetireBackingsOf(GuestPath, null, true);
             if (RetiredViews >= RetiredViewLimit)
                 Flush();
         }
 
-        // Every view of the path is unmapped on return, so the host file can then change. A cell without a view stays.
+        // Every view and lease of the path is gone on return, so the host file can then change. A cell with neither stays.
         internal void ReleasePath(string GuestPath, string ChildPrefix)
         {
-            if (!HasViews && RetiredViews == 0)
+            if (!HasViews && !HasMetadata && RetiredViews == 0)
                 return;
 
-            if (RetireViewsOf(GuestPath, ChildPrefix))
+            if (RetireBackingsOf(GuestPath, ChildPrefix, false))
                 Flush();
         }
 
-        private bool RetireViewsOf(string GuestPath, string ChildPrefix)
+        private bool RetireBackingsOf(string GuestPath, string ChildPrefix, bool ViewsOnly)
         {
             bool Any = false;
             for (int i = 0; i < CellObjects.Length; i++)
             {
                 KernelFileCell Cell = CellObjects[i];
-                if (Cell == null || !Cell.HasView || !WinSysHelper.MatchesGuestPath(Cell.File.Path, GuestPath, ChildPrefix))
+                if (Cell == null || (!Cell.HasView && (ViewsOnly || !Cell.HasMetadata))
+                    || !WinSysHelper.MatchesGuestPath(Cell.File.Path, GuestPath, ChildPrefix))
                     continue;
 
                 if (Cell.IsLive)
@@ -435,6 +568,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 RetiredViews++;
             }
 
+            if (Cell.HasMetadata)
+            {
+                LiveMetadata--;
+                Cell.MetadataLease.Revoke();
+            }
+
             Retired.Add(Cell);
         }
 
@@ -478,6 +617,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         StillMapped.Add(Cell.View);
                 }
 
+                Cell.MetadataLease?.Dispose();
                 CellObjects[Cell.Index] = null;
                 FreeCells.Push(Cell.Index);
             }

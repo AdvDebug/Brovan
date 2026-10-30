@@ -1599,6 +1599,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public bool DeletePending;
+        public bool DeleteOnClose;
         public AccessMask GrantedAccess;
         public uint ShareAccess;
         public string OpenId = Guid.NewGuid().ToString("N");

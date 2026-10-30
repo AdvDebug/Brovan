@@ -410,7 +410,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_DIRECTORY_NOT_EMPTY;
             }
 
-            FileObj.DeletePending = Delete;
+            Instance.WinHelper.SetFileDeletePending(FileObj, Delete);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileDispositionInformationSize);
             return NTSTATUS.STATUS_SUCCESS;
         }
@@ -456,7 +456,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_DIRECTORY_NOT_EMPTY;
             }
 
-            FileObj.DeletePending = Delete;
+            Instance.WinHelper.SetFileDeletePending(FileObj, Delete);
 
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FileDispositionInformationExSize);
             return NTSTATUS.STATUS_SUCCESS;

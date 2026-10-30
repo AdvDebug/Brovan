@@ -128,7 +128,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 || Length > MaxReadBytes)
                 return;
 
-            if (File.KernelCell == null)
+            if (File.KernelCell is not { HasView: true })
             {
                 // A view pays for itself only when as many reads of this size remain as it took to qualify.
                 if (!IsReadEligible(File) || !Table.Enabled || ++File.KernelNotes.Reads < ReadsBeforeView

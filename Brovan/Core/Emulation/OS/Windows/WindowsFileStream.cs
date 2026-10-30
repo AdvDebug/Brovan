@@ -1,7 +1,12 @@
 using System;
+using System.ComponentModel;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using Microsoft.Win32.SafeHandles;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -21,6 +26,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private string CachedHandlePath;
         private bool CachedHandleWritable;
         private bool CachedHandleReadable;
+        private HostFileReadLease? ReadLease;
+        private EventWaitHandle? ReadEvent;
 
         // The VFS write copy only appears when this layer materializes it, so both host probes are memoized
         // per stream and dropped whenever anything reshapes the sandbox.
@@ -69,7 +76,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// Reads the metadata through the host handle this stream already holds for its effective file or
         /// directory. Returns false when there is no such handle, and nothing is opened for it.
         /// </summary>
-        public bool TryGetHandleMetadata(out FileAttributes Attributes, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long Length)
+        public bool TryGetHandleMetadata(out FileAttributes Attributes, out long CreationTime, out long LastAccessTime, out long LastWriteTime, out long Length, out long AllocationSize)
         {
             lock (HandleLock)
             {
@@ -80,11 +87,46 @@ namespace Brovan.Core.Emulation.OS.Windows
                     LastAccessTime = 0;
                     LastWriteTime = 0;
                     Length = 0;
+                    AllocationSize = -1;
                     return false;
                 }
 
-                return GeneralHelper.IO.TryGetHandleMetadata(CachedHandle, out Attributes, out CreationTime, out LastAccessTime, out LastWriteTime, out Length);
+                return GeneralHelper.IO.TryGetHandleMetadata(CachedHandle, out Attributes, out CreationTime, out LastAccessTime, out LastWriteTime, out Length, out AllocationSize);
             }
+        }
+
+        internal unsafe bool TryAcquireReadLease(int* Guard, [NotNullWhen(true)] out HostFileReadLease? Lease, out long Length, out long AllocationSize)
+        {
+            Lease = null;
+            Length = 0;
+            AllocationSize = 0;
+            lock (HandleLock)
+            {
+                DropReadLease();
+                if (AcquireReadHandle() == null || CachedHandleWritable
+                    || (GeneralHelper.IsWindows && !TryReopenCachedHandle(NativeWinImports.FileFlagOverlapped)))
+                    return false;
+
+                Lease = HostFileReadLease.TryAcquire(CachedHandle, Guard);
+                if (Lease != null && GeneralHelper.IO.TryGetHandleMetadata(CachedHandle, out _, out _, out _, out _, out Length, out AllocationSize)
+                    && Length >= 0 && AllocationSize >= 0 && Lease.IsValid)
+                {
+                    ReadLease = Lease;
+                    return true;
+                }
+
+                Lease?.Dispose();
+                Lease = null;
+                if (GeneralHelper.IsWindows)
+                    RestoreSynchronousReadHandle();
+                return false;
+            }
+        }
+
+        private void DropReadLease()
+        {
+            ReadLease?.Revoke();
+            ReadLease = null;
         }
 
         public override long Position
@@ -542,7 +584,87 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Handle == null)
                     throw new FileNotFoundException(GuestPath);
 
+                if (GeneralHelper.IsWindows && Handle.IsAsync)
+                {
+                    if (ReadLease is { IsValid: false })
+                    {
+                        RestoreSynchronousReadHandle();
+                        Handle = CachedHandle;
+                    }
+                    if (Handle.IsAsync)
+                        return ReadOverlapped(Handle, buffer, position);
+                }
                 return RandomAccess.Read(Handle, buffer, position);
+            }
+        }
+
+        [SupportedOSPlatform("windows")]
+        private void RestoreSynchronousReadHandle()
+        {
+            DropReadLease();
+            if (CachedHandle != null && CachedHandle.IsAsync)
+                TryReopenCachedHandle(0);
+        }
+
+        [SupportedOSPlatform("windows")]
+        private bool TryReopenCachedHandle(uint Flags)
+        {
+            SafeFileHandle Reopened = NativeWinImports.ReOpenFile(CachedHandle, NativeWinImports.GenericRead, ShareMode, Flags);
+            if (Reopened.IsInvalid)
+            {
+                Reopened.Dispose();
+                return false;
+            }
+
+            SafeFileHandle Previous = CachedHandle;
+            CachedHandle = Reopened;
+            Previous.Dispose();
+            ReadEvent?.Dispose();
+            ReadEvent = null;
+            return true;
+        }
+
+        [SupportedOSPlatform("windows")]
+        private unsafe int ReadOverlapped(SafeFileHandle Handle, Span<byte> Buffer, long Position)
+        {
+            if (Buffer.IsEmpty)
+                return 0;
+
+            ReadEvent ??= new EventWaitHandle(false, EventResetMode.ManualReset);
+            NativeOverlapped Overlapped = new()
+            {
+                OffsetLow = (int)Position,
+                OffsetHigh = (int)(Position >> 32),
+                EventHandle = GeneralHelper.IO.OverlappedEvent(ReadEvent)
+            };
+            try
+            {
+                fixed (byte* Data = Buffer)
+                {
+                    bool Completed = NativeWinImports.ReadFile(Handle, Data, (uint)Buffer.Length, IntPtr.Zero, &Overlapped);
+                    int Error = Completed ? 0 : Marshal.GetLastPInvokeError();
+                    if (Completed || Error == NativeWinImports.ErrorIoPending)
+                    {
+                        if (NativeWinImports.GetOverlappedResult(Handle.DangerousGetHandle(), (IntPtr)(&Overlapped), out uint BytesRead, true))
+                            return (int)BytesRead;
+                        Error = Marshal.GetLastPInvokeError();
+                        if (Overlapped.InternalLow == (IntPtr)NativeWinImports.StatusPending)
+                        {
+                            NativeWinImports.CancelIoEx(Handle.DangerousGetHandle(), (IntPtr)(&Overlapped));
+                            NativeWinImports.GetOverlappedResult(Handle.DangerousGetHandle(), (IntPtr)(&Overlapped), out _, true);
+                            if (Overlapped.InternalLow == (IntPtr)NativeWinImports.StatusPending)
+                                Environment.FailFast("A host file read did not finish after cancellation.");
+                        }
+                    }
+                    if (Error == NativeWinImports.ErrorHandleEof)
+                        return 0;
+                    throw new IOException(new Win32Exception(Error).Message, unchecked((int)0x80070000) | Error);
+                }
+            }
+            finally
+            {
+                GC.KeepAlive(Handle);
+                GC.KeepAlive(ReadEvent);
             }
         }
 
@@ -566,6 +688,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (position < 0)
                 throw new ArgumentOutOfRangeException(nameof(position));
 
+            HostFileChanging?.Invoke(GuestPath);
             lock (HandleLock)
             {
                 RandomAccess.Write(AcquireWriteHandle(), buffer, position);
@@ -576,6 +699,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             ValidateBuffer(buffer, offset, count);
 
+            HostFileChanging?.Invoke(GuestPath);
             lock (HandleLock)
             {
                 SafeFileHandle Handle = AcquireWriteHandle();
@@ -711,6 +835,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private SafeFileHandle AcquireWriteHandle()
         {
+            DropReadLease();
             if (HoldsWriteHandle)
                 return CachedHandle;
 
@@ -829,11 +954,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void CloseCachedHandle(bool Later = false)
         {
+            DropReadLease();
             if (Later)
                 GeneralHelper.IO.CloseHandleLater(CachedHandle);
             else
                 CachedHandle?.Dispose();
 
+            ReadEvent?.Dispose();
+            ReadEvent = null;
             CachedHandle = null;
             CachedHandlePath = null;
             CachedHandleWritable = false;

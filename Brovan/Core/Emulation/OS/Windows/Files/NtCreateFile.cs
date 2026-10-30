@@ -253,7 +253,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Position = 0,
                 Handler = null,
                 FileStream = Stream,
-                DeletePending = DeleteOnClose,
+                DeleteOnClose = DeleteOnClose,
                 GrantedAccess = Permissions,
                 ShareAccess = ShareAccess,
                 Mode = ModeFromCreateOptions(CreateOptions)
@@ -320,7 +320,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Position = 0,
                 Handler = null,
                 FileStream = Stream,
-                DeletePending = DeleteOnClose,
+                DeleteOnClose = DeleteOnClose,
                 GrantedAccess = Permissions,
                 ShareAccess = ShareAccess,
                 Mode = ModeFromCreateOptions(CreateOptions)
