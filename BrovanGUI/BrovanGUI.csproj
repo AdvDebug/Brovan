@@ -16,7 +16,12 @@
         <StripSymbols>true</StripSymbols>
         <Version>0.1.0</Version>
         <AvaloniaVersion>12.1.4</AvaloniaVersion>
+        <ApplicationIcon>Assets\brovan.ico</ApplicationIcon>
     </PropertyGroup>
+
+    <ItemGroup>
+        <AvaloniaResource Include="Assets\brovan.ico" />
+    </ItemGroup>
 
     <ItemGroup>
         <PackageReference Include="Avalonia" Version="$(AvaloniaVersion)" />
