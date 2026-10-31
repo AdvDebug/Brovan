@@ -8920,21 +8920,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Bits;
         }
 
-        // Both directions are checked, what this open wants and what the existing opens took.
+        // NT skips share checks for opens without read, write or delete access.
         public bool ShareAccessAllows(string Path, AccessMask DesiredAccess, uint ShareAccess)
         {
-            if (string.IsNullOrEmpty(Path) || !OpenFilesByPath.TryGetValue(Path, out List<WinFile> Opens))
-                return true;
-
             uint Wanted = AccessToShareBits(DesiredAccess);
+            if (Wanted == 0 || string.IsNullOrEmpty(Path) || !OpenFilesByPath.TryGetValue(Path, out List<WinFile> Opens))
+                return true;
 
             for (int Index = 0; Index < Opens.Count; Index++)
             {
                 WinFile Existing = Opens[Index];
+                uint Taken = AccessToShareBits(Existing.GrantedAccess);
+                if (Taken == 0)
+                    continue;
+
                 if ((Wanted & ~Existing.ShareAccess) != 0)
                     return false;
 
-                if ((AccessToShareBits(Existing.GrantedAccess) & ~ShareAccess) != 0)
+                if ((Taken & ~ShareAccess) != 0)
                     return false;
             }
 
