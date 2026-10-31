@@ -39,9 +39,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const ulong WindowDpiOffset = 0x11C;
         private const ulong WindowDpiAlternateOffset = 0x11E;
 
-        private const uint ResourceIdCreateProcessManifest = 1;
-        private const int MaxManifestBytes = 0x100000;
-
         private static readonly ConditionalWeakTable<BinaryEmulator, DpiState> States = new();
 
         private sealed class DpiState
@@ -263,7 +260,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Module == null || Instance._binary?.FileFormat != BinaryFormat.PE)
                 return;
 
-            byte[] Manifest = ReadImageManifest(Instance, Module);
+            byte[] Manifest = WinSxS.ReadImageManifest(Instance, Module);
             if (Manifest == null)
                 return;
 
@@ -282,41 +279,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             catch (InvalidOperationException)
             {
             }
-        }
-
-        internal static byte[] ReadImageManifest(BinaryEmulator Instance, WinModule Module)
-        {
-            if (Module == null)
-                return null;
-
-            // NT: an embedded manifest wins over image.manifest.
-            return ReadEmbeddedManifest(new MappedImage(Instance, Module.MappedBase)) ?? ReadExternalManifest(Module.Path);
-        }
-
-        internal static byte[] ReadImageManifest(BinaryFile Image, string HostPath)
-        {
-            if (Image == null || Image.FileFormat != BinaryFormat.PE)
-                return null;
-
-            return ReadEmbeddedManifest(new ImageFile(Image)) ?? ReadExternalManifest(HostPath);
-        }
-
-        private static byte[] ReadExternalManifest(string ImagePath)
-        {
-            if (string.IsNullOrEmpty(ImagePath))
-                return null;
-
-            return GeneralHelper.IO.TryReadHostFile(ImagePath + ".manifest", MaxManifestBytes, out byte[] Manifest) ? Manifest : null;
-        }
-
-        private static byte[] ReadEmbeddedManifest<TImage>(TImage Image) where TImage : struct, IImageReader
-        {
-            if (!ImageResources.TryFindResource(Image, ImageResources.TypeManifest, ResourceIdCreateProcessManifest, out uint DataRva, out uint DataSize)
-                || DataSize > MaxManifestBytes)
-                return null;
-
-            byte[] Manifest = new byte[DataSize];
-            return Image.TryRead(DataRva, Manifest) ? Manifest : null;
         }
 
         private static bool TryParseManifestAwareness(byte[] Manifest, out uint Awareness, out bool GdiScaled)

@@ -113,9 +113,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Shell
             WinWindow Window = Instance.WinHelper.GetWindow((ulong)(long)(int)Hwnd);
             if (Window != null)
             {
-                Window.StringProperties[ViewIdProperty] = View.ViewId;
+                Window.AtomProperties[Instance.WinHelper.RegisterWindowMessageAtom(ViewIdProperty)] = View.ViewId;
                 if ((uint)View.ActivationId != 0)
-                    Window.StringProperties[ActivationIdProperty] = (uint)View.ActivationId;
+                    Window.AtomProperties[Instance.WinHelper.RegisterWindowMessageAtom(ActivationIdProperty)] = (uint)View.ActivationId;
             }
 
             return SuccessResult;

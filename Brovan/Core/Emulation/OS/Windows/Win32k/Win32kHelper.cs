@@ -99,6 +99,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     internal static class Win32kHelper
     {
         private const uint EtoOpaque = 0x0002;
+        private const uint EtoClipped = 0x0004;
 
         private const uint USER_TIMER_MINIMUM = 0x0000000A;
         private const uint USER_TIMER_MAXIMUM = 0x7FFFFFFF;
@@ -114,6 +115,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint ERROR_NOACCESS = 998;
         internal const uint ERROR_INVALID_WINDOW_HANDLE = 1400;
         internal const uint ERROR_INCORRECT_SIZE = 1462;
+        internal const uint ERROR_TLW_WITH_WSCHILD = 1406;
         internal const uint ERROR_CANNOT_FIND_WND_CLASS = 1407;
         internal const uint ERROR_INVALID_THREAD_ID = 1444;
         internal const uint ERROR_ALREADY_INITIALIZED = 1247;
@@ -195,9 +197,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WM_KEYDOWN = 0x0100;
         internal const uint WM_KEYUP = 0x0101;
         internal const uint WM_CHAR = 0x0102;
+        internal const uint WM_DEADCHAR = 0x0103;
         internal const uint WM_SYSKEYDOWN = 0x0104;
         internal const uint WM_SYSKEYUP = 0x0105;
         internal const uint WM_SYSCHAR = 0x0106;
+        internal const uint WM_SYSDEADCHAR = 0x0107;
         internal const uint WM_DPICHANGED = 0x02E0;
         internal const uint WM_INPUT = 0x00FF;
         internal const uint WM_MOUSEMOVE = 0x0200;
@@ -258,6 +262,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly Dictionary<ulong, Win32kCursorIcon> CursorIcons = new();
             public ulong NextWindowlessTimerId = 1;
             public readonly Dictionary<ulong, Win32kDeviceContext> DeviceContexts = new();
+            public bool WorldTransformRefusalReported;
             public readonly Dictionary<ulong, Win32kPenBrush> PenBrushObjects = new();
             public readonly Dictionary<ulong, Win32kBitmap> Bitmaps = new();
             public readonly Dictionary<ulong, GdiClipRect[]> RegionRects = new();
@@ -415,6 +420,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             public FontDescription Description;
             public IntPtr HostFont;
+            public byte[] EnumLogFont;
         }
 
         private struct Win32kDcState
@@ -422,6 +428,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public ulong Bitmap;
             public ulong Font;
             public GdiClipRect[] Clip;
+            public float WorldDx;
+            public float WorldDy;
 
             // Rented, DcAttributeSaveSize bytes used.
             public byte[] Attributes;
@@ -441,6 +449,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public ulong SelectedFont;
             public ulong SelectedPalette;
             public List<Win32kDcState> SavedStates;
+
+            public float WorldDx;
+            public float WorldDy;
 
             // Device coordinates. Null when not set.
             public GdiClipRect[] Clip;
@@ -934,6 +945,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return GetState(Instance).DeviceContexts.ContainsKey(Hdc);
         }
 
+        // NT includes the live DC state in the save depth.
+        internal static bool TryDescribeDc(BinaryEmulator Instance, ulong Hdc, out bool MemoryDc, out int SaveDepth)
+        {
+            MemoryDc = false;
+            SaveDepth = 0;
+            if (!GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return false;
+
+            MemoryDc = !Dc.Display;
+            SaveDepth = 1 + (Dc.SavedStates?.Count ?? 0);
+            return true;
+        }
+
         internal static bool TrySelectDcBitmap(BinaryEmulator Instance, ulong Hdc, ulong Bitmap, out ulong Previous)
         {
             Previous = 0;
@@ -1021,7 +1045,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Handle;
         }
 
-        internal static ulong CreateFont(BinaryEmulator Instance, in FontDescription Description)
+        internal static ulong CreateFont(BinaryEmulator Instance, in FontDescription Description, byte[] EnumLogFont)
         {
             IntPtr HostFont = Instance.WinHelper.CreateHostFont(Description);
             if (HostFont == IntPtr.Zero)
@@ -1034,8 +1058,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return 0;
             }
 
-            GetState(Instance).Fonts[Handle] = new Win32kFont { Description = Description, HostFont = HostFont };
+            GetState(Instance).Fonts[Handle] = new Win32kFont { Description = Description, HostFont = HostFont, EnumLogFont = EnumLogFont };
             return Handle;
+        }
+
+        internal static bool TryGetFontEnumLogFont(BinaryEmulator Instance, ulong Handle, out byte[] EnumLogFont)
+        {
+            if (Handle != 0 && GetState(Instance).Fonts.TryGetValue(Handle, out Win32kFont Font))
+            {
+                EnumLogFont = Font.EnumLogFont;
+                return true;
+            }
+
+            EnumLogFont = null;
+            return false;
         }
 
         internal static bool RemoveFont(BinaryEmulator Instance, ulong Handle)
@@ -1360,7 +1396,34 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return 0;
         }
 
-        internal static bool TryTranslateKey(uint VirtualKey, bool Shift, bool CapsLock, bool Control, out char Character)
+        internal const int KeyStateSize = 256;
+        internal const int MaxKeyCharacters = 16;
+        private const uint ScanCodeKeyUp = 0x8000;
+        internal const byte KeyStateDown = 0x80;
+        internal const byte KeyStateToggled = 0x01;
+
+        internal static int TranslateKey(BinaryEmulator Instance, uint VirtualKey, uint ScanCode, ReadOnlySpan<byte> KeyState, Span<char> Output)
+        {
+            if ((ScanCode & ScanCodeKeyUp) != 0 || Output.IsEmpty || KeyState.Length < KeyStateSize)
+                return 0;
+
+            if (Instance.WinHelper.TryTranslateHostKey(VirtualKey, ScanCode, KeyState, Output, out int Count))
+                return Count;
+
+            bool Shift = (KeyState[VkShift] & KeyStateDown) != 0;
+            bool CapsLock = (KeyState[VkCapital] & KeyStateToggled) != 0;
+            bool Control = (KeyState[VkControl] & KeyStateDown) != 0;
+            bool Menu = (KeyState[VkMenu] & KeyStateDown) != 0;
+
+            // NT ignores Alt alone or with Shift in the US layout.
+            if ((Menu && Control) || !TryTranslateKey(VirtualKey, Shift, CapsLock, Control, out char Character))
+                return 0;
+
+            Output[0] = Character;
+            return 1;
+        }
+
+        private static bool TryTranslateKey(uint VirtualKey, bool Shift, bool CapsLock, bool Control, out char Character)
         {
             Character = '\0';
             if (!TryGetKeyMapping(VirtualKey, out Win32kKeyMapping Mapping))
@@ -1555,84 +1618,73 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Copy;
         }
 
-        internal static bool TryRenderTextToDcBitmap(BinaryEmulator Instance, ulong Hdc, string Text, int X, int Y, uint Options)
+        internal static bool TryRenderTextToDcBitmap(BinaryEmulator Instance, ulong Hdc, string Text, int X, int Y, uint Options, GdiClipRect? Rect)
         {
             Win32kState State = GetState(Instance);
             if (!State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc) || Dc.Hwnd != 0 || Dc.SelectedBitmap == 0)
                 return false;
 
-            if (!State.Bitmaps.TryGetValue(Dc.SelectedBitmap, out Win32kBitmap Bitmap)
-                || !Bitmap.DibSection || Bitmap.BitsPerPixel != 32 || Bitmap.BitsAddress == 0
-                || Bitmap.Width <= 0 || Bitmap.Height <= 0)
-                return false;
-
-            if (!Instance.IsRegionMapped(Bitmap.BitsAddress, Bitmap.BitsSize))
+            if (!State.Bitmaps.TryGetValue(Dc.SelectedBitmap, out Win32kBitmap Bitmap) || Bitmap.BitsPerPixel != 32 || !CanBlitBitmap(Bitmap))
                 return false;
 
             Instance.WinHelper.ReadDcTextColors(Hdc, out uint TextColor, out uint BackColor, out bool Opaque);
-            if ((Options & EtoOpaque) != 0)
-                Opaque = true;
-
             Instance.WinHelper.ReadDcOrigin(Hdc, out int OffsetX, out int OffsetY);
             X += OffsetX;
             Y += OffsetY;
             TryGetDcClip(Instance, Hdc, out GdiClipRect[] Clip);
 
-            int Count = Bitmap.Width * Bitmap.Height;
-            uint[] Rented = ArrayPool<uint>.Shared.Rent(Count);
+            if (Rect is GdiClipRect Given)
+            {
+                if ((Options & EtoClipped) != 0)
+                {
+                    IntersectClipInto(State.RegionA, Clip, ShiftRect(Given, OffsetX, OffsetY));
+                    Clip = State.RegionA.ToArray();
+                }
+
+                if ((Options & EtoOpaque) != 0 && !FillDcRect(Instance, Hdc, Given, BackColor))
+                    return false;
+            }
+
+            if (string.IsNullOrEmpty(Text))
+                return true;
+
+            IntPtr Font = ResolveDcFont(Instance, Hdc);
+            if (!Instance.WinHelper.MeasureText(Font, Text, out int TextWidth, out int TextHeight) || !IsBlitExtentValid(TextWidth, TextHeight))
+                return false;
+
+            int Count = TextWidth * TextHeight;
+            uint[] Rented = RentGuiPixels(Count, out bool Pooled);
             try
             {
                 Span<uint> Pixels = Rented.AsSpan(0, Count);
-                if (!TransferBitmapRows(Instance, Bitmap, Pixels, false))
-                    return false;
-
-                if (!Instance.WinHelper.RasterizeText(ResolveDcFont(Instance, Hdc), Text, Pixels,
-                        Bitmap.Width, Bitmap.Height, X, Y, TextColor, BackColor, Opaque))
-                    return false;
-
-                if (Clip == null)
-                    return TransferBitmapRows(Instance, Bitmap, Pixels, true);
-
-                foreach (GdiClipRect Rect in Clip)
-                {
-                    int Left = Math.Max(Rect.Left, 0);
-                    int Right = Math.Min(Rect.Right, Bitmap.Width);
-                    for (int Row = Math.Max(Rect.Top, 0); Row < Math.Min(Rect.Bottom, Bitmap.Height) && Left < Right; Row++)
-                    {
-                        if (!TryWriteBitmapRow(Instance, Bitmap, Row, Left, Right - Left, Pixels.Slice(Row * Bitmap.Width + Left, Right - Left), default))
-                            return false;
-                    }
-                }
-
-                return true;
+                return TryReadBitmapBlock(Instance, Bitmap, X, Y, TextWidth, TextHeight, Pixels)
+                    && Instance.WinHelper.RasterizeText(Font, Text, Pixels, TextWidth, TextHeight, 0, 0, TextColor, BackColor, Opaque)
+                    && TryBlitBlockIntoBitmap(Instance, Bitmap, X, Y, TextWidth, TextHeight, Pixels, TextWidth, TextHeight, SrcCopyRop, 0, Clip);
             }
             finally
             {
-                ArrayPool<uint>.Shared.Return(Rented);
+                if (Pooled)
+                    ArrayPool<uint>.Shared.Return(Rented);
             }
         }
 
-        // The buffer is top-down. A bottom-up DIB stores its first row last.
-        private static bool TransferBitmapRows(BinaryEmulator Instance, in Win32kBitmap Bitmap, Span<uint> Pixels, bool ToGuest)
+        internal static bool FillDcRect(BinaryEmulator Instance, ulong Hdc, in GdiClipRect Rect, uint ColorRef)
         {
-            for (int Row = 0; Row < Bitmap.Height; Row++)
-            {
-                int GuestRow = Bitmap.TopDown ? Row : Bitmap.Height - 1 - Row;
-                ulong Address = Bitmap.BitsAddress + (ulong)((long)GuestRow * Bitmap.Stride);
-                Span<byte> Line = MemoryMarshal.AsBytes(Pixels.Slice(Row * Bitmap.Width, Bitmap.Width));
+            return IsEmpty(Rect) || PatBltDcColor(Instance, Hdc, Rect.Left, Rect.Top, Rect.Right - Rect.Left, Rect.Bottom - Rect.Top, PatCopy, ColorRef);
+        }
 
-                if (ToGuest)
-                {
-                    if (!Instance.WriteMemory(Address, Line))
-                        return false;
-                }
-                else if (!Instance.ReadMemory(Address, Line, (uint)Line.Length))
-                {
-                    return false;
-                }
+        private static void IntersectClipInto(List<GdiClipRect> Target, GdiClipRect[] Clip, in GdiClipRect Bounds)
+        {
+            Target.Clear();
+            if (Clip == null)
+            {
+                if (!IsEmpty(Bounds))
+                    Target.Add(Bounds);
+                return;
             }
 
-            return true;
+            Target.AddRange(Clip);
+            IntersectClip(Target, Bounds);
         }
 
         internal static bool CopyBitmapBitsIn(BinaryEmulator Instance, in Win32kBitmap Bitmap, ulong SourceAddress)
@@ -1763,7 +1815,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         }
 
                         int Offset = SourceColumn * BytesPerPixel;
-                        Target[Column] = (uint)(Line[Offset] | (Line[Offset + 1] << 8) | (Line[Offset + 2] << 16));
+                        Target[Column] = BytesPerPixel == 4
+                            ? BinaryPrimitives.ReadUInt32LittleEndian(Line.Slice(Offset, 4))
+                            : (uint)(Line[Offset] | (Line[Offset + 1] << 8) | (Line[Offset + 2] << 16));
                     }
                 }
 
@@ -2058,17 +2112,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 GetDcClipBase(Instance, Dc, Clip);
                 SubtractRect(Clip, Rect);
             }
-            else if (Dc.Clip == null)
-            {
-                Clip.Clear();
-                if (!IsEmpty(Rect))
-                    Clip.Add(Rect);
-            }
             else
             {
-                Clip.Clear();
-                Clip.AddRange(Dc.Clip);
-                IntersectClip(Clip, Rect);
+                IntersectClipInto(Clip, Dc.Clip, Rect);
             }
 
             Dc.Clip = Clip.ToArray();
@@ -2314,11 +2360,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static bool PatBltDc(BinaryEmulator Instance, ulong Hdc, int X, int Y, int Width, int Height, uint Rop, ulong Brush)
         {
-            Win32kPenBrush Resolved = ResolvePenBrush(Instance, Brush, false);
+            return PatBltDcColor(Instance, Hdc, X, Y, Width, Height, Rop, ResolvePenBrush(Instance, Brush, false).ColorRef);
+        }
+
+        private static bool PatBltDcColor(BinaryEmulator Instance, ulong Hdc, int X, int Y, int Width, int Height, uint Rop, uint ColorRef)
+        {
             ulong Hwnd = Instance.WinHelper.GetHwndFromDc(Hdc);
             if (Hwnd != 0)
             {
-                Instance.WinHelper.EnqueueGdiFillRect(Hwnd, Hdc, X, Y, X + Width, Y + Height, Resolved.ColorRef, Rop);
+                Instance.WinHelper.EnqueueGdiFillRect(Hwnd, Hdc, X, Y, X + Width, Y + Height, ColorRef, Rop);
                 return true;
             }
 
@@ -2342,7 +2392,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Instance.WinHelper.ReadDcOrigin(Hdc, out int OffsetX, out int OffsetY);
             TryGetDcClip(Instance, Hdc, out GdiClipRect[] Clip);
-            uint PatternPixel = HostColor.FromColorRef(Resolved.ColorRef);
+            uint PatternPixel = HostColor.FromColorRef(ColorRef);
             ReadOnlySpan<uint> Unused = stackalloc uint[1];
             return TryBlitBlockIntoBitmap(Instance, Target, X + OffsetX, Y + OffsetY, Width, Height, Unused, 1, 1, Rop, PatternPixel, Clip);
         }
@@ -2363,6 +2413,96 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return 0;
         }
 
+        internal const uint WorldTransformIdentity = 1;
+        internal const uint WorldTransformLeftMultiply = 2;
+        internal const uint WorldTransformRightMultiply = 3;
+        internal const uint WorldTransformSet = 4;
+        private const float MaxWorldOffset = 0x7FFFFFF;
+
+        // NT rounds 28.4 fixed-point device coordinates to pixels.
+        internal static int FixToPixel(int Fix)
+        {
+            return (Fix + 8) >> 4;
+        }
+
+        internal static void GetWorldFix(BinaryEmulator Instance, ulong Hdc, out int FixX, out int FixY)
+        {
+            FixX = 0;
+            FixY = 0;
+            if (!GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return;
+
+            FixX = ToFix(Dc.WorldDx);
+            FixY = ToFix(Dc.WorldDy);
+        }
+
+        internal static bool TryGetWorldTranslation(BinaryEmulator Instance, ulong Hdc, out float Dx, out float Dy)
+        {
+            Dx = 0;
+            Dy = 0;
+            if (!GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return false;
+
+            Dx = Dc.WorldDx;
+            Dy = Dc.WorldDy;
+            return true;
+        }
+
+        internal static bool TryModifyWorldTransform(BinaryEmulator Instance, ulong Hdc, ReadOnlySpan<float> Xform, uint Mode)
+        {
+            Win32kState State = GetState(Instance);
+            if (!State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
+                return false;
+
+            float Dx;
+            float Dy;
+            switch (Mode)
+            {
+                case WorldTransformIdentity:
+                    Dx = 0;
+                    Dy = 0;
+                    break;
+
+                case WorldTransformLeftMultiply:
+                case WorldTransformRightMultiply:
+                case WorldTransformSet:
+                    if (Xform[0] != 1 || Xform[1] != 0 || Xform[2] != 0 || Xform[3] != 1)
+                    {
+                        if (!State.WorldTransformRefusalReported && (Instance.Settings.Flags & LogFlags.Issues) != 0)
+                        {
+                            State.WorldTransformRefusalReported = true;
+                            Instance.TriggerEventMessage("[!] NtGdiModifyWorldTransform: only translations are supported, a scaled or rotated transform was refused", LogFlags.Issues);
+                        }
+
+                        return false;
+                    }
+
+                    Dx = Mode == WorldTransformSet ? Xform[4] : Dc.WorldDx + Xform[4];
+                    Dy = Mode == WorldTransformSet ? Xform[5] : Dc.WorldDy + Xform[5];
+                    break;
+
+                default:
+                    return false;
+            }
+
+            if (!(MathF.Abs(Dx) <= MaxWorldOffset) || !(MathF.Abs(Dy) <= MaxWorldOffset))
+                return false;
+
+            // NT leaves DC_ATTR unchanged when identity is already set.
+            if ((Mode == WorldTransformIdentity || Mode == WorldTransformSet) && Dx == 0 && Dy == 0 && Dc.WorldDx == 0 && Dc.WorldDy == 0)
+                return true;
+
+            Dc.WorldDx = Dx;
+            Dc.WorldDy = Dy;
+            Instance.WinHelper.MarkDcWorldTransformChanged(Hdc, Dx == 0 && Dy == 0);
+            return true;
+        }
+
+        private static int ToFix(float Value)
+        {
+            return (int)MathF.Round(Value * 16);
+        }
+
         internal static int SaveDeviceContext(BinaryEmulator Instance, ulong Hdc)
         {
             if (!GetState(Instance).DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc))
@@ -2381,7 +2521,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             Dc.SavedStates ??= new List<Win32kDcState>();
-            Dc.SavedStates.Add(new Win32kDcState { Bitmap = Dc.SelectedBitmap, Font = Dc.SelectedFont, Clip = Dc.Clip, Attributes = Attributes });
+            Dc.SavedStates.Add(new Win32kDcState
+            {
+                Bitmap = Dc.SelectedBitmap, Font = Dc.SelectedFont, Clip = Dc.Clip, WorldDx = Dc.WorldDx, WorldDy = Dc.WorldDy, Attributes = Attributes,
+            });
             return Dc.SavedStates.Count;
         }
 
@@ -2400,6 +2543,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Dc.SelectedBitmap = Saved.Bitmap;
             Dc.SelectedFont = Saved.Font;
             Dc.Clip = Saved.Clip;
+            Dc.WorldDx = Saved.WorldDx;
+            Dc.WorldDy = Saved.WorldDy;
 
             ulong AttributeBlock = Instance.WinHelper.GetDcAttributeAddress(Hdc);
             if (Saved.Attributes != null && AttributeBlock != 0)
@@ -2510,7 +2655,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return ((Index >> 1) & 0x55) != (Index & 0x55);
         }
 
-        // Index is bits 16 to 23 of the rop code.
+        // NT applies the ROP to all four bytes of a 32 bpp pixel.
         internal static uint ApplyRop(uint Index, uint Pattern, uint Source, uint Destination)
         {
             uint Result = 0;
@@ -2524,7 +2669,57 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if ((Index & 0x40) != 0) Result |= Pattern & Source & ~Destination;
             if ((Index & 0x80) != 0) Result |= Pattern & Source & Destination;
 
-            return Result & 0x00FFFFFF;
+            return Result;
+        }
+
+        internal const byte BlendOpSourceOver = 0;
+        internal const byte AlphaFormatSourceAlpha = 1;
+
+        internal static uint BlendPixel(uint Function, uint Source, uint Destination)
+        {
+            uint Constant = (Function >> 16) & 0xFF;
+            if ((Function >> 24 & AlphaFormatSourceAlpha) == 0)
+            {
+                uint Result = 0;
+                for (int Shift = 0; Shift < 32; Shift += 8)
+                    Result |= Div255((Source >> Shift & 0xFF) * Constant + (Destination >> Shift & 0xFF) * (255 - Constant)) << Shift;
+                return Result;
+            }
+
+            uint Scaled = Constant == 255 ? Source : ScalePixel(Source, Constant);
+
+            // NT adds whole pixels, so unpremultiplied input can carry between channels.
+            return Scaled + ScalePixel(Destination, 255 - (Scaled >> 24));
+        }
+
+        private static bool IsOpaqueBlend(uint Function, ReadOnlySpan<uint> Source)
+        {
+            if ((Function >> 16 & 0xFF) != 255)
+                return false;
+
+            if ((Function >> 24 & AlphaFormatSourceAlpha) == 0)
+                return true;
+
+            foreach (uint Pixel in Source)
+            {
+                if (Pixel >> 24 != 255)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static uint ScalePixel(uint Pixel, uint Factor)
+        {
+            uint Result = 0;
+            for (int Shift = 0; Shift < 32; Shift += 8)
+                Result |= Div255((Pixel >> Shift & 0xFF) * Factor) << Shift;
+            return Result;
+        }
+
+        private static uint Div255(uint Value)
+        {
+            return (Value + 127) / 255;
         }
 
         private static ulong BitmapRowAddress(in Win32kBitmap Bitmap, int Row)
@@ -2616,7 +2811,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
 
         internal static bool TryBlitBlockIntoBitmap(BinaryEmulator Instance, in Win32kBitmap Bitmap, int X, int Y, int Width, int Height,
-            ReadOnlySpan<uint> Source, int SourceWidth, int SourceHeight, uint Rop, uint PatternPixel, GdiClipRect[] Clip = null)
+            ReadOnlySpan<uint> Source, int SourceWidth, int SourceHeight, uint Rop, uint PatternPixel, GdiClipRect[] Clip = null, uint? Blend = null)
         {
             if (!CanBlitBitmap(Bitmap) || Width <= 0 || Height <= 0 || SourceWidth <= 0 || SourceHeight <= 0)
                 return false;
@@ -2632,7 +2827,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return true;
 
             if (Clip == null)
-                return BlitRowsIntoBitmap(Instance, Bitmap, X, Y, Width, Height, Source, SourceWidth, SourceHeight, Rop, PatternPixel, Left, Top, Right, Bottom);
+                return BlitRowsIntoBitmap(Instance, Bitmap, X, Y, Width, Height, Source, SourceWidth, SourceHeight, Rop, PatternPixel, Left, Top, Right, Bottom, Blend);
 
             foreach (GdiClipRect Rect in Clip)
             {
@@ -2643,7 +2838,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (ClipRight <= ClipLeft || ClipBottom <= ClipTop)
                     continue;
 
-                if (!BlitRowsIntoBitmap(Instance, Bitmap, X, Y, Width, Height, Source, SourceWidth, SourceHeight, Rop, PatternPixel, ClipLeft, ClipTop, ClipRight, ClipBottom))
+                if (!BlitRowsIntoBitmap(Instance, Bitmap, X, Y, Width, Height, Source, SourceWidth, SourceHeight, Rop, PatternPixel, ClipLeft, ClipTop, ClipRight, ClipBottom, Blend))
                     return false;
             }
 
@@ -2651,12 +2846,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
 
         private static bool BlitRowsIntoBitmap(BinaryEmulator Instance, in Win32kBitmap Bitmap, int X, int Y, int Width, int Height,
-            ReadOnlySpan<uint> Source, int SourceWidth, int SourceHeight, uint Rop, uint PatternPixel, int Left, int Top, int Right, int Bottom)
+            ReadOnlySpan<uint> Source, int SourceWidth, int SourceHeight, uint Rop, uint PatternPixel, int Left, int Top, int Right, int Bottom,
+            uint? Blend)
         {
             int Span = Right - Left;
             uint Index = (Rop >> 16) & 0xFF;
-            bool Copy = Rop == SrcCopyRop;
-            bool ReadDestination = !Copy && RopUsesDestination(Rop);
+            bool Blending = Blend.HasValue;
+            uint Function = Blend.GetValueOrDefault();
+            bool Copy = !Blending && Rop == SrcCopyRop;
+            bool ReadDestination = Blending || (!Copy && RopUsesDestination(Rop));
 
             bool Solid = SourceWidth == 1 && SourceHeight == 1;
             bool Unscaled = SourceWidth == Width;
@@ -2669,7 +2867,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
                 if (Solid && !ReadDestination)
                 {
-                    Line.Fill(Copy ? Source[0] & 0x00FFFFFF : ApplyRop(Index, PatternPixel, Source[0], 0));
+                    Line.Fill(Copy ? Source[0] : ApplyRop(Index, PatternPixel, Source[0], 0));
                     for (int Row = Top; Row < Bottom; Row++)
                     {
                         if (!TryWriteBitmapRow(Instance, Bitmap, Row, Left, Span, Line, Packed))
@@ -2691,7 +2889,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     {
                         int SourceColumn = Solid ? 0 : Unscaled ? Left + Column - X : (int)((long)(Left + Column - X) * SourceWidth / Width);
                         uint Pixel = SourceLine[SourceColumn];
-                        Line[Column] = Copy ? Pixel & 0x00FFFFFF : ApplyRop(Index, PatternPixel, Pixel, ReadDestination ? Line[Column] : 0);
+                        if (Blending)
+                            Line[Column] = BlendPixel(Function, Pixel, Line[Column]);
+                        else
+                            Line[Column] = Copy ? Pixel : ApplyRop(Index, PatternPixel, Pixel, ReadDestination ? Line[Column] : 0);
                     }
 
                     if (!TryWriteBitmapRow(Instance, Bitmap, Row, Left, Span, Line, Packed))
@@ -2709,12 +2910,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
 
         internal static bool BlitBlockToDc(BinaryEmulator Instance, ulong Hdc, int X, int Y, int Width, int Height,
-            ReadOnlySpan<uint> Source, int SourceWidth, int SourceHeight, uint Rop)
+            ReadOnlySpan<uint> Source, int SourceWidth, int SourceHeight, uint Rop, uint? Blend = null)
         {
             if (Width <= 0 || Height <= 0 || SourceWidth <= 0 || SourceHeight <= 0)
                 return false;
 
-            if (Source.Length < SourceWidth * SourceHeight)
+            int Count = SourceWidth * SourceHeight;
+            if (Source.Length < Count)
                 return false;
 
             if (TryGetDcBitmap(Instance, Hdc, out Win32kBitmap Target) && CanBlitBitmap(Target))
@@ -2722,14 +2924,22 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 uint PatternPixel = HostColor.FromColorRef(ResolvePenBrush(Instance, Instance.WinHelper.ReadDcSelectedBrush(Hdc), false).ColorRef);
                 Instance.WinHelper.ReadDcOrigin(Hdc, out int OffsetX, out int OffsetY);
                 TryGetDcClip(Instance, Hdc, out GdiClipRect[] Clip);
-                return TryBlitBlockIntoBitmap(Instance, Target, X + OffsetX, Y + OffsetY, Width, Height, Source, SourceWidth, SourceHeight, Rop, PatternPixel, Clip);
+                return TryBlitBlockIntoBitmap(Instance, Target, X + OffsetX, Y + OffsetY, Width, Height, Source, SourceWidth, SourceHeight, Rop, PatternPixel,
+                    Clip, Blend);
             }
 
             ulong Hwnd = Instance.WinHelper.GetHwndFromDc(Hdc);
             if (Hwnd == 0)
                 return false;
 
-            int Count = SourceWidth * SourceHeight;
+            // Window surfaces cannot be read back for blending.
+            if (Blend is uint Function && !IsOpaqueBlend(Function, Source.Slice(0, Count)))
+            {
+                if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
+                    Instance.TriggerEventMessage("[!] GDI: alpha blending onto a window DC is not supported", LogFlags.Issues);
+                return false;
+            }
+
             uint[] Owned = CopyPixelsForGuiThread(Source, Count, out bool Pooled);
 
             // A window has no readable surface, so only a rop that ignores the destination can be resolved.
@@ -4551,13 +4761,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
         }
 
-        // LParam is in the client coordinates of Root.
+        // Wheel coordinates are in screen space. Other mouse coordinates are relative to Root.
         private static ulong ResolveInputTarget(BinaryEmulator Instance, ulong Root, uint Message, ref ulong LParam)
         {
             if (Message >= WM_KEYDOWN && Message <= WM_SYSCHAR)
             {
                 ulong Focus = Instance.WinHelper.FocusWindow;
                 return Focus != 0 && Instance.WinHelper.GetWindow(Focus) != null ? Focus : Root;
+            }
+
+            // NT routes wheel input to the hovered window, even during capture.
+            if (Message == WM_MOUSEWHEEL || Message == WM_MOUSEHWHEEL)
+            {
+                GetClientScreenOrigin(Instance, Root, out int OriginX, out int OriginY);
+                return ChildFromPoint(Instance, Root, (short)(LParam & 0xFFFF) - OriginX, (short)((LParam >> 16) & 0xFFFF) - OriginY, 0);
             }
 
             if (Message < WM_MOUSEMOVE || Message > WM_RBUTTONUP)
@@ -6400,6 +6617,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Instance.WinHelper.DestroyWindow(Window.Hwnd, 0, out Deferred);
                     return 0;
 
+                case WM_MOUSEWHEEL:
+                case WM_MOUSEHWHEEL:
+                    if ((Window.Style & (WindowStyleChild | WindowStylePopup)) == WindowStyleChild)
+                    {
+                        WinWindow Parent = Instance.WinHelper.GetWindow(Window.ParentHwnd);
+                        if (Parent != null && OwnedByThread(Parent, Instance.CurrentThread?.ThreadId ?? 0))
+                            Deferred = InvokeWindowProc(Instance, Parent.Hwnd, Parent.WndProc, Message, WParam, LParam, DeferredSyscallResult: 0);
+                    }
+
+                    return 0;
+
                 default:
                     if (Message >= WM_CTLCOLORMSGBOX && Message <= WM_CTLCOLORSTATIC)
                         return Instance.WinHelper.GetSystemColorBrush(DefaultControlColorIndex(Message));
@@ -6708,6 +6936,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const ushort FnidGhost = 0x02AA;
 
         private const ushort FnidSendMessageFirst = 0x02B1;
+        internal const ushort FnidSendMessageCallProc = 0x02B4;
         internal const ushort FnidSendNotifyMessage = 0x02B7;
         internal const ushort FnidSendMessageCallback = 0x02B8;
         private const ushort FnidSendMessageLast = 0x02B8;

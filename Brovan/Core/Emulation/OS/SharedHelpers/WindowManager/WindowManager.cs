@@ -860,7 +860,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
     public interface IKeyboardTranslateSupport
     {
-        bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character);
+        // A negative character count marks a dead key.
+        int TranslateKey(uint virtualKey, uint scanCode, ReadOnlySpan<byte> keyState, Span<char> output);
     }
 
     public struct TextMetricsData

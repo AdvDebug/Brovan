@@ -1,3 +1,4 @@
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -22,10 +23,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Text = Instance._emulator.ReadMemoryString(StringPtr, (int)(Count * 2), System.Text.Encoding.Unicode)?.TrimEnd('\0') ?? string.Empty;
             }
 
+            GdiClipRect? Rect = null;
+            if (RectPtr != 0 && Win32kHelper.TryReadGuestRect(Instance, RectPtr, out GdiClipRect Given))
+                Rect = Given;
+
             ulong Hwnd = Instance.WinHelper.GetHwndFromDc(Hdc);
             if (Hwnd == 0)
             {
-                Win32kHelper.TryRenderTextToDcBitmap(Instance, Hdc, Text, X, Y, Options);
+                Win32kHelper.TryRenderTextToDcBitmap(Instance, Hdc, Text, X, Y, Options, Rect);
                 Instance.SetRawSyscallReturn(1);
                 return NTSTATUS.STATUS_SUCCESS;
             }
@@ -37,20 +42,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            int RectLeft = 0, RectTop = 0, RectRight = 0, RectBottom = 0;
-            if (RectPtr != 0 && Instance.IsRegionMapped(RectPtr, 16))
+            if (Rect is not GdiClipRect Bounds)
             {
-                RectLeft = unchecked((int)Instance.ReadMemoryUInt(RectPtr));
-                RectTop = unchecked((int)Instance.ReadMemoryUInt(RectPtr + 4));
-                RectRight = unchecked((int)Instance.ReadMemoryUInt(RectPtr + 8));
-                RectBottom = unchecked((int)Instance.ReadMemoryUInt(RectPtr + 12));
-            }
-            else
-            {
-                Win32kHelper.GetClientSize(Instance, Window, out RectRight, out RectBottom);
+                Win32kHelper.GetClientSize(Instance, Window, out int ClientWidth, out int ClientHeight);
+                Bounds = new GdiClipRect { Right = ClientWidth, Bottom = ClientHeight };
             }
 
-            Instance.WinHelper.EnqueueTextRender(Hwnd, Hdc, Win32kHelper.ResolveDcFont(Instance, Hdc), Text, X, Y, RectLeft, RectTop, RectRight, RectBottom, Options);
+            Instance.WinHelper.EnqueueTextRender(Hwnd, Hdc, Win32kHelper.ResolveDcFont(Instance, Hdc), Text, X, Y, Bounds.Left, Bounds.Top, Bounds.Right, Bounds.Bottom,
+                Options);
 
             Instance.SetRawSyscallReturn(1);
             return NTSTATUS.STATUS_SUCCESS;

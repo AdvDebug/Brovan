@@ -26,6 +26,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int Count = unchecked((int)Instance.WinHelper.GetArg32(1));
             ulong OutBuffer = Instance.WinHelper.GetArg(2);
 
+            if (Win32kHelper.TryGetFontEnumLogFont(Instance, Handle, out byte[] EnumLogFont))
+                return GetFont(Instance, EnumLogFont, (uint)Count, OutBuffer);
+
             bool IsBitmap = Win32kHelper.TryGetBitmap(Instance, Handle, out Win32kBitmap Bitmap);
             Win32kPenBrush PenBrush = default;
             bool IsPenBrush = false;
@@ -67,6 +70,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Instance.SetLastWinError(0);
             Instance.SetRawSyscallReturn(Instance.WriteMemory(OutBuffer, Buffer) ? (ulong)Size : 0ul);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS GetFont(BinaryEmulator Instance, byte[] EnumLogFont, uint Count, ulong OutBuffer)
+        {
+            if (OutBuffer == 0)
+            {
+                Instance.SetRawSyscallReturn((ulong)EnumLogFont.Length);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            int Copied = (int)Math.Min(Count, (uint)EnumLogFont.Length);
+            bool Written = Copied == 0 || Instance.WriteMemory(OutBuffer, EnumLogFont.AsSpan(0, Copied));
+            Instance.SetRawSyscallReturn(Written ? (ulong)Copied : 0ul);
             return NTSTATUS.STATUS_SUCCESS;
         }
 

@@ -85,6 +85,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         Line[Offset] = (byte)Pixel;
                         Line[Offset + 1] = (byte)(Pixel >> 8);
                         Line[Offset + 2] = (byte)(Pixel >> 16);
+                        if (BytesPerPixel == 4)
+                            Line[Offset + 3] = (byte)(Pixel >> 24);
                     }
 
                     // The caller's rows follow its own header, bottom-up by default.

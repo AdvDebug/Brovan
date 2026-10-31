@@ -22,9 +22,14 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const int OffClientConnectConnectionInfo = OffCsrDataStart + 0x08;
         private const int OffClientConnectConnectionInfoSize = OffCsrDataStart + 0x10;
         private const int BaseSrvCreateActivationContextMessageSize = 0x1F8;
+        private const int OffBaseSrvActCtxArchitecture = OffCsrDataStart + 0x04;
+        private const int OffBaseSrvActCtxManifestHandleType = OffCsrDataStart + 0x1A;
+        private const int OffBaseSrvActCtxManifestFileHandle = OffCsrDataStart + 0x30;
+        private const int OffBaseSrvActCtxManifestHandle = OffCsrDataStart + 0x38;
+        private const int OffBaseSrvActCtxManifestOffset = OffCsrDataStart + 0x40;
+        private const int OffBaseSrvActCtxManifestSize = OffCsrDataStart + 0x48;
         private const int OffBaseSrvActCtxOutputPointer = OffCsrDataStart + 0xB8;
         private const int OffBaseSrvActCtxDataPointer = OffCsrDataStart + 0xC0;
-        private const int MinimalActivationContextDataSize = 0x300;
         private const int OffBaseSrvCreateProcessHandle = OffCsrDataStart + 0x00;
         private const int OffBaseSrvCreateProcessSxsFlags = OffCsrDataStart + 0x38;
         private const int OffBaseSrvCreateProcessSupportedOs = OffCsrDataStart + 0xDC;
@@ -78,19 +83,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         };
 
         private static readonly HashSet<string> EventLogRpcPorts = new(StringComparer.OrdinalIgnoreCase);
-
-        private static readonly uint[] ActivationContextSectionIds =
-        {
-            2u,  // ACTIVATION_CONTEXT_SECTION_DLL_REDIRECTION.
-            3u,  // ACTIVATION_CONTEXT_SECTION_WINDOW_CLASS_REDIRECTION.
-            4u,  // ACTIVATION_CONTEXT_SECTION_COM_SERVER_REDIRECTION.
-            5u,  // ACTIVATION_CONTEXT_SECTION_COM_INTERFACE_REDIRECTION.
-            6u,  // ACTIVATION_CONTEXT_SECTION_COM_TYPE_LIBRARY_REDIRECTION.
-            7u,  // ACTIVATION_CONTEXT_SECTION_COM_PROGID_REDIRECTION.
-            9u,  // ACTIVATION_CONTEXT_SECTION_CLR_SURROGATES.
-            10u, // ACTIVATION_CONTEXT_SECTION_APPLICATION_SETTINGS.
-            12u  // ACTIVATION_CONTEXT_SECTION_WINRT_ACTIVATABLE_CLASSES.
-        };
 
         private static ulong _fakeServerInfo = 0;
         private static uint _tempFileCounter = 1;
@@ -441,8 +433,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     Instance.WinHelper.NlsUserInfo?.UpdateCacheCount(Instance);
                     break;
                 case 30: // BaseSrvCreateActivationContext.
-                    if (!HandleBaseSrvCreateActivationContext(Reply, Instance))
-                        TryZeroCapturedBuffer(Reply, Instance, 0x00, 0x08);
+                    WriteCsrStatus(Reply, HandleBaseSrvCreateActivationContext(Reply, Instance));
                     break;
                 default:
                     break;
@@ -691,7 +682,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             try
             {
                 Image = Instance.LoadBinary(Process.HostImagePath);
-                Manifest = Win32k.Win32kDpi.ReadImageManifest(Image, Process.HostImagePath);
+                Manifest = WinSxS.ReadImageManifest(Image, Process.HostImagePath);
             }
             catch (Exception Ex) when (Ex is IOException || Ex is UnauthorizedAccessException)
             {
@@ -710,24 +701,28 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return true;
         }
 
-        private static bool HandleBaseSrvCreateActivationContext(byte[] Reply, BinaryEmulator Instance)
+        private static NTSTATUS HandleBaseSrvCreateActivationContext(byte[] Reply, BinaryEmulator Instance)
         {
             if (Reply.Length < OffCsrDataStart + BaseSrvCreateActivationContextMessageSize)
-                return false;
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            ulong OutputPointer = ReadU64(Reply, OffBaseSrvActCtxOutputPointer);
-            if (OutputPointer == 0 || !Instance.IsRegionMapped(OutputPointer, 8))
-                return false;
+            WinSxS.ActivationContextRequest Request = new WinSxS.ActivationContextRequest(
+                Reply[OffBaseSrvActCtxManifestHandleType],
+                ReadU64(Reply, OffBaseSrvActCtxManifestFileHandle),
+                ReadU64(Reply, OffBaseSrvActCtxManifestHandle),
+                ReadU64(Reply, OffBaseSrvActCtxManifestOffset),
+                ReadU64(Reply, OffBaseSrvActCtxManifestSize),
+                ReadU16(Reply, OffBaseSrvActCtxArchitecture),
+                ReadU64(Reply, OffBaseSrvActCtxOutputPointer));
 
-            ulong ActivationContextData = AllocActivationContextData(Instance);
-            if (ActivationContextData == 0)
-                return false;
+            NTSTATUS Status = WinSxS.CreateActivationContext(Instance, Request, out ulong ActivationContextData);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
-            Instance._emulator.WriteMemory(OutputPointer, ActivationContextData, 8);
             WriteU64(Reply, OffBaseSrvActCtxDataPointer, ActivationContextData);
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
-                Instance.TriggerEventMessage($"CsrssPortHandler: BaseSrvCreateActivationContext -> Data=0x{ActivationContextData:X}, Out=0x{OutputPointer:X}.", LogFlags.Syscall);
-            return true;
+                Instance.TriggerEventMessage($"CsrssPortHandler: BaseSrvCreateActivationContext -> Data=0x{ActivationContextData:X}, Out=0x{Request.OutputPointer:X}.", LogFlags.Syscall);
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         private static void NormalizeConsoleReply(byte[] Reply, BinaryEmulator Instance)
@@ -773,22 +768,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"CsrssPortHandler: Connected server {ServerId}, ConnectionInfo=0x{ConnectionInfo:X}, Size=0x{WriteLength:X}.", LogFlags.Syscall);
-        }
-
-        private static void TryZeroCapturedBuffer(byte[] Reply, BinaryEmulator Instance, int PointerOffset, int SizeOffset)
-        {
-            if (Reply.Length < OffCsrDataStart + Math.Max(PointerOffset + 8, SizeOffset + 4))
-                return;
-
-            ulong Buffer = ReadU64(Reply, OffCsrDataStart + PointerOffset);
-            uint Size = ReadU32(Reply, OffCsrDataStart + SizeOffset);
-            if (Buffer == 0 || Size == 0 || Size > 0x10000)
-                return;
-
-            if (!Instance.IsRegionMapped(Buffer, Size))
-                return;
-
-            Instance.WinHelper.WriteZeroMemory(Buffer, Size);
         }
 
         private static bool TryBuildDceRpcReply(WinPort Port, byte[] SendData, out byte[] Reply, BinaryEmulator Instance)
@@ -1071,70 +1050,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             _fakeServerInfo = addr;
             return addr;
-        }
-
-        /// <remarks>
-        /// Every created context owns its own block. ntdll unmaps the block when it releases the context,
-        /// so a shared block leaves the other contexts pointing at freed address space.
-        /// </remarks>
-        public static ulong AllocActivationContextData(BinaryEmulator Instance)
-        {
-            const ulong Size = 0x1000;
-            ulong Address = Instance.MapUniqueAddress(Size, MemoryProtection.ReadWrite);
-            if (Address == 0)
-                return 0;
-
-            Instance.WinHelper.WriteZeroMemory(Address, (uint)Size);
-            Span<byte> Data = Instance.WinHelper.Shared.GetSpan(MinimalActivationContextDataSize);
-            Data.Clear();
-            BuildMinimalActivationContextData(Data);
-            Instance._emulator.WriteMemory(Address, Data.Slice(0, MinimalActivationContextDataSize));
-            return Address;
-        }
-
-        private static void BuildMinimalActivationContextData(Span<byte> Data)
-        {
-            const uint ActCtxMagic = 0x78746341u;
-            const uint StringSectionMagic = 0x64487353u;
-            const uint GuidSectionMagic = 0x64487347u;
-            const uint TocOffset = 0x20u;
-            const uint TocEntriesOffset = 0x30u;
-            const uint AssemblyRosterOffset = 0xC0u;
-            const uint StringSectionLength = 0x2Cu;
-            const uint GuidSectionLength = 0x28u;
-
-            WriteU32(Data, 0x00, ActCtxMagic);
-            WriteU32(Data, 0x04, 0x20u);
-            WriteU32(Data, 0x08, 1u);
-            WriteU32(Data, 0x0C, (uint)Data.Length);
-            WriteU32(Data, 0x10, TocOffset);
-            WriteU32(Data, 0x18, AssemblyRosterOffset);
-
-            WriteU32(Data, (int)TocOffset + 0x00, 0x10u);
-            WriteU32(Data, (int)TocOffset + 0x04, (uint)ActivationContextSectionIds.Length);
-            WriteU32(Data, (int)TocOffset + 0x08, TocEntriesOffset);
-
-            uint SectionOffset = 0xD8u;
-            for (int i = 0; i < ActivationContextSectionIds.Length; i++)
-            {
-                uint SectionId = ActivationContextSectionIds[i];
-                bool GuidSection = SectionId == 4u || SectionId == 5u || SectionId == 6u || SectionId == 9u;
-                uint SectionLength = GuidSection ? GuidSectionLength : StringSectionLength;
-                int TocEntry = (int)(TocEntriesOffset + (uint)(i * 0x10));
-
-                WriteU32(Data, TocEntry + 0x00, SectionId);
-                WriteU32(Data, TocEntry + 0x04, SectionOffset);
-                WriteU32(Data, TocEntry + 0x08, SectionLength);
-
-                WriteU32(Data, (int)SectionOffset, GuidSection ? GuidSectionMagic : StringSectionMagic);
-                WriteU32(Data, (int)SectionOffset + 0x14, 0u);
-
-                SectionOffset += (SectionLength + 3u) & ~3u;
-            }
-
-            WriteU32(Data, (int)AssemblyRosterOffset + 0x00, 0x14u);
-            WriteU32(Data, (int)AssemblyRosterOffset + 0x08, 1u);
-
         }
 
         private static bool IsCsrApiPort(string Name)

@@ -32,7 +32,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (OwnedHere)
                 {
                     ulong WndProc = Target.WndProc;
-                    if (Ansi)
+
+                    if (FunctionId == Win32kHelper.FnidSendMessageCallProc)
+                    {
+                        if (!Instance.WinHelper.TryGetCallProc(XParam, out WndProc))
+                            WndProc = XParam;
+                    }
+                    else if (Ansi)
                     {
                         if (Instance.WinHelper.BeginClientPfnFetch())
                             return NTSTATUS.STATUS_SUCCESS;

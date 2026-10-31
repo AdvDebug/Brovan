@@ -39,18 +39,27 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             else if (ParentHwnd != 0 && Instance.WinHelper.GetWindow(ParentHwnd) == null)
                 return Win32kHelper.FailWithError(Instance, ERROR_INVALID_WINDOW_HANDLE);
 
-            string ClassName = Win32kHelper.ReadLargeString(Instance, ClassNamePtr);
-            string classVersion = Win32kHelper.ReadLargeString(Instance, ClassVersionPtr) ?? string.Empty;
-            WinWindowClass WindowClass = null;
+            uint Style = (uint)StyleArg;
+            bool Child = (Style & (Win32kHelper.WindowStyleChild | Win32kHelper.WindowStylePopup)) == Win32kHelper.WindowStyleChild;
+            if (Child && ParentHwnd == 0)
+                return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_TLW_WITH_WSCHILD);
 
-            if (ClassNamePtr != 0 && ClassNamePtr <= 0xFFFF)
+            // ClassVersionPtr holds the class identity, even for unversioned classes.
+            WinWindowClass WindowClass = null;
+            if (ClassVersionPtr != 0 && ClassVersionPtr <= 0xFFFF)
             {
-                WindowClass = Instance.WinHelper.GetWindowClass((ushort)ClassNamePtr);
-                ClassName = WindowClass?.Name ?? $"#ATOM_{ClassNamePtr:X}";
+                WindowClass = Instance.WinHelper.GetWindowClass((ushort)ClassVersionPtr);
             }
-            else if (!string.IsNullOrEmpty(ClassName))
+            else if (ClassVersionPtr != 0)
             {
-                WindowClass = Instance.WinHelper.GetWindowClass(InstanceHandle, ClassName, classVersion);
+                string ClassName = null;
+                if (ClassNamePtr > 0xFFFF)
+                    ClassName = Win32kHelper.ReadLargeString(Instance, ClassNamePtr);
+                else if (ClassNamePtr != 0)
+                    Instance.WinHelper.TryGetAtomName((ushort)ClassNamePtr, out ClassName);
+
+                string ClassVersion = Win32kHelper.ReadLargeString(Instance, ClassVersionPtr);
+                WindowClass = Instance.WinHelper.GetWindowClass(InstanceHandle, ClassName ?? ClassVersion, ClassVersion);
             }
 
             // Answering "no such class" is what makes user32 register a standard control and call back in.
@@ -60,10 +69,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             string title = Win32kHelper.ReadLargeString(Instance, WindowNamePtr) ?? string.Empty;
             ulong hwnd = Instance.WinHelper.AllocateUserHandle();
 
-            // NT: a child has WS_CHILD without WS_POPUP.
-            uint Style = (uint)StyleArg;
             uint ExStyle = (uint)exStyleArg;
-            bool Child = (Style & (Win32kHelper.WindowStyleChild | Win32kHelper.WindowStylePopup)) == Win32kHelper.WindowStyleChild;
 
             // Without WS_CHILD the argument names the owner, not the parent. NT owns by its top-level window.
             ulong OwnerHwnd = 0;
@@ -91,7 +97,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Hwnd = hwnd,
                 ClassAtom = WindowClass.Atom,
                 Title = title,
-                ClassName = string.IsNullOrEmpty(ClassName) ? "#UNNAMED" : ClassName,
+                ClassName = string.IsNullOrEmpty(WindowClass.Name) ? "#UNNAMED" : WindowClass.Name,
                 Visible = (Style & Win32kHelper.WindowStyleVisible) != 0,
                 Style = Style,
                 ExStyle = ExStyle,
@@ -106,6 +112,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 CreateParam = CreateParam,
                 OwnerThreadId = Instance.CurrentThread?.ThreadId ?? 0,
                 WndProc = WindowClass.WndProc,
+                ActivationContext = Instance.WinHelper.GetArg(16),
                 WindowExtraBytes = WindowClass.WindowExtraBytes,
                 Dirty = true,
             };

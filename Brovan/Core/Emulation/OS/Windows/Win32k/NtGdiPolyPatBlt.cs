@@ -4,7 +4,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtGdiPolyPatBlt : IWinSyscall
     {
-        private const int EntrySize = 24;
+        private const int EntryRectBytes = 16;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -20,6 +20,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            // POLYPATBLT ends with a pointer-sized HBRUSH.
+            uint EntrySize = EntryRectBytes + (uint)Instance.WinHelper.PointerSize;
             for (uint i = 0; i < Count; i++)
             {
                 ulong EntryAddr = SrcPtr + (ulong)i * EntrySize;
@@ -30,7 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 int Y = unchecked((int)Instance.ReadMemoryUInt(EntryAddr + 0x04));
                 int Width = unchecked((int)Instance.ReadMemoryUInt(EntryAddr + 0x08));
                 int Height = unchecked((int)Instance.ReadMemoryUInt(EntryAddr + 0x0C));
-                ulong BrushHandle = Instance.ReadMemoryULong(EntryAddr + 0x10);
+                ulong BrushHandle = Instance.WinHelper.ReadPointer(EntryAddr + EntryRectBytes);
 
                 // An entry with no brush of its own paints with the one selected into the DC.
                 if (BrushHandle == 0)

@@ -346,8 +346,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public const long PropertyChangeMask = 1L << 22;
 
         public const uint ShiftMask = 1 << 0;
+        public const uint LockMask = 1 << 1;
         public const uint ControlMask = 1 << 2;
         public const uint Mod1Mask = 1 << 3;
+        public const uint Mod5Mask = 1 << 7;
         public const uint Button1Mask = 1 << 8;
         public const uint Button2Mask = 1 << 9;
         public const uint Button3Mask = 1 << 10;
@@ -630,7 +632,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private int _rasterHeight;
         private nuint _whitePixel;
         private nuint _blackPixel;
-        private uint _modifierState;
         private byte[]? _virtualKeyToKeycode;
         private bool _disposed;
 
@@ -909,7 +910,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 case X11.KeyRelease:
                     {
                         ref X11.XKeyEvent key = ref Unsafe.As<X11.XEvent, X11.XKeyEvent>(ref nativeEvent);
-                        _modifierState = key.State;
 
                         uint virtualKey = KeysymToVirtualKey(LookupKeysym((byte)key.Keycode));
                         if (virtualKey == 0)
@@ -931,7 +931,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 case X11.ButtonRelease:
                     {
                         ref X11.XButtonEvent button = ref Unsafe.As<X11.XEvent, X11.XButtonEvent>(ref nativeEvent);
-                        _modifierState = button.State;
                         TranslateButton(ref button, nativeEvent.Type == X11.ButtonPress);
                         return;
                     }
@@ -939,7 +938,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 case X11.MotionNotify:
                     {
                         ref X11.XMotionEvent motion = ref Unsafe.As<X11.XEvent, X11.XMotionEvent>(ref nativeEvent);
-                        _modifierState = motion.State;
                         HostEventQueue.Enqueue(WM_MOUSEMOVE, StateToMouseKeys(motion.State), HostEventQueue.MakeLParam(motion.X, motion.Y));
                         return;
                     }
@@ -1180,6 +1178,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 case 0xFFE5: return 0x14; // XK_Caps_Lock
                 case 0xFFE9: return 0xA4; // XK_Alt_L
                 case 0xFFEA: return 0xA5; // XK_Alt_R
+                case 0xFE03: return 0xA5; // XK_ISO_Level3_Shift
                 case 0xFFEB: return 0x5B; // XK_Super_L
                 case 0xFFEC: return 0x5C; // XK_Super_R
                 case 0xFFFF: return 0x2E; // XK_Delete
@@ -1220,22 +1219,20 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return map[virtualKey];
         }
 
-        public unsafe bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character)
+        public unsafe int TranslateKey(uint virtualKey, uint scanCode, ReadOnlySpan<byte> keyState, Span<char> output)
         {
-            character = '\0';
-
             if (_xDisplay == IntPtr.Zero)
-                return false;
+                return 0;
 
             byte keycode = VirtualKeyToKeycode(virtualKey);
             if (keycode == 0)
-                return false;
+                return 0;
 
             X11.XEvent synthetic = default;
             ref X11.XKeyEvent key = ref Unsafe.As<X11.XEvent, X11.XKeyEvent>(ref synthetic);
             key.Type = X11.KeyPress;
             key.Display = _xDisplay;
-            key.State = _modifierState;
+            key.State = ModifierStateFromKeys(keyState);
             key.Keycode = keycode;
 
             foreach (KeyValuePair<IntPtr, LinuxWindow> entry in _windows)
@@ -1245,13 +1242,33 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
 
             byte* buffer = stackalloc byte[8];
-            int written = X11.XLookupString(&synthetic, buffer, 8, out _, IntPtr.Zero);
-            if (written <= 0)
-                return false;
+            int written = Math.Min(X11.XLookupString(&synthetic, buffer, 8, out _, IntPtr.Zero), output.Length);
+            for (int i = 0; i < written; i++)
+                output[i] = (char)buffer[i];
 
-            character = (char)buffer[0];
-            return character != '\0';
+            return Math.Max(written, 0);
         }
+
+        private static uint ModifierStateFromKeys(ReadOnlySpan<byte> keyState)
+        {
+            uint state = 0;
+            if (IsKeyDown(keyState, Win32kHelper.VkShift) || IsKeyDown(keyState, Win32kHelper.VkLShift) || IsKeyDown(keyState, Win32kHelper.VkRShift))
+                state |= X11.ShiftMask;
+            if ((keyState[Win32kHelper.VkCapital] & Win32kHelper.KeyStateToggled) != 0)
+                state |= X11.LockMask;
+            if (IsKeyDown(keyState, Win32kHelper.VkControl) || IsKeyDown(keyState, Win32kHelper.VkLControl) || IsKeyDown(keyState, Win32kHelper.VkRControl))
+                state |= X11.ControlMask;
+            if (IsKeyDown(keyState, Win32kHelper.VkLMenu) || (IsKeyDown(keyState, Win32kHelper.VkMenu) && !IsKeyDown(keyState, Win32kHelper.VkRMenu)))
+                state |= X11.Mod1Mask;
+
+            // Windows reports AltGr as Right Alt.
+            if (IsKeyDown(keyState, Win32kHelper.VkRMenu))
+                state |= X11.Mod5Mask;
+
+            return state;
+        }
+
+        private static bool IsKeyDown(ReadOnlySpan<byte> keyState, byte virtualKey) => (keyState[virtualKey] & Win32kHelper.KeyStateDown) != 0;
 
         public void Dispose()
         {

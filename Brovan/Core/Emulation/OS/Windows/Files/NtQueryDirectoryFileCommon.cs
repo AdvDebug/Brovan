@@ -240,7 +240,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : DirectoryPath + "\\" + Name;
         }
 
-        private static List<WinDirectoryEntry> ListDirectory(string GuestPath, string Mask, WindowsFileStream DirectoryStream)
+        internal static List<WinDirectoryEntry> ListDirectory(string GuestPath, string Mask, WindowsFileStream DirectoryStream)
         {
             if (IsMissingExactName(GuestPath, Mask, DirectoryStream))
                 return new List<WinDirectoryEntry>();

@@ -221,7 +221,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             BinaryPrimitives.WriteUInt32LittleEndian(Key, DefaultCompartmentId);
             int Produced = (int)Math.Min((uint)Consumed, Request.ParamLength);
-            if (!WriteParameter(Instance, Request.ParamPtr, Request.ParamLength, Output.Slice(0, Produced)) || !Instance.WriteMemory(Request.KeyPtr, Key))
+
+            // nsiproxy returns the full buffer with a zero-filled tail.
+            if (!Instance.WinHelper.WritePadded(Request.ParamPtr, Request.ParamLength, Output.Slice(0, Produced)) || !Instance.WriteMemory(Request.KeyPtr, Key))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             Data.Information = GetParameterInformation;
@@ -294,24 +296,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return true;
 
             return Address != 0 && Instance.IsRegionCommitted(Address, Length);
-        }
-
-        // nsiproxy copies back the whole buffer, so the tail reads as zero.
-        private static bool WriteParameter(BinaryEmulator Instance, ulong Address, uint Length, ReadOnlySpan<byte> Produced)
-        {
-            if (!Instance.WriteMemory(Address, Produced))
-                return false;
-
-            ulong Done = (ulong)Produced.Length;
-            while (Done < Length)
-            {
-                uint Chunk = (uint)Math.Min(Length - Done, (ulong)NtReadFile.IoChunkBytes);
-                if (!Instance.WinHelper.WriteZeroMemory(Address + Done, Chunk))
-                    return false;
-                Done += Chunk;
-            }
-
-            return true;
         }
 
         private static void ReportUnmodeled(BinaryEmulator Instance, string What) =>

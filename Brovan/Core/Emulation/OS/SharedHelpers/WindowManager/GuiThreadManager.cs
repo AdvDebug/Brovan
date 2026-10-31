@@ -585,15 +585,19 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return true;
         }
 
-        public bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character)
+        public bool TryTranslateKey(uint virtualKey, uint scanCode, ReadOnlySpan<byte> keyState, Span<char> output, out int count)
         {
-            character = '\0';
+            count = 0;
 
             if (_disposed || !WaitForInitialization())
                 return false;
 
             IKeyboardTranslateSupport support = _keyboardTranslate;
-            return support != null && support.TranslateVirtualKey(virtualKey, scanCode, out character);
+            if (support == null)
+                return false;
+
+            count = support.TranslateKey(virtualKey, scanCode, keyState, output);
+            return true;
         }
 
         public bool MeasureText(IntPtr font, string text, out int width, out int height)

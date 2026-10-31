@@ -93,6 +93,12 @@ namespace Brovan.Core.Settings
         // Application hives one process holds loaded.
         public static int AppHives { get; private set; }
 
+        public static int SideBySideManifestBytes { get; private set; }
+
+        public static int ActivationContextAssemblies { get; private set; }
+
+        public static int ActivationContextBytes { get; private set; }
+
         // The guest Vulkan ICD sizes its descriptor pool raise budget from this figure.
         public static ulong GuestPhysicalBytes { get; private set; }
 
@@ -134,6 +140,9 @@ namespace Brovan.Core.Settings
             CompositionBatchTotalBytes = Megabytes(Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8));
             CompositionResources = (int)Pick(Off: 1048576, Minimal: 786432, Medium: 524288, High: 262144, Aggressive: 131072);
             AppHives = (int)Pick(Off: 256, Minimal: 192, Medium: 128, High: 96, Aggressive: 64);
+            SideBySideManifestBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 256));
+            ActivationContextAssemblies = (int)Pick(Off: 64, Minimal: 64, Medium: 48, High: 32, Aggressive: 16);
+            ActivationContextBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 128));
             ulong PhysicalMegabytes = Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
 
             GuestPhysicalBytes = Megabytes(PhysicalMegabytes);

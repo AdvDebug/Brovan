@@ -720,6 +720,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Emulator._emulator.WriteMemory(Address, Buffer, Size);
         }
 
+        public bool WritePadded(ulong Address, ulong Length, ReadOnlySpan<byte> Produced)
+        {
+            if (!Emulator.WriteMemory(Address, Produced))
+                return false;
+
+            ulong Done = (ulong)Produced.Length;
+            while (Done < Length)
+            {
+                uint Chunk = (uint)Math.Min(Length - Done, (ulong)NtReadFile.IoChunkBytes);
+                if (!WriteZeroMemory(Address + Done, Chunk))
+                    return false;
+                Done += Chunk;
+            }
+
+            return true;
+        }
+
         public bool WriteByte(ulong Address, byte Value)
         {
             Span<byte> Buffer = stackalloc byte[1];
@@ -2882,13 +2899,32 @@ namespace Brovan.Core.Emulation.OS.Windows
         };
         private const ulong UserServerInfoKeyStateGenerationOffset = 0x1B48;
         private const ulong UserServerInfoAsyncKeyStateGenerationOffset = 0x1B4C;
-        private const int LogFontSize = 92;
-        private const int LogFontFaceNameOffset = 28;
-        private const int LogFontFaceNameChars = 32;
+        internal const int LogFontSize = 92;
+        internal const int LogFontFaceNameOffset = 28;
+        internal const int LogFontFaceNameChars = 32;
         private const int MessageFontPointSize = 9;
         private const string MessageFontFace = "Segoe UI";
         private const int MessageFontWeight = 400;
         private const byte MessageFontCharSet = 1;
+
+        internal const int NonClientMetricsSize = 504;
+        internal const int IconMetricsSize = 108;
+        private const int NonClientBorderWidthOffset = 4;
+        private const int WindowBorderWidth = 1;
+        private const int IconTitleWrap = 1;
+
+        // NONCLIENTMETRICSW offsets and SERVERINFO metric slots.
+        private static readonly (int Offset, int Slot)[] NonClientMetricSlots =
+        {
+            (8, 0), (12, 10), (16, 12), (20, 13), (116, 23), (120, 24), (216, 25), (220, 26), (500, 29),
+        };
+
+        // Caption, small caption, menu, status and message fonts.
+        private static readonly int[] NonClientFontOffsets = { 24, 124, 224, 316, 408 };
+
+        private static readonly (int Offset, int Slot)[] IconMetricSlots = { (4, 18), (8, 19) };
+        private const int IconMetricsTitleWrapOffset = 12;
+        private const int IconMetricsFontOffset = 16;
 
         private const int MaxWindowAncestorDepth = 32;
 
@@ -2935,6 +2971,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint DefaultDisplayFrequency = 60;
         private uint PrimaryDisplayFrequency;
         private const byte UserHandleTypeWindow = 1;
+        private const byte UserHandleTypeCallProc = 7;
         private const byte UserHandleTypeMonitor = 0xC;
         private ulong UserPrimaryMonitorHandle;
         private ushort NextUserHandleIndex = 1;
@@ -4680,26 +4717,97 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Handle == 0)
                 return false;
 
-            ushort Index = (ushort)(Handle & 0xFFFF);
-            ushort Uniq = (ushort)((Handle >> 16) & 0x7FFF);
-
-            ulong ThreadInfo = EnsureUserThreadInfo(Emulator.CurrentThread);
-
-            ulong Entry = HandleTable + (ulong)Index * EntrySize;
-            Span<byte> Data = Shared.GetSpan(0x20);
-            Data.Slice(0, 0x20).Clear();
-            WriteU64(Data, 0x00, Monitor);
-            WriteU64(Data, 0x08, ThreadInfo);
-            WriteU64(Data, 0x10, UserDesktopOwnerAddress);
-            Data[0x18] = UserHandleTypeMonitor;
-            Data[0x19] = 0;
-            WriteU16(Data, 0x1A, Uniq);
-
-            if (!Emulator._emulator.WriteMemory(Entry, Data.Slice(0, 0x20)))
+            ulong Entry = HandleTable + (Handle & 0xFFFF) * EntrySize;
+            if (!WriteUserHandleEntry(Entry, Handle, Monitor, EnsureUserThreadInfo(Emulator.CurrentThread), UserHandleTypeMonitor))
                 return false;
 
             UserPrimaryMonitorHandle = Handle;
             return true;
+        }
+
+        // user32 reads CALLPROCDATA at +0x10 (procedure) and +0x18 (flags).
+        private const uint CallProcObjectSize = 0x20;
+        private const uint CallProcTag = 0xFFFF0000;
+
+        private readonly record struct CallProc(ushort ClassAtom, ulong Procedure, ushort Options);
+
+        private readonly Dictionary<ushort, CallProc> CallProcsByIndex = new();
+        private readonly Dictionary<CallProc, ushort> CallProcIndexes = new();
+        private ulong CallProcObjectPool;
+
+        // user32 recognizes CALLPROCDATA handles by the all-ones uniqueness tag.
+        public ulong GetCallProcHandle(WinWindow Window, ulong Procedure, ushort Options)
+        {
+            CallProc Key = new CallProc(Window.ClassAtom, Procedure, Options);
+            if (CallProcIndexes.TryGetValue(Key, out ushort Existing))
+                return CallProcTag | Existing;
+
+            if (!EnsureUserSharedInfo(out _, out ulong HandleTable, out uint EntrySize))
+                return 0;
+
+            if (CallProcObjectPool == 0)
+            {
+                CallProcObjectPool = Emulator.MapUniqueAddress((ulong)UserHandleEntryCount * CallProcObjectSize, MemoryProtection.ReadWrite);
+                if (CallProcObjectPool == 0)
+                    return 0;
+            }
+
+            ulong Handle = AllocateUserHandle();
+            if (Handle == 0)
+                return 0;
+
+            ushort Index = (ushort)(Handle & 0xFFFF);
+            ulong Object = CallProcObjectPool + (ulong)Index * CallProcObjectSize;
+
+            Span<byte> Data = stackalloc byte[(int)CallProcObjectSize];
+            WriteU64(Data, 0x00, Handle);
+            WriteU64(Data, 0x10, Procedure);
+            WriteU16(Data, 0x18, Options);
+            if (!Emulator._emulator.WriteMemory(Object, Data)
+                || !WriteUserHandleEntry(HandleTable + (ulong)Index * EntrySize, Handle, Object, EnsureUserThreadInfo(Emulator.CurrentThread),
+                    UserHandleTypeCallProc))
+            {
+                ReleaseUserHandle(Handle);
+                return 0;
+            }
+
+            CallProcsByIndex[Index] = Key;
+            CallProcIndexes[Key] = Index;
+            return CallProcTag | Index;
+        }
+
+        public bool TryGetCallProc(ulong Value, out ulong Procedure)
+        {
+            Procedure = 0;
+            if (((uint)Value & CallProcTag) != CallProcTag || !CallProcsByIndex.TryGetValue((ushort)Value, out CallProc Entry))
+                return false;
+
+            Procedure = Entry.Procedure;
+            return true;
+        }
+
+        private void ReleaseCallProcs(ushort ClassAtom)
+        {
+            if (CallProcsByIndex.Count == 0 || !EnsureUserSharedInfo(out _, out ulong HandleTable, out uint EntrySize))
+                return;
+
+            List<ushort> Released = null;
+            foreach (KeyValuePair<ushort, CallProc> Pair in CallProcsByIndex)
+            {
+                if (Pair.Value.ClassAtom == ClassAtom)
+                    (Released ??= new List<ushort>()).Add(Pair.Key);
+            }
+
+            if (Released == null)
+                return;
+
+            foreach (ushort Index in Released)
+            {
+                CallProcIndexes.Remove(CallProcsByIndex[Index]);
+                CallProcsByIndex.Remove(Index);
+                WriteZeroMemory(HandleTable + (ulong)Index * EntrySize, EntrySize);
+                ReleaseUserHandle(Index);
+            }
         }
 
         public bool TryGetPrimaryMonitorWorkRect(out int Left, out int Top, out int Right, out int Bottom)
@@ -4798,8 +4906,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Window == null)
                     return false;
 
-                // NT destroys a refused window before CreateWindowEx returns.
-                return BeginWindowDestruction(Window, 0);
+                return Creation.Step == WinWindowCreationStep.NonClientCreate
+                    ? BeginWindowFree(Window)
+                    : BeginWindowDestruction(Window, 0);
             }
 
             Result = Creation.Hwnd;
@@ -5203,7 +5312,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Zeroed.Clear();
                     Emulator._emulator.WriteMemory(DcAttr, Zeroed);
 
-                    Emulator._emulator.WriteMemory(DcAttr + 0x68, 1, 4);
+                    Emulator._emulator.WriteMemory(DcAttr + DcAttrMapModeOffset, MapModeText, 4);
+                    Emulator._emulator.WriteMemory(DcAttr + DcAttrGraphicsModeOffset, GraphicsModeCompatible, 4);
+
+                    // Mark matrices stale so gdi32 calls NtGdiTransformPoints.
+                    Emulator._emulator.WriteMemory(DcAttr + DcAttrXformFlagsOffset, XformFlagsWorldIdentity | XformFlagsWorldChanged, 4);
                     Emulator._emulator.WriteMemory(DcAttr + 0x128, 0x00010001UL, 8);
                     Emulator._emulator.WriteMemory(DcAttr + 0x140, 1, 4);
                     Emulator._emulator.WriteMemory(DcAttr + 0x14C, 1, 4);
@@ -5263,6 +5376,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return RotatedBack ^ 1;
         }
 
+        internal const int DcAttrMapModeOffset = 0x68;
+        private const int DcAttrGraphicsModeOffset = 0xD0;
+        private const uint GraphicsModeCompatible = 1;
+        internal const int DcAttrBreakExtraOffset = 0x11C;
+        internal const int DcAttrBreakCountOffset = 0x120;
+        private const uint MapModeText = 1;
         private const int DcAttrBackgroundColorOffset = 0xB4;
         private const int DcAttrTextColorOffset = 0xBC;
         private const int DcAttrBackgroundModeOffset = 0xE0;
@@ -5350,24 +5469,50 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.WriteMemory(DcAttr + DcAttrVisibleTypeOffset, Buffer);
         }
 
+        private const int DcAttrXformFlagsOffset = 0x154;
+        private const uint XformFlagsWorldIdentity = 0x2;
+        private const uint XformFlagsWorldChanged = 0x80B0;
+
+        public void MarkDcWorldTransformChanged(ulong Hdc, bool Identity)
+        {
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            if (DcAttr == 0)
+                return;
+
+            uint Flags = Emulator.ReadMemoryUInt(DcAttr + DcAttrXformFlagsOffset) | XformFlagsWorldChanged;
+            Flags = Identity ? Flags | XformFlagsWorldIdentity : Flags & ~XformFlagsWorldIdentity;
+            Emulator._emulator.WriteMemory(DcAttr + DcAttrXformFlagsOffset, Flags, 4);
+        }
+
         // Device position of logical 0,0.
         public void ReadDcOrigin(ulong Hdc, out int X, out int Y)
+        {
+            if (!ReadDcPageOrigin(Hdc, out X, out Y))
+                return;
+
+            Win32kHelper.GetWorldFix(Emulator, Hdc, out int FixX, out int FixY);
+            X = unchecked(X + Win32kHelper.FixToPixel(FixX));
+            Y = unchecked(Y + Win32kHelper.FixToPixel(FixY));
+        }
+
+        public bool ReadDcPageOrigin(ulong Hdc, out int X, out int Y)
         {
             X = 0;
             Y = 0;
 
             ulong DcAttr = GetDcAttributeAddress(Hdc);
             if (DcAttr == 0)
-                return;
+                return false;
 
             Span<byte> Origins = stackalloc byte[DcAttrViewportOrgYOffset + 4 - DcAttrWindowOrgXOffset];
             if (!Emulator.ReadMemory(DcAttr + DcAttrWindowOrgXOffset, Origins))
-                return;
+                return false;
 
             X = unchecked(BinaryPrimitives.ReadInt32LittleEndian(Origins.Slice(DcAttrViewportOrgXOffset - DcAttrWindowOrgXOffset))
                 - BinaryPrimitives.ReadInt32LittleEndian(Origins));
             Y = unchecked(BinaryPrimitives.ReadInt32LittleEndian(Origins.Slice(DcAttrViewportOrgYOffset - DcAttrWindowOrgXOffset))
                 - BinaryPrimitives.ReadInt32LittleEndian(Origins.Slice(DcAttrWindowOrgYOffset - DcAttrWindowOrgXOffset)));
+            return true;
         }
 
         // gdi32 reads this back out of DC_ATTR and only calls the kernel when it cannot batch the change.
@@ -5451,6 +5596,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int GdiBatchPatBlt = 0;
         private const int GdiBatchPolyPatBlt = 1;
         private const int GdiBatchTextOut = 2;
+        private const int GdiBatchTextOutRect = 3;
         private const int GdiBatchExtSelectClipRgn = 5;
         private const int GdiBatchSelectFont = 6;
         private const int GdiBatchDeleteRegion = 7;
@@ -5551,6 +5697,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     RunGdiBatchTextOut(Hdc, Entry);
                     return;
 
+                case GdiBatchTextOutRect:
+                    RunGdiBatchTextOutRect(Hdc, Entry);
+                    return;
+
                 case GdiBatchExtSelectClipRgn:
                     if (Entry.Length >= 0x18)
                     {
@@ -5574,45 +5724,62 @@ namespace Brovan.Core.Emulation.OS.Windows
             int X = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x18));
             int Y = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x1C));
             uint Options = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(0x20));
-            int RectLeft = 0, RectTop = 0, RectRight = 0, RectBottom = 0;
-            if ((Options & GdiBatchNoRectFlag) == 0)
-            {
-                RectLeft = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x24));
-                RectTop = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x28));
-                RectRight = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x2C));
-                RectBottom = BinaryPrimitives.ReadInt32LittleEndian(Entry.Slice(0x30));
-            }
+            bool HasRect = (Options & GdiBatchNoRectFlag) == 0;
+            GdiClipRect Rect = HasRect ? Win32kHelper.ReadGuestRect(Entry.Slice(0x24)) : default;
 
             // NT: the string follows the header, and a Dx array follows the string.
             uint Count = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(0x38));
             ulong RecordViewport = BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(0x4C));
 
+            // ETO_OPAQUE can fill a rectangle with no text.
             int Payload = Entry.Length - GdiBatchTextOutStringOffset;
-            if (Count == 0 || Count > (uint)Payload / 2)
+            if (Count > (uint)Payload / 2)
                 return;
 
             string Text = System.Text.Encoding.Unicode.GetString(Entry.Slice(GdiBatchTextOutStringOffset, (int)Count * 2));
 
-            // NT: the flush draws through the record's viewport origin, not the DC's current one.
-            ulong DcAttr = GetDcAttributeAddress(Hdc);
-            if (DcAttr != 0)
-            {
-                ulong CurrentViewport = Emulator.ReadMemoryULong(DcAttr + DcAttrViewportOrgXOffset);
-                int ShiftX = unchecked((int)(uint)RecordViewport - (int)(uint)CurrentViewport);
-                int ShiftY = unchecked((int)(uint)(RecordViewport >> 32) - (int)(uint)(CurrentViewport >> 32));
-                X = unchecked(X + ShiftX);
-                Y = unchecked(Y + ShiftY);
-                RectLeft = unchecked(RectLeft + ShiftX);
-                RectTop = unchecked(RectTop + ShiftY);
-                RectRight = unchecked(RectRight + ShiftX);
-                RectBottom = unchecked(RectBottom + ShiftY);
-            }
+            GetBatchViewportShift(Hdc, RecordViewport, out int ShiftX, out int ShiftY);
+            X = unchecked(X + ShiftX);
+            Y = unchecked(Y + ShiftY);
+            Rect.Left = unchecked(Rect.Left + ShiftX);
+            Rect.Top = unchecked(Rect.Top + ShiftY);
+            Rect.Right = unchecked(Rect.Right + ShiftX);
+            Rect.Bottom = unchecked(Rect.Bottom + ShiftY);
 
             ulong Hwnd = Win32kHelper.GetHwndFromDc(Emulator, Hdc);
             if (Hwnd == 0)
-                Win32kHelper.TryRenderTextToDcBitmap(Emulator, Hdc, Text, X, Y, Options);
+                Win32kHelper.TryRenderTextToDcBitmap(Emulator, Hdc, Text, X, Y, Options & ~GdiBatchNoRectFlag, HasRect ? Rect : null);
             else
-                EnqueueTextRender(Hwnd, Hdc, Win32kHelper.ResolveDcFont(Emulator, Hdc), Text, X, Y, RectLeft, RectTop, RectRight, RectBottom, Options);
+                EnqueueTextRender(Hwnd, Hdc, Win32kHelper.ResolveDcFont(Emulator, Hdc), Text, X, Y, Rect.Left, Rect.Top, Rect.Right, Rect.Bottom, Options);
+        }
+
+        private void RunGdiBatchTextOutRect(ulong Hdc, ReadOnlySpan<byte> Entry)
+        {
+            const int RecordSize = 0x28;
+            if (Entry.Length < RecordSize)
+                return;
+
+            GdiClipRect Rect = Win32kHelper.ReadGuestRect(Entry.Slice(0x0C));
+            ulong RecordViewport = BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(0x1C));
+            uint BackColor = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(0x24)) & 0x00FFFFFF;
+
+            GetBatchViewportShift(Hdc, RecordViewport, out int ShiftX, out int ShiftY);
+            Win32kHelper.FillDcRect(Emulator, Hdc, Win32kHelper.ShiftRect(Rect, ShiftX, ShiftY), BackColor);
+        }
+
+        // gdi32 can change the viewport between recording and flushing a batch.
+        private void GetBatchViewportShift(ulong Hdc, ulong RecordViewport, out int ShiftX, out int ShiftY)
+        {
+            ShiftX = 0;
+            ShiftY = 0;
+
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            if (DcAttr == 0)
+                return;
+
+            ulong CurrentViewport = Emulator.ReadMemoryULong(DcAttr + DcAttrViewportOrgXOffset);
+            ShiftX = unchecked((int)(uint)RecordViewport - (int)(uint)CurrentViewport);
+            ShiftY = unchecked((int)(uint)(RecordViewport >> 32) - (int)(uint)(CurrentViewport >> 32));
         }
 
         public bool FreeGdiHandle(ulong Handle)
@@ -6019,15 +6186,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             });
         }
 
-        public bool TranslateVirtualKey(uint VirtualKey, uint ScanCode, out char Character)
+        public bool TryTranslateHostKey(uint VirtualKey, uint ScanCode, ReadOnlySpan<byte> KeyState, Span<char> Output, out int Count)
         {
-            Character = '\0';
+            Count = 0;
 
             EnsureDesktopDisplay();
-            if (DesktopDisplay is GuiThreadManager guiManager)
-                return guiManager.TranslateVirtualKey(VirtualKey, ScanCode, out Character);
-
-            return false;
+            return DesktopDisplay is GuiThreadManager guiManager && guiManager.TryTranslateKey(VirtualKey, ScanCode, KeyState, Output, out Count);
         }
 
         public bool MeasureText(IntPtr Font, string Text, out int Width, out int Height)
@@ -6314,7 +6478,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             DefaultTextFontResolved = true;
             DefaultTextFont = CreateHostFont(new FontDescription(
-                -(int)((MessageFontPointSize * Win32kDpi.GetEffectiveDpi(Emulator)) / 72),
+                -GetMessageFontPixels(Win32kDpi.GetEffectiveDpi(Emulator)),
                 0, MessageFontWeight, false, false, false, MessageFontCharSet, 0, MessageFontFace));
 
             return DefaultTextFont;
@@ -6344,9 +6508,29 @@ namespace Brovan.Core.Emulation.OS.Windows
         private void WriteUserMessageFont(ulong Address, uint Dpi)
         {
             Span<byte> Font = stackalloc byte[LogFontSize];
+            WriteSystemLogFont(Font, -GetMessageFontPixels(Dpi));
+            Emulator.WriteMemory(Address, Font);
+        }
+
+        private static int GetMessageFontPixels(uint Dpi)
+        {
+            return (int)((MessageFontPointSize * Dpi) / 72);
+        }
+
+        // NT scales message fonts from the system DPI.
+        internal int GetSystemFontHeight(uint Dpi)
+        {
+            uint SystemDpi = Win32kDpi.GetEffectiveDpi(Emulator);
+            long Pixels = GetMessageFontPixels(SystemDpi);
+            return -(int)(Dpi == SystemDpi ? Pixels : (Pixels * Dpi + SystemDpi / 2) / SystemDpi);
+        }
+
+        internal static void WriteSystemLogFont(Span<byte> Font, int Height)
+        {
+            Font = Font.Slice(0, LogFontSize);
             Font.Clear();
 
-            BinaryPrimitives.WriteInt32LittleEndian(Font, -(int)((MessageFontPointSize * Dpi) / 72));
+            BinaryPrimitives.WriteInt32LittleEndian(Font, Height);
             BinaryPrimitives.WriteInt32LittleEndian(Font.Slice(16), 400); // FW_NORMAL
             Font[23] = 1; // DEFAULT_CHARSET
             Font[26] = 5; // CLEARTYPE_QUALITY
@@ -6355,8 +6539,37 @@ namespace Brovan.Core.Emulation.OS.Windows
             Face.Clear();
             MessageFontFace.AsSpan().CopyTo(Face);
             Encoding.Unicode.GetBytes(Face, Font.Slice(LogFontFaceNameOffset));
+        }
 
-            Emulator.WriteMemory(Address, Font);
+        internal void WriteNonClientMetrics(Span<byte> Metrics, uint Dpi)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(Metrics.Slice(NonClientBorderWidthOffset), ScaleMetric(WindowBorderWidth, Dpi));
+
+            foreach ((int Offset, int Slot) in NonClientMetricSlots)
+                BinaryPrimitives.WriteInt32LittleEndian(Metrics.Slice(Offset), GetDpiDependentMetric(Slot, Dpi));
+
+            int FontHeight = GetSystemFontHeight(Dpi);
+            foreach (int Offset in NonClientFontOffsets)
+                WriteSystemLogFont(Metrics.Slice(Offset), FontHeight);
+        }
+
+        internal void WriteIconMetrics(Span<byte> Metrics, uint Dpi)
+        {
+            foreach ((int Offset, int Slot) in IconMetricSlots)
+                BinaryPrimitives.WriteInt32LittleEndian(Metrics.Slice(Offset), GetDpiDependentMetric(Slot, Dpi));
+
+            BinaryPrimitives.WriteInt32LittleEndian(Metrics.Slice(IconMetricsTitleWrapOffset), IconTitleWrap);
+            WriteSystemLogFont(Metrics.Slice(IconMetricsFontOffset), GetSystemFontHeight(Dpi));
+        }
+
+        // DPI values outside SERVERINFO's table scale from 96 DPI.
+        private int GetDpiDependentMetric(int Slot, uint Dpi)
+        {
+            bool HasPlateau = Dpi == Win32kDpi.GetEffectiveDpi(Emulator)
+                || (Dpi >= HostDisplayMetrics.DefaultDpi && Dpi % DpiPlateauStep == 0
+                    && (Dpi - DpiPlateauBase) / DpiPlateauStep < UserServerInfoDpiBlockCount);
+
+            return HasPlateau ? ScaleDpiMetric(Slot, Dpi) : ScaleMetric(ScaleDpiMetric(Slot, HostDisplayMetrics.DefaultDpi), Dpi);
         }
 
         private ulong EnsureUserHandleTable()
@@ -6801,7 +7014,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             ushort Index = (ushort)(Window.Hwnd & 0xFFFF);
-            ushort Uniq = (ushort)((Window.Hwnd >> 16) & 0x7FFF);
             if (Index == 0 || Index >= UserHandleEntryCount)
                 return false;
 
@@ -6821,17 +7033,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong Entry = HandleTable + (ulong)Index * EntrySize;
             Window.UserHandleEntryAddress = Entry;
+            return WriteUserHandleEntry(Entry, Window.Hwnd, ClientWindow, ThreadInfo, UserHandleTypeWindow);
+        }
 
-            Span<byte> Data = Shared.GetSpan(0x20);
-            Data.Slice(0, 0x20).Clear();
-            WriteU64(Data, 0x00, ClientWindow);
+        private bool WriteUserHandleEntry(ulong Entry, ulong Handle, ulong Object, ulong ThreadInfo, byte Type)
+        {
+            Span<byte> Data = stackalloc byte[(int)UserHandleEntrySize];
+            WriteU64(Data, 0x00, Object);
             WriteU64(Data, 0x08, ThreadInfo);
             WriteU64(Data, 0x10, UserDesktopOwnerAddress);
-            Data[0x18] = UserHandleTypeWindow;
-            Data[0x19] = 0;
-            WriteU16(Data, 0x1A, Uniq);
-
-            return Emulator._emulator.WriteMemory(Entry, Data.Slice(0, 0x20));
+            Data[0x18] = Type;
+            WriteU16(Data, 0x1A, (ushort)((Handle >> 16) & 0x7FFF));
+            return Emulator._emulator.WriteMemory(Entry, Data);
         }
 
         private void ClearUserWindowHandleEntry(WinWindow Window)
@@ -7017,6 +7230,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int UserWindowThreadIdOffset = 0x148;
         private const int UserWindowProcessIdOffset = 0x14C;
         private const int UserWindowUserDataOffset = 0xD8;
+        // user32 activates this context before calling the window procedure.
+        private const int UserWindowActivationContextOffset = 0xE0;
         private const int UserWindowStateOffset = 0x12;
         private const byte UserWindowStateDialog = 0x01;
         internal const uint UserWindowStateVisible = 0x800;
@@ -7135,7 +7350,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowUserDataOffset, Window.UserData, 8);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xB8, Window.ClientTextBytes, 4);
             Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xC0, TextObject, 8);
-            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + 0xE0, 0UL, 8);
+            Emulator._emulator.WriteMemory(Window.ClientWindowAddress + (ulong)UserWindowActivationContextOffset, Window.ActivationContext, 8);
 
             PublishWindowPaintState(Window);
 
@@ -7353,6 +7568,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinWindowClassesByAtom.Remove(WindowClass.Atom);
             WinWindowClassAtomsByKey.Remove(BuildWindowClassKey(WindowClass.InstanceHandle, WindowClass.Name, WindowClass.Version));
+            ReleaseCallProcs(WindowClass.Atom);
             return true;
         }
 
@@ -7371,6 +7587,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             RegisteredMessageAtoms[Name] = Atom;
             RegisteredMessageNames[Atom] = Name;
             return Atom;
+        }
+
+        public bool TryFindGlobalAtom(string Name, out ushort Atom)
+        {
+            Atom = 0;
+            return !string.IsNullOrEmpty(Name) && RegisteredMessageAtoms.TryGetValue(Name, out Atom);
         }
 
         public bool TryGetAtomName(ushort Atom, out string Name)
@@ -7553,13 +7775,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (WinWindowClassAtomsByKey.TryGetValue(Key, out Atom) && WinWindowClassesByAtom.TryGetValue(Atom, out WindowClass))
                 return WindowClass;
 
+            string Identity = string.IsNullOrEmpty(Version) ? Name : Version;
             foreach (WinWindowClass Candidate in WinWindowClassesByAtom.Values)
             {
-                if (!string.Equals(Candidate.Name, Name, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                if (string.IsNullOrEmpty(Version) || string.IsNullOrEmpty(Candidate.Version) ||
-                    string.Equals(Candidate.Version, Version, StringComparison.OrdinalIgnoreCase))
+                string CandidateIdentity = string.IsNullOrEmpty(Candidate.Version) ? Candidate.Name : Candidate.Version;
+                if (string.Equals(CandidateIdentity, Identity, StringComparison.OrdinalIgnoreCase))
                     return Candidate;
             }
 
@@ -8374,6 +8594,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             WinWindowDestruction Destruction = new WinWindowDestruction { Result = Result };
             PlanWindowDestruction(Destruction, Window, 0);
+            return RunWindowDestruction(Destruction);
+        }
+
+        // NT frees windows with WM_NCDESTROY only, children first.
+        private bool BeginWindowFree(WinWindow Window)
+        {
+            WinWindowDestruction Destruction = new WinWindowDestruction();
+            PlanTreeNonClientDestroyMessages(Destruction, Window, 0);
             return RunWindowDestruction(Destruction);
         }
 
@@ -10628,7 +10856,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // The section has no handle, so unmapping the view frees it.
-        public ulong MapUnnamedSectionView(byte[] Data, MemoryProtection Protection)
+        public ulong MapUnnamedSectionView(ReadOnlySpan<byte> Data, MemoryProtection Protection)
         {
             ulong Base = Emulator.MapUniqueAddress((ulong)Data.Length, Protection);
             if (Base == 0)

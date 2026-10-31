@@ -86,6 +86,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         }
 
         private readonly IntPtr _instanceHandle;
+        private readonly uint _threadId;
         private readonly string _className;
 
         /// <summary>
@@ -137,7 +138,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private const uint WM_KEYDOWN = 0x0100;
         private const uint WM_KEYUP = 0x0101;
-        private const uint WM_CHAR = 0x0102;
         private const uint WM_SYSKEYDOWN = 0x0104;
         private const uint WM_SYSKEYUP = 0x0105;
         private const uint WM_SYSCOMMAND = 0x0112;
@@ -250,6 +250,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 throw new PlatformNotSupportedException("Windows window manager needs to be used on a Windows system.");
 
             _instanceHandle = GetModuleHandleW(null);
+            _threadId = GetCurrentThreadId();
             _className = $"BrovanWindow_{Guid.NewGuid():N}";
             RegisterWindowClass();
         }
@@ -856,24 +857,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 ArrayPool<POINT>.Shared.Return(rented);
         }
 
-        public unsafe bool TranslateVirtualKey(uint virtualKey, uint scanCode, out char character)
+        public unsafe int TranslateKey(uint virtualKey, uint scanCode, ReadOnlySpan<byte> keyState, Span<char> output)
         {
-            character = '\0';
-
-            Span<byte> keyboardState = stackalloc byte[256];
-            fixed (byte* state = keyboardState)
-            {
-                if (!GetKeyboardState(state))
-                    return false;
-
-                char* buffer = stackalloc char[8];
-                if (ToUnicode(virtualKey, scanCode, state, buffer, 8, 0) <= 0)
-                    return false;
-
-                character = buffer[0];
-            }
-
-            return true;
+            fixed (byte* state = keyState)
+            fixed (char* buffer = output)
+                return ToUnicodeEx(virtualKey, scanCode, state, buffer, output.Length, ToUnicodeKeepKeyboardState, GetKeyboardLayout(_threadId));
         }
 
         public bool MeasureText(IntPtr font, string text, out int width, out int height)
@@ -1888,7 +1876,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     case WM_MOUSEHWHEEL:
                     case WM_KEYDOWN:
                     case WM_KEYUP:
-                    case WM_CHAR:
                     case WM_SYSKEYDOWN:
                     case WM_SYSKEYUP:
                         HostEventQueue.Enqueue(msg, unchecked((ulong)(long)wParam), unchecked((ulong)(long)lParam), _guestWindow);
@@ -2444,12 +2431,16 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool PatBlt(IntPtr hdc, int x, int y, int width, int height, uint rop);
 
-        [DllImport("user32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern unsafe bool GetKeyboardState(byte* lpKeyState);
+        [DllImport("user32.dll")]
+        private static extern unsafe int ToUnicodeEx(uint wVirtKey, uint wScanCode, byte* lpKeyState, char* pwszBuff, int cchBuff, uint wFlags, IntPtr dwhkl);
 
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern unsafe int ToUnicode(uint wVirtKey, uint wScanCode, byte* lpKeyState, char* pwszBuff, int cchBuff, uint wFlags);
+        private const uint ToUnicodeKeepKeyboardState = 0x4;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetKeyboardLayout(uint idThread);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern uint MsgWaitForMultipleObjectsEx(uint nCount, ref IntPtr pHandles, uint dwMilliseconds, uint dwWakeMask, uint dwFlags);

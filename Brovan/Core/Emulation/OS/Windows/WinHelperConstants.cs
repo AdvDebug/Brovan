@@ -353,6 +353,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_NO_MATCH = 0xC0000272,
         STATUS_INVALID_IMAGE_HASH = 0xC0000428,
         STATUS_ALREADY_INITIALIZED = 0xC0000510,
+        STATUS_SXS_CANT_GEN_ACTCTX = 0xC0150002,
         STATUS_GRAPHICS_PRESENT_INVALID_WINDOW = 0xC01E000F,
         STATUS_GRAPHICS_PRESENT_BUFFER_NOT_BOUND = 0xC01E0010,
         STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE = 0xC01E0200,
@@ -2209,12 +2210,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public byte LayeredAlpha;
 
         public Dictionary<ushort, ulong> AtomProperties = new();
-        public Dictionary<string, ulong> StringProperties = new(StringComparer.OrdinalIgnoreCase);
 
         // Top of the z-order first.
         public List<ulong> Children = new();
 
         public ulong WndProc;
+        public ulong ActivationContext;
         public ushort Fnid;
         public int WindowExtraBytes;
         public bool IsDialog;
