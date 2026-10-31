@@ -46,10 +46,12 @@
             android:screenOrientation="landscape"
             android:launchMode="singleTask" />
 
-        <!-- One process per guest, and Android fixes the processes at build time. GuestSpawner picks a free one. -->
+        <!-- Separate tasks prevent guest switches from finishing other activities. -->
         <activity
             android:name=".GuestActivity1"
             android:process=":guest1"
+            android:taskAffinity=":guest1"
+            android:autoRemoveFromRecents="true"
             android:exported="false"
             android:theme="@style/Theme.Brovan.Player"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
@@ -59,6 +61,8 @@
         <activity
             android:name=".GuestActivity2"
             android:process=":guest2"
+            android:taskAffinity=":guest2"
+            android:autoRemoveFromRecents="true"
             android:exported="false"
             android:theme="@style/Theme.Brovan.Player"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
@@ -68,6 +72,8 @@
         <activity
             android:name=".GuestActivity3"
             android:process=":guest3"
+            android:taskAffinity=":guest3"
+            android:autoRemoveFromRecents="true"
             android:exported="false"
             android:theme="@style/Theme.Brovan.Player"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
@@ -77,6 +83,8 @@
         <activity
             android:name=".GuestActivity4"
             android:process=":guest4"
+            android:taskAffinity=":guest4"
+            android:autoRemoveFromRecents="true"
             android:exported="false"
             android:theme="@style/Theme.Brovan.Player"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"

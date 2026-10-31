@@ -29,6 +29,7 @@ import androidx.core.content.ContextCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+import androidx.lifecycle.Lifecycle;
 
 import com.google.android.material.sidesheet.SideSheetDialog;
 import com.google.android.material.slider.Slider;
@@ -111,6 +112,7 @@ public class PlayerActivity extends AppCompatActivity
     private final int[] panelOrigin = new int[2];
     private SideSheetDialog menu;
     private ControlOverlay controls;
+    private TaskbarView taskbar;
     private Settings settings;
     private ProgramSettings program;
     private Library library;
@@ -224,6 +226,8 @@ public class PlayerActivity extends AppCompatActivity
         controls = findViewById(R.id.controls);
         debugger = findViewById(R.id.debugger);
         debugger.setListener(this);
+        taskbar = findViewById(R.id.taskbar);
+        TaskbarView.publish(this, getIntent().getStringExtra(EXTRA_NAME), getIntent().getStringExtra(EXTRA_EXECUTABLE));
 
         controls.setCustomLayout(ControlLayout.fromJson(getIntent().getStringExtra(EXTRA_LAYOUT)));
         int scheme = getIntent().getIntExtra(EXTRA_CONTROLS, 0);
@@ -652,9 +656,30 @@ public class PlayerActivity extends AppCompatActivity
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        taskbar.startWatching();
+    }
+
+    @Override
     protected void onPause() {
         super.onPause();
         controls.releaseAll();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        taskbar.stopWatching();
+    }
+
+    @Override
+    public void finish() {
+        if (!isFinishing() && getLifecycle().getCurrentState().isAtLeast(Lifecycle.State.RESUMED)) {
+            GuestSpawner.showNext(this);
+        }
+
+        super.finish();
     }
 
     /**
@@ -845,6 +870,7 @@ public class PlayerActivity extends AppCompatActivity
         // The emulator refuses a second guest in the same process, so the process goes with the activity.
         if (isFinishing()) {
             finishRun(null);
+            TaskbarView.withdraw(this);
             android.os.Process.killProcess(android.os.Process.myPid());
         }
     }

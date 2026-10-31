@@ -277,6 +277,7 @@
     <string name="terminal_closed">The program closed. Press Back to leave.</string>
     <string name="terminal_stopped">The program stopped unexpectedly. Press Back to leave.</string>
     <string name="player_resume">Resume</string>
+    <string name="taskbar_starting">Starting…</string>
 
     <string name="debug_run">Run</string>
     <string name="debug_continue">Continue</string>

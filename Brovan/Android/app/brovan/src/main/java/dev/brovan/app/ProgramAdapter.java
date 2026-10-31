@@ -380,7 +380,7 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         }
     }
 
-    private static final class Monogram extends Drawable {
+    static final class Monogram extends Drawable {
 
         private final Paint tile = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint glyph = new Paint(Paint.ANTI_ALIAS_FLAG);
