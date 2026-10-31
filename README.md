@@ -5,7 +5,7 @@
   
   [![.NET](https://img.shields.io/badge/.NET-10.0-512BD4?style=flat-square&logo=dotnet)](https://dotnet.microsoft.com/)
   [![Language](https://img.shields.io/badge/Language-C%23-239120?style=flat-square&logo=csharp)](https://learn.microsoft.com/dotnet/csharp/)
-  [![License](https://img.shields.io/badge/License-GPL--2.0-blue?style=flat-square)](https://www.gnu.org/licenses/gpl-2.0.html)
+  [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
   
   <p align="center">
     <b>A user-mode x86_64 binary emulator for inspecting programs, tracing syscalls, and safely running untrusted software.</b>
@@ -183,4 +183,8 @@ Thanks to my friend <a href="https://github.com/ZypherionTechnologies">Adam (Zyp
 
 ## License
 
-GPL-2.0
+Brovan is licensed under the [MIT License](LICENSE).
+
+The Unicorn patches in [Brovan/native/unicorn](Brovan/native/unicorn) are GPL-2.0, like
+[Unicorn](https://github.com/unicorn-engine/unicorn) itself. Brovan's releases include Unicorn, so a release as a whole
+is distributed under the GPL-2.0, but Brovan's own code in it stays MIT and can be reused under MIT without Unicorn.

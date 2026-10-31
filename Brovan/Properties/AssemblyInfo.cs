@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Brovan.Fuzz")]
 [assembly: AssemblyCompany("AdvDebug")]
 [assembly: AssemblyConfiguration("Release")]
-[assembly: AssemblyCopyright("Copyright (c) 2026 AdvDebug. Licensed under the GNU General Public License v2.0.")]
+[assembly: AssemblyCopyright("Copyright (c) 2026 AdvDebug. Licensed under the MIT License.")]
 [assembly: AssemblyFileVersion("1.0.0.0")]
 [assembly: AssemblyInformationalVersion("1.0.0")]
 [assembly: AssemblyProduct("Brovan")]

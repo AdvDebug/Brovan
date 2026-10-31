@@ -279,4 +279,27 @@ Log.LogMessage(MessageImportance.High,
     <Copy SourceFiles="$(UnicornArtifact)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
     <Message Text="[Brovan.Unicorn] Copied $(UnicornLibName) -> $(PublishDir)" Importance="high" />
   </Target>
+
+  <!-- Unicorn is GPL-2.0, so every publish that ships it carries the GPL text beside Brovan's own license. -->
+  <Target Name="WriteLicenseToPublishOutput" AfterTargets="Publish" Condition="'$(SkipUnicornNative)' != 'true'">
+    <PropertyGroup>
+      <_BrovanLicenseFile>$([MSBuild]::NormalizePath($(MSBuildThisFileDirectory), '..', 'LICENSE'))</_BrovanLicenseFile>
+      <_PublishLicenseText>Brovan is licensed under the MIT License (first text below).
+
+This copy of Brovan also includes Unicorn ($(UnicornLibName)) with Brovan's patches, licensed under the
+GNU General Public License version 2 (second text below).
+Source code: https://github.com/AdvDebug/Brovan
+Unicorn $(UnicornTag): https://github.com/unicorn-engine/unicorn/releases/tag/$(UnicornTag)
+
+================ MIT License ================
+
+$([System.IO.File]::ReadAllText($(_BrovanLicenseFile)))
+================ GNU General Public License, version 2 ================
+
+$([System.IO.File]::ReadAllText('$(UnicornPatchDir)COPYING'))</_PublishLicenseText>
+    </PropertyGroup>
+    <!-- Escaped so the semicolons in the license texts do not split them into separate lines. -->
+    <WriteLinesToFile File="$(PublishDir)LICENSE.txt" Lines="$([MSBuild]::Escape($(_PublishLicenseText.Replace('&#13;', '').Replace('&#10;', $([System.Environment]::NewLine)))))" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <Message Text="[Brovan.Unicorn] Wrote LICENSE.txt -> $(PublishDir)" Importance="high" />
+  </Target>
 </Project>

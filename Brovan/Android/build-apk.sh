@@ -150,6 +150,10 @@ PRODUCED="$(find "$PUBLISH_DIR" -maxdepth 1 -name 'Brovan.so' -o -maxdepth 1 -na
 cp "$PRODUCED" "$JNI_LIBS/libBrovan.so"
 file "$JNI_LIBS/libBrovan.so"
 
+# libunicorn.so is GPL-2.0, so the license text the publish wrote has to ship inside the APK with it.
+mkdir -p "$GRADLE_PROJECT/brovan/src/main/assets"
+cp "$PUBLISH_DIR/LICENSE.txt" "$GRADLE_PROJECT/brovan/src/main/assets/LICENSE.txt"
+
 # The Vulkan shim is a guest PE, not a host library, so it ships as an asset and the app
 # drops it into the guest's System32 on launch. Its C sources come from the Roslyn
 # generator that runs while Brovan compiles, so this has to follow the publish above -
