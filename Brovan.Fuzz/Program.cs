@@ -45,6 +45,8 @@ internal static class Program
             return 2;
         }
 
+        MemoryGuard.LimitData();
+
         // --target_arg carries exactly one argument, so the target is part of the command word.
         if (args[0].StartsWith("libfuzzer:", StringComparison.Ordinal))
         {
@@ -474,6 +476,29 @@ internal static class MemoryGuard
             $"[fuzz] resident set {resident >> 20} MB is over the {LimitBytes >> 20} MB cap");
         Console.Error.Flush();
         Environment.FailFast("Brovan.Fuzz: harness memory growth");
+    }
+
+    private const ulong DataLimitBytes = 2048UL << 20;
+    private const int RlimitData = 2;
+
+    private struct RLimit
+    {
+        public ulong Current;
+        public ulong Maximum;
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int getrlimit(int resource, out RLimit limit);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int setrlimit(int resource, ref RLimit limit);
+
+    public static void LimitData()
+    {
+        if (getrlimit(RlimitData, out RLimit limit) != 0 || limit.Current <= DataLimitBytes)
+            return;
+        limit.Current = Math.Min(DataLimitBytes, limit.Maximum);
+        setrlimit(RlimitData, ref limit);
     }
 }
 
