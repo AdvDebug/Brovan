@@ -36,6 +36,7 @@ internal static class Program
     [DllImport("libc", EntryPoint = "_exit")]
     private static extern void HardExit(int code);
 
+    // Keep Brovan.dll references out of Main. Its initializer needs the coverage map.
     private static int Main(string[] args)
     {
         if (args.Length == 0)
@@ -49,14 +50,13 @@ internal static class Program
         {
             string target = args[0]["libfuzzer:".Length..];
             FuzzBody body = Resolve(target);
-            Utils.DiscardErrorLog = true;
 
-            // Instrumented code writes to memory Fuzzer.Run maps, so Prepare waits for the first input.
             bool ready = false;
             SharpFuzz.Fuzzer.LibFuzzer.Run(d =>
             {
                 if (!ready)
                 {
+                    Utils.DiscardErrorLog = true;
                     Prepare(target);
                     ready = true;
                 }
@@ -75,7 +75,6 @@ internal static class Program
                 string target = args.Length > 1 ? args[1] : "struct";
                 int seconds = args.Length > 2 ? int.Parse(args[2]) : 30;
                 int seed = args.Length > 3 ? int.Parse(args[3]) : Environment.TickCount;
-                Utils.DiscardErrorLog = true;
                 return SelfDrive.Run(target, Resolve(target), Prepare, seconds, seed);
             }
 
@@ -309,6 +308,7 @@ internal static class SelfDrive
 
     public static int Run(string target, FuzzBody body, Action<string> prepare, int seconds, int seed)
     {
+        Utils.DiscardErrorLog = true;
         prepare(target);
 
         string dir = Path.Combine(Path.GetTempPath(), $"brovfuzz-{target}-{seed}");
