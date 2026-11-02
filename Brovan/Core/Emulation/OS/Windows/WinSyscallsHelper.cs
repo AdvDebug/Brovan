@@ -5314,6 +5314,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ushort Upper = (ushort)((type & GdiHandleTypeMask) | (Stock ? GdiHandleStockBit : 0) | (GdiHandleUniq[Index] << GdiHandleUniqShift));
 
             Span<byte> EntryData = stackalloc byte[(int)GdiHandleEntrySize];
+            EntryData.Clear();
             BinaryPrimitives.WriteUInt32LittleEndian(EntryData.Slice(0x08), W32Pid);
             BinaryPrimitives.WriteUInt16LittleEndian(EntryData.Slice(0x0C), Upper);
             EntryData[0x0E] = (byte)(type & 0x1F);

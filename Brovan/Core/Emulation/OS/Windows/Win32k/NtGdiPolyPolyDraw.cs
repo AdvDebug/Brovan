@@ -42,6 +42,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            if (!Instance.IsAccessible(CountsPtr, (ulong)FigureCount * 4, false))
+            {
+                Instance.SetRawSyscallReturn(0);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
             Span<byte> CountBytes = stackalloc byte[4];
             ulong TotalPoints = 0;
             for (uint Figure = 0; Figure < FigureCount && TotalPoints <= MaxPoints; Figure++)
@@ -52,7 +58,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     TotalPoints += BinaryPrimitives.ReadUInt32LittleEndian(CountBytes);
             }
 
-            if (TotalPoints > MaxPoints)
+            if (TotalPoints > MaxPoints || !Instance.IsAccessible(PointsPtr, TotalPoints * PointSize, false))
             {
                 Instance.SetRawSyscallReturn(0);
                 return NTSTATUS.STATUS_SUCCESS;

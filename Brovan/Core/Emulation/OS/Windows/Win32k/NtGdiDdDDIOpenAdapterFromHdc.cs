@@ -16,6 +16,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             Span<byte> Output = stackalloc byte[OutputSize];
+            Output.Clear();
 
             NTSTATUS Status = NTSTATUS.STATUS_INVALID_PARAMETER;
             DxgkProcess Process = Instance.WinHelper.DxgkProcess;

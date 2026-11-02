@@ -7,6 +7,9 @@ on:
     tags:
       - 'v*'
 
+env:
+  GUEST_DRIVER_FILES: System32/libgallium_wgl.dll SysWOW64/libgallium_wgl.dll System32/clvk.dll SysWOW64/clvk.dll
+
 jobs:
   guest-drivers:
     name: Build guest GPU driver ${{ matrix.driver }} ${{ matrix.arch }}
@@ -139,10 +142,11 @@ jobs:
         shell: bash
         run: |
           drivers="Brovan.Graphics/guest-drivers/bin"
+          for file in $GUEST_DRIVER_FILES; do
+            [ -f "$drivers/$file" ] || echo "::warning::guest GPU driver $file is missing, so this build ships without it"
+          done
           if [ -d "$drivers" ]; then
             cp -Rf "$drivers/." "artifacts/publish/${{ matrix.rid }}/VirtualFS/C/Windows/"
-          else
-            echo "::warning::no guest GPU drivers, so this build ships without hardware OpenGL"
           fi
 
       - name: Build the BrovSteam client shim (Windows)
@@ -196,6 +200,13 @@ jobs:
           pattern: guest-drivers-*
           merge-multiple: true
           path: Brovan.Graphics/guest-drivers/bin
+
+      - name: Check the guest GPU drivers
+        shell: bash
+        run: |
+          for file in $GUEST_DRIVER_FILES; do
+            [ -f "Brovan.Graphics/guest-drivers/bin/$file" ] || echo "::warning::guest GPU driver $file is missing, so the APK ships without it"
+          done
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
