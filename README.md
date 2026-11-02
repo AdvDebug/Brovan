@@ -177,6 +177,10 @@ Thanks to <a href="https://github.com/icedland/iced">Iced library</a> for x86_64
 
 Thanks to <a href="https://github.com/unicorn-engine/unicorn">Unicorn Engine</a> for the core emulator.
 
+Thanks to <a href="https://www.mesa3d.org">Mesa</a> for zink, which gives Windows programs OpenGL on top of Brovvulk.
+
+Thanks to <a href="https://github.com/kpet/clvk">clvk</a> and <a href="https://github.com/google/clspv">clspv</a> for OpenCL on top of Brovvulk, and to <a href="https://github.com/llvm/llvm-project">LLVM</a>, <a href="https://github.com/KhronosGroup/SPIRV-Tools">SPIRV-Tools</a> and <a href="https://github.com/KhronosGroup/SPIRV-LLVM-Translator">SPIRV-LLVM-Translator</a>, which they are built with.
+
 Thanks to my friend <a href="https://github.com/GittingHubbers">GittingHubbers</a> for help with the MLFQ Scheduler.
 
 Thanks to my friend <a href="https://github.com/ZypherionTechnologies">Adam (Zypherion Technologies)</a> for help with various parts of the emulator.
