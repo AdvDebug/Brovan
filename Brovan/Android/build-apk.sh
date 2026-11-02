@@ -178,6 +178,12 @@ cp -f "$SHIM_DIR/bin/vulkan-1.dll" "$GUEST_ASSETS/System32/vulkan-1.dll"
 [ -f "$SHIM_DIR/bin/x86/vulkan-1.dll" ] && cp -f "$SHIM_DIR/bin/x86/vulkan-1.dll" "$GUEST_ASSETS/SysWOW64/vulkan-1.dll"
 echo "    packaged vulkan-1.dll into the APK assets"
 
+GUEST_DRIVERS="$REPO_ROOT/Brovan.Graphics/guest-drivers/bin"
+if [ -d "$GUEST_DRIVERS" ]; then
+    cp -Rf "$GUEST_DRIVERS/." "$GUEST_ASSETS/"
+    echo "    packaged the guest GPU drivers into the APK assets"
+fi
+
 echo "==> [4/5] Assembling the APK"
 printf 'sdk.dir=%s\n' "$ANDROID_SDK_ROOT" > "$GRADLE_PROJECT/local.properties"
 GRADLE_LOG="$(mktemp)"

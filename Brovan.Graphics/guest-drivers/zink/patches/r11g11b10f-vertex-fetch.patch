@@ -1,0 +1,217 @@
+--- a/src/gallium/drivers/zink/zink_compiler.c
++++ b/src/gallium/drivers/zink/zink_compiler.c
+@@ -38,6 +38,7 @@
+ #include "compiler/nir/nir_builder.h"
+ #include "compiler/nir/nir_serialize.h"
+ #include "compiler/nir/nir_builtin_builder.h"
++#include "compiler/nir/nir_format_convert.h"
+ 
+ #include "nir/tgsi_to_nir.h"
+ #include "tgsi/tgsi_dump.h"
+@@ -2136,6 +2137,48 @@
+ }
+ 
+ static bool
++lower_r11g11b10f_attrib(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   nir_variable **vars = data;
++   if (intr->intrinsic != nir_intrinsic_load_deref || nir_intrinsic_get_var(intr, 0) != vars[0])
++      return false;
++   b->cursor = nir_after_instr(&intr->instr);
++   nir_def *packed = nir_load_deref(b, nir_build_deref_var(b, vars[1]));
++   /* Avoid nir_format_unpack_11f11f10f, which needs 16-bit types. */
++   nir_def *rgba[4] = {
++      nir_mask_shift(b, packed, 0x000007ff, 4),
++      nir_mask_shift(b, packed, 0x003ff800, -7),
++      nir_mask_shift(b, packed, 0xffc00000, -17),
++      nir_imm_float(b, 1.0),
++   };
++   for (unsigned c = 0; c < 3; c++)
++      rgba[c] = nir_channel(b, nir_unpack_half_2x16(b, rgba[c]), 0);
++   nir_def_rewrite_uses(&intr->def, nir_trim_vector(b, nir_vec(b, rgba, 4), intr->def.num_components));
++   nir_instr_remove(&intr->instr);
++   return true;
++}
++
++static bool
++unpack_r11g11b10f_attribs(nir_shader *nir, uint32_t attrs)
++{
++   u_foreach_bit(location, attrs) {
++      nir_variable *var = nir_find_variable_with_driver_location(nir, nir_var_shader_in, location);
++      if (!var)
++         continue;
++      nir_variable *vars[2] = { var, nir_variable_clone(var, nir) };
++      nir_variable_set_namef(nir, vars[1], "%s_r11g11b10f", var->name);
++      vars[1]->type = glsl_uint_type();
++      nir_shader_add_variable(nir, vars[1]);
++      var->data.mode = nir_var_shader_temp;
++      nir_shader_intrinsics_pass(nir, lower_r11g11b10f_attrib, nir_metadata_control_flow, vars);
++   }
++   nir_fixup_deref_modes(nir);
++   NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_shader_temp, NULL);
++   optimize_nir(nir, NULL, true);
++   return true;
++}
++
++static bool
+ rewrite_bo_access_instr(nir_builder *b, nir_instr *instr, void *data)
+ {
+    struct zink_screen *screen = data;
+@@ -4118,23 +4161,28 @@
+       if (!screen->optimal_keys) {
+          switch (zs->info.stage) {
+          case MESA_SHADER_VERTEX: {
+-            uint32_t decomposed_attrs = 0, decomposed_attrs_without_w = 0;
++            uint32_t decomposed_attrs = 0, decomposed_attrs_without_w = 0, r11g11b10f_attrs = 0;
+             const struct zink_vs_key *vs_key = zink_vs_key(key);
+             switch (vs_key->size) {
+             case 4:
+                decomposed_attrs = vs_key->u32.decomposed_attrs;
+                decomposed_attrs_without_w = vs_key->u32.decomposed_attrs_without_w;
++               r11g11b10f_attrs = vs_key->u32.r11g11b10f_attrs;
+                break;
+             case 2:
+                decomposed_attrs = vs_key->u16.decomposed_attrs;
+                decomposed_attrs_without_w = vs_key->u16.decomposed_attrs_without_w;
++               r11g11b10f_attrs = vs_key->u16.r11g11b10f_attrs;
+                break;
+             case 1:
+                decomposed_attrs = vs_key->u8.decomposed_attrs;
+                decomposed_attrs_without_w = vs_key->u8.decomposed_attrs_without_w;
++               r11g11b10f_attrs = vs_key->u8.r11g11b10f_attrs;
+                break;
+             default: break;
+             }
++            if (r11g11b10f_attrs)
++               NIR_PASS(_, nir, unpack_r11g11b10f_attribs, r11g11b10f_attrs);
+             if (decomposed_attrs || decomposed_attrs_without_w)
+                NIR_PASS(_, nir, decompose_attribs, decomposed_attrs, decomposed_attrs_without_w);
+             break;
+--- a/src/gallium/drivers/zink/zink_context.c
++++ b/src/gallium/drivers/zink/zink_context.c
+@@ -1450,43 +1450,51 @@
+       if (zink_screen(pctx->screen)->optimal_keys)
+          return;
+       const struct zink_vs_key *vs = zink_get_vs_key(ctx);
+-      uint32_t decomposed_attrs = 0, decomposed_attrs_without_w = 0;
++      uint32_t decomposed_attrs = 0, decomposed_attrs_without_w = 0, r11g11b10f_attrs = 0;
+       switch (vs->size) {
+       case 1:
+          decomposed_attrs = vs->u8.decomposed_attrs;
+          decomposed_attrs_without_w = vs->u8.decomposed_attrs_without_w;
++         r11g11b10f_attrs = vs->u8.r11g11b10f_attrs;
+          break;
+       case 2:
+          decomposed_attrs = vs->u16.decomposed_attrs;
+          decomposed_attrs_without_w = vs->u16.decomposed_attrs_without_w;
++         r11g11b10f_attrs = vs->u16.r11g11b10f_attrs;
+          break;
+       case 4:
+          decomposed_attrs = vs->u32.decomposed_attrs;
+          decomposed_attrs_without_w = vs->u32.decomposed_attrs_without_w;
++         r11g11b10f_attrs = vs->u32.r11g11b10f_attrs;
+          break;
+       }
+       if (ctx->element_state->decomposed_attrs != decomposed_attrs ||
+-          ctx->element_state->decomposed_attrs_without_w != decomposed_attrs_without_w) {
+-         unsigned size = MAX2(ctx->element_state->decomposed_attrs_size, ctx->element_state->decomposed_attrs_without_w_size);
++          ctx->element_state->decomposed_attrs_without_w != decomposed_attrs_without_w ||
++          ctx->element_state->r11g11b10f_attrs != r11g11b10f_attrs) {
++         unsigned size = MAX3(ctx->element_state->decomposed_attrs_size,
++                              ctx->element_state->decomposed_attrs_without_w_size,
++                              ctx->element_state->r11g11b10f_attrs_size);
+          struct zink_shader_key *key = (struct zink_shader_key *)zink_set_vs_key(ctx);
+-         key->size -= 2 * key->key.vs.size;
+          switch (size) {
+          case 1:
+             key->key.vs.u8.decomposed_attrs = ctx->element_state->decomposed_attrs;
+             key->key.vs.u8.decomposed_attrs_without_w = ctx->element_state->decomposed_attrs_without_w;
++            key->key.vs.u8.r11g11b10f_attrs = ctx->element_state->r11g11b10f_attrs;
+             break;
+          case 2:
+             key->key.vs.u16.decomposed_attrs = ctx->element_state->decomposed_attrs;
+             key->key.vs.u16.decomposed_attrs_without_w = ctx->element_state->decomposed_attrs_without_w;
++            key->key.vs.u16.r11g11b10f_attrs = ctx->element_state->r11g11b10f_attrs;
+             break;
+          case 4:
+             key->key.vs.u32.decomposed_attrs = ctx->element_state->decomposed_attrs;
+             key->key.vs.u32.decomposed_attrs_without_w = ctx->element_state->decomposed_attrs_without_w;
++            key->key.vs.u32.r11g11b10f_attrs = ctx->element_state->r11g11b10f_attrs;
+             break;
+          default: break;
+          }
+          key->key.vs.size = size;
+-         key->size += 2 * size;
++         key->size = size ? offsetof(struct zink_vs_key, u8) + 3 * size : sizeof(struct zink_vs_key_base);
+       }
+    } else {
+      state->element_state = NULL;
+--- a/src/gallium/drivers/zink/zink_screen.c
++++ b/src/gallium/drivers/zink/zink_screen.c
+@@ -1453,7 +1453,8 @@
+    if (target == PIPE_BUFFER) {
+       if (bind & PIPE_BIND_VERTEX_BUFFER) {
+          if (!(props->bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)) {
+-            enum pipe_format new_format = zink_decompose_vertex_format(format);
++            enum pipe_format new_format = format != PIPE_FORMAT_R11G11B10_FLOAT ? zink_decompose_vertex_format(format) :
++                                          screen->optimal_keys ? PIPE_FORMAT_NONE : PIPE_FORMAT_R32_UINT;
+             if (!new_format)
+                return false;
+             if (!(zink_get_format_props(screen, new_format)->bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT))
+@@ -2347,6 +2348,10 @@
+          mesa_logw("zink: this application would be much faster if %s supported vertex format %s", screen->info.props.deviceName, util_format_name(format_list[i]));
+       }
+    }
++   /* Packed formats cannot use single-channel fetches. */
++   if (!(zink_get_format_props(screen, PIPE_FORMAT_R11G11B10_FLOAT)->bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) &&
++       zink_get_format_props(screen, PIPE_FORMAT_R32_UINT)->bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)
++      screen->need_decompose_attrs = true;
+ }
+ 
+ static void
+--- a/src/gallium/drivers/zink/zink_shader_keys.h
++++ b/src/gallium/drivers/zink/zink_shader_keys.h
+@@ -43,14 +43,17 @@
+       struct {
+          uint32_t decomposed_attrs;
+          uint32_t decomposed_attrs_without_w;
++         uint32_t r11g11b10f_attrs;
+       } u32;
+       struct {
+          uint16_t decomposed_attrs;
+          uint16_t decomposed_attrs_without_w;
++         uint16_t r11g11b10f_attrs;
+       } u16;
+       struct {
+          uint8_t decomposed_attrs;
+          uint8_t decomposed_attrs_without_w;
++         uint8_t r11g11b10f_attrs;
+       } u8;
+    };
+    // not hashed
+--- a/src/gallium/drivers/zink/zink_state.c
++++ b/src/gallium/drivers/zink/zink_state.c
+@@ -80,7 +80,11 @@
+       VkFormat format;
+       if (zink_get_format_props(screen, elem->src_format)->bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)
+          format = zink_get_format(screen, elem->src_format);
+-      else {
++      else if (elem->src_format == PIPE_FORMAT_R11G11B10_FLOAT) {
++         format = zink_get_format(screen, PIPE_FORMAT_R32_UINT);
++         ves->r11g11b10f_attrs |= BITFIELD_BIT(i);
++         ves->r11g11b10f_attrs_size = i < 8 ? 1 : i < 16 ? 2 : 4;
++      } else {
+          enum pipe_format new_format = zink_decompose_vertex_format(elem->src_format);
+          assert(new_format);
+          num_decomposed++;
+--- a/src/gallium/drivers/zink/zink_types.h
++++ b/src/gallium/drivers/zink/zink_types.h
+@@ -337,6 +337,8 @@
+    unsigned decomposed_attrs_size;
+    uint32_t decomposed_attrs_without_w;
+    unsigned decomposed_attrs_without_w_size;
++   uint32_t r11g11b10f_attrs;
++   unsigned r11g11b10f_attrs_size;
+    struct zink_vertex_elements_hw_state hw_state;
+ };
+ 

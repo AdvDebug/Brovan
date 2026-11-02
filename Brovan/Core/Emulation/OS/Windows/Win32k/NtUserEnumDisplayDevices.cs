@@ -24,7 +24,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint DisplayDevicePrimaryDevice = 0x00000004;
         private const uint DisplayDeviceVgaCompatible = 0x00000010;
 
-        private const string AdapterKey = @"\Registry\Machine\System\CurrentControlSet\Control\Video\{00000000-0000-0000-0000-000000000000}\0000";
         private const string MonitorName = @"\\.\DISPLAY1\Monitor0";
         private const string MonitorId = @"MONITOR\Default_Monitor\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001";
         private const string MonitorKey = @"\Registry\Machine\System\CurrentControlSet\Control\Class\{4d36e96e-e325-11ce-bfc1-08002be10318}\0001";
@@ -65,8 +64,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             WriteField(Buffer, OffsetDeviceName, DeviceNameCharacters, EnumeratingAdapters ? Win32kDisplayConfig.AdapterName : MonitorName);
             WriteField(Buffer, OffsetDeviceString, DeviceStringCharacters, EnumeratingAdapters ? Win32kDxgk.Display.Description : Win32kDisplayConfig.MonitorFriendlyName);
-            WriteField(Buffer, OffsetDeviceId, DeviceStringCharacters, EnumeratingAdapters ? Win32kDxgk.Display.DeviceInstanceId : MonitorId);
-            WriteField(Buffer, OffsetDeviceKey, DeviceStringCharacters, EnumeratingAdapters ? AdapterKey : MonitorKey);
+            WriteField(Buffer, OffsetDeviceId, DeviceStringCharacters, EnumeratingAdapters ? Win32kDxgk.Display.HardwareId : MonitorId);
+            WriteField(Buffer, OffsetDeviceKey, DeviceStringCharacters, EnumeratingAdapters ? Win32kDxgk.DisplayVideoKey : MonitorKey);
 
             uint StateFlags = EnumeratingAdapters
                 ? DisplayDeviceActive | DisplayDevicePrimaryDevice | DisplayDeviceVgaCompatible

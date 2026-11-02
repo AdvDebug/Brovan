@@ -23,17 +23,29 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static readonly Dictionary<(int Width, int ColorRef), IntPtr> _penCache = new();
         private static readonly Dictionary<int, IntPtr> _brushCache = new();
 
-        private static IntPtr _stockBlackPen;
+        private static IntPtr _stockNullPen;
+        private static IntPtr _stockNullBrush;
         private static IntPtr _stockWhiteBrush;
 
-        private static IntPtr StockBlackPen
+        private static IntPtr StockNullPen
         {
             get
             {
-                if (_stockBlackPen == IntPtr.Zero)
-                    _stockBlackPen = GetStockObject(STOCK_OBJECT_BLACK_PEN);
+                if (_stockNullPen == IntPtr.Zero)
+                    _stockNullPen = GetStockObject(STOCK_OBJECT_NULL_PEN);
 
-                return _stockBlackPen;
+                return _stockNullPen;
+            }
+        }
+
+        private static IntPtr StockNullBrush
+        {
+            get
+            {
+                if (_stockNullBrush == IntPtr.Zero)
+                    _stockNullBrush = GetStockObject(STOCK_OBJECT_NULL_BRUSH);
+
+                return _stockNullBrush;
             }
         }
 
@@ -757,11 +769,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             window.ApplyClip(hdc, primitive.Clip);
             window.SelectPen(primitive.HasPen
                 ? GetOrCreatePen(primitive.Pen.Width, unchecked((int)primitive.Pen.ColorRef))
-                : StockBlackPen);
+                : StockNullPen);
 
+            // Blits have no guest brush, so pattern ROPs use white.
             window.SelectBrush(primitive.HasBrush
                 ? GetOrCreateBrush(unchecked((int)primitive.Brush.ColorRef))
-                : StockWhiteBrush);
+                : primitive.Kind == GdiPrimitiveKind.Blit ? StockWhiteBrush : StockNullBrush);
 
             switch (primitive.Kind)
             {
@@ -2255,7 +2268,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static extern IntPtr GetStockObject(int fnObject);
 
         private const int STOCK_OBJECT_WHITE_BRUSH = 0;
-        private const int STOCK_OBJECT_BLACK_PEN = 7;
+        private const int STOCK_OBJECT_NULL_BRUSH = 5;
+        private const int STOCK_OBJECT_NULL_PEN = 8;
         private const int STOCK_OBJECT_DEFAULT_GUI_FONT = 17;
 
         private const int TRANSPARENT = 1;

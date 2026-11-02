@@ -1,4 +1,6 @@
-﻿using Brovan.Core.Emulation.OS.SharedHelpers;
+﻿using System.Buffers.Binary;
+using System.Runtime.InteropServices;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -8,6 +10,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint PolygonType = 1;
         private const uint PolylineType = 2;
         private const int PointSize = 8;
+        private const uint MaxFigures = 0x9C4000;
+        private const ulong MaxPoints = 0x4E2000;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -31,21 +35,55 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Win32kPenBrush Pen = Win32kHelper.ResolvePenBrush(Instance, Instance.WinHelper.ReadDcSelectedPen(Hdc), true);
+            if (FigureCount > MaxFigures)
+            {
+                Instance.SetLastWinError(Win32kHelper.ERROR_INVALID_PARAMETER);
+                Instance.SetRawSyscallReturn(0);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            if (!Instance.IsAccessible(CountsPtr, (ulong)FigureCount * 4, false))
+            {
+                Instance.SetRawSyscallReturn(0);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            Span<byte> CountBytes = stackalloc byte[4];
+            ulong TotalPoints = 0;
+            for (uint Figure = 0; Figure < FigureCount && TotalPoints <= MaxPoints; Figure++)
+            {
+                if (!Instance.ReadMemory(CountsPtr + (ulong)Figure * 4, CountBytes))
+                    TotalPoints = MaxPoints + 1;
+                else
+                    TotalPoints += BinaryPrimitives.ReadUInt32LittleEndian(CountBytes);
+            }
+
+            if (TotalPoints > MaxPoints || !Instance.IsAccessible(PointsPtr, TotalPoints * PointSize, false))
+            {
+                Instance.SetRawSyscallReturn(0);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            Win32kPenBrush Pen = Win32kHelper.ResolveDcPenBrush(Instance, Hdc, Instance.WinHelper.ReadDcSelectedPen(Hdc), true);
             Win32kPenBrush Brush = DrawType == PolygonType
-                ? Win32kHelper.ResolvePenBrush(Instance, Instance.WinHelper.ReadDcSelectedBrush(Hdc), false)
+                ? Win32kHelper.ResolveDcPenBrush(Instance, Hdc, Instance.WinHelper.ReadDcSelectedBrush(Hdc), false)
                 : default;
 
             GdiPrimitiveKind Kind = DrawType == PolygonType ? GdiPrimitiveKind.Polygon : GdiPrimitiveKind.Polyline;
 
             ulong PointOffset = 0;
+            ulong PointsLeft = TotalPoints;
 
             for (uint Figure = 0; Figure < FigureCount; Figure++)
             {
-                if (!Instance.IsRegionMapped(CountsPtr + (ulong)Figure * 4, 4))
+                if (!Instance.ReadMemory(CountsPtr + (ulong)Figure * 4, CountBytes))
                     break;
 
-                uint PointCount = Instance.ReadMemoryUInt(CountsPtr + (ulong)Figure * 4);
+                uint PointCount = BinaryPrimitives.ReadUInt32LittleEndian(CountBytes);
+                if (PointCount > PointsLeft)
+                    break;
+
+                PointsLeft -= PointCount;
                 ulong FigureBytes = (ulong)PointCount * PointSize;
 
                 // A figure too short to draw still owns its points, and the ones after it are found past them.
@@ -55,22 +93,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     continue;
                 }
 
-                ulong FigureAddr = PointsPtr + PointOffset;
-                if (!Instance.IsRegionMapped(FigureAddr, FigureBytes))
+                GdiPoint[] Points = new GdiPoint[PointCount];
+                if (!Instance.ReadMemory(PointsPtr + PointOffset, MemoryMarshal.AsBytes(Points.AsSpan())))
                     break;
 
-                GdiPoint[] Points = new GdiPoint[PointCount];
-                for (uint i = 0; i < PointCount; i++)
-                {
-                    ulong Addr = FigureAddr + (ulong)i * PointSize;
-                    Points[i] = new GdiPoint
-                    {
-                        X = unchecked((int)Instance.ReadMemoryUInt(Addr + 0x00)),
-                        Y = unchecked((int)Instance.ReadMemoryUInt(Addr + 0x04)),
-                    };
-                }
-
-                Instance.WinHelper.EnqueueGdiPoly(Hwnd, Hdc, Kind, Points, Pen.ColorRef, Pen.PenWidth, Brush.ColorRef, DrawType == PolygonType);
+                Instance.WinHelper.EnqueueGdiPoly(Hwnd, Hdc, Kind, Points, Pen.ColorRef, Pen.PenWidth, Brush.ColorRef,
+                    HasPen: !Pen.IsNull, HasBrush: DrawType == PolygonType && !Brush.IsNull);
 
                 PointOffset += FigureBytes;
             }

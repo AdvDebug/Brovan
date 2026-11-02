@@ -1476,6 +1476,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public long CreationTime;
         public long ExitTime;
         public uint ExitStatus = (uint)NTSTATUS.STATUS_PENDING;
+        // STATUS_PENDING is also a valid exit code.
+        public bool Exiting;
 
         // NT takes the exit status from the last thread, so a threadless process keeps STATUS_PENDING.
         public bool Threadless;

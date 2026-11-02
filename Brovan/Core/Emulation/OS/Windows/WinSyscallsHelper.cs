@@ -276,6 +276,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        internal static void ReleaseBrovVulk()
+        {
+            if (!DeviceRegistry.IsValueCreated)
+                return;
+
+            foreach (IWinDevice Device in DeviceRegistry.Value.Values)
+            {
+                if (Device is BrovVulkDevice Vulkan)
+                    Vulkan.ReleaseHostMemory();
+            }
+        }
+
         // I/O that NtCancelSynchronousIoFile can cancel.
         internal WinPendingIo SynchronousIo(WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock)
         {
@@ -439,7 +451,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Current)
                 Emulator.ReleaseThreadProcessor(Thread);
 
-            if (Thread.StackAddress != 0)
+            // NT keeps stacks and TEBs during process exit for pending wait blocks.
+            bool ProcessExiting = OwnProcess.Exiting;
+            if (Thread.StackAddress != 0 && !ProcessExiting)
             {
                 ForgetLockedPages(Thread.StackAddress, Thread.StackAddress + Thread.StackSize);
                 if (!Emulator.ReleaseMemory(Thread.StackAddress))
@@ -453,7 +467,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (State != null)
             {
                 ulong TebBase = State.NativeTeb != 0 ? State.NativeTeb : State.Teb;
-                if (TebBase != 0)
+                if (TebBase != 0 && !ProcessExiting)
                 {
                     ForgetLockedRegion(TebBase);
                     Emulator.UnmapMemoryRegion(TebBase);
@@ -2906,6 +2920,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const string MessageFontFace = "Segoe UI";
         private const int MessageFontWeight = 400;
         private const byte MessageFontCharSet = 1;
+        private const byte MessageFontQuality = 5;
 
         internal const int NonClientMetricsSize = 504;
         internal const int IconMetricsSize = 108;
@@ -2957,6 +2972,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint GdiHandleEntrySize = 0x18;
 
         private const int GdiHandleTypeMask = 0x7F;
+        private const int GdiHandleStockBit = 0x80;
         private const int GdiHandleUniqShift = 8;
 
         private ulong GdiHandleTableAddress;
@@ -5282,7 +5298,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return ServerInfo != 0 && HandleTable != 0;
         }
 
-        public ulong AllocateGdiHandle(byte type)
+        public ulong AllocateGdiHandle(byte type, bool Stock = false, bool Public = false)
         {
             EnsureGdiHandleTable();
             if (GdiHandleTableAddress == 0)
@@ -5293,15 +5309,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong Entry = GdiHandleTableAddress + (ulong)Index * GdiHandleEntrySize;
 
-            for (uint i = 0; i < GdiHandleEntrySize; i += 8)
-                Emulator._emulator.WriteMemory(Entry + i, 0UL, 8);
+            // NT uses PID 0 for public GDI objects.
+            uint W32Pid = Stock || Public ? 0 : PID & 0xFFFFFFFCu;
+            ushort Upper = (ushort)((type & GdiHandleTypeMask) | (Stock ? GdiHandleStockBit : 0) | (GdiHandleUniq[Index] << GdiHandleUniqShift));
 
-            uint W32Pid = PID & 0xFFFFFFFCu;
-            ushort Upper = (ushort)((type & GdiHandleTypeMask) | (GdiHandleUniq[Index] << GdiHandleUniqShift));
-            Emulator._emulator.WriteMemory(Entry + 0x08, W32Pid, 4);
-            Emulator._emulator.WriteMemory(Entry + 0x0C, Upper, 2);
-
-            Emulator._emulator.WriteMemory(Entry + 0x0E, (byte)(type & 0x1F), 1);
+            Span<byte> EntryData = stackalloc byte[(int)GdiHandleEntrySize];
+            EntryData.Clear();
+            BinaryPrimitives.WriteUInt32LittleEndian(EntryData.Slice(0x08), W32Pid);
+            BinaryPrimitives.WriteUInt16LittleEndian(EntryData.Slice(0x0C), Upper);
+            EntryData[0x0E] = (byte)(type & 0x1F);
+            Emulator._emulator.WriteMemory(Entry, EntryData);
 
             if (type == 1)
             {
@@ -5310,6 +5327,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     Span<byte> Zeroed = Shared.GetSpan(0x600);
                     Zeroed.Clear();
+
+                    BinaryPrimitives.WriteUInt64LittleEndian(Zeroed.Slice(DcAttrSelectedBrushOffset), Win32kHelper.GetStockObject(Emulator, Win32kHelper.WhiteBrushIndex));
+                    BinaryPrimitives.WriteUInt64LittleEndian(Zeroed.Slice(DcAttrSelectedPenOffset), Win32kHelper.GetStockObject(Emulator, Win32kHelper.BlackPenIndex));
+                    BinaryPrimitives.WriteUInt64LittleEndian(Zeroed.Slice(DcAttrSelectedFontOffset), Win32kHelper.GetDefaultDcFont(Emulator));
+                    BinaryPrimitives.WriteUInt32LittleEndian(Zeroed.Slice(DcAttrDcBrushRealizedColorOffset), DefaultDcBrushColor);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Zeroed.Slice(DcAttrDcBrushColorOffset), DefaultDcBrushColor);
                     Emulator._emulator.WriteMemory(DcAttr, Zeroed);
 
                     Emulator._emulator.WriteMemory(DcAttr + DcAttrMapModeOffset, MapModeText, 4);
@@ -5317,7 +5340,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     // Mark matrices stale so gdi32 calls NtGdiTransformPoints.
                     Emulator._emulator.WriteMemory(DcAttr + DcAttrXformFlagsOffset, XformFlagsWorldIdentity | XformFlagsWorldChanged, 4);
-                    Emulator._emulator.WriteMemory(DcAttr + 0x128, 0x00010001UL, 8);
                     Emulator._emulator.WriteMemory(DcAttr + 0x140, 1, 4);
                     Emulator._emulator.WriteMemory(DcAttr + 0x14C, 1, 4);
                     Emulator._emulator.WriteMemory(DcAttr + 0x150, 1, 4);
@@ -5388,6 +5410,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint TransparentBackgroundMode = 1;
         private const int DcAttrSelectedBrushOffset = 0xA0;
         private const int DcAttrSelectedPenOffset = 0xA8;
+        private const int DcAttrDcBrushRealizedColorOffset = 0xC0;
+        private const int DcAttrDcBrushColorOffset = 0xC4;
+        private const int DcAttrDcPenColorOffset = 0xCC;
+        private const int DcAttrSelectedFontOffset = 0x128;
+        private const uint DefaultDcBrushColor = 0x00FFFFFF;
         private const int DcAttrWindowOrgXOffset = 0x134;
         private const int DcAttrWindowOrgYOffset = 0x138;
         private const int DcAttrViewportOrgXOffset = 0x144;
@@ -5561,6 +5588,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong DcAttr = GetDcAttributeAddress(Hdc);
             return DcAttr == 0 ? 0 : Emulator.ReadMemoryULong(DcAttr + DcAttrSelectedBrushOffset);
         }
+
+        public uint ReadDcObjectColor(ulong Hdc, bool Pen)
+        {
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            return DcAttr == 0 ? 0 : Emulator.ReadMemoryUInt(DcAttr + (ulong)(Pen ? DcAttrDcPenColorOffset : DcAttrDcBrushColorOffset));
+        }
+
+        public bool IsSystemColorBrush(ulong Handle) => Handle != 0 && Array.IndexOf(SystemColorBrushes, Handle) >= 0;
 
         public bool ValidateGdiHandle(ulong Handle)
         {
@@ -6131,9 +6166,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             });
         }
 
-        public void EnqueueGdiShape(ulong Hwnd, ulong Hdc, GdiPrimitiveKind Kind, int Left, int Top, int Right, int Bottom, uint PenColor, int PenWidth, uint BrushColor, int RoundedWidth = 0, int RoundedHeight = 0)
+        public void EnqueueGdiShape(ulong Hwnd, ulong Hdc, GdiPrimitiveKind Kind, int Left, int Top, int Right, int Bottom, uint PenColor, int PenWidth, uint BrushColor,
+            bool HasPen = true, bool HasBrush = true, int RoundedWidth = 0, int RoundedHeight = 0)
         {
-            if (DesktopDisplay is not GuiThreadManager guiManager)
+            if ((!HasPen && !HasBrush) || DesktopDisplay is not GuiThreadManager guiManager)
                 return;
 
             GetDcDrawTarget(Hwnd, Hdc, out int SurfaceX, out int SurfaceY, out ulong Root, out GdiClipRect[] Clip);
@@ -6151,14 +6187,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 RoundedHeight = RoundedHeight,
                 Pen = new GdiPenDescriptor { ColorRef = PenColor, Width = PenWidth },
                 Brush = new GdiBrushDescriptor { ColorRef = BrushColor },
-                HasPen = true,
-                HasBrush = true,
+                HasPen = HasPen,
+                HasBrush = HasBrush,
             });
         }
 
-        public void EnqueueGdiPoly(ulong Hwnd, ulong Hdc, GdiPrimitiveKind Kind, GdiPoint[] Points, uint PenColor, int PenWidth, uint BrushColor, bool HasBrush)
+        public void EnqueueGdiPoly(ulong Hwnd, ulong Hdc, GdiPrimitiveKind Kind, GdiPoint[] Points, uint PenColor, int PenWidth, uint BrushColor, bool HasPen, bool HasBrush)
         {
-            if (DesktopDisplay is not GuiThreadManager guiManager)
+            if ((!HasPen && !HasBrush) || DesktopDisplay is not GuiThreadManager guiManager)
                 return;
 
             GetDcDrawTarget(Hwnd, Hdc, out int SurfaceX, out int SurfaceY, out ulong Root, out GdiClipRect[] Clip);
@@ -6181,7 +6217,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Points = Points,
                 Pen = new GdiPenDescriptor { ColorRef = PenColor, Width = PenWidth },
                 Brush = new GdiBrushDescriptor { ColorRef = BrushColor },
-                HasPen = true,
+                HasPen = HasPen,
                 HasBrush = HasBrush,
             });
         }
@@ -6358,6 +6394,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             DeleteHostFont(DefaultTextFont);
             DefaultTextFont = IntPtr.Zero;
             DefaultTextFontResolved = false;
+            Win32kHelper.PublishGuiStockFont(Emulator);
         }
 
         // The first DPI plateau is the system DPI. Plateau N after it is 72 + 24 * N.
@@ -6527,18 +6564,28 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void WriteSystemLogFont(Span<byte> Font, int Height)
         {
+            FontDescription Description = new FontDescription(Height, 0, MessageFontWeight, false, false, false,
+                MessageFontCharSet, 0, MessageFontFace);
+            WriteLogFont(Font, Description, OutPrecision: 0, ClipPrecision: 0, Quality: MessageFontQuality);
+        }
+
+        internal static void WriteLogFont(Span<byte> Font, in FontDescription Description, byte OutPrecision, byte ClipPrecision, byte Quality)
+        {
             Font = Font.Slice(0, LogFontSize);
             Font.Clear();
 
-            BinaryPrimitives.WriteInt32LittleEndian(Font, Height);
-            BinaryPrimitives.WriteInt32LittleEndian(Font.Slice(16), 400); // FW_NORMAL
-            Font[23] = 1; // DEFAULT_CHARSET
-            Font[26] = 5; // CLEARTYPE_QUALITY
-
-            Span<char> Face = stackalloc char[LogFontFaceNameChars];
-            Face.Clear();
-            MessageFontFace.AsSpan().CopyTo(Face);
-            Encoding.Unicode.GetBytes(Face, Font.Slice(LogFontFaceNameOffset));
+            BinaryPrimitives.WriteInt32LittleEndian(Font, Description.Height);
+            BinaryPrimitives.WriteInt32LittleEndian(Font.Slice(4), Description.Width);
+            BinaryPrimitives.WriteInt32LittleEndian(Font.Slice(16), Description.Weight);
+            Font[20] = Description.Italic ? (byte)1 : (byte)0;
+            Font[21] = Description.Underline ? (byte)1 : (byte)0;
+            Font[22] = Description.StrikeOut ? (byte)1 : (byte)0;
+            Font[23] = Description.CharSet;
+            Font[24] = OutPrecision;
+            Font[25] = ClipPrecision;
+            Font[26] = Quality;
+            Font[27] = Description.PitchAndFamily;
+            Encoding.Unicode.GetBytes(Description.FaceName, Font.Slice(LogFontFaceNameOffset, LogFontFaceNameChars * sizeof(char)));
         }
 
         internal void WriteNonClientMetrics(Span<byte> Metrics, uint Dpi)
@@ -9314,6 +9361,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             SetSyntheticRegistryDword(ProfileListKey, "RefCount", 0);
 
             InitializeSyntheticWindowsVersionRegistryDefaults();
+            Win32kDxgk.PublishDriverKey(this);
             InitializeSyntheticKnownFolderDescriptions();
             InitializeSyntheticSteamRegistry();
 

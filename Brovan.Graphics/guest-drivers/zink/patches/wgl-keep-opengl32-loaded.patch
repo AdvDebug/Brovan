@@ -1,0 +1,14 @@
+--- a/src/gallium/frontends/wgl/stw_device.c
++++ b/src/gallium/frontends/wgl/stw_device.c
+@@ -285,6 +285,11 @@
+    size = MIN2(nProcs * sizeof *pProcs, sizeof stw_dev->callbacks);
+    memcpy(&stw_dev->callbacks, pProcs, size);
+ 
++   /* Keep opengl32.dll loaded while its callbacks are stored. */
++   static HMODULE opengl32;
++   if (!opengl32 && nProcs > 0)
++      GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)pProcs[0], &opengl32);
++
+    return;
+ }
+ 

@@ -11,14 +11,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const int DibSection32Size = 0x54;
         private const int BitmapInfoHeaderSize = 0x28;
         private const int LogPenSize = 0x10;
+        private const int ExtLogPen64Size = 0x20;
         private const int LogBrush64Size = 0x10;
 
         // lbHatch is a ULONG_PTR, so LOGBRUSH loses its tail padding on x86.
         private const int LogBrush32Size = 0x0C;
         private const uint BiRgb = 0;
-
-        private const uint PsSolid = 0;
-        private const uint BsSolid = 0;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -45,9 +43,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             // A DIB section answers with the longer form only when the caller asked for all of it.
             bool AsDibSection = IsBitmap && Bitmap.DibSection && Count >= (Wide ? DibSection64Size : DibSection32Size);
 
+            // NT returns a style-only EXTLOGPEN for a null pen (cjGetBrushOrPen).
+            bool AsNullExtPen = IsPenBrush && PenBrush.IsPen && PenBrush.IsNull && Wide && Count == ExtLogPen64Size && OutBuffer != 0;
+
             int Size = IsBitmap
                 ? (AsDibSection ? (Wide ? DibSection64Size : DibSection32Size) : BitmapSize)
-                : (PenBrush.IsPen ? LogPenSize : (Wide ? LogBrush64Size : LogBrush32Size));
+                : (PenBrush.IsPen ? (AsNullExtPen ? ExtLogPen64Size : LogPenSize) : (Wide ? LogBrush64Size : LogBrush32Size));
 
             if (OutBuffer == 0)
             {
@@ -65,6 +66,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (IsBitmap)
                 WriteBitmap(Buffer, Bitmap, Wide, AsDibSection, BitmapSize);
+            else if (AsNullExtPen)
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer, PenBrush.Style);
             else
                 WritePenBrush(Buffer, PenBrush);
 
@@ -126,15 +129,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static void WritePenBrush(Span<byte> Buffer, in Win32kPenBrush PenBrush)
         {
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), PenBrush.Style);
             if (PenBrush.IsPen)
             {
-                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), PsSolid);
                 BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0x04, 4), PenBrush.PenWidth);
                 BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x0C, 4), PenBrush.ColorRef);
                 return;
             }
 
-            BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x00, 4), BsSolid);
             BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x04, 4), PenBrush.ColorRef);
         }
     }

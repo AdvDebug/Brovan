@@ -2715,7 +2715,7 @@ namespace Brovan
             }
 
             /// <returns>returns the resolved virtual path, or null if the path cannot be mapped into the sandbox.</returns>
-            public static string ResolveVirtualHostPath(string EmulatedPath, BinaryFormat Format, bool CreateDirectories = false)
+            public static string ResolveVirtualHostPath(string EmulatedPath, BinaryFormat Format, bool CreateDirectories = false, bool NativeSystemView = false)
             {
                 if (string.IsNullOrWhiteSpace(EmulatedPath))
                     return null;
@@ -2734,7 +2734,8 @@ namespace Brovan
                 if (string.IsNullOrEmpty(WinPath))
                     return null;
 
-                WinPath = ApplyWow64FileRedirect(WinPath);
+                if (!NativeSystemView)
+                    WinPath = ApplyWow64FileRedirect(WinPath);
                 return ReadsSystemCopy(WinPath) ? null : ResolveVirtualHostPathInternal(WinPath, CreateDirectories);
             }
 

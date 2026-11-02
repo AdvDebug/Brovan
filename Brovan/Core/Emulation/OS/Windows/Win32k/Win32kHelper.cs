@@ -43,8 +43,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     internal struct Win32kPenBrush
     {
         public bool IsPen;
+        public uint Style;
         public uint ColorRef;
         public int PenWidth;
+
+        public readonly bool IsNull => Style == (IsPen ? Win32kHelper.PenStyleNull : Win32kHelper.BrushStyleNull);
     }
 
     internal readonly struct Win32kKeyMapping
@@ -132,6 +135,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const byte RegionHandleType = 0x04;
         internal const byte FontHandleType = 0x0A;
         internal const byte PaletteHandleType = 0x08;
+        internal const byte ColorSpaceHandleType = 0x09;
+
+        // ENUMLOGFONTEXDVW through the design vector's axis count.
+        internal const int StoredEnumLogFontSize = 0x164;
 
         internal const uint WindowStylePopup = 0x80000000;
         internal const uint WindowStyleChild = 0x40000000;
@@ -273,6 +280,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly Dictionary<IntPtr, int[]> CharAdvanceWidthsByFont = new();
 
             public ulong StockBitmap;
+            public readonly ulong[] StockObjects = new ulong[StockObjectCount];
+            public readonly ulong[] UnawareStockObjects = new ulong[StockObjectCount];
+            public ulong SystemGuiFont;
+            public ulong GdiSharedMemory;
             public ulong DisplaySurfaceBitmap;
             public ulong NextDeviceContext = FirstDeviceContextHandle;
             public ulong CaptureWindow;
@@ -904,6 +915,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 PaintDc = PaintDc,
                 Display = Display || Hwnd != 0,
                 SelectedBitmap = EnsureStockBitmap(Instance),
+                SelectedFont = GetDefaultDcFont(Instance),
+                SelectedPalette = State.StockObjects[DefaultPaletteIndex],
             };
             PublishDcVisibleArea(Instance, GdiHandle);
             return GdiHandle;
@@ -1030,28 +1043,35 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return true;
         }
 
-        internal static ulong CreatePen(BinaryEmulator Instance, int Style, int Width, uint ColorRef)
+        internal static ulong CreatePen(BinaryEmulator Instance, uint Style, int Width, uint ColorRef)
         {
-            ulong Handle = Instance.WinHelper.AllocateGdiHandle(PenHandleType);
-            if (Handle == 0)
-                return 0;
+            if (Style == PenStyleNull)
+                return GetState(Instance).StockObjects[NullPenIndex];
 
-            GetState(Instance).PenBrushObjects[Handle] = new Win32kPenBrush
-            {
-                IsPen = true,
-                ColorRef = ColorRef,
-                PenWidth = Width,
-            };
+            return CreatePenBrush(Instance, new Win32kPenBrush { IsPen = true, Style = Style, ColorRef = ColorRef, PenWidth = Math.Abs(Width) });
+        }
+
+        private static ulong CreatePenBrush(BinaryEmulator Instance, in Win32kPenBrush PenBrush, bool Stock = false)
+        {
+            ulong Handle = Instance.WinHelper.AllocateGdiHandle(PenBrush.IsPen ? PenHandleType : BrushHandleType, Stock);
+            if (Handle != 0)
+                GetState(Instance).PenBrushObjects[Handle] = PenBrush;
+
             return Handle;
         }
 
-        internal static ulong CreateFont(BinaryEmulator Instance, in FontDescription Description, byte[] EnumLogFont)
+        // Public fonts can exist before the host display.
+        internal static ulong CreateFont(BinaryEmulator Instance, in FontDescription Description, byte[] EnumLogFont, bool Stock = false, bool Public = false)
         {
-            IntPtr HostFont = Instance.WinHelper.CreateHostFont(Description);
-            if (HostFont == IntPtr.Zero)
-                return 0;
+            IntPtr HostFont = IntPtr.Zero;
+            if (!Public)
+            {
+                HostFont = Instance.WinHelper.CreateHostFont(Description);
+                if (HostFont == IntPtr.Zero)
+                    return 0;
+            }
 
-            ulong Handle = Instance.WinHelper.AllocateGdiHandle(FontHandleType);
+            ulong Handle = Instance.WinHelper.AllocateGdiHandle(FontHandleType, Stock, Public);
             if (Handle == 0)
             {
                 Instance.WinHelper.DeleteHostFont(HostFont);
@@ -1099,7 +1119,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static IntPtr ResolveDcFont(BinaryEmulator Instance, ulong Hdc)
         {
             Win32kFont Font = ResolveDcFontObject(Instance, Hdc);
-            return Font != null ? Font.HostFont : Instance.WinHelper.EnsureDefaultTextFont();
+            if (Font == null)
+                return Instance.WinHelper.EnsureDefaultTextFont();
+
+            if (Font.HostFont == IntPtr.Zero)
+                Font.HostFont = Instance.WinHelper.CreateHostFont(Font.Description);
+
+            return Font.HostFont;
         }
 
         internal static string GetDcFaceName(BinaryEmulator Instance, ulong Hdc)
@@ -1129,16 +1155,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static ulong CreateSolidBrush(BinaryEmulator Instance, uint ColorRef)
         {
-            ulong Handle = Instance.WinHelper.AllocateGdiHandle(BrushHandleType);
-            if (Handle == 0)
-                return 0;
-
-            GetState(Instance).PenBrushObjects[Handle] = new Win32kPenBrush
-            {
-                IsPen = false,
-                ColorRef = ColorRef,
-            };
-            return Handle;
+            return CreatePenBrush(Instance, new Win32kPenBrush { ColorRef = ColorRef });
         }
 
         internal static ulong CreatePaletteHandle(BinaryEmulator Instance)
@@ -1155,6 +1172,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return Found;
 
             return new Win32kPenBrush { IsPen = IsPen, ColorRef = 0x00000000, PenWidth = 1 };
+        }
+
+        internal static Win32kPenBrush ResolveDcPenBrush(BinaryEmulator Instance, ulong Hdc, ulong Handle, bool IsPen)
+        {
+            Win32kPenBrush Found = ResolvePenBrush(Instance, Handle, IsPen);
+            if (Handle != 0 && Handle == GetState(Instance).StockObjects[IsPen ? DcPenIndex : DcBrushIndex])
+                Found.ColorRef = Instance.WinHelper.ReadDcObjectColor(Hdc, IsPen);
+
+            return Found;
         }
 
         internal static bool TryGetPenBrush(BinaryEmulator Instance, ulong Handle, out Win32kPenBrush PenBrush)
@@ -1519,15 +1545,155 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Width > 0 && Height > 0 && (long)Width * Height <= MaxBlitPixels;
         }
 
-        // A stock object outlives every caller, so DeleteObject on one succeeds. Every window DC reports the
-        // one display surface, which is shared the same way.
+        // NT accepts DeleteObject on shared GDI objects without deleting them.
         internal static bool IsStockObject(BinaryEmulator Instance, ulong Handle)
         {
             if (Handle == 0)
                 return false;
 
             Win32kState State = GetState(Instance);
-            return Handle == State.StockBitmap || Handle == State.DisplaySurfaceBitmap;
+            return Handle == State.StockBitmap || Handle == State.DisplaySurfaceBitmap || Array.IndexOf(State.StockObjects, Handle) >= 0
+                || Array.IndexOf(State.UnawareStockObjects, Handle) >= 0 || Instance.WinHelper.IsSystemColorBrush(Handle);
+        }
+
+        private const int StockObjectCount = 22;
+        internal const int WhiteBrushIndex = 0;
+        internal const int BlackPenIndex = 7;
+        private const int OemFixedFontIndex = 10;
+        internal const int SystemFontIndex = 13;
+        internal const int DefaultPaletteIndex = 15;
+        private const int SystemFixedFontIndex = 16;
+        private const int DefaultGuiFontIndex = 17;
+        private const int DcBrushIndex = 18;
+        private const int DcPenIndex = 19;
+        private const int StockColorSpaceIndex = 20;
+        private const int StockBitmapIndex = 21;
+        private const ulong GdiSharedStockObjectsOffset = 0x1800B0;
+        private const ulong GdiSharedUnawareStockObjectsOffset = GdiSharedStockObjectsOffset + StockObjectCount * 8;
+        private const ulong GdiSharedGuiFontPlateauOffset = GdiSharedUnawareStockObjectsOffset + StockObjectCount * 8;
+        private const uint GdiSharedGuiFontPlateaus = 16;
+        private const int DefaultGuiFontPoints = 8;
+        private const string DefaultGuiFontFace = "MS Shell Dlg";
+        private const uint LargeFontsDpi = 120;
+        private const int NullPenIndex = 8;
+        internal const uint BrushStyleNull = 1;
+        internal const uint PenStyleNull = 5;
+        internal const uint PenStyleInsideFrame = 6;
+
+        private static readonly (int Index, Win32kPenBrush Object)[] StockPensAndBrushes =
+        {
+            (0, new Win32kPenBrush { ColorRef = 0x00FFFFFF }),
+            (1, new Win32kPenBrush { ColorRef = 0x00C0C0C0 }),
+            (2, new Win32kPenBrush { ColorRef = 0x00808080 }),
+            (3, new Win32kPenBrush { ColorRef = 0x00404040 }),
+            (4, new Win32kPenBrush { ColorRef = 0x00000000 }),
+            (5, new Win32kPenBrush { Style = BrushStyleNull }),
+            (6, new Win32kPenBrush { IsPen = true, ColorRef = 0x00FFFFFF }),
+            (7, new Win32kPenBrush { IsPen = true, ColorRef = 0x00000000 }),
+            (NullPenIndex, new Win32kPenBrush { IsPen = true, Style = PenStyleNull, PenWidth = 1 }),
+            (18, new Win32kPenBrush { ColorRef = 0x00FFFFFF }),
+            (19, new Win32kPenBrush { IsPen = true, ColorRef = 0x00000000 }),
+        };
+
+        private readonly record struct StockFont(int Index, string FaceName, int Height, int Width, int Weight, byte CharSet,
+            byte OutPrecision, byte ClipPrecision, byte Quality, byte PitchAndFamily);
+
+        private static readonly StockFont[] SmallStockFonts =
+        {
+            new(10, "Terminal", 12, 8, 400, 255, 1, 2, 2, 0x31),
+            new(11, "Courier", 12, 9, 400, 0, 0, 2, 2, 0x01),
+            new(12, "MS Sans Serif", 12, 9, 400, 0, 0, 2, 2, 0x02),
+            new(13, "System", 16, 7, 700, 0, 1, 2, 2, 0x22),
+            new(14, "System", 16, 7, 700, 0, 1, 2, 2, 0x22),
+            new(16, "Fixedsys", 15, 8, 400, 0, 1, 2, 2, 0x31),
+        };
+
+        private static readonly StockFont[] LargeStockFonts =
+        {
+            new(10, "8514oem", 20, 10, 400, 255, 1, 2, 2, 0x31),
+            new(11, "Courier", 12, 9, 400, 0, 0, 2, 2, 0x01),
+            new(12, "MS Sans Serif", 12, 9, 400, 0, 0, 2, 2, 0x02),
+            new(13, "System", 20, 9, 700, 0, 1, 2, 2, 0x22),
+            new(14, "System", 20, 9, 700, 0, 1, 2, 2, 0x22),
+            new(16, "Fixedsys", 20, 10, 400, 0, 1, 2, 2, 0x31),
+        };
+
+        // gdi32 reads stock handles directly from shared memory.
+        internal static void PublishStockObjects(BinaryEmulator Instance, ulong SharedMemory)
+        {
+            Win32kState State = GetState(Instance);
+            ulong[] Handles = State.StockObjects;
+
+            foreach ((int Index, Win32kPenBrush Object) in StockPensAndBrushes)
+                Handles[Index] = CreatePenBrush(Instance, Object, Stock: true);
+
+            uint SystemDpi = HostDisplayMetrics.SystemDpi;
+            bool LargeFonts = SystemDpi >= LargeFontsDpi;
+            foreach (StockFont Font in LargeFonts ? LargeStockFonts : SmallStockFonts)
+                Handles[Font.Index] = CreateStockFont(Instance, Font);
+
+            ulong[] Unaware = State.UnawareStockObjects;
+            foreach (StockFont Font in SmallStockFonts)
+            {
+                if (Font.Index is OemFixedFontIndex or SystemFontIndex or SystemFixedFontIndex)
+                    Unaware[Font.Index] = LargeFonts ? CreateStockFont(Instance, Font) : Handles[Font.Index];
+            }
+
+            int SystemGuiFontHeight = (int)((DefaultGuiFontPoints * SystemDpi + 36) / 72);
+            State.SystemGuiFont = CreateGuiFont(Instance, SystemGuiFontHeight, Stock: true);
+            Unaware[DefaultGuiFontIndex] = SystemDpi == HostDisplayMetrics.DefaultDpi
+                ? State.SystemGuiFont
+                : CreateGuiFont(Instance, (int)((SystemGuiFontHeight * HostDisplayMetrics.DefaultDpi + SystemDpi / 2) / SystemDpi), Stock: false);
+
+            Handles[DefaultPaletteIndex] = Instance.WinHelper.AllocateGdiHandle(PaletteHandleType, Stock: true);
+            Handles[StockColorSpaceIndex] = Instance.WinHelper.AllocateGdiHandle(ColorSpaceHandleType, Stock: true);
+
+            Handles[StockBitmapIndex] = EnsureStockBitmap(Instance);
+
+            State.GdiSharedMemory = SharedMemory;
+            Instance._emulator.WriteMemory(SharedMemory + GdiSharedUnawareStockObjectsOffset, MemoryMarshal.AsBytes(Unaware.AsSpan()));
+
+            if (LargeFonts && SystemDpi % 24 == 0 && (SystemDpi - LargeFontsDpi) / 24 < GdiSharedGuiFontPlateaus)
+                Instance._emulator.WriteMemory(SharedMemory + GdiSharedGuiFontPlateauOffset + (SystemDpi - LargeFontsDpi) / 24 * 8, State.SystemGuiFont, 8);
+
+            PublishGuiStockFont(Instance);
+        }
+
+        // SERVERINFO reports the session DPI according to process awareness.
+        internal static void PublishGuiStockFont(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            if (State.GdiSharedMemory == 0)
+                return;
+
+            ulong[] Handles = State.StockObjects;
+            Handles[DefaultGuiFontIndex] = Win32kDpi.GetEffectiveDpi(Instance) == HostDisplayMetrics.SystemDpi
+                ? State.SystemGuiFont
+                : State.UnawareStockObjects[DefaultGuiFontIndex];
+            Instance._emulator.WriteMemory(State.GdiSharedMemory + GdiSharedStockObjectsOffset, MemoryMarshal.AsBytes(Handles.AsSpan()));
+        }
+
+        private static ulong CreateGuiFont(BinaryEmulator Instance, int Pixels, bool Stock)
+        {
+            return CreateStockFont(Instance, new StockFont(DefaultGuiFontIndex, DefaultGuiFontFace, -Pixels, 0, 400, 0, 0, 0, 0, 0), Stock);
+        }
+
+        private static ulong CreateStockFont(BinaryEmulator Instance, in StockFont Font, bool Stock = true)
+        {
+            FontDescription Description = new FontDescription(Font.Height, Font.Width, Font.Weight, false, false, false,
+                Font.CharSet, Font.PitchAndFamily, Font.FaceName);
+            byte[] EnumLogFont = new byte[StoredEnumLogFontSize];
+            WinSysHelper.WriteLogFont(EnumLogFont, Description, Font.OutPrecision, Font.ClipPrecision, Font.Quality);
+            return CreateFont(Instance, Description, EnumLogFont, Stock, Public: true);
+        }
+
+        internal static ulong GetStockObject(BinaryEmulator Instance, int Index) => GetState(Instance).StockObjects[Index];
+
+        internal static ulong GetDefaultDcFont(BinaryEmulator Instance)
+        {
+            Win32kState State = GetState(Instance);
+            ulong Unaware = State.UnawareStockObjects[SystemFontIndex];
+            return Unaware != 0 && Win32kDpi.GetEffectiveDpi(Instance) != HostDisplayMetrics.SystemDpi ? Unaware : State.StockObjects[SystemFontIndex];
         }
 
         // Every DC starts on this, so a caller that selects its own bitmap has one to select back.
@@ -1535,7 +1701,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             Win32kState State = GetState(Instance);
             if (State.StockBitmap == 0)
-                State.StockBitmap = CreateBitmap(Instance, 1, 1, 1, 1, false, false);
+                State.StockBitmap = CreateBitmap(Instance, 1, 1, 1, 1, false, false, Stock: true);
 
             return State.StockBitmap;
         }
@@ -1552,7 +1718,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return CreateBitmap(Instance, Width, Height, Source.Planes, Source.BitsPerPixel, false, false);
         }
 
-        internal static ulong CreateBitmap(BinaryEmulator Instance, int Width, int Height, ushort Planes, ushort BitsPerPixel, bool DibSection, bool TopDown)
+        internal static ulong CreateBitmap(BinaryEmulator Instance, int Width, int Height, ushort Planes, ushort BitsPerPixel, bool DibSection, bool TopDown, bool Stock = false)
         {
             int Stride = GetBitmapStride(Width, Planes, BitsPerPixel, DibSection);
             if (Width <= 0 || Height <= 0 || Planes == 0 || BitsPerPixel == 0 || Stride == 0)
@@ -1562,7 +1728,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (TotalBytes > MaxBitmapBytes)
                 return 0;
 
-            ulong Handle = Instance.WinHelper.AllocateGdiHandle(BitmapHandleType);
+            ulong Handle = Instance.WinHelper.AllocateGdiHandle(BitmapHandleType, Stock);
             if (Handle == 0)
                 return 0;
 
@@ -2360,7 +2526,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static bool PatBltDc(BinaryEmulator Instance, ulong Hdc, int X, int Y, int Width, int Height, uint Rop, ulong Brush)
         {
-            return PatBltDcColor(Instance, Hdc, X, Y, Width, Height, Rop, ResolvePenBrush(Instance, Brush, false).ColorRef);
+            Win32kPenBrush Pattern = ResolveDcPenBrush(Instance, Hdc, Brush, false);
+            if (DrawsNothing(Pattern, Rop))
+                return true;
+
+            return PatBltDcColor(Instance, Hdc, X, Y, Width, Height, Rop, Pattern.ColorRef);
         }
 
         private static bool PatBltDcColor(BinaryEmulator Instance, ulong Hdc, int X, int Y, int Width, int Height, uint Rop, uint ColorRef)
@@ -2655,6 +2825,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return ((Index >> 1) & 0x55) != (Index & 0x55);
         }
 
+        internal static bool RopUsesPattern(uint Rop)
+        {
+            uint Index = (Rop >> 16) & 0xFF;
+            return (Index >> 4) != (Index & 0x0F);
+        }
+
+        // NT skips pattern ROPs with a null brush (bGetRealizedBrush).
+        private static bool DrawsNothing(in Win32kPenBrush Pattern, uint Rop) => Pattern.IsNull && RopUsesPattern(Rop);
+
         // NT applies the ROP to all four bytes of a 32 bpp pixel.
         internal static uint ApplyRop(uint Index, uint Pattern, uint Source, uint Destination)
         {
@@ -2919,9 +3098,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Source.Length < Count)
                 return false;
 
+            Win32kPenBrush Pattern = ResolveDcPenBrush(Instance, Hdc, Instance.WinHelper.ReadDcSelectedBrush(Hdc), false);
+            if (DrawsNothing(Pattern, Rop))
+                return true;
+
+            uint PatternPixel = HostColor.FromColorRef(Pattern.ColorRef);
             if (TryGetDcBitmap(Instance, Hdc, out Win32kBitmap Target) && CanBlitBitmap(Target))
             {
-                uint PatternPixel = HostColor.FromColorRef(ResolvePenBrush(Instance, Instance.WinHelper.ReadDcSelectedBrush(Hdc), false).ColorRef);
                 Instance.WinHelper.ReadDcOrigin(Hdc, out int OffsetX, out int OffsetY);
                 TryGetDcClip(Instance, Hdc, out GdiClipRect[] Clip);
                 return TryBlitBlockIntoBitmap(Instance, Target, X + OffsetX, Y + OffsetY, Width, Height, Source, SourceWidth, SourceHeight, Rop, PatternPixel,
@@ -2946,8 +3129,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Rop != SrcCopyRop && !RopUsesDestination(Rop))
             {
                 uint Index = (Rop >> 16) & 0xFF;
-                uint PatternPixel = HostColor.FromColorRef(ResolvePenBrush(Instance, Instance.WinHelper.ReadDcSelectedBrush(Hdc), false).ColorRef);
-
                 for (int i = 0; i < Count; i++)
                     Owned[i] = ApplyRop(Index, PatternPixel, Owned[i], 0);
 
@@ -6659,9 +6840,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return false;
 
             // A class can name a system colour instead of a brush, as the colour index plus one.
-            uint Color = Background <= SystemColorCount
-                ? Instance.WinHelper.GetSystemColor((int)Background - 1)
-                : ResolvePenBrush(Instance, Background, false).ColorRef;
+            uint Color;
+            if (Background <= SystemColorCount)
+                Color = Instance.WinHelper.GetSystemColor((int)Background - 1);
+            else
+            {
+                Win32kPenBrush Brush = ResolveDcPenBrush(Instance, Hdc, Background, false);
+                if (DrawsNothing(Brush, PatCopy))
+                    return true;
+
+                Color = Brush.ColorRef;
+            }
 
             GetClientSize(Instance, Window, out int ClientWidth, out int ClientHeight);
             Instance.WinHelper.EnqueueGdiFillRect(Window.Hwnd, Hdc, 0, 0, ClientWidth, ClientHeight, Color, PatCopy);
