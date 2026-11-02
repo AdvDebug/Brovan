@@ -8,9 +8,51 @@ on:
       - 'v*'
 
 jobs:
+  guest-drivers:
+    name: Build guest GPU driver ${{ matrix.driver }} ${{ matrix.arch }}
+    runs-on: windows-latest
+
+    # LLVM builds need a separate job per architecture to stay within the time limit.
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [ zink, clvk ]
+        arch: [ amd64, x86 ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache the driver
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: Brovan.Graphics/guest-drivers/bin
+          key: guest-drivers-${{ matrix.driver }}-${{ matrix.arch }}-${{ hashFiles('Brovan.Graphics/guest-drivers/build.ps1', 'Brovan.Graphics/guest-drivers/requirements.txt', format('Brovan.Graphics/guest-drivers/{0}/**', matrix.driver)) }}
+
+      - name: Setup Python
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Build the driver
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Brovan.Graphics/guest-drivers/build.ps1 -Driver ${{ matrix.driver }} -Arch ${{ matrix.arch }}
+
+      - name: Upload the driver
+        uses: actions/upload-artifact@v6
+        with:
+          name: guest-drivers-${{ matrix.driver }}-${{ matrix.arch }}
+          path: Brovan.Graphics/guest-drivers/bin
+          retention-days: 14
+
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
+    needs: guest-drivers
+    if: ${{ !cancelled() }}
 
     strategy:
       fail-fast: false
@@ -85,6 +127,24 @@ jobs:
           cp -f "$shim/vulkan-1.dll" "$vfs/System32/vulkan-1.dll"
           cp -f "$shim/x86/vulkan-1.dll" "$vfs/SysWOW64/vulkan-1.dll"
 
+      - name: Download the guest GPU drivers
+        uses: actions/download-artifact@v6
+        continue-on-error: true
+        with:
+          pattern: guest-drivers-*
+          merge-multiple: true
+          path: Brovan.Graphics/guest-drivers/bin
+
+      - name: Stage the guest GPU drivers into the published VirtualFS
+        shell: bash
+        run: |
+          drivers="Brovan.Graphics/guest-drivers/bin"
+          if [ -d "$drivers" ]; then
+            cp -Rf "$drivers/." "artifacts/publish/${{ matrix.rid }}/VirtualFS/C/Windows/"
+          else
+            echo "::warning::no guest GPU drivers, so this build ships without hardware OpenGL"
+          fi
+
       - name: Build the BrovSteam client shim (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -122,10 +182,20 @@ jobs:
   android:
     name: Build Android arm64
     runs-on: ubuntu-latest
+    needs: guest-drivers
+    if: ${{ !cancelled() }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Download the guest GPU drivers
+        uses: actions/download-artifact@v6
+        continue-on-error: true
+        with:
+          pattern: guest-drivers-*
+          merge-multiple: true
+          path: Brovan.Graphics/guest-drivers/bin
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
@@ -179,7 +249,8 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    if: startsWith(github.ref, 'refs/tags/')
+    # success() includes the optional driver jobs.
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') && needs.build.result == 'success' && needs.android.result == 'success' }}
     needs: [ build, android ]
     runs-on: ubuntu-latest
     permissions:

@@ -62,6 +62,8 @@ namespace Brovan.Core.Settings
 
         public static int VulkanWaitThreads { get; private set; }
 
+        public static long VulkanRetainedBytes { get; private set; }
+
         public static int CoreMessagingRegistrations { get; private set; }
 
         // Connections, endpoints and references of one CoreMessaging server the host runs.
@@ -128,6 +130,7 @@ namespace Brovan.Core.Settings
             KernelReadViewBytes = (long)Megabytes(Pick(Off: 256, Minimal: 192, Medium: 128, High: 64, Aggressive: 32));
             KernelFileCells = (int)Pick(Off: 512, Minimal: 384, Medium: 256, High: 128, Aggressive: 64);
             VulkanWaitThreads = (int)Pick(Off: 8, Minimal: 8, Medium: 6, High: 4, Aggressive: 2);
+            VulkanRetainedBytes = (long)Megabytes(Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8));
             CoreMessagingRegistrations = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
             HostMessagingObjects = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
             HostObjects = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);

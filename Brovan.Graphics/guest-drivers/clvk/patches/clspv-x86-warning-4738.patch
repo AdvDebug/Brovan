@@ -1,0 +1,12 @@
+--- a/clvk/external/clspv/lib/CMakeLists.txt
++++ b/clvk/external/clspv/lib/CMakeLists.txt
+@@ -169,7 +169,8 @@
+ if (MSVC)
+   set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/SPIRVProducerPass.cpp"
+     # 4596: Upgrade to newer LLVM.  See https://github.com/google/clspv/issues/153
+-    PROPERTIES COMPILE_FLAGS "/Wall /WX /wd4710 /wd4820 /wd4625 /wd4626 /wd5026 /wd5027 /wd4061 /wd4711 /wd4996 /wd4530 /wd4577 /wd4514 /wd4365 /wd4987 /wd4774 /wd4623 /wd4571 /wd4596 /wd5039 /wd5045"
++    # C4738 is expected for x86 x87 code.
++    PROPERTIES COMPILE_FLAGS "/Wall /WX /wd4710 /wd4820 /wd4625 /wd4626 /wd5026 /wd5027 /wd4061 /wd4711 /wd4996 /wd4530 /wd4577 /wd4514 /wd4365 /wd4987 /wd4774 /wd4623 /wd4571 /wd4596 /wd5039 /wd5045 /wd4738"
+   )
+ endif()
+ 

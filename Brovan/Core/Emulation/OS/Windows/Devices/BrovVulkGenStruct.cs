@@ -222,7 +222,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                             int psid = (int)r.ReadU32();
                             if (psid < 0 || psid >= BrovVulkStructMeta.PNext.Length || !BrovVulkStructMeta.PNext[psid])
                                 throw new InvalidOperationException("BrovVulk generic: pNext sid not allowed.");
+                            st.EnterChain();
                             IntPtr node = Rebuild(psid, r, st);
+                            st.LeaveChain();
                             CheckedSType(*(uint*)node, psid);
                             *(IntPtr*)fp = node;
                         }

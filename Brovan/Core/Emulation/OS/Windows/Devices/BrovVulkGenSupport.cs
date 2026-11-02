@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using Brovan.Core.Helpers;
+using Brovan.Core.Settings;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -192,6 +193,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal static unsafe class BrovVulkGenExt
     {
         private const int PropSize = 260;
+        private const uint ApiPatchMask = 0xFFF;
+
+        private static readonly int PropertiesApiVersion = BrovVulkLayout.MemberOffset["VkPhysicalDeviceProperties.apiVersion"];
 
         private static byte[] _instance;
         private static byte[] _device;
@@ -213,6 +217,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             w.WriteBytes(_device);
             return 0;
+        }
+
+        public static uint ClampApiVersion(uint version)
+        {
+            uint max = BrovVulkGenDispatch.MaxApiVersion;
+            return version > (max | ApiPatchMask) ? max | (version & ApiPatchMask) : version;
+        }
+
+        public static void ClampApiVersion(IntPtr properties)
+        {
+            uint* version = (uint*)(properties + PropertiesApiVersion);
+            *version = ClampApiVersion(*version);
         }
 
         internal static Dictionary<string, uint> QueryHost(IntPtr physicalDevice)
@@ -282,11 +298,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         private IntPtr _arena;
         private int _arenaUsed;
         private readonly List<IntPtr> _overflow = new List<IntPtr>();
+        private readonly List<IntPtr> _retainPending = new List<IntPtr>();
+        private long _retainPendingBytes;
+        private bool _retainArmed;
+        private int _chainDepth;
+
+        public long PendingRetainedBytes => _retainPendingBytes;
 
         public IntPtr Alloc(int size)
         {
             if (size <= 0)
                 throw new InvalidOperationException($"Generic forwarding: invalid allocation size {size}.");
+
+            if (_chainDepth != 0)
+                return AllocRetained(size);
 
             int aligned = (size + 15) & ~15;
             if (_arena == IntPtr.Zero)
@@ -300,20 +325,66 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return p;
             }
 
-            IntPtr q = Marshal.AllocHGlobal(size);
-            new Span<byte>((void*)q, size).Clear();
-            _overflow.Add(q);
-            return q;
+            return AllocBlock(size, _overflow);
+        }
+
+        private static IntPtr AllocBlock(int size, List<IntPtr> owner)
+        {
+            IntPtr p = Marshal.AllocHGlobal(size);
+            new Span<byte>((void*)p, size).Clear();
+            owner.Add(p);
+            return p;
+        }
+
+        private static void FreeBlocks(List<IntPtr> blocks)
+        {
+            foreach (IntPtr p in blocks)
+                Marshal.FreeHGlobal(p);
+            blocks.Clear();
+        }
+
+        public void ArmRetain() => _retainArmed = true;
+
+        public void EnterChain()
+        {
+            if (_retainArmed)
+                _chainDepth++;
+        }
+
+        public void LeaveChain()
+        {
+            if (_chainDepth != 0)
+                _chainDepth--;
+        }
+
+        private IntPtr AllocRetained(int size)
+        {
+            _retainPendingBytes += size;
+            return AllocBlock(size, _retainPending);
+        }
+
+        public IntPtr[]? TakeRetained(out long bytes)
+        {
+            bytes = _retainPendingBytes;
+            if (_retainPending.Count == 0)
+                return null;
+
+            IntPtr[] blocks = _retainPending.ToArray();
+            _retainPending.Clear();
+            _retainPendingBytes = 0;
+            return blocks;
         }
 
         public void FreeCallAllocs()
         {
             _arenaUsed = 0;
-            if (_overflow.Count == 0)
-                return;
-            foreach (IntPtr p in _overflow)
-                Marshal.FreeHGlobal(p);
-            _overflow.Clear();
+            _retainArmed = false;
+            _chainDepth = 0;
+            _retainPendingBytes = 0;
+            if (_retainPending.Count != 0)
+                FreeBlocks(_retainPending);
+            if (_overflow.Count != 0)
+                FreeBlocks(_overflow);
         }
 
         public void FreeAll()
@@ -387,6 +458,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         private uint _next = 1;
         private readonly HashSet<uint> _lostDevices = new HashSet<uint>();
         private readonly HashSet<uint> _guestIdScratch = new HashSet<uint>();
+        private readonly Dictionary<uint, (IntPtr[] Blocks, long Bytes)> _retained = new Dictionary<uint, (IntPtr[], long)>();
+        private long _retainedBytes;
+        private bool _retainRefusalLogged;
+        private int _chainDepth;
+
+        private static readonly int MaxChainDepth = Array.FindAll(BrovVulkStructMeta.PNext, Allowed => Allowed).Length;
 
         // NT D3DKMT global share handles have this form.
         private const uint KmtTokenBase = 0x40000002;
@@ -562,6 +639,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 _mappings.Remove(next);
+                if (_retained.Count != 0 && _retained.Remove(next, out (IntPtr[] Blocks, long Bytes) kept))
+                    FreeRetained(kept);
                 if (_importedMem.Remove(next, out IntPtr pin))
                     _importMemory!.UnpinBacking(pin);
                 _memorySizes.Remove(next);
@@ -712,9 +791,69 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public IntPtr Alloc(int size) => _arena.Alloc(size);
 
-        public void FreeCallAllocs() => _arena.FreeCallAllocs();
+        public void FreeCallAllocs()
+        {
+            _chainDepth = 0;
+            _arena.FreeCallAllocs();
+        }
 
-        public void Dispose() => _arena.FreeAll();
+        public void RetainChains() => _arena.ArmRetain();
+
+        public void EnterChain()
+        {
+            if (++_chainDepth > MaxChainDepth)
+                throw new InvalidOperationException("BrovVulk generic: pNext chain deeper than the structures it may hold.");
+
+            _arena.EnterChain();
+        }
+
+        public void LeaveChain()
+        {
+            _chainDepth--;
+            _arena.LeaveChain();
+        }
+
+        public bool RetainFits()
+        {
+            if (_retainedBytes + _arena.PendingRetainedBytes <= MemoryBudget.VulkanRetainedBytes)
+                return true;
+
+            if (!_retainRefusalLogged)
+            {
+                _retainRefusalLogged = true;
+                Utils.LogError($"[!] BrovVulk(gen): kept create-info chains reached {MemoryBudget.VulkanRetainedBytes} bytes; further creates fail.");
+            }
+            return false;
+        }
+
+        public void KeepRetained(uint id)
+        {
+            if (id == 0)
+                return;
+
+            IntPtr[]? blocks = _arena.TakeRetained(out long bytes);
+            if (blocks == null)
+                return;
+
+            _retained[id] = (blocks, bytes);
+            _retainedBytes += bytes;
+        }
+
+        private void FreeRetained((IntPtr[] Blocks, long Bytes) kept)
+        {
+            foreach (IntPtr block in kept.Blocks)
+                Marshal.FreeHGlobal(block);
+            _retainedBytes -= kept.Bytes;
+        }
+
+        public void Dispose()
+        {
+            foreach ((IntPtr[] Blocks, long Bytes) kept in _retained.Values)
+                FreeRetained(kept);
+            _retained.Clear();
+            _retainedBytes = 0;
+            _arena.FreeAll();
+        }
 
     }
 }

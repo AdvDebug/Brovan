@@ -14,13 +14,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ProcessHandle == 0)
             {
                 WinProcess Own = Instance.WinHelper.OwnProcess;
-                if (Own.ExitStatus != (uint)NTSTATUS.STATUS_PENDING)
+                if (Own.Exiting)
                 {
                     TerminateCurrentProcess(Instance, Own.ExitStatus);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 
                 Own.ExitStatus = ExitCode;
+                Own.Exiting = true;
                 TerminateThreads(Instance, ExitCode, true);
                 return NTSTATUS.STATUS_SUCCESS;
             }

@@ -1587,6 +1587,116 @@ VKAPI_ATTR void VKAPI_CALL vkGetPrivateData(
     ReleaseSRWLockShared(&s->lock);
 }
 
+// VK_EXT_debug_utils does not require host driver support.
+typedef struct BvkMessenger
+{
+    struct BvkMessenger* next;
+    VkInstance instance;
+    VkDebugUtilsMessageSeverityFlagsEXT severity;
+    VkDebugUtilsMessageTypeFlagsEXT types;
+    PFN_vkDebugUtilsMessengerCallbackEXT callback;
+    void* userData;
+} BvkMessenger;
+
+static SRWLOCK bvk_messenger_lock = SRWLOCK_INIT;
+static BvkMessenger* bvk_messengers;
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDebugUtilsMessengerEXT(
+    VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pMessenger)
+{
+    (void)pAllocator;
+    if (!pCreateInfo || !pCreateInfo->pfnUserCallback || !pMessenger)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    BvkMessenger* m = (BvkMessenger*)calloc(1, sizeof(BvkMessenger));
+    if (!m)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    m->instance = instance;
+    m->severity = pCreateInfo->messageSeverity;
+    m->types = pCreateInfo->messageType;
+    m->callback = pCreateInfo->pfnUserCallback;
+    m->userData = pCreateInfo->pUserData;
+    AcquireSRWLockExclusive(&bvk_messenger_lock);
+    m->next = bvk_messengers;
+    bvk_messengers = m;
+    ReleaseSRWLockExclusive(&bvk_messenger_lock);
+    *pMessenger = (VkDebugUtilsMessengerEXT)(uintptr_t)m;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyDebugUtilsMessengerEXT(
+    VkInstance instance, VkDebugUtilsMessengerEXT messenger, const VkAllocationCallbacks* pAllocator)
+{
+    (void)instance; (void)pAllocator;
+    BvkMessenger* m = (BvkMessenger*)(uintptr_t)messenger;
+    if (!m)
+        return;
+    AcquireSRWLockExclusive(&bvk_messenger_lock);
+    for (BvkMessenger** link = &bvk_messengers; *link; link = &(*link)->next)
+        if (*link == m)
+        {
+            *link = m->next;
+            free(m);
+            break;
+        }
+    ReleaseSRWLockExclusive(&bvk_messenger_lock);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkSubmitDebugUtilsMessageEXT(
+    VkInstance instance, VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+    VkDebugUtilsMessageTypeFlagsEXT messageTypes, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData)
+{
+    AcquireSRWLockShared(&bvk_messenger_lock);
+    for (BvkMessenger* m = bvk_messengers; m; m = m->next)
+        if (m->instance == instance && (m->severity & messageSeverity) && (m->types & messageTypes))
+            m->callback(messageSeverity, messageTypes, pCallbackData, m->userData);
+    ReleaseSRWLockShared(&bvk_messenger_lock);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkSetDebugUtilsObjectNameEXT(
+    VkDevice device, const VkDebugUtilsObjectNameInfoEXT* pNameInfo)
+{
+    (void)device; (void)pNameInfo;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkSetDebugUtilsObjectTagEXT(
+    VkDevice device, const VkDebugUtilsObjectTagInfoEXT* pTagInfo)
+{
+    (void)device; (void)pTagInfo;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkQueueBeginDebugUtilsLabelEXT(VkQueue queue, const VkDebugUtilsLabelEXT* pLabelInfo)
+{
+    (void)queue; (void)pLabelInfo;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkQueueEndDebugUtilsLabelEXT(VkQueue queue)
+{
+    (void)queue;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkQueueInsertDebugUtilsLabelEXT(VkQueue queue, const VkDebugUtilsLabelEXT* pLabelInfo)
+{
+    (void)queue; (void)pLabelInfo;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginDebugUtilsLabelEXT(VkCommandBuffer commandBuffer, const VkDebugUtilsLabelEXT* pLabelInfo)
+{
+    (void)commandBuffer; (void)pLabelInfo;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdEndDebugUtilsLabelEXT(VkCommandBuffer commandBuffer)
+{
+    (void)commandBuffer;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdInsertDebugUtilsLabelEXT(VkCommandBuffer commandBuffer, const VkDebugUtilsLabelEXT* pLabelInfo)
+{
+    (void)commandBuffer; (void)pLabelInfo;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName)
 {
     (void)instance;
@@ -1597,19 +1707,6 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
     if (strcmp(pName, #n) == 0)                      \
     return (PFN_vkVoidFunction)n
 
-    M(vkGetInstanceProcAddr);
-    M(vkGetDeviceProcAddr);
-    M(vkEnumerateInstanceLayerProperties);
-    M(vkEnumerateDeviceLayerProperties);
-    M(vkCreateDescriptorUpdateTemplate);
-    M(vkDestroyDescriptorUpdateTemplate);
-    M(vkUpdateDescriptorSetWithTemplate);
-    M(vkCmdPushDescriptorSetWithTemplate);
-    M(vkCmdPushDescriptorSetWithTemplate2);
-    M(vkCreatePrivateDataSlot);
-    M(vkDestroyPrivateDataSlot);
-    M(vkSetPrivateData);
-    M(vkGetPrivateData);
 #include "obj/generated/brovvulk_gen_procs.inc"
 #undef M
 

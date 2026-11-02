@@ -1,5 +1,7 @@
 ﻿using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Text;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
@@ -7,6 +9,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         private const uint UmDriverPrivate = 0;
         private const uint UmDriverName = 1;
+        private const uint UmOpenGlInfo = 2;
         private const uint GetSegmentSize = 3;
         private const uint CheckDriverUpdateStatus = 11;
         private const uint DriverVersion = 13;
@@ -28,14 +31,33 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint CrossAdapterResourceSupport = 76;
         private const uint Wddm30Caps = 77;
 
-        private const int UmdFileNameInfoSize = 4 + 260 * 2;
+        private const int MaxPathCharacters = 260;
+        private const int UmdFileNameInfoSize = 4 + MaxPathCharacters * 2;
         private const uint UmdVersionCount = 4;
+        private const int OpenGlInfoSize = 0x210;
+        private const int OffsetOpenGlVersion = MaxPathCharacters * 2;
+        private const int OffsetOpenGlFlags = OffsetOpenGlVersion + 4;
         private const int SegmentSizeInfoSize = 24;
         private const int Wddm12CapsSize = 12;
         private const int NodeMetadataSize = 78;
         private const int QueryDeviceIdsSize = 28;
-        private const int QueryRegistryInfoSize = 552;
         private const int UniqueGuidSize = 80;
+
+        private const int QueryRegistryInfoSize = 552;
+        private const int OffsetRegistryFlags = 4;
+        private const int OffsetRegistryValueName = 8;
+        private const int OffsetRegistryValueType = 528;
+        private const int OffsetRegistryPhysicalAdapter = 532;
+        private const int OffsetRegistryOutputSize = 536;
+        private const int OffsetRegistryOutput = 544;
+        private const uint RegistryAdapterKey = 1;
+        private const uint RegistryDriverStorePath = 2;
+        private const uint RegistryDriverImagePath = 3;
+        private const uint RegistryTranslatePath = 1;
+        private const uint RegistryKnownFlags = 3;
+        private const uint RegistryStatusSuccess = 0;
+        private const uint RegistryStatusBufferOverflow = 1;
+        private const uint RegistryTranslatePathSlack = 16;
         private const int DriverDescriptionSize = 8192;
 
         private const uint WarpPrivateVersion = 2;
@@ -69,9 +91,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!Instance.WinHelper.DxgkProcess.TryGet(Handle, out DxgkAdapter Adapter) || DataPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            // The modeled driver keys hold no value a guest asks for.
             if (Type == QueryRegistry)
-                return Size >= QueryRegistryInfoSize ? NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND : NTSTATUS.STATUS_INVALID_PARAMETER;
+                return QueryDriverRegistry(Instance, Adapter, DataPtr, Size);
 
             if (Size == 0 || Size > DriverDescriptionSize)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -101,6 +122,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(8), WarpPrivateFlags);
                     Written = Math.Min(Data.Length, 12);
                     return NTSTATUS.STATUS_SUCCESS;
+
+                case UmOpenGlInfo when Data.Length == OpenGlInfoSize:
+                    return WriteOpenGlInfo(Instance, Adapter, Data);
 
                 case UmDriverName when Render && Data.Length == UmdFileNameInfoSize:
                     if (BinaryPrimitives.ReadUInt32LittleEndian(Data) >= UmdVersionCount)
@@ -202,14 +226,110 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        private static NTSTATUS WriteOpenGlInfo(BinaryEmulator Instance, DxgkAdapter Adapter, Span<byte> Data)
+        {
+            WinSysHelper WinHelper = Instance.WinHelper;
+            string Suffix = WinHelper.PointerSize == 4 ? Win32kDxgk.WowSuffix : string.Empty;
+            string Name = string.Empty;
+            uint Version = 0;
+            uint Flags = 0;
+            WinRegKey Key = Win32kDxgk.TryGetDriverKey(WinHelper, Adapter, out string DriverKey) ? WinHelper.ResolveRegistryKey(DriverKey) : null;
+            if (Key != null)
+            {
+                if (WinHelper.TryGetRegistryValue(Key, Win32kDxgk.OpenGlDriverNameValue + Suffix, out ValueNode Value)
+                    && (Value.Type == WinSysHelper.RegSz || Value.Type == WinSysHelper.RegMultiSz))
+                    Name = WinSysHelper.DecodeRegistryString(Value.Data);
+                Version = ReadDword(WinHelper, Key, Win32kDxgk.OpenGlVersionValue + Suffix);
+                Flags = ReadDword(WinHelper, Key, Win32kDxgk.OpenGlFlagsValue + Suffix);
+            }
+
+            if (Name.Length >= MaxPathCharacters)
+                return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(OffsetOpenGlVersion), Version);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(OffsetOpenGlFlags), Flags);
+            Data.Slice(0, OffsetOpenGlVersion).Clear();
+            Encoding.Unicode.GetBytes(Name, Data);
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static uint ReadDword(WinSysHelper WinHelper, WinRegKey Key, string Name)
+        {
+            return WinHelper.TryGetRegistryValue(Key, Name, out ValueNode Value) && Value.Type == WinSysHelper.RegDword
+                && Value.Data != null && Value.Data.Length >= 4
+                ? BinaryPrimitives.ReadUInt32LittleEndian(Value.Data)
+                : 0;
+        }
+
+        // NT reports buffer overflow in the record (DxgkpQueryRegistry).
+        private static NTSTATUS QueryDriverRegistry(BinaryEmulator Instance, DxgkAdapter Adapter, ulong DataPtr, uint Size)
+        {
+            if (Size < QueryRegistryInfoSize)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            Span<byte> Info = stackalloc byte[QueryRegistryInfoSize];
+            if (!Instance.ReadMemory(DataPtr, Info))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            uint QueryType = BinaryPrimitives.ReadUInt32LittleEndian(Info);
+            uint Flags = BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OffsetRegistryFlags));
+            uint ValueType = BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OffsetRegistryValueType));
+            uint PhysicalAdapter = BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OffsetRegistryPhysicalAdapter));
+            if (Flags > RegistryKnownFlags || PhysicalAdapter != 0 || QueryType > RegistryDriverImagePath)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            if (QueryType >= RegistryDriverStorePath && (ValueType != 0 || (Flags & RegistryTranslatePath) != 0))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            if (QueryType != RegistryAdapterKey || !Win32kDxgk.TryGetDriverKey(Instance.WinHelper, Adapter, out string Key))
+                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+
+            // NT limits the value name to 259 characters.
+            ReadOnlySpan<char> Name = MemoryMarshal.Cast<byte, char>(Info.Slice(OffsetRegistryValueName, (MaxPathCharacters - 1) * 2));
+            int End = Name.IndexOf('\0');
+            if (End >= 0)
+                Name = Name.Slice(0, End);
+            int Split = Name.LastIndexOf('\\');
+            if (Split > 0)
+            {
+                Key = string.Concat(Key, "\\", Name.Slice(0, Split));
+                Name = Name.Slice(Split + 1);
+            }
+
+            if (!Instance.WinHelper.TryReadRegistryValue(Key, Name.ToString(), out ValueNode Value))
+                return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+            if ((uint)Value.Type != ValueType)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            byte[] Data = Value.Data ?? Array.Empty<byte>();
+            if ((uint)Data.Length > Size - OffsetRegistryOutput)
+            {
+                uint Needed = (uint)Data.Length + ((Flags & RegistryTranslatePath) != 0 ? RegistryTranslatePathSlack : 0);
+                return WriteRegistryResult(Instance, DataPtr, Needed, RegistryStatusBufferOverflow, ReadOnlySpan<byte>.Empty);
+            }
+
+            return WriteRegistryResult(Instance, DataPtr, (uint)Data.Length, RegistryStatusSuccess, Data);
+        }
+
+        private static NTSTATUS WriteRegistryResult(BinaryEmulator Instance, ulong DataPtr, uint OutputSize, uint Status, ReadOnlySpan<byte> Output)
+        {
+            // NT leaves both outputs unchanged if either is unwritable.
+            if (!Instance.IsAccessible(DataPtr + OffsetRegistryOutputSize, (ulong)(OffsetRegistryOutput - OffsetRegistryOutputSize + Output.Length), true))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            Span<byte> Result = stackalloc byte[8];
+            BinaryPrimitives.WriteUInt32LittleEndian(Result, OutputSize);
+            BinaryPrimitives.WriteUInt32LittleEndian(Result.Slice(4), Status);
+            if (!Instance.WriteMemory(DataPtr + OffsetRegistryOutputSize, Result))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            if (!Output.IsEmpty && !Instance.WriteMemory(DataPtr + OffsetRegistryOutput, Output))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
         private static bool TryReadDriverVersion(WinSysHelper WinHelper, DxgkAdapter Adapter, out ulong Version)
         {
-            const string ControlSet = "\\Registry\\Machine\\System\\CurrentControlSet\\";
             Version = 0;
-
-            return WinHelper.TryReadRegistryString(ControlSet + "Enum\\" + Adapter.DeviceInstanceId, "Driver", out string Driver)
-                && Driver.Length != 0
-                && WinHelper.TryReadRegistryString(ControlSet + "Control\\Class\\" + Driver, "DriverVersion", out string Text)
+            return Win32kDxgk.TryGetDriverKey(WinHelper, Adapter, out string DriverKey)
+                && WinHelper.TryReadRegistryString(DriverKey, "DriverVersion", out string Text)
                 && AppxPackageModel.TryParseVersion(Text, out Version);
         }
 

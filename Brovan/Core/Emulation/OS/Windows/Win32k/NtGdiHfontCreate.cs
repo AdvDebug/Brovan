@@ -10,7 +10,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         // ENUMLOGFONTEXDVW opens with the LOGFONTW the caller asked for.
         private const int MaxEnumLogFontSize = 0x1A4;
         private const int DesignVectorAxesOffset = 0x160;
-        private const int StoredEnumLogFontSize = 0x164;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -45,7 +44,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Data[27],
                 ReadFaceName(Data));
 
-            ulong Handle = Win32kHelper.CreateFont(Instance, Description, Data.Slice(0, StoredEnumLogFontSize).ToArray());
+            ulong Handle = Win32kHelper.CreateFont(Instance, Description, Data.Slice(0, Win32kHelper.StoredEnumLogFontSize).ToArray());
             Instance.SetLastWinError(Handle == 0 ? Win32kHelper.ERROR_INVALID_PARAMETER : 0u);
             Instance.SetRawSyscallReturn(Handle);
             return NTSTATUS.STATUS_SUCCESS;

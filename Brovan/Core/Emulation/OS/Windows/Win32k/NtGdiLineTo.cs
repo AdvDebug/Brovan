@@ -20,9 +20,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Instance.WinHelper.ReadDcCurrentPosition(Hdc, out int StartX, out int StartY);
             ulong PenHandle = Instance.WinHelper.ReadDcSelectedPen(Hdc);
-            Win32kPenBrush Pen = Win32kHelper.ResolvePenBrush(Instance, PenHandle, true);
+            Win32kPenBrush Pen = Win32kHelper.ResolveDcPenBrush(Instance, Hdc, PenHandle, true);
 
-            Instance.WinHelper.EnqueueGdiLine(Hwnd, Hdc, StartX, StartY, X, Y, Pen.ColorRef, Pen.PenWidth);
+            if (!Pen.IsNull)
+                Instance.WinHelper.EnqueueGdiLine(Hwnd, Hdc, StartX, StartY, X, Y, Pen.ColorRef, Pen.PenWidth);
             Instance.WinHelper.WriteDcCurrentPosition(Hdc, X, Y);
 
             Instance.SetRawSyscallReturn(1);

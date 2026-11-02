@@ -24,6 +24,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public string DeviceName => "\\Device\\BrovVulk";
 
+        internal void ReleaseHostMemory()
+        {
+            lock (Lock)
+                GenState.Dispose();
+        }
+
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
         {
             InternalPath = DevicePath;

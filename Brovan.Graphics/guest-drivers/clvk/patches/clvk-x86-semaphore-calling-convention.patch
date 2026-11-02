@@ -1,0 +1,56 @@
+--- a/clvk/src/api.cpp
++++ b/clvk/src/api.cpp
+@@ -6153,7 +6153,7 @@
+     return sem.release();
+ }
+ 
+-cl_semaphore_khr clCreateSemaphoreWithPropertiesKHR(
++cl_semaphore_khr CLVK_API_CALL clCreateSemaphoreWithPropertiesKHR(
+     cl_context context, const cl_semaphore_properties_khr* sema_props,
+     cl_int* errcode_ret) {
+ 
+@@ -6173,7 +6173,7 @@
+     return sem;
+ }
+ 
+-cl_int
++cl_int CLVK_API_CALL
+ clEnqueueWaitSemaphoresKHR(cl_command_queue command_queue,
+                            cl_uint num_sema_objects,
+                            const cl_semaphore_khr* sema_objects,
+@@ -6232,7 +6232,7 @@
+     return CL_INVALID_OPERATION;
+ }
+ 
+-cl_int
++cl_int CLVK_API_CALL
+ clEnqueueSignalSemaphoresKHR(cl_command_queue command_queue,
+                              cl_uint num_sema_objects,
+                              const cl_semaphore_khr* sema_objects,
+@@ -6291,7 +6291,7 @@
+     return CL_INVALID_OPERATION;
+ }
+ 
+-cl_int clGetSemaphoreInfoKHR(const cl_semaphore_khr sema_object,
++cl_int CLVK_API_CALL clGetSemaphoreInfoKHR(const cl_semaphore_khr sema_object,
+                              cl_semaphore_info_khr param_name,
+                              size_t param_value_size, void* param_value,
+                              size_t* param_value_size_ret) {
+@@ -6363,7 +6363,7 @@
+     return ret;
+ }
+ 
+-cl_int clReleaseSemaphoreKHR(cl_semaphore_khr sema_object) {
++cl_int CLVK_API_CALL clReleaseSemaphoreKHR(cl_semaphore_khr sema_object) {
+     TRACE_FUNCTION("sema_object", (uintptr_t)sema_object);
+     LOG_API_CALL("sema_object = %p", sema_object);
+ 
+@@ -6376,7 +6376,7 @@
+     return CL_SUCCESS;
+ }
+ 
+-cl_int clRetainSemaphoreKHR(cl_semaphore_khr sema_object) {
++cl_int CLVK_API_CALL clRetainSemaphoreKHR(cl_semaphore_khr sema_object) {
+     TRACE_FUNCTION("sema_object", (uintptr_t)sema_object);
+     LOG_API_CALL("sema_object = %p", sema_object);
+ 

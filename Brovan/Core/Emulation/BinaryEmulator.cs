@@ -4061,6 +4061,10 @@ namespace Brovan.Core.Emulation
                     _emulator.Dispose();
                 }
 
+                // Release retained driver pointers only after all processors stop.
+                if (WinHelper != null)
+                    OS.Windows.WinSysHelper.ReleaseBrovVulk();
+
                 _memory.Clear();
                 _freedmemory.Clear();
                 _emulator = null;

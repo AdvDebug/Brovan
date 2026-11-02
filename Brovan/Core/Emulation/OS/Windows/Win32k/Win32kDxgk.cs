@@ -1,5 +1,8 @@
 ﻿using System.Buffers.Binary;
+using System.Text;
+using Brovan.Core.Helpers;
 using Brovan.Core.Settings;
+using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
@@ -20,12 +23,21 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal uint VendorId { get; init; }
         internal uint DeviceId { get; init; }
         internal string Description { get; init; }
-        internal string DeviceInstanceId { get; init; }
+        internal string HardwareId { get; init; }
+        internal string InstanceId { get; init; }
         internal string DeviceInterface { get; init; }
         internal string UniqueId { get; init; }
         internal ulong DedicatedVideoMemory { get; init; }
 
         internal bool MatchesLuid(uint LowPart, int HighPart) => LowPart == LuidLowPart && HighPart == LuidHighPart;
+    }
+
+    internal sealed class GuestGpuDriver
+    {
+        internal string FileName { get; init; }
+        internal string PathValue { get; init; }
+        internal int PathType { get; init; }
+        internal (string Name, uint Value)[] Dwords { get; init; } = Array.Empty<(string, uint)>();
     }
 
     /// <summary>
@@ -61,6 +73,35 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private const string DisplayInterfaceClass = "{1024e4c9-47c9-48d3-b4a8-f9df78523b53}";
 
+        private const string ControlSet = @"\Registry\Machine\System\CurrentControlSet\";
+        private const string DisplayClass = "{4d36e968-e325-11ce-bfc1-08002be10318}";
+        private const string DisplayClassKey = ControlSet + @"Control\Class\" + DisplayClass;
+        private const int MaxClassInstances = 10000;
+        internal const string WowSuffix = "Wow";
+        internal const string OpenGlDriverNameValue = "OpenGLDriverName";
+        internal const string OpenGlVersionValue = "OpenGLVersion";
+        internal const string OpenGlFlagsValue = "OpenGLFlags";
+        private const string OpenClDriverNameValue = "OpenCLDriverName";
+
+        internal const string DisplayVideoKey = ControlSet + @"Control\Video\{00000000-0000-0000-0000-000000000000}\0000";
+
+        internal static readonly GuestGpuDriver[] GuestDrivers =
+        {
+            new()
+            {
+                FileName = "libgallium_wgl.dll",
+                PathValue = OpenGlDriverNameValue,
+                PathType = WinSysHelper.RegMultiSz,
+                Dwords = new[] { (OpenGlVersionValue, 1u), (OpenGlFlagsValue, 3u) },
+            },
+            new()
+            {
+                FileName = "clvk.dll",
+                PathValue = OpenClDriverNameValue,
+                PathType = WinSysHelper.RegSz,
+            },
+        };
+
         internal static readonly DxgkAdapter Display = new()
         {
             Kind = DxgkAdapterKind.Display,
@@ -70,7 +111,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             AdapterType = DisplaySupported,
             BusType = 1,
             Description = "Brovan Display Adapter",
-            DeviceInstanceId = @"PCI\VEN_0000&DEV_0000&SUBSYS_00000000&REV_00",
+            HardwareId = @"PCI\VEN_0000&DEV_0000&SUBSYS_00000000&REV_00",
+            InstanceId = @"PCI\VEN_0000&DEV_0000&SUBSYS_00000000&REV_00\0",
             DeviceInterface = @"\\?\PCI#VEN_0000&DEV_0000&SUBSYS_00000000&REV_00#0#" + DisplayInterfaceClass,
             UniqueId = "{B73ADCCD-99F6-4B2B-831E-47E106405C20}",
             DedicatedVideoMemory = DisplayDedicatedVideoMemory,
@@ -87,7 +129,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             VendorId = 0x1414,
             DeviceId = 0x8C,
             Description = "Microsoft Basic Render Driver",
-            DeviceInstanceId = @"ROOT\BasicRender\0000",
+            HardwareId = @"ROOT\BasicRender",
+            InstanceId = @"ROOT\BasicRender\0000",
             DeviceInterface = @"\\?\ROOT#BasicRender#0000#" + DisplayInterfaceClass,
             UniqueId = "{FD011EF1-249B-4D83-AA9C-CC5C9FDADA67}",
         };
@@ -102,6 +145,68 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 if (Adapter.MatchesLuid(LowPart, HighPart))
                     return Adapter;
+            }
+
+            return null;
+        }
+
+        private static string EnumKey(DxgkAdapter Adapter) => ControlSet + @"Enum\" + Adapter.InstanceId;
+
+        internal static bool TryGetDriverKey(WinSysHelper WinHelper, DxgkAdapter Adapter, out string DriverKey)
+        {
+            DriverKey = null;
+            if (!WinHelper.TryReadRegistryString(EnumKey(Adapter), "Driver", out string Driver) || Driver.Length == 0)
+                return false;
+
+            DriverKey = ControlSet + @"Control\Class\" + Driver;
+            return true;
+        }
+
+        // Windows hosts share the host hive, so Brovan needs its own class instance.
+        internal static void PublishDriverKey(WinSysHelper WinHelper)
+        {
+            string Instance = FirstFreeClassInstance(WinHelper);
+            if (Instance == null)
+                return;
+
+            string EnumPath = EnumKey(Display);
+            string DriverKey = DisplayClassKey + "\\" + Instance;
+            if (!WinHelper.CreateRegistryKeyPath(EnumPath, true, out _) || !WinHelper.CreateRegistryKeyPath(DriverKey, true, out _))
+                return;
+
+            WinHelper.SetRegistryValue(EnumPath, "Driver", WinSysHelper.RegSz, Encoding.Unicode.GetBytes(DisplayClass + "\\" + Instance + "\0"));
+            foreach (GuestGpuDriver Driver in GuestDrivers)
+            {
+                PublishDriverValues(WinHelper, DriverKey, Driver, "System32", string.Empty);
+                PublishDriverValues(WinHelper, DriverKey, Driver, "SysWOW64", WowSuffix);
+            }
+        }
+
+        private static void PublishDriverValues(WinSysHelper WinHelper, string DriverKey, GuestGpuDriver Driver, string Directory, string Suffix)
+        {
+            string GuestPath = WindowsVersionInfo.SystemRoot + "\\" + Directory + "\\" + Driver.FileName;
+            string HostPath = GeneralHelper.IO.ResolveVirtualHostPath(GuestPath, BinaryFormat.PE, NativeSystemView: true);
+            if (HostPath == null || !GeneralHelper.IO.HostPathExists(HostPath))
+                return;
+
+            string Terminator = Driver.PathType == WinSysHelper.RegMultiSz ? "\0\0" : "\0";
+            WinHelper.SetRegistryValue(DriverKey, Driver.PathValue + Suffix, Driver.PathType, Encoding.Unicode.GetBytes(GuestPath + Terminator));
+            foreach ((string Name, uint Value) in Driver.Dwords)
+                WinHelper.SetRegistryValue(DriverKey, Name + Suffix, WinSysHelper.RegDword, BitConverter.GetBytes(Value));
+        }
+
+        private static string FirstFreeClassInstance(WinSysHelper WinHelper)
+        {
+            WinRegKey Class = WinHelper.ResolveRegistryKey(DisplayClassKey);
+            HashSet<string> Taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (Class != null && WinHelper.TryCollectRegistrySubKeyNames(Class, out List<string> Names))
+                Taken.UnionWith(Names);
+
+            for (int Index = 0; Index < MaxClassInstances; Index++)
+            {
+                string Name = Index.ToString("D4");
+                if (!Taken.Contains(Name))
+                    return Name;
             }
 
             return null;
