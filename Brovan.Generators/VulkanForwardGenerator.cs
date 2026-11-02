@@ -669,7 +669,9 @@ namespace Brovan.Generators
 
         private const double MaxCoreVersion = 1.3;
 
-        private static uint MaxApiVersion => ((uint)MaxCoreVersion << 22) | (((uint)Math.Round(MaxCoreVersion * 10) % 10) << 12);
+        private static uint MaxApiVersion => ApiVersion(MaxCoreVersion);
+
+        private static uint ApiVersion(double version) => ((uint)version << 22) | (((uint)Math.Round(version * 10) % 10) << 12);
 
         private static bool IsWaitTimeoutParam(Model m, Param p)
             => p.Name == "timeout" && ParamKind(m, p) == "ScalarIn" && ScalarWidth(m, p.Type) == 8;
@@ -750,6 +752,8 @@ namespace Brovan.Generators
         }
 
         private static Dictionary<string, int> StructId = new Dictionary<string, int>();
+
+        private static Dictionary<int, string> WireShapes = new Dictionary<int, string>();
 
         private static readonly DiagnosticDescriptor ExtGuard = new DiagnosticDescriptor(
             "BVK001", "BrovVulk extension table drift",
@@ -1689,6 +1693,7 @@ namespace Brovan.Generators
 
             StringBuilder b = new StringBuilder();
             List<string> callArgs = new List<string>();
+            List<string> shape = new List<string>();
             List<string> check = new List<string>();
             List<string> post = new List<string>();
             bool vkRes = c.Ret == "VkResult";
@@ -1715,6 +1720,7 @@ namespace Brovan.Generators
                     b.Append("                System.IntPtr ").Append(local).Append("a = ").Append(local).Append("pr != 0 ? st.Alloc(BrovVulkGenStruct.CheckedBytes(").Append(local).Append("c, ").Append(esz).Append(")) : System.IntPtr.Zero;\n");
                     if (elemChain)
                         b.Append("                if (").Append(local).Append("pr != 0) for (uint k = 0; k < ").Append(local).Append("c; k++) *(uint*)(").Append(local).Append("a + (int)(k * (uint)(").Append(esz).Append("))) = r.ReadU32();\n");
+                    shape.Add(elemChain && StructId.TryGetValue(a.Type, out int chainSid) ? "p:" + chainSid : "p");
                     callArgs.Add("(System.IntPtr)(&" + local + "c)");
                     callArgs.Add(local + "a");
                     if (vkRes && elemHandle)
@@ -1744,6 +1750,7 @@ namespace Brovan.Generators
                     b.Append("                ").Append(local).Append("ch.Add((").Append(local).Append(", ").Append(baseSid).Append("));\n");
                     b.Append("                while (r.ReadU32() == 1) { uint ").Append(local).Append("st = r.ReadU32(); int ").Append(local).Append("sd = (int)r.ReadU32(); if (").Append(local).Append("sd < 0 || ").Append(local).Append("sd >= BrovVulkStructMeta.PNext.Length || !BrovVulkStructMeta.PNext[").Append(local).Append("sd]) throw new System.InvalidOperationException(\"BrovVulk generic: pNext sid not allowed.\"); System.IntPtr ").Append(local).Append("nd = st.Alloc(BrovVulkStructMeta.Sizes[").Append(local).Append("sd]); *(uint*)").Append(local).Append("nd = BrovVulkGenStruct.CheckedSType(").Append(local).Append("st, ").Append(local).Append("sd); *(System.IntPtr*)(").Append(local).Append("tail + 8) = ").Append(local).Append("nd; ").Append(local).Append("tail = ").Append(local).Append("nd; ").Append(local).Append("ch.Add((").Append(local).Append("nd, ").Append(local).Append("sd)); }\n");
                     b.Append("                *(System.IntPtr*)(").Append(local).Append("tail + 8) = System.IntPtr.Zero;\n");
+                    shape.Add("c:" + baseSid);
                     callArgs.Add(local);
                     post.Add("                foreach (var e in " + local + "ch) BrovVulkGenStruct.WritebackBody(e.Item2, w, e.Item1);");
                 }
@@ -1757,6 +1764,7 @@ namespace Brovan.Generators
                         b.Append("                double ").Append(local).Append(" = System.BitConverter.Int64BitsToDouble((long)r.ReadU64());\n");
                     else
                         b.Append("                ").Append(ct).Append(" ").Append(local).Append(" = (").Append(ct).Append(")r.Read").Append(w == 8 ? "U64" : "U32").Append("();\n");
+                    shape.Add(w == 8 || p.Type == "double" ? "u8" : "u4");
                     if (IsWaitTimeoutParam(m, p))
                     {
                         guestTimeout = local + "t";
@@ -1777,6 +1785,7 @@ namespace Brovan.Generators
                 else if (kind == "HandleIn")
                 {
                     b.Append("                uint ").Append(local).Append("Id = r.ReadU32();\n");
+                    shape.Add("h:" + p.Type);
                     if (i == forgetIdx)
                     {
                         b.Append("                System.IntPtr ").Append(local).Append(" = st.Lookup(").Append(local).Append("Id, \"").Append(p.Type).Append("\");\n");
@@ -1791,6 +1800,7 @@ namespace Brovan.Generators
                 else if (kind == "HandleOut")
                 {
                     b.Append("                System.IntPtr ").Append(local).Append(" = System.IntPtr.Zero;\n");
+                    shape.Add("H:" + p.Type);
                     callArgs.Add("(System.IntPtr)(&" + local + ")");
                     if (vkRes)
                     {
@@ -1818,6 +1828,7 @@ namespace Brovan.Generators
                     int bytes = p.ArrayLen * ScalarWidth(m, p.Type);
                     b.Append("                System.IntPtr ").Append(local).Append(" = st.Alloc(").Append(bytes).Append(");\n");
                     b.Append("                r.CopyInto(").Append(local).Append(", ").Append(bytes).Append(");\n");
+                    shape.Add("x:" + bytes);
                     callArgs.Add(local);
                 }
                 else if (kind == "StructIn" && StructId.ContainsKey(p.Type))
@@ -1828,6 +1839,7 @@ namespace Brovan.Generators
                         b.Append("                System.IntPtr ").Append(local).Append(" = r.ReadU32() != 0 ? BrovVulkGenStruct.Rebuild(").Append(StructId[p.Type]).Append(", r, st) : System.IntPtr.Zero;\n");
                     else
                         b.Append("                System.IntPtr ").Append(local).Append(" = BrovVulkGenStruct.RebuildRequired(").Append(StructId[p.Type]).Append(", r, st, \"").Append(p.Type).Append("\");\n");
+                    shape.Add("s:" + StructId[p.Type]);
                     if (p == WaitTimeoutStructParam(m, c))
                     {
                         string timeout = "*(ulong*)(" + local + " + BrovVulkLayout.MemberOffset[\"" + p.Type + ".timeout\"])";
@@ -1850,6 +1862,9 @@ namespace Brovan.Generators
                 else if (kind == "ArrayIn" && (!m.Structs.ContainsKey(p.Type) || StructId.ContainsKey(p.Type)) && arrLen >= 0)
                 {
                     b.Append("                uint ").Append(local).Append("n = r.ReadU32();\n");
+                    shape.Add(m.Structs.ContainsKey(p.Type) ? "a:s:" + StructId[p.Type]
+                        : m.Handles.ContainsKey(p.Type) ? "a:h:" + p.Type
+                        : "a:" + ScalarWidth(m, p.Type));
                     int liIn = arrSamples ? arrLen : ParamLenIndex(c, p, i);
                     string declared = arrSamples ? "((uint)p" + liIn + " + 31) / 32" : "p" + liIn;
                     if (liIn >= 0 && liIn < i)
@@ -1893,6 +1908,7 @@ namespace Brovan.Generators
                     if (spi < 0)
                         return null;
                     b.Append("                uint ").Append(local).Append("n = r.ReadU32();\n");
+                    shape.Add((GuestIds.Contains(c.Name) ? "o:g:" : "o:") + p.Type);
                     // The field also sizes input arrays that RebuildAt has already checked against it.
                     b.Append("                if (p").Append(spi).Append(" == System.IntPtr.Zero) { if (").Append(local).Append("n != 0) throw new System.InvalidOperationException(\"BrovVulk generic: array count mismatch.\"); }\n");
                     b.Append("                else if (").Append(local).Append("n != *(uint*)(p").Append(spi).Append(" + BrovVulkLayout.MemberOffset[\"").Append(c.Params[spi].Type).Append(".").Append(fld).Append("\"])) throw new System.InvalidOperationException(\"BrovVulk generic: array count mismatch.\");\n");
@@ -1918,6 +1934,7 @@ namespace Brovan.Generators
                 {
                     int liOut = ParamLenIndex(c, p, i);
                     b.Append("                System.IntPtr ").Append(local).Append(" = p").Append(liOut).Append(" > 0 ? st.Alloc(BrovVulkGenStruct.CheckedBytes(p").Append(liOut).Append(", 8)) : System.IntPtr.Zero;\n");
+                    shape.Add("H:" + p.Type);
                     callArgs.Add(local);
                     if (vkRes)
                     {
@@ -1929,6 +1946,7 @@ namespace Brovan.Generators
                 else if (kind == "ArrayOut" && m.Handles.ContainsKey(p.Type))
                 {
                     b.Append("                System.IntPtr ").Append(local).Append(" = System.IntPtr.Zero;\n");
+                    shape.Add("H:" + p.Type);
                     callArgs.Add("(System.IntPtr)(&" + local + ")");
                     if (vkRes)
                     {
@@ -1942,6 +1960,7 @@ namespace Brovan.Generators
                 else if (kind == "VoidIn" && c.Params.Any(x => x.Name == p.Length))
                 {
                     b.Append("                uint ").Append(local).Append("n = r.ReadU32();\n");
+                    shape.Add("v");
                     int lvIn = BlobLenIndex(m, c, p, i);
                     if (lvIn >= 0)
                         b.Append("                if (").Append(local).Append("n != (ulong)p").Append(lvIn).Append(") throw new System.InvalidOperationException(\"BrovVulk generic: blob length mismatch.\");\n");
@@ -1952,6 +1971,7 @@ namespace Brovan.Generators
                 else if (kind == "VoidOut" && c.Params.Any(x => x.Name == p.Length))
                 {
                     b.Append("                uint ").Append(local).Append("n = r.ReadU32();\n");
+                    shape.Add("V");
                     int lvOut = BlobLenIndex(m, c, p, i);
                     if (lvOut >= 0)
                         b.Append("                if (").Append(local).Append("n != (ulong)p").Append(lvOut).Append(") throw new System.InvalidOperationException(\"BrovVulk generic: blob length mismatch.\");\n");
@@ -2022,9 +2042,13 @@ namespace Brovan.Generators
             if (c.Name == "vkQueueSubmit" || c.Name == "vkQueueSubmit2")
                 head.Append("                BrovVulkGenMemory.SyncAllMappingsToHost(st, inst);\n");
             head.Append(b);
+            string hostGate = replaced ? null : PhysicalDeviceGate(m, c);
+            if (hostGate != null)
+                callArgs[0] = hostGate;
             string call = HostReplaced.TryGetValue(c.Name, out string replacement)
                 ? replacement + "(st, inst, " + string.Join(", ", callArgs) + ")"
                 : "BrovVulkApi." + c.Name + "(" + string.Join(", ", callArgs) + ")";
+            WireShapes[id] = string.Join(" ", shape);
             if (DeferredDestroyCall(m, c) != null)
             {
                 int parent = DeferredDestroyParentIndex(m, c, forgetIdx);
@@ -2077,6 +2101,36 @@ namespace Brovan.Generators
             methods.Append("\n        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]\n");
             methods.Append("        private static int ").Append(name).Append("(GenReader r, GenBuf w, GenState st, Brovan.Core.Emulation.IGuestMemory inst)\n");
             methods.Append(body.Substring(4).Replace("\n    ", "\n"));
+        }
+
+        // Resolve newer commands through their owner when the loader predates them.
+        private static bool OwnerRouted(Model m, Command c)
+        {
+            if (c.Params.Count == 0)
+                return false;
+            if (m.CoreCommandVersion.TryGetValue(c.Name, out double version) && version <= 1.0)
+                return false;
+            string first = c.Params[0].Type;
+            return c.Params[0].PtrDepth == 0
+                && (first == "VkDevice" || first == "VkQueue" || first == "VkCommandBuffer" || first == "VkPhysicalDevice");
+        }
+
+        // Loader trampolines can reach null driver slots for unsupported device extensions.
+        private static string PhysicalDeviceGate(Model m, Command c)
+        {
+            if (!OwnerRouted(m, c) || c.Params[0].Type != "VkPhysicalDevice" || IsCountArrayPair(m, c, 0)
+                || ParamKind(m, c.Params[0]) != "HandleIn")
+                return null;
+
+            bool core = m.CoreCommandVersion.TryGetValue(c.Name, out double version);
+            List<VkExtension> providers = m.Extensions.Values
+                .Where(e => e.Commands.Contains(c.Name) || e.Gated.Any(g => g.Commands.Contains(c.Name)))
+                .OrderBy(e => e.Name, StringComparer.Ordinal).ToList();
+            if ((providers.Count == 0 && !core) || providers.Any(e => e.Type != "device"))
+                return null;
+            uint coreVersion = core ? ApiVersion(version) : 0;
+            return "BrovVulkGenExt.PhysicalDeviceCommand(p0, " + coreVersion + "u"
+                + string.Concat(providers.Select(e => ", \"" + e.Name + "\"")) + ")";
         }
 
         private static string Arg(Command c, string name)
@@ -3015,8 +3069,18 @@ namespace Brovan.Generators
             foreach (List<string> names in promotedFrom.Values)
                 names.Sort(StringComparer.Ordinal);
 
+            b.AppendLine("        internal static readonly string[][] CommandAliases = new string[][]");
+            b.AppendLine("        {");
             foreach (Command c in cmds)
+                b.AppendLine(promotedFrom.TryGetValue(c.Name, out List<string> names)
+                    ? "            new string[] { " + string.Join(", ", names.Select(n => "\"" + n + "\"")) + " },"
+                    : "            null,");
+            b.AppendLine("        };");
+            b.AppendLine();
+
+            for (int id = 0; id < cmds.Count; id++)
             {
+                Command c = cmds[id];
                 StringBuilder args = new StringBuilder();
                 StringBuilder call = new StringBuilder();
                 StringBuilder fnPtr = new StringBuilder("delegate* unmanaged<");
@@ -3031,27 +3095,15 @@ namespace Brovan.Generators
                 string ret = CsRet(m, c.Ret);
                 fnPtr.Append(ret).Append('>');
 
-                promotedFrom.TryGetValue(c.Name, out List<string> aliases);
-                if (aliases == null && m.CoreCommandVersion.ContainsKey(c.Name))
+                if (!promotedFrom.ContainsKey(c.Name) && m.CoreCommandVersion.ContainsKey(c.Name))
                 {
                     b.AppendLine("        [DllImport(\"vulkan-1.dll\", EntryPoint = \"" + c.Name + "\", CallingConvention = CallingConvention.Winapi)]");
                     b.AppendLine("        internal static extern " + ret + " " + c.Name + "(" + args + ");");
                     continue;
                 }
 
-                StringBuilder aliasArgs = new StringBuilder();
-                if (aliases != null)
-                    foreach (string alias in aliases)
-                        aliasArgs.Append(", \"").Append(alias).Append('"');
-
-                b.AppendLine("        private static IntPtr Pfn" + c.Name + ";");
-                b.AppendLine("        internal static " + ret + " " + c.Name + "(" + args + ")");
-                b.AppendLine("        {");
-                b.AppendLine("            IntPtr p = Pfn" + c.Name + ";");
-                b.AppendLine("            if (p == IntPtr.Zero)");
-                b.AppendLine("                p = Pfn" + c.Name + " = BrovVulkProc.Resolve(\"" + c.Name + "\"" + aliasArgs + ");");
-                b.AppendLine("            " + (ret == "void" ? "" : "return ") + "((" + fnPtr + ")p)(" + call + ");");
-                b.AppendLine("        }");
+                string proc = OwnerRouted(m, c) ? "BrovVulkProc.Owned(a0, " + id + ")" : "BrovVulkProc.Global(" + id + ")";
+                b.AppendLine("        internal static " + ret + " " + c.Name + "(" + args + ") => ((" + fnPtr + ")" + proc + ")(" + call + ");");
             }
             b.AppendLine("    }");
             b.AppendLine("}");
@@ -3214,6 +3266,7 @@ namespace Brovan.Generators
             StructId = new Dictionary<string, int>();
             for (int i = 0; i < needed.Count; i++)
                 StructId[needed[i]] = i;
+            WireShapes = new Dictionary<int, string>();
             foreach ((string Name, string Problem) bad in GuestAnswerProblems(m))
                 spc.ReportDiagnostic(Diagnostic.Create(GuestAnswerGuard, Location.None, bad.Name, bad.Problem));
             foreach ((string Name, string Problem) bad in RetainedChainProblems(m))
@@ -3434,6 +3487,21 @@ namespace Brovan.Generators
             db.AppendLine("    }");
             db.AppendLine("}");
             spc.AddSource("BrovVulkGenDispatch.g.cs", SourceText.From(db.ToString(), Encoding.UTF8));
+
+            StringBuilder wb = new StringBuilder();
+            wb.AppendLine("// <auto-generated/>");
+            wb.AppendLine("namespace Brovan.Core.Emulation.OS.Windows");
+            wb.AppendLine("{");
+            wb.AppendLine("    internal static class BrovVulkWireShapes");
+            wb.AppendLine("    {");
+            wb.AppendLine("        internal static readonly string[] Shapes = new string[]");
+            wb.AppendLine("        {");
+            for (int i = 0; i < cmds.Count; i++)
+                wb.AppendLine(WireShapes.TryGetValue(i, out string ws) ? "            \"" + ws + "\"," : "            null,");
+            wb.AppendLine("        };");
+            wb.AppendLine("    }");
+            wb.AppendLine("}");
+            spc.AddSource("BrovVulkWireShapes.g.cs", SourceText.From(wb.ToString(), Encoding.UTF8));
 
             StringBuilder rb = new StringBuilder();
             HashSet<string> outSideFinal = OutSideStructs(m, exported);

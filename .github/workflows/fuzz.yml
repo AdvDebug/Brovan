@@ -45,17 +45,20 @@ jobs:
       - name: Install clang and a software Vulkan driver
         run: |
           sudo apt-get update
-          # libclang-rt-dev carries libclang_rt.fuzzer, which --no-install-recommends would leave
-          # out. lavapipe lets the ioctl target reach a real driver with no GPU on the runner.
+          # --no-install-recommends omits the fuzzer runtime unless requested.
           sudo apt-get install -y --no-install-recommends \
-            clang libclang-rt-dev gdb mesa-vulkan-drivers
+            clang libclang-rt-dev gdb mesa-vulkan-drivers vulkan-validationlayers
           echo "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json" >> "$GITHUB_ENV"
 
       - name: Build libfuzzer-dotnet
+        env:
+          LIBFUZZER_DOTNET_COMMIT: bd39d4e88d715ab460a929943645be2a186cde52
+          LIBFUZZER_DOTNET_SHA256: 90f019e2e9ad3a0b93c7ecc2c5afb2fbfc8b5aab6aac51c7e0d349ec79354f36
         run: |
           curl -fsSLo libfuzzer-dotnet.cc \
-            https://raw.githubusercontent.com/Metalnem/libfuzzer-dotnet/master/libfuzzer-dotnet.cc
-          clang -fsanitize=fuzzer libfuzzer-dotnet.cc -o libfuzzer-dotnet
+            "https://raw.githubusercontent.com/Metalnem/libfuzzer-dotnet/$LIBFUZZER_DOTNET_COMMIT/libfuzzer-dotnet.cc"
+          echo "$LIBFUZZER_DOTNET_SHA256  libfuzzer-dotnet.cc" | sha256sum -c -
+          clang -O2 -fsanitize=fuzzer libfuzzer-dotnet.cc -o libfuzzer-dotnet
           test -x ./libfuzzer-dotnet && echo "libfuzzer-dotnet ready"
 
       - name: Build the harness
@@ -108,13 +111,9 @@ jobs:
           fi
 
           mkdir -p crashes
-          # No -seed: it would give every worker the same schedule. Each draws from its own pid
-          # and clock and prints what it drew.
           WORKERS=$(nproc)
 
-          # -rss_limit_mb bounds the driver, which runs the target in a child, so MemoryGuard
-          # watches the harness itself.
-
+          # The RSS limit covers the driver process. MemoryGuard covers the harness.
           ./libfuzzer-dotnet \
             --target_path=fuzzbin/Brovan.Fuzz \
             --target_arg="libfuzzer:${{ matrix.target }}" \
@@ -122,21 +121,14 @@ jobs:
             -dict=artifacts/brovvulk.dict \
             -artifact_prefix=crashes/ \
             -max_total_time=$(( MINUTES * 60 )) \
-            -jobs=$WORKERS -workers=$WORKERS \
+            -fork=$WORKERS -ignore_crashes=1 -ignore_timeouts=1 -ignore_ooms=1 \
             -max_len=8192 \
             -rss_limit_mb=2048 \
             -timeout=25 \
-            -print_final_stats=1
-          # $? must stay on the line after the run.
-          echo "FUZZ_STATUS=$?" >> "$GITHUB_ENV"
-
-          # -jobs sends each worker to its own file rather than to stdout.
-          for f in fuzz-*.log; do
-            [ -e "$f" ] || continue
-            echo "===== $f ====="
-            tail -40 "$f"
-            mv "$f" "artifacts/${{ matrix.target }}-$f"
-          done
+            -print_final_stats=1 2>&1 | tee artifacts/fuzz-${{ matrix.target }}.log | grep -v -E '^#[0-9]+'
+          # Read PIPESTATUS before another command resets it.
+          echo "FUZZ_STATUS=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+          tail -40 artifacts/fuzz-${{ matrix.target }}.log
 
       - name: Minimise the corpus
         # Keeps the cached corpus from growing without bound across nightly runs.
@@ -163,12 +155,22 @@ jobs:
           set +e
           shopt -s nullglob
           OUT=Brovan.Fuzz/bin/Release/net10.0
-          mkdir -p artifacts
-          # The loop is piped into tee, and a pipeline runs its left side in a subshell, so a
-          # flag set inside it never reaches this shell.
+          mkdir -p artifacts crashes-layer
+          LIMIT=40
+          # The validation layer can crash on input the driver rejects.
+          all=(crashes/*)
+          for f in "${all[@]:0:$LIMIT}"; do
+            timeout 60 dotnet "$OUT/Brovan.Fuzz.dll" replay ${{ matrix.target }} "$f" > /dev/null 2>&1
+            [ $? -ge 128 ] || continue
+            VK_LAYER_PATH=/nonexistent timeout 60 dotnet "$OUT/Brovan.Fuzz.dll" replay ${{ matrix.target }} "$f" > /dev/null 2>&1
+            [ $? -eq 0 ] && mv "$f" crashes-layer/
+          done
+          echo "crashes only the validation layer has: $(ls crashes-layer | wc -l)"
+          # Set FOUND outside the pipeline subshell.
           found=(crashes/*)
           if [ "${#found[@]}" -gt 0 ]; then FOUND=1; else FOUND=0; fi
-          for f in "${found[@]}"; do
+          echo "crash inputs: ${#found[@]}, the first $LIMIT replayed below"
+          for f in "${found[@]:0:$LIMIT}"; do
             echo "=============================================================="
             echo "crash input: $f  ($(stat -c%s "$f") bytes)"
             echo "sha256: $(sha256sum "$f" | cut -d' ' -f1)"
@@ -195,6 +197,7 @@ jobs:
           path: |
             artifacts/
             crashes/
+            crashes-layer/
           if-no-files-found: ignore
           retention-days: 30
 

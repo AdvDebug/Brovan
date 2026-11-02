@@ -1,8 +1,10 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using Brovan.Core.Helpers;
 using Brovan.Core.Settings;
 
@@ -151,7 +153,32 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static IntPtr HostInstance;
 
-        internal static IntPtr Resolve(string Name, params string[] Aliases)
+        private static readonly IntPtr[] Globals = new IntPtr[BrovVulkApi.CommandCount];
+
+        // The loader dispatch pointer is shared by an owner and its child handles.
+        private static readonly ConcurrentDictionary<IntPtr, HostProcs> Owners = new ConcurrentDictionary<IntPtr, HostProcs>();
+
+        internal static unsafe IntPtr AddOwner(IntPtr Owner, bool Device)
+        {
+            IntPtr Key = *(IntPtr*)Owner;
+            Owners[Key] = new HostProcs(Owner, Device);
+            return Key;
+        }
+
+        internal static void RemoveOwner(IntPtr Key) => Owners.TryRemove(Key, out _);
+
+        internal static unsafe IntPtr Owned(IntPtr Handle, int Command)
+        {
+            if (Handle == IntPtr.Zero || !Owners.TryGetValue(*(IntPtr*)Handle, out HostProcs? Procs))
+                return Global(Command);
+
+            IntPtr Proc = Procs.Get(Command);
+            if (Proc == IntPtr.Zero)
+                throw new EntryPointNotFoundException("The host has no " + BrovVulkApi.CommandNames[Command] + " for this object.");
+            return Proc;
+        }
+
+        private static IntPtr Resolve(string Name, string[]? Aliases)
         {
             if (!LibraryTried)
             {
@@ -167,26 +194,64 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (HostInstance != IntPtr.Zero)
             {
-                IntPtr Proc = InstanceProc(Name);
+                IntPtr Proc = OwnedProc(HostInstance, false, Name, Aliases);
                 if (Proc != IntPtr.Zero)
                     return Proc;
-
-                for (int i = 0; i < Aliases.Length; i++)
-                {
-                    Proc = InstanceProc(Aliases[i]);
-                    if (Proc != IntPtr.Zero)
-                        return Proc;
-                }
             }
 
             throw new EntryPointNotFoundException("The host Vulkan loader has no entry point for " + Name + ".");
         }
 
-        private static IntPtr InstanceProc(string Name)
+        internal static IntPtr Global(int Command)
+        {
+            IntPtr Proc = Globals[Command];
+            if (Proc == IntPtr.Zero)
+                Proc = Globals[Command] = Resolve(BrovVulkApi.CommandNames[Command], BrovVulkApi.CommandAliases[Command]);
+            return Proc;
+        }
+
+        internal static IntPtr OwnedProc(IntPtr Owner, bool Device, string Name, string[]? Aliases = null)
+        {
+            IntPtr Proc = AskLoader(Owner, Device, Name);
+            for (int i = 0; Proc == IntPtr.Zero && Aliases != null && i < Aliases.Length; i++)
+                Proc = AskLoader(Owner, Device, Aliases[i]);
+            return Proc;
+        }
+
+        private static IntPtr AskLoader(IntPtr Owner, bool Device, string Name)
         {
             IntPtr Ansi = Marshal.StringToHGlobalAnsi(Name);
-            try { return BrovVulkApi.vkGetInstanceProcAddr(HostInstance, Ansi); }
+            try { return Device ? BrovVulkApi.vkGetDeviceProcAddr(Owner, Ansi) : BrovVulkApi.vkGetInstanceProcAddr(Owner, Ansi); }
             finally { Marshal.FreeHGlobal(Ansi); }
+        }
+    }
+
+    // Waiter threads also read this cache outside BrovVulkDevice.Lock.
+    internal sealed class HostProcs
+    {
+        private static readonly IntPtr Absent = new IntPtr(-1);
+
+        private readonly IntPtr _owner;
+        private readonly bool _device;
+        private readonly IntPtr[] _procs = new IntPtr[BrovVulkApi.CommandCount];
+
+        public HostProcs(IntPtr owner, bool device)
+        {
+            _owner = owner;
+            _device = device;
+        }
+
+        public IntPtr Get(int command)
+        {
+            IntPtr proc = Volatile.Read(ref _procs[command]);
+            if (proc == IntPtr.Zero)
+            {
+                proc = BrovVulkProc.OwnedProc(_owner, _device, BrovVulkApi.CommandNames[command], BrovVulkApi.CommandAliases[command]);
+                if (proc == IntPtr.Zero)
+                    proc = Absent;
+                Volatile.Write(ref _procs[command], proc);
+            }
+            return proc == Absent ? IntPtr.Zero : proc;
         }
     }
 
@@ -195,7 +260,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int PropSize = 260;
         private const uint ApiPatchMask = 0xFFF;
 
-        private static readonly int PropertiesApiVersion = BrovVulkLayout.MemberOffset["VkPhysicalDeviceProperties.apiVersion"];
+        internal static readonly int PropertiesApiVersion = BrovVulkLayout.MemberOffset["VkPhysicalDeviceProperties.apiVersion"];
 
         private static byte[] _instance;
         private static byte[] _device;
@@ -229,6 +294,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             uint* version = (uint*)(properties + PropertiesApiVersion);
             *version = ClampApiVersion(*version);
+        }
+
+        public static IntPtr PhysicalDeviceCommand(IntPtr physicalDevice, uint coreVersion, params ReadOnlySpan<string> extensions)
+        {
+            VulkanStandIns.DeviceGaps gaps = VulkanStandIns.Gaps(physicalDevice);
+            if (coreVersion != 0 && gaps.ApiVersion >= coreVersion)
+                return physicalDevice;
+            foreach (string name in extensions)
+            {
+                if (gaps.HostExtensions.ContainsKey(name))
+                    return physicalDevice;
+            }
+            throw new EntryPointNotFoundException("BrovVulk generic: the host physical device lacks " + (extensions.Length != 0 ? extensions[0] : "the core version") + ".");
         }
 
         internal static Dictionary<string, uint> QueryHost(IntPtr physicalDevice)
@@ -457,6 +535,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private uint _nextKmtSlot;
         private uint _next = 1;
         private readonly HashSet<uint> _lostDevices = new HashSet<uint>();
+        private readonly Dictionary<uint, IntPtr> _ownerKeys = new Dictionary<uint, IntPtr>();
         private readonly HashSet<uint> _guestIdScratch = new HashSet<uint>();
         private readonly Dictionary<uint, (IntPtr[] Blocks, long Bytes)> _retained = new Dictionary<uint, (IntPtr[], long)>();
         private long _retainedBytes;
@@ -492,7 +571,23 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             uint id = _next++;
             Add(id, ptr, type, parent);
+            // Forget runs after host destruction, so save the dispatch key now.
+            if (type == "VkDevice" || type == "VkInstance")
+                _ownerKeys[id] = BrovVulkProc.AddOwner(ptr, type == "VkDevice");
             return id;
+        }
+
+        public uint NextHostId => _next;
+
+        public void Rewind(uint next)
+        {
+            foreach (uint id in _handles.Keys)
+            {
+                if (id >= next)
+                    _forgetting.Push(id);
+            }
+            ForgetQueued();
+            _next = next;
         }
 
         public unsafe void CheckGuestIds(IntPtr ids, uint count, string type)
@@ -613,6 +708,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void Forget(uint id)
         {
             _forgetting.Push(id);
+            ForgetQueued();
+        }
+
+        private void ForgetQueued()
+        {
             while (_forgetting.Count != 0)
             {
                 uint next = _forgetting.Pop();
@@ -639,6 +739,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 _mappings.Remove(next);
+                if (_ownerKeys.Count != 0 && _ownerKeys.Remove(next, out IntPtr ownerKey))
+                    BrovVulkProc.RemoveOwner(ownerKey);
                 if (_retained.Count != 0 && _retained.Remove(next, out (IntPtr[] Blocks, long Bytes) kept))
                     FreeRetained(kept);
                 if (_importedMem.Remove(next, out IntPtr pin))
@@ -848,6 +950,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void Dispose()
         {
+            foreach (IntPtr ownerKey in _ownerKeys.Values)
+                BrovVulkProc.RemoveOwner(ownerKey);
+            _ownerKeys.Clear();
             foreach ((IntPtr[] Blocks, long Bytes) kept in _retained.Values)
                 FreeRetained(kept);
             _retained.Clear();

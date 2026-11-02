@@ -11,7 +11,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const uint IOCTL_BROVVULK_GEN = 0x80002004;
         private const uint MaxGenPayload = 1u << 20;
-        private const uint BatchId = 0xFFFFFFFE;
+        internal const uint BatchId = 0xFFFFFFFE;
         private const uint MaxBatchCommands = 1u << 20;
         private const int VK_ERROR_INITIALIZATION_FAILED = -3;
 

@@ -162,6 +162,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             public int ImplementedBits;
             public int HostBits;
+            public uint ApiVersion;
             public string[] Missing = Array.Empty<string>();
             public Dictionary<string, uint> HostExtensions = new Dictionary<string, uint>(StringComparer.Ordinal);
             public SpirvRelocation Relocation = new SpirvRelocation(-1, -1, -1);
@@ -285,6 +286,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             byte* properties = stackalloc byte[size];
             new Span<byte>(properties, size).Clear();
             BrovVulkApi.vkGetPhysicalDeviceProperties(physicalDevice, (IntPtr)properties);
+            gaps.ApiVersion = *(uint*)(properties + BrovVulkGenExt.PropertiesApiVersion);
             byte* limits = properties + PropertiesLimits;
 
             ulong alignment = *(ulong*)(limits + LimitsStorageAlignment);

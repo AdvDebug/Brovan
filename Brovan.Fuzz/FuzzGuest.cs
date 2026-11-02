@@ -12,7 +12,11 @@ internal sealed unsafe class FuzzGuest : IGuestMemory, IDisposable
     public const ulong GuestSize = 8UL << 20;
     private const nuint Page = 4096;
 
-    private IntPtr _region;
+    private static readonly byte[] Fills = { 0x00, 0xFF, 0xA5, 0x80 };
+
+    private readonly IntPtr[] _regions = new IntPtr[Fills.Length];
+    private readonly bool[] _filled = new bool[Fills.Length];
+    private int _window;
     private byte* _guest;
 
     public bool AllowShareBacking;
@@ -21,20 +25,26 @@ internal sealed unsafe class FuzzGuest : IGuestMemory, IDisposable
 
     public long RefusedReads, RefusedWrites;
 
-    // Repainting the whole window between iterations costs more than the iteration itself.
+    private ulong _dirtyLow = ulong.MaxValue;
     private ulong _dirtyHigh;
 
     public FuzzGuest()
     {
         nuint total = (nuint)GuestSize + Page * 2;
-        _region = Native.mmap(IntPtr.Zero, total, Native.PROT_READ | Native.PROT_WRITE,
-                              Native.MAP_PRIVATE | Native.MAP_ANONYMOUS, -1, 0);
-        if (_region == IntPtr.Zero || _region == new IntPtr(-1))
-            throw new InvalidOperationException("guest address space mmap failed");
+        for (int i = 0; i < _regions.Length; i++)
+        {
+            IntPtr region = Native.mmap(IntPtr.Zero, total, Native.PROT_READ | Native.PROT_WRITE,
+                                        Native.MAP_PRIVATE | Native.MAP_ANONYMOUS, -1, 0);
+            if (region == IntPtr.Zero || region == new IntPtr(-1))
+                throw new InvalidOperationException("guest address space mmap failed");
 
-        Native.mprotect(_region, Page, Native.PROT_NONE);
-        Native.mprotect(_region + (int)((nuint)GuestSize + Page), Page, Native.PROT_NONE);
-        _guest = (byte*)_region + Page;
+            Native.mprotect(region, Page, Native.PROT_NONE);
+            Native.mprotect(region + (int)((nuint)GuestSize + Page), Page, Native.PROT_NONE);
+            _regions[i] = region;
+        }
+
+        _filled[0] = true;
+        _guest = (byte*)_regions[0] + Page;
     }
 
     // BinaryEmulator.IsRegionMapped tests overlap, not containment.
@@ -54,6 +64,14 @@ internal sealed unsafe class FuzzGuest : IGuestMemory, IDisposable
         return offset <= GuestSize && Size <= GuestSize - offset;
     }
 
+    private void Dirty(ulong offset, ulong end)
+    {
+        if (offset < _dirtyLow)
+            _dirtyLow = offset;
+        if (end > _dirtyHigh)
+            _dirtyHigh = end;
+    }
+
     public bool IsRegionMapped(ulong Address, ulong Size) => Overlaps(Address, Size);
 
     public IntPtr GetHostPointer(ulong Address, ulong Size)
@@ -61,10 +79,9 @@ internal sealed unsafe class FuzzGuest : IGuestMemory, IDisposable
         if (!Contains(Address, Size))
             return IntPtr.Zero;
         // The caller can write through the pointer without going through WriteMemory.
-        ulong end = (Address - GuestBase) + Size;
-        if (end > _dirtyHigh)
-            _dirtyHigh = end;
-        return (IntPtr)(_guest + (Address - GuestBase));
+        ulong offset = Address - GuestBase;
+        Dirty(offset, offset + Size);
+        return (IntPtr)(_guest + offset);
     }
 
     public bool ReadMemory(ulong Address, Span<byte> Destination)
@@ -87,9 +104,7 @@ internal sealed unsafe class FuzzGuest : IGuestMemory, IDisposable
         }
         ulong offset = Address - GuestBase;
         Source.CopyTo(new Span<byte>(_guest + offset, Source.Length));
-        ulong end = offset + (ulong)Source.Length;
-        if (end > _dirtyHigh)
-            _dirtyHigh = end;
+        Dirty(offset, offset + (ulong)Source.Length);
         return true;
     }
 
@@ -132,33 +147,37 @@ internal sealed unsafe class FuzzGuest : IGuestMemory, IDisposable
 
     public SafeHandle? FindSharedGpuMemoryHandle(ulong GuestHandle) => null;
 
-    public void ResetDirty(byte Fill)
-    {
-        if (_dirtyHigh != 0)
-        {
-            new Span<byte>(_guest, (int)Math.Min(_dirtyHigh, GuestSize)).Fill(Fill);
-            _dirtyHigh = 0;
-        }
-        else if (_lastFill != Fill)
-        {
-            new Span<byte>(_guest, (int)GuestSize).Fill(Fill);
-        }
+    public static int WindowCount => Fills.Length;
 
-        _lastFill = Fill;
+    public void ResetDirty(int window)
+    {
+        if (_dirtyHigh > _dirtyLow)
+            new Span<byte>(_guest + _dirtyLow, (int)(Math.Min(_dirtyHigh, GuestSize) - _dirtyLow)).Fill(Fills[_window]);
+        _dirtyLow = ulong.MaxValue;
+        _dirtyHigh = 0;
+
+        if (!_filled[window])
+        {
+            new Span<byte>((byte*)_regions[window] + Page, (int)GuestSize).Fill(Fills[window]);
+            _filled[window] = true;
+        }
+        _window = window;
+        _guest = (byte*)_regions[window] + Page;
+
         RefusedReads = 0;
         RefusedWrites = 0;
     }
 
-    private byte _lastFill;
-
     public void Dispose()
     {
-        if (_region != IntPtr.Zero)
+        for (int i = 0; i < _regions.Length; i++)
         {
-            Native.munmap(_region, (nuint)GuestSize + Page * 2);
-            _region = IntPtr.Zero;
-            _guest = null;
+            if (_regions[i] == IntPtr.Zero)
+                continue;
+            Native.munmap(_regions[i], (nuint)GuestSize + Page * 2);
+            _regions[i] = IntPtr.Zero;
         }
+        _guest = null;
     }
 
     private static class Native

@@ -51,6 +51,8 @@ namespace Brovan.Core.Helpers
         /// </summary>
         public static bool SilentMode { get; set; }
 
+        public static bool DiscardErrorLog { get; set; }
+
         /// <summary>
         /// Removes user-identifying data from an error message.
         /// </summary>
@@ -118,7 +120,7 @@ namespace Brovan.Core.Helpers
         /// <param name="Error">Error to log.</param>
         public static void LogError(string Error)
         {
-            if (string.IsNullOrWhiteSpace(Error))
+            if (DiscardErrorLog || string.IsNullOrWhiteSpace(Error))
                 return;
 
             string Timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");

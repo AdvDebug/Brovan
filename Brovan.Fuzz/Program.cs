@@ -1,7 +1,9 @@
+using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using Brovan.Core.Emulation.OS.Windows;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Fuzz;
 
@@ -24,9 +26,9 @@ internal static class Program
 
         IoctlTarget.Init();
         Console.Error.WriteLine(VulkanBootstrap.Available
-            ? VulkanBootstrap.Surface != IntPtr.Zero
-                ? "[ioctl] host Vulkan device ready, handle ids 1 to 5 registered"
-                : "[ioctl] host Vulkan device ready, handle ids 1 to 4 registered, no headless surface"
+            ? $"[ioctl] host Vulkan device ready, the bootstrap made handle ids 1 to {IoctlTarget.NextId - 1}"
+              + (VulkanBootstrap.Surface != IntPtr.Zero ? "" : ", no headless surface")
+              + (VulkanBootstrap.Validating ? ", the validation layer refuses invalid calls" : ", no validation layer, so invalid calls reach the driver")
             : "[ioctl] no host Vulkan device, only the framing and the reader are reachable");
     }
 
@@ -47,6 +49,7 @@ internal static class Program
         {
             string target = args[0]["libfuzzer:".Length..];
             FuzzBody body = Resolve(target);
+            Utils.DiscardErrorLog = true;
 
             // Instrumented code writes to memory Fuzzer.Run maps, so Prepare waits for the first input.
             bool ready = false;
@@ -72,6 +75,7 @@ internal static class Program
                 string target = args.Length > 1 ? args[1] : "struct";
                 int seconds = args.Length > 2 ? int.Parse(args[2]) : 30;
                 int seed = args.Length > 3 ? int.Parse(args[3]) : Environment.TickCount;
+                Utils.DiscardErrorLog = true;
                 return SelfDrive.Run(target, Resolve(target), Prepare, seconds, seed);
             }
 
@@ -96,6 +100,7 @@ internal static class Program
             {
                 string target = args.Length > 1 ? args[1] : "struct";
                 string path = args[2];
+                VulkanBootstrap.EchoValidation = true;
                 Prepare(target);
                 FuzzBody body = Resolve(target);
 
@@ -107,7 +112,7 @@ internal static class Program
                 using Stream err = Console.OpenStandardError();
                 foreach (string f in files)
                 {
-                    byte[] data = File.ReadAllBytes(f);
+                    byte[] data = SelfDrive.ReadInput(f);
                     err.Write(System.Text.Encoding.UTF8.GetBytes($"{f} ({data.Length} bytes)\n"));
                     err.Flush();
                     body(data);
@@ -172,18 +177,45 @@ internal static class Corpus
                 break;
 
             case "ioctl":
-                // A command reads its dispatchable handle first, so seed one input per handle.
-                foreach ((uint handle, uint standIns) in Shapes)
-                    for (uint id = 0; id < (uint)Grammar.CommandCount; id++)
-                        Emit(Frame(id, standIns, new WireWriter().U32(handle).U32(0).U32(0).Done()));
+            {
+                // Seed handle IDs must match the replay host's bootstrap.
+                IoctlTarget.Init();
+                for (int id = 0; id < Grammar.CommandCount; id++)
+                {
+                    if (BrovVulkWireShapes.Shapes[id] == null)
+                    {
+                        // Custom payloads start with a dispatchable handle.
+                        foreach ((string type, uint standIns) in FirstHandles)
+                            Emit(Frame((uint)id, standIns, new WireWriter().U32(IoctlTarget.HandleOf(type)).U32(0).U32(0).Done()));
+                        continue;
+                    }
 
-                // A surface query reads the physical device and then the surface, and a null surface
-                // is refused, so the one-handle shape never reaches the call.
-                for (uint id = 0; id < (uint)Grammar.CommandCount; id++)
-                    Emit(Frame(id, 0, new WireWriter().U32(2).U32(5).U32(0).U32(0).Done()));
+                    Emit(Frame((uint)id, 0, Grammar.Command(id, IoctlTarget.HandleOf)));
+                    if (Grammar.ShapeOf(id).Any(t => t[0] == 'p'))
+                        Emit(Frame((uint)id, 0, Grammar.Command(id, IoctlTarget.HandleOf, pairs: true)));
+                }
 
-                Emit(Frame(0xFFFFFFFE, 0, new WireWriter().U32(2).U32(0).U32(3).U32(1).U32(3).Done()));
+                for (int maker = 0; maker < Grammar.CommandCount; maker++)
+                {
+                    string? made = Grammar.Creates(maker);
+                    if (made == null || Grammar.ShapeOf(maker).Any(t => t.StartsWith("o:", StringComparison.Ordinal)))
+                        continue;
+                    string madeToken = "h:" + made;
+                    byte[] makerPayload = Grammar.Command(maker, IoctlTarget.HandleOf);
+                    uint Handle(string type) => type == made ? IoctlTarget.NextId : IoctlTarget.HandleOf(type);
+                    for (int user = 0; user < Grammar.CommandCount; user++)
+                    {
+                        if (user == maker || !Grammar.ShapeOf(user).Contains(madeToken))
+                            continue;
+                        Emit(Frame(BrovVulkDevice.BatchId, 0, new WireWriter().U32(2)
+                            .U32((uint)maker).Raw(makerPayload)
+                            .U32((uint)user).Raw(Grammar.Command(user, Handle)).Done()));
+                    }
+                }
+
+                Emit(Frame(BrovVulkDevice.BatchId, 0, new WireWriter().U32(2).U32(0).U32(3).U32(1).U32(3).Done()));
                 break;
+            }
 
             default:
                 throw new ArgumentException($"no corpus for target '{target}'");
@@ -192,8 +224,10 @@ internal static class Corpus
         return n;
     }
 
-    private static readonly (uint Handle, uint StandIns)[] Shapes =
-        { (1, 0), (2, 0), (3, 0), (3, 0xFFFFFFFF), (4, 0) };
+    private static readonly (string Type, uint StandIns)[] FirstHandles =
+    {
+        ("VkInstance", 0), ("VkPhysicalDevice", 0), ("VkDevice", 0), ("VkDevice", 0xFFFFFFFF), ("VkQueue", 0),
+    };
 
     /// <summary>[knobs][standIns][id][payloadLen][payload]</summary>
     private static byte[] Frame(uint id, uint standIns, byte[] payload)
@@ -269,9 +303,9 @@ internal static class SelfDrive
     [DllImport("libc", SetLastError = true)]
     private static extern int kill(int pid, int sig);
 
+    private const int MaxInput = 1 << 16;
+
     private static long _execStart;
-    private static int _inFlightLen;
-    private static readonly byte[] InFlight = new byte[1 << 16];
 
     public static int Run(string target, FuzzBody body, Action<string> prepare, int seconds, int seed)
     {
@@ -286,20 +320,25 @@ internal static class SelfDrive
         Random rng = new(seed);
         DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
         long execs = 0;
-        byte[] scratch = new byte[1 << 16];
+        byte[] scratch = new byte[MaxInput];
 
-        Console.WriteLine($"[{target}] seed={seed} corpus={corpus.Count} for {seconds}s");
-        string hangPath = StartWatchdog(target);
+        // Native crashes bypass managed cleanup. Keep the active input in a shared mapping.
+        string inFlightPath = Path.GetFullPath($"{InFlightPrefix}{target}-{Environment.ProcessId}.bin");
+        using MemoryMappedFile map = MemoryMappedFile.CreateFromFile(inFlightPath, FileMode.Create, null, 4 + MaxInput);
+        using MemoryMappedViewAccessor inFlight = map.CreateViewAccessor();
 
-        while (DateTime.UtcNow < deadline)
+        Console.WriteLine($"[{target}] seed={seed} corpus={corpus.Count} for {seconds}s, an input that kills the process stays in {inFlightPath}");
+        string hangPath = StartWatchdog(target, inFlight);
+
+        while ((execs & 0xFF) != 0 || DateTime.UtcNow < deadline)
         {
             byte[] basis = corpus[rng.Next(corpus.Count)];
             int len = Math.Min(basis.Length, scratch.Length);
             basis.AsSpan(0, len).CopyTo(scratch);
             len = Mutate(scratch, len, rng);
 
-            scratch.AsSpan(0, len).CopyTo(InFlight);
-            Volatile.Write(ref _inFlightLen, len);
+            inFlight.WriteArray(4, scratch, 0, len);
+            inFlight.Write(0, len);
             Volatile.Write(ref _execStart, Environment.TickCount64);
             try
             {
@@ -327,12 +366,23 @@ internal static class SelfDrive
 
         Console.WriteLine($"[{target}] done, {execs:N0} execs, no crash");
         File.Delete(hangPath);
+        File.Delete(inFlightPath);
         return 0;
     }
 
-    // A loop with no safepoint stops the collector, so allocating on the fire path would block the
-    // watchdog behind the loop it reports. Everything it needs is built up front.
-    private static string StartWatchdog(string target)
+    public const string InFlightPrefix = "inflight-";
+
+    public static byte[] ReadInput(string path)
+    {
+        byte[] data = File.ReadAllBytes(path);
+        if (!Path.GetFileName(path).StartsWith(InFlightPrefix, StringComparison.Ordinal) || data.Length < 4)
+            return data;
+        int len = Math.Clamp(BitConverter.ToInt32(data, 0), 0, data.Length - 4);
+        return data.AsSpan(4, len).ToArray();
+    }
+
+    // Preallocate because a loop without safepoints can block GC and the watchdog.
+    private static string StartWatchdog(string target, MemoryMappedViewAccessor inFlight)
     {
         string path = Path.GetFullPath($"hang-{target}-{Environment.ProcessId}.bin");
         FileStream file = new(path, FileMode.Create, FileAccess.Write, FileShare.Read, 1);
@@ -341,6 +391,7 @@ internal static class SelfDrive
             $"\n[{target}] HANG: one input ran for over {HangSeconds}s, saved to {path}\n");
         int self = Environment.ProcessId;
         kill(self, 0);
+        byte[] input = new byte[MaxInput];
 
         Thread t = new(() =>
         {
@@ -351,7 +402,9 @@ internal static class SelfDrive
                 if (started == 0 || Environment.TickCount64 - started < HangSeconds * 1000L)
                     continue;
 
-                file.Write(InFlight, 0, Volatile.Read(ref _inFlightLen));
+                int len = Math.Clamp(inFlight.ReadInt32(0), 0, MaxInput);
+                inFlight.ReadArray(4, input, 0, len);
+                file.Write(input, 0, len);
                 file.Flush();
                 err.Write(notice, 0, notice.Length);
                 err.Flush();
