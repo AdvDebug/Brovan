@@ -541,6 +541,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private long _retainedBytes;
         private bool _retainRefusalLogged;
         private int _chainDepth;
+        private IntPtr _callDevice;
 
         private static readonly int MaxChainDepth = Array.FindAll(BrovVulkStructMeta.PNext, Allowed => Allowed).Length;
 
@@ -725,6 +726,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     else if (e.Type == "VkDevice")
                     {
                         _devicePhysical.Remove(e.Ptr);
+                        _deviceImports.Remove(e.Ptr);
+                        _deviceStandIns.Remove(e.Ptr);
                         _win32MemoryDevices.Remove(e.Ptr);
                         _lostDevices.Remove(next);
                     }
@@ -896,8 +899,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void FreeCallAllocs()
         {
             _chainDepth = 0;
+            _callDevice = IntPtr.Zero;
             _arena.FreeCallAllocs();
         }
+
+        public IntPtr CallDevice => _callDevice;
+
+        public void SetCallDevice(IntPtr device) => _callDevice = device;
 
         public void RetainChains() => _arena.ArmRetain();
 

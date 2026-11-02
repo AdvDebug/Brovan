@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Numerics;
 using System.Runtime.InteropServices;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -7,6 +8,13 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const uint MaxElems = 1u << 20;
         private const long MaxBytes = 256L << 20;
+
+        private static readonly int SamplerCreateInfoSid = Array.IndexOf(BrovVulkStructMeta.STypes, (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO);
+        private static readonly int SamplerAddressModeU = BrovVulkLayout.MemberOffset["VkSamplerCreateInfo.addressModeU"];
+        private static readonly int SamplerAddressModeV = BrovVulkLayout.MemberOffset["VkSamplerCreateInfo.addressModeV"];
+        private static readonly int SamplerAddressModeW = BrovVulkLayout.MemberOffset["VkSamplerCreateInfo.addressModeW"];
+        private static readonly int SamplerBorderColor = BrovVulkLayout.MemberOffset["VkSamplerCreateInfo.borderColor"];
+        private static readonly int ImageCreateInfoSid = Array.IndexOf(BrovVulkStructMeta.STypes, (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
 
         // The slot is sized from the descriptor id, so a node whose sType names a different struct would let
         // a reader of the chain write outside the slot.
@@ -240,6 +248,38 @@ namespace Brovan.Core.Emulation.OS.Windows
                 st.CheckBufferRange(*(IntPtr*)(dst + BrovVulkStructMeta.DescriptorBufferInfoBuffer),
                                     *(ulong*)(dst + BrovVulkStructMeta.DescriptorBufferInfoOffset),
                                     *(ulong*)(dst + BrovVulkStructMeta.DescriptorBufferInfoRange));
+            else if (sid == SamplerCreateInfoSid)
+                CheckSamplerBorderColor(dst);
+            else if (sid == ImageCreateInfoSid)
+                CheckImageCreateInfo(st, dst);
+        }
+
+        // VUID-VkImageCreateInfo-mipLevels-00947 and -00958.
+        private static void CheckImageCreateInfo(GenState st, IntPtr info)
+        {
+            uint largest = Math.Max(*(uint*)(info + VkOffsets.ImageWidth), Math.Max(*(uint*)(info + VkOffsets.ImageHeight), *(uint*)(info + VkOffsets.ImageDepth)));
+            uint levels = *(uint*)(info + VkOffsets.ImageMipLevels);
+            if (levels == 0 || levels > 32 - (uint)BitOperations.LeadingZeroCount(largest))
+                throw new InvalidOperationException($"BrovVulk generic: {levels} mip levels do not fit the image extent.");
+
+            if (!st.TryGetDevicePhysical(st.CallDevice, out IntPtr physicalDevice) || !VulkanStandIns.ImageExtentFits(physicalDevice, info))
+                throw new InvalidOperationException("BrovVulk generic: the image extent is past what the device creates.");
+        }
+
+        // Some drivers read borderColor even when no address mode uses it.
+        private static void CheckSamplerBorderColor(IntPtr info)
+        {
+            int color = *(int*)(info + SamplerBorderColor);
+            if (color is >= BrovVulkConstants.VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK and <= BrovVulkConstants.VK_BORDER_COLOR_INT_OPAQUE_WHITE
+                or BrovVulkConstants.VK_BORDER_COLOR_FLOAT_CUSTOM_EXT or BrovVulkConstants.VK_BORDER_COLOR_INT_CUSTOM_EXT)
+                return;
+
+            const int ClampToBorder = BrovVulkConstants.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            if (*(int*)(info + SamplerAddressModeU) == ClampToBorder || *(int*)(info + SamplerAddressModeV) == ClampToBorder
+                || *(int*)(info + SamplerAddressModeW) == ClampToBorder)
+                throw new InvalidOperationException($"BrovVulk generic: border color {color} is not a VkBorderColor.");
+
+            *(int*)(info + SamplerBorderColor) = BrovVulkConstants.VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
         }
 
         public static void WritebackBody(int sid, GenBuf w, IntPtr src)

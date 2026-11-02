@@ -1795,6 +1795,8 @@ namespace Brovan.Generators
                     {
                         b.Append("                System.IntPtr ").Append(local).Append(" = st.").Append(p.Optional ? "Lookup" : "LookupRequired").Append("(").Append(local).Append("Id, \"").Append(p.Type).Append("\");\n");
                     }
+                    if (i == 0 && p.Type == "VkDevice")
+                        b.Append("                st.SetCallDevice(").Append(local).Append(");\n");
                     callArgs.Add(local);
                 }
                 else if (kind == "HandleOut")
@@ -2007,6 +2009,16 @@ namespace Brovan.Generators
                      .Append(" + BrovVulkLayout.MemberOffset[\"").Append(t).Append(".firstSet\"]), *(uint*)(p").Append(infoIdx)
                      .Append(" + BrovVulkLayout.MemberOffset[\"").Append(t).Append(".descriptorSetCount\"]));\n");
                 }
+            }
+
+            // VUID-09647.
+            if (c.Name == "vkCmdSetDepthClampRangeEXT")
+            {
+                int modeIdx = c.Params.FindIndex(x => x.Name == "depthClampMode");
+                int rangeIdx = c.Params.FindIndex(x => x.Name == "pDepthClampRange");
+                if (modeIdx >= 0 && rangeIdx >= 0)
+                    b.Append("                if (p").Append(modeIdx).Append(" == BrovVulkConstants.VK_DEPTH_CLAMP_MODE_USER_DEFINED_RANGE_EXT && p").Append(rangeIdx)
+                     .Append(" == System.IntPtr.Zero) throw new System.InvalidOperationException(\"BrovVulk generic: a user defined depth clamp mode needs pDepthClampRange.\");\n");
             }
 
             if (c.Name == "vkEnumerateInstanceVersion")

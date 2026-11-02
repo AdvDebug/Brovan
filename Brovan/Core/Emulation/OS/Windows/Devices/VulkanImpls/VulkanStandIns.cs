@@ -101,6 +101,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int SamplerMaxAnisotropy = BrovVulkLayout.MemberOffset["VkSamplerCreateInfo.maxAnisotropy"];
         private static readonly int LimitsStorageAlignment = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.minStorageBufferOffsetAlignment"];
         private static readonly int LimitsStorageRange = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxStorageBufferRange"];
+        private static readonly int LimitsImageDimension1D = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxImageDimension1D"];
+        private static readonly int LimitsImageDimension2D = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxImageDimension2D"];
+        private static readonly int LimitsImageDimension3D = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxImageDimension3D"];
+        private static readonly int LimitsImageDimensionCube = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxImageDimensionCube"];
+        private static readonly int ImageFormatPropertiesSize = BrovVulkLayout.StructSize["VkImageFormatProperties"];
+        private static readonly int ImageFormatMaxWidth = BrovVulkLayout.MemberOffset["VkImageFormatProperties.maxExtent"] + BrovVulkLayout.MemberOffset["VkExtent3D.width"];
+        private static readonly int ImageFormatMaxHeight = BrovVulkLayout.MemberOffset["VkImageFormatProperties.maxExtent"] + BrovVulkLayout.MemberOffset["VkExtent3D.height"];
+        private static readonly int ImageFormatMaxDepth = BrovVulkLayout.MemberOffset["VkImageFormatProperties.maxExtent"] + BrovVulkLayout.MemberOffset["VkExtent3D.depth"];
+        private static readonly int ImageFormatMaxMipLevels = BrovVulkLayout.MemberOffset["VkImageFormatProperties.maxMipLevels"];
         private static readonly int LimitsVertexOutputs = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxVertexOutputComponents"];
         private static readonly int LimitsGeometryOutputs = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxGeometryOutputComponents"];
         private static readonly int LimitsTessellationOutputs = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxTessellationEvaluationOutputComponents"];
@@ -168,6 +177,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             public SpirvRelocation Relocation = new SpirvRelocation(-1, -1, -1);
             public uint StorageAlignment = 256;
             public ulong StorageRange = 1 << 27;
+            public uint MaxImageDimension1D;
+            public uint MaxImageDimension2D;
+            public uint MaxImageDimension3D;
+            public uint MaxImageDimensionCube;
             public bool R8Storage;
             public bool Rg8Storage;
             public bool Etc2Transcode;
@@ -295,6 +308,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint range = *(uint*)(limits + LimitsStorageRange);
             if (range != 0)
                 gaps.StorageRange = range;
+
+            gaps.MaxImageDimension1D = *(uint*)(limits + LimitsImageDimension1D);
+            gaps.MaxImageDimension2D = *(uint*)(limits + LimitsImageDimension2D);
+            gaps.MaxImageDimension3D = *(uint*)(limits + LimitsImageDimension3D);
+            gaps.MaxImageDimensionCube = *(uint*)(limits + LimitsImageDimensionCube);
 
             if ((gaps.ImplementedBits & RelocationBits) != 0)
             {
@@ -732,6 +750,52 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return 0;
 
             return TextureCompressionBC.ImageFormatProperties(gaps, ref format, type, tiling, ref usage, ref flags);
+        }
+
+        // Format limits can exceed device limits (VUID-02252 to -02255).
+        internal static bool ImageExtentFits(IntPtr physicalDevice, IntPtr createInfo)
+        {
+            DeviceGaps gaps = Gaps(physicalDevice);
+            int type = *(int*)(createInfo + VkOffsets.ImageType);
+            uint flags = *(uint*)(createInfo + VkOffsets.ImageFlags);
+            uint width = *(uint*)(createInfo + VkOffsets.ImageWidth);
+            uint height = *(uint*)(createInfo + VkOffsets.ImageHeight);
+            uint depth = *(uint*)(createInfo + VkOffsets.ImageDepth);
+
+            uint limit = type switch
+            {
+                BrovVulkConstants.VK_IMAGE_TYPE_1D => gaps.MaxImageDimension1D,
+                BrovVulkConstants.VK_IMAGE_TYPE_2D => (flags & BrovVulkConstants.VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) != 0
+                    ? gaps.MaxImageDimensionCube
+                    : gaps.MaxImageDimension2D,
+                BrovVulkConstants.VK_IMAGE_TYPE_3D => gaps.MaxImageDimension3D,
+                _ => 0,
+            };
+            if (limit == 0)
+                return false;
+
+            uint heightLimit = type == BrovVulkConstants.VK_IMAGE_TYPE_1D ? 1 : limit;
+            uint depthLimit = type == BrovVulkConstants.VK_IMAGE_TYPE_3D ? limit : 1;
+            if (width <= limit && height <= heightLimit && depth <= depthLimit)
+                return true;
+
+            int tiling = *(int*)(createInfo + VkOffsets.ImageTiling);
+            if (tiling != BrovVulkConstants.VK_IMAGE_TILING_OPTIMAL && tiling != BrovVulkConstants.VK_IMAGE_TILING_LINEAR)
+                return false;
+
+            int format = *(int*)(createInfo + VkOffsets.ImageFormat);
+            uint usage = *(uint*)(createInfo + VkOffsets.ImageUsage);
+            if (ImageFormatProperties(physicalDevice, ref format, type, tiling, ref usage, ref flags) < 0)
+                return false;
+
+            byte* properties = stackalloc byte[ImageFormatPropertiesSize];
+            new Span<byte>(properties, ImageFormatPropertiesSize).Clear();
+            if (BrovVulkApi.vkGetPhysicalDeviceImageFormatProperties(physicalDevice, format, type, tiling, usage, flags, (IntPtr)properties) != 0)
+                return false;
+
+            return width <= *(uint*)(properties + ImageFormatMaxWidth) && height <= *(uint*)(properties + ImageFormatMaxHeight)
+                && depth <= *(uint*)(properties + ImageFormatMaxDepth)
+                && *(uint*)(createInfo + VkOffsets.ImageMipLevels) <= *(uint*)(properties + ImageFormatMaxMipLevels);
         }
 
         internal static int ImageFormatProperties2(GenState st, IntPtr physicalDevice, IntPtr info)
@@ -1319,6 +1383,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static readonly int LibraryCount = BrovVulkLayout.MemberOffset["VkPipelineLibraryCreateInfoKHR.libraryCount"];
         internal static readonly int LibraryHandles = BrovVulkLayout.MemberOffset["VkPipelineLibraryCreateInfoKHR.pLibraries"];
         internal static readonly int LibraryFlags = BrovVulkLayout.MemberOffset["VkGraphicsPipelineLibraryCreateInfoEXT.flags"];
+
+        internal static readonly int ImageFlags = BrovVulkLayout.MemberOffset["VkImageCreateInfo.flags"];
+        internal static readonly int ImageType = BrovVulkLayout.MemberOffset["VkImageCreateInfo.imageType"];
+        internal static readonly int ImageFormat = BrovVulkLayout.MemberOffset["VkImageCreateInfo.format"];
+        internal static readonly int ImageWidth = BrovVulkLayout.MemberOffset["VkImageCreateInfo.extent"] + BrovVulkLayout.MemberOffset["VkExtent3D.width"];
+        internal static readonly int ImageHeight = BrovVulkLayout.MemberOffset["VkImageCreateInfo.extent"] + BrovVulkLayout.MemberOffset["VkExtent3D.height"];
+        internal static readonly int ImageDepth = BrovVulkLayout.MemberOffset["VkImageCreateInfo.extent"] + BrovVulkLayout.MemberOffset["VkExtent3D.depth"];
+        internal static readonly int ImageMipLevels = BrovVulkLayout.MemberOffset["VkImageCreateInfo.mipLevels"];
+        internal static readonly int ImageTiling = BrovVulkLayout.MemberOffset["VkImageCreateInfo.tiling"];
+        internal static readonly int ImageUsage = BrovVulkLayout.MemberOffset["VkImageCreateInfo.usage"];
 
         internal static readonly int ImageFormatInfoFormat = BrovVulkLayout.MemberOffset["VkPhysicalDeviceImageFormatInfo2.format"];
         internal static readonly int CopyImageSource = BrovVulkLayout.MemberOffset["VkCopyImageInfo2.srcImage"];

@@ -118,15 +118,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static class L
         {
-            internal static readonly int ImageFlags = BrovVulkLayout.MemberOffset["VkImageCreateInfo.flags"];
-            internal static readonly int ImageType = BrovVulkLayout.MemberOffset["VkImageCreateInfo.imageType"];
-            internal static readonly int ImageFormat = BrovVulkLayout.MemberOffset["VkImageCreateInfo.format"];
-            internal static readonly int ImageExtent = BrovVulkLayout.MemberOffset["VkImageCreateInfo.extent"];
-            internal static readonly int ImageMipLevels = BrovVulkLayout.MemberOffset["VkImageCreateInfo.mipLevels"];
-            internal static readonly int ImageArrayLayers = BrovVulkLayout.MemberOffset["VkImageCreateInfo.arrayLayers"];
-            internal static readonly int ImageTiling = BrovVulkLayout.MemberOffset["VkImageCreateInfo.tiling"];
-            internal static readonly int ImageUsage = BrovVulkLayout.MemberOffset["VkImageCreateInfo.usage"];
-
             internal static readonly int FormatListSize = BrovVulkLayout.StructSize["VkImageFormatListCreateInfo"];
             internal static readonly int FormatListCount = BrovVulkLayout.MemberOffset["VkImageFormatListCreateInfo.viewFormatCount"];
             internal static readonly int FormatListFormats = BrovVulkLayout.MemberOffset["VkImageFormatListCreateInfo.pViewFormats"];
@@ -591,11 +582,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             VulkanStandInState state = st.StandIns;
             state.PendingImage = null;
-            int format = *(int*)(createInfo + L.ImageFormat);
+            int format = *(int*)(createInfo + VkOffsets.ImageFormat);
             if (!IsCompressed(format))
                 return 0;
 
-            if (*(int*)(createInfo + L.ImageTiling) != ImageTilingOptimal)
+            if (*(int*)(createInfo + VkOffsets.ImageTiling) != ImageTilingOptimal)
             {
                 Complain("a linear tiled BCn image was refused");
                 return ErrorFormatNotSupported;
@@ -603,23 +594,22 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             st.TryGetDevicePhysical(device, out IntPtr physicalDevice);
             VulkanStandIns.DeviceGaps gaps = VulkanStandIns.Gaps(physicalDevice);
-            int type = *(int*)(createInfo + L.ImageType);
+            int type = *(int*)(createInfo + VkOffsets.ImageType);
             Family family = Describe(format, gaps, type);
-            uint usage = *(uint*)(createInfo + L.ImageUsage);
-            *(int*)(createInfo + L.ImageFormat) = family.Format;
-            *(uint*)(createInfo + L.ImageFlags) = SubstituteFlags(*(uint*)(createInfo + L.ImageFlags), type, Transcodes(family));
-            *(uint*)(createInfo + L.ImageUsage) = SubstituteUsage(usage, Transcodes(family));
+            uint usage = *(uint*)(createInfo + VkOffsets.ImageUsage);
+            *(int*)(createInfo + VkOffsets.ImageFormat) = family.Format;
+            *(uint*)(createInfo + VkOffsets.ImageFlags) = SubstituteFlags(*(uint*)(createInfo + VkOffsets.ImageFlags), type, Transcodes(family));
+            *(uint*)(createInfo + VkOffsets.ImageUsage) = SubstituteUsage(usage, Transcodes(family));
             ReplaceFormatList(st, createInfo, family, true);
 
-            uint* extent = (uint*)(createInfo + L.ImageExtent);
             state.PendingImage = new ImageRecord
             {
                 Device = device,
                 Family = family,
                 Usage = usage,
-                Width = extent[0],
-                Height = extent[1],
-                Depth = extent[2],
+                Width = *(uint*)(createInfo + VkOffsets.ImageWidth),
+                Height = *(uint*)(createInfo + VkOffsets.ImageHeight),
+                Depth = *(uint*)(createInfo + VkOffsets.ImageDepth),
                 ThreeDimensional = type == ImageType3D,
             };
             return 0;
