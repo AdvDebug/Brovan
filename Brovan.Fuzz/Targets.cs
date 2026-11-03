@@ -222,6 +222,9 @@ internal static class IoctlTarget
 
     private static readonly Restore[] Restores = new Restore[BrovVulkApi.CommandCount];
 
+    private static readonly uint DestroyInstanceId = (uint)Grammar.CommandId("vkDestroyInstance");
+    private static readonly uint DestroyDeviceId = (uint)Grammar.CommandId("vkDestroyDevice");
+
     public static uint NextId => _mark;
 
     public static uint HandleOf(string type) => FirstOfType.TryGetValue(type, out uint id) ? id : 0;
@@ -328,6 +331,12 @@ internal static class IoctlTarget
             _input = new byte[Math.Max(body.Length, _input.Length * 2)];
         body.CopyTo(_input);
 
+        // Vulkan requires devices to be destroyed before their instance.
+        uint command = BinaryPrimitives.ReadUInt32LittleEndian(body);
+        uint bootstrapDevice = HandleOf("VkDevice");
+        if (bootstrapDevice != 0 && MayDestroyInstance(body, HandleOf("VkInstance")))
+            Send(Frame(DestroyDeviceId, BitConverter.GetBytes(bootstrapDevice)), out _);
+
         int result = int.MinValue;
         ReadOnlySpan<byte> written = default;
         try
@@ -338,12 +347,25 @@ internal static class IoctlTarget
         {
         }
 
-        uint command = BinaryPrimitives.ReadUInt32LittleEndian(body);
         uint known = command < (uint)BrovVulkApi.CommandCount || command >= BrovVulkGenDispatch.PostedBatchId ? command : uint.MaxValue;
         Feedback.Add(Feedback.CommandResult, known, (uint)result);
         Feedback.Add(Feedback.CommandOutput, known, Feedback.Bucket(written.Length));
 
         Settle(command);
+    }
+
+    // Unframed batch commands can start at any byte. Framed commands include a length word.
+    private static bool MayDestroyInstance(ReadOnlySpan<byte> body, uint instance)
+    {
+        for (int at = 0; at + 8 <= body.Length; at++)
+        {
+            if (BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(at, 4)) != DestroyInstanceId)
+                continue;
+            if (BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(at + 4, 4)) == instance
+                || (at + 12 <= body.Length && BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(at + 8, 4)) == instance))
+                return true;
+        }
+        return false;
     }
 
     // Each input must replay without earlier inputs.
