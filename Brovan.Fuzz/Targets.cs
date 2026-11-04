@@ -1,14 +1,54 @@
-// The oracles are the guard pages, a native crash, -timeout and -rss_limit_mb. A managed exception
-// is not one: HandleGenIoctl catches Exception, so a throw is the parser rejecting input as designed.
-// -rss_limit_mb being an oracle is why the per-iteration paths hold no allocation.
+// Allocations in the fuzz loop can trip the memory oracle.
 
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Brovan.Core.Emulation;
 using Brovan.Core.Emulation.OS.Windows;
+using Microsoft.Win32.SafeHandles;
 
 namespace Brovan.Fuzz;
+
+internal static class Oracle
+{
+    public static bool Rejects(Exception e) =>
+        e is InvalidOperationException
+          or IndexOutOfRangeException
+          or ArgumentException
+          or OverflowException
+          or NullReferenceException;
+
+    // FailFast bypasses the target's exception handler.
+    public static void Fail(string message)
+    {
+        Console.Error.WriteLine($"[fuzz] {message}");
+        Console.Error.Flush();
+        Environment.FailFast($"Brovan.Fuzz: {message}");
+    }
+}
+
+internal sealed class InputFile
+{
+    private readonly SafeFileHandle _handle;
+
+    public string Path { get; }
+
+    public InputFile()
+    {
+        int fd = NativeUnixImports.MemfdCreate("brovan-fuzz-input", 0);
+        if (fd < 0)
+            Oracle.Fail($"memfd_create failed with errno {Marshal.GetLastWin32Error()}");
+        _handle = new SafeFileHandle((IntPtr)fd, true);
+        Path = $"/proc/self/fd/{fd}";
+    }
+
+    public string Write(ReadOnlySpan<byte> data)
+    {
+        RandomAccess.SetLength(_handle, data.Length);
+        RandomAccess.Write(_handle, data, 0);
+        return Path;
+    }
+}
 
 internal sealed unsafe class GuardedRegion : IDisposable
 {
@@ -108,7 +148,7 @@ internal static class StructTarget
         {
             BrovVulkGenStruct.Rebuild(sid, Reader, State);
         }
-        catch (Exception e) when (Expected(e))
+        catch (Exception e) when (Oracle.Rejects(e))
         {
             outcome = e is IndexOutOfRangeException ? 2u : 1u;
         }
@@ -118,14 +158,6 @@ internal static class StructTarget
         }
         Feedback.Add(Feedback.StructRead, (uint)sid, Feedback.Bucket(Reader.Offset) | outcome << 8);
     }
-
-    internal static bool Expected(Exception e) =>
-        e is InvalidOperationException
-          or IndexOutOfRangeException
-          or ArgumentOutOfRangeException
-          or ArgumentException
-          or OverflowException
-          or NullReferenceException;
 }
 
 /// <summary>The SPIR-V entry points reached from vkCreateShaderModule and the pipeline stand-ins.</summary>
@@ -188,7 +220,7 @@ internal static class SpirvTarget
                 }
             }
         }
-        catch (Exception e) when (StructTarget.Expected(e))
+        catch (Exception e) when (Oracle.Rejects(e))
         {
         }
     }
@@ -249,6 +281,16 @@ internal static class IoctlTarget
 
         VulkanBootstrap.TryInitialise();
         Recycle();
+    }
+
+    public static void Prepare()
+    {
+        Init();
+        Console.Error.WriteLine(VulkanBootstrap.Available
+            ? $"[ioctl] host Vulkan device ready, the bootstrap made handle ids 1 to {NextId - 1}"
+              + (VulkanBootstrap.Surface != IntPtr.Zero ? "" : ", no headless surface")
+              + (VulkanBootstrap.Validating ? ", the validation layer refuses invalid calls" : ", no validation layer, so invalid calls reach the driver")
+            : "[ioctl] no host Vulkan device, only the framing and the reader are reachable");
     }
 
     // The loader aborts on a second destroy of a bootstrap object.
@@ -343,7 +385,7 @@ internal static class IoctlTarget
         {
             result = Send(_input, body.Length, out written);
         }
-        catch (Exception e) when (StructTarget.Expected(e))
+        catch (Exception e) when (Oracle.Rejects(e))
         {
         }
 

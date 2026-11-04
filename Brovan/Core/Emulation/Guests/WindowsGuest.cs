@@ -162,12 +162,8 @@ namespace Brovan.Core.Emulation.Guests
             RandomizeThreadStacks = Binary.PE.ILOnly || BinaryEmulator.IsDynamicallyRelocatable(Binary);
             ulong ImageBase = Binary.PE.ImageBase;
             ReadOnlySpan<byte> BinaryData = Binary.GetBinaryData();
-            ulong ImageSize = Instance.AlignToPageSize(Binary.PE.SizeOfImage != 0 ? Binary.PE.SizeOfImage : (uint)Binary.BinarySize);
-            ulong HeaderSizeUlong = Binary.PE.SizeOfHeaders;
-            if (HeaderSizeUlong > (ulong)BinaryData.Length)
-                HeaderSizeUlong = (ulong)BinaryData.Length;
-
-            int HeaderSize = HeaderSizeUlong > int.MaxValue ? int.MaxValue : (int)HeaderSizeUlong;
+            ulong ImageSize = BinaryEmulator.GetPeImageSize(Binary);
+            int HeaderSize = BinaryEmulator.GetPeHeaderCopySize(Binary, ImageSize);
             ulong BaseAddress = Instance.MapWinMemoryRegion(ImageBase, (ulong)HeaderSize, MemoryProtection.ReadWrite, SpecialProtections.None, AllocationType.Image, ImageBase);
 
             if (HeaderSize != 0)

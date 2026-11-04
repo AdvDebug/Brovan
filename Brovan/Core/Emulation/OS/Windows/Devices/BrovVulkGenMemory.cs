@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using Brovan.Core.Helpers;
@@ -36,6 +37,48 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static readonly IntPtr ExternalMemoryHostExtName = Marshal.StringToHGlobalAnsi("VK_EXT_external_memory_host");
 
+        private static readonly HashSet<string> AdvertisedInstanceExtensions = ExtensionNames(BrovVulkExtensions.Instance);
+        private static readonly HashSet<string> AdvertisedDeviceExtensions = ExtensionNames(BrovVulkExtensions.Device);
+
+        private static HashSet<string> ExtensionNames((string Name, uint Version)[] extensions)
+        {
+            HashSet<string> names = new HashSet<string>(StringComparer.Ordinal);
+            foreach ((string Name, uint Version) e in extensions)
+                names.Add(e.Name);
+            return names;
+        }
+
+        internal static void RestrictInstanceCreateInfo(GenState st, IntPtr ci) => RestrictToAdvertised(st, ci, "VkInstanceCreateInfo", AdvertisedInstanceExtensions, IntPtr.Zero);
+
+        // Unchecked extensions can expose host pointers, and layers can load host code.
+        private static void RestrictToAdvertised(GenState st, IntPtr ci, string createInfoType, HashSet<string> advertised, IntPtr physicalDevice)
+        {
+            if (ci == IntPtr.Zero)
+                return;
+
+            *(uint*)(ci + BrovVulkLayout.MemberOffset[createInfoType + ".enabledLayerCount"]) = 0;
+            *(IntPtr*)(ci + BrovVulkLayout.MemberOffset[createInfoType + ".ppEnabledLayerNames"]) = IntPtr.Zero;
+
+            uint* count = (uint*)(ci + BrovVulkLayout.MemberOffset[createInfoType + ".enabledExtensionCount"]);
+            IntPtr* names = (IntPtr*)(ci + BrovVulkLayout.MemberOffset[createInfoType + ".ppEnabledExtensionNames"]);
+            uint kept = 0;
+            IntPtr keptNames = IntPtr.Zero;
+            if (*names != IntPtr.Zero && *count != 0)
+            {
+                keptNames = st.Alloc(BrovVulkGenStruct.CheckedBytes(*count, 8));
+                for (uint k = 0; k < *count; k++)
+                {
+                    IntPtr name = *(IntPtr*)(*names + (int)(k * 8));
+                    string? text = name == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(name);
+                    if (text != null && advertised.Contains(text) && (physicalDevice == IntPtr.Zero || !VulkanStandIns.WithholdsExtension(physicalDevice, text)))
+                        *(IntPtr*)(keptNames + (int)(kept++ * 8)) = name;
+                }
+            }
+
+            *count = kept;
+            *names = kept != 0 ? keptNames : IntPtr.Zero;
+        }
+
         internal static int CreateDevice(GenReader r, GenBuf w, GenState st, int createInfoSid)
         {
             uint pdId = r.ReadU32();
@@ -46,6 +89,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             IntPtr ci = BrovVulkGenStruct.Rebuild(createInfoSid, r, st);
             if (!st.HasHostIds(1))
                 return BrovVulkConstants.VK_ERROR_OUT_OF_HOST_MEMORY;
+
+            RestrictToAdvertised(st, ci, "VkDeviceCreateInfo", AdvertisedDeviceExtensions, pd);
 
             int standIns = VulkanStandIns.StripDeviceFeatures(st, pd, ci);
             bool win32Memory = EnablesExtension(ci, ExternalMemoryWin32Name);
@@ -69,6 +114,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 rr = VkErrorInitializationFailed;
             if (rr < 0)
                 return rr;
+
+            if ((standIns & VulkanStandIns.HostCpuDeviceBit) != 0)
+            {
+                int timelines = st.Retire.AddDevice(device, ci);
+                if (timelines < 0)
+                {
+                    BrovVulkApi.vkDestroyDevice(device, IntPtr.Zero);
+                    return timelines;
+                }
+            }
 
             st.SetDevicePhysical(device, pd);
             st.SetDeviceStandIns(device, standIns);
@@ -117,7 +172,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
-        private static bool EnablesExtension(IntPtr createInfo, string name)
+        internal static bool EnablesExtension(IntPtr createInfo, string name)
         {
             uint count = *(uint*)(createInfo + VulkanStandIns.DeviceCreateInfoExtensionCount);
             IntPtr names = *(IntPtr*)(createInfo + VulkanStandIns.DeviceCreateInfoExtensionNames);
@@ -261,7 +316,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             st.SetMemorySize(id, requested);
             st.SetExportTypes(id, exportTypes);
             if (imported != 0)
+            {
                 st.MarkImported(id, inst, pin);
+                st.Retire.NoteImport(id, device);
+            }
             w.WriteU32(id);
             return rr;
         }
@@ -381,7 +439,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 BrovVulkApi.vkUnmapMemory(device, memory);
                 st.RemoveMapping(memId);
             }
-            BrovVulkApi.vkFreeMemory(device, memory, IntPtr.Zero);
+            if (!st.Retire.TryDeferFreeMemory(device, memory))
+                BrovVulkApi.vkFreeMemory(device, memory, IntPtr.Zero);
             st.Forget(memId);
             return 0;
         }

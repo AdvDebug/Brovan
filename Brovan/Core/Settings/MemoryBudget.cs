@@ -62,7 +62,14 @@ namespace Brovan.Core.Settings
 
         public static int VulkanWaitThreads { get; private set; }
 
+        public static int VulkanRetiredReleases { get; private set; }
+
+        public static long VulkanHeldDescriptors { get; private set; }
+
         public static long VulkanRetainedBytes { get; private set; }
+
+        // Each leaf covers 1 GiB of guest addresses and costs 128 KiB when used.
+        public static int VulkanAddressLeaves { get; private set; }
 
         public static int CoreMessagingRegistrations { get; private set; }
 
@@ -130,7 +137,10 @@ namespace Brovan.Core.Settings
             KernelReadViewBytes = (long)Megabytes(Pick(Off: 256, Minimal: 192, Medium: 128, High: 64, Aggressive: 32));
             KernelFileCells = (int)Pick(Off: 512, Minimal: 384, Medium: 256, High: 128, Aggressive: 64);
             VulkanWaitThreads = (int)Pick(Off: 8, Minimal: 8, Medium: 6, High: 4, Aggressive: 2);
+            VulkanRetiredReleases = (int)Pick(Off: 65536, Minimal: 32768, Medium: 16384, High: 8192, Aggressive: 4096);
+            VulkanHeldDescriptors = (long)Pick(Off: 4194304, Minimal: 4194304, Medium: 2097152, High: 1048576, Aggressive: 524288);
             VulkanRetainedBytes = (long)Megabytes(Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8));
+            VulkanAddressLeaves = (int)Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 128);
             CoreMessagingRegistrations = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
             HostMessagingObjects = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
             HostObjects = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);

@@ -97,7 +97,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach (BinaryEmulator.PeImageExtent Extent in Extents)
             {
-                if (Extent.Rva > ImageSize || Extent.Size > ImageSize - Extent.Rva)
+                if (!Extent.FitsIn(ImageSize))
                     return null;
             }
 

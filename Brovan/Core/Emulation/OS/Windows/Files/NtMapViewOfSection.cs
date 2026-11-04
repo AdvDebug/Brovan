@@ -311,7 +311,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     // loader refuses the mismatch.
                     bool MachineMismatch = Image.Architecture != Instance._binary.Architecture;
 
-                    ulong ImageSize = Instance.AlignToPageSize(Image.PE.SizeOfImage != 0 ? Image.PE.SizeOfImage : (uint)Image.BinarySize);
+                    ulong ImageSize = BinaryEmulator.GetPeImageSize(Image);
                     Section.Size = ImageSize;
                     if (RequestedBase != 0 && Instance.IsRegionInUse(RequestedBase, ImageSize))
                         return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;

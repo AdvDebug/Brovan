@@ -40,6 +40,8 @@ namespace Brovan.Core.Emulation
 
         // Ranges WHvUnmapGpaRange refused. Their host memory is freed only with the partition.
         private readonly List<InstalledMap> _stillMappedBacking = new();
+        // Keep foreign backing live if WHvUnmapGpaRange fails.
+        private readonly Dictionary<ulong, IntPtr> _foreignStillMapped = new();
         private ulong _backingBytes;
         private readonly Dictionary<ulong, bool> _trappedPages = new();
         private readonly Dictionary<ulong, IntPtr> _pageTableViews = new();
@@ -588,14 +590,19 @@ namespace Brovan.Core.Emulation
                 removedRegions = _mmioRegions.RemoveAll(r => r.Address >= address && r.Address < address + size);
             }
 
+            List<(ulong Guest, IntPtr Host)>? foreign = null;
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong guest = address + off;
                 if (_mappedPages.TryGetValue(guest, out MappedPage page))
                 {
+                    if (page.OwnedBacking == IntPtr.Zero && page.HostPage != IntPtr.Zero)
+                        (foreign ??= new()).Add((guest, page.HostPage));
                     ReleaseBacking(page);
                     RemoveMappedPage(guest);
                 }
+                else if (_foreignStillMapped.TryGetValue(guest, out IntPtr stuck))
+                    (foreign ??= new()).Add((guest, stuck));
             }
 
             RefreshMmioHostPages(address, size);
@@ -604,6 +611,28 @@ namespace Brovan.Core.Emulation
             else
                 RebuildMappings();
             FreeReleasedBackings();
+
+            // The owner frees foreign memory as soon as this returns true.
+            bool foreignStillMapped = false;
+            if (foreign != null)
+            {
+                foreach ((ulong guest, IntPtr host) in foreign)
+                {
+                    if (!IsBackingStillMapped(host, WhpConstants.PageSize))
+                    {
+                        _foreignStillMapped.Remove(guest);
+                        continue;
+                    }
+                    _foreignStillMapped[guest] = host;
+                    foreignStillMapped = true;
+                }
+            }
+            if (foreignStillMapped)
+            {
+                _error = WhpErrors.ResourceError;
+                return false;
+            }
+
             _error = WhpErrors.Ok;
             return true;
         }
@@ -1869,7 +1898,15 @@ namespace Brovan.Core.Emulation
             {
                 ulong pageBase = current & ~WhpConstants.PageMask;
                 if (!TryLookupPage(pageBase, out MappedPage page))
-                    return false;
+                {
+                    if (!_foreignStillMapped.ContainsKey(pageBase))
+                        return false;
+                    ulong stuck = pageBase + WhpConstants.PageSize - current;
+                    if (stuck > remaining) stuck = remaining;
+                    current += stuck;
+                    remaining -= stuck;
+                    continue;
+                }
                 ulong runEnd = TryGetIntactBackingEnd(page, pageBase, out ulong backingEnd)
                     ? backingEnd
                     : pageBase + WhpConstants.PageSize;
@@ -2838,6 +2875,8 @@ namespace Brovan.Core.Emulation
                 ForgetWatchedPage(replaced);
 
             _mappedPages[guestAddress] = page;
+            if (_foreignStillMapped.Count != 0)
+                _foreignStillMapped.Remove(guestAddress);
             _sortedPageKeysDirty = true;
             _mappingsDirty = true;
             MarkSpanDirty(guestAddress, WhpConstants.PageSize);

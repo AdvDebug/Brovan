@@ -1,9 +1,11 @@
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
 // Usage: SteamSpecConvert <out.xml> <header>=<Class>=<VersionString> ...
+//        SteamSpecConvert --callbacks <steam_api.json> <steam.xml>
 static class Program
 {
     static readonly HashSet<string> Defined = new HashSet<string> { "_WIN32", "_WIN64", "WIN32", "_MSC_VER" };
@@ -55,11 +57,28 @@ static class Program
         "SteamAPIWarningMessageHook_t", "SteamAPI_CheckCallbackRegistered_t", "SteamAPI_PostAPIResultInProcess_t", "SteamAPI_ManualDispatch_t",
     };
 
+    // HTML callbacks carry host pointers.
+    static readonly HashSet<string> GuestOnlyInterfaces = new HashSet<string> { "ISteamHTMLSurface" };
+
+    // steamclient uses a heap pointer as HServerListRequest.
+    static readonly HashSet<string> HostPointerHandles = new HashSet<string> { "HServerListRequest" };
+
     // Parameters the header does not annotate and whose type alone misleads.
     static readonly Dictionary<string, (string Kind, string Count)> Overrides = new Dictionary<string, (string, string)>
     {
         ["ISteamUser::RequestEncryptedAppTicket.pDataToInclude"] = ("inbuf", "cbDataToInclude"),
         ["ISteamApps::GetInstalledDepots.pvecDepots"] = ("outarray", "cMaxDepots"),
+        ["ISteamUGC::GetSubscribedItems.pvecPublishedFileID"] = ("outarray", "cMaxEntries"),
+        ["ISteamUGC::GetQueryUGCChildren.pvecPublishedFileID"] = ("outarray", "cMaxEntries"),
+        ["ISteamUGC::GetQueryUGCContentDescriptors.pvecDescriptors"] = ("outarray", "cMaxEntries"),
+        ["ISteamUGC::GetUserContentDescriptorPreferences.pvecDescriptors"] = ("outarray", "cMaxEntries"),
+        ["ISteamUGC::CreateQueryUGCDetailsRequest.pvecPublishedFileID"] = ("inarray", "unNumPublishedFileIDs"),
+        ["ISteamUGC::StartPlaytimeTracking.pvecPublishedFileID"] = ("inarray", "unNumPublishedFileIDs"),
+        ["ISteamUGC::StopPlaytimeTracking.pvecPublishedFileID"] = ("inarray", "unNumPublishedFileIDs"),
+        ["ISteamUGC::SetItemsDisabledLocally.pvecPublishedFileIDs"] = ("inarray", "unNumPublishedFileIDs"),
+        ["ISteamUGC::SetSubscriptionsLoadOrder.pvecPublishedFileIDs"] = ("inarray", "unNumPublishedFileIDs"),
+        ["ISteamNetworkingUtils::GetPOPList.list"] = ("outarray", "nListSz"),
+        ["ISteamUserStats::GetDownloadedLeaderboardEntry.pDetails"] = ("outarray", "cDetailsMax"),
     };
 
     sealed class Param
@@ -77,6 +96,9 @@ static class Program
 
     static int Main(string[] args)
     {
+        if (args.Length == 3 && args[0] == "--callbacks")
+            return WriteCallbacks(args[1], args[2]);
+
         if (args.Length < 2)
         {
             Console.Error.WriteLine("usage: SteamSpecConvert <out.xml> <header>=<Class>=<Version> ...");
@@ -143,8 +165,158 @@ static class Program
             return 1;
         }
 
+        XElement callbacks = File.Exists(args[0]) ? XDocument.Load(args[0]).Root?.Element("callbacks") : null;
+        if (callbacks != null)
+            types.AddAfterSelf(callbacks);
+
         new XDocument(root).Save(args[0]);
         return 0;
+    }
+
+    sealed class CallbackTypes
+    {
+        public readonly Dictionary<string, string> Typedefs = new Dictionary<string, string>();
+        public readonly HashSet<string> Enums = new HashSet<string>();
+        public readonly Dictionary<string, List<string>> Structs = new Dictionary<string, List<string>>();
+    }
+
+    // Valve packs callbacks at 8 bytes on Windows and 4 elsewhere.
+    static int WriteCallbacks(string jsonPath, string xmlPath)
+    {
+        using JsonDocument json = JsonDocument.Parse(File.ReadAllText(jsonPath));
+        JsonElement api = json.RootElement;
+        CallbackTypes t = new CallbackTypes();
+        foreach (JsonElement e in api.GetProperty("typedefs").EnumerateArray())
+            t.Typedefs[e.GetProperty("typedef").GetString()] = e.GetProperty("type").GetString();
+        foreach (JsonElement e in api.GetProperty("enums").EnumerateArray())
+            t.Enums.Add(e.GetProperty("enumname").GetString());
+        foreach (JsonElement e in api.GetProperty("structs").EnumerateArray())
+            t.Structs[e.GetProperty("struct").GetString()] = FieldTypes(e);
+
+        // The JSON flattens unions and omits pack(1).
+        foreach (KeyValuePair<string, (int Size, bool Ctor)> known in Structs)
+        {
+            if (t.Structs.TryGetValue(known.Key, out List<string> fields)
+                && (!TryFieldsLayout(t, fields, 8, out int size, out _, null, 0) || size != known.Value.Size))
+            {
+                Console.Error.WriteLine($"  {known.Key}: json layout does not match the header, callbacks using it are skipped");
+                t.Structs.Remove(known.Key);
+            }
+        }
+
+        XElement callbacks = new XElement("callbacks");
+        int skipped = 0;
+        foreach (JsonElement cb in api.GetProperty("callback_structs").EnumerateArray())
+        {
+            string name = cb.GetProperty("struct").GetString();
+            List<string> fields = FieldTypes(cb);
+            if (!TryPadding(t, fields, 8, out int size8, out string pad8) || !TryPadding(t, fields, 4, out int size4, out string pad4))
+            {
+                Console.Error.WriteLine($"  {name}: layout unknown, skipped");
+                skipped++;
+                continue;
+            }
+            if (pad8.Length == 0 && pad4.Length == 0)
+                continue;
+
+            callbacks.Add(new XElement("callback",
+                new XAttribute("id", cb.GetProperty("callback_id").GetInt32()), new XAttribute("name", name),
+                new XAttribute("size8", size8), new XAttribute("pad8", pad8),
+                new XAttribute("size4", size4), new XAttribute("pad4", pad4)));
+        }
+
+        XDocument doc = XDocument.Load(xmlPath);
+        doc.Root.Element("callbacks")?.Remove();
+        doc.Root.Element("types").AddAfterSelf(callbacks);
+        doc.Save(xmlPath);
+        Console.Error.WriteLine($"{callbacks.Elements().Count()} callbacks with padding, {skipped} skipped");
+        return 0;
+    }
+
+    static List<string> FieldTypes(JsonElement s)
+    {
+        List<string> fields = new List<string>();
+        foreach (JsonElement f in s.GetProperty("fields").EnumerateArray())
+            fields.Add(f.GetProperty("fieldtype").GetString());
+        return fields;
+    }
+
+    static bool TryPadding(CallbackTypes t, List<string> fields, int pack, out int size, out string padding)
+    {
+        padding = null;
+        if (!TryFieldsLayout(t, fields, pack, out size, out _, null, 0))
+            return false;
+
+        bool[] covered = new bool[size];
+        TryFieldsLayout(t, fields, pack, out _, out _, covered, 0);
+        List<string> ranges = new List<string>();
+        for (int i = 0; i < size; i++)
+        {
+            if (covered[i])
+                continue;
+            int start = i;
+            while (i < size && !covered[i])
+                i++;
+            ranges.Add($"{start}:{i - start}");
+        }
+        padding = string.Join(",", ranges);
+        return true;
+    }
+
+    static bool TryFieldsLayout(CallbackTypes t, List<string> fields, int pack, out int size, out int align, bool[] covered, int at)
+    {
+        int offset = 0;
+        align = 1;
+        size = 0;
+        foreach (string f in fields)
+        {
+            if (!TryTypeLayout(t, f, pack, out int fieldSize, out int fieldAlign, null, 0))
+                return false;
+            offset = (offset + fieldAlign - 1) / fieldAlign * fieldAlign;
+            if (covered != null)
+                TryTypeLayout(t, f, pack, out _, out _, covered, at + offset);
+            offset += fieldSize;
+            align = Math.Max(align, fieldAlign);
+        }
+        size = Math.Max(1, (offset + align - 1) / align * align);
+        return true;
+    }
+
+    static bool TryTypeLayout(CallbackTypes t, string type, int pack, out int size, out int align, bool[] covered, int at)
+    {
+        size = 0;
+        align = 0;
+        type = type.Trim();
+        Match array = Regex.Match(type, @"^(.+?)\s*\[(\d+)\]$");
+        if (array.Success)
+        {
+            int count = int.Parse(array.Groups[2].Value);
+            if (!TryTypeLayout(t, array.Groups[1].Value, pack, out int element, out align, null, 0))
+                return false;
+            for (int k = 0; covered != null && k < count; k++)
+                TryTypeLayout(t, array.Groups[1].Value, pack, out _, out _, covered, at + k * element);
+            size = element * count;
+            return true;
+        }
+        if (t.Structs.TryGetValue(type, out List<string> fields))
+            return TryFieldsLayout(t, fields, pack, out size, out align, covered, at);
+        if (t.Typedefs.TryGetValue(type, out string target))
+            return TryTypeLayout(t, target, pack, out size, out align, covered, at);
+
+        size = type.EndsWith("*") ? 8 : t.Enums.Contains(type) ? 4 : type switch
+        {
+            "bool" or "char" or "signed char" or "unsigned char" or "uint8" or "int8" => 1,
+            "short" or "unsigned short" or "uint16" or "int16" => 2,
+            "int" or "unsigned int" or "uint32" or "int32" or "float" => 4,
+            "long long" or "unsigned long long" or "uint64" or "int64" or "double" or "CSteamID" or "CGameID" => 8,
+            _ => 0,
+        };
+        if (size == 0)
+            return false;
+        align = Math.Min(size, pack);
+        for (int i = at; covered != null && i < at + size && i < covered.Length; i++)
+            covered[i] = true;
+        return true;
     }
 
     static List<Method> Parse(string text, string className, ref int errors)
@@ -287,6 +459,15 @@ static class Program
                 ParseParam(method, p, className, ref errors);
 
             ResolveCounts(method, className, ref errors);
+
+            if (GuestOnlyInterfaces.Contains(className))
+                method.Local = true;
+
+            if (method.Params.Any(p => HostPointerHandles.Contains(p.Type)))
+            {
+                Console.Error.WriteLine($"  local (host pointer handle) in {className}::{method.Name}");
+                method.Local = true;
+            }
 
             // An interface return is registered under the version string the caller passes.
             if (method.Ret == "iface" && !HasVersionParam(method))

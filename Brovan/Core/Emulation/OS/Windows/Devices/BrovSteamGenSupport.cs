@@ -73,12 +73,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return (byte*)Buffer;
         }
 
-        public IntPtr ReadBlob(GenReader R)
+        public IntPtr ReadBlob(GenReader R, out uint Length)
         {
+            Length = 0;
             if (R.ReadU32() == 0)
                 return IntPtr.Zero;
 
-            uint Length = R.ReadU32();
+            Length = R.ReadU32();
             if (Length > MaxBlobBytes)
                 throw new InvalidOperationException($"BrovSteam: buffer of {Length} bytes exceeds the cap.");
 
@@ -143,13 +144,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // The client writes Count bytes into a block the guest sized separately, so the two have to agree.
-        public static void CheckOutCapacity(IntPtr Buffer, uint Capacity, long Count)
+        public static void CheckCapacity(IntPtr Buffer, uint Capacity, long Count)
         {
             if (Buffer == IntPtr.Zero)
                 return;
 
             if (Count < 0 || (ulong)Count > Capacity)
-                throw new InvalidOperationException($"BrovSteam: byte count {Count} does not fit the {Capacity} byte output buffer.");
+                throw new InvalidOperationException($"BrovSteam: byte count {Count} does not fit the {Capacity} byte buffer.");
         }
 
         public void WriteString(GenBuf W, IntPtr Text)

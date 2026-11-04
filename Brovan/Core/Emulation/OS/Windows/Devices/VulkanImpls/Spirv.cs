@@ -49,8 +49,16 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public const uint Magic = 0x07230203;
 
+        public const int OpSourceContinued = 2;
+        public const int OpSource = 3;
+        public const int OpSourceExtension = 4;
         public const int OpName = 5;
+        public const int OpMemberName = 6;
+        public const int OpString = 7;
         public const int OpLine = 8;
+        public const int OpExtension = 10;
+        public const int OpExtInstImport = 11;
+        public const int OpExtInst = 12;
         public const int OpMemoryModel = 14;
         public const int OpEntryPoint = 15;
         public const int OpExecutionMode = 16;
@@ -61,41 +69,115 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const int OpTypeFloat = 22;
         public const int OpTypeVector = 23;
         public const int OpTypeMatrix = 24;
+        public const int OpTypeImage = 25;
+        public const int OpTypeSampler = 26;
+        public const int OpTypeSampledImage = 27;
         public const int OpTypeArray = 28;
+        public const int OpTypeRuntimeArray = 29;
         public const int OpTypeStruct = 30;
         public const int OpTypePointer = 32;
         public const int OpTypeFunction = 33;
+        public const int OpTypeForwardPointer = 39;
         public const int OpConstant = 43;
+        public const int OpConstantSampler = 45;
         public const int OpSpecConstant = 50;
+        public const int OpSpecConstantOp = 52;
         public const int OpFunction = 54;
+        public const int OpFunctionParameter = 55;
         public const int OpFunctionEnd = 56;
+        public const int OpFunctionCall = 57;
         public const int OpVariable = 59;
+        public const int OpImageTexelPointer = 60;
         public const int OpLoad = 61;
         public const int OpStore = 62;
+        public const int OpCopyMemory = 63;
+        public const int OpCopyMemorySized = 64;
         public const int OpAccessChain = 65;
+        public const int OpInBoundsAccessChain = 66;
+        public const int OpPtrAccessChain = 67;
+        public const int OpArrayLength = 68;
+        public const int OpInBoundsPtrAccessChain = 70;
         public const int OpDecorate = 71;
         public const int OpMemberDecorate = 72;
+        public const int OpDecorationGroup = 73;
+        public const int OpGroupDecorate = 74;
+        public const int OpGroupMemberDecorate = 75;
+        public const int OpVectorShuffle = 79;
+        public const int OpCompositeConstruct = 80;
+        public const int OpCompositeExtract = 81;
+        public const int OpCompositeInsert = 82;
+        public const int OpCopyObject = 83;
+        public const int OpConvertPtrToU = 117;
+        public const int OpConvertUToPtr = 120;
+        public const int OpBitcast = 124;
+        public const int OpIAdd = 128;
+        public const int OpISub = 130;
+        public const int OpIMul = 132;
         public const int OpLogicalOr = 166;
+        public const int OpLogicalAnd = 167;
+        public const int OpSelect = 169;
+        public const int OpUGreaterThanEqual = 174;
+        public const int OpULessThan = 176;
+        public const int OpULessThanEqual = 178;
         public const int OpFOrdLessThan = 184;
+        public const int OpShiftRightLogical = 194;
+        public const int OpBitwiseAnd = 199;
         public const int OpEmitVertex = 218;
         public const int OpEndPrimitive = 219;
+        public const int OpAtomicStore = 228;
+        public const int OpPhi = 245;
+        public const int OpLoopMerge = 246;
         public const int OpSelectionMerge = 247;
         public const int OpLabel = 248;
         public const int OpBranchConditional = 250;
+        public const int OpSwitch = 251;
         public const int OpKill = 252;
         public const int OpReturn = 253;
+        public const int OpReturnValue = 254;
         public const int OpNoLine = 317;
+        public const int OpAtomicFlagTestAndSet = 318;
+        public const int OpAtomicFlagClear = 319;
+        public const int OpModuleProcessed = 330;
+        public const int OpExecutionModeId = 331;
         public const int OpDecorateId = 332;
+        public const int OpCopyLogical = 400;
+        public const int OpPtrEqual = 401;
+        public const int OpPtrNotEqual = 402;
+        public const int OpPtrDiff = 403;
+        public const int OpTypeUntypedPointerKHR = 4417;
+        public const int OpCooperativeMatrixLoadKHR = 4457;
+        public const int OpCooperativeMatrixStoreKHR = 4458;
+        public const int OpTypeAccelerationStructureKHR = 5341;
+        public const int OpAtomicFMinEXT = 5614;
+        public const int OpAtomicFMaxEXT = 5615;
         public const int OpDecorateString = 5632;
         public const int OpMemberDecorateString = 5633;
+        public const int OpAtomicFAddEXT = 6035;
 
+        public const uint StorageUniformConstant = 0;
         public const uint StorageInput = 1;
+        public const uint StorageUniform = 2;
         public const uint StorageOutput = 3;
+        public const uint StorageCrossWorkgroup = 5;
+        public const uint StorageFunction = 7;
+        public const uint StorageGeneric = 8;
+        public const uint StorageStorageBuffer = 12;
+        public const uint StoragePhysicalStorageBuffer = 5349;
 
         public const uint ModelVertex = 0;
+        public const uint ModelTessellationControl = 1;
         public const uint ModelTessellationEvaluation = 2;
         public const uint ModelGeometry = 3;
         public const uint ModelFragment = 4;
+        public const uint ModelGLCompute = 5;
+        public const uint ModelTaskNV = 5267;
+        public const uint ModelMeshNV = 5268;
+        public const uint ModelTaskEXT = 5364;
+        public const uint ModelMeshEXT = 5365;
+
+        public const uint AddressingPhysical32 = 1;
+        public const uint AddressingPhysical64 = 2;
+        public const uint AddressingPhysicalStorageBuffer64 = 5348;
 
         public const uint ModePointMode = 10;
         public const uint ModeTriangles = 22;
@@ -106,6 +188,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public const uint DecorationRelaxedPrecision = 0;
         public const uint DecorationBlock = 2;
+        public const uint DecorationBufferBlock = 3;
+        public const uint DecorationRowMajor = 4;
+        public const uint DecorationColMajor = 5;
+        public const uint DecorationArrayStride = 6;
+        public const uint DecorationMatrixStride = 7;
         public const uint DecorationBuiltIn = 11;
         public const uint DecorationNoPerspective = 13;
         public const uint DecorationFlat = 14;
@@ -115,8 +202,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const uint DecorationStream = 29;
         public const uint DecorationLocation = 30;
         public const uint DecorationComponent = 31;
+        public const uint DecorationBinding = 33;
+        public const uint DecorationDescriptorSet = 34;
+        public const uint DecorationOffset = 35;
         public const uint DecorationXfbBuffer = 36;
         public const uint DecorationXfbStride = 37;
+        public const uint DecorationNonUniform = 5300;
 
         public const uint BuiltInPosition = 0;
         public const uint BuiltInPointSize = 1;
@@ -127,12 +218,27 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public const uint CapabilityShader = 1;
         public const uint CapabilityGeometry = 2;
+        public const uint CapabilityAddresses = 4;
+        public const uint CapabilityInt64 = 11;
         public const uint CapabilityGeometryPointSize = 24;
         public const uint CapabilityClipDistance = 32;
         public const uint CapabilityCullDistance = 33;
         public const uint CapabilityMultiViewport = 57;
         public const uint CapabilityShaderViewportIndex = 70;
+        public const uint CapabilityUntypedPointersKHR = 4473;
         public const uint CapabilityShaderViewportIndexLayerEXT = 5254;
+        public const uint CapabilityPhysicalStorageBufferAddresses = 5347;
+
+        public const uint DimBuffer = 5;
+        public const uint DimSubpassData = 6;
+
+        public const uint MemoryAligned = 0x2;
+
+        internal static void Emit(List<uint> section, int op, params ReadOnlySpan<uint> operands)
+        {
+            section.Add(((uint)(operands.Length + 1) << 16) | (uint)op);
+            section.AddRange(operands);
+        }
 
         public static int BuiltInOf(List<uint[]> decorations)
         {

@@ -1958,12 +1958,9 @@ namespace Brovan.Core.Emulation
 
         private const int PeImageCopyChunkSize = 1024 * 1024;
 
-        private static int GetPeHeaderCopySize(BinaryFile Library)
+        internal static int GetPeHeaderCopySize(BinaryFile Library, ulong ImageSize)
         {
-            ulong HeaderSize = Library.PE.SizeOfHeaders;
-            if (HeaderSize > (ulong)Library.BinarySize)
-                HeaderSize = (ulong)Library.BinarySize;
-
+            ulong HeaderSize = Math.Min(Library.PE.SizeOfHeaders, Math.Min((ulong)Library.BinarySize, ImageSize));
             return HeaderSize > int.MaxValue ? int.MaxValue : (int)HeaderSize;
         }
 
@@ -1993,13 +1990,18 @@ namespace Brovan.Core.Emulation
                 this.IsHeader = IsHeader;
                 this.Section = Section;
             }
+
+            public bool FitsIn(ulong ImageSize) => Rva <= ImageSize && Size <= ImageSize - Rva;
         }
+
+        internal static ulong GetPeImageSize(BinaryFile Library)
+            => AlignUp(Library.PE.SizeOfImage != 0 ? Library.PE.SizeOfImage : (uint)Library.BinarySize, PageSize);
 
         internal static List<PeImageExtent> GetPeImageExtents(BinaryFile Library, ulong ImageSize)
         {
             List<PeImageExtent> Extents = new List<PeImageExtent>(Library.PE.Sections.Length + 1);
 
-            int HeaderSize = GetPeHeaderCopySize(Library);
+            int HeaderSize = GetPeHeaderCopySize(Library, ImageSize);
             if (HeaderSize != 0)
                 Extents.Add(new PeImageExtent(0, 0, (ulong)HeaderSize, true, default));
 
@@ -2149,8 +2151,8 @@ namespace Brovan.Core.Emulation
         /// <returns>The mapped image base, or zero on failure.</returns>
         internal ulong MapPeImageBySections(BinaryFile Library, ulong BaseAddress, WinModule Module)
         {
-            ulong ImageSize = AlignToPageSize(Library.PE.SizeOfImage != 0 ? Library.PE.SizeOfImage : (uint)Library.BinarySize);
-            int HeaderSize = GetPeHeaderCopySize(Library);
+            ulong ImageSize = GetPeImageSize(Library);
+            int HeaderSize = GetPeHeaderCopySize(Library, ImageSize);
             ulong HeaderMapSize = HeaderSize != 0 ? AlignToPageSize((ulong)HeaderSize) : 0;
             ulong MappedBase = HeaderMapSize != 0
                 ? MapWinMemoryRegion(BaseAddress, HeaderMapSize, MemoryProtection.ReadWrite, SpecialProtections.None, AllocationType.Image, BaseAddress)
@@ -2234,7 +2236,7 @@ namespace Brovan.Core.Emulation
             if (Library.FileFormat != BinaryFormat.PE)
                 throw new InvalidOperationException("Emulator tried to load a non-valid PE library.");
 
-            ulong ImageSize = AlignToPageSize(Library.PE.SizeOfImage != 0 ? Library.PE.SizeOfImage : (uint)Library.BinarySize);
+            ulong ImageSize = GetPeImageSize(Library);
             ulong PreferredBase = Library.PE.ImageBase;
             ulong BaseAddress = 0;
             ulong UserEnd = UserAddressEnd;

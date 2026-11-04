@@ -16,6 +16,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint CmdGetApiCallResult = 3;
         private const uint CmdNotifyMissingInterface = 6;
 
+        // k_iSteamHTMLSurfaceCallbacks carry host pointers.
+        private const int HostPointerCallbacksFirst = 4500;
+        private const int HostPointerCallbacksEnd = 4600;
+        private const int MaxDroppedCallbacksPerPoll = 64;
+
         private readonly object Lock = new object();
         private readonly BrovSteamState State = new BrovSteamState();
         private readonly GenReader Reader = new GenReader();
@@ -121,10 +126,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                         // CallbackMsg_t: hSteamUser@0, iCallback@4, pubParam@8, cubParam@16.
                         byte* Message = stackalloc byte[24];
                         int Call = 0;
-                        if (NativeSteamClient.BGetCallback(Pipe, Message, &Call) == 0)
+                        for (int Dropped = 0; ; Dropped++)
                         {
-                            Writer.WriteU32(0);
-                            return true;
+                            if (Dropped == MaxDroppedCallbacksPerPoll || NativeSteamClient.BGetCallback(Pipe, Message, &Call) == 0)
+                            {
+                                Writer.WriteU32(0);
+                                return true;
+                            }
+
+                            if (!CarriesHostPointers(*(int*)(Message + 4)))
+                                break;
+
+                            NativeSteamClient.FreeLastCallback(Pipe);
                         }
 
                         uint Length = *(uint*)(Message + 16);
@@ -137,7 +150,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Writer.WriteU32(*(uint*)(Message + 4));
                         Writer.WriteU32(Length);
                         if (Length != 0)
-                            Writer.WriteBytesFrom(Parameter, Length);
+                            WritePayload(*(int*)(Message + 4), Parameter, Length);
 
                         NativeSteamClient.FreeLastCallback(Pipe);
                         return true;
@@ -150,6 +163,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                         int Expected = (int)Reader.ReadU32();
                         if (Size > MaxCallResult)
                             throw new InvalidOperationException($"BrovSteam: call result of {Size} bytes exceeds the cap.");
+                        if (CarriesHostPointers(Expected))
+                            throw new InvalidOperationException($"BrovSteam: call result {Expected} carries host pointers.");
 
                         IntPtr Buffer = State.Alloc((int)(Size == 0 ? 1 : Size));
                         byte Failed = 0;
@@ -159,7 +174,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Writer.WriteU32(Failed);
                         Writer.WriteU32(Size);
                         if (Size != 0)
-                            Writer.WriteBytesFrom(Buffer, Size);
+                            WritePayload(Expected, Buffer, Size);
                         return true;
                     }
                 case CmdNotifyMissingInterface:
@@ -176,6 +191,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 default:
                     return false;
             }
+        }
+
+        private static bool CarriesHostPointers(int Callback) => Callback >= HostPointerCallbacksFirst && Callback < HostPointerCallbacksEnd;
+
+        // steamclient can leave padding uninitialized.
+        private void WritePayload(int Callback, IntPtr Payload, uint Length)
+        {
+            if (BrovSteamCallbacks.TryGetPadding(Callback, Length, out int[] Padding))
+                Writer.WriteBytesFrom(Payload, Length, Padding);
+            else
+                Writer.WriteBytesFrom(Payload, Length);
         }
     }
 }

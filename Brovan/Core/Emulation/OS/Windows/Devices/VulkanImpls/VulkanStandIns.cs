@@ -27,6 +27,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const int HostCullDistanceBit = 1 << 11;
         internal const int HostDepthClampBit = 1 << 12;
 
+        internal const int HostCpuDeviceBit = 1 << 13;
+
         internal const int Maintenance5Bit = 1 << 16;
         internal const int Maintenance6Bit = 1 << 17;
         internal const int LoadStoreOpNoneBit = 1 << 18;
@@ -39,14 +41,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const string FeaturePrefix = "VkPhysicalDeviceFeatures.";
 
-        // Comma separated core features, extension names or robustBufferAccess2 to treat as missing.
         private const string ForceVariable = "BROVVULK_FORCE_STANDINS";
+        private const string CpuDeviceName = "cpuDevice";
 
         private const uint StPhysicalDeviceFeatures2 = 1000059000u;
+        private const uint ApiVersion11 = (1u << 22) | (1u << 12);
+        private const uint ApiVersion12 = (1u << 22) | (2u << 12);
         private const uint StPhysicalDeviceVulkan12Features = 51u;
+        private const uint StPhysicalDeviceVulkan13Features = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+        private const uint StPhysicalDeviceDescriptorIndexingFeatures = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+        private const uint StPhysicalDeviceInlineUniformBlockFeatures = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_FEATURES;
         private const uint StPhysicalDeviceVulkan14Features = 55u;
         private const uint StPhysicalDeviceTransformFeedbackFeaturesExt = 1000028000u;
         private const uint StPhysicalDeviceRobustness2FeaturesExt = 1000286000u;
+        private const uint StPhysicalDeviceBufferDeviceAddressFeatures = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+        private const uint StPhysicalDeviceTimelineSemaphoreFeatures = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
         private const uint StPhysicalDeviceDepthClipEnableFeaturesExt = 1000102000u;
         private const uint StPhysicalDeviceMaintenance5Features = 1000470000u;
         private const uint StPhysicalDeviceMaintenance5Properties = 1000470001u;
@@ -93,7 +102,66 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int Maintenance6Feature = BrovVulkLayout.MemberOffset["VkPhysicalDeviceMaintenance6Features.maintenance6"];
         private static readonly int Maintenance5PropertiesSize = BrovVulkLayout.StructSize["VkPhysicalDeviceMaintenance5Properties"];
 
+        private static readonly int Vulkan12CaptureReplay = BrovVulkLayout.MemberOffset["VkPhysicalDeviceVulkan12Features.bufferDeviceAddressCaptureReplay"];
+        private static readonly int Vulkan12MultiDevice = BrovVulkLayout.MemberOffset["VkPhysicalDeviceVulkan12Features.bufferDeviceAddressMultiDevice"];
+        private static readonly int AddressCaptureReplay = BrovVulkLayout.MemberOffset["VkPhysicalDeviceBufferDeviceAddressFeatures.bufferDeviceAddressCaptureReplay"];
+        private static readonly int AddressMultiDevice = BrovVulkLayout.MemberOffset["VkPhysicalDeviceBufferDeviceAddressFeatures.bufferDeviceAddressMultiDevice"];
+        private static readonly int Robustness2ImageAccess2 = BrovVulkLayout.MemberOffset["VkPhysicalDeviceRobustness2FeaturesKHR.robustImageAccess2"];
+        private static readonly int Robustness2NullDescriptor = BrovVulkLayout.MemberOffset["VkPhysicalDeviceRobustness2FeaturesKHR.nullDescriptor"];
+        private static readonly int Robustness2Size = BrovVulkLayout.StructSize["VkPhysicalDeviceRobustness2FeaturesKHR"];
+        private static readonly int Vulkan12Timeline = BrovVulkLayout.MemberOffset["VkPhysicalDeviceVulkan12Features.timelineSemaphore"];
+        private static readonly int TimelineFeature = BrovVulkLayout.MemberOffset["VkPhysicalDeviceTimelineSemaphoreFeatures.timelineSemaphore"];
+        private static readonly int TimelineFeaturesSize = BrovVulkLayout.StructSize["VkPhysicalDeviceTimelineSemaphoreFeatures"];
+
+        // Sparse binds can change backing without a retirement event.
+        private static readonly string[] SparseFeatures =
+        {
+            "sparseBinding", "sparseResidencyBuffer", "sparseResidencyImage2D", "sparseResidencyImage3D", "sparseResidency2Samples",
+            "sparseResidency4Samples", "sparseResidency8Samples", "sparseResidency16Samples", "sparseResidencyAliased",
+        };
+
+        // A torn buffer or storage descriptor can point outside its resource.
+        private static readonly string[] UpdateAfterBindFeatures =
+        {
+            "descriptorBindingUniformBufferUpdateAfterBind", "descriptorBindingStorageImageUpdateAfterBind", "descriptorBindingStorageBufferUpdateAfterBind",
+            "descriptorBindingUniformTexelBufferUpdateAfterBind", "descriptorBindingStorageTexelBufferUpdateAfterBind",
+        };
+
+        private static readonly int[] Vulkan12UpdateAfterBind = UpdateAfterBindOffsets("VkPhysicalDeviceVulkan12Features");
+        private static readonly int[] IndexingUpdateAfterBind = UpdateAfterBindOffsets("VkPhysicalDeviceDescriptorIndexingFeatures");
+        private static readonly int Vulkan13InlineUpdateAfterBind = BrovVulkLayout.MemberOffset["VkPhysicalDeviceVulkan13Features.descriptorBindingInlineUniformBlockUpdateAfterBind"];
+        private static readonly int InlineBlockUpdateAfterBind = BrovVulkLayout.MemberOffset["VkPhysicalDeviceInlineUniformBlockFeatures.descriptorBindingInlineUniformBlockUpdateAfterBind"];
+
+        private static int[] UpdateAfterBindOffsets(string type) =>
+            Array.ConvertAll(UpdateAfterBindFeatures, feature => BrovVulkLayout.MemberOffset[type + "." + feature]);
+
+        private static void ClearCpuWithheld(IntPtr node)
+        {
+            switch (*(uint*)node)
+            {
+                case StPhysicalDeviceVulkan12Features:
+                    *(uint*)(node + Vulkan12CaptureReplay) = *(uint*)(node + Vulkan12MultiDevice) = 0;
+                    foreach (int offset in Vulkan12UpdateAfterBind)
+                        *(uint*)(node + offset) = 0;
+                    break;
+                case StPhysicalDeviceDescriptorIndexingFeatures:
+                    foreach (int offset in IndexingUpdateAfterBind)
+                        *(uint*)(node + offset) = 0;
+                    break;
+                case StPhysicalDeviceVulkan13Features:
+                    *(uint*)(node + Vulkan13InlineUpdateAfterBind) = 0;
+                    break;
+                case StPhysicalDeviceInlineUniformBlockFeatures:
+                    *(uint*)(node + InlineBlockUpdateAfterBind) = 0;
+                    break;
+                case StPhysicalDeviceBufferDeviceAddressFeatures:
+                    *(uint*)(node + AddressCaptureReplay) = *(uint*)(node + AddressMultiDevice) = 0;
+                    break;
+            }
+        }
+
         private static readonly int Properties2Properties = BrovVulkLayout.MemberOffset["VkPhysicalDeviceProperties2.properties"];
+        private static readonly int PropertiesDeviceType = BrovVulkLayout.MemberOffset["VkPhysicalDeviceProperties.deviceType"];
         private static readonly int PropertiesLimits = BrovVulkLayout.MemberOffset["VkPhysicalDeviceProperties.limits"];
         private static readonly int LimitsDrawIndirectCount = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxDrawIndirectCount"];
         private static readonly int LimitsSamplerAnisotropy = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxSamplerAnisotropy"];
@@ -105,6 +173,44 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int LimitsImageDimension2D = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxImageDimension2D"];
         private static readonly int LimitsImageDimension3D = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxImageDimension3D"];
         private static readonly int LimitsImageDimensionCube = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxImageDimensionCube"];
+        private static readonly int LimitsColorAttachments = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxColorAttachments"];
+        private static readonly int LimitsUniformBuffersDynamic = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxDescriptorSetUniformBuffersDynamic"];
+        private static readonly int LimitsStorageBuffersDynamic = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxDescriptorSetStorageBuffersDynamic"];
+        private static readonly int LimitsPushConstantsSize = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxPushConstantsSize"];
+        private static readonly int LimitsBoundDescriptorSets = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxBoundDescriptorSets"];
+        private static readonly int LimitsViewports = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxViewports"];
+        private static readonly int LimitsVertexInputBindings = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxVertexInputBindings"];
+        private static readonly int LimitsVertexInputAttributes = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxVertexInputAttributes"];
+
+        private static void ProbeExtensionLimits(IntPtr physicalDevice, DeviceGaps gaps)
+        {
+            if (gaps.ApiVersion < ApiVersion11)
+                return;
+
+            int size = BrovVulkLayout.StructSize["VkPhysicalDeviceProperties2"];
+            int pushSize = BrovVulkLayout.StructSize["VkPhysicalDevicePushDescriptorProperties"];
+            int inlineSize = BrovVulkLayout.StructSize["VkPhysicalDeviceInlineUniformBlockProperties"];
+            int feedbackSize = BrovVulkLayout.StructSize["VkPhysicalDeviceTransformFeedbackPropertiesEXT"];
+            byte* properties = stackalloc byte[size];
+            byte* push = stackalloc byte[pushSize];
+            byte* inlineBlocks = stackalloc byte[inlineSize];
+            byte* feedback = stackalloc byte[feedbackSize];
+            new Span<byte>(properties, size).Clear();
+            new Span<byte>(push, pushSize).Clear();
+            new Span<byte>(inlineBlocks, inlineSize).Clear();
+            new Span<byte>(feedback, feedbackSize).Clear();
+            *(int*)properties = BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            *(IntPtr*)(properties + VkOffsets.NodePNext) = (IntPtr)push;
+            *(int*)push = BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES;
+            *(IntPtr*)(push + VkOffsets.NodePNext) = (IntPtr)inlineBlocks;
+            *(int*)inlineBlocks = BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_PROPERTIES;
+            *(IntPtr*)(inlineBlocks + VkOffsets.NodePNext) = (IntPtr)feedback;
+            *(int*)feedback = BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT;
+            BrovVulkApi.vkGetPhysicalDeviceProperties2(physicalDevice, (IntPtr)properties);
+            gaps.MaxPushDescriptors = *(uint*)(push + BrovVulkLayout.MemberOffset["VkPhysicalDevicePushDescriptorProperties.maxPushDescriptors"]);
+            gaps.MaxInlineUniformBlockSize = *(uint*)(inlineBlocks + BrovVulkLayout.MemberOffset["VkPhysicalDeviceInlineUniformBlockProperties.maxInlineUniformBlockSize"]);
+            gaps.MaxTransformFeedbackBuffers = *(uint*)(feedback + BrovVulkLayout.MemberOffset["VkPhysicalDeviceTransformFeedbackPropertiesEXT.maxTransformFeedbackBuffers"]);
+        }
         private static readonly int ImageFormatPropertiesSize = BrovVulkLayout.StructSize["VkImageFormatProperties"];
         private static readonly int ImageFormatMaxWidth = BrovVulkLayout.MemberOffset["VkImageFormatProperties.maxExtent"] + BrovVulkLayout.MemberOffset["VkExtent3D.width"];
         private static readonly int ImageFormatMaxHeight = BrovVulkLayout.MemberOffset["VkImageFormatProperties.maxExtent"] + BrovVulkLayout.MemberOffset["VkExtent3D.height"];
@@ -154,6 +260,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static readonly IntPtr LoadStoreOpNoneKhrName = Marshal.StringToHGlobalAnsi(LoadStoreOpNoneKhr);
         private static readonly IntPtr LoadStoreOpNoneExtName = Marshal.StringToHGlobalAnsi(LoadStoreOpNoneExt);
+        private static readonly IntPtr Robustness2KhrName = Marshal.StringToHGlobalAnsi("VK_KHR_robustness2");
+        private static readonly IntPtr Robustness2ExtName = Marshal.StringToHGlobalAnsi("VK_EXT_robustness2");
+        private static readonly IntPtr TimelineSemaphoreName = Marshal.StringToHGlobalAnsi("VK_KHR_timeline_semaphore");
 
         private static readonly string[] CoreFeatures = BuildCoreFeatures();
         private static readonly string[] Forced = ReadForced();
@@ -181,10 +290,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             public uint MaxImageDimension2D;
             public uint MaxImageDimension3D;
             public uint MaxImageDimensionCube;
+            public uint MaxColorAttachments;
+            public uint MaxUniformBuffersDynamic;
+            public uint MaxStorageBuffersDynamic;
+            public uint MaxPushConstantsSize;
+            public uint MaxPushDescriptors;
+            public uint MaxInlineUniformBlockSize;
+            public uint MaxBoundDescriptorSets;
+            public uint MaxViewports;
+            public uint MaxVertexInputBindings;
+            public uint MaxVertexInputAttributes;
+            public uint MaxTransformFeedbackBuffers;
             public bool R8Storage;
             public bool Rg8Storage;
             public bool Etc2Transcode;
             public uint[] QueueFamilies = Array.Empty<uint>();
+            public IntPtr Robustness2Name;
+            public bool RobustImageAccess2;
+            public bool NullDescriptor;
+            public bool TimelineSemaphore;
         }
 
         private static string[] BuildCoreFeatures()
@@ -269,12 +393,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((gaps.ImplementedBits & DepthClipEnableBit) != 0 && (gaps.HostBits & HostDepthClampBit) == 0)
                 gaps.ImplementedBits &= ~DepthClipEnableBit;
 
-            if (gaps.HostExtensions.ContainsKey("VK_EXT_robustness2") || gaps.HostExtensions.ContainsKey("VK_KHR_robustness2"))
+            gaps.Robustness2Name = gaps.HostExtensions.ContainsKey("VK_KHR_robustness2") ? Robustness2KhrName
+                : gaps.HostExtensions.ContainsKey("VK_EXT_robustness2") ? Robustness2ExtName : IntPtr.Zero;
+            if (gaps.Robustness2Name != IntPtr.Zero)
             {
                 byte* robustness = stackalloc byte[64];
                 HostFeatures(physicalDevice, StPhysicalDeviceRobustness2FeaturesExt, robustness);
                 if (*(uint*)(robustness + Robustness2BufferAccess2) == 0 || Array.IndexOf(Forced, RobustBufferAccess2Name) >= 0)
                     gaps.ImplementedBits |= RobustBufferAccess2Bit;
+                gaps.RobustImageAccess2 = *(uint*)(robustness + Robustness2ImageAccess2) != 0;
+                gaps.NullDescriptor = *(uint*)(robustness + Robustness2NullDescriptor) != 0;
+            }
+
+            if (gaps.ApiVersion >= ApiVersion12 || gaps.HostExtensions.ContainsKey("VK_KHR_timeline_semaphore"))
+            {
+                byte* timeline = stackalloc byte[64];
+                HostFeatures(physicalDevice, StPhysicalDeviceTimelineSemaphoreFeatures, timeline);
+                gaps.TimelineSemaphore = *(uint*)(timeline + TimelineFeature) != 0;
             }
         }
 
@@ -300,6 +435,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             new Span<byte>(properties, size).Clear();
             BrovVulkApi.vkGetPhysicalDeviceProperties(physicalDevice, (IntPtr)properties);
             gaps.ApiVersion = *(uint*)(properties + BrovVulkGenExt.PropertiesApiVersion);
+            if (*(int*)(properties + PropertiesDeviceType) == BrovVulkConstants.VK_PHYSICAL_DEVICE_TYPE_CPU || Array.IndexOf(Forced, CpuDeviceName) >= 0)
+                gaps.HostBits |= HostCpuDeviceBit;
             byte* limits = properties + PropertiesLimits;
 
             ulong alignment = *(ulong*)(limits + LimitsStorageAlignment);
@@ -313,6 +450,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             gaps.MaxImageDimension2D = *(uint*)(limits + LimitsImageDimension2D);
             gaps.MaxImageDimension3D = *(uint*)(limits + LimitsImageDimension3D);
             gaps.MaxImageDimensionCube = *(uint*)(limits + LimitsImageDimensionCube);
+            gaps.MaxColorAttachments = *(uint*)(limits + LimitsColorAttachments);
+            gaps.MaxUniformBuffersDynamic = *(uint*)(limits + LimitsUniformBuffersDynamic);
+            gaps.MaxStorageBuffersDynamic = *(uint*)(limits + LimitsStorageBuffersDynamic);
+            gaps.MaxPushConstantsSize = *(uint*)(limits + LimitsPushConstantsSize);
+            gaps.MaxBoundDescriptorSets = *(uint*)(limits + LimitsBoundDescriptorSets);
+            gaps.MaxViewports = *(uint*)(limits + LimitsViewports);
+            gaps.MaxVertexInputBindings = *(uint*)(limits + LimitsVertexInputBindings);
+            gaps.MaxVertexInputAttributes = *(uint*)(limits + LimitsVertexInputAttributes);
+            ProbeExtensionLimits(physicalDevice, gaps);
 
             if ((gaps.ImplementedBits & RelocationBits) != 0)
             {
@@ -372,7 +518,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (features == IntPtr.Zero)
                 return;
 
-            Write(features, Gaps(physicalDevice), 1);
+            DeviceGaps gaps = Gaps(physicalDevice);
+            Write(features, gaps, 1);
+            HideSparse(gaps, features);
+        }
+
+        private static void HideSparse(DeviceGaps gaps, IntPtr block)
+        {
+            if ((gaps.HostBits & HostCpuDeviceBit) == 0 || block == IntPtr.Zero)
+                return;
+
+            foreach (string name in SparseFeatures)
+                *(uint*)((byte*)block + Offset(name)) = 0;
         }
 
         internal static void Advertise2(IntPtr physicalDevice, IntPtr features2)
@@ -382,8 +539,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             DeviceGaps gaps = Gaps(physicalDevice);
             Write(features2 + FeatureBits, gaps, 1);
+            HideSparse(gaps, features2 + FeatureBits);
             for (IntPtr node = *(IntPtr*)(features2 + VkOffsets.NodePNext); node != IntPtr.Zero; node = *(IntPtr*)(node + VkOffsets.NodePNext))
             {
+                if ((gaps.HostBits & HostCpuDeviceBit) != 0)
+                    ClearCpuWithheld(node);
                 switch (*(uint*)node)
                 {
                     case StPhysicalDeviceVulkan12Features:
@@ -516,9 +676,97 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
+            if ((gaps.HostBits & HostCpuDeviceBit) != 0)
+                ForceCpuDevice(st, gaps, createInfo);
+
             Report(gaps);
             return bits;
         }
+
+        private static void ForceCpuDevice(GenState st, DeviceGaps gaps, IntPtr createInfo)
+        {
+            if (Array.IndexOf(gaps.Missing, "robustBufferAccess") >= 0 || gaps.Robustness2Name == IntPtr.Zero || !gaps.RobustImageAccess2 || !gaps.TimelineSemaphore)
+                throw new InvalidOperationException("BrovVulk generic: a CPU device needs robustBufferAccess, robustImageAccess2 and timelineSemaphore, and this driver lacks one.");
+
+            IntPtr block = *(IntPtr*)((byte*)createInfo + DeviceCreateInfoEnabledFeatures);
+            IntPtr robustness = IntPtr.Zero;
+            IntPtr timeline = IntPtr.Zero;
+            for (IntPtr node = *(IntPtr*)((byte*)createInfo + DeviceCreateInfoPNext); node != IntPtr.Zero; node = *(IntPtr*)(node + VkOffsets.NodePNext))
+            {
+                ClearCpuWithheld(node);
+                switch (*(uint*)node)
+                {
+                    case StPhysicalDeviceFeatures2:
+                        block = node + FeatureBits;
+                        break;
+                    case StPhysicalDeviceRobustness2FeaturesExt:
+                        robustness = node;
+                        break;
+                    case StPhysicalDeviceVulkan12Features:
+                        timeline = node + Vulkan12Timeline;
+                        break;
+                    case StPhysicalDeviceTimelineSemaphoreFeatures:
+                        timeline = node + TimelineFeature;
+                        break;
+                }
+            }
+
+            if (block == IntPtr.Zero)
+            {
+                block = st.Alloc(BrovVulkLayout.StructSize["VkPhysicalDeviceFeatures"]);
+                *(IntPtr*)((byte*)createInfo + DeviceCreateInfoEnabledFeatures) = block;
+            }
+            *(uint*)((byte*)block + Offset("robustBufferAccess")) = 1;
+            HideSparse(gaps, block);
+
+            if (timeline == IntPtr.Zero)
+            {
+                IntPtr node = st.Alloc(TimelineFeaturesSize);
+                *(uint*)node = StPhysicalDeviceTimelineSemaphoreFeatures;
+                *(IntPtr*)(node + VkOffsets.NodePNext) = *(IntPtr*)((byte*)createInfo + DeviceCreateInfoPNext);
+                *(IntPtr*)((byte*)createInfo + DeviceCreateInfoPNext) = node;
+                timeline = node + TimelineFeature;
+                if (gaps.HostExtensions.ContainsKey("VK_KHR_timeline_semaphore"))
+                    EnsureExtension(st, createInfo, TimelineSemaphoreName, "VK_KHR_timeline_semaphore");
+            }
+            *(uint*)timeline = 1;
+
+            if (robustness == IntPtr.Zero)
+            {
+                robustness = st.Alloc(Robustness2Size);
+                *(uint*)robustness = StPhysicalDeviceRobustness2FeaturesExt;
+                *(IntPtr*)(robustness + VkOffsets.NodePNext) = *(IntPtr*)((byte*)createInfo + DeviceCreateInfoPNext);
+                *(IntPtr*)((byte*)createInfo + DeviceCreateInfoPNext) = robustness;
+            }
+            *(uint*)(robustness + Robustness2ImageAccess2) = 1;
+            if ((gaps.ImplementedBits & RobustBufferAccess2Bit) == 0)
+                *(uint*)(robustness + Robustness2BufferAccess2) = 1;
+            if (gaps.NullDescriptor)
+                *(uint*)(robustness + Robustness2NullDescriptor) = 1;
+
+            EnsureExtension(st, createInfo, gaps.Robustness2Name, "VK_KHR_robustness2", "VK_EXT_robustness2");
+        }
+
+        private static void EnsureExtension(GenState st, IntPtr createInfo, IntPtr name, params string[] equivalent)
+        {
+            foreach (string enabled in equivalent)
+            {
+                if (BrovVulkGenMemory.EnablesExtension(createInfo, enabled))
+                    return;
+            }
+
+            uint count = *(uint*)((byte*)createInfo + DeviceCreateInfoExtensionCount);
+            IntPtr names = *(IntPtr*)((byte*)createInfo + DeviceCreateInfoExtensionNames);
+            IntPtr grown = st.Alloc(BrovVulkGenStruct.CheckedBytes(count + 1, 8));
+            for (uint k = 0; k < count; k++)
+                *(IntPtr*)(grown + (int)(k * 8)) = *(IntPtr*)(names + (int)(k * 8));
+            *(IntPtr*)(grown + (int)(count * 8)) = name;
+            *(uint*)((byte*)createInfo + DeviceCreateInfoExtensionCount) = count + 1;
+            *(IntPtr*)((byte*)createInfo + DeviceCreateInfoExtensionNames) = grown;
+        }
+
+        internal static bool WithholdsExtension(IntPtr physicalDevice, string name) =>
+            (Gaps(physicalDevice).HostBits & HostCpuDeviceBit) != 0 && Array.IndexOf(BrovVulkExtensions.CpuWithheld, name) >= 0;
 
         private static void Write(IntPtr features, DeviceGaps gaps, uint value)
         {
@@ -815,7 +1063,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void QueueFamilyProperties(IntPtr physicalDevice, uint count, IntPtr properties, int stride, int flagsOffset)
         {
-            if (properties == IntPtr.Zero || !Compression(physicalDevice, out _))
+            if (properties == IntPtr.Zero)
+                return;
+
+            if ((Gaps(physicalDevice).HostBits & HostCpuDeviceBit) != 0)
+            {
+                for (uint k = 0; k < count; k++)
+                    *(uint*)(properties + (int)(k * (uint)stride) + flagsOffset) &= ~(uint)BrovVulkConstants.VK_QUEUE_SPARSE_BINDING_BIT;
+            }
+
+            if (!Compression(physicalDevice, out _))
                 return;
 
             // The decoder is a compute dispatch, so a family without compute must not attract the guest's copies.
@@ -844,7 +1101,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static void NoteShaderModule(GenState st, IntPtr device, IntPtr createInfo, IntPtr module)
         {
             int bits = st.DeviceStandIns(device);
-            if ((bits & (FillModeNonSolidBit | ClipDistanceBit)) == 0)
+            if ((bits & (FillModeNonSolidBit | ClipDistanceBit | HostCpuDeviceBit)) == 0)
                 return;
 
             ulong size = *(ulong*)(createInfo + VkOffsets.ShaderModuleCodeSize);
@@ -860,24 +1117,52 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static void PreparePipelines(GenState st, IntPtr device, IntPtr createInfos, uint count, int stride)
         {
             int bits = st.DeviceStandIns(device);
-            if ((bits & PipelineBits) == 0 || createInfos == IntPtr.Zero || stride <= 0)
+            if ((bits & (PipelineBits | HostCpuDeviceBit)) == 0 || createInfos == IntPtr.Zero || stride <= 0)
                 return;
+            if ((bits & HostCpuDeviceBit) != 0)
+                st.BeginPipelines(count);
 
+            try
+            {
+                PrepareEachPipeline(st, device, bits, createInfos, count, stride);
+            }
+            catch
+            {
+                FinishPipelines(st, device, IntPtr.Zero, IntPtr.Zero, BrovVulkConstants.VK_ERROR_INITIALIZATION_FAILED);
+                st.DropPendingPipelines();
+                throw;
+            }
+        }
+
+        private static void PrepareEachPipeline(GenState st, IntPtr device, int bits, IntPtr createInfos, uint count, int stride)
+        {
             // The flag fold runs first so the later passes read the pipeline flags, and inline code becomes
             // modules so they find it where a guest made module would be.
             for (uint i = 0; i < count; i++)
             {
                 IntPtr info = createInfos + (int)(i * (uint)stride);
-
                 // pStages is optional, so stageCount can be non-zero with no array behind it.
-                if (*(IntPtr*)(info + VkOffsets.PipelineStages) == IntPtr.Zero && *(uint*)(info + VkOffsets.PipelineStageCount) != 0)
-                    continue;
+                bool noStages = *(IntPtr*)(info + VkOffsets.PipelineStages) == IntPtr.Zero && *(uint*)(info + VkOffsets.PipelineStageCount) != 0;
 
                 if ((bits & Maintenance5Bit) != 0)
                 {
                     Maintenance5.FoldCreateFlags(info, VkOffsets.PipelineFlags);
-                    Maintenance5.MaterializeModules(st, device, *(IntPtr*)(info + VkOffsets.PipelineStages), *(uint*)(info + VkOffsets.PipelineStageCount));
+                    if (!noStages)
+                        Maintenance5.MaterializeModules(st, device, *(IntPtr*)(info + VkOffsets.PipelineStages), *(uint*)(info + VkOffsets.PipelineStageCount));
                 }
+
+                if ((bits & HostCpuDeviceBit) != 0)
+                {
+                    IntPtr layout = *(IntPtr*)(info + VkOffsets.PipelineLayout);
+                    HashSet<uint> used = st.PipelineUse((int)i, layout, CreatesLibrary(info) ? GenState.PipelineLibrary : GenState.PipelineGraphics);
+                    UseLibraries(st, info, (int)i);
+                    if (!noStages)
+                        BoundStages(st, device, *(IntPtr*)(info + VkOffsets.PipelineStages), *(uint*)(info + VkOffsets.PipelineStageCount), layout, used);
+                    st.ResolvePipelineUse((int)i);
+                }
+
+                if (noStages)
+                    continue;
 
                 if ((bits & RelocationBits) != 0)
                     ShaderPatches.PreparePipeline(st, device, bits, info);
@@ -893,6 +1178,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        // VkPipelineCreateFlags2CreateInfo replaces the flags member when it is in the chain.
+        private static bool CreatesLibrary(IntPtr info)
+        {
+            for (IntPtr node = *(IntPtr*)(info + VkOffsets.NodePNext); node != IntPtr.Zero; node = *(IntPtr*)(node + VkOffsets.NodePNext))
+            {
+                if (*(int*)node == BrovVulkConstants.VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO)
+                    return (*(ulong*)(node + VkOffsets.CreateFlags2) & BrovVulkConstants.VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) != 0;
+            }
+            return (*(uint*)(info + VkOffsets.PipelineFlags) & BrovVulkConstants.VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) != 0;
+        }
+
         internal static void FinishPipelines(GenState st, IntPtr device, IntPtr cache, IntPtr pipelines, int result)
         {
             if (st.StandIns.Plans.Count == 0 && st.StandIns.TemporaryModules.Count == 0)
@@ -905,16 +1201,109 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void PrepareComputePipelines(GenState st, IntPtr device, IntPtr createInfos, uint count, int stride)
         {
-            if ((st.DeviceStandIns(device) & Maintenance5Bit) == 0 || createInfos == IntPtr.Zero || stride <= 0)
+            int bits = st.DeviceStandIns(device);
+            if ((bits & (Maintenance5Bit | HostCpuDeviceBit)) == 0 || createInfos == IntPtr.Zero || stride <= 0)
                 return;
+            if ((bits & HostCpuDeviceBit) != 0)
+                st.BeginPipelines(count);
 
-            for (uint i = 0; i < count; i++)
+            try
             {
-                IntPtr info = createInfos + (int)(i * (uint)stride);
-                Maintenance5.FoldCreateFlags(info, VkOffsets.ComputePipelineFlags);
-                Maintenance5.MaterializeModules(st, device, info + VkOffsets.ComputePipelineStage, 1);
+                for (uint i = 0; i < count; i++)
+                {
+                    IntPtr info = createInfos + (int)(i * (uint)stride);
+                    if ((bits & Maintenance5Bit) != 0)
+                    {
+                        Maintenance5.FoldCreateFlags(info, VkOffsets.ComputePipelineFlags);
+                        Maintenance5.MaterializeModules(st, device, info + VkOffsets.ComputePipelineStage, 1);
+                    }
+                    if ((bits & HostCpuDeviceBit) != 0)
+                    {
+                        IntPtr layout = *(IntPtr*)(info + VkOffsets.ComputePipelineLayout);
+                        BoundStages(st, device, info + VkOffsets.ComputePipelineStage, 1, layout, st.PipelineUse((int)i, layout, GenState.PipelineCompute));
+                        st.ResolvePipelineUse((int)i);
+                    }
+                }
+            }
+            catch
+            {
+                FinishComputePipelines(st, device);
+                st.DropPendingPipelines();
+                throw;
             }
         }
+
+        // Later stand-ins must patch the bounded module.
+        private static void BoundStages(GenState st, IntPtr device, IntPtr stages, uint count, IntPtr layout, HashSet<uint> used)
+        {
+            if (stages == IntPtr.Zero)
+                return;
+
+            BrovVulkAddressSpace? addresses = st.Retire.AddressSpaceOf(device);
+            SpirvBounds.BindingInfo binding = (uint set, uint b, out long count, out int type) => st.LayoutBinding(layout, set, b, out count, out type);
+            for (uint i = 0; i < count; i++)
+            {
+                IntPtr stage = stages + (int)(i * (uint)VkOffsets.StageSize);
+                IntPtr module = *(IntPtr*)(stage + VkOffsets.StageModule);
+                byte* namePtr = *(byte**)(stage + VkOffsets.StageName);
+                ReadOnlySpan<byte> entry = namePtr != null ? MemoryMarshal.CreateReadOnlySpanFromNullTerminated(namePtr) : default;
+                uint stageBit = *(uint*)(stage + VkOffsets.StageStage);
+                IntPtr inline = IntPtr.Zero;
+                ShaderModuleRecord? record = null;
+                uint[]? bounded;
+                string? refusal;
+                if (module != IntPtr.Zero)
+                {
+                    if (!st.StandIns.Modules.TryGetValue(module, out record) || record.Code == null)
+                        throw new InvalidOperationException("BrovVulk generic: a pipeline stage names a shader module this layer did not keep.");
+                    fixed (uint* code = record.Code)
+                        bounded = SpirvBounds.Bound(code, record.Code.Length, entry, stageBit, binding, addresses, used, out refusal);
+                }
+                else
+                {
+                    inline = ShaderPatches.InlineModule(stage);
+                    if (inline == IntPtr.Zero)
+                        throw new InvalidOperationException("BrovVulk generic: a pipeline stage has neither a module nor inline code.");
+                    ulong size = *(ulong*)(inline + VkOffsets.ShaderModuleCodeSize);
+                    IntPtr code = *(IntPtr*)(inline + VkOffsets.ShaderModuleCode);
+                    if (code == IntPtr.Zero || size < 20 || (size & 3) != 0 || size > int.MaxValue)
+                        throw new InvalidOperationException("BrovVulk generic: inline shader code of a bad size.");
+                    bounded = SpirvBounds.Bound((uint*)code, (int)(size / 4), entry, stageBit, binding, addresses, used, out refusal);
+                }
+
+                if (refusal != null)
+                    throw new InvalidOperationException("BrovVulk generic: " + refusal + ".");
+                if (bounded == null)
+                    continue;
+
+                IntPtr temporary = ShaderPatches.CreateModule(st, device, bounded);
+                if (temporary == IntPtr.Zero)
+                    throw new InvalidOperationException("BrovVulk generic: the host refused a bounded shader module.");
+                st.StandIns.Modules[temporary] = new ShaderModuleRecord
+                {
+                    Device = device, Models = record?.Models ?? 0, ClipOutputs = record?.ClipOutputs ?? 0,
+                    InterfaceModel = record?.InterfaceModel ?? 0, Interface = record?.Interface, Code = bounded,
+                };
+                st.StandIns.TemporaryModules.Add(temporary);
+                *(IntPtr*)(stage + VkOffsets.StageModule) = temporary;
+                if (inline != IntPtr.Zero)
+                    ShaderPatches.UnlinkInlineModules(stage);
+            }
+        }
+
+        private static void UseLibraries(GenState st, IntPtr info, int index)
+        {
+            for (IntPtr node = *(IntPtr*)(info + VkOffsets.NodePNext); node != IntPtr.Zero; node = *(IntPtr*)(node + VkOffsets.NodePNext))
+            {
+                if (*(int*)node != BrovVulkConstants.VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR)
+                    continue;
+                uint count = *(uint*)(node + VkOffsets.LibraryCount);
+                IntPtr* libraries = *(IntPtr**)(node + VkOffsets.LibraryHandles);
+                for (uint k = 0; libraries != null && k < count; k++)
+                    st.UseLibrary(index, libraries[k]);
+            }
+        }
+
 
         internal static void PrepareStagePipelines(GenState st, IntPtr device, IntPtr createInfos, uint count, int stride, int flagsOffset, int stagesOffset, int stageCountOffset)
         {
@@ -1271,6 +1660,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void ReleaseDevice(GenState st, IntPtr device)
         {
+            if (device == IntPtr.Zero ? !st.Retire.Active : !st.Retire.IsCpu(device))
+                ReleaseHostDevice(st, device);
+        }
+
+        internal static void ReleaseHostDevice(GenState st, IntPtr device)
+        {
             VulkanStandInState state = st.StandIns;
             FillModeNonSolid.ReleaseDevice(state, device);
             TextureCompressionBC.ReleaseDevice(state, device);
@@ -1371,6 +1766,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static readonly int PipelineBaseIndex = BrovVulkLayout.MemberOffset["VkGraphicsPipelineCreateInfo.basePipelineIndex"];
         internal static readonly int ComputePipelineFlags = BrovVulkLayout.MemberOffset["VkComputePipelineCreateInfo.flags"];
         internal static readonly int ComputePipelineStage = BrovVulkLayout.MemberOffset["VkComputePipelineCreateInfo.stage"];
+        internal static readonly int ComputePipelineLayout = BrovVulkLayout.MemberOffset["VkComputePipelineCreateInfo.layout"];
+        internal static readonly int PipelineLayout = BrovVulkLayout.MemberOffset["VkGraphicsPipelineCreateInfo.layout"];
+        internal static readonly int CreateFlags2 = BrovVulkLayout.MemberOffset["VkPipelineCreateFlags2CreateInfo.flags"];
 
         internal static readonly int InputAssemblyTopology = BrovVulkLayout.MemberOffset["VkPipelineInputAssemblyStateCreateInfo.topology"];
         internal static readonly int RasterizationDiscard = BrovVulkLayout.MemberOffset["VkPipelineRasterizationStateCreateInfo.rasterizerDiscardEnable"];

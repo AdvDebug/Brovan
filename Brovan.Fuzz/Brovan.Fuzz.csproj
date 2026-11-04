@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Harness for the Brovvulk forwarding path. Linux only: the guard pages use mmap. -->
+  <!-- The fuzz harness requires Linux. -->
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>

@@ -195,7 +195,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                         continue;
                     }
 
-                    long Written = Interlocked.CompareExchange(ref *(long*)(Base + OffClientCursor), 0, 0);
+                    long Written = Math.Max(0, Interlocked.CompareExchange(ref *(long*)(Base + OffClientCursor), 0, 0));
 
                     // IAudioClient::Reset zeroes both cursors client side and tells the server nothing.
                     if (Written < Read)
@@ -328,7 +328,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
                 Due += PacketTicks;
 
-                long Consumed = Interlocked.CompareExchange(ref *(long*)(Base + OffServerCursor), 0, 0);
+                long Consumed = Math.Max(0, Interlocked.CompareExchange(ref *(long*)(Base + OffServerCursor), 0, 0));
                 uint ReadIndex = Volatile.Read(ref *(uint*)(Base + OffQueueRead));
 
                 // IAudioClient::Reset zeroes the cursors and drains the queue client side.

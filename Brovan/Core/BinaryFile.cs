@@ -473,7 +473,7 @@ namespace Brovan.Core
                     for (int i = 0; i < ExistingCount; i++)
                         ExistingOffsets.Add(Functions[i].Offset);
 
-                    if (PDataSection.RawOffset > (uint)Data.Length || PDataSection.RawSize > (uint)Data.Length - PDataSection.RawOffset)
+                    if (!InsideData(PDataSection.RawOffset, PDataSection.RawSize))
                         throw new IndexOutOfRangeException("pdata section is out of the binary length range.");
 
                     int EntrySize = 12;
@@ -1993,6 +1993,8 @@ namespace Brovan.Core
             Functions = Result;
         }
 
+        private bool InsideData(uint Offset, uint Size) => Offset <= (uint)Data.Length && Size <= (uint)Data.Length - Offset;
+
         private void ParseELFImports(bool Is64Bit)
         {
 
@@ -2024,6 +2026,9 @@ namespace Brovan.Core
                 BytesToCopy = MaxReadable;
 
             ReadOnlySpan<byte> DynStr = DataSpan.Slice(RawOffset, BytesToCopy);
+
+            if (!InsideData(DynSymSection.RawOffset, DynSymSection.RawSize))
+                throw new IndexOutOfRangeException("Invalid .dynsym data.");
 
             int SymbolSize = Is64Bit ? 24 : 16; // Elf64_Sym, Elf32_Sym
             int SymbolCount = (int)(DynSymSection.RawSize / SymbolSize);
@@ -2472,7 +2477,15 @@ namespace Brovan.Core
                 throw new FileNotFoundException($"The binary file \"{BinaryPath}\" couldn't be found in the path.");
             Data = new MappedMemoryBytes(BinaryPath);
             this.Quick = Quick;
-            ParseBinary(Data.AsSpan());
+            try
+            {
+                ParseBinary(Data.AsSpan());
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
             this.Location = Path.GetFullPath(BinaryPath);
         }
 

@@ -22,7 +22,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static class L
         {
-            internal static readonly int CreateFlags2 = BrovVulkLayout.MemberOffset["VkPipelineCreateFlags2CreateInfo.flags"];
             internal static readonly int BufferUsage = BrovVulkLayout.MemberOffset["VkBufferCreateInfo.usage"];
             internal static readonly int BufferUsage2 = BrovVulkLayout.MemberOffset["VkBufferUsageFlags2CreateInfo.usage"];
             internal static readonly int Subresource2Subresource = BrovVulkLayout.MemberOffset["VkImageSubresource2.imageSubresource"];
@@ -52,7 +51,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
                 }
 
-                ulong flags = *(ulong*)(node + L.CreateFlags2);
+                ulong flags = *(ulong*)(node + VkOffsets.CreateFlags2);
                 if ((flags >> 32) != 0)
                     Complain("a pipeline uses create flags above bit 31, which the host cannot take");
                 *(uint*)(info + flagsOffset) = (uint)flags;

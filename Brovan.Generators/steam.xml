@@ -14,6 +14,138 @@
     <struct name="InputDigitalActionData_t" size="2" />
     <struct name="InputMotionData_t" size="40" />
   </types>
+  <callbacks>
+    <callback id="101" name="SteamServersConnected_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="102" name="SteamServerConnectFailure_t" size8="8" pad8="5:3" size4="8" pad4="5:3" />
+    <callback id="125" name="LicensesUpdated_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="143" name="ValidateAuthTicketResponse_t" size8="24" pad8="12:4" size4="20" pad4="" />
+    <callback id="152" name="MicroTxnAuthorizationResponse_t" size8="24" pad8="4:4,17:7" size4="16" pad4="13:3" />
+    <callback id="166" name="MarketEligibilityResponse_t" size8="20" pad8="1:3" size4="20" pad4="1:3" />
+    <callback id="167" name="DurationControl_t" size8="32" pad8="9:3" size4="32" pad4="9:3" />
+    <callback id="304" name="PersonaStateChange_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="331" name="GameOverlayActivated_t" size8="12" pad8="2:2" size4="12" pad4="2:2" />
+    <callback id="334" name="AvatarImageLoaded_t" size8="24" pad8="20:4" size4="20" pad4="" />
+    <callback id="335" name="ClanOfficerListResponse_t" size8="16" pad8="13:3" size4="16" pad4="13:3" />
+    <callback id="336" name="FriendRichPresenceUpdate_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="338" name="GameConnectedClanChatMsg_t" size8="24" pad8="20:4" size4="20" pad4="" />
+    <callback id="340" name="GameConnectedChatLeave_t" size8="24" pad8="18:6" size4="20" pad4="18:2" />
+    <callback id="342" name="JoinClanChatRoomCompletionResult_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="343" name="GameConnectedFriendChatMsg_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="344" name="FriendsGetFollowerCount_t" size8="24" pad8="4:4,20:4" size4="16" pad4="" />
+    <callback id="345" name="FriendsIsFollowing_t" size8="24" pad8="4:4,17:7" size4="16" pad4="13:3" />
+    <callback id="346" name="FriendsEnumerateFollowingList_t" size8="416" pad8="4:4" size4="412" pad4="" />
+    <callback id="348" name="UnreadChatMessagesChanged_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="351" name="EquippedProfileItems_t" size8="24" pad8="4:4,22:2" size4="20" pad4="18:2" />
+    <callback id="701" name="IPCountry_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="704" name="SteamShutdown_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="714" name="GamepadTextInputDismissed_t" size8="12" pad8="1:3" size4="12" pad4="1:3" />
+    <callback id="736" name="AppResumingFromSuspend_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="738" name="FloatingGamepadTextInputDismissed_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="502" name="FavoritesListChanged_t" size8="28" pad8="21:3" size4="28" pad4="21:3" />
+    <callback id="504" name="LobbyEnter_t" size8="24" pad8="13:3,20:4" size4="20" pad4="13:3" />
+    <callback id="505" name="LobbyDataUpdate_t" size8="24" pad8="17:7" size4="20" pad4="17:3" />
+    <callback id="506" name="LobbyChatUpdate_t" size8="32" pad8="28:4" size4="28" pad4="" />
+    <callback id="507" name="LobbyChatMsg_t" size8="24" pad8="17:3" size4="24" pad4="17:3" />
+    <callback id="509" name="LobbyGameCreated_t" size8="24" pad8="22:2" size4="24" pad4="22:2" />
+    <callback id="512" name="LobbyKicked_t" size8="24" pad8="17:7" size4="20" pad4="17:3" />
+    <callback id="513" name="LobbyCreated_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="5301" name="JoinPartyCallback_t" size8="280" pad8="4:4" size4="276" pad4="" />
+    <callback id="5302" name="CreateBeaconCallback_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="5305" name="AvailableBeaconLocationsUpdated_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="5306" name="ActiveBeaconsUpdated_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="1307" name="RemoteStorageFileShareResult_t" size8="280" pad8="4:4,276:4" size4="272" pad4="" />
+    <callback id="1309" name="RemoteStoragePublishFileResult_t" size8="24" pad8="4:4,17:7" size4="16" pad4="13:3" />
+    <callback id="1311" name="RemoteStorageDeletePublishedFileResult_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="1312" name="RemoteStorageEnumerateUserPublishedFilesResult_t" size8="416" pad8="12:4" size4="412" pad4="" />
+    <callback id="1313" name="RemoteStorageSubscribePublishedFileResult_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="1314" name="RemoteStorageEnumerateUserSubscribedFilesResult_t" size8="616" pad8="12:4" size4="612" pad4="" />
+    <callback id="1315" name="RemoteStorageUnsubscribePublishedFileResult_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="1316" name="RemoteStorageUpdatePublishedFileResult_t" size8="24" pad8="4:4,17:7" size4="16" pad4="13:3" />
+    <callback id="1317" name="RemoteStorageDownloadUGCResult_t" size8="296" pad8="4:4,284:4" size4="288" pad4="" />
+    <callback id="1318" name="RemoteStorageGetPublishedFileDetailsResult_t" size8="9760" pad8="4:4,8153:7,9483:1,9753:7" size4="9748" pad4="8149:3,9475:1,9745:3" />
+    <callback id="1319" name="RemoteStorageEnumerateWorkshopFilesResult_t" size8="624" pad8="12:4" size4="620" pad4="" />
+    <callback id="1320" name="RemoteStorageGetPublishedItemVoteDetailsResult_t" size8="32" pad8="4:4" size4="28" pad4="" />
+    <callback id="1321" name="RemoteStoragePublishedFileSubscribed_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="1322" name="RemoteStoragePublishedFileUnsubscribed_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="1323" name="RemoteStoragePublishedFileDeleted_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="1324" name="RemoteStorageUpdateUserPublishedItemVoteResult_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="1325" name="RemoteStorageUserVoteDetails_t" size8="24" pad8="4:4,20:4" size4="16" pad4="" />
+    <callback id="1326" name="RemoteStorageEnumerateUserSharedWorkshopFilesResult_t" size8="416" pad8="12:4" size4="412" pad4="" />
+    <callback id="1327" name="RemoteStorageSetUserPublishedFileActionResult_t" size8="24" pad8="4:4,20:4" size4="16" pad4="" />
+    <callback id="1329" name="RemoteStoragePublishFileProgress_t" size8="16" pad8="9:7" size4="12" pad4="9:3" />
+    <callback id="1330" name="RemoteStoragePublishedFileUpdated_t" size8="24" pad8="12:4" size4="20" pad4="" />
+    <callback id="1332" name="RemoteStorageFileReadAsyncComplete_t" size8="24" pad8="20:4" size4="20" pad4="" />
+    <callback id="1333" name="RemoteStorageLocalFileChange_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="1101" name="UserStatsReceived_t" size8="24" pad8="12:4" size4="20" pad4="" />
+    <callback id="1102" name="UserStatsStored_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="1103" name="UserAchievementStored_t" size8="152" pad8="137:3,148:4" size4="148" pad4="137:3" />
+    <callback id="1104" name="LeaderboardFindResult_t" size8="16" pad8="9:7" size4="12" pad4="9:3" />
+    <callback id="1105" name="LeaderboardScoresDownloaded_t" size8="24" pad8="20:4" size4="20" pad4="" />
+    <callback id="1106" name="LeaderboardScoreUploaded_t" size8="32" pad8="1:7,21:3" size4="28" pad4="1:3,17:3" />
+    <callback id="1107" name="NumberOfCurrentPlayers_t" size8="8" pad8="1:3" size4="8" pad4="1:3" />
+    <callback id="1109" name="UserAchievementIconFetched_t" size8="144" pad8="137:3" size4="144" pad4="137:3" />
+    <callback id="1110" name="GlobalAchievementPercentagesReady_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="1111" name="LeaderboardUGCSet_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="1112" name="GlobalStatsReceived_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="1014" name="NewUrlLaunchParameters_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="1023" name="FileDetailsResult_t" size8="40" pad8="4:4" size4="36" pad4="" />
+    <callback id="1030" name="TimedTrialStatus_t" size8="16" pad8="5:3" size4="16" pad4="5:3" />
+    <callback id="1203" name="P2PSessionConnectFail_t" size8="16" pad8="9:7" size4="12" pad4="9:3" />
+    <callback id="1201" name="SocketStatusCallback_t" size8="24" pad8="20:4" size4="20" pad4="" />
+    <callback id="2302" name="ScreenshotRequested_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="4001" name="PlaybackStatusHasChanged_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="2101" name="HTTPRequestCompleted_t" size8="32" pad8="4:4,17:3,28:4" size4="24" pad4="13:3" />
+    <callback id="2102" name="HTTPRequestHeadersReceived_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="2103" name="HTTPRequestDataReceived_t" size8="24" pad8="4:4" size4="20" pad4="" />
+    <callback id="2803" name="SteamInputConfigurationLoaded_t" size8="40" pad8="4:4,34:6" size4="32" pad4="30:2" />
+    <callback id="2804" name="SteamInputGamepadSlotChange_t" size8="32" pad8="4:4,28:4" size4="24" pad4="" />
+    <callback id="3401" name="SteamUGCQueryCompleted_t" size8="280" pad8="277:3" size4="280" pad4="277:3" />
+    <callback id="3402" name="SteamUGCRequestUGCDetailsResult_t" size8="9792" pad8="8153:7,9212:4,9772:4,9785:7" size4="9776" pad4="8153:3,9773:3" />
+    <callback id="3403" name="CreateItemResult_t" size8="24" pad8="4:4,17:7" size4="16" pad4="13:3" />
+    <callback id="3404" name="SubmitItemUpdateResult_t" size8="16" pad8="5:3" size4="16" pad4="5:3" />
+    <callback id="3405" name="ItemInstalled_t" size8="32" pad8="4:4" size4="28" pad4="" />
+    <callback id="3406" name="DownloadItemResult_t" size8="24" pad8="4:4,20:4" size4="16" pad4="" />
+    <callback id="3407" name="UserFavoriteItemsListChanged_t" size8="16" pad8="13:3" size4="16" pad4="13:3" />
+    <callback id="3408" name="SetUserItemVoteResult_t" size8="16" pad8="13:3" size4="16" pad4="13:3" />
+    <callback id="3409" name="GetUserItemVoteResult_t" size8="16" pad8="15:1" size4="16" pad4="15:1" />
+    <callback id="3412" name="AddUGCDependencyResult_t" size8="24" pad8="4:4" size4="20" pad4="" />
+    <callback id="3413" name="RemoveUGCDependencyResult_t" size8="24" pad8="4:4" size4="20" pad4="" />
+    <callback id="3414" name="AddAppDependencyResult_t" size8="24" pad8="4:4,20:4" size4="16" pad4="" />
+    <callback id="3415" name="RemoveAppDependencyResult_t" size8="24" pad8="4:4,20:4" size4="16" pad4="" />
+    <callback id="3416" name="GetAppDependenciesResult_t" size8="152" pad8="4:4" size4="148" pad4="" />
+    <callback id="3417" name="DeleteItemResult_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="3420" name="WorkshopEULAStatus_t" size8="20" pad8="18:2" size4="20" pad4="18:2" />
+    <callback id="4502" name="HTML_NeedsPaint_t" size8="56" pad8="4:4" size4="52" pad4="" />
+    <callback id="4503" name="HTML_StartRequest_t" size8="40" pad8="4:4,33:7" size4="32" pad4="29:3" />
+    <callback id="4505" name="HTML_URLChanged_t" size8="48" pad8="4:4,25:7,41:7" size4="36" pad4="21:3,33:3" />
+    <callback id="4506" name="HTML_FinishedRequest_t" size8="24" pad8="4:4" size4="20" pad4="" />
+    <callback id="4507" name="HTML_OpenLinkInNewTab_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="4508" name="HTML_ChangedTitle_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="4510" name="HTML_CanGoBackAndForward_t" size8="8" pad8="6:2" size4="8" pad4="6:2" />
+    <callback id="4511" name="HTML_HorizontalScroll_t" size8="24" pad8="17:3" size4="24" pad4="17:3" />
+    <callback id="4512" name="HTML_VerticalScroll_t" size8="24" pad8="17:3" size4="24" pad4="17:3" />
+    <callback id="4513" name="HTML_LinkAtPosition_t" size8="32" pad8="12:4,26:6" size4="24" pad4="22:2" />
+    <callback id="4514" name="HTML_JSAlert_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="4515" name="HTML_JSConfirm_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="4516" name="HTML_FileOpenDialog_t" size8="24" pad8="4:4" size4="20" pad4="" />
+    <callback id="4521" name="HTML_NewWindow_t" size8="40" pad8="4:4,36:4" size4="32" pad4="" />
+    <callback id="4523" name="HTML_StatusText_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="4524" name="HTML_ShowToolTip_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="4525" name="HTML_UpdateToolTip_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="4702" name="SteamInventoryDefinitionUpdate_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="4703" name="SteamInventoryEligiblePromoItemDefIDs_t" size8="24" pad8="4:4,21:3" size4="20" pad4="17:3" />
+    <callback id="4704" name="SteamInventoryStartPurchaseResult_t" size8="24" pad8="4:4" size4="20" pad4="" />
+    <callback id="6002" name="SteamTimelineEventRecordingExists_t" size8="16" pad8="9:7" size4="12" pad4="9:3" />
+    <callback id="5001" name="SteamParentalSettingsChanged_t" size8="1" pad8="0:1" size4="1" pad4="0:1" />
+    <callback id="1221" name="SteamNetConnectionStatusChangedCallback_t" size8="712" pad8="4:4,708:4" size4="704" pad4="" />
+    <callback id="202" name="GSClientDeny_t" size8="144" pad8="140:4" size4="140" pad4="" />
+    <callback id="203" name="GSClientKick_t" size8="16" pad8="12:4" size4="12" pad4="" />
+    <callback id="206" name="GSClientAchievementStatus_t" size8="144" pad8="137:7" size4="140" pad4="137:3" />
+    <callback id="208" name="GSClientGroupStatus_t" size8="24" pad8="18:6" size4="20" pad4="18:2" />
+    <callback id="209" name="GSReputation_t" size8="40" pad8="9:3,18:6,36:4" size4="32" pad4="9:3,18:2" />
+    <callback id="1800" name="GSStatsReceived_t" size8="16" pad8="4:4" size4="12" pad4="" />
+    <callback id="1801" name="GSStatsStored_t" size8="16" pad8="4:4" size4="12" pad4="" />
+  </callbacks>
   <interface name="ISteamClient" version="SteamClient014">
     <method name="CreateSteamPipe" ret="i32" />
     <method name="BReleaseSteamPipe" ret="bool">
@@ -2234,7 +2366,7 @@
       <param name="pchCursor" type="const char*" kind="str" />
     </method>
     <method name="CreateQueryUGCDetailsRequest" ret="u64">
-      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="inarray" wire="u64" count="unNumPublishedFileIDs" />
       <param name="unNumPublishedFileIDs" type="uint32" kind="in" wire="u32" />
     </method>
     <method name="SendQueryUGCRequest" ret="u64">
@@ -2278,7 +2410,7 @@
     <method name="GetQueryUGCChildren" ret="bool">
       <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
       <param name="index" type="uint32" kind="in" wire="u32" />
-      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="outarray" wire="u64" count="cMaxEntries" />
       <param name="cMaxEntries" type="uint32" kind="in" wire="u32" />
     </method>
     <method name="GetQueryUGCStatistic" ret="bool">
@@ -2336,7 +2468,7 @@
     <method name="GetQueryUGCContentDescriptors" ret="u32">
       <param name="handle" type="UGCQueryHandle_t" kind="in" wire="u64" />
       <param name="index" type="uint32" kind="in" wire="u32" />
-      <param name="pvecDescriptors" type="EUGCContentDescriptorID*" kind="out" wire="enum" />
+      <param name="pvecDescriptors" type="EUGCContentDescriptorID*" kind="outarray" wire="enum" count="cMaxEntries" />
       <param name="cMaxEntries" type="uint32" kind="in" wire="u32" />
     </method>
     <method name="ReleaseQueryUGCRequest" ret="bool">
@@ -2560,7 +2692,7 @@
       <param name="bIncludeLocallyDisabled" type="bool" kind="in" wire="bool" />
     </method>
     <method name="GetSubscribedItems" ret="u32">
-      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="outarray" wire="u64" count="cMaxEntries" />
       <param name="cMaxEntries" type="uint32" kind="in" wire="u32" />
       <param name="bIncludeLocallyDisabled" type="bool" kind="in" wire="bool" />
     </method>
@@ -2591,11 +2723,11 @@
       <param name="bSuspend" type="bool" kind="in" wire="bool" />
     </method>
     <method name="StartPlaytimeTracking" ret="u64">
-      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="inarray" wire="u64" count="unNumPublishedFileIDs" />
       <param name="unNumPublishedFileIDs" type="uint32" kind="in" wire="u32" />
     </method>
     <method name="StopPlaytimeTracking" ret="u64">
-      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="pvecPublishedFileID" type="PublishedFileId_t*" kind="inarray" wire="u64" count="unNumPublishedFileIDs" />
       <param name="unNumPublishedFileIDs" type="uint32" kind="in" wire="u32" />
     </method>
     <method name="StopPlaytimeTrackingForAllItems" ret="u64" />
@@ -2624,16 +2756,16 @@
     <method name="ShowWorkshopEULA" ret="bool" />
     <method name="GetWorkshopEULAStatus" ret="u64" />
     <method name="GetUserContentDescriptorPreferences" ret="u32">
-      <param name="pvecDescriptors" type="EUGCContentDescriptorID*" kind="out" wire="enum" />
+      <param name="pvecDescriptors" type="EUGCContentDescriptorID*" kind="outarray" wire="enum" count="cMaxEntries" />
       <param name="cMaxEntries" type="uint32" kind="in" wire="u32" />
     </method>
     <method name="SetItemsDisabledLocally" ret="bool">
-      <param name="pvecPublishedFileIDs" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="pvecPublishedFileIDs" type="PublishedFileId_t*" kind="inarray" wire="u64" count="unNumPublishedFileIDs" />
       <param name="unNumPublishedFileIDs" type="uint32" kind="in" wire="u32" />
       <param name="bDisabledLocally" type="bool" kind="in" wire="bool" />
     </method>
     <method name="SetSubscriptionsLoadOrder" ret="bool">
-      <param name="pvecPublishedFileIDs" type="PublishedFileId_t*" kind="out" wire="u64" />
+      <param name="pvecPublishedFileIDs" type="PublishedFileId_t*" kind="inarray" wire="u64" count="unNumPublishedFileIDs" />
       <param name="unNumPublishedFileIDs" type="uint32" kind="in" wire="u32" />
     </method>
   </interface>
@@ -2753,7 +2885,7 @@
       <param name="hSteamLeaderboardEntries" type="SteamLeaderboardEntries_t" kind="in" wire="u64" />
       <param name="index" type="int" kind="in" wire="i32" />
       <param name="pLeaderboardEntry" type="LeaderboardEntry_t*" kind="outstruct" struct="LeaderboardEntry_t" />
-      <param name="pDetails" type="int32*" kind="out" wire="i32" />
+      <param name="pDetails" type="int32*" kind="outarray" wire="i32" count="cDetailsMax" />
       <param name="cDetailsMax" type="int" kind="in" wire="i32" />
     </method>
     <method name="UploadLeaderboardScore" ret="u64">
@@ -2836,119 +2968,119 @@
   </interface>
   <interface name="ISteamHTMLSurface" version="STEAMHTMLSURFACE_INTERFACE_VERSION_005">
     <method name="Destructor" ret="void" local="true" />
-    <method name="Init" ret="bool" />
-    <method name="Shutdown" ret="bool" />
-    <method name="CreateBrowser" ret="u64">
+    <method name="Init" ret="bool" local="true" />
+    <method name="Shutdown" ret="bool" local="true" />
+    <method name="CreateBrowser" ret="u64" local="true">
       <param name="pchUserAgent" type="const char*" kind="str" />
       <param name="pchUserCSS" type="const char*" kind="str" />
     </method>
-    <method name="RemoveBrowser" ret="void">
+    <method name="RemoveBrowser" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
     </method>
-    <method name="LoadURL" ret="void">
+    <method name="LoadURL" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="pchURL" type="const char*" kind="str" />
       <param name="pchPostData" type="const char*" kind="str" />
     </method>
-    <method name="SetSize" ret="void">
+    <method name="SetSize" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="unWidth" type="uint32" kind="in" wire="u32" />
       <param name="unHeight" type="uint32" kind="in" wire="u32" />
     </method>
-    <method name="StopLoad" ret="void">
+    <method name="StopLoad" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
     </method>
-    <method name="Reload" ret="void">
+    <method name="Reload" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
     </method>
-    <method name="GoBack" ret="void">
+    <method name="GoBack" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
     </method>
-    <method name="GoForward" ret="void">
+    <method name="GoForward" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
     </method>
-    <method name="AddHeader" ret="void">
+    <method name="AddHeader" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="pchKey" type="const char*" kind="str" />
       <param name="pchValue" type="const char*" kind="str" />
     </method>
-    <method name="ExecuteJavascript" ret="void">
+    <method name="ExecuteJavascript" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="pchScript" type="const char*" kind="str" />
     </method>
-    <method name="MouseUp" ret="void">
+    <method name="MouseUp" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="eMouseButton" type="EHTMLMouseButton" kind="in" wire="enum" />
     </method>
-    <method name="MouseDown" ret="void">
+    <method name="MouseDown" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="eMouseButton" type="EHTMLMouseButton" kind="in" wire="enum" />
     </method>
-    <method name="MouseDoubleClick" ret="void">
+    <method name="MouseDoubleClick" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="eMouseButton" type="EHTMLMouseButton" kind="in" wire="enum" />
     </method>
-    <method name="MouseMove" ret="void">
+    <method name="MouseMove" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="x" type="int" kind="in" wire="i32" />
       <param name="y" type="int" kind="in" wire="i32" />
     </method>
-    <method name="MouseWheel" ret="void">
+    <method name="MouseWheel" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="nDelta" type="int32" kind="in" wire="i32" />
     </method>
-    <method name="KeyDown" ret="void">
+    <method name="KeyDown" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="nNativeKeyCode" type="uint32" kind="in" wire="u32" />
       <param name="eHTMLKeyModifiers" type="EHTMLKeyModifiers" kind="in" wire="enum" />
       <param name="bIsSystemKey" type="bool" kind="in" wire="bool" />
     </method>
-    <method name="KeyUp" ret="void">
+    <method name="KeyUp" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="nNativeKeyCode" type="uint32" kind="in" wire="u32" />
       <param name="eHTMLKeyModifiers" type="EHTMLKeyModifiers" kind="in" wire="enum" />
     </method>
-    <method name="KeyChar" ret="void">
+    <method name="KeyChar" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="cUnicodeChar" type="uint32" kind="in" wire="u32" />
       <param name="eHTMLKeyModifiers" type="EHTMLKeyModifiers" kind="in" wire="enum" />
     </method>
-    <method name="SetHorizontalScroll" ret="void">
+    <method name="SetHorizontalScroll" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="nAbsolutePixelScroll" type="uint32" kind="in" wire="u32" />
     </method>
-    <method name="SetVerticalScroll" ret="void">
+    <method name="SetVerticalScroll" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="nAbsolutePixelScroll" type="uint32" kind="in" wire="u32" />
     </method>
-    <method name="SetKeyFocus" ret="void">
+    <method name="SetKeyFocus" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="bHasKeyFocus" type="bool" kind="in" wire="bool" />
     </method>
-    <method name="ViewSource" ret="void">
+    <method name="ViewSource" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
     </method>
-    <method name="CopyToClipboard" ret="void">
+    <method name="CopyToClipboard" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
     </method>
-    <method name="PasteFromClipboard" ret="void">
+    <method name="PasteFromClipboard" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
     </method>
-    <method name="Find" ret="void">
+    <method name="Find" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="pchSearchStr" type="const char*" kind="str" />
       <param name="bCurrentlyInFind" type="bool" kind="in" wire="bool" />
       <param name="bReverse" type="bool" kind="in" wire="bool" />
     </method>
-    <method name="StopFind" ret="void">
+    <method name="StopFind" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
     </method>
-    <method name="GetLinkAtPosition" ret="void">
+    <method name="GetLinkAtPosition" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="x" type="int" kind="in" wire="i32" />
       <param name="y" type="int" kind="in" wire="i32" />
     </method>
-    <method name="SetCookie" ret="void">
+    <method name="SetCookie" ret="void" local="true">
       <param name="pchHostname" type="const char*" kind="str" />
       <param name="pchKey" type="const char*" kind="str" />
       <param name="pchValue" type="const char*" kind="str" />
@@ -2957,28 +3089,28 @@
       <param name="bSecure" type="bool" kind="in" wire="bool" />
       <param name="bHTTPOnly" type="bool" kind="in" wire="bool" />
     </method>
-    <method name="SetPageScaleFactor" ret="void">
+    <method name="SetPageScaleFactor" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="flZoom" type="float" kind="in" wire="f32" />
       <param name="nPointX" type="int" kind="in" wire="i32" />
       <param name="nPointY" type="int" kind="in" wire="i32" />
     </method>
-    <method name="SetBackgroundMode" ret="void">
+    <method name="SetBackgroundMode" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="bBackgroundMode" type="bool" kind="in" wire="bool" />
     </method>
-    <method name="SetDPIScalingFactor" ret="void">
+    <method name="SetDPIScalingFactor" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="flDPIScaling" type="float" kind="in" wire="f32" />
     </method>
-    <method name="OpenDeveloperTools" ret="void">
+    <method name="OpenDeveloperTools" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
     </method>
-    <method name="AllowStartRequest" ret="void">
+    <method name="AllowStartRequest" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="bAllowed" type="bool" kind="in" wire="bool" />
     </method>
-    <method name="JSDialogResponse" ret="void">
+    <method name="JSDialogResponse" ret="void" local="true">
       <param name="unBrowserHandle" type="HHTMLBrowser" kind="in" wire="u32" />
       <param name="bResult" type="bool" kind="in" wire="bool" />
     </method>
@@ -3239,7 +3371,7 @@
     </method>
     <method name="GetPOPCount" ret="i32" />
     <method name="GetPOPList" ret="i32">
-      <param name="list" type="SteamNetworkingPOPID*" kind="out" wire="u32" />
+      <param name="list" type="SteamNetworkingPOPID*" kind="outarray" wire="u32" count="nListSz" />
       <param name="nListSz" type="int" kind="in" wire="i32" />
     </method>
     <method name="GetLocalTimestamp" ret="i64" />
@@ -3336,26 +3468,26 @@
       <param name="nFilters" type="uint32" kind="in" wire="u32" />
       <param name="pRequestServersResponse" type="ISteamMatchmakingServerListResponse*" kind="in" wire="u64" />
     </method>
-    <method name="ReleaseRequest" ret="void">
+    <method name="ReleaseRequest" ret="void" local="true">
       <param name="hServerListRequest" type="HServerListRequest" kind="in" wire="u64" />
     </method>
     <method name="GetServerDetails" ret="iface" local="true">
       <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
       <param name="iServer" type="int" kind="in" wire="i32" />
     </method>
-    <method name="CancelQuery" ret="void">
+    <method name="CancelQuery" ret="void" local="true">
       <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
     </method>
-    <method name="RefreshQuery" ret="void">
+    <method name="RefreshQuery" ret="void" local="true">
       <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
     </method>
-    <method name="IsRefreshing" ret="bool">
+    <method name="IsRefreshing" ret="bool" local="true">
       <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
     </method>
-    <method name="GetServerCount" ret="i32">
+    <method name="GetServerCount" ret="i32" local="true">
       <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
     </method>
-    <method name="RefreshServer" ret="void">
+    <method name="RefreshServer" ret="void" local="true">
       <param name="hRequest" type="HServerListRequest" kind="in" wire="u64" />
       <param name="iServer" type="int" kind="in" wire="i32" />
     </method>
@@ -4408,7 +4540,7 @@
       <param name="hSteamLeaderboardEntries" type="SteamLeaderboardEntries_t" kind="in" wire="u64" />
       <param name="index" type="int" kind="in" wire="i32" />
       <param name="pLeaderboardEntry" type="LeaderboardEntry_t*" kind="outstruct" struct="LeaderboardEntry_t" />
-      <param name="pDetails" type="int32*" kind="out" wire="i32" />
+      <param name="pDetails" type="int32*" kind="outarray" wire="i32" count="cDetailsMax" />
       <param name="cDetailsMax" type="int" kind="in" wire="i32" />
     </method>
     <method name="UploadLeaderboardScore" ret="u64">

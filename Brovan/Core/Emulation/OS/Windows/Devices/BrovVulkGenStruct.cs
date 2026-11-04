@@ -15,6 +15,25 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int SamplerAddressModeW = BrovVulkLayout.MemberOffset["VkSamplerCreateInfo.addressModeW"];
         private static readonly int SamplerBorderColor = BrovVulkLayout.MemberOffset["VkSamplerCreateInfo.borderColor"];
         private static readonly int ImageCreateInfoSid = Array.IndexOf(BrovVulkStructMeta.STypes, (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
+        private static readonly int BufferViewCreateInfoSid = Array.IndexOf(BrovVulkStructMeta.STypes, (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO);
+        private static readonly int BufferViewBuffer = BrovVulkLayout.MemberOffset["VkBufferViewCreateInfo.buffer"];
+        private static readonly int BufferViewOffset = BrovVulkLayout.MemberOffset["VkBufferViewCreateInfo.offset"];
+        private static readonly int BufferViewRange = BrovVulkLayout.MemberOffset["VkBufferViewCreateInfo.range"];
+        private static readonly int ImageViewCreateInfoSid = Array.IndexOf(BrovVulkStructMeta.STypes, (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
+        private static readonly int PipelineLayoutSid = Array.IndexOf(BrovVulkStructMeta.STypes, (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
+        private static readonly Dictionary<int, int> ColorCounts = ColorCountMembers(
+            (BrovVulkConstants.VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, "VkPipelineRenderingCreateInfo.colorAttachmentCount"),
+            (BrovVulkConstants.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, "VkPipelineColorBlendStateCreateInfo.attachmentCount"),
+            (BrovVulkConstants.VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO, "VkRenderingAttachmentLocationInfo.colorAttachmentCount"),
+            (BrovVulkConstants.VK_STRUCTURE_TYPE_RENDERING_INPUT_ATTACHMENT_INDEX_INFO, "VkRenderingInputAttachmentIndexInfo.colorAttachmentCount"),
+            (BrovVulkConstants.VK_STRUCTURE_TYPE_PIPELINE_COLOR_WRITE_CREATE_INFO_EXT, "VkPipelineColorWriteCreateInfoEXT.attachmentCount"),
+            (BrovVulkConstants.VK_STRUCTURE_TYPE_ATTACHMENT_SAMPLE_COUNT_INFO_AMD, "VkAttachmentSampleCountInfoAMD.colorAttachmentCount"));
+        private static readonly int GraphicsPipelineSid = Array.IndexOf(BrovVulkStructMeta.STypes, (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO);
+        private static readonly int GraphicsPipelinePass = BrovVulkLayout.MemberOffset["VkGraphicsPipelineCreateInfo.renderPass"];
+        private static readonly int GraphicsPipelineSubpass = BrovVulkLayout.MemberOffset["VkGraphicsPipelineCreateInfo.subpass"];
+        private static readonly int PipelineRobustnessSid = Array.IndexOf(BrovVulkStructMeta.STypes, (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO);
+        private static readonly int PipelineRobustnessBehaviours = BrovVulkLayout.MemberOffset["VkPipelineRobustnessCreateInfo.storageBuffers"];
+        private static readonly int PipelineRobustnessBehavioursEnd = BrovVulkLayout.MemberOffset["VkPipelineRobustnessCreateInfo.images"] + 4;
 
         // The slot is sized from the descriptor id, so a node whose sType names a different struct would let
         // a reader of the chain write outside the slot.
@@ -234,6 +253,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                             IntPtr node = Rebuild(psid, r, st);
                             st.LeaveChain();
                             CheckedSType(*(uint*)node, psid);
+                            if (!BrovVulkStructMeta.Repeatable[psid])
+                            {
+                                for (byte* later = *(byte**)((byte*)node + 8); later != null; later = *(byte**)(later + 8))
+                                {
+                                    if (*(uint*)later == *(uint*)node)
+                                        throw new InvalidOperationException("BrovVulk generic: a pNext chain repeats a structure.");
+                                }
+                            }
                             *(IntPtr*)fp = node;
                         }
                         else *(IntPtr*)fp = IntPtr.Zero;
@@ -252,6 +279,31 @@ namespace Brovan.Core.Emulation.OS.Windows
                 CheckSamplerBorderColor(dst);
             else if (sid == ImageCreateInfoSid)
                 CheckImageCreateInfo(st, dst);
+            else if (sid == ImageViewCreateInfoSid)
+                st.CheckImageView(dst);
+            else if (sid == PipelineLayoutSid)
+                st.CheckPipelineLayout(dst);
+            else if (ColorCounts.TryGetValue(sid, out int colorCount))
+                st.CheckColorCount(*(uint*)(dst + colorCount));
+            else if (sid == GraphicsPipelineSid)
+                st.CheckSubpass(*(IntPtr*)(dst + GraphicsPipelinePass), *(uint*)(dst + GraphicsPipelineSubpass));
+            else if (sid == BufferViewCreateInfoSid)
+                st.CheckBufferSpanOrRest(*(IntPtr*)(dst + BufferViewBuffer), *(ulong*)(dst + BufferViewOffset), *(ulong*)(dst + BufferViewRange));
+            // Zero selects the device's forced robustness settings.
+            else if (sid == PipelineRobustnessSid && (st.DeviceStandIns(st.CallDevice) & VulkanStandIns.HostCpuDeviceBit) != 0)
+                new Span<byte>((void*)(dst + PipelineRobustnessBehaviours), PipelineRobustnessBehavioursEnd - PipelineRobustnessBehaviours).Clear();
+        }
+
+        private static Dictionary<int, int> ColorCountMembers(params (int SType, string Member)[] members)
+        {
+            Dictionary<int, int> counts = new Dictionary<int, int>();
+            foreach ((int sType, string member) in members)
+            {
+                int sid = Array.IndexOf(BrovVulkStructMeta.STypes, (uint)sType);
+                if (sid >= 0 && BrovVulkLayout.MemberOffset.TryGetValue(member, out int offset))
+                    counts[sid] = offset;
+            }
+            return counts;
         }
 
         // VUID-VkImageCreateInfo-mipLevels-00947 and -00958.
@@ -284,6 +336,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static void WritebackBody(int sid, GenBuf w, IntPtr src)
         {
+            int[] Padding = BrovVulkStructMeta.Padding[sid];
+            if (Padding != null)
+            {
+                for (int pi = 0; pi < Padding.Length; pi += 2)
+                    new Span<byte>((void*)(src + Padding[pi]), Padding[pi + 1]).Clear();
+            }
+
             BvkM[] Members = BrovVulkStructMeta.Members[sid];
             for (int mi = 0; mi < Members.Length; mi++)
             {

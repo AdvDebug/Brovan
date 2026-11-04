@@ -4,7 +4,10 @@
  * brovan_uc_tcg.inc.c and is reached through uc->brov. */
 
 #ifndef _WIN32
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
@@ -98,30 +101,112 @@ bool brov_commit_rwx(void *addr, uint64_t size)
 #endif
 }
 
-/* A saved cache can only be reloaded at the address it was generated for, so the
- * base has to be reproducible across runs. Letting the OS pick is not: the CLR
- * has usually taken part of that range by the next launch. These are tried in
- * order and each is verified, never assumed - the last entry is small enough to
- * sit under a 39-bit user VA, which older Android kernels still use. */
-static const uint64_t brov_preferred_bases[] = {
+/* Load bcrypt at runtime to avoid a link dependency. */
+static bool brov_os_random(void *buf, size_t len)
+{
+#ifdef _WIN32
+    typedef LONG(WINAPI * brov_gen_random_fn)(void *, unsigned char *, ULONG, ULONG);
+    static brov_gen_random_fn gen;
+
+    if (!gen) {
+        HMODULE bcrypt = LoadLibraryExW(L"bcrypt.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (bcrypt) {
+            gen = (brov_gen_random_fn)GetProcAddress(bcrypt, "BCryptGenRandom");
+        }
+    }
+    /* BCRYPT_USE_SYSTEM_PREFERRED_RNG */
+    return gen && len <= 0xffffffffu && gen(NULL, (unsigned char *)buf, (ULONG)len, 2) == 0;
+#else
+    unsigned char *p = (unsigned char *)buf;
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+
+    if (fd < 0) {
+        return false;
+    }
+    while (len) {
+        ssize_t n = read(fd, p, len);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            close(fd);
+            return false;
+        }
+        p += n;
+        len -= (size_t)n;
+    }
+    close(fd);
+    return true;
+#endif
+}
+
+/* Cache reload needs the exact saved base. The low range fits 39-bit Android VA. */
+static const struct {
+    uint64_t lo;
+    uint64_t hi;
+} brov_random_windows[] = {
+    { 0x0000100000000000ull, 0x0000700000000000ull },
+    { 0x0000000200000000ull, 0x0000004000000000ull },
+};
+
+static const uint64_t brov_legacy_bases[] = {
     0x0000100000000000ull,
     0x0000004000000000ull,
     0x0000000200000000ull,
 };
 
+#define BROV_RESERVE_ALIGN 0x10000ull
+#define BROV_RESERVE_TRIES 16
+
+static bool brov_is_legacy_base(uint64_t base)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(brov_legacy_bases) / sizeof(brov_legacy_bases[0]); i++) {
+        if (brov_legacy_bases[i] == base) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool brov_reserve_random(uint64_t lo, uint64_t hi, uint64_t avoid, uint64_t size, void **got)
+{
+    uint64_t slots;
+    int i;
+
+    if (hi <= lo || size > hi - lo) {
+        return false;
+    }
+    slots = (hi - lo - size) / BROV_RESERVE_ALIGN + 1;
+
+    for (i = 0; i < BROV_RESERVE_TRIES; i++) {
+        uint64_t r, base;
+
+        if (!brov_os_random(&r, sizeof(r))) {
+            return false;
+        }
+        base = lo + (r % slots) * BROV_RESERVE_ALIGN;
+        if (base == avoid || brov_is_legacy_base(base)) {
+            continue;
+        }
+        if (brov_os_reserve((void *)(uintptr_t)base, size, got)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool brov_reserve_somewhere(uint64_t wanted, uint64_t size, void **got)
 {
     size_t i;
 
-    if (wanted && brov_os_reserve((void *)(uintptr_t)wanted, size, got)) {
+    if (wanted && !brov_is_legacy_base(wanted) && brov_os_reserve((void *)(uintptr_t)wanted, size, got)) {
         return true;
     }
 
-    for (i = 0; i < sizeof(brov_preferred_bases) / sizeof(brov_preferred_bases[0]); i++) {
-        if (brov_preferred_bases[i] == wanted) {
-            continue;
-        }
-        if (brov_os_reserve((void *)(uintptr_t)brov_preferred_bases[i], size, got)) {
+    for (i = 0; i < sizeof(brov_random_windows) / sizeof(brov_random_windows[0]); i++) {
+        if (brov_reserve_random(brov_random_windows[i].lo, brov_random_windows[i].hi, wanted, size, got)) {
             return true;
         }
     }

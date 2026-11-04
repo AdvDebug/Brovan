@@ -102,6 +102,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Reader.Reset(Input, 8, (int)PayloadLen);
                 Writer.Reset();
+                if (GenState.Retire.HasPending)
+                    GenState.Retire.Poll(GenState);
                 int Result;
                 uint Failing = Id;
                 IntPtr PreviousDpiContext = HostDisplayMetrics.EnterWindowDpiContext(Instance.GuestDpiAwareness);
@@ -122,6 +124,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             PostStats.SentNow();
                         GenState.Waits.BeginCommand(CanPark, Rerun);
                         try { Result = BrovVulkGenDispatch.Dispatch(Id, Reader, Writer, GenState, Instance); }
+                        catch { GenState.FailCall(); throw; }
                         finally { GenState.FreeCallAllocs(); }
                         Parked = GenState.Waits.TakeParked();
                     }
@@ -194,14 +197,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 catch (EntryPointNotFoundException Ex)
                 {
+                    GenState.FailCall();
                     ReportMissingEntryPoint(SubId, Ex, Instance);
                     if (Posted)
                         Result = VK_ERROR_INITIALIZATION_FAILED;
                 }
                 catch (Exception Ex) when (Posted)
                 {
+                    GenState.FailCall();
                     LogFailure(SubId, Ex.Message, Instance);
                     Result = VK_ERROR_INITIALIZATION_FAILED;
+                }
+                catch
+                {
+                    GenState.FailCall();
+                    throw;
                 }
                 finally
                 {

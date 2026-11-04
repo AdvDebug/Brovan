@@ -65,6 +65,7 @@ namespace Brovan.Generators
             public string Name;
             public bool IsUnion;
             public string[] Extends = Array.Empty<string>();
+            public bool AllowDuplicate;
             public readonly List<Member> Members = new List<Member>();
         }
 
@@ -117,6 +118,7 @@ namespace Brovan.Generators
             public readonly Dictionary<string, VkExtension> Extensions = new Dictionary<string, VkExtension>();
             public readonly Dictionary<string, double> CoreTypeVersion = new Dictionary<string, double>();
             public readonly Dictionary<string, double> CoreCommandVersion = new Dictionary<string, double>();
+            public XElement Formats;
         }
 
         private static readonly string[] SkipPlatform =
@@ -212,6 +214,7 @@ namespace Brovan.Generators
             Model m = new Model();
             XDocument doc = XDocument.Parse(xml);
             XElement root = doc.Root;
+            m.Formats = root.Element("formats");
 
             foreach (XElement e in root.Descendants("enum"))
             {
@@ -249,7 +252,7 @@ namespace Brovan.Generators
                 string cat = (string)t.Attribute("category");
                 if (cat == null)
                     continue;
-                string name = (string)t.Attribute("name") ?? t.Element("name")?.Value;
+                string name = (string)t.Attribute("name") ?? t.Element("name")?.Value ?? t.Element("proto")?.Element("name")?.Value;
                 if (name == null)
                     continue;
                 string typeAlias = (string)t.Attribute("alias");
@@ -276,6 +279,7 @@ namespace Brovan.Generators
                         Name = name,
                         IsUnion = cat == "union",
                         Extends = extends == null ? Array.Empty<string>() : extends.Split(','),
+                        AllowDuplicate = (string)t.Attribute("allowduplicate") == "true",
                     };
                     foreach (XElement mem in t.Elements("member"))
                     {
@@ -331,6 +335,19 @@ namespace Brovan.Generators
             }
 
             string Canonical(string ty) => m.TypeAlias.TryGetValue(ty, out string tgt) ? tgt : ty;
+
+            string Resolve(string ty)
+            {
+                for (int hops = 0; ty != null && hops < 8 && m.TypeAlias.TryGetValue(ty, out string tgt); hops++)
+                    ty = tgt;
+                return ty;
+            }
+            foreach (VkStruct s in m.Structs.Values)
+                foreach (Member mem in s.Members)
+                    mem.Type = Resolve(mem.Type);
+            foreach (Command cmd in m.Commands.Values)
+                foreach (Param p in cmd.Params)
+                    p.Type = Resolve(p.Type);
 
             foreach (XElement f in root.Elements("feature"))
             {
@@ -433,30 +450,43 @@ namespace Brovan.Generators
 
         private static int AlignUp(int x, int a) => a <= 1 ? x : ((x + a - 1) / a) * a;
 
-        private static void SizeAlign(Model m, string ty, int ptrDepth, Dictionary<string, Layout> cache, out int size, out int align)
+        private static bool ScalarSizeAlign(string ty, out int size, out int align)
         {
-            if (ptrDepth > 0 || m.Handles.ContainsKey(ty) || m.FuncPointers.Contains(ty)) { size = 8; align = 8; return; }
             switch (ty)
             {
-                case "uint8_t": case "int8_t": case "char": size = 1; align = 1; return;
-                case "uint16_t": case "int16_t": size = 2; align = 2; return;
+                case "uint8_t": case "int8_t": case "char": size = 1; align = 1; return true;
+                case "uint16_t": case "int16_t": size = 2; align = 2; return true;
                 case "uint32_t":
                 case "int32_t":
                 case "int":
                 case "float":
                 case "VkBool32":
                 case "VkFlags":
-                case "VkSampleMask": size = 4; align = 4; return;
+                case "VkSampleMask": size = 4; align = 4; return true;
                 case "uint64_t":
                 case "int64_t":
                 case "double":
                 case "size_t":
                 case "VkDeviceSize":
                 case "VkDeviceAddress":
-                case "VkFlags64": size = 8; align = 8; return;
-                case "HINSTANCE": case "HWND": case "HANDLE": case "HMONITOR": case "HDC": case "LPCWSTR": size = 8; align = 8; return;
-                case "DWORD": case "BOOL": case "LONG": case "UINT": size = 4; align = 4; return;
+                case "VkFlags64": size = 8; align = 8; return true;
+                case "HINSTANCE": case "HWND": case "HANDLE": case "HMONITOR": case "HDC": case "LPCWSTR": size = 8; align = 8; return true;
+                case "DWORD": case "BOOL": case "LONG": case "UINT": size = 4; align = 4; return true;
             }
+            size = 0;
+            align = 0;
+            return false;
+        }
+
+        // Only gapped structs may use the 4-byte fallback.
+        private static bool IsSizedType(Model m, string ty) =>
+            m.Handles.ContainsKey(ty) || m.FuncPointers.Contains(ty) || ScalarSizeAlign(ty, out _, out _)
+            || m.Enums.Contains(ty) || m.BitmaskWidth.ContainsKey(ty) || m.Structs.ContainsKey(ty);
+
+        private static void SizeAlign(Model m, string ty, int ptrDepth, Dictionary<string, Layout> cache, out int size, out int align)
+        {
+            if (ptrDepth > 0 || m.Handles.ContainsKey(ty) || m.FuncPointers.Contains(ty)) { size = 8; align = 8; return; }
+            if (ScalarSizeAlign(ty, out size, out align)) return;
             if (m.Enums.Contains(ty)) { size = 4; align = 4; return; }
             if (m.BitmaskWidth.TryGetValue(ty, out int w)) { size = w == 64 ? 8 : 4; align = size; return; }
             if (m.Structs.ContainsKey(ty)) { Layout la = ComputeLayout(m, ty, cache); size = la.Size; align = la.Align; return; }
@@ -574,6 +604,9 @@ namespace Brovan.Generators
             ["VK_KHR_external_fence_fd"] = "host file descriptor crosses the boundary",
             ["VK_EXT_external_memory_dma_buf"] = "host file descriptor crosses the boundary",
             ["VK_EXT_external_memory_host"] = "host and guest pointers cross the boundary",
+            ["VK_LUNARG_direct_driver_loading"] = "the host loader calls a function pointer from the create info",
+            ["VK_NV_external_memory_rdma"] = "returns a driver address (VkRemoteAddressNV)",
+            ["VK_EXT_pipeline_properties"] = "output is a generic VkBaseOutStructure the driver writes past",
             ["VK_EXT_map_memory_placed"] = "host and guest pointers cross the boundary",
             ["VK_KHR_map_memory2"] = "host and guest pointers cross the boundary",
             ["VK_EXT_host_image_copy"] = "host and guest pointers cross the boundary",
@@ -621,6 +654,11 @@ namespace Brovan.Generators
             ["vkGetMemoryWin32HandlePropertiesKHR"] = "BrovVulkGenMemory.GetMemoryWin32HandleProperties",
             ["vkWaitForFences"] = "BrovVulkWaits.WaitForFences",
             ["vkWaitSemaphores"] = "BrovVulkWaits.WaitSemaphores",
+            ["vkQueueSubmit"] = "BrovVulkRetire.QueueSubmit",
+            ["vkQueueSubmit2"] = "BrovVulkRetire.QueueSubmit2",
+            ["vkQueueBindSparse"] = "BrovVulkRetire.QueueBindSparse",
+            ["vkFreeCommandBuffers"] = "BrovVulkRetire.FreeCommandBuffers",
+            ["vkFreeDescriptorSets"] = "BrovVulkRetire.FreeDescriptorSets",
         };
 
         // The guest does not wait for a reply to these. It sends them in one batch before its next ioctl.
@@ -656,6 +694,65 @@ namespace Brovan.Generators
         {
             "VkFence", "VkSemaphore", "VkDevice", "VkInstance",
         };
+
+        // These extensions bypass CPU shader or resource checks.
+        private static readonly HashSet<string> CpuWithheldNames = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "VK_EXT_shader_module_identifier", "VK_KHR_pipeline_binary", "VK_NV_ray_tracing",
+            "VK_EXT_fragment_density_map", "VK_EXT_fragment_density_map2", "VK_EXT_fragment_density_map_offset", "VK_QCOM_fragment_density_map_offset",
+            "VK_EXT_mutable_descriptor_type", "VK_VALVE_mutable_descriptor_type", "VK_KHR_pipeline_executable_properties",
+        };
+
+        private static readonly HashSet<string> ComputeDispatches = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "vkCmdDispatch", "vkCmdDispatchBase", "vkCmdDispatchIndirect",
+        };
+
+        private static bool RunsShaders(string name) =>
+            name.Contains("Dispatch") || name.Contains("TraceRays") || name.Contains("Launch") || name.Contains("SubpassShading")
+            || name.Contains("ExecuteGeneratedCommands");
+
+        private static readonly HashSet<string> AddressQueries = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "vkGetBufferDeviceAddress", "vkGetBufferOpaqueCaptureAddress", "vkGetDeviceMemoryOpaqueCaptureAddress",
+        };
+
+        private static bool WithheldOnCpu(Model m, VkExtension ext, Dictionary<string, bool> carries)
+        {
+            if (CpuWithheldNames.Contains(ext.Name))
+                return true;
+
+            foreach (string name in EffectiveCommands(ext))
+            {
+                if (!m.Commands.TryGetValue(name, out Command c))
+                    continue;
+                for (int hops = 0; c.Alias != null && hops < 8 && m.Commands.TryGetValue(c.Alias, out Command target); hops++)
+                    c = target;
+                if (!AddressQueries.Contains(c.Name) && (CarriesAddress(m, c.Ret, carries) || c.Params.Any(p => CarriesAddress(m, p.Type, carries))))
+                    return true;
+            }
+
+            return EffectiveTypes(ext).Any(t => CarriesAddress(m, t, carries));
+        }
+
+        private static bool CarriesAddress(Model m, string type, Dictionary<string, bool> carries)
+        {
+            if (type == null)
+                return false;
+            if (m.TypeAlias.TryGetValue(type, out string target))
+                type = target;
+            if (type == "VkDeviceAddress")
+                return true;
+            if (!m.Structs.TryGetValue(type, out VkStruct s))
+                return false;
+            if (carries.TryGetValue(type, out bool known))
+                return known;
+
+            carries[type] = false;
+            bool found = s.Members.Any(mem => CarriesAddress(m, mem.Type, carries));
+            carries[type] = found;
+            return found;
+        }
 
         private static bool HostImplemented(VkExtension ext)
         {
@@ -852,6 +949,58 @@ namespace Brovan.Generators
             "size_t", "HINSTANCE", "HWND", "HANDLE", "HMONITOR", "HDC", "LPCWSTR"
         };
 
+        private static void FlatPadding(Model m, string type, int baseOffset, Dictionary<string, Layout> cache, List<int> ranges)
+        {
+            bool[] covered = new bool[ComputeLayout(m, type, cache).Size];
+            MarkCovered(m, type, 0, cache, covered);
+            for (int i = 0; i < covered.Length; i++)
+            {
+                if (covered[i])
+                    continue;
+                int start = i;
+                while (i < covered.Length && !covered[i])
+                    i++;
+                ranges.Add(baseOffset + start);
+                ranges.Add(i - start);
+            }
+        }
+
+        private static void MarkCovered(Model m, string type, int at, Dictionary<string, Layout> cache, bool[] covered)
+        {
+            VkStruct s = m.Structs[type];
+            Layout lay = ComputeLayout(m, type, cache);
+            if (s.IsUnion)
+            {
+                Cover(covered, at, lay.Size);
+                return;
+            }
+            foreach (Member mem in s.Members)
+            {
+                if (!lay.Offsets.TryGetValue(mem.Name, out int off))
+                {
+                    Cover(covered, at, lay.Size);
+                    return;
+                }
+                off += at;
+                int count = Math.Max(1, mem.ArrayLen);
+                if (mem.PtrDepth == 0 && m.Structs.ContainsKey(mem.Type))
+                {
+                    int esz = ComputeLayout(m, mem.Type, cache).Size;
+                    for (int k = 0; k < count; k++)
+                        MarkCovered(m, mem.Type, off + k * esz, cache, covered);
+                    continue;
+                }
+                SizeAlign(m, mem.Type, mem.PtrDepth, cache, out int w, out _);
+                Cover(covered, off, w * count);
+            }
+        }
+
+        private static void Cover(bool[] covered, int from, int length)
+        {
+            for (int i = from; i < from + length && i < covered.Length; i++)
+                covered[i] = true;
+        }
+
         private static bool StructIsFlat(Model m, string name, HashSet<string> seen)
         {
             if (!seen.Add(name)) return true;
@@ -1017,6 +1166,8 @@ namespace Brovan.Generators
                 {
                     if (mem.PtrDepth > 0 || m.Handles.ContainsKey(mem.Type) || m.FuncPointers.Contains(mem.Type))
                         return name + "." + mem.Name + " is a pointer inside a union";
+                    if (!IsSizedType(m, mem.Type))
+                        return name + "." + mem.Name + " has a type this layer cannot size";
                     if (m.Structs.ContainsKey(mem.Type))
                     {
                         string sub = StructGap(m, mem.Type, seen, cache);
@@ -1033,6 +1184,8 @@ namespace Brovan.Generators
                     continue;
                 if (m.FuncPointers.Contains(mem.Type))
                     return name + "." + mem.Name + " is a function pointer";
+                if (mem.Type != "void" && !IsSizedType(m, mem.Type))
+                    return name + "." + mem.Name + " has a type this layer cannot size";
                 MDesc d = ClassifyMember(m, s, mem, lay.Offsets, cache);
                 if (d.Kind == "Ignore")
                     return name + "." + mem.Name + " is not forwarded";
@@ -1373,8 +1526,7 @@ namespace Brovan.Generators
         private static string DeferredDestroyCall(Model m, Command c)
         {
             int destroyed = DestroyedHandleIndex(m, c);
-            if (destroyed < 0 || c.Ret != "void" || !c.Name.StartsWith("vkDestroy", StringComparison.Ordinal)
-                || !ParkedWaitHandleTypes.Contains(c.Params[destroyed].Type))
+            if (destroyed < 0 || c.Ret != "void" || !c.Name.StartsWith("vkDestroy", StringComparison.Ordinal))
                 return null;
 
             int parent = DeferredDestroyParentIndex(m, c, destroyed);
@@ -1566,6 +1718,7 @@ namespace Brovan.Generators
                     "                uint hasCi = r.ReadU32();\n" +
                     "                System.IntPtr ci = System.IntPtr.Zero;\n" +
                     "                if (hasCi != 0) ci = BrovVulkGenStruct.Rebuild(" + StructId["VkInstanceCreateInfo"] + ", r, st);\n" +
+                    "                BrovVulkGenMemory.RestrictInstanceCreateInfo(st, ci);\n" +
                     "                if ((Brovan.GeneralHelper.IsLinux || Brovan.Android.AndroidHost.IsActive) && ci != System.IntPtr.Zero)\n" +
                     "                {\n" +
                     "                    System.IntPtr extPtr = *(System.IntPtr*)(ci + 56);\n" +
@@ -1666,30 +1819,30 @@ namespace Brovan.Generators
                     "                uint qf = r.ReadU32();\n" +
                     "                return Brovan.GeneralHelper.IsLinux ? 1 : (int)BrovVulkApi.vkGetPhysicalDeviceWin32PresentationSupportKHR(pd, qf);\n" +
                     "            }\n";
+            // Driver cache entries can contain host heap pointers.
             if (c.Name == "vkGetPipelineCacheData")
                 return "            {\n" +
                     "                System.IntPtr dev = st.Lookup(r.ReadU32(), \"VkDevice\");\n" +
                     "                System.IntPtr pc = st.Lookup(r.ReadU32(), \"VkPipelineCache\");\n" +
                     "                uint want = r.ReadU32();\n" +
                     "                ulong req = r.ReadU64();\n" +
-                    "                ulong total = 0;\n" +
-                    "                int rr = (int)BrovVulkApi.vkGetPipelineCacheData(dev, pc, (System.IntPtr)(&total), System.IntPtr.Zero);\n" +
+                    "                int headerBytes = BrovVulkLayout.StructSize[\"VkPipelineCacheHeaderVersionOne\"];\n" +
+                    "                System.IntPtr buf = st.Alloc(headerBytes);\n" +
+                    "                ulong got = (ulong)headerBytes;\n" +
+                    "                int rr = (int)BrovVulkApi.vkGetPipelineCacheData(dev, pc, (System.IntPtr)(&got), buf);\n" +
                     "                if (rr < 0) return rr;\n" +
+                    "                bool header = got == (ulong)headerBytes && *(uint*)(buf + BrovVulkLayout.MemberOffset[\"VkPipelineCacheHeaderVersionOne.headerSize\"]) == (uint)headerBytes\n" +
+                    "                    && *(uint*)(buf + BrovVulkLayout.MemberOffset[\"VkPipelineCacheHeaderVersionOne.headerVersion\"]) == BrovVulkConstants.VK_PIPELINE_CACHE_HEADER_VERSION_ONE;\n" +
+                    "                ulong total = header ? (ulong)headerBytes : 0;\n" +
                     "                if (want == 0)\n" +
                     "                {\n" +
                     "                    w.WriteU64(total);\n" +
-                    "                    return rr;\n" +
+                    "                    return BrovVulkConstants.VK_SUCCESS;\n" +
                     "                }\n" +
-                    "                ulong take = req < total ? req : total;\n" +
-                    "                if (take > (1ul << 26)) take = 1ul << 26;\n" +
-                    "                System.IntPtr buf = System.IntPtr.Zero;\n" +
-                    "                if (take > 0) buf = st.Alloc(BrovVulkGenStruct.CheckedBytes((uint)((take + 63) / 64), 64));\n" +
-                    "                ulong got = take;\n" +
-                    "                rr = (int)BrovVulkApi.vkGetPipelineCacheData(dev, pc, (System.IntPtr)(&got), buf);\n" +
-                    "                if (rr < 0) return rr;\n" +
-                    "                w.WriteU64(got);\n" +
-                    "                if (got > 0) w.WriteBytesFrom(buf, (uint)got);\n" +
-                    "                return rr;\n            }\n";
+                    "                ulong take = req < total ? 0 : total;\n" +
+                    "                w.WriteU64(take);\n" +
+                    "                if (take > 0) w.WriteBytesFrom(buf, (uint)take);\n" +
+                    "                return take < total ? BrovVulkConstants.VK_INCOMPLETE : BrovVulkConstants.VK_SUCCESS;\n            }\n";
 
             StringBuilder b = new StringBuilder();
             List<string> callArgs = new List<string>();
@@ -1702,6 +1855,8 @@ namespace Brovan.Generators
             int forgetIdx = DestroyedHandleIndex(m, c);
             bool replaced = HostReplaced.ContainsKey(c.Name);
             string guestTimeout = null;
+            if (c.Params.Any(x => x.Type != "void" && !IsSizedType(m, x.Type)))
+                return null;
             for (int i = 0; i < c.Params.Count; i++)
             {
                 Param p = c.Params[i];
@@ -1797,6 +1952,8 @@ namespace Brovan.Generators
                     }
                     if (i == 0 && p.Type == "VkDevice")
                         b.Append("                st.SetCallDevice(").Append(local).Append(");\n");
+                    else if (i == 0 && p.Type == "VkCommandBuffer" && c.Name.StartsWith("vkCmd", StringComparison.Ordinal))
+                        b.Append("                st.BeginCommand(").Append(local).Append(");\n");
                     callArgs.Add(local);
                 }
                 else if (kind == "HandleOut")
@@ -1990,27 +2147,6 @@ namespace Brovan.Generators
             if (ReleasesMappings(c))
                 b.Append("                BrovVulkGenMemory.ReleaseMappings(st, inst);\n");
 
-            // The driver indexes its own per-layout descriptor state by firstSet with no bound check of
-            // its own, so the set count the layout was built with has to be kept and enforced here.
-            if (c.Name.StartsWith("vkCmdBindDescriptorSets", StringComparison.Ordinal))
-            {
-                int layoutIdx = c.Params.FindIndex(x => x.Name == "layout");
-                int firstIdx = c.Params.FindIndex(x => x.Name == "firstSet");
-                int countIdx = c.Params.FindIndex(x => x.Name == "descriptorSetCount");
-                int infoIdx = c.Params.FindIndex(x => ParamKind(m, x) == "StructIn" && StructId.ContainsKey(x.Type));
-
-                if (layoutIdx >= 0 && firstIdx >= 0 && countIdx >= 0)
-                    b.Append("                st.CheckDescriptorSetRange(p").Append(layoutIdx).Append(", p").Append(firstIdx).Append(", p").Append(countIdx).Append(");\n");
-                else if (infoIdx >= 0)
-                {
-                    string t = c.Params[infoIdx].Type;
-                    b.Append("                if (p").Append(infoIdx).Append(" != System.IntPtr.Zero) st.CheckDescriptorSetRange(*(System.IntPtr*)(p").Append(infoIdx)
-                     .Append(" + BrovVulkLayout.MemberOffset[\"").Append(t).Append(".layout\"]), *(uint*)(p").Append(infoIdx)
-                     .Append(" + BrovVulkLayout.MemberOffset[\"").Append(t).Append(".firstSet\"]), *(uint*)(p").Append(infoIdx)
-                     .Append(" + BrovVulkLayout.MemberOffset[\"").Append(t).Append(".descriptorSetCount\"]));\n");
-                }
-            }
-
             // VUID-09647.
             if (c.Name == "vkCmdSetDepthClampRangeEXT")
             {
@@ -2021,12 +2157,36 @@ namespace Brovan.Generators
                      .Append(" == System.IntPtr.Zero) throw new System.InvalidOperationException(\"BrovVulk generic: a user defined depth clamp mode needs pDepthClampRange.\");\n");
             }
 
+            if (c.Name == "vkCreatePipelineCache")
+            {
+                int infoIdx = c.Params.FindIndex(x => ParamKind(m, x) == "StructIn" && StructId.ContainsKey(x.Type));
+                if (infoIdx < 0)
+                    return null;
+
+                b.Append("                *(System.UIntPtr*)(p").Append(infoIdx).Append(" + BrovVulkLayout.MemberOffset[\"VkPipelineCacheCreateInfo.initialDataSize\"]) = System.UIntPtr.Zero;\n");
+                b.Append("                *(System.IntPtr*)(p").Append(infoIdx).Append(" + BrovVulkLayout.MemberOffset[\"VkPipelineCacheCreateInfo.pInitialData\"]) = System.IntPtr.Zero;\n");
+            }
+
+            if (!EmitRenderTracking(m, c, b, post))
+                return null;
+            EmitRetireHooks(c, b);
+            if (!EmitExtentChecks(m, c, b, post))
+                return null;
+            int poolIdx = c.Params.FindIndex(x => x.Type == "VkQueryPool" && x.PtrDepth == 0);
+            if (poolIdx >= 0)
+                EmitQueryChecks(c, b, poolIdx);
+
             if (c.Name == "vkEnumerateInstanceVersion")
                 post.Insert(0, "                p0 = BrovVulkGenExt.ClampApiVersion(p0);");
             else if (c.Name == "vkGetPhysicalDeviceProperties")
                 post.Insert(0, "                BrovVulkGenExt.ClampApiVersion(p1);");
             else if (c.Name == "vkGetPhysicalDeviceProperties2")
                 post.Insert(0, "                BrovVulkGenExt.ClampApiVersion(p1 + BrovVulkLayout.MemberOffset[\"VkPhysicalDeviceProperties2.properties\"]);");
+            // CPU device addresses and capture addresses can expose host pointers.
+            else if (c.Name == "vkGetBufferDeviceAddress")
+                post.Insert(0, "                if ((st.DeviceStandIns(p0) & VulkanStandIns.HostCpuDeviceBit) != 0) rv = st.GuestBufferAddress(p1);");
+            else if (c.Name == "vkGetBufferOpaqueCaptureAddress" || c.Name == "vkGetDeviceMemoryOpaqueCaptureAddress")
+                post.Insert(0, "                if ((st.DeviceStandIns(p0) & VulkanStandIns.HostCpuDeviceBit) != 0) rv = 0;");
 
             if (c.Name == "vkCreatePipelineLayout" || c.Name == "vkCreateBuffer")
             {
@@ -2034,11 +2194,21 @@ namespace Brovan.Generators
                 int infoIdx = c.Params.FindIndex(x => ParamKind(m, x) == "StructIn" && StructId.ContainsKey(x.Type));
                 if (outIdx >= 0 && infoIdx >= 0)
                 {
-                    string t = c.Params[infoIdx].Type;
                     post.Add(c.Name == "vkCreateBuffer"
-                        ? "                if (rr >= 0 && p" + infoIdx + " != System.IntPtr.Zero) st.SetBufferSize(p" + outIdx + ", *(ulong*)(p" + infoIdx + " + BrovVulkLayout.MemberOffset[\"" + t + ".size\"]));"
-                        : "                if (rr >= 0 && p" + infoIdx + " != System.IntPtr.Zero) st.SetPipelineLayoutSets(p" + outIdx + ", *(uint*)(p" + infoIdx + " + BrovVulkLayout.MemberOffset[\"" + t + ".setLayoutCount\"]));");
+                        ? "                if (rr >= 0) st.SetBuffer(p0, p" + outIdx + ", p" + infoIdx + ");"
+                        : "                if (rr >= 0) st.SetPipelineLayoutSets(p" + outIdx + ", p" + infoIdx + ");");
                 }
+            }
+
+            if (c.Name == "vkCreateQueryPool")
+            {
+                int outIdx = c.Params.FindIndex(x => ParamKind(m, x) == "HandleOut");
+                int infoIdx = c.Params.FindIndex(x => ParamKind(m, x) == "StructIn" && StructId.ContainsKey(x.Type));
+                if (outIdx < 0 || infoIdx < 0)
+                    return null;
+
+                b.Append("                uint p").Append(infoIdx).Append("q = GenState.QueryResultValues(p").Append(infoIdx).Append(");\n");
+                post.Add("                if (rr >= 0) st.SetQueryPool(p" + outIdx + ", *(uint*)(p" + infoIdx + " + BrovVulkLayout.MemberOffset[\"VkQueryPoolCreateInfo.queryCount\"]), p" + infoIdx + "q);");
             }
 
             int resetIdx = ResetChildrenIndex(m, c);
@@ -2064,15 +2234,27 @@ namespace Brovan.Generators
             if (DeferredDestroyCall(m, c) != null)
             {
                 int parent = DeferredDestroyParentIndex(m, c, forgetIdx);
-                string defer = "st.Waits.TryDeferDestroy(" + id + "u, \"" + c.Params[forgetIdx].Type + "\", " + (parent >= 0 ? "p" + parent : "System.IntPtr.Zero") + ", p" + forgetIdx + ")";
-                guard = guard == null ? defer : "(" + guard + ") || " + defer;
+                string type = c.Params[forgetIdx].Type;
+                string waits = ParkedWaitHandleTypes.Contains(type)
+                    ? "st.Waits.TryDeferDestroy(" + id + "u, \"" + type + "\", " + (parent >= 0 ? "p" + parent : "System.IntPtr.Zero") + ", p" + forgetIdx + ")"
+                    : null;
+                string retire = type == "VkDevice" ? "st.Retire.TryDeferDevice(" + id + "u, p" + forgetIdx + ")"
+                    : type == "VkInstance" ? "st.Retire.TryDeferInstance(" + id + "u, p" + forgetIdx + ")"
+                    : parent >= 0 && c.Params[parent].Type == "VkDevice"
+                        ? "st.Retire.TryDefer(" + id + "u, \"" + type + "\", p" + parent + ", p" + forgetIdx + ")"
+                    : type == "VkSurfaceKHR" && parent >= 0
+                        ? "st.Retire.TryDeferHeld(" + id + "u, \"" + type + "\", p" + parent + ", p" + forgetIdx + ")"
+                        : null;
+                string defer = retire == null ? waits : waits == null ? retire : retire + " || " + waits;
+                if (defer != null)
+                    guard = guard == null ? defer : "(" + guard + ") || " + defer;
             }
 
             if (c.Ret == "void")
             {
                 head.Append("                ");
                 if (guard != null)
-                    head.Append("if (!").Append(guard).Append(") ");
+                    head.Append("if (!(").Append(guard).Append(")) ");
                 head.Append(call).Append(";\n");
                 foreach (string s in post) head.Append(s).Append("\n");
                 head.Append("                return 0;\n            }\n");
@@ -2095,6 +2277,371 @@ namespace Brovan.Generators
                 head.Append("                return rr;\n            }\n");
             }
             return head.ToString();
+        }
+
+        private static void EmitQueryChecks(Command c, StringBuilder b, int poolIdx)
+        {
+            int Find(string name) => c.Params.FindIndex(x => x.Name == name);
+            int firstIdx = Find("firstQuery");
+            int queryIdx = Find("query");
+            int countIdx = Find("queryCount");
+            if (firstIdx >= 0 && countIdx < 0)
+                countIdx = c.Params.FindIndex(x => x.Type == "uint32_t" && x.PtrDepth == 0 && x.Name.EndsWith("Count", StringComparison.Ordinal));
+
+            if (firstIdx < 0 && queryIdx < 0)
+                return;
+
+            string refuse = "                throw new System.InvalidOperationException(\"BrovVulk generic: " + c.Name + " has no query range this layer can check.\");\n";
+            string pool = "p" + poolIdx;
+            if (c.Name == "vkGetQueryPoolResults")
+            {
+                int sizeIdx = Find("dataSize"), strideIdx = Find("stride"), flagsIdx = Find("flags");
+                b.Append(firstIdx < 0 || countIdx < 0 || sizeIdx < 0 || strideIdx < 0 || flagsIdx < 0
+                    ? refuse
+                    : "                st.CheckQueryResults(" + pool + ", p" + firstIdx + ", p" + countIdx + ", p" + strideIdx + ", p" + flagsIdx + ", (ulong)p" + sizeIdx + ");\n");
+            }
+            else if (c.Name == "vkCmdCopyQueryPoolResults")
+            {
+                int bufferIdx = Find("dstBuffer"), offsetIdx = Find("dstOffset"), strideIdx = Find("stride"), flagsIdx = Find("flags");
+                b.Append(firstIdx < 0 || countIdx < 0 || bufferIdx < 0 || offsetIdx < 0 || strideIdx < 0 || flagsIdx < 0
+                    ? refuse
+                    : "                st.CheckQueryCopy(" + pool + ", p" + firstIdx + ", p" + countIdx + ", p" + bufferIdx + ", p" + offsetIdx + ", p" + strideIdx + ", p" + flagsIdx + ");\n");
+            }
+            else if (firstIdx >= 0)
+                b.Append(countIdx < 0 ? refuse : "                st.CheckQueryRange(" + pool + ", p" + firstIdx + ", p" + countIdx + ");\n");
+            else
+                b.Append("                st.CheckQueryRange(" + pool + ", p" + queryIdx + ", " + (c.Params[0].Type == "VkCommandBuffer" ? "st.QueryViews(p0)" : "1u") + ");\n");
+        }
+
+        private static void EmitRetireHooks(Command c, StringBuilder b)
+        {
+            const string Lost = "                { st.MarkDeviceLostOf(p0Id); return BrovVulkConstants.VK_ERROR_DEVICE_LOST; }\n";
+            switch (c.Name)
+            {
+                case "vkResetCommandBuffer":
+                case "vkBeginCommandBuffer":
+                    b.Append("                if (st.Retire.Active && !st.Retire.CommandBufferIdle(st, p0))\n").Append(Lost);
+                    break;
+                case "vkResetCommandPool":
+                    b.Append("                if (st.Retire.Active && (!st.Retire.CommandPoolIdle(st, p1) || !st.Retire.PoolIdle(p1)))\n").Append(Lost);
+                    break;
+                case "vkResetDescriptorPool":
+                    b.Append("                if (st.Retire.Active && !st.Retire.PoolIdle(p1))\n").Append(Lost);
+                    b.Append("                if (st.Retire.Active) st.Retire.DropSetFrees(p1);\n");
+                    break;
+                case "vkResetQueryPool":
+                    b.Append("                if (st.Retire.Active && !st.Retire.PoolIdle(p1)) { st.MarkDeviceLostOf(p0Id); return 0; }\n");
+                    break;
+            }
+        }
+
+        // A 24-bit depth aspect copies as 32 bits.
+        private static string EmitFormats(Model m)
+        {
+            StringBuilder fb = new StringBuilder();
+            fb.AppendLine("// <auto-generated> BrovVulk copy layout of each format, from vk.xml.");
+            fb.AppendLine("using System.Collections.Generic;");
+            fb.AppendLine("namespace Brovan.Core.Emulation.OS.Windows");
+            fb.AppendLine("{");
+            fb.AppendLine("    internal readonly struct BrovVulkFormat");
+            fb.AppendLine("    {");
+            fb.AppendLine("        public readonly byte Bytes, Width, Height, Depth, DepthBytes, StencilBytes;");
+            fb.AppendLine("        public readonly byte[] Planes;");
+            fb.AppendLine("        public BrovVulkFormat(byte bytes, byte width, byte height, byte depth, byte depthBytes, byte stencilBytes, byte[] planes)");
+            fb.AppendLine("        {");
+            fb.AppendLine("            Bytes = bytes; Width = width; Height = height; Depth = depth; DepthBytes = depthBytes; StencilBytes = stencilBytes; Planes = planes;");
+            fb.AppendLine("        }");
+            fb.AppendLine("    }");
+            fb.AppendLine();
+            fb.AppendLine("    internal static class BrovVulkFormats");
+            fb.AppendLine("    {");
+            fb.AppendLine("        private static readonly Dictionary<int, BrovVulkFormat> Table = new Dictionary<int, BrovVulkFormat>");
+            fb.AppendLine("        {");
+
+            XElement formats = m.Formats;
+            Dictionary<string, int> blockBytes = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (XElement f in formats?.Elements("format") ?? Enumerable.Empty<XElement>())
+                blockBytes[(string)f.Attribute("name")] = int.Parse((string)f.Attribute("blockSize"));
+
+            foreach (XElement f in formats?.Elements("format") ?? Enumerable.Empty<XElement>())
+            {
+                string name = (string)f.Attribute("name");
+                if (!m.Constants.TryGetValue(name, out int value))
+                    continue;
+                string[] extent = ((string)f.Attribute("blockExtent") ?? "1,1,1").Split(',');
+                int depthBits = 0, stencilBits = 0;
+                foreach (XElement component in f.Elements("component"))
+                {
+                    int.TryParse((string)component.Attribute("bits"), out int bits);
+                    if ((string)component.Attribute("name") == "D") depthBits = bits;
+                    else if ((string)component.Attribute("name") == "S") stencilBits = bits;
+                }
+                List<string> planes = new List<string>();
+                foreach (XElement plane in f.Elements("plane").OrderBy(p => int.Parse((string)p.Attribute("index"))))
+                {
+                    blockBytes.TryGetValue((string)plane.Attribute("compatible"), out int bytes);
+                    planes.Add(bytes + ", " + (string)plane.Attribute("widthDivisor") + ", " + (string)plane.Attribute("heightDivisor"));
+                }
+                fb.Append("            [").Append(value).Append("] = new BrovVulkFormat(").Append((string)f.Attribute("blockSize")).Append(", ")
+                  .Append(extent[0]).Append(", ").Append(extent[1]).Append(", ").Append(extent[2]).Append(", ")
+                  .Append(depthBits == 0 ? 0 : depthBits <= 16 ? 2 : 4).Append(", ").Append(stencilBits == 0 ? 0 : 1).Append(", ")
+                  .Append(planes.Count == 0 ? "null" : "new byte[] { " + string.Join(", ", planes) + " }").AppendLine("),");
+            }
+
+            fb.AppendLine("        };");
+            fb.AppendLine();
+            fb.AppendLine("        internal static bool TryGet(int format, out BrovVulkFormat info) => Table.TryGetValue(format, out info);");
+            fb.AppendLine("    }");
+            fb.AppendLine("}");
+            return fb.ToString();
+        }
+
+        private static readonly Dictionary<string, string> IndirectCommands = new Dictionary<string, string>
+        {
+            ["vkCmdDrawIndirect"] = "VkDrawIndirectCommand",
+            ["vkCmdDrawIndirectCount"] = "VkDrawIndirectCommand",
+            ["vkCmdDrawIndexedIndirect"] = "VkDrawIndexedIndirectCommand",
+            ["vkCmdDrawIndexedIndirectCount"] = "VkDrawIndexedIndirectCommand",
+            ["vkCmdDispatchIndirect"] = "VkDispatchIndirectCommand",
+            ["vkCmdDrawMeshTasksIndirectEXT"] = "VkDrawMeshTasksIndirectCommandEXT",
+            ["vkCmdDrawMeshTasksIndirectCountEXT"] = "VkDrawMeshTasksIndirectCommandEXT",
+            ["vkCmdDrawMeshTasksIndirectNV"] = "VkDrawMeshTasksIndirectCommandNV",
+            ["vkCmdDrawMeshTasksIndirectCountNV"] = "VkDrawMeshTasksIndirectCommandNV",
+        };
+
+        private static bool EmitExtentChecks(Model m, Command c, StringBuilder b, List<string> post)
+        {
+            Dictionary<string, Layout> cache = new Dictionary<string, Layout>();
+            int Size(string type) => ComputeLayout(m, type, cache).Size;
+            int Off(string type, string member) => ComputeLayout(m, type, cache).Offsets[member];
+            int Find(string name) => c.Params.FindIndex(x => x.Name == name);
+            string Field(string type, string member) => "*(System.IntPtr*)(p1 + " + Off(type, member) + ")";
+            string Subresource(string type, string member) => (Off(type, member) + Off("VkImageSubresourceLayers", "aspectMask")).ToString();
+            string ImageCopyLayout(string region) => Size(region) + ", " + Subresource(region, "srcSubresource") + ", " + Off(region, "srcOffset") + ", "
+                + Subresource(region, "dstSubresource") + ", " + Off(region, "dstOffset") + ", " + Off(region, "extent");
+            string BlitLayout(string region) => Size(region) + ", " + Subresource(region, "srcSubresource") + ", " + Off(region, "srcOffsets") + ", "
+                + Subresource(region, "dstSubresource") + ", " + Off(region, "dstOffsets");
+
+            string line;
+            switch (c.Name)
+            {
+                case "vkBindBufferMemory":
+                    line = "st.CheckBufferBind(p0, p1, p2, p3);";
+                    post.Add("                if (rr >= 0) st.HoldMemory(p0, p1, \"VkBuffer\", p2);");
+                    post.Add("                if (rr >= 0) rr = st.RegisterAddress(p0, p1);");
+                    break;
+                case "vkBindImageMemory":
+                    line = "st.CheckImageBind(p0, p1, p2, p3, 0u);";
+                    post.Add("                if (rr >= 0) st.HoldMemory(p0, p1, \"VkImage\", p2);");
+                    break;
+                case "vkBindBufferMemory2":
+                    line = "st.CheckBufferBinds(p0, p2, p1);";
+                    post.Add("                if (rr >= 0) st.HoldMemories(p0, p2, p1, false);");
+                    post.Add("                if (rr >= 0) rr = st.RegisterAddresses(p0, p2, p1);");
+                    break;
+                case "vkBindImageMemory2":
+                    line = "st.CheckImageBinds(p0, p2, p1);";
+                    post.Add("                if (rr >= 0) st.HoldMemories(p0, p2, p1, true);");
+                    break;
+                case "vkCreateBufferView":
+                    post.Add("                if (rr >= 0) st.SetBufferView(p3, p1);");
+                    return true;
+                case "vkCmdBindIndexBuffer": line = "st.CheckBufferSpanOrRest(p1, p2, ulong.MaxValue);"; break;
+                case "vkCmdBindIndexBuffer2": line = "st.CheckBufferSpanOrRest(p1, p2, p3);"; break;
+                case "vkCmdBindVertexBuffers": line = "st.CheckVertexBindingRange(p1, p2); st.CheckBufferSpans(p3, p4, System.IntPtr.Zero, p2);"; break;
+                case "vkCmdBindVertexBuffers2": line = "st.CheckVertexBindingRange(p1, p2); st.CheckBufferSpans(p3, p4, p5, p2);"; break;
+                case "vkCmdBindTransformFeedbackBuffersEXT": line = "st.CheckFeedbackBufferRange(p1, p2); st.CheckBufferSpans(p3, p4, p5, p2);"; break;
+                case "vkCmdSetVertexInputEXT": line = "st.CheckVertexInput(p1, p2, p3, p4);"; break;
+                case "vkCmdPushConstants": line = "st.CheckPushConstants(p3, p4);"; break;
+                case "vkCmdPushConstants2":
+                    line = "if (p1 != System.IntPtr.Zero) st.CheckPushConstants(*(uint*)(p1 + " + Off("VkPushConstantsInfo", "offset") + "), *(uint*)(p1 + "
+                        + Off("VkPushConstantsInfo", "size") + "));";
+                    break;
+                case "vkCmdBeginTransformFeedbackEXT":
+                case "vkCmdEndTransformFeedbackEXT": line = "st.CheckBufferWords(p3, p4, p2);"; break;
+                case "vkCmdDrawIndirectByteCountEXT": line = "st.CheckBufferSpan(p3, p4, 4);"; break;
+                case "vkCmdWriteBufferMarkerAMD":
+                case "vkCmdWriteBufferMarker2AMD": line = "st.CheckBufferSpan(p2, p3, 4);"; break;
+                case "vkCmdBeginConditionalRenderingEXT":
+                    line = "if (p1 != System.IntPtr.Zero) st.CheckBufferSpan(*(System.IntPtr*)(p1 + " + Off("VkConditionalRenderingBeginInfoEXT", "buffer")
+                        + "), *(ulong*)(p1 + " + Off("VkConditionalRenderingBeginInfoEXT", "offset") + "), 4);";
+                    break;
+                case "vkCmdFillBuffer": line = "st.CheckBufferSpanOrRest(p1, p2, p3);"; break;
+                case "vkCmdCopyImage":
+                case "vkCmdResolveImage":
+                {
+                    string region = c.Name == "vkCmdCopyImage" ? "VkImageCopy" : "VkImageResolve";
+                    line = "st.CheckImageCopies(p1, p3, p6, p5, " + ImageCopyLayout(region) + ");";
+                    break;
+                }
+                case "vkCmdCopyImage2":
+                case "vkCmdResolveImage2":
+                {
+                    string info = c.Name == "vkCmdCopyImage2" ? "VkCopyImageInfo2" : "VkResolveImageInfo2";
+                    string region = c.Name == "vkCmdCopyImage2" ? "VkImageCopy2" : "VkImageResolve2";
+                    line = "if (p1 != System.IntPtr.Zero) st.CheckImageCopies(" + Field(info, "srcImage") + ", " + Field(info, "dstImage") + ", "
+                        + Field(info, "pRegions") + ", *(uint*)(p1 + " + Off(info, "regionCount") + "), " + ImageCopyLayout(region) + ");";
+                    break;
+                }
+                case "vkCmdBlitImage":
+                    line = "st.CheckImageBlits(p1, p3, p6, p5, " + BlitLayout("VkImageBlit") + ");";
+                    break;
+                case "vkCmdBlitImage2":
+                    line = "if (p1 != System.IntPtr.Zero) st.CheckImageBlits(" + Field("VkBlitImageInfo2", "srcImage") + ", " + Field("VkBlitImageInfo2", "dstImage") + ", "
+                        + Field("VkBlitImageInfo2", "pRegions") + ", *(uint*)(p1 + " + Off("VkBlitImageInfo2", "regionCount") + "), " + BlitLayout("VkImageBlit2") + ");";
+                    break;
+                case "vkCmdCopyBufferToImage":
+                    line = "st.CheckBufferImageCopies(p1, p2, p5, p4, " + Size("VkBufferImageCopy") + ", " + Off("VkBufferImageCopy", "bufferOffset") + ");";
+                    break;
+                case "vkCmdCopyImageToBuffer":
+                    line = "st.CheckBufferImageCopies(p3, p1, p5, p4, " + Size("VkBufferImageCopy") + ", " + Off("VkBufferImageCopy", "bufferOffset") + ");";
+                    break;
+                case "vkCmdCopyBufferToImage2":
+                    line = "if (p1 != System.IntPtr.Zero) st.CheckBufferImageCopies(" + Field("VkCopyBufferToImageInfo2", "srcBuffer") + ", " + Field("VkCopyBufferToImageInfo2", "dstImage") + ", "
+                        + Field("VkCopyBufferToImageInfo2", "pRegions") + ", *(uint*)(p1 + " + Off("VkCopyBufferToImageInfo2", "regionCount") + "), "
+                        + Size("VkBufferImageCopy2") + ", " + Off("VkBufferImageCopy2", "bufferOffset") + ");";
+                    break;
+                case "vkCmdCopyImageToBuffer2":
+                    line = "if (p1 != System.IntPtr.Zero) st.CheckBufferImageCopies(" + Field("VkCopyImageToBufferInfo2", "dstBuffer") + ", " + Field("VkCopyImageToBufferInfo2", "srcImage") + ", "
+                        + Field("VkCopyImageToBufferInfo2", "pRegions") + ", *(uint*)(p1 + " + Off("VkCopyImageToBufferInfo2", "regionCount") + "), "
+                        + Size("VkBufferImageCopy2") + ", " + Off("VkBufferImageCopy2", "bufferOffset") + ");";
+                    break;
+                case "vkCmdClearColorImage":
+                case "vkCmdClearDepthStencilImage":
+                    line = "st.CheckImageRanges(p1, p5, p4);";
+                    break;
+                case "vkCreateImage":
+                    line = "GenState.ImageExtent p1image = GenState.ReadImage(p1);";
+                    post.Add("                if (rr >= 0) st.SetImage(p3, p1image);");
+                    break;
+                case "vkCreateSwapchainKHR":
+                    post.Add("                if (rr >= 0) st.SetSwapchainExtent(p3, p1);");
+                    return true;
+                case "vkGetSwapchainImagesKHR":
+                    post.Add("                if (rr >= 0 && p2pr != 0) st.SetSwapchainImages(p1, p2a, p2c);");
+                    return true;
+                case "vkCmdUpdateBuffer": line = "st.CheckBufferSpan(p1, p2, p3);"; break;
+                case "vkCreateDescriptorSetLayout":
+                    line = "GenState.SetLayoutShape p1layout = st.ReadSetLayout(p1);";
+                    post.Add("                if (rr >= 0) st.SetSetLayout(p3, p1layout);");
+                    break;
+                case "vkAllocateDescriptorSets":
+                    line = "st.ForceVariableCounts(p0, p1);";
+                    post.Add("                if (rr >= 0) st.AddSets(p0, p1, p2, p2n);");
+                    break;
+                case "vkUpdateDescriptorSets": line = "if (!st.CheckDescriptorUpdates(p1, p2, p3, p4)) { st.MarkDeviceLostOf(p0Id); return 0; }"; break;
+                case "vkCmdBindDescriptorSets": line = "st.CheckBindDescriptorSets(p0, GenState.BindPointMask(p1), p2, p3, p4, p5, p6, p7);"; break;
+                case "vkCmdBindDescriptorSets2":
+                {
+                    string info = "VkBindDescriptorSetsInfo";
+                    line = "if (p1 != System.IntPtr.Zero) st.CheckBindDescriptorSets(p0, GenState.StageMask(*(uint*)(p1 + " + Off(info, "stageFlags") + ")), " + Field(info, "layout") + ", *(uint*)(p1 + " + Off(info, "firstSet") + "), *(uint*)(p1 + "
+                        + Off(info, "descriptorSetCount") + "), " + Field(info, "pDescriptorSets") + ", *(uint*)(p1 + " + Off(info, "dynamicOffsetCount") + "), " + Field(info, "pDynamicOffsets") + ");";
+                    break;
+                }
+                case "vkCmdPushDescriptorSet": line = "st.CheckPushDescriptors(GenState.BindPointMask(p1), p2, p3, p4, p5);"; break;
+                case "vkCmdPushDescriptorSet2":
+                {
+                    string info = "VkPushDescriptorSetInfo";
+                    line = "if (p1 != System.IntPtr.Zero) st.CheckPushDescriptors(GenState.StageMask(*(uint*)(p1 + " + Off(info, "stageFlags") + ")), " + Field(info, "layout") + ", *(uint*)(p1 + " + Off(info, "set") + "), *(uint*)(p1 + "
+                        + Off(info, "descriptorWriteCount") + "), " + Field(info, "pDescriptorWrites") + ");";
+                    break;
+                }
+                case "vkCmdCopyBuffer":
+                    line = "st.CheckBufferCopies(p1, p2, p4, p3, " + Size("VkBufferCopy") + ", " + Off("VkBufferCopy", "srcOffset") + ", "
+                        + Off("VkBufferCopy", "dstOffset") + ", " + Off("VkBufferCopy", "size") + ");";
+                    break;
+                case "vkCmdCopyBuffer2":
+                    line = "if (p1 != System.IntPtr.Zero) st.CheckBufferCopies(*(System.IntPtr*)(p1 + " + Off("VkCopyBufferInfo2", "srcBuffer")
+                        + "), *(System.IntPtr*)(p1 + " + Off("VkCopyBufferInfo2", "dstBuffer") + "), *(System.IntPtr*)(p1 + " + Off("VkCopyBufferInfo2", "pRegions")
+                        + "), *(uint*)(p1 + " + Off("VkCopyBufferInfo2", "regionCount") + "), " + Size("VkBufferCopy2") + ", " + Off("VkBufferCopy2", "srcOffset")
+                        + ", " + Off("VkBufferCopy2", "dstOffset") + ", " + Off("VkBufferCopy2", "size") + ");";
+                    break;
+                default:
+                    if (IndirectCommands.TryGetValue(c.Name, out string record))
+                    {
+                        int buffer = Find("buffer"), offset = Find("offset"), countBuffer = Find("countBuffer"), countOffset = Find("countBufferOffset");
+                        int count = countBuffer >= 0 ? Find("maxDrawCount") : Find("drawCount"), stride = Find("stride");
+                        line = "st.CheckIndirect(p" + buffer + ", p" + offset + ", " + (count >= 0 ? "p" + count : "1u") + ", " + (stride >= 0 ? "p" + stride : "0u") + ", " + Size(record) + ");";
+                        if (countBuffer >= 0)
+                            line += " st.CheckBufferSpan(p" + countBuffer + ", p" + countOffset + ", 4);";
+                        break;
+                    }
+                    return !(c.Name.StartsWith("vkCmd", StringComparison.Ordinal) && c.Name.Contains("Indirect")
+                        && c.Params.Any(x => x.Type == "VkBuffer" && x.PtrDepth == 0));
+            }
+
+            b.Append("                ").Append(line).Append('\n');
+            return true;
+        }
+
+        private static bool EmitRenderTracking(Model m, Command c, StringBuilder b, List<string> post)
+        {
+            string line;
+            switch (c.Name)
+            {
+                case "vkCreateRenderPass":
+                case "vkCreateRenderPass2":
+                    {
+                        int outIdx = c.Params.FindIndex(x => ParamKind(m, x) == "HandleOut");
+                        int infoIdx = c.Params.FindIndex(x => ParamKind(m, x) == "StructIn" && StructId.ContainsKey(x.Type));
+                        if (outIdx < 0 || infoIdx < 0)
+                            return false;
+                        b.Append("                GenState.RenderPassShape p").Append(infoIdx).Append("pass = st.ReadRenderPass(p").Append(infoIdx).Append(", ")
+                         .Append(c.Name == "vkCreateRenderPass2" ? "true" : "false").Append(");\n");
+                        post.Add("                if (rr >= 0) st.SetRenderPass(p" + outIdx + ", p" + infoIdx + "pass);");
+                        return true;
+                    }
+                case "vkCreateFramebuffer":
+                    b.Append("                GenState.FramebufferExtent p1framebuffer = st.ReadFramebuffer(p1);\n");
+                    post.Add("                if (rr >= 0) st.SetFramebuffer(p3, p1framebuffer);");
+                    return true;
+                case "vkCreateImageView":
+                    post.Add("                if (rr >= 0) st.SetView(p3, p1);");
+                    return true;
+                case "vkAllocateCommandBuffers":
+                    post.Add("                if (rr >= 0) st.AddRecordings(p0, p1, p2, p2n);");
+                    return true;
+                case "vkCmdBeginRenderPass":
+                case "vkCmdBeginRenderPass2": line = "st.BeginRenderPass(p0, p1);"; break;
+                case "vkCmdNextSubpass":
+                case "vkCmdNextSubpass2": line = "st.NextSubpass(p0);"; break;
+                case "vkCmdEndRenderPass":
+                case "vkCmdEndRenderPass2": line = "st.EndInstance(p0, true);"; break;
+                case "vkCmdEndRendering":
+                case "vkCmdEndRendering2KHR": line = "st.EndInstance(p0, false);"; break;
+                case "vkCmdBeginRendering": line = "st.BeginRendering(p0, p1);"; break;
+                case "vkBeginCommandBuffer":
+                    post.Add("                if (rr >= 0) st.BeginRecording(p0, p1, true);");
+                    line = "st.BeginRecording(p0, p1, false);";
+                    break;
+                case "vkCmdSetColorBlendEnableEXT":
+                case "vkCmdSetColorBlendEquationEXT":
+                case "vkCmdSetColorWriteMaskEXT":
+                case "vkCmdSetColorBlendAdvancedEXT": line = "st.CheckColorRange(p1, p2);"; break;
+                case "vkCmdSetColorWriteEnableEXT": line = "st.CheckColorRange(0u, p1);"; break;
+                case "vkEndCommandBuffer":
+                    post.Add("                if (rr < 0) st.ResetRecording(p0);");
+                    line = "st.EndRecording(p0);";
+                    break;
+                case "vkResetCommandBuffer": line = "st.ResetRecording(p0);"; break;
+                case "vkResetCommandPool": line = "st.ResetPoolRecordings(p1Id);"; break;
+                case "vkCmdClearAttachments": line = "st.CheckClearAttachments(p0, p1, p2, p3, p4);"; break;
+                case "vkCmdExecuteCommands": line = "st.ExecuteCommands(p0, p1, p2);"; break;
+                case "vkCmdBindPipeline": line = "st.NotePipelineBind(p1, p2);"; break;
+                default:
+                    if (c.Name.StartsWith("vkCmdDraw", StringComparison.Ordinal))
+                        line = "st.CheckBoundSets(0);";
+                    else if (ComputeDispatches.Contains(c.Name))
+                        line = "st.CheckBoundSets(1);";
+                    else if (RunsShaders(c.Name))
+                        line = "st.RefuseOnCpu();";
+                    else
+                        return true;
+                    break;
+            }
+
+            b.Append("                ").Append(line).Append('\n');
+            return true;
         }
 
         // A switch that holds every body is past the JIT size limit, so it runs unoptimized and each call zeroes one
@@ -2207,6 +2754,7 @@ namespace Brovan.Generators
                     b.Append("                VulkanStandIns.PreparePipelines(st, ").Append(device).Append(", p").Append(infoIdx)
                      .Append(", p").Append(countIdx).Append(", BrovVulkStructMeta.Sizes[").Append(sid).Append("]);\n");
                     post.Insert(0, "                VulkanStandIns.FinishPipelines(st, " + device + ", " + cache + ", " + pipelines + ", rr);");
+                    post.Add("                st.NotePipelines(rr >= 0 ? " + pipelines + " : System.IntPtr.Zero, p" + countIdx + ");");
                 }
                 return false;
             }
@@ -2220,6 +2768,9 @@ namespace Brovan.Generators
                     b.Append("                VulkanStandIns.PrepareComputePipelines(st, ").Append(device).Append(", p").Append(infoIdx)
                      .Append(", p").Append(countIdx).Append(", BrovVulkStructMeta.Sizes[").Append(sid).Append("]);\n");
                     post.Insert(0, "                VulkanStandIns.FinishComputePipelines(st, " + device + ");");
+                    string computePipelines = Arg(c, "pPipelines");
+                    if (computePipelines != null)
+                        post.Add("                st.NotePipelines(rr >= 0 ? " + computePipelines + " : System.IntPtr.Zero, p" + countIdx + ");");
                 }
                 return false;
             }
@@ -2465,6 +3016,8 @@ namespace Brovan.Generators
                     b.Append("                    if (MultiViewport.Skip(").Append(first).Append(")) return 0;\n");
                 b.Append("                    p").Append(i).Append(" = MultiViewport.Clamp(p").Append(i).Append(");\n");
                 b.Append("                }\n");
+                b.Append("                else\n");
+                b.Append("                    st.CheckViewportRange(").Append(first ?? "0u").Append(", p").Append(i).Append(");\n");
             }
 
             return false;
@@ -3303,6 +3856,9 @@ namespace Brovan.Generators
             sm.Append("        internal static readonly bool[] PNext = { ");
             foreach (string n in needed) sm.Append(PNextSet.Contains(n) ? "true" : "false").Append(", ");
             sm.AppendLine("};");
+            sm.Append("        internal static readonly bool[] Repeatable = { ");
+            foreach (string n in needed) sm.Append(m.Structs.TryGetValue(n, out VkStruct rs) && rs.AllowDuplicate ? "true" : "false").Append(", ");
+            sm.AppendLine("};");
             sm.Append("        internal static readonly uint[] STypes = { ");
             foreach (string n in needed) sm.Append(STypeValue(m, n)).Append("u, ");
             sm.AppendLine("};");
@@ -3354,6 +3910,31 @@ namespace Brovan.Generators
             }
             sm.AppendLine("        };");
 
+            // Drivers can leave raw struct padding uninitialized.
+            sm.AppendLine("        internal static readonly int[][] Padding = new int[][]");
+            sm.AppendLine("        {");
+            foreach (string n in needed)
+            {
+                List<int> ranges = new List<int>();
+                VkStruct s = m.Structs[n];
+                Layout lay = ComputeLayout(m, n, cache);
+                if (!s.IsUnion && StructIsFlat(m, n, new HashSet<string>()))
+                    FlatPadding(m, n, 0, cache, ranges);
+                else if (!s.IsUnion)
+                {
+                    foreach (Member mem in s.Members)
+                    {
+                        if (mem.PtrDepth != 0 || !m.Structs.ContainsKey(mem.Type) || ClassifyMember(m, s, mem, lay.Offsets, cache).Kind != "Scalar")
+                            continue;
+                        int esz = ComputeLayout(m, mem.Type, cache).Size;
+                        for (int k = 0; k < Math.Max(1, mem.ArrayLen); k++)
+                            FlatPadding(m, mem.Type, lay.Offsets[mem.Name] + k * esz, cache, ranges);
+                    }
+                }
+                sm.Append("            ").Append(ranges.Count == 0 ? "null" : "new int[] { " + string.Join(", ", ranges) + " }").AppendLine(",");
+            }
+            sm.AppendLine("        };");
+
             int DbiSid = -1, DbiBuffer = 0, DbiOffset = 0, DbiRange = 0;
             if (StructId.TryGetValue("VkDescriptorBufferInfo", out int DbiId))
             {
@@ -3388,9 +3969,17 @@ namespace Brovan.Generators
                         xb.AppendLine("            (\"" + en + "\", " + ext.SpecVersion + "u),");
                 xb.AppendLine("        };");
             }
+            xb.AppendLine("        internal static readonly string[] CpuWithheld =");
+            xb.AppendLine("        {");
+            Dictionary<string, bool> carries = new Dictionary<string, bool>(StringComparer.Ordinal);
+            foreach (string en in Advertised.OrderBy(x => x, StringComparer.Ordinal))
+                if (m.Extensions.TryGetValue(en, out VkExtension ext) && ext.Type == "device" && WithheldOnCpu(m, ext, carries))
+                    xb.AppendLine("            \"" + en + "\",");
+            xb.AppendLine("        };");
             xb.AppendLine("    }");
             xb.AppendLine("}");
             spc.AddSource("BrovVulkExtensions.g.cs", SourceText.From(xb.ToString(), Encoding.UTF8));
+            spc.AddSource("BrovVulkFormats.g.cs", SourceText.From(EmitFormats(m), Encoding.UTF8));
 
             gs.Append("static const BvkM* const bvk_structs[] = { ");
             for (int si = 0; si < needed.Count; si++) gs.Append("bvk_s").Append(si).Append(", ");

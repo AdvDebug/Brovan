@@ -55,7 +55,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            if ((bits & VulkanStandIns.ClipDistanceBit) != 0 && info.Has(Spirv.ModelFragment))
+            // CPU pipeline creation needs the original SPIR-V.
+            if (((bits & VulkanStandIns.ClipDistanceBit) != 0 && info.Has(Spirv.ModelFragment)) || (bits & VulkanStandIns.HostCpuDeviceBit) != 0)
                 record.Code = new ReadOnlySpan<uint>(words, count).ToArray();
 
             if (record.Interface != null || record.Code != null || record.ClipOutputs != 0)
@@ -144,7 +145,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             state.TemporaryModules.Add(module);
             *(IntPtr*)(fragment + VkOffsets.StageModule) = module;
-            IntPtr* link = (IntPtr*)(fragment + VkOffsets.StagePNext);
+            UnlinkInlineModules(fragment);
+        }
+
+        internal static void UnlinkInlineModules(IntPtr stage)
+        {
+            IntPtr* link = (IntPtr*)(stage + VkOffsets.StagePNext);
             while (*link != IntPtr.Zero)
             {
                 if (*(uint*)*link == StShaderModuleCreateInfo)
@@ -156,7 +162,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static IntPtr CreateModule(GenState st, IntPtr device, uint[] words)
         {
-            IntPtr code = st.Alloc(words.Length * 4);
+            IntPtr code = st.Alloc(BrovVulkGenStruct.CheckedBytes((uint)words.Length, sizeof(uint)));
             words.AsSpan().CopyTo(new Span<uint>((void*)code, words.Length));
             IntPtr moduleInfo = st.Alloc(VkOffsets.ShaderModuleSize);
             *(uint*)moduleInfo = StShaderModuleCreateInfo;

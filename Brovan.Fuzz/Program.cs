@@ -9,27 +9,27 @@ namespace Brovan.Fuzz;
 
 internal delegate void FuzzBody(ReadOnlySpan<byte> data);
 
+// Keep this table safe to load before coverage is initialized.
+internal sealed record FuzzTarget(string Name, FuzzBody Run, Action? Prepare, Func<IEnumerable<byte[]>> Seeds, Func<string> Dictionary);
+
 internal static class Program
 {
-    private static FuzzBody Resolve(string target) => target switch
+    private static readonly FuzzTarget[] Targets =
     {
-        "struct" => StructTarget.Run,
-        "spirv" => SpirvTarget.Run,
-        "ioctl" => IoctlTarget.Run,
-        _ => throw new ArgumentException($"unknown target '{target}' (struct | spirv | ioctl)")
+        new("struct", StructTarget.Run, null, Corpus.Struct, Grammar.Dictionary),
+        new("spirv", SpirvTarget.Run, null, Corpus.Spirv, Grammar.Dictionary),
+        new("ioctl", IoctlTarget.Run, IoctlTarget.Prepare, Corpus.Ioctl, Grammar.Dictionary),
+        new("binary", BinaryTarget.Run, null, BinaryTarget.Seeds, BinaryTarget.Dictionary),
     };
 
-    private static void Prepare(string target)
+    private static FuzzTarget Find(string name)
     {
-        if (target != "ioctl")
-            return;
-
-        IoctlTarget.Init();
-        Console.Error.WriteLine(VulkanBootstrap.Available
-            ? $"[ioctl] host Vulkan device ready, the bootstrap made handle ids 1 to {IoctlTarget.NextId - 1}"
-              + (VulkanBootstrap.Surface != IntPtr.Zero ? "" : ", no headless surface")
-              + (VulkanBootstrap.Validating ? ", the validation layer refuses invalid calls" : ", no validation layer, so invalid calls reach the driver")
-            : "[ioctl] no host Vulkan device, only the framing and the reader are reachable");
+        foreach (FuzzTarget target in Targets)
+        {
+            if (target.Name == name)
+                return target;
+        }
+        throw new ArgumentException($"unknown target '{name}' ({string.Join(" | ", Targets.Select(t => t.Name))})");
     }
 
     // Unlike Environment.Exit, this does not run managed shutdown.
@@ -50,8 +50,7 @@ internal static class Program
         // --target_arg carries exactly one argument, so the target is part of the command word.
         if (args[0].StartsWith("libfuzzer:", StringComparison.Ordinal))
         {
-            string target = args[0]["libfuzzer:".Length..];
-            FuzzBody body = Resolve(target);
+            FuzzTarget target = Find(args[0]["libfuzzer:".Length..]);
 
             bool ready = false;
             SharpFuzz.Fuzzer.LibFuzzer.Run(d =>
@@ -59,10 +58,10 @@ internal static class Program
                 if (!ready)
                 {
                     Utils.DiscardErrorLog = true;
-                    Prepare(target);
+                    target.Prepare?.Invoke();
                     ready = true;
                 }
-                body(d);
+                target.Run(d);
                 MemoryGuard.Check();
             });
 
@@ -74,16 +73,16 @@ internal static class Program
         {
             case "run":
             {
-                string target = args.Length > 1 ? args[1] : "struct";
+                FuzzTarget target = Find(args.Length > 1 ? args[1] : "struct");
                 int seconds = args.Length > 2 ? int.Parse(args[2]) : 30;
                 int seed = args.Length > 3 ? int.Parse(args[3]) : Environment.TickCount;
-                return SelfDrive.Run(target, Resolve(target), Prepare, seconds, seed);
+                return SelfDrive.Run(target, seconds, seed);
             }
 
             case "seed":
             {
-                string target = args.Length > 1 ? args[1] : "struct";
-                string dir = args.Length > 2 ? args[2] : $"corpus-{target}";
+                FuzzTarget target = Find(args.Length > 1 ? args[1] : "struct");
+                string dir = args.Length > 2 ? args[2] : $"corpus-{target.Name}";
                 int written = Corpus.Write(target, dir);
                 Console.WriteLine($"wrote {written} seeds to {dir}");
                 return 0;
@@ -91,19 +90,20 @@ internal static class Program
 
             case "dict":
             {
-                string path = args.Length > 1 ? args[1] : "brovvulk.dict";
-                File.WriteAllText(path, Grammar.Dictionary());
+                FuzzTarget target = Find(args.Length > 1 ? args[1] : "struct");
+                string path = args.Length > 2 ? args[2] : $"{target.Name}.dict";
+                File.WriteAllText(path, target.Dictionary());
                 Console.WriteLine($"wrote dictionary to {path}");
                 return 0;
             }
 
             case "replay":
             {
-                string target = args.Length > 1 ? args[1] : "struct";
+                FuzzTarget target = Find(args.Length > 1 ? args[1] : "struct");
                 string path = args[2];
                 VulkanBootstrap.EchoValidation = true;
-                Prepare(target);
-                FuzzBody body = Resolve(target);
+                target.Prepare?.Invoke();
+                FuzzBody body = target.Run;
 
                 // Unbuffered, so the name of the input that faults survives a native crash.
                 string[] files = Directory.Exists(path)
@@ -135,94 +135,86 @@ internal static class Program
 
 internal static class Corpus
 {
-    public static int Write(string target, string dir)
+    public static int Write(FuzzTarget target, string dir)
     {
         Directory.CreateDirectory(dir);
         int n = 0;
-
-        void Emit(byte[] bytes)
+        foreach (byte[] bytes in target.Seeds())
         {
             string name = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()[..16];
             File.WriteAllBytes(Path.Combine(dir, name), bytes);
             n++;
         }
+        return n;
+    }
 
-        switch (target)
+    public static IEnumerable<byte[]> Struct()
+    {
+        for (int sid = 0; sid < Grammar.StructCount; sid++)
         {
-            case "struct":
-                for (int sid = 0; sid < Grammar.StructCount; sid++)
-                {
-                    foreach ((uint len, int chain) in new[] { (0u, 0), (1u, 0), (1u, 1) })
-                    {
-                        byte[] payload;
-                        try { payload = Grammar.Struct(sid, len, chain); }
-                        catch { continue; }
-                        byte[] input = new byte[2 + payload.Length];
-                        input[0] = (byte)sid;
-                        input[1] = (byte)(sid >> 8);
-                        payload.CopyTo(input, 2);
-                        Emit(input);
-                    }
-                }
-                break;
-
-            case "spirv":
-                foreach (byte mode in new byte[] { 0x00, 0x1C, 0x01, 0x02, 0x03, 0x83 })
-                    foreach (byte[] module in SpirvSeeds.All())
-                    {
-                        byte[] input = new byte[1 + module.Length];
-                        input[0] = mode;
-                        module.CopyTo(input, 1);
-                        Emit(input);
-                    }
-                break;
-
-            case "ioctl":
+            foreach ((uint len, int chain) in new[] { (0u, 0), (1u, 0), (1u, 1) })
             {
-                // Seed handle IDs must match the replay host's bootstrap.
-                IoctlTarget.Init();
-                for (int id = 0; id < Grammar.CommandCount; id++)
-                {
-                    if (BrovVulkWireShapes.Shapes[id] == null)
-                    {
-                        // Custom payloads start with a dispatchable handle.
-                        foreach ((string type, uint standIns) in FirstHandles)
-                            Emit(Frame((uint)id, standIns, new WireWriter().U32(IoctlTarget.HandleOf(type)).U32(0).U32(0).Done()));
-                        continue;
-                    }
+                byte[] payload;
+                try { payload = Grammar.Struct(sid, len, chain); }
+                catch { continue; }
+                byte[] input = new byte[2 + payload.Length];
+                input[0] = (byte)sid;
+                input[1] = (byte)(sid >> 8);
+                payload.CopyTo(input, 2);
+                yield return input;
+            }
+        }
+    }
 
-                    Emit(Frame((uint)id, 0, Grammar.Command(id, IoctlTarget.HandleOf)));
-                    if (Grammar.ShapeOf(id).Any(t => t[0] == 'p'))
-                        Emit(Frame((uint)id, 0, Grammar.Command(id, IoctlTarget.HandleOf, pairs: true)));
-                }
+    public static IEnumerable<byte[]> Spirv()
+    {
+        foreach (byte mode in new byte[] { 0x00, 0x1C, 0x01, 0x02, 0x03, 0x83 })
+            foreach (byte[] module in SpirvSeeds.All())
+            {
+                byte[] input = new byte[1 + module.Length];
+                input[0] = mode;
+                module.CopyTo(input, 1);
+                yield return input;
+            }
+    }
 
-                for (int maker = 0; maker < Grammar.CommandCount; maker++)
-                {
-                    string? made = Grammar.Creates(maker);
-                    if (made == null || Grammar.ShapeOf(maker).Any(t => t.StartsWith("o:", StringComparison.Ordinal)))
-                        continue;
-                    string madeToken = "h:" + made;
-                    byte[] makerPayload = Grammar.Command(maker, IoctlTarget.HandleOf);
-                    uint Handle(string type) => type == made ? IoctlTarget.NextId : IoctlTarget.HandleOf(type);
-                    for (int user = 0; user < Grammar.CommandCount; user++)
-                    {
-                        if (user == maker || !Grammar.ShapeOf(user).Contains(madeToken))
-                            continue;
-                        Emit(Frame(BrovVulkDevice.BatchId, 0, new WireWriter().U32(2)
-                            .U32((uint)maker).Raw(makerPayload)
-                            .U32((uint)user).Raw(Grammar.Command(user, Handle)).Done()));
-                    }
-                }
-
-                Emit(Frame(BrovVulkDevice.BatchId, 0, new WireWriter().U32(2).U32(0).U32(3).U32(1).U32(3).Done()));
-                break;
+    public static IEnumerable<byte[]> Ioctl()
+    {
+        // Seed handle IDs must match replay.
+        IoctlTarget.Init();
+        for (int id = 0; id < Grammar.CommandCount; id++)
+        {
+            if (BrovVulkWireShapes.Shapes[id] == null)
+            {
+                foreach ((string type, uint standIns) in FirstHandles)
+                    yield return Frame((uint)id, standIns, new WireWriter().U32(IoctlTarget.HandleOf(type)).U32(0).U32(0).Done());
+                continue;
             }
 
-            default:
-                throw new ArgumentException($"no corpus for target '{target}'");
+            yield return Frame((uint)id, 0, Grammar.Command(id, IoctlTarget.HandleOf));
+            if (Grammar.ShapeOf(id).Any(t => t[0] == 'p'))
+                yield return Frame((uint)id, 0, Grammar.Command(id, IoctlTarget.HandleOf, pairs: true));
         }
 
-        return n;
+        for (int maker = 0; maker < Grammar.CommandCount; maker++)
+        {
+            string? made = Grammar.Creates(maker);
+            if (made == null || Grammar.ShapeOf(maker).Any(t => t.StartsWith("o:", StringComparison.Ordinal)))
+                continue;
+            string madeToken = "h:" + made;
+            byte[] makerPayload = Grammar.Command(maker, IoctlTarget.HandleOf);
+            uint Handle(string type) => type == made ? IoctlTarget.NextId : IoctlTarget.HandleOf(type);
+            for (int user = 0; user < Grammar.CommandCount; user++)
+            {
+                if (user == maker || !Grammar.ShapeOf(user).Contains(madeToken))
+                    continue;
+                yield return Frame(BrovVulkDevice.BatchId, 0, new WireWriter().U32(2)
+                    .U32((uint)maker).Raw(makerPayload)
+                    .U32((uint)user).Raw(Grammar.Command(user, Handle)).Done());
+            }
+        }
+
+        yield return Frame(BrovVulkDevice.BatchId, 0, new WireWriter().U32(2).U32(0).U32(3).U32(1).U32(3).Done());
     }
 
     private static readonly (string Type, uint StandIns)[] FirstHandles =
@@ -308,13 +300,15 @@ internal static class SelfDrive
 
     private static long _execStart;
 
-    public static int Run(string target, FuzzBody body, Action<string> prepare, int seconds, int seed)
+    public static int Run(FuzzTarget fuzzTarget, int seconds, int seed)
     {
         Utils.DiscardErrorLog = true;
-        prepare(target);
+        fuzzTarget.Prepare?.Invoke();
+        string target = fuzzTarget.Name;
+        FuzzBody body = fuzzTarget.Run;
 
         string dir = Path.Combine(Path.GetTempPath(), $"brovfuzz-{target}-{seed}");
-        Corpus.Write(target, dir);
+        Corpus.Write(fuzzTarget, dir);
         List<byte[]> corpus = Directory.GetFiles(dir).Select(File.ReadAllBytes).ToList();
         if (corpus.Count == 0)
             corpus.Add(new byte[16]);
@@ -345,9 +339,6 @@ internal static class SelfDrive
             try
             {
                 body(scratch.AsSpan(0, len));
-            }
-            catch (Exception e) when (StructTarget.Expected(e))
-            {
             }
             catch (Exception e)
             {
@@ -472,10 +463,7 @@ internal static class MemoryGuard
         if (resident <= LimitBytes)
             return;
 
-        Console.Error.WriteLine(
-            $"[fuzz] resident set {resident >> 20} MB is over the {LimitBytes >> 20} MB cap");
-        Console.Error.Flush();
-        Environment.FailFast("Brovan.Fuzz: harness memory growth");
+        Oracle.Fail($"resident set {resident >> 20} MB is over the {LimitBytes >> 20} MB cap");
     }
 
     private const ulong DataLimitBytes = 2048UL << 20;
