@@ -79,6 +79,19 @@ static class Program
         ["ISteamUGC::SetSubscriptionsLoadOrder.pvecPublishedFileIDs"] = ("inarray", "unNumPublishedFileIDs"),
         ["ISteamNetworkingUtils::GetPOPList.list"] = ("outarray", "nListSz"),
         ["ISteamUserStats::GetDownloadedLeaderboardEntry.pDetails"] = ("outarray", "cDetailsMax"),
+
+        ["ISteamInput::SetInputActionManifestFilePath.pchInputActionManifestAbsolutePath"] = ("readpath", null),
+        ["ISteamScreenshots::AddScreenshotToLibrary.pchFilename"] = ("readpath", null),
+        ["ISteamScreenshots::AddScreenshotToLibrary.pchThumbnailFilename"] = ("readpath", null),
+        ["ISteamScreenshots::AddVRScreenshotToLibrary.pchFilename"] = ("readpath", null),
+        ["ISteamScreenshots::AddVRScreenshotToLibrary.pchVRFilename"] = ("readpath", null),
+        ["ISteamUGC::SetItemContent.pszContentFolder"] = ("readpath", null),
+        ["ISteamUGC::SetItemPreview.pszPreviewFile"] = ("readpath", null),
+        ["ISteamUGC::AddItemPreviewFile.pszPreviewFile"] = ("readpath", null),
+        ["ISteamUGC::UpdateItemPreviewFile.pszPreviewFile"] = ("readpath", null),
+        ["ISteamUGC::BInitWorkshopForGameServer.pszFolder"] = ("writepath", null),
+        ["ISteamUtils::CheckFileSignature.szFileName"] = ("readpath", null),
+        ["ISteamRemoteStorage::UGCDownloadToLocation.pchLocation"] = ("writepath", null),
     };
 
     sealed class Param

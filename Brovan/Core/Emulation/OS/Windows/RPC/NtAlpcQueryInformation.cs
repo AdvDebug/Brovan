@@ -22,8 +22,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             uint Length = (uint)Instance.WinHelper.GetArg(3);
             ulong ReturnLengthPtr = Instance.WinHelper.GetArg(4);
 
-            if (PortHandle != 0 && Instance.WinHelper.HandleManager.GetObjectByHandle<WinPort>(PortHandle) == null)
+            WinPort Port = null;
+            ulong PortKey = 0;
+            if (PortHandle != 0 && (!Instance.WinHelper.HandleManager.TryGetHandle(PortHandle, out PortKey, out HandleEntry PortEntry) || (Port = PortEntry.Object as WinPort) == null))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            if (InformationClass == AlpcBasicInformation && Port == null)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             uint RequiredLength = InformationClass switch
             {
@@ -52,6 +57,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             Instance.WinHelper.WriteZeroMemory(InformationPtr, RequiredLength);
+
+            if (InformationClass == AlpcBasicInformation)
+            {
+                Instance._emulator.WriteMemory(InformationPtr + 4, AlpcMessaging.SequenceOf(Port, PortKey));
+                Instance.WinHelper.WritePointer(InformationPtr + 8, AlpcMessaging.PortContextOf(Port));
+            }
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtAlpcQueryInformation: class {InformationClass}, length {Length}", LogFlags.Syscall);

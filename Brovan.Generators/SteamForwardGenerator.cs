@@ -65,10 +65,9 @@ namespace Brovan.Generators
             public string CName;
             public string Ret;
             public string RetStruct;
-            public bool RetByRef;
-            public bool RetHasCtor;
             public bool Local;
             public int Slot;
+            public int MsvcSlot;
             public uint Id;
             public readonly List<Param> Params = new List<Param>();
         }
@@ -135,13 +134,8 @@ namespace Brovan.Generators
         private static void Parse(XElement Root, out List<Interface> Interfaces, out Dictionary<string, int> Structs)
         {
             Structs = new Dictionary<string, int>(StringComparer.Ordinal);
-            HashSet<string> Ctors = new HashSet<string>(StringComparer.Ordinal);
             foreach (XElement S in Root.Element("types").Elements("struct"))
-            {
                 Structs[S.Attribute("name").Value] = int.Parse(S.Attribute("size").Value);
-                if (S.Attribute("ctor")?.Value == "true")
-                    Ctors.Add(S.Attribute("name").Value);
-            }
 
             Interfaces = new List<Interface>();
             uint NextId = FirstMethodId;
@@ -167,11 +161,6 @@ namespace Brovan.Generators
                         Id = NextId++,
                     };
 
-                    // The guest library is a Windows PE on every host, so its trampolines always take
-                    // the MSVC shape. Only the host side, which calls the platform client, varies.
-                    Meth.RetHasCtor = Meth.Ret == "struct" && Ctors.Contains(Meth.RetStruct);
-                    Meth.RetByRef = Meth.Ret == "struct" && ReturnsByRef(Structs[Meth.RetStruct], Meth.RetHasCtor);
-
                     foreach (XElement P in M.Elements("param"))
                     {
                         Meth.Params.Add(new Param
@@ -188,8 +177,35 @@ namespace Brovan.Generators
                     Iface.Methods.Add(Meth);
                 }
 
+                AssignMsvcSlots(Iface);
                 Interfaces.Add(Iface);
             }
+        }
+
+        // MSVC groups virtual overloads in reverse order at the first declaration.
+        private static void AssignMsvcSlots(Interface Iface)
+        {
+            HashSet<string> Placed = new HashSet<string>(StringComparer.Ordinal);
+            int Next = 0;
+
+            foreach (Method M in Iface.Methods)
+            {
+                if (!Placed.Add(M.Name))
+                    continue;
+
+                for (int i = Iface.Methods.Count - 1; i >= 0; i--)
+                {
+                    if (Iface.Methods[i].Name == M.Name)
+                        Iface.Methods[i].MsvcSlot = Next++;
+                }
+            }
+        }
+
+        private static string HostSlot(Method M)
+        {
+            return M.MsvcSlot == M.Slot
+                ? M.Slot.ToString()
+                : $"(Brovan.GeneralHelper.IsWindows ? {M.MsvcSlot} : {M.Slot})";
         }
 
         private enum StructReturn
@@ -200,12 +216,8 @@ namespace Brovan.Generators
             RegisterPair,
         }
 
-        // MSVC x64 returns a user defined type in RAX only when it is 1, 2, 4 or 8 bytes and has no
-        // constructor. Everything else comes back through a hidden pointer that follows this.
-        private static StructReturn WindowsStructReturn(int Size, bool HasCtor)
-        {
-            return ReturnsByRef(Size, HasCtor) ? StructReturn.HiddenAfterSelf : StructReturn.Register;
-        }
+        // MSVC instance methods pass the struct return pointer after this, even for small structs.
+        private const StructReturn WindowsStructReturn = StructReturn.HiddenAfterSelf;
 
         // System V classifies by size, not by constructor, and the hidden pointer comes before this.
         // Every by value return in steam.xml has an integer field in each eightbyte, so a small one
@@ -216,11 +228,6 @@ namespace Brovan.Generators
                 return StructReturn.HiddenBeforeSelf;
 
             return Size > 8 ? StructReturn.RegisterPair : StructReturn.Register;
-        }
-
-        private static bool ReturnsByRef(int Size, bool HasCtor)
-        {
-            return HasCtor || (Size != 1 && Size != 2 && Size != 4 && Size != 8);
         }
 
         private static void EmitStructCall(StringBuilder B, string Pad, Method M, Dictionary<string, int> Structs,
@@ -264,21 +271,10 @@ namespace Brovan.Generators
             Types.Add(RetCs);
 
             string FnType = "delegate* unmanaged<" + string.Join(", ", Types) + ">";
-            B.AppendLine($"{Pad}{RetCs} Ret = (({FnType})(*(IntPtr**)Self)[{M.Slot}])({string.Join(", ", Args)});");
+            B.AppendLine($"{Pad}{RetCs} Ret = (({FnType})(*(IntPtr**)Self)[{HostSlot(M)}])({string.Join(", ", Args)});");
             B.AppendLine(Hidden
                 ? $"{Pad}W.WriteBytesFrom(RetBuf, {Size});"
                 : $"{Pad}W.WriteBytesFrom((IntPtr)(&Ret), {Size});");
-        }
-
-        private static string CRaxType(int Size)
-        {
-            switch (Size)
-            {
-                case 1: return "uint8_t";
-                case 2: return "uint16_t";
-                case 4: return "uint32_t";
-                default: return "uint64_t";
-            }
         }
 
         private static string Sanitize(string Value)
@@ -444,6 +440,12 @@ namespace Brovan.Generators
                         CallArgs.Add(V);
                         CallTypes.Add("byte*");
                         break;
+                    case "readpath":
+                    case "writepath":
+                        B.AppendLine($"{Pad}byte* {V} = S.ReadGuestPath(R, Write: {(P.Kind == "writepath" ? "true" : "false")});");
+                        CallArgs.Add(V);
+                        CallTypes.Add("byte*");
+                        break;
                     case "inbuf":
                     case "inarray":
                         B.AppendLine($"{Pad}IntPtr {V} = S.ReadBlob(R, out uint {V}Cap);");
@@ -503,7 +505,7 @@ namespace Brovan.Generators
 
             if (M.Ret == "struct")
             {
-                StructReturn Win = WindowsStructReturn(Structs[M.RetStruct], M.RetHasCtor);
+                StructReturn Win = WindowsStructReturn;
                 StructReturn Sysv = SystemVStructReturn(Structs[M.RetStruct]);
 
                 if (Win == Sysv)
@@ -533,7 +535,7 @@ namespace Brovan.Generators
                 Args.AddRange(CallArgs);
 
                 string FnType = "delegate* unmanaged<" + string.Join(", ", Types) + ">";
-                string Call = $"(({FnType})(*(IntPtr**)Self)[{M.Slot}])({string.Join(", ", Args)})";
+                string Call = $"(({FnType})(*(IntPtr**)Self)[{HostSlot(M)}])({string.Join(", ", Args)})";
 
                 if (M.Ret == "void")
                     B.AppendLine($"{Pad}{Call};");
@@ -658,7 +660,7 @@ namespace Brovan.Generators
             {
                 B.AppendLine($"static const void* bs_vt_{Sanitize(I.Version)}[] =");
                 B.AppendLine("{");
-                foreach (Method M in I.Methods)
+                foreach (Method M in I.Methods.OrderBy(M => M.MsvcSlot))
                     B.AppendLine($"    (const void*)bs_{Sanitize(I.Version)}_{M.Slot}_{Sanitize(M.CName)},");
                 B.AppendLine("};");
                 B.AppendLine();
@@ -692,8 +694,9 @@ namespace Brovan.Generators
         private static void EmitGuestMethod(StringBuilder B, Interface I, Method M, Dictionary<string, int> Structs)
         {
             string Name = $"bs_{Sanitize(I.Version)}_{M.Slot}_{Sanitize(M.CName)}";
+
             List<string> Sig = new List<string> { "void* self" };
-            if (M.RetByRef)
+            if (M.Ret == "struct")
                 Sig.Add("void* bsret");
 
             for (int i = 0; i < M.Params.Count; i++)
@@ -702,7 +705,7 @@ namespace Brovan.Generators
                 Sig.Add(GuestParamType(P) + " p" + i);
             }
 
-            string Ret = GuestReturnType(M, Structs);
+            string Ret = GuestReturnType(M);
             B.AppendLine($"static {Ret} {Name}({string.Join(", ", Sig)})");
             B.AppendLine("{");
 
@@ -737,6 +740,8 @@ namespace Brovan.Generators
                             B.AppendLine($"    bs_w_u32((uint32_t){V});");
                         break;
                     case "str":
+                    case "readpath":
+                    case "writepath":
                         B.AppendLine($"    bs_w_str({V});");
                         break;
                     case "inbuf":
@@ -798,17 +803,8 @@ namespace Brovan.Generators
                         break;
                     }
                 case "struct":
-                    if (M.RetByRef)
-                    {
-                        B.AppendLine($"    bs_r_bytes(bsret, {Structs[M.RetStruct]}u);");
-                        RetVar = "bsret";
-                    }
-                    else
-                    {
-                        B.AppendLine($"    {CRaxType(Structs[M.RetStruct])} bsr = 0;");
-                        B.AppendLine($"    bs_r_bytes(&bsr, {Structs[M.RetStruct]}u);");
-                        RetVar = "bsr";
-                    }
+                    B.AppendLine($"    bs_r_bytes(bsret, {Structs[M.RetStruct]}u);");
+                    RetVar = "bsret";
                     break;
                 case "f32":
                     B.AppendLine("    float bsr = bs_r_f32();");
@@ -872,15 +868,8 @@ namespace Brovan.Generators
                     B.AppendLine("        return 0;");
                     break;
                 case "struct":
-                    if (M.RetByRef)
-                    {
-                        B.AppendLine($"        memset(bsret, 0, {Structs[M.RetStruct]});");
-                        B.AppendLine("        return bsret;");
-                    }
-                    else
-                    {
-                        B.AppendLine("        return 0;");
-                    }
+                    B.AppendLine($"        memset(bsret, 0, {Structs[M.RetStruct]});");
+                    B.AppendLine("        return bsret;");
                     break;
                 default:
                     B.AppendLine("        return 0;");
@@ -910,6 +899,8 @@ namespace Brovan.Generators
             {
                 case "in": return CScalar[P.Wire];
                 case "str": return "const char*";
+                case "readpath": return "const char*";
+                case "writepath": return "const char*";
                 case "inbuf": return "const void*";
                 case "inarray": return "const void*";
                 case "instruct": return "const void*";
@@ -924,14 +915,14 @@ namespace Brovan.Generators
             }
         }
 
-        private static string GuestReturnType(Method M, Dictionary<string, int> Structs)
+        private static string GuestReturnType(Method M)
         {
             switch (M.Ret)
             {
                 case "void": return "void";
                 case "str": return "const char*";
                 case "iface": return "void*";
-                case "struct": return M.RetByRef ? "void*" : CRaxType(Structs[M.RetStruct]);
+                case "struct": return "void*";
                 default: return CScalar[M.Ret];
             }
         }

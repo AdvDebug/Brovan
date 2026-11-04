@@ -1172,7 +1172,7 @@
     </method>
     <method name="Shutdown" ret="bool" />
     <method name="SetInputActionManifestFilePath" ret="bool">
-      <param name="pchInputActionManifestAbsolutePath" type="const char*" kind="str" />
+      <param name="pchInputActionManifestAbsolutePath" type="const char*" kind="readpath" />
     </method>
     <method name="RunFrame" ret="void">
       <param name="bReservedValue" type="bool" kind="in" wire="bool" />
@@ -2233,8 +2233,8 @@
       <param name="nHeight" type="int" kind="in" wire="i32" />
     </method>
     <method name="AddScreenshotToLibrary" ret="u32">
-      <param name="pchFilename" type="const char*" kind="str" />
-      <param name="pchThumbnailFilename" type="const char*" kind="str" />
+      <param name="pchFilename" type="const char*" kind="readpath" />
+      <param name="pchThumbnailFilename" type="const char*" kind="readpath" />
       <param name="nWidth" type="int" kind="in" wire="i32" />
       <param name="nHeight" type="int" kind="in" wire="i32" />
     </method>
@@ -2257,8 +2257,8 @@
     <method name="IsScreenshotsHooked" ret="bool" />
     <method name="AddVRScreenshotToLibrary" ret="u32">
       <param name="eType" type="EVRScreenshotType" kind="in" wire="enum" />
-      <param name="pchFilename" type="const char*" kind="str" />
-      <param name="pchVRFilename" type="const char*" kind="str" />
+      <param name="pchFilename" type="const char*" kind="readpath" />
+      <param name="pchVRFilename" type="const char*" kind="readpath" />
     </method>
   </interface>
   <interface name="ISteamTimeline" version="STEAMTIMELINE_INTERFACE_V004">
@@ -2600,11 +2600,11 @@
     </method>
     <method name="SetItemContent" ret="bool">
       <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
-      <param name="pszContentFolder" type="const char*" kind="str" />
+      <param name="pszContentFolder" type="const char*" kind="readpath" />
     </method>
     <method name="SetItemPreview" ret="bool">
       <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
-      <param name="pszPreviewFile" type="const char*" kind="str" />
+      <param name="pszPreviewFile" type="const char*" kind="readpath" />
     </method>
     <method name="SetAllowLegacyUpload" ret="bool">
       <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
@@ -2624,7 +2624,7 @@
     </method>
     <method name="AddItemPreviewFile" ret="bool">
       <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
-      <param name="pszPreviewFile" type="const char*" kind="str" />
+      <param name="pszPreviewFile" type="const char*" kind="readpath" />
       <param name="type" type="EItemPreviewType" kind="in" wire="enum" />
     </method>
     <method name="AddItemPreviewVideo" ret="bool">
@@ -2634,7 +2634,7 @@
     <method name="UpdateItemPreviewFile" ret="bool">
       <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
       <param name="index" type="uint32" kind="in" wire="u32" />
-      <param name="pszPreviewFile" type="const char*" kind="str" />
+      <param name="pszPreviewFile" type="const char*" kind="readpath" />
     </method>
     <method name="UpdateItemPreviewVideo" ret="bool">
       <param name="handle" type="UGCUpdateHandle_t" kind="in" wire="u64" />
@@ -2717,7 +2717,7 @@
     </method>
     <method name="BInitWorkshopForGameServer" ret="bool">
       <param name="unWorkshopDepotID" type="DepotId_t" kind="in" wire="u32" />
-      <param name="pszFolder" type="const char*" kind="str" />
+      <param name="pszFolder" type="const char*" kind="writepath" />
     </method>
     <method name="SuspendDownloads" ret="void">
       <param name="bSuspend" type="bool" kind="in" wire="bool" />
@@ -3874,7 +3874,7 @@
     <method name="IsOverlayEnabled" ret="bool" />
     <method name="BOverlayNeedsPresent" ret="bool" />
     <method name="CheckFileSignature" ret="u64">
-      <param name="szFileName" type="const char*" kind="str" />
+      <param name="szFileName" type="const char*" kind="readpath" />
     </method>
     <method name="ShowGamepadTextInput" ret="bool">
       <param name="eInputMode" type="EGamepadTextInputMode" kind="in" wire="enum" />
@@ -3938,7 +3938,7 @@
     <method name="IsOverlayEnabled" ret="bool" />
     <method name="BOverlayNeedsPresent" ret="bool" />
     <method name="CheckFileSignature" ret="u64">
-      <param name="szFileName" type="const char*" kind="str" />
+      <param name="szFileName" type="const char*" kind="readpath" />
     </method>
     <method name="ShowGamepadTextInput" ret="bool">
       <param name="eInputMode" type="EGamepadTextInputMode" kind="in" wire="enum" />
@@ -4023,7 +4023,7 @@
     <method name="IsOverlayEnabled" ret="bool" />
     <method name="BOverlayNeedsPresent" ret="bool" />
     <method name="CheckFileSignature" ret="u64">
-      <param name="szFileName" type="const char*" kind="str" />
+      <param name="szFileName" type="const char*" kind="readpath" />
     </method>
     <method name="ShowGamepadTextInput" ret="bool">
       <param name="eInputMode" type="EGamepadTextInputMode" kind="in" wire="enum" />
@@ -4822,7 +4822,7 @@
     </method>
     <method name="UGCDownloadToLocation" ret="u64">
       <param name="hContent" type="UGCHandle_t" kind="in" wire="u64" />
-      <param name="pchLocation" type="const char*" kind="str" />
+      <param name="pchLocation" type="const char*" kind="writepath" />
       <param name="unPriority" type="uint32" kind="in" wire="u32" />
     </method>
     <method name="GetLocalFileChangeCount" ret="i32" />

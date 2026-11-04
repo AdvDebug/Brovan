@@ -208,6 +208,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const uint DecorationXfbBuffer = 36;
         public const uint DecorationXfbStride = 37;
         public const uint DecorationNonUniform = 5300;
+        public const uint DecorationCounterBuffer = 5634;
+        public const uint DecorationUserSemantic = 5635;
+        public const uint DecorationUserTypeGOOGLE = 5636;
 
         public const uint BuiltInPosition = 0;
         public const uint BuiltInPointSize = 1;

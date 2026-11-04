@@ -316,6 +316,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_STACK_OVERFLOW = 0xC00000FD,
         STATUS_CONTROL_C_EXIT = 0xC000013A,
         STATUS_INVALID_ADDRESS = 0xC0000141,
+        STATUS_MAPPED_FILE_SIZE_ZERO = 0xC000011E,
         STATUS_TOO_MANY_OPENED_FILES = 0xC000011F,
         STATUS_FILE_INVALID = 0xC0000098,
         STATUS_PRIVILEGED_INSTRUCTION = 0xC0000096,
@@ -2952,6 +2953,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Both communication ports of a connection share it.
         internal AlpcConnection Connection;
         internal bool IsClientEnd;
+        internal bool Disconnected;
         private string UnnamedId;
 
         internal bool AcceptsRequests;

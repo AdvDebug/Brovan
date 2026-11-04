@@ -902,8 +902,18 @@ namespace Brovan
             if (Parameters.IndexOfAnyExcept(CsiParameterBytes) >= 0 || !SafeConsoleCsiFinals.Contains(Final))
                 return false;
 
-            if (Final == (byte)'J' && Parameters.TrimStart((byte)'0').SequenceEqual("3"u8))
-                return false;
+            if (Final == (byte)'J')
+            {
+                for (ReadOnlySpan<byte> Rest = Parameters; ;)
+                {
+                    int End = Rest.IndexOf((byte)';');
+                    if ((End < 0 ? Rest : Rest[..End]).TrimStart((byte)'0').SequenceEqual("3"u8))
+                        return false;
+                    if (End < 0)
+                        break;
+                    Rest = Rest[(End + 1)..];
+                }
+            }
 
             return Final == (byte)'m' || !Parameters.Contains((byte)':');
         }
@@ -1666,6 +1676,7 @@ namespace Brovan
             private static readonly object DriveMapLock = new();
             private static readonly Dictionary<char, string> DriveMappings = new();
             private static readonly HashSet<string> AllowedRoots = new(IsWindows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            private static readonly HashSet<string> ReadOnlyRoots = new(IsWindows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             private static readonly Dictionary<string, string> LinuxMountMappings = new(StringComparer.Ordinal);
             private static readonly Dictionary<string, string> WindowsMountMappings = new(StringComparer.OrdinalIgnoreCase);
 
@@ -1911,7 +1922,7 @@ namespace Brovan
 
                 for (int i = 0; i < RequiredFiles.Length; i++)
                 {
-                    string Resolved = ResolveSandboxLinks(RequiredFiles[i], true, EnforceAllowedRoots: false);
+                    string Resolved = ResolveSandboxLinks(RequiredFiles[i], true, SandboxRoots.Any);
                     if (!string.IsNullOrEmpty(Resolved) && File.Exists(Resolved))
                         return true;
                 }
@@ -2562,7 +2573,7 @@ namespace Brovan
                 string Full;
                 try
                 {
-                    Full = ResolveSandboxLinks(Path.GetFullPath(HostPath), IncludeFinal: true, EnforceAllowedRoots: false);
+                    Full = ResolveSandboxLinks(Path.GetFullPath(HostPath), IncludeFinal: true, SandboxRoots.Any);
                 }
                 catch
                 {
@@ -2692,6 +2703,10 @@ namespace Brovan
                     if (CreateDirectories || HostPathExists(VirtualPath))
                         return VirtualPath;
                 }
+
+                string MountedPath = ResolveWindowsMountReadPath(WinPath, PreserveFinalLink);
+                if (!string.IsNullOrEmpty(MountedPath) && HostPathExists(MountedPath))
+                    return MountedPath;
 
                 if (IsWindows)
                 {
@@ -2881,9 +2896,6 @@ namespace Brovan
                 if (WinPath.Length < 2 || WinPath[1] != ':')
                     return null;
 
-                if (TryResolveWindowsMount(WinPath, out string MountedHostPath))
-                    return GetSandboxedFullPath(ResolveExistingHostCase(MountedHostPath), CreateDirectories, PreserveFinalLink);
-
                 char Drive = char.ToUpperInvariant(WinPath[0]);
                 string DriveRelative = WinPath.Substring(2).TrimStart('\\');
 
@@ -2893,6 +2905,15 @@ namespace Brovan
 
                 string HostPath = CombineWindowsRelativePath(Root, DriveRelative);
                 return GetSandboxedFullPath(ResolveExistingHostCase(HostPath), CreateDirectories, PreserveFinalLink);
+            }
+
+            // Mounted host directories are read-only layers beneath VirtualFS.
+            private static string ResolveWindowsMountReadPath(string WinPath, bool PreserveFinalLink)
+            {
+                if (!TryResolveWindowsMount(WinPath, out string MountedHostPath))
+                    return null;
+
+                return GetSandboxedFullPath(ResolveExistingHostCase(MountedHostPath), CreateDirectories: false, PreserveFinalLink, ReadOnly: true);
             }
 
             private static readonly EnumerationOptions CaseInsensitiveComponentSearch = new EnumerationOptions
@@ -3114,7 +3135,7 @@ namespace Brovan
                 return true;
             }
 
-            private static bool IsWindowsRootedPath(string PathValue)
+            internal static bool IsWindowsRootedPath(string PathValue)
             {
                 if (string.IsNullOrEmpty(PathValue))
                     return false;
@@ -3266,7 +3287,7 @@ namespace Brovan
                 string NormalizedHostRoot;
                 try
                 {
-                    NormalizedHostRoot = ResolveSandboxLinks(Path.GetFullPath(HostRoot), IncludeFinal: true, EnforceAllowedRoots: false);
+                    NormalizedHostRoot = ResolveSandboxLinks(Path.GetFullPath(HostRoot), IncludeFinal: true, SandboxRoots.Any);
                 }
                 catch
                 {
@@ -3526,6 +3547,7 @@ namespace Brovan
                 lock (DriveMapLock)
                 {
                     AllowedRoots.Clear();
+                    ReadOnlyRoots.Clear();
 
                     foreach (KeyValuePair<char, string> Pair in DriveMappings)
                     {
@@ -3562,7 +3584,7 @@ namespace Brovan
 
                         try
                         {
-                            AllowedRoots.Add(Path.GetFullPath(Pair.Value));
+                            ReadOnlyRoots.Add(Path.GetFullPath(Pair.Value));
                         }
                         catch
                         {
@@ -3571,7 +3593,7 @@ namespace Brovan
 
                     try
                     {
-                        AllowedRoots.Add(Path.GetFullPath(WindowsLibsPath));
+                        ReadOnlyRoots.Add(Path.GetFullPath(WindowsLibsPath));
                     }
                     catch
                     {
@@ -3579,7 +3601,7 @@ namespace Brovan
                 }
             }
 
-            private static string GetSandboxedFullPath(string CandidatePath, bool CreateDirectories, bool PreserveFinalLink = false)
+            private static string GetSandboxedFullPath(string CandidatePath, bool CreateDirectories, bool PreserveFinalLink = false, bool ReadOnly = false)
             {
                 if (string.IsNullOrWhiteSpace(CandidatePath))
                     return null;
@@ -3594,14 +3616,15 @@ namespace Brovan
                     return null;
                 }
 
-                if (!IsUnderAllowedRoots(Full))
+                if (!IsUnderAllowedRoots(Full, ReadOnly))
                     return null;
 
                 // The final component cannot be gated on the path existing: a path below a symlinked directory only
                 // exists once the walk has resolved that directory.
                 bool IncludeFinal = !PreserveFinalLink;
-                string Resolved = ResolveSandboxLinks(Full, IncludeFinal);
-                if (string.IsNullOrEmpty(Resolved) || !IsUnderAllowedRoots(Resolved))
+                SandboxRoots Roots = ReadOnly ? SandboxRoots.Readable : SandboxRoots.Writable;
+                string Resolved = ResolveSandboxLinks(Full, IncludeFinal, Roots);
+                if (string.IsNullOrEmpty(Resolved) || !IsUnderAllowedRoots(Resolved, ReadOnly))
                     return null;
 
                 if (CreateDirectories)
@@ -3617,8 +3640,8 @@ namespace Brovan
                         return null;
                     }
 
-                    Resolved = ResolveSandboxLinks(Resolved, IncludeFinal);
-                    if (string.IsNullOrEmpty(Resolved) || !IsUnderAllowedRoots(Resolved))
+                    Resolved = ResolveSandboxLinks(Resolved, IncludeFinal, Roots);
+                    if (string.IsNullOrEmpty(Resolved) || !IsUnderAllowedRoots(Resolved, ReadOnly))
                         return null;
                 }
 
@@ -4168,22 +4191,31 @@ namespace Brovan
             // Components known to exist and not be reparse points. All walks share them.
             private static readonly PathCache<byte> SandboxPlainComponents = new PathCache<byte>(StringComparer.Ordinal);
 
-            private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, bool EnforceAllowedRoots = true)
+            private enum SandboxRoots : byte
+            {
+                Any,
+                Writable,
+                Readable,
+            }
+
+            private static readonly string[] SandboxRootsKeys = { "0", "1", "2" };
+
+            private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, SandboxRoots Roots)
             {
                 if (string.IsNullOrEmpty(FullPath))
-                    return ResolveSandboxLinks(FullPath, IncludeFinal, EnforceAllowedRoots, 0);
+                    return ResolveSandboxLinks(FullPath, IncludeFinal, Roots, 0);
 
-                string Key = string.Concat(IncludeFinal ? "1" : "0", EnforceAllowedRoots ? "1" : "0", FullPath);
+                string Key = string.Concat(IncludeFinal ? "1" : "0", SandboxRootsKeys[(int)Roots], FullPath);
                 if (SandboxLinkCache.TryGetValue(Key, out string Cached))
                     return Cached;
 
                 int Generation = Volatile.Read(ref SandboxLinkGeneration);
-                string Resolved = ResolveSandboxLinks(FullPath, IncludeFinal, EnforceAllowedRoots, 0);
+                string Resolved = ResolveSandboxLinks(FullPath, IncludeFinal, Roots, 0);
                 SandboxLinkCache.Add(Key, Resolved, ref SandboxLinkGeneration, Generation);
                 return Resolved;
             }
 
-            private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, bool EnforceAllowedRoots, int Hops)
+            private static string ResolveSandboxLinks(string FullPath, bool IncludeFinal, SandboxRoots Roots, int Hops)
             {
                 if (string.IsNullOrWhiteSpace(FullPath) || Hops > MaximumSymlinkHops)
                     return null;
@@ -4241,7 +4273,7 @@ namespace Brovan
                         if (!TryReadHostSymlinkTarget(Current, out LinkTarget))
                         {
                             string HostTarget = ResolveLinkTarget(Current, Attributes);
-                            if (string.IsNullOrEmpty(HostTarget) || !IsAcceptedLinkTarget(Current, HostTarget, EnforceAllowedRoots))
+                            if (string.IsNullOrEmpty(HostTarget) || !IsAcceptedLinkTarget(Current, HostTarget, Roots))
                                 return null;
 
                             Current = HostTarget;
@@ -4251,8 +4283,8 @@ namespace Brovan
                     else if (!TryReadHostSymlinkTarget(Current, out LinkTarget))
                         continue;
 
-                    string Resolved = ResolveSandboxLinks(CombineHostLinkTarget(Current, LinkTarget), true, EnforceAllowedRoots, Hops + 1);
-                    if (string.IsNullOrEmpty(Resolved) || !IsAcceptedLinkTarget(Current, Resolved, EnforceAllowedRoots))
+                    string Resolved = ResolveSandboxLinks(CombineHostLinkTarget(Current, LinkTarget), true, Roots, Hops + 1);
+                    if (string.IsNullOrEmpty(Resolved) || !IsAcceptedLinkTarget(Current, Resolved, Roots))
                         return null;
 
                     Current = Resolved;
@@ -4300,9 +4332,9 @@ namespace Brovan
                 }
             }
 
-            private static bool IsAcceptedLinkTarget(string LinkPath, string TargetPath, bool EnforceAllowedRoots)
+            private static bool IsAcceptedLinkTarget(string LinkPath, string TargetPath, SandboxRoots Roots)
             {
-                if (EnforceAllowedRoots && !IsUnderAllowedRoots(TargetPath))
+                if (Roots != SandboxRoots.Any && !IsUnderAllowedRoots(TargetPath, Roots == SandboxRoots.Readable))
                     return false;
 
                 // A link the guest wrote inside a linux mount must not reach the windows drives or the host.
@@ -4370,14 +4402,19 @@ namespace Brovan
             /// </remarks>
             public static string ResolveNativeHostPath(string EmulatedPath)
             {
-                if (!IsWindows || string.IsNullOrWhiteSpace(EmulatedPath))
+                if (string.IsNullOrWhiteSpace(EmulatedPath))
                     return null;
 
                 string WinPath = NormalizeWindowsEmulatedPath(EmulatedPath.Trim().TrimEnd('\0').Replace('/', '\\'));
                 if (string.IsNullOrEmpty(WinPath))
                     return null;
 
-                return GetNativeFullPath(ApplyWow64FileRedirect(WinPath), false);
+                WinPath = ApplyWow64FileRedirect(WinPath);
+                string MountedPath = ResolveWindowsMountReadPath(WinPath, PreserveFinalLink: false);
+                if (!string.IsNullOrEmpty(MountedPath))
+                    return MountedPath;
+
+                return IsWindows ? GetNativeFullPath(WinPath, false) : null;
             }
 
             private static string GetNativeFullPath(string CandidatePath, bool CreateDirectories)
@@ -4411,7 +4448,7 @@ namespace Brovan
                 return Full;
             }
 
-            private static bool IsUnderAllowedRoots(string FullPath)
+            private static bool IsUnderAllowedRoots(string FullPath, bool IncludeReadOnly = false)
             {
                 if (string.IsNullOrWhiteSpace(FullPath))
                     return false;
@@ -4428,24 +4465,31 @@ namespace Brovan
 
                 lock (DriveMapLock)
                 {
-                    foreach (string Root in AllowedRoots)
-                    {
-                        if (string.IsNullOrWhiteSpace(Root))
-                            continue;
+                    return IsUnderAnyRoot(Normalized, AllowedRoots) || (IncludeReadOnly && IsUnderAnyRoot(Normalized, ReadOnlyRoots));
+                }
+            }
 
-                        string RootNorm = Root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                        StringComparison Comparison = IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-                        if (Normalized.StartsWith(RootNorm + Path.DirectorySeparatorChar, Comparison) ||
-                            string.Equals(Normalized, RootNorm, Comparison))
-                        {
-                            return true;
-                        }
+            private static bool IsUnderAnyRoot(string Normalized, HashSet<string> Roots)
+            {
+                StringComparison Comparison = IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+                foreach (string Root in Roots)
+                {
+                    if (string.IsNullOrWhiteSpace(Root))
+                        continue;
+
+                    string RootNorm = Root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    if (Normalized.StartsWith(RootNorm + Path.DirectorySeparatorChar, Comparison) ||
+                        string.Equals(Normalized, RootNorm, Comparison))
+                    {
+                        return true;
                     }
                 }
 
                 return false;
             }
 
+            // Path.Combine discards the base if a component is rooted.
             private static string CombineWindowsRelativePath(string Root, string WindowsRelative)
             {
                 if (string.IsNullOrWhiteSpace(Root))
@@ -4458,7 +4502,12 @@ namespace Brovan
                 string Result = Root;
 
                 for (int i = 0; i < Parts.Length; i++)
+                {
+                    if (Path.IsPathRooted(Parts[i]))
+                        return null;
+
                     Result = Path.Combine(Result, Parts[i]);
+                }
 
                 return Result;
             }
@@ -4530,7 +4579,7 @@ namespace Brovan
                 if (string.IsNullOrWhiteSpace(Candidate))
                     return null;
 
-                string Full = GetSandboxedFullPath(Candidate, CreateDirectories: false);
+                string Full = GetSandboxedFullPath(Candidate, CreateDirectories: false, ReadOnly: true);
                 if (!string.IsNullOrEmpty(Full) && HostPathExists(Full))
                     return Full;
 
@@ -4576,7 +4625,7 @@ namespace Brovan
 
                             if (!WindowsLibsFileIndex.ContainsKey(Leaf))
                             {
-                                string Full = GetSandboxedFullPath(FilePath, CreateDirectories: false);
+                                string Full = GetSandboxedFullPath(FilePath, CreateDirectories: false, ReadOnly: true);
                                 if (!string.IsNullOrEmpty(Full))
                                     WindowsLibsFileIndex[Leaf] = Full;
                             }

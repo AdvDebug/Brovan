@@ -185,11 +185,36 @@ namespace Brovan.Core.Helpers
             NativeWinImports.SetConsoleMode(Handle, Mode);
         }
 
+        // Escape C0, C1 and DEL except line feed and tab.
+        private static readonly System.Buffers.SearchValues<char> TerminalControls = System.Buffers.SearchValues.Create(
+            "\0\x01\x02\x03\x04\x05\x06\x07\x08\x0B\x0C\x0D\x0E\x0F\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1A\x1B\x1C\x1D\x1E\x1F"
+            + "\x7F\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8A\x8B\x8C\x8D\x8E\x8F\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9A\x9B\x9C\x9D\x9E\x9F");
+
+        private static string EscapeTerminalControls(string Text)
+        {
+            int Next = Text.AsSpan().IndexOfAny(TerminalControls);
+            if (Next < 0)
+                return Text;
+
+            StringBuilder Builder = new StringBuilder(Text.Length + 8);
+            int Start = 0;
+            while (Next >= 0)
+            {
+                Builder.Append(Text, Start, Next - Start).Append("\\x").Append(((int)Text[Next]).ToString("X2"));
+                Start = Next + 1;
+                int Found = Text.AsSpan(Start).IndexOfAny(TerminalControls);
+                Next = Found < 0 ? -1 : Start + Found;
+            }
+
+            return Builder.Append(Text, Start, Text.Length - Start).ToString();
+        }
+
         public static void PrintHighlight(string Message, bool ColorPrefixOnly = false, bool HidePrefix = false, bool IgnoreSilent = false)
         {
             if (!IgnoreSilent && SilentMode)
                 return;
 
+            Message = EscapeTerminalControls(Message ?? string.Empty);
             string Prefix = null;
             ConsoleColor? PrefixColor = null;
             string PrefixTextColor = null;

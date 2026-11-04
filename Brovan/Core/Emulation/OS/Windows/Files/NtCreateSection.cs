@@ -9,6 +9,29 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const uint SEC_IMAGE = 0x01000000;
         private const uint SEC_RESERVE = 0x04000000;
+        private const uint PAGE_READWRITE = 0x04;
+        private const uint PAGE_EXECUTE = 0x10;
+        private const uint PAGE_EXECUTE_READ = 0x20;
+        private const uint PAGE_EXECUTE_READWRITE = 0x40;
+        private const uint PAGE_EXECUTE_WRITECOPY = 0x80;
+
+        private const AccessMask ExecuteDataAccess = AccessMask.GenericAll | AccessMask.MaximumAllowed | AccessMask.GenericExecute | AccessMask.FileExecute;
+
+        // Write-copy uses private pages and needs no file write access.
+        private static bool HasFileAccess(AccessMask Granted, uint Protection)
+        {
+            bool Read = (Granted & WinFile.ReadDataAccess) != 0;
+            bool Write = (Granted & WinFile.WriteDataAccess) != 0;
+            bool Execute = (Granted & ExecuteDataAccess) != 0;
+            return (Protection & 0xFF) switch
+            {
+                PAGE_READWRITE => Read && Write,
+                PAGE_EXECUTE => Execute,
+                PAGE_EXECUTE_READ or PAGE_EXECUTE_WRITECOPY => Read && Execute,
+                PAGE_EXECUTE_READWRITE => Read && Write && Execute,
+                _ => Read,
+            };
+        }
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -64,6 +87,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             string Path = null;
             WindowsFileStream Source = null;
+            WinFile Grow = null;
 
             if (FileHandle != 0)
             {
@@ -73,14 +97,39 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Path = FileObj.Path;
 
-                if (!string.IsNullOrEmpty(Path))
+                if (!IsImage)
                 {
-                    WindowsFileStream Stream = FileObj.GetFileStream();
-                    if (Stream != null && Stream.ExistsAsFile && Stream.Length != 0)
-                    {
-                        Size = (ulong)Stream.Length;
+                    if (!HasFileAccess(Instance.WinHelper.HandleManager.GetPermissionsByHandle(FileHandle), SectionPageProtection))
+                        return NTSTATUS.STATUS_ACCESS_DENIED;
+                    if (FileObj.Directory)
+                        return NTSTATUS.STATUS_INVALID_FILE_FOR_SECTION;
+                }
 
-                        if (!IsImage)
+                WindowsFileStream Stream = string.IsNullOrEmpty(Path) ? null : FileObj.GetFileStream();
+                if (Stream != null && Stream.ExistsAsFile)
+                {
+                    ulong FileSize = (ulong)Stream.Length;
+                    if (IsImage)
+                    {
+                        if (FileSize != 0)
+                            Size = FileSize;
+                    }
+                    else
+                    {
+                        if (Size == 0)
+                        {
+                            if (FileSize == 0)
+                                return NTSTATUS.STATUS_MAPPED_FILE_SIZE_ZERO;
+                            Size = FileSize;
+                        }
+                        else if (Size > FileSize)
+                        {
+                            if ((SectionPageProtection & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) == 0)
+                                return NTSTATUS.STATUS_SECTION_TOO_BIG;
+                            Grow = FileObj;
+                        }
+
+                        if (FileSize != 0)
                             Source = Stream;
                     }
                 }
@@ -99,6 +148,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Size > uint.MaxValue && !IsReserveOnly)
                 return NTSTATUS.STATUS_NO_MEMORY;
 
+            if (Grow != null)
+            {
+                WindowsFileStream Writable = Grow.GetFileStream(true);
+                if (Writable == null)
+                    return NTSTATUS.STATUS_ACCESS_DENIED;
+                try
+                {
+                    Writable.SetLength((long)Size);
+                    Grow.Real = true;
+                }
+                catch (Exception Ex)
+                {
+                    Utils.LogError($"[NtCreateSection] Growing \"{Grow.Path}\" to 0x{Size:X} failed: {Ex.Message}");
+                    return NTSTATUS.STATUS_ACCESS_DENIED;
+                }
+            }
+
             IntPtr Storage = IntPtr.Zero;
             string SharedMemoryPath = null;
             if (!IsImage && !IsReserveOnly)
@@ -115,7 +181,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Storage == IntPtr.Zero)
                     return NTSTATUS.STATUS_COMMITMENT_LIMIT;
 
-                if (Source != null && !CopyToStorage(Source, Storage, Size))
+                // The last mapped page includes file bytes past the section size.
+                if (Source != null && !CopyToStorage(Source, Storage, StorageSize))
                 {
                     Instance._emulator.ReleaseSharedStorage(Storage);
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;

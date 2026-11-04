@@ -662,7 +662,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     if (Directory.Exists(VirtualPath))
                     {
-                        Directory.Delete(VirtualPath, true);
+                        Directory.Delete(VirtualPath, false);
                         WindowsFileStream.InvalidateGuestPathCache();
                     }
 

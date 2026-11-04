@@ -13,6 +13,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
     {
         None,
         RenderText,
+        DeleteFont,
         GdiPrimitive,
         CreateWindow,
         WarpCursor,
@@ -652,12 +653,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return support == null ? Array.Empty<FontFamilyData>() : support.EnumerateFontFamilies(faceName, charSet);
         }
 
+        // Queued text draws may still use this font.
         public void DeleteFont(IntPtr font)
         {
             if (_disposed || font == IntPtr.Zero)
                 return;
 
-            _textMetrics?.DeleteFont(font);
+            Submit(new GuiCommand { Kind = GuiCommandKind.DeleteFont, Font = font });
         }
 
         public void PumpEvents()
@@ -844,6 +846,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                             command.Clip);
                     }
 
+                    return;
+
+                case GuiCommandKind.DeleteFont:
+                    _textMetrics?.DeleteFont(command.Font);
                     return;
 
                 case GuiCommandKind.CreateWindow:

@@ -17,6 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly List<RemoteGuestProcess> Live = new List<RemoteGuestProcess>();
 
         private readonly Process Host;
+        private readonly DateTime? HostStart;
         private readonly BinaryEmulator Owner;
 
         private RemoteGuestProcess(uint ProcessId, Process Host, BinaryEmulator Owner, ulong PebAddress, ulong ProcessParameters)
@@ -26,6 +27,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             this.Owner = Owner;
             this.PebAddress = PebAddress;
             this.ProcessParameters = ProcessParameters;
+            HostStart = ReadStartTime(Host);
+        }
+
+        private static DateTime? ReadStartTime(Process Host)
+        {
+            if (Host == null)
+                return null;
+
+            try
+            {
+                Host.Refresh();
+                return Host.StartTime;
+            }
+            catch (Exception Error) when (Error is InvalidOperationException || Error is System.ComponentModel.Win32Exception || Error is NotSupportedException)
+            {
+                return null;
+            }
         }
 
         internal uint ProcessId { get; }
@@ -260,7 +278,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (GuestSession.RequestTerminate(ProcessId, ExitCode))
                 return NTSTATUS.STATUS_SUCCESS;
 
-            if (Host == null)
+            if (Host == null || HostStart == null || ReadStartTime(Host) != HostStart)
                 return NTSTATUS.STATUS_INVALID_CID;
 
             try

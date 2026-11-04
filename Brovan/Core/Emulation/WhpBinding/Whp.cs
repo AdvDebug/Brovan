@@ -397,15 +397,27 @@ namespace Brovan.Core.Emulation
 
             WhpMemoryPermission perm = TranslateProtection(protection);
             long backingAddr = hostPointer.ToInt64();
-            IntPtr backing = FindBackingAllocation(hostPointer);
+            IntPtr backing = IntPtr.Zero;
+            BackingAllocation allocation = null;
             bool replaced = false;
 
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong guest = address + off;
+                IntPtr hostPage = new IntPtr(backingAddr + (long)off);
+
+                if (allocation == null || (ulong)(hostPage.ToInt64() - backing.ToInt64()) >= allocation.Size)
+                {
+                    backing = FindBackingAllocation(hostPage);
+                    if (backing == IntPtr.Zero || !_backingAllocations.TryGetValue(backing, out allocation))
+                    {
+                        backing = IntPtr.Zero;
+                        allocation = null;
+                    }
+                }
 
                 // Referenced before the replaced page is released, so the last reference cannot drop mid-loop.
-                if (backing != IntPtr.Zero && _backingAllocations.TryGetValue(backing, out BackingAllocation allocation))
+                if (allocation != null)
                     allocation.AliasPages++;
 
                 if (_mappedPages.TryGetValue(guest, out MappedPage previous))
@@ -416,7 +428,7 @@ namespace Brovan.Core.Emulation
 
                 SetMappedPage(guest, new MappedPage
                 {
-                    HostPage = new IntPtr(backingAddr + (long)off),
+                    HostPage = hostPage,
                     OwnedBacking = backing,
                     IsAlias = true,
                     Permissions = perm,
@@ -5035,7 +5047,8 @@ namespace Brovan.Core.Emulation
                 ulong cursor = firstPageEnd;
                 while (cursor < accessEnd)
                 {
-                    if (!_mappedPages.TryGetValue(cursor, out MappedPage next) || next == null || next.HostPage == IntPtr.Zero)
+                    if (!_mappedPages.TryGetValue(cursor, out MappedPage next) || next == null || next.HostPage == IntPtr.Zero
+                        || next.OwnedBacking != page.OwnedBacking)
                         return false;
                     long expectedHost = page.HostPage.ToInt64() + (long)(cursor - pageBase);
                     long actualHost = next.HostPage.ToInt64();

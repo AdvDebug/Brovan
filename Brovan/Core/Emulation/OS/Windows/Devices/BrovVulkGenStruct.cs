@@ -34,6 +34,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int PipelineRobustnessSid = Array.IndexOf(BrovVulkStructMeta.STypes, (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO);
         private static readonly int PipelineRobustnessBehaviours = BrovVulkLayout.MemberOffset["VkPipelineRobustnessCreateInfo.storageBuffers"];
         private static readonly int PipelineRobustnessBehavioursEnd = BrovVulkLayout.MemberOffset["VkPipelineRobustnessCreateInfo.images"] + 4;
+        private static readonly int SpecializationEntryCount = BrovVulkLayout.MemberOffset["VkSpecializationInfo.mapEntryCount"];
+        private static readonly int SpecializationEntries = BrovVulkLayout.MemberOffset["VkSpecializationInfo.pMapEntries"];
+        private static readonly int SpecializationDataSize = BrovVulkLayout.MemberOffset["VkSpecializationInfo.dataSize"];
+        private static readonly int SpecializationMapEntrySize = BrovVulkLayout.StructSize["VkSpecializationMapEntry"];
+        private static readonly int SpecializationEntryOffset = BrovVulkLayout.MemberOffset["VkSpecializationMapEntry.offset"];
+        private static readonly int SpecializationEntryBytes = BrovVulkLayout.MemberOffset["VkSpecializationMapEntry.size"];
 
         // The slot is sized from the descriptor id, so a node whose sType names a different struct would let
         // a reader of the chain write outside the slot.
@@ -202,7 +208,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     {
                         uint n = r.ReadU32();
                         ulong declared = d.Size == 8 ? *(ulong*)(dst + d.LenOffset) : *(uint*)(dst + d.LenOffset);
-                        if (n != 0 && n != declared)
+                        if (n != declared)
                             throw new InvalidOperationException("BrovVulk generic: blob length mismatch.");
                         if (n > 0)
                         {
@@ -289,9 +295,27 @@ namespace Brovan.Core.Emulation.OS.Windows
                 st.CheckSubpass(*(IntPtr*)(dst + GraphicsPipelinePass), *(uint*)(dst + GraphicsPipelineSubpass));
             else if (sid == BufferViewCreateInfoSid)
                 st.CheckBufferSpanOrRest(*(IntPtr*)(dst + BufferViewBuffer), *(ulong*)(dst + BufferViewOffset), *(ulong*)(dst + BufferViewRange));
+            else if (sid == BrovVulkStructMeta.SpecializationInfoSid)
+                CheckSpecializationInfo(dst);
             // Zero selects the device's forced robustness settings.
             else if (sid == PipelineRobustnessSid && (st.DeviceStandIns(st.CallDevice) & VulkanStandIns.HostCpuDeviceBit) != 0)
                 new Span<byte>((void*)(dst + PipelineRobustnessBehaviours), PipelineRobustnessBehavioursEnd - PipelineRobustnessBehaviours).Clear();
+        }
+
+        private static void CheckSpecializationInfo(IntPtr info)
+        {
+            uint count = *(uint*)(info + SpecializationEntryCount);
+            byte* entries = *(byte**)(info + SpecializationEntries);
+            ulong dataSize = *(ulong*)(info + SpecializationDataSize);
+
+            for (uint k = 0; k < count; k++)
+            {
+                byte* entry = entries + (long)k * SpecializationMapEntrySize;
+                ulong offset = *(uint*)(entry + SpecializationEntryOffset);
+                ulong size = *(ulong*)(entry + SpecializationEntryBytes);
+                if ((size != 1 && size != 2 && size != 4 && size != 8) || offset > dataSize || size > dataSize - offset)
+                    throw new InvalidOperationException($"BrovVulk generic: a specialization entry of {size} bytes at {offset} outside the {dataSize} byte data.");
+            }
         }
 
         private static Dictionary<int, int> ColorCountMembers(params (int SType, string Member)[] members)

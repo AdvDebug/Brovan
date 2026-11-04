@@ -29,6 +29,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (AlpcMessaging.Owns(Port))
                 return AlpcMessaging.SendWaitReceive(Instance, Port, Flags, SendMessagePtr, SendMessageAttributesPtr, ReceiveMessagePtr, BufferLengthPtr, ReceiveMessageAttributesPtr, TimeoutPtr);
 
+            if (SendMessagePtr != 0 && Port.Handler != null && IsDisconnected(Port, PortKey))
+                return NTSTATUS.STATUS_PORT_DISCONNECTED;
+
             if (SendMessagePtr == 0 && ReceiveMessagePtr != 0 && ServedQueueOf(Port, PortKey) is AlpcReceiveQueue Answers)
                 return ReceiveFrom(Instance, Answers, null, ReceiveMessagePtr, BufferLengthPtr, ReceiveMessageAttributesPtr, TimeoutPtr);
 
@@ -183,7 +186,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
             }
 
-            return QueueHandlerReply(Instance, Port, Answers, new AlpcRequestFacts(TypeFlagsOf(SendBytes), NewCallbackId(), MessageContext), Reply.Data);
+            return QueueHandlerReply(Instance, Port, PortKey, Answers, new AlpcRequestFacts(TypeFlagsOf(SendBytes), NewCallbackId(), MessageContext), Reply.Data);
         }
 
         private static PortReply RunHandler(BinaryEmulator Instance, WinPort Port, ulong PortKey, byte[] SendBytes, ulong SendAttributesPtr)

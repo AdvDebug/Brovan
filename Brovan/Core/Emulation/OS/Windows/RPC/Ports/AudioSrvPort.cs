@@ -71,6 +71,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private sealed class AudioStream
         {
+            public BinaryEmulator Owner;
             public uint Id;
             public string EndpointId;
             public bool Capture;
@@ -84,6 +85,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             public uint PeriodFrames;
             public string HandlePortName;
             public AudioEngine Engine;
+            public IntPtr EnginePin;
             public uint QueueOffset;
             public uint QueueCount;
             public AudioSession Session;
@@ -185,6 +187,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const int EInvalidArg = unchecked((int)0x80070057);
         private const int SFalse = 1;
         private const int AudioClientNotInitialized = unchecked((int)0x88890001);
+        private const int AudioClientAlreadyInitialized = unchecked((int)0x88890002);
         private const int AudioClientUnsupportedFormat = unchecked((int)0x88890008);
         private const uint RpcXInvalidBound = 1734;
         private const uint MaxVolumeQueryChannels = 32;
@@ -434,6 +437,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             AudioStream Stream = new AudioStream
             {
+                Owner = Instance,
                 Id = NextStreamId++,
                 EndpointId = EndpointId,
                 Capture = Capture,
@@ -476,6 +480,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             {
                 Log(Instance, "stream setup for an unknown context handle.");
                 return LrpcPacket.BuildFault(Message, ErrorNotFound);
+            }
+
+            if (Stream.SectionHandle != 0)
+            {
+                Log(Instance, $"stream {Stream.Id} setup refused, the stream already has its buffer.");
+                return BuildSetupReply(Message, null, -1, AudioClientAlreadyInitialized);
             }
 
             int Accepted = AcceptStreamFormat(Stream);
@@ -563,8 +573,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             {
                 Log(Instance, $"stream {Stream.Id} released after {Stream.Engine?.TransferredBytes ?? 0} bytes.");
 
-                bool EngineStopped = Stream.Engine?.Stop() ?? true;
-                if (EngineStopped && Stream.ServerSectionHandle != 0)
+                if (StopEngine(Instance, Stream) && Stream.ServerSectionHandle != 0)
                     Instance.WinHelper.CloseHandle(Stream.ServerSectionHandle);
 
                 RemoveHandlePort(Instance, Stream);
@@ -573,6 +582,43 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             }
 
             return LrpcPacket.BuildResponse(Message, Ndr20Writer.BuildContextHandleReply(Guid.Empty));
+        }
+
+        // The engine thread can use the pinned buffer after the guest unmaps it.
+        private static bool StopEngine(BinaryEmulator Instance, AudioStream Stream)
+        {
+            if (Stream.Engine != null && !Stream.Engine.Stop())
+                return false;
+
+            Stream.Engine = null;
+            if (Stream.EnginePin != IntPtr.Zero)
+            {
+                Instance.UnpinBacking(Stream.EnginePin);
+                Stream.EnginePin = IntPtr.Zero;
+            }
+
+            return true;
+        }
+
+        internal static void StopStreams(BinaryEmulator Instance)
+        {
+            List<uint> Stopped = new List<uint>();
+            foreach (AudioStream Stream in Streams.Values)
+            {
+                if (Stream.Owner != Instance)
+                    continue;
+
+                if (!StopEngine(Instance, Stream))
+                    Utils.LogError($"[AudioSrv] the engine of stream {Stream.Id} did not stop before the emulator was disposed.");
+
+                Stopped.Add(Stream.Id);
+            }
+
+            foreach (uint Id in Stopped)
+            {
+                DetachSession(Streams[Id]);
+                Streams.Remove(Id);
+            }
         }
 
         private static byte[] GetMixFormat(in LrpcMessage Message, BinaryEmulator Instance)
@@ -1247,11 +1293,14 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             // The engine walks the ring from a host thread, so it needs a host pointer into the section
             // rather than the emulator's memory accessors, which are only safe from the guest thread.
             IntPtr Host = Instance.GetHostPointer(Backing, SectionSize);
-            if (Host == IntPtr.Zero)
+            IntPtr Pin = Host == IntPtr.Zero ? IntPtr.Zero : Instance.PinBacking(Host, SectionSize);
+            if (Pin == IntPtr.Zero)
             {
-                Log(Instance, "no host pointer for the shared section; stream will not run.");
+                Log(Instance, "no host memory the engine can hold for the shared section; stream will not run.");
                 return true;
             }
+
+            Stream.EnginePin = Pin;
 
             if (Stream.Capture)
             {

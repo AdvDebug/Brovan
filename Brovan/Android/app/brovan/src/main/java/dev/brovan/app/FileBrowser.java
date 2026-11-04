@@ -590,7 +590,7 @@ final class FileBrowser {
                 DocumentFile document = DocumentFile.fromSingleUri(activity, source);
                 String name = document == null ? null : document.getName();
 
-                if (name == null) {
+                if (name == null || !usable(name)) {
                     continue;
                 }
 

@@ -525,7 +525,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const ulong WholeSize = ulong.MaxValue;
 
-        private readonly record struct HandleEntry(IntPtr Ptr, string Type, uint Parent, ulong Serial, uint Device);
+        private record struct HandleEntry(IntPtr Ptr, string Type, uint Parent, ulong Serial, uint Device)
+        {
+            // Last generation to name this handle. Use MaxValue for implicitly bound views.
+            public ulong Named;
+        }
 
         private readonly Dictionary<uint, HandleEntry> _handles = new Dictionary<uint, HandleEntry>();
         private readonly Dictionary<(IntPtr Ptr, string Type), uint> _ids = new Dictionary<(IntPtr, string), uint>();
@@ -550,6 +554,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int SwapchainInfoFormat = BrovVulkLayout.MemberOffset["VkSwapchainCreateInfoKHR.imageFormat"];
         private static readonly int SwapchainInfoExtent = BrovVulkLayout.MemberOffset["VkSwapchainCreateInfoKHR.imageExtent"];
         private static readonly int SwapchainInfoLayers = BrovVulkLayout.MemberOffset["VkSwapchainCreateInfoKHR.imageArrayLayers"];
+        private static readonly int PhysicalProperties2Size = BrovVulkLayout.StructSize["VkPhysicalDeviceProperties2"];
+        private static readonly int RayTracingPropertiesSize = BrovVulkLayout.StructSize["VkPhysicalDeviceRayTracingPropertiesNV"];
+        private static readonly int RayTracingHandleSize = BrovVulkLayout.MemberOffset["VkPhysicalDeviceRayTracingPropertiesNV.shaderGroupHandleSize"];
+        private static readonly int PresentInfoSwapchainCount = BrovVulkLayout.MemberOffset["VkPresentInfoKHR.swapchainCount"];
+        private static readonly int PresentInfoSwapchains = BrovVulkLayout.MemberOffset["VkPresentInfoKHR.pSwapchains"];
+        private static readonly int PresentInfoImageIndices = BrovVulkLayout.MemberOffset["VkPresentInfoKHR.pImageIndices"];
+        private static readonly int ReleaseInfoSwapchain = BrovVulkLayout.MemberOffset["VkReleaseSwapchainImagesInfoKHR.swapchain"];
+        private static readonly int ReleaseInfoIndexCount = BrovVulkLayout.MemberOffset["VkReleaseSwapchainImagesInfoKHR.imageIndexCount"];
+        private static readonly int ReleaseInfoImageIndices = BrovVulkLayout.MemberOffset["VkReleaseSwapchainImagesInfoKHR.pImageIndices"];
         private static readonly int SwapchainInfoSurface = BrovVulkLayout.MemberOffset["VkSwapchainCreateInfoKHR.surface"];
         private static readonly int ViewInfoImage = BrovVulkLayout.MemberOffset["VkImageViewCreateInfo.image"];
         private static readonly int ViewInfoType = BrovVulkLayout.MemberOffset["VkImageViewCreateInfo.viewType"];
@@ -716,6 +729,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int VertexAttributeBinding = BrovVulkLayout.MemberOffset["VkVertexInputAttributeDescription2EXT.binding"];
         private readonly Dictionary<IntPtr, ImageExtent> _images = new Dictionary<IntPtr, ImageExtent>();
         private readonly Dictionary<IntPtr, ImageExtent> _swapchainExtents = new Dictionary<IntPtr, ImageExtent>();
+        private readonly Dictionary<IntPtr, uint> _swapchainImageCounts = new Dictionary<IntPtr, uint>();
+        private readonly Dictionary<IntPtr, uint> _shaderGroupCounts = new Dictionary<IntPtr, uint>();
+        private readonly Dictionary<IntPtr, uint> _shaderGroupHandleSizes = new Dictionary<IntPtr, uint>();
         private readonly Dictionary<IntPtr, (uint Count, uint Values)> _queryPools = new Dictionary<IntPtr, (uint, uint)>();
         private readonly Dictionary<IntPtr, RenderPassShape> _renderPasses = new Dictionary<IntPtr, RenderPassShape>();
         private readonly Dictionary<IntPtr, FramebufferExtent> _framebuffers = new Dictionary<IntPtr, FramebufferExtent>();
@@ -917,7 +933,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 return IntPtr.Zero;
             }
-            if (_handles.TryGetValue(id, out HandleEntry e) && e.Type == type)
+            ref HandleEntry e = ref CollectionsMarshal.GetValueRefOrNullRef(_handles, id);
+            if (!System.Runtime.CompilerServices.Unsafe.IsNullRef(ref e) && e.Type == type)
             {
                 if (e.Device != 0)
                 {
@@ -926,9 +943,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     else if (_callOwner != e.Device)
                         throw new InvalidOperationException($"BrovVulk generic: a {type} of another device.");
                 }
+                if (_callCommand != null)
+                    e.Named = Math.Max(e.Named, _recordingGeneration);
+                IntPtr ptr = e.Ptr;
                 if (_callRecording != null)
-                    NoteHandle(id, e.Ptr, e.Type, e.Serial);
-                return e.Ptr;
+                    NoteHandle(id, ptr, e.Type, e.Serial);
+                return ptr;
             }
             throw new InvalidOperationException($"BrovVulk generic: bad handle id {id} (expected {type}).");
         }
@@ -969,6 +989,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     else if (_handles.TryGetValue(e.Parent, out HandleEntry parent) && parent.Type == "VkDevice")
                         device = parent.Ptr;
                     Retire.ForgetObject(e.Ptr, e.Type);
+                    if (_openRecordings.Count != 0 && MayBeBound(e.Named))
+                        InvalidateBound(e.Ptr, e.Type, e.Named);
                     owner = e.Ptr;
                     ownerType = e.Type;
                     if (e.Type == "VkBuffer")
@@ -1002,10 +1024,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                             _framebuffers.Remove(e.Ptr);
                             break;
                         case "VkCommandBuffer":
-                            _recordings.Remove(e.Ptr);
+                            if (_recordings.Remove(e.Ptr, out Recording? freed))
+                                ClearBound(freed);
                             break;
                         case "VkPipeline":
                             _pipelines.Remove(e.Ptr);
+                            _shaderGroupCounts.Remove(e.Ptr);
                             break;
                         case "VkDescriptorSetLayout":
                             _setLayouts.Remove(e.Ptr);
@@ -1015,6 +1039,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             break;
                         case "VkDevice":
                             _devicePhysical.Remove(e.Ptr);
+                            _shaderGroupHandleSizes.Remove(e.Ptr);
                             _deviceImports.Remove(e.Ptr);
                             _deviceStandIns.Remove(e.Ptr);
                             _win32MemoryDevices.Remove(e.Ptr);
@@ -1026,6 +1051,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         case "VkSwapchainKHR":
                             Wsi.Forget(e.Ptr, e.Type);
                             _swapchainExtents.Remove(e.Ptr);
+                            _swapchainImageCounts.Remove(e.Ptr);
                             ScrubSwapchain(e.Ptr);
                             break;
                     }
@@ -1229,6 +1255,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public unsafe void CheckImageBind(IntPtr device, IntPtr image, IntPtr memory, ulong offset, uint planeAspect)
         {
+            RefuseSwapchainImage(image);
             if (memory == IntPtr.Zero)
                 return;
 
@@ -1363,6 +1390,102 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             for (uint k = 0; k < count; k++)
                 SetImage(*(IntPtr*)(images + (int)(k * 8)), extent);
+        }
+
+        public unsafe void CheckPresentIndices(IntPtr info)
+        {
+            if (info == IntPtr.Zero)
+                return;
+
+            uint count = *(uint*)(info + PresentInfoSwapchainCount);
+            IntPtr swapchains = *(IntPtr*)(info + PresentInfoSwapchains);
+            IntPtr indices = *(IntPtr*)(info + PresentInfoImageIndices);
+            if (count != 0 && (swapchains == IntPtr.Zero || indices == IntPtr.Zero))
+                throw new InvalidOperationException("BrovVulk generic: a present without its swapchains or image indices.");
+
+            for (uint k = 0; k < count; k++)
+                CheckImageIndex(((IntPtr*)swapchains)[k], ((uint*)indices)[k]);
+        }
+
+        public unsafe void CheckReleasedIndices(IntPtr info)
+        {
+            if (info == IntPtr.Zero)
+                return;
+
+            IntPtr swapchain = *(IntPtr*)(info + ReleaseInfoSwapchain);
+            uint count = *(uint*)(info + ReleaseInfoIndexCount);
+            IntPtr indices = *(IntPtr*)(info + ReleaseInfoImageIndices);
+            if (count != 0 && indices == IntPtr.Zero)
+                throw new InvalidOperationException("BrovVulk generic: a swapchain image release without its image indices.");
+
+            for (uint k = 0; k < count; k++)
+                CheckImageIndex(swapchain, ((uint*)indices)[k]);
+        }
+
+        private unsafe void CheckImageIndex(IntPtr swapchain, uint index)
+        {
+            if (!_swapchainImageCounts.TryGetValue(swapchain, out uint images))
+            {
+                if (!_handles.TryGetValue(IdOf(swapchain, "VkSwapchainKHR"), out HandleEntry entry)
+                    || !_handles.TryGetValue(entry.Device, out HandleEntry device)
+                    || BrovVulkApi.vkGetSwapchainImagesKHR(device.Ptr, swapchain, (IntPtr)(&images), IntPtr.Zero) < 0)
+                    throw new InvalidOperationException("BrovVulk generic: a swapchain this layer cannot count the images of.");
+                _swapchainImageCounts[swapchain] = images;
+            }
+
+            if (index >= images)
+                throw new InvalidOperationException($"BrovVulk generic: image index {index} past the swapchain's {images} images.");
+        }
+
+        public unsafe void NoteShaderGroups(IntPtr pipelines, IntPtr infos, uint count, int infoSize, int groupCountOffset)
+        {
+            for (uint k = 0; pipelines != IntPtr.Zero && infos != IntPtr.Zero && k < count; k++)
+            {
+                IntPtr pipeline = ((IntPtr*)pipelines)[k];
+                if (pipeline != IntPtr.Zero)
+                    _shaderGroupCounts[pipeline] = *(uint*)(infos + (int)(k * (uint)infoSize) + groupCountOffset);
+            }
+        }
+
+        public unsafe void CheckShaderGroupHandles(IntPtr device, IntPtr pipeline, uint firstGroup, uint groupCount, ulong dataSize)
+        {
+            if (!_shaderGroupCounts.TryGetValue(pipeline, out uint groups))
+                throw new InvalidOperationException("BrovVulk generic: shader group handles of a pipeline that is not a ray tracing pipeline.");
+            if (firstGroup > groups || groupCount > groups - firstGroup)
+                throw new InvalidOperationException($"BrovVulk generic: shader groups {firstGroup} to {(ulong)firstGroup + groupCount} past the pipeline's {groups}.");
+            if ((ulong)groupCount * ShaderGroupHandleSize(device) > dataSize)
+                throw new InvalidOperationException($"BrovVulk generic: {groupCount} shader group handles do not fit {dataSize} bytes.");
+        }
+
+        private unsafe uint ShaderGroupHandleSize(IntPtr device)
+        {
+            if (_shaderGroupHandleSizes.TryGetValue(device, out uint size))
+                return size;
+            if (!_devicePhysical.TryGetValue(device, out IntPtr physicalDevice))
+                throw new InvalidOperationException("BrovVulk generic: a device without a physical device.");
+
+            byte* properties = stackalloc byte[PhysicalProperties2Size];
+            byte* rayTracing = stackalloc byte[RayTracingPropertiesSize];
+            new Span<byte>(properties, PhysicalProperties2Size).Clear();
+            new Span<byte>(rayTracing, RayTracingPropertiesSize).Clear();
+            *(int*)properties = BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            *(IntPtr*)(properties + VkOffsets.NodePNext) = (IntPtr)rayTracing;
+            *(int*)rayTracing = BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PROPERTIES_NV;
+            BrovVulkApi.vkGetPhysicalDeviceProperties2(physicalDevice, (IntPtr)properties);
+
+            size = *(uint*)(rayTracing + RayTracingHandleSize);
+            if (size == 0)
+                throw new InvalidOperationException("BrovVulk generic: the device reports no shader group handle size.");
+            _shaderGroupHandleSizes[device] = size;
+            return size;
+        }
+
+        // The driver frees swapchain images with the swapchain.
+        public void RefuseSwapchainImage(IntPtr image)
+        {
+            if (_handles.TryGetValue(IdOf(image, "VkImage"), out HandleEntry entry)
+                && _handles.TryGetValue(entry.Parent, out HandleEntry parent) && parent.Type == "VkSwapchainKHR")
+                throw new InvalidOperationException("BrovVulk generic: a swapchain image cannot be destroyed or bound to memory.");
         }
 
         private IntPtr SwapchainOfView(IntPtr view)
@@ -1713,6 +1836,147 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal enum RecordingState : byte { Initial, Recording, Executable, Invalid }
 
+        internal enum BoundKind : byte { Pipeline, Set, Buffer, RenderPass, Framebuffer, View }
+
+        private const int BoundPoints = BindPoints + 1;
+
+        private static int BoundPoint(int bindPoint) => BindPointIndex(bindPoint) is int index && index >= 0 ? index : BindPoints;
+
+        private readonly HashSet<Recording> _openRecordings = new HashSet<Recording>();
+
+        // Lower bound on the oldest open recording, recomputed on demand.
+        private ulong _oldestOpen;
+        private bool _oldestLeft;
+
+        private bool MayBeBound(ulong named)
+        {
+            if (named < _oldestOpen)
+                return false;
+            if (!_oldestLeft)
+                return true;
+            _oldestLeft = false;
+            _oldestOpen = ulong.MaxValue;
+            foreach (Recording rec in _openRecordings)
+                _oldestOpen = Math.Min(_oldestOpen, rec.Generation);
+            return named >= _oldestOpen;
+        }
+
+        // Callers must check first + count against device limits.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        private static unsafe void CopyBound(ref IntPtr[]? slots, uint first, uint count, IntPtr handles)
+        {
+            IntPtr[]? target = slots;
+            if (target == null || first + count > (uint)target.Length)
+                target = GrowBound(ref slots, first + count);
+            if (handles == IntPtr.Zero)
+                Array.Clear(target, (int)first, (int)count);
+            else if (count == 1)
+                target[first] = *(IntPtr*)handles;
+            else
+                new ReadOnlySpan<IntPtr>((void*)handles, (int)count).CopyTo(target.AsSpan((int)first));
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static IntPtr[] GrowBound(ref IntPtr[]? slots, uint end)
+        {
+            Array.Resize(ref slots, (int)Math.Max(end, Math.Max(8u, (uint)(slots?.Length ?? 0) * 2)));
+            return slots;
+        }
+
+        private static void NoteView(Recording rec, IntPtr view)
+        {
+            if (view == IntPtr.Zero)
+                return;
+            if (rec.BoundViews == null || rec.ViewsBound == (uint)rec.BoundViews.Length)
+                GrowBound(ref rec.BoundViews, rec.ViewsBound + 1);
+            rec.BoundViews![rec.ViewsBound++] = view;
+        }
+
+        private void ClearBound(Recording rec)
+        {
+            if (!_openRecordings.Remove(rec))
+                return;
+            _oldestLeft = true;
+            Array.Clear(rec.BoundPipelines);
+            foreach (IntPtr[]? sets in rec.BoundSetHandles)
+            {
+                if (sets != null)
+                    Array.Clear(sets);
+            }
+            if (rec.BoundVertex != null)
+                Array.Clear(rec.BoundVertex);
+            rec.BoundIndex = rec.BoundRenderPass = rec.BoundFramebuffer = IntPtr.Zero;
+            rec.ViewsBound = 0;
+        }
+
+        private bool Binds(Recording rec, IntPtr ptr, BoundKind kind)
+        {
+            switch (kind)
+            {
+                case BoundKind.Pipeline:
+                    return Array.IndexOf(rec.BoundPipelines, ptr) >= 0;
+                case BoundKind.Set:
+                    foreach (IntPtr[]? sets in rec.BoundSetHandles)
+                    {
+                        if (sets != null && Array.IndexOf(sets, ptr) >= 0)
+                            return true;
+                    }
+                    return false;
+                case BoundKind.Buffer:
+                    return rec.BoundIndex == ptr || (rec.BoundVertex != null && Array.IndexOf(rec.BoundVertex, ptr) >= 0);
+                case BoundKind.RenderPass:
+                    return rec.BoundRenderPass == ptr;
+                case BoundKind.Framebuffer:
+                    return rec.BoundFramebuffer == ptr;
+                default:
+                    if (rec.BoundViews != null && Array.IndexOf(rec.BoundViews, ptr, 0, (int)rec.ViewsBound) >= 0)
+                        return true;
+                    return rec.BoundFramebuffer != IntPtr.Zero && _framebuffers.TryGetValue(rec.BoundFramebuffer, out FramebufferExtent? fb)
+                        && fb.Views != null && Array.IndexOf(fb.Views, ptr) >= 0;
+            }
+        }
+
+        // Later commands can use bound objects without naming them.
+        private void InvalidateBound(IntPtr ptr, string type, ulong named)
+        {
+            BoundKind kind;
+            switch (type)
+            {
+                case "VkPipeline": kind = BoundKind.Pipeline; break;
+                case "VkDescriptorSet": kind = BoundKind.Set; break;
+                case "VkBuffer": kind = BoundKind.Buffer; break;
+                case "VkRenderPass": kind = BoundKind.RenderPass; break;
+                case "VkFramebuffer": kind = BoundKind.Framebuffer; break;
+                case "VkImageView": kind = BoundKind.View; break;
+                default: return;
+            }
+
+            List<Recording>? hit = null;
+            foreach (Recording rec in _openRecordings)
+            {
+                if (rec.Generation <= named && Binds(rec, ptr, kind))
+                    (hit ??= new List<Recording>()).Add(rec);
+            }
+            for (int k = 0; hit != null && k < hit.Count; k++)
+            {
+                ClearBound(hit[k]);
+                hit[k].State = RecordingState.Invalid;
+                Utils.LogError($"[!] BrovVulk(gen): a {type} was destroyed while a command buffer being recorded had it bound. That command buffer is refused until it is begun again or reset.");
+            }
+        }
+
+        public void NoteVertexBuffers(uint first, uint count, IntPtr buffers)
+        {
+            if (_callCommand != null && count != 0)
+                CopyBound(ref _callCommand.BoundVertex, first, count, buffers);
+        }
+
+        public void NoteIndexBuffer(IntPtr buffer)
+        {
+            if (_callCommand != null)
+                _callCommand.BoundIndex = buffer;
+        }
+
         // A secondary's clear bounds are checked against the primary's render area.
         internal sealed class Recording
         {
@@ -1742,6 +2006,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             public readonly SetLayoutShape?[]?[] BoundSets = new SetLayoutShape?[]?[BindPoints];
             public HashSet<SetLayoutShape>? PushedLayouts;
             public BrovVulkRetire.Stamp Stamp;
+            public readonly IntPtr[] BoundPipelines = new IntPtr[BoundPoints];
+            public readonly IntPtr[]?[] BoundSetHandles = new IntPtr[]?[BoundPoints];
+            public IntPtr[]? BoundVertex;
+            public IntPtr BoundIndex;
+            public IntPtr BoundRenderPass;
+            public IntPtr BoundFramebuffer;
+            public IntPtr[]? BoundViews;
+            public uint ViewsBound;
 
             public void EndInstance()
             {
@@ -1807,6 +2079,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!_recordings.TryGetValue(commandBuffer, out Recording? rec))
                 return;
             LetGo(commandBuffer, "VkCommandBuffer");
+            ClearBound(rec);
             rec.Restart(++_recordingGeneration, RecordingState.Initial);
         }
 
@@ -2068,7 +2341,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             _framebuffers[framebuffer] = extent;
             foreach (IntPtr view in extent.Views ?? Array.Empty<IntPtr>())
+            {
                 HoldFor(CallDevice, framebuffer, "VkFramebuffer", view, "VkImageView");
+                ref HandleEntry entry = ref CollectionsMarshal.GetValueRefOrNullRef(_handles, IdOf(view, "VkImageView"));
+                if (!System.Runtime.CompilerServices.Unsafe.IsNullRef(ref entry))
+                    entry.Named = ulong.MaxValue;
+            }
         }
 
         public unsafe void BeginRenderPass(IntPtr commandBuffer, IntPtr info)
@@ -2111,6 +2389,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             rec.Views = pass.Views != null ? pass.Views[0] : 1u;
             rec.Colors = pass.Colors.Length != 0 ? pass.Colors[0] : 0u;
             rec.Layers = pass.ViewMask != 0 ? 1u : fb.Layers;
+
+            rec.BoundRenderPass = *(IntPtr*)(p + BeginPass);
+            rec.BoundFramebuffer = *(IntPtr*)(p + BeginFramebuffer);
+            for (uint a = 0; fb.Views == null && a < fb.Attachments; a++)
+                NoteView(rec, views[a]);
         }
 
         private unsafe void PadClearValues(byte* info, uint needed)
@@ -2205,6 +2488,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!rec.Inside || !rec.AreaKnown || (rec.Pass != null) != renderPass)
                 throw new InvalidOperationException("BrovVulk generic: no render pass instance of that kind is open.");
             rec.EndInstance();
+            rec.BoundRenderPass = rec.BoundFramebuffer = IntPtr.Zero;
+            rec.ViewsBound = 0;
         }
 
         public unsafe void BeginRendering(IntPtr commandBuffer, IntPtr info)
@@ -2245,6 +2530,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             rec.Views = ViewCount(mask);
             rec.Colors = colors;
             rec.Layers = mask != 0 ? 1u : *(uint*)(p + RenderingLayerCount);
+
+            for (uint k = 0; list != null && k < colors; k++)
+                NoteRenderingAttachment(rec, list + (long)k * RenderingAttachmentSize);
+            NoteRenderingAttachment(rec, *(byte**)(p + RenderingDepth));
+            NoteRenderingAttachment(rec, *(byte**)(p + RenderingStencil));
+            if (rate != null)
+                NoteView(rec, *(IntPtr*)(rate + RateView));
+        }
+
+        private static unsafe void NoteRenderingAttachment(Recording rec, byte* attachment)
+        {
+            if (attachment == null)
+                return;
+            NoteView(rec, *(IntPtr*)(attachment + RenderingAttachmentView));
+            if (*(int*)(attachment + RenderingAttachmentResolveMode) != 0)
+                NoteView(rec, *(IntPtr*)(attachment + RenderingAttachmentResolveView));
         }
 
         private unsafe void CheckRenderingAttachment(byte* attachment, ulong width, ulong height, uint layers)
@@ -2299,7 +2600,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!commit)
                 return;
             LetGo(commandBuffer, "VkCommandBuffer");
+            ClearBound(rec);
             rec.Restart(++_recordingGeneration, RecordingState.Recording);
+            if (_openRecordings.Count == 0)
+            {
+                _oldestOpen = rec.Generation;
+                _oldestLeft = false;
+            }
+            _openRecordings.Add(rec);
             if (!continues)
                 return;
             rec.Inside = rec.Continues = true;
@@ -2315,6 +2623,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (rec.Inside && !rec.Continues)
                 throw new InvalidOperationException("BrovVulk generic: a render pass instance is still open at the end of the recording.");
             rec.State = RecordingState.Executable;
+            ClearBound(rec);
         }
 
         public unsafe void CheckClearAttachments(IntPtr commandBuffer, uint count, IntPtr attachments, uint rectCount, IntPtr rects)
@@ -3154,12 +3463,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void NotePipelineBind(int bindPoint, IntPtr pipeline)
         {
             Recording? rec = _callCommand;
-            if (rec == null || !rec.Cpu)
+            if (rec == null)
                 return;
-            int index = BindPointIndex(bindPoint);
-            if (index < 0 || !_pipelines.TryGetValue(pipeline, out PipelineReads? record) || record.Kind != (index == 0 ? PipelineGraphics : PipelineCompute))
-                throw new InvalidOperationException("BrovVulk generic: a pipeline bound where its kind does not run.");
-            rec.Reads[index] = record.Reads;
+            if (rec.Cpu)
+            {
+                int index = BindPointIndex(bindPoint);
+                if (index < 0 || !_pipelines.TryGetValue(pipeline, out PipelineReads? record) || record.Kind != (index == 0 ? PipelineGraphics : PipelineCompute))
+                    throw new InvalidOperationException("BrovVulk generic: a pipeline bound where its kind does not run.");
+                rec.Reads[index] = record.Reads;
+            }
+            rec.BoundPipelines[BoundPoint(bindPoint)] = pipeline;
         }
 
         public void RefuseOnCpu()
@@ -3431,6 +3744,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (used != offsetCount)
                 throw new InvalidOperationException($"BrovVulk generic: {offsetCount} dynamic offsets for {used} dynamic descriptors.");
+
+            for (uint points = bindPoints != 0 ? bindPoints : 1u << BindPoints; points != 0 && setCount != 0; points &= points - 1)
+                CopyBound(ref rec.BoundSetHandles[System.Numerics.BitOperations.TrailingZeroCount(points)], firstSet, setCount, sets);
         }
 
         private static unsafe void NoteOffsets(Recording rec, IntPtr set, uint* given, uint count)
@@ -3557,7 +3873,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void FailCall()
         {
             if (_callCommand != null && _callCommand.State == RecordingState.Recording)
+            {
                 _callCommand.State = RecordingState.Invalid;
+                ClearBound(_callCommand);
+            }
         }
 
         public IntPtr CallDevice

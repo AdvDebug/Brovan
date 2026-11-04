@@ -314,6 +314,12 @@ namespace Brovan.Core.Helpers.WindowsImage
                 if (Entry.IsDirectory || Entry.IsReparsePoint || Entry.Hash.IsZero || !IsWanted(Entry.Name))
                     continue;
 
+                if (!IsPlainName(Entry.Name))
+                {
+                    Report($"[-] {SourcePath} holds an entry named '{Entry.Name}', which is not a plain file name.");
+                    continue;
+                }
+
                 WimBlob? Blob = Contents.FindBlob(Entry);
 
                 if (Blob == null)
@@ -338,6 +344,11 @@ namespace Brovan.Core.Helpers.WindowsImage
             else
                 Files.Add(new PendingFile(Name, Blob));
         }
+
+        private static readonly char[] NameSeparators = { '/', '\\', ':', '\0' };
+
+        private static bool IsPlainName(string Name)
+            => Name.Length != 0 && Name != "." && Name != ".." && Name.IndexOfAny(NameSeparators) < 0;
 
         private static bool IsWanted(string Name)
         {

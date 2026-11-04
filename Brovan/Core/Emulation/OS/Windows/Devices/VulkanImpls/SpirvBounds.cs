@@ -10,6 +10,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static readonly uint[] MemoryOperandBits = { 0x2, 0x8, 0x10, 0x10000, 0x20000 };
 
+        // SPIR-V universal limit for the ID bound.
+        private const uint MaxIdBound = 0x3FFFFF;
+
         private enum Kind { Unknown, Sampler, Combined, Sampled, Storage, UniformTexel, StorageTexel, InputAttachment, UniformBlock, StorageBlock, AccelerationStructure }
 
         public static uint[]? Bound(uint* words, int count, ReadOnlySpan<byte> entry, uint stage, BindingInfo layout, BrovVulkAddressSpace? addresses,
@@ -19,6 +22,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (count < 5 || words[0] != Spirv.Magic)
             {
                 refusal = "not a SPIR-V module";
+                return null;
+            }
+
+            uint guestBound = words[3];
+            if (guestBound == 0 || guestBound > MaxIdBound)
+            {
+                refusal = $"an id bound of {guestBound}";
                 return null;
             }
 
@@ -42,16 +52,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             int annotationsEnd = -1, preambleEnd = -1, firstFunction = -1, capabilitiesEnd = 5;
             bool physicalPointers = false, int64 = false;
             Layouts layouts = new Layouts();
-            HashSet<uint> typeIds = new HashSet<uint>();
+            ulong[] typeIds = new ulong[(guestBound + 63) / 64];
 
             for (int i = 5; i < count;)
             {
                 uint head = words[i];
                 int len = (int)(head >> 16);
                 int op = (int)(head & 0xFFFF);
-                if (len == 0 || i + len > count)
+                if (len == 0 || i + len > count || len < MinimumLength(op))
                 {
                     refusal = "a malformed instruction";
+                    return null;
+                }
+
+                bool typed = len >= 3 && HasId(typeIds, words[i + 1]);
+                if (DefinedId(words, i, len, op, typed, firstFunction >= 0) >= guestBound)
+                {
+                    refusal = "an id at or past the module's id bound";
                     return null;
                 }
 
@@ -89,19 +106,45 @@ namespace Brovan.Core.Emulation.OS.Windows
                             }
                             physicalPointers |= words[i + 1] == AddressingPhysicalStorageBuffer64;
                             break;
-                        case OpDecorate when len >= 3:
-                            Decorate(words[i + 1], words[i + 2], len >= 4 ? words[i + 3] : 0, sets, bindings, nonUniform, blocks, bufferBlocks);
-                            if (words[i + 2] == DecorationArrayStride && len >= 4)
+                        case OpDecorate:
+                            uint decoration = words[i + 2];
+                            if ((decoration == DecorationDescriptorSet || decoration == DecorationBinding || decoration == DecorationArrayStride) && len < 4)
+                            {
+                                refusal = "a decoration without its literal";
+                                return null;
+                            }
+                            if (!Decorate(words[i + 1], decoration, len >= 4 ? words[i + 3] : 0, sets, bindings, nonUniform, blocks, bufferBlocks))
+                            {
+                                refusal = "a descriptor set or binding given twice";
+                                return null;
+                            }
+                            if (decoration == DecorationArrayStride)
                                 layouts.Conflict |= !layouts.ArrayStrides.TryAdd(words[i + 1], words[i + 3]);
                             break;
-                        case OpMemberDecorate when len >= 4:
+                        case OpMemberDecorate:
                             (uint, uint) member = (words[i + 1], words[i + 2]);
-                            if (words[i + 3] == DecorationOffset && len >= 5)
+                            if ((words[i + 3] == DecorationOffset || words[i + 3] == DecorationMatrixStride) && len < 5)
+                            {
+                                refusal = "a decoration without its literal";
+                                return null;
+                            }
+                            if (words[i + 3] == DecorationOffset)
                                 layouts.Conflict |= !layouts.Offsets.TryAdd(member, words[i + 4]);
-                            else if (words[i + 3] == DecorationMatrixStride && len >= 5)
+                            else if (words[i + 3] == DecorationMatrixStride)
                                 layouts.Conflict |= !layouts.MatrixStrides.TryAdd(member, words[i + 4]);
                             else if (words[i + 3] == DecorationRowMajor || words[i + 3] == DecorationColMajor)
                                 layouts.Conflict |= !layouts.Majors.TryAdd(member, words[i + 3] == DecorationRowMajor);
+                            break;
+                        // Allow only reflection decorations in forms the bounds pass cannot track.
+                        case OpDecorateId:
+                        case OpDecorateString:
+                        case OpMemberDecorateString:
+                            uint alternate = words[i + (op == OpMemberDecorateString ? 3 : 2)];
+                            if (alternate != DecorationCounterBuffer && alternate != DecorationUserSemantic && alternate != DecorationUserTypeGOOGLE)
+                            {
+                                refusal = $"decoration {alternate} given through an id or string form";
+                                return null;
+                            }
                             break;
                         case OpGroupMemberDecorate:
                             layouts.Conflict = true;
@@ -109,9 +152,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                         case OpTypeUntypedPointerKHR:
                             refusal = "the module uses untyped pointers";
                             return null;
-                        case OpGroupDecorate when len >= 2:
+                        case OpGroupDecorate:
                             for (int w = 2; w < len; w++)
-                                CopyDecorations(words[i + 1], words[i + w], sets, bindings, nonUniform, blocks, bufferBlocks);
+                            {
+                                if (!CopyDecorations(words[i + 1], words[i + w], sets, bindings, nonUniform, blocks, bufferBlocks))
+                                {
+                                    refusal = "a descriptor set or binding given twice";
+                                    return null;
+                                }
+                            }
                             layouts.Conflict = true;
                             break;
                         case OpTypeBool when len >= 2:
@@ -194,8 +243,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 if (IsTypeDeclaration(op) && len >= 2 && firstFunction < 0)
-                    typeIds.Add(words[i + 1]);
-                else if (len >= 3 && typeIds.Contains(words[i + 1]) && (firstFunction >= 0 || DeclaresValue(op)))
+                    typeIds[words[i + 1] >> 6] |= 1UL << (int)(words[i + 1] & 63);
+                else if (typed && (firstFunction >= 0 || DeclaresValue(op)))
                     types[words[i + 2]] = words[i + 1];
                 i += len;
             }
@@ -214,12 +263,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             HashSet<uint> used = Referenced(words, count, annotationsEnd, variables, entryFound, entryFunction, nonSemantic);
 
             Dictionary<uint, ulong[]> descriptors = new Dictionary<uint, ulong[]>();
+            HashSet<uint> bufferDescriptors = new HashSet<uint>();
             foreach ((uint id, uint pointerType) in variables)
             {
                 if (!used.Contains(id))
                     continue;
                 if (!pointers.TryGetValue(pointerType, out (uint Storage, uint Pointee) pointer))
-                    continue;
+                {
+                    refusal = "a descriptor variable whose pointer type is not declared";
+                    return null;
+                }
                 if (!sets.TryGetValue(id, out uint set) || !bindings.TryGetValue(id, out uint binding))
                 {
                     refusal = "a descriptor variable without a set and binding";
@@ -256,6 +309,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                         break;
                 }
 
+                if (arrays.ContainsKey(type) || runtimeArrays.ContainsKey(type))
+                {
+                    refusal = $"set {set} binding {binding} nests descriptor arrays deeper than this pass bounds";
+                    return null;
+                }
+
                 if (bindingType == BrovVulkConstants.VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK && dims.Count != 0)
                 {
                     refusal = $"set {set} binding {binding} is an array of inline uniform blocks";
@@ -283,6 +342,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return null;
                 }
                 descriptors[id] = dims.ToArray();
+                if (kind == Kind.UniformBlock || kind == Kind.StorageBlock)
+                    bufferDescriptors.Add(id);
                 usedSets.Add(set);
             }
 
@@ -324,6 +385,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return null;
                 }
 
+                // IDs at or above guestBound can name injected code that returns host addresses.
+                if (op == OpFunctionCall)
+                {
+                    for (int w = 3; w < len; w++)
+                    {
+                        if (words[i + w] >= guestBound)
+                        {
+                            refusal = "a call that names an id past the module's id bound";
+                            return null;
+                        }
+                    }
+                }
+
                 if ((op == OpBitcast || op == OpConvertUToPtr || op == OpConvertPtrToU) && len >= 4
                     && (IsLogicalPointer(words[i + 1], pointers) || (types.TryGetValue(words[i + 3], out uint from) && IsLogicalPointer(from, pointers))))
                 {
@@ -348,6 +422,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     chain.Clear();
                     chain.AddRange(new ReadOnlySpan<uint>(words + i, len));
                     int indices = len - 4;
+                    // Robust buffer access covers buffer members beyond the descriptor indices.
+                    if (indices > dims.Length && !bufferDescriptors.Contains(words[i + 3]))
+                    {
+                        refusal = "an access chain that indexes past a descriptor that is not a buffer";
+                        return null;
+                    }
                     for (int k = 0; k < dims.Length && k < indices; k++)
                     {
                         uint index = words[i + 4 + k];
@@ -383,7 +463,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                         changed = true;
                     }
                     if (indices <= dims.Length)
+                    {
                         descriptors[words[i + 2]] = dims.AsSpan(indices).ToArray();
+                        if (bufferDescriptors.Contains(words[i + 3]))
+                            bufferDescriptors.Add(words[i + 2]);
+                    }
                     body.AddRange(chain);
                 }
                 else
@@ -414,35 +498,41 @@ namespace Brovan.Core.Emulation.OS.Windows
             return result.ToArray();
         }
 
-        private static void Decorate(uint target, uint decoration, uint value, Dictionary<uint, uint> sets, Dictionary<uint, uint> bindings,
+        // Conflicting decorations can make the driver and the bounds pass use different bindings.
+        private static bool Decorate(uint target, uint decoration, uint value, Dictionary<uint, uint> sets, Dictionary<uint, uint> bindings,
             HashSet<uint> nonUniform, HashSet<uint> blocks, HashSet<uint> bufferBlocks)
         {
             if (decoration == DecorationDescriptorSet)
-                sets[target] = value;
-            else if (decoration == DecorationBinding)
-                bindings[target] = value;
-            else if (decoration == DecorationNonUniform)
+                return SetOnce(sets, target, value);
+            if (decoration == DecorationBinding)
+                return SetOnce(bindings, target, value);
+            if (decoration == DecorationNonUniform)
                 nonUniform.Add(target);
             else if (decoration == DecorationBlock)
                 blocks.Add(target);
             else if (decoration == DecorationBufferBlock)
                 bufferBlocks.Add(target);
+            return true;
         }
 
-        private static void CopyDecorations(uint group, uint target, Dictionary<uint, uint> sets, Dictionary<uint, uint> bindings,
+        private static bool CopyDecorations(uint group, uint target, Dictionary<uint, uint> sets, Dictionary<uint, uint> bindings,
             HashSet<uint> nonUniform, HashSet<uint> blocks, HashSet<uint> bufferBlocks)
         {
-            if (sets.TryGetValue(group, out uint set))
-                sets[target] = set;
-            if (bindings.TryGetValue(group, out uint binding))
-                bindings[target] = binding;
+            if (sets.TryGetValue(group, out uint set) && !SetOnce(sets, target, set))
+                return false;
+            if (bindings.TryGetValue(group, out uint binding) && !SetOnce(bindings, target, binding))
+                return false;
             if (nonUniform.Contains(group))
                 nonUniform.Add(target);
             if (blocks.Contains(group))
                 blocks.Add(target);
             if (bufferBlocks.Contains(group))
                 bufferBlocks.Add(target);
+            return true;
         }
+
+        private static bool SetOnce(Dictionary<uint, uint> values, uint target, uint value)
+            => values.TryAdd(target, value) || values[target] == value;
 
         private static bool Accepts(int bindingType, Kind kind) => bindingType switch
         {
@@ -638,6 +728,52 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
+        private static readonly byte[] MinimumLengths = BuildMinimumLengths();
+
+        private static byte[] BuildMinimumLengths()
+        {
+            byte[] lengths = new byte[0x10000];
+            for (int op = 0; op < lengths.Length; op++)
+                lengths[op] = (byte)MinimumLengthOf(op);
+            return lengths;
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        private static int MinimumLength(int op) => MinimumLengths[op & 0xFFFF];
+
+        private static int MinimumLengthOf(int op) => op switch
+        {
+            OpCapability or OpTypeBool or OpTypeStruct or OpTypeSampler or OpTypeAccelerationStructureKHR or OpDecorationGroup
+                or OpGroupDecorate or OpGroupMemberDecorate or OpLabel or OpReturnValue => 2,
+            OpExtInstImport or OpMemoryModel or OpDecorate or OpDecorateId or OpTypeFloat or OpTypeFunction or OpTypeSampledImage
+                or OpTypeRuntimeArray or OpTypeForwardPointer or OpString or OpStore or OpCopyMemory or OpPhi => 3,
+            OpEntryPoint or OpMemberDecorate or OpDecorateString or OpTypeInt or OpTypeVector or OpTypeMatrix or OpTypeArray
+                or OpTypePointer or OpConstant or OpVariable or OpFunctionCall or OpAccessChain or OpInBoundsAccessChain or OpLoad
+                or OpCopyMemorySized or OpBitcast or OpConvertPtrToU or OpConvertUToPtr or OpCopyObject or OpAtomicFlagClear => 4,
+            OpMemberDecorateString or OpFunction or OpPtrAccessChain or OpInBoundsPtrAccessChain or OpArrayLength or OpExtInst
+                or OpAtomicStore => 5,
+            OpImageTexelPointer or OpSelect or OpAtomicFlagTestAndSet or 227 or 232 or 233 => 6,
+            OpAtomicFMinEXT or OpAtomicFMaxEXT or OpAtomicFAddEXT or 229 or (>= 234 and <= 242) => 7,
+            OpTypeImage or 230 or 231 => 9,
+            _ => 1,
+        };
+
+        // Debug and annotation operands can look like typed result IDs.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        private static uint DefinedId(uint* words, int i, int len, int op, bool typed, bool inFunctions)
+        {
+            if (typed && inFunctions)
+                return words[i + 2];
+            if (len < 2)
+                return 0;
+            if (IsTypeDeclaration(op) || op == OpLabel || op == OpString || op == OpExtInstImport || op == OpDecorationGroup)
+                return words[i + 1];
+            return typed && !IsPreamble(op) && !IsAnnotation(op) ? words[i + 2] : 0;
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        private static bool HasId(ulong[] ids, uint id) => id >> 6 < (uint)ids.Length && (ids[id >> 6] & (1UL << (int)(id & 63))) != 0;
+
         private static bool IsPreamble(int op) => op is OpSourceContinued or OpSource or OpSourceExtension or OpName or OpMemberName or OpString
             or OpLine or OpExtension or OpExtInstImport or OpMemoryModel or OpEntryPoint or OpExecutionMode or OpCapability or OpNoLine
             or OpModuleProcessed or OpExecutionModeId;
@@ -674,7 +810,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             private readonly BrovVulkAddressSpace _space;
             private readonly Layouts _layouts;
             private readonly Dictionary<uint, uint> _types;
-            private readonly HashSet<uint> _typeIds;
+            private readonly ulong[] _typeIds;
             private readonly Dictionary<uint, uint> _intWidth;
             private readonly Dictionary<uint, (uint Element, uint Length)> _arrays;
             private readonly Dictionary<uint, ulong> _constants;
@@ -685,7 +821,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             private uint _u64, _bool, _pointer, _functionType, _function;
             private bool _used;
 
-            public Resolver(BrovVulkAddressSpace space, Layouts layouts, Dictionary<uint, uint> types, HashSet<uint> typeIds, Dictionary<uint, uint> intWidth,
+            public Resolver(BrovVulkAddressSpace space, Layouts layouts, Dictionary<uint, uint> types, ulong[] typeIds, Dictionary<uint, uint> intWidth,
                 Dictionary<uint, (uint Element, uint Length)> arrays, Dictionary<uint, ulong> constants, Dictionary<uint, (uint Storage, uint Pointee)> pointers,
                 HashSet<uint> nonSemantic)
             {
@@ -914,7 +1050,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 if (op == OpExtInst && len >= 4 && _nonSemantic.Contains(words[i + 3]))
                     return false;
-                for (int w = len >= 3 && _typeIds.Contains(words[i + 1]) ? 3 : 1; w < len; w++)
+                for (int w = len >= 3 && HasId(_typeIds, words[i + 1]) ? 3 : 1; w < len; w++)
                 {
                     if (IsPsb(words[i + w]))
                         return true;

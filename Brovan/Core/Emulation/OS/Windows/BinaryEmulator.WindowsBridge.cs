@@ -2698,7 +2698,13 @@ namespace Brovan.Core.Emulation
                 while (Offset + Run < AlignedSize && GetHostPointer(Address + Offset, Run + PageSize) != IntPtr.Zero)
                     Run += PageSize;
 
-                if (!MapSharedMemoryRegion(Alias + Offset, Run, Protection, HostPages, AllocationProtect, AllocationBase))
+                // An alias needs owned backing pages so it can keep them alive.
+                IntPtr Pin = PinBacking(HostPages, Run);
+                bool Mapped = Pin != IntPtr.Zero && MapSharedMemoryRegion(Alias + Offset, Run, Protection, HostPages, AllocationProtect, AllocationBase);
+                if (Pin != IntPtr.Zero)
+                    UnpinBacking(Pin);
+
+                if (!Mapped)
                 {
                     UnmapMemoryRuns(Alias, AlignedSize);
                     return false;

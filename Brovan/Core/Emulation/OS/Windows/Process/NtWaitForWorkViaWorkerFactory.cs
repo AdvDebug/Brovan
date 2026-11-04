@@ -79,6 +79,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Factory == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            // ntdll exits the worker on STATUS_ABANDONED.
+            if (Factory.Shutdown)
+                return NTSTATUS.STATUS_ABANDONED;
+
             WinIoCompletion Completion = WorkerFactoryHelper.GetIoCompletion(Instance, Factory.IoCompletionHandle);
             if (Completion == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;

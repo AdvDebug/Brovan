@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
+using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -70,6 +72,32 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Count != 0)
                 R.CopyInto(Buffer, Count);
             ((byte*)Buffer)[Count] = 0;
+            return (byte*)Buffer;
+        }
+
+        // Relative paths need the guest working directory, which the bridge lacks.
+        public byte* ReadGuestPath(GenReader R, bool Write)
+        {
+            byte* Guest = ReadString(R);
+            if (Guest == null)
+                return null;
+
+            string GuestPath = Marshal.PtrToStringUTF8((IntPtr)Guest);
+            string HostPath = null;
+            if (GeneralHelper.IO.IsWindowsRootedPath(GuestPath))
+            {
+                HostPath = Write
+                    ? GeneralHelper.IO.ResolveVirtualHostPath(GuestPath, BinaryFormat.PE, CreateDirectories: true)
+                    : GeneralHelper.IO.ResolveHostPath(GuestPath, BinaryFormat.PE);
+            }
+
+            if (string.IsNullOrEmpty(HostPath))
+                throw new InvalidOperationException($"BrovSteam: '{GuestPath}' is not an absolute guest path.");
+
+            int Bytes = Encoding.UTF8.GetByteCount(HostPath);
+            IntPtr Buffer = Arena.Alloc(Bytes + 1);
+            Encoding.UTF8.GetBytes(HostPath, new Span<byte>((void*)Buffer, Bytes));
+            ((byte*)Buffer)[Bytes] = 0;
             return (byte*)Buffer;
         }
 

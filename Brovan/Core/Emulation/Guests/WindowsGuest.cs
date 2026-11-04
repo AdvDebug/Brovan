@@ -304,6 +304,7 @@ namespace Brovan.Core.Emulation.Guests
 
             lock (Instance.KernelLock)
             {
+                OS.Windows.RPC.Ports.AudioSrvPortHandler.StopStreams(Instance);
                 WinHelper.UnloadAppHives();
                 WinHelper.KernelFiles?.Dispose();
                 WinHelper.Composition.ReleaseAll(Instance);
@@ -592,7 +593,12 @@ namespace Brovan.Core.Emulation.Guests
             WinWorkerFactory Factory = WinHelper?.HandleManager.GetObjectByHandle<WinWorkerFactory>(State.WorkerFactoryHandle);
             bool HasEntries = State.WorkerFactoryReservedEntries != null && State.WorkerFactoryReservedEntries.Count > 0;
 
-            if (!HasEntries && Instance.IsEmulatedDeadlineExpired(Thread.WaitDeadline))
+            // ntdll expects at least one packet on success.
+            if (!HasEntries && (Factory == null || Factory.Shutdown))
+            {
+                WaitStatus = NTSTATUS.STATUS_ABANDONED;
+            }
+            else if (!HasEntries)
             {
                 WaitStatus = NTSTATUS.STATUS_TIMEOUT;
                 if (State.WorkerFactoryPacketsReturned != 0)
@@ -603,17 +609,14 @@ namespace Brovan.Core.Emulation.Guests
                         Instance._emulator.WriteMemory(State.WorkerFactoryPacketsReturned, 0u);
                 }
             }
-            else if (Factory != null)
+            else
             {
                 uint Removed = 0;
-                if (State.WorkerFactoryReservedEntries != null && State.WorkerFactoryReservedEntries.Count > 0)
+                foreach (WinIoCompletionEntry Entry in State.WorkerFactoryReservedEntries)
                 {
-                    foreach (WinIoCompletionEntry Entry in State.WorkerFactoryReservedEntries)
-                    {
-                        if (!OS.Windows.NtWaitForWorkViaWorkerFactory.WritePacket(Instance, State.WorkerFactoryMiniPackets, Removed, Entry))
-                            WaitStatus = NTSTATUS.STATUS_ACCESS_VIOLATION;
-                        Removed++;
-                    }
+                    if (!OS.Windows.NtWaitForWorkViaWorkerFactory.WritePacket(Instance, State.WorkerFactoryMiniPackets, Removed, Entry))
+                        WaitStatus = NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    Removed++;
                 }
 
                 if (State.WorkerFactoryPacketsReturned != 0)

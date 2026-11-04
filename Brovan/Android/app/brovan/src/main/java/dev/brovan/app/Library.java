@@ -215,7 +215,7 @@ final class Library {
             throw new IOException("Could not create " + destination);
         }
 
-        copyFile(context, source.getUri(), new File(destination, fileName));
+        copyFile(context, source.getUri(), entry(destination, fileName));
         return new ImportResult(destination, findExecutables(destination));
     }
 
@@ -312,6 +312,13 @@ final class Library {
             throw new IOException("The path must stay inside the program folder.");
         }
         return result;
+    }
+
+    private static File entry(File directory, String name) throws IOException {
+        if (name.indexOf('/') >= 0 || name.indexOf('\0') >= 0) {
+            throw new IOException("The name " + name + " is not a plain file name.");
+        }
+        return child(directory, name);
     }
 
     private static boolean within(File file, File parent) throws IOException {
@@ -531,7 +538,7 @@ final class Library {
                 continue;
             }
 
-            File target = new File(destination, name);
+            File target = entry(destination, name);
             if (child.isDirectory()) {
                 copyTree(context, child, target);
             } else {

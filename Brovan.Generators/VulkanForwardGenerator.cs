@@ -2446,10 +2446,10 @@ namespace Brovan.Generators
                 case "vkCreateBufferView":
                     post.Add("                if (rr >= 0) st.SetBufferView(p3, p1);");
                     return true;
-                case "vkCmdBindIndexBuffer": line = "st.CheckBufferSpanOrRest(p1, p2, ulong.MaxValue);"; break;
-                case "vkCmdBindIndexBuffer2": line = "st.CheckBufferSpanOrRest(p1, p2, p3);"; break;
-                case "vkCmdBindVertexBuffers": line = "st.CheckVertexBindingRange(p1, p2); st.CheckBufferSpans(p3, p4, System.IntPtr.Zero, p2);"; break;
-                case "vkCmdBindVertexBuffers2": line = "st.CheckVertexBindingRange(p1, p2); st.CheckBufferSpans(p3, p4, p5, p2);"; break;
+                case "vkCmdBindIndexBuffer": line = "st.CheckBufferSpanOrRest(p1, p2, ulong.MaxValue); st.NoteIndexBuffer(p1);"; break;
+                case "vkCmdBindIndexBuffer2": line = "st.CheckBufferSpanOrRest(p1, p2, p3); st.NoteIndexBuffer(p1);"; break;
+                case "vkCmdBindVertexBuffers": line = "st.CheckVertexBindingRange(p1, p2); st.CheckBufferSpans(p3, p4, System.IntPtr.Zero, p2); st.NoteVertexBuffers(p1, p2, p3);"; break;
+                case "vkCmdBindVertexBuffers2": line = "st.CheckVertexBindingRange(p1, p2); st.CheckBufferSpans(p3, p4, p5, p2); st.NoteVertexBuffers(p1, p2, p3);"; break;
                 case "vkCmdBindTransformFeedbackBuffersEXT": line = "st.CheckFeedbackBufferRange(p1, p2); st.CheckBufferSpans(p3, p4, p5, p2);"; break;
                 case "vkCmdSetVertexInputEXT": line = "st.CheckVertexInput(p1, p2, p3, p4);"; break;
                 case "vkCmdPushConstants": line = "st.CheckPushConstants(p3, p4);"; break;
@@ -2520,6 +2520,15 @@ namespace Brovan.Generators
                 case "vkGetSwapchainImagesKHR":
                     post.Add("                if (rr >= 0 && p2pr != 0) st.SetSwapchainImages(p1, p2a, p2c);");
                     return true;
+                case "vkQueuePresentKHR": line = "st.CheckPresentIndices(p1);"; break;
+                case "vkCreateRayTracingPipelinesNV":
+                    post.Add("                if (rr >= 0) st.NoteShaderGroups(p5, p3, p2, " + Size("VkRayTracingPipelineCreateInfoNV") + ", "
+                        + Off("VkRayTracingPipelineCreateInfoNV", "groupCount") + ");");
+                    return true;
+                case "vkGetRayTracingShaderGroupHandlesKHR":
+                case "vkGetRayTracingShaderGroupHandlesNV": line = "st.CheckShaderGroupHandles(p0, p1, p2, p3, (ulong)p4);"; break;
+                case "vkReleaseSwapchainImagesKHR":
+                case "vkReleaseSwapchainImagesEXT": line = "st.CheckReleasedIndices(p1);"; break;
                 case "vkCmdUpdateBuffer": line = "st.CheckBufferSpan(p1, p2, p3);"; break;
                 case "vkCreateDescriptorSetLayout":
                     line = "GenState.SetLayoutShape p1layout = st.ReadSetLayout(p1);";
@@ -2868,6 +2877,8 @@ namespace Brovan.Generators
             if (name == "vkDestroyImage")
             {
                 string image = Arg(c, "image");
+                if (image != null)
+                    b.Append("                st.RefuseSwapchainImage(").Append(image).Append(");\n");
                 if (device != null && image != null)
                     b.Append("                VulkanStandIns.DestroyImage(st, ").Append(device).Append(", ").Append(image).Append(");\n");
                 return false;
@@ -3949,6 +3960,7 @@ namespace Brovan.Generators
             sm.AppendLine("        internal const int DescriptorBufferInfoBuffer = " + DbiBuffer + ";");
             sm.AppendLine("        internal const int DescriptorBufferInfoOffset = " + DbiOffset + ";");
             sm.AppendLine("        internal const int DescriptorBufferInfoRange = " + DbiRange + ";");
+            sm.AppendLine("        internal const int SpecializationInfoSid = " + (StructId.TryGetValue("VkSpecializationInfo", out int SpecId) ? SpecId : -1) + ";");
             sm.AppendLine("    }");
             sm.AppendLine("}");
             spc.AddSource("BrovVulkStructMeta.g.cs", SourceText.From(sm.ToString(), Encoding.UTF8));
