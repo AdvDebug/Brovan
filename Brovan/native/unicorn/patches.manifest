@@ -42,6 +42,15 @@ copy|brovan_softfloat_fast.inc.h|include/brovan_softfloat_fast.inc.h
 copy|brovan_softfloat_cmp.inc.c|include/brovan_softfloat_cmp.inc.c
 copy|brovan_sse_fastconv.inc.h|include/brovan_sse_fastconv.inc.h
 
+# --- longjmp out of translated code under CFG and a user shadow stack ---------
+copy|brovan_setjmp_win64.asm|qemu/util/setjmp-wrapper-win32.asm
+copy|brovan_setjmp_win64.h|include/brovan_setjmp_win64.h
+insert-after|qemu/include/sysemu/os-win32.h|#define siglongjmp(env, val) longjmp(env, val)|#include "brovan_setjmp_win64.h"
+# The store helper is entered by a jump. A call over a jump back pushes its return
+# address, so the helper's ret matches a shadow stack.
+replace-all|qemu/tcg/i386/tcg-target.inc.c|tcg_out_push(s, retaddr);|{ tcg_insn_unit *brov_call; tcg_out8(s, OPC_CALL_Jz); brov_call = s->code_ptr; tcg_out32(s, 0); tcg_out_jmp(s, l->raddr); tcg_patch32(brov_call, s->code_ptr - brov_call - 4); }
+replace-all|qemu/tcg/i386/tcg-target.inc.c|/* "Tail call" to the helper, with the return address back inline.  */|/* brov: tail jump to the helper, after a call pushed its return address */
+
 # --- uc_struct gains the brov ops table and the inline-hook switch -----------
 insert-after|include/uc_priv.h|#include "list.h"|#include "brovan_uc.h"
 insert-after|include/uc_priv.h|uc_del_inline_hook_t del_inline_hook;|    BROVAN_UC_FIELDS
@@ -53,6 +62,9 @@ insert-after|qemu/include/tcg/tcg.h|struct uc_struct *uc;|    BROVAN_TCG_FIELDS
 # --- uc is pinned in the reservation: it is baked in by tcg_const_ptr(uc) ----
 replace-all|uc.c|uc = calloc(1, sizeof(*uc));|uc = brov_alloc_uc(sizeof(*uc));
 replace-all|uc.c|free(uc);|brov_free_uc(uc);
+replace-all|uc.c|g_free(uc->tcg_ctx);|brov_free_arena(uc->tcg_ctx);
+insert-before|uc.c|memset(uc, 0, sizeof(*uc));|    brov_release_uc(uc);
+insert-before|qemu/unicorn_common.h|/* clean up tcg_ctx->code_gen_buffer. */|    if (s->uc->brov.release) { s->uc->brov.release(s->uc); }
 append|uc.c|#include "brovan_uc_api.inc.c"
 
 # --- code buffer, slot table, ops install -----------------------------------

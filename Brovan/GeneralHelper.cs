@@ -33,45 +33,6 @@ namespace Brovan
         public uint Type;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct STARTUPINFO
-    {
-        public uint cb;
-        public IntPtr lpReserved;
-        public IntPtr lpDesktop;
-        public IntPtr lpTitle;
-        public uint dwX;
-        public uint dwY;
-        public uint dwXSize;
-        public uint dwYSize;
-        public uint dwXCountChars;
-        public uint dwYCountChars;
-        public uint dwFillAttribute;
-        public uint dwFlags;
-        public short wShowWindow;
-        public short cbReserved2;
-        public IntPtr lpReserved2;
-        public IntPtr hStdInput;
-        public IntPtr hStdOutput;
-        public IntPtr hStdError;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct STARTUPINFOEX
-    {
-        public STARTUPINFO StartupInfo;
-        public IntPtr lpAttributeList;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct PROCESS_INFORMATION
-    {
-        public IntPtr hProcess;
-        public IntPtr hThread;
-        public uint dwProcessId;
-        public uint dwThreadId;
-    }
-
     internal class NativeWinImports
     {
         public const int ErrorHandleEof = 38;
@@ -95,38 +56,11 @@ namespace Brovan
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern UIntPtr VirtualQuery(IntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, UIntPtr dwLength);
 
-        [DllImport("kernel32.dll")]
-        public static extern bool GetProcessMitigationPolicy(IntPtr hProcess, uint MitigationPolicy, out uint Buffer, UIntPtr Length);
-
         [DllImport("kernelbase.dll", SetLastError = true)]
         public static extern IntPtr GetModuleHandleA(string Library);
 
         [DllImport("kernelbase.dll", SetLastError = true)]
         public static extern IntPtr LoadLibraryA(string Library);
-
-        [DllImport("kernelbase.dll", SetLastError = true)]
-        public static extern IntPtr GetProcAddress(IntPtr hModule, string Function);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool InitializeProcThreadAttributeList(IntPtr lpAttributeList, int dwAttributeCount, int dwFlags, ref IntPtr lpSize);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool UpdateProcThreadAttribute(IntPtr lpAttributeList, uint dwFlags, IntPtr Attribute, IntPtr lpValue, IntPtr cbSize, IntPtr lpPreviousValue, IntPtr lpReturnSize);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern void DeleteProcThreadAttributeList(IntPtr lpAttributeList);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool CloseHandle(IntPtr hObject);
-
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        public static extern bool CreateProcessW(string lpApplicationName, StringBuilder lpCommandLine, IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory, ref STARTUPINFOEX lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
 
         public const int StdInputHandle = -10;
         public const int StdOutputHandle = -11;
@@ -681,151 +615,6 @@ namespace Brovan
 
             Builder.Append('"');
             return Builder.ToString();
-        }
-
-        private static string BuildCommandLine(string ExePath, string[] Args)
-        {
-            StringBuilder Builder = new StringBuilder();
-            Builder.Append(QuoteCommandLineArg(ExePath));
-
-            for (int i = 0; i < Args.Length; i++)
-            {
-                Builder.Append(' ');
-                Builder.Append(QuoteCommandLineArg(Args[i]));
-            }
-
-            return Builder.ToString();
-        }
-
-        /// <param name="KeepAlive">Keeps the parent alive/waiting till the process finishes.</param>
-        /// <returns>false when the restart fails. On success the current process exits and the call does not return.</returns>
-        public static bool RestartProcessWithCfgDisabled(bool KeepAlive)
-        {
-            if (!IsWindows)
-                return false;
-
-            string ExePath = Environment.ProcessPath ?? string.Empty;
-            if (string.IsNullOrEmpty(ExePath))
-                return false;
-
-            // Under "dotnet Brovan.dll" argv[0] is the assembly, which the shared host needs again.
-            string[] Raw = Environment.GetCommandLineArgs();
-            bool SharedHost = Raw.Length != 0 && !string.Equals(Path.GetFileNameWithoutExtension(Raw[0]),
-                Path.GetFileNameWithoutExtension(ExePath), StringComparison.OrdinalIgnoreCase);
-            string[] Args = Raw.Skip(SharedHost ? 0 : 1).ToArray();
-            string CommandLine = BuildCommandLine(ExePath, Args);
-
-            const uint ExtendedStartupInfoPresent = 0x00080000;
-            const int ProcThreadAttributeMitigationPolicy = 0x00020007;
-
-            ulong MitigationPolicy = 0x00000002UL << 40;
-            ulong MitigationPolicy2 = 0x00000002UL << 8;
-
-            uint ChildExitCode = 0;
-            IntPtr AttributeListSize = IntPtr.Zero;
-            NativeWinImports.InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref AttributeListSize);
-
-            if (AttributeListSize == IntPtr.Zero)
-                return false;
-
-            IntPtr AttributeList = IntPtr.Zero;
-            IntPtr MitigationPtr = IntPtr.Zero;
-            bool AttributeListInitialized = false;
-
-            try
-            {
-                AttributeList = Marshal.AllocHGlobal(AttributeListSize);
-
-                if (!NativeWinImports.InitializeProcThreadAttributeList(AttributeList, 1, 0, ref AttributeListSize))
-                    return false;
-
-                AttributeListInitialized = true;
-
-                STARTUPINFOEX StartupInfoEx = new STARTUPINFOEX();
-                StartupInfoEx.StartupInfo.cb = (uint)Marshal.SizeOf<STARTUPINFOEX>();
-                StartupInfoEx.lpAttributeList = AttributeList;
-
-                bool AttributeOk = false;
-
-                MitigationPtr = Marshal.AllocHGlobal(sizeof(ulong) * 2);
-                Marshal.WriteInt64(MitigationPtr, unchecked((long)MitigationPolicy));
-                Marshal.WriteInt64(IntPtr.Add(MitigationPtr, sizeof(ulong)), unchecked((long)MitigationPolicy2));
-
-                AttributeOk = NativeWinImports.UpdateProcThreadAttribute(AttributeList, 0, (IntPtr)ProcThreadAttributeMitigationPolicy, MitigationPtr, (IntPtr)(sizeof(ulong) * 2), IntPtr.Zero, IntPtr.Zero);
-
-                if (!AttributeOk)
-                {
-                    Marshal.WriteInt64(MitigationPtr, unchecked((long)MitigationPolicy));
-                    AttributeOk = NativeWinImports.UpdateProcThreadAttribute(AttributeList, 0, (IntPtr)ProcThreadAttributeMitigationPolicy, MitigationPtr, (IntPtr)sizeof(ulong), IntPtr.Zero, IntPtr.Zero);
-                }
-
-                if (!AttributeOk)
-                    return false;
-
-                string PrevEnv = Environment.GetEnvironmentVariable("BROVAN_CFG_DISABLED");
-                Environment.SetEnvironmentVariable("BROVAN_CFG_DISABLED", "1");
-
-                try
-                {
-                    PROCESS_INFORMATION ProcessInfo;
-                    bool Created = NativeWinImports.CreateProcessW(null, new StringBuilder(CommandLine), IntPtr.Zero, IntPtr.Zero, false, ExtendedStartupInfoPresent, IntPtr.Zero, Environment.CurrentDirectory, ref StartupInfoEx, out ProcessInfo);
-                    if (!Created)
-                    {
-                        if (PrevEnv == null)
-                            Environment.SetEnvironmentVariable("BROVAN_CFG_DISABLED", null);
-                        else
-                            Environment.SetEnvironmentVariable("BROVAN_CFG_DISABLED", PrevEnv);
-
-                        return false;
-                    }
-
-                    if (ProcessInfo.hThread != IntPtr.Zero)
-                        NativeWinImports.CloseHandle(ProcessInfo.hThread);
-
-                    if (KeepAlive)
-                    {
-                        NativeWinImports.WaitForSingleObject(ProcessInfo.hProcess, 0xFFFFFFFF);
-                        if (!NativeWinImports.GetExitCodeProcess(ProcessInfo.hProcess, out ChildExitCode))
-                            ChildExitCode = 1;
-                    }
-
-                    if (ProcessInfo.hProcess != IntPtr.Zero)
-                        NativeWinImports.CloseHandle(ProcessInfo.hProcess);
-                }
-                catch
-                {
-                    if (PrevEnv == null)
-                        Environment.SetEnvironmentVariable("BROVAN_CFG_DISABLED", null);
-                    else
-                        Environment.SetEnvironmentVariable("BROVAN_CFG_DISABLED", PrevEnv);
-
-                    return false;
-                }
-            }
-            finally
-            {
-                if (AttributeList != IntPtr.Zero)
-                {
-                    if (AttributeListInitialized)
-                    {
-                        try
-                        {
-                            NativeWinImports.DeleteProcThreadAttributeList(AttributeList);
-                        }
-                        catch
-                        {
-
-                        }
-                    }
-                    Marshal.FreeHGlobal(AttributeList);
-                }
-
-                if (MitigationPtr != IntPtr.Zero)
-                    Marshal.FreeHGlobal(MitigationPtr);
-            }
-
-            Environment.Exit((int)ChildExitCode);
-            return true;
         }
 
         private const int ConsoleFilterChunkBytes = 1 << 16;

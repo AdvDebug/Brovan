@@ -6,8 +6,6 @@
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <!-- Unicorn leaves its translated code with longjmp, which a CET shadow stack turns into a fatal unwind. -->
-    <CetCompat>false</CetCompat>
   </PropertyGroup>
 
   <ItemGroup>

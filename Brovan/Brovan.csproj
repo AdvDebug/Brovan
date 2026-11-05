@@ -10,7 +10,7 @@
         <PublishAot>true</PublishAot>
         <InvariantGlobalization>true</InvariantGlobalization>
         <StripSymbols>true</StripSymbols>
-		<CetCompat>false</CetCompat>
+        <ControlFlowGuard>Guard</ControlFlowGuard>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
@@ -20,44 +20,6 @@
     <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
         <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
     </PropertyGroup>
-
-    <UsingTask TaskName="DisableGuardCF" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
-        <ParameterGroup>
-            <FilePath ParameterType="System.String" Required="true" />
-        </ParameterGroup>
-        <Task>
-            <Using Namespace="System" />
-            <Using Namespace="System.IO" />
-            <Code Type="Fragment" Language="cs">
-                <![CDATA[
-                byte[] Image = File.ReadAllBytes(FilePath);
-                if (Image.Length < 0x40 || Image[0] != (byte)'M' || Image[1] != (byte)'Z')
-                    return true;
-
-                int PeHeaderOffset = BitConverter.ToInt32(Image, 0x3C);
-                int DllCharacteristicsOffset = PeHeaderOffset + 4 + 20 + 0x46;
-                if (PeHeaderOffset <= 0 || DllCharacteristicsOffset + 2 > Image.Length ||
-                    Image[PeHeaderOffset] != (byte)'P' || Image[PeHeaderOffset + 1] != (byte)'E')
-                    return true;
-
-                const ushort GuardCF = 0x4000;
-                ushort DllCharacteristics = BitConverter.ToUInt16(Image, DllCharacteristicsOffset);
-                if ((DllCharacteristics & GuardCF) == 0)
-                    return true;
-
-                DllCharacteristics &= unchecked((ushort)~GuardCF);
-                Image[DllCharacteristicsOffset] = (byte)DllCharacteristics;
-                Image[DllCharacteristicsOffset + 1] = (byte)(DllCharacteristics >> 8);
-                File.WriteAllBytes(FilePath, Image);
-                Log.LogMessage(MessageImportance.High, "Cleared the GuardCF flag in " + Path.GetFileName(FilePath) + " so Unicorn can run without a CFG-disabling restart.");
-            ]]>
-            </Code>
-        </Task>
-    </UsingTask>
-
-    <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="Exists('$(TargetDir)$(TargetName).exe')">
-        <DisableGuardCF FilePath="$(TargetDir)$(TargetName).exe" />
-    </Target>
 
     <ItemGroup>
         <PackageReference Include="Iced" Version="1.21.0" />

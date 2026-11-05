@@ -206,6 +206,7 @@ struct brov_ops {
     void (*set_budget)(struct uc_struct *uc, int32_t budget);
     int32_t *(*budget_ptr)(struct uc_struct *uc);
     bool (*page_has_tbs)(struct uc_struct *uc, uint64_t ram_addr);
+    void (*release)(struct uc_struct *uc);
 };
 
 /* One jump cache entry. See brovan_tcg_budget.inc.h.
@@ -346,7 +347,9 @@ static inline uint32_t brov_slot_intern(void **slots, uint32_t *map, uint32_t ma
  * whole library; the per-target implementations are all static. */
 void *brov_alloc_uc(size_t size);
 void brov_free_uc(void *p);
+void brov_release_uc(struct uc_struct *uc);
 void *brov_alloc_arena(size_t size);
+void brov_free_arena(void *p);
 bool brov_reservation(uint64_t *base, uint64_t *size, uint32_t *slot_count);
 uint64_t brov_arena_offset(const void *p);
 uint64_t brov_arena_used(void);

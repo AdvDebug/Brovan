@@ -458,18 +458,6 @@ namespace Brovan
 
             SettingsStore.ApplyGlobals(Settings);
 
-            if (IsWindows && Settings.Backend == EmulationBackendKind.Unicorn && Unicorn.IsCFGEnabled())
-            {
-                if (Environment.GetEnvironmentVariable("BROVAN_CFG_DISABLED") != "1")
-                {
-                    PrintHighlight("[!] Control Flow Guard is enabled, Brovan will try to restart the process with CFG disabled.", true);
-                    RestartProcessWithCfgDisabled(true);
-                }
-
-                PrintFatal("[-] Unicorn doesn't support CFG Mitigation which is currently enabled in the process, and Brovan failed to restart with CFG disabled. Please use a build without CFG or clear the GuardCF flag in the PE header.");
-                return;
-            }
-
             if (BinaryFile.GetBinaryFormat(FilePath) != BinaryFormat.ELF && !TryPrepareWindowsFiles())
                 return;
 

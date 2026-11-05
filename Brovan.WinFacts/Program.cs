@@ -19,7 +19,7 @@ namespace Brovan.WinFacts
             switch (Args.Length == 0 ? null : Args[0])
             {
                 case "update":
-                    return Mitigations.RunWithoutControlFlowGuard() ?? Update(Args);
+                    return Update(Args);
                 case "groups":
                     foreach (Rules.FactGroup Group in Rules.FactGroup.All)
                         Console.WriteLine($"{Group.Name} {Group.OutputPath}");

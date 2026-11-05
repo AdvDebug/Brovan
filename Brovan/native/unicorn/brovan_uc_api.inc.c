@@ -409,24 +409,28 @@ void *brov_alloc_uc(size_t size)
     return p ? p : calloc(1, size);
 }
 
+/* uc_close clears the struct before it frees it, so it calls this first. */
+void brov_release_uc(struct uc_struct *uc)
+{
+    g_free(uc->brov_ram_starts);
+    uc->brov_ram_starts = NULL;
+    uc->brov_ram_starts_cap = 0;
+
+    free(uc->brov_aliases);
+    uc->brov_aliases = NULL;
+    uc->brov_alias_count = 0;
+    uc->brov_alias_cap = 0;
+
+    /* The table is arena memory, not heap. */
+    uc->brov_jmp = NULL;
+}
+
 void brov_free_uc(void *p)
 {
     if (p) {
         /* Every free(uc) site in uc.c passes the uc_struct, and it is zeroed at
          * allocation, so this is a no-op on the early-teardown paths. */
-        struct uc_struct *uc = (struct uc_struct *)p;
-
-        g_free(uc->brov_ram_starts);
-        uc->brov_ram_starts = NULL;
-        uc->brov_ram_starts_cap = 0;
-
-        free(uc->brov_aliases);
-        uc->brov_aliases = NULL;
-        uc->brov_alias_count = 0;
-        uc->brov_alias_cap = 0;
-
-        /* The table is arena memory, not heap. */
-        uc->brov_jmp = NULL;
+        brov_release_uc((struct uc_struct *)p);
     }
 
     if (g_brov.active && (uint8_t *)p >= g_brov.arena &&
@@ -440,6 +444,13 @@ void *brov_alloc_arena(size_t size)
 {
     void *p = brov_arena_alloc(size);
     return p ? p : g_malloc0(size);
+}
+
+void brov_free_arena(void *p)
+{
+    if (brov_arena_offset(p) == (uint64_t)-1) {
+        g_free(p);
+    }
 }
 
 static int64_t brov_host_ticks(void)

@@ -33,8 +33,7 @@ namespace Brovan.Core.Emulation
         UC_ERR_HOOK_EXIST,
         UC_ERR_RESOURCE,
         UC_ERR_EXCEPTION,
-        UC_ERR_OVERFLOW,
-        UC_ERR_CFG // Binding-only. Unicorn has no such code.
+        UC_ERR_OVERFLOW
     }
 
     /// <summary>

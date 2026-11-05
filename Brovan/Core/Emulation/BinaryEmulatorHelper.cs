@@ -1725,8 +1725,7 @@ namespace Brovan.Core.Emulation
 
                 foreach (string SupportedFunction in Functions)
                 {
-                    IntPtr hFunction = NativeWinImports.GetProcAddress(Module, SupportedFunction);
-                    if (hFunction == IntPtr.Zero)
+                    if (!NativeLibrary.TryGetExport(Module, SupportedFunction, out IntPtr hFunction))
                         continue;
 
                     uint SyscallNumber;

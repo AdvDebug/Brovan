@@ -319,8 +319,6 @@ namespace Brovan.Core.Emulation
             Inner?.Dispose();
         }
 
-        public static bool IsCFGEnabled() => Unicorn.IsCFGEnabled();
-
         private static BackendError TranslateError(UCErrors e) => e switch
         {
             UCErrors.UC_ERR_OK => BackendError.None,

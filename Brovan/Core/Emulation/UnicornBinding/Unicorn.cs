@@ -94,23 +94,6 @@ namespace Brovan.Core.Emulation
 
         public static bool ThrowDisposed = true;
 
-        public static bool IsCFGEnabled()
-        {
-            if (!GeneralHelper.IsWindows)
-                return false;
-
-            IntPtr CurrentProcess = new IntPtr(-1);
-            uint CFGFlag = 7;
-            uint Flags = 0;
-            UIntPtr BufferSize = new UIntPtr(sizeof(uint));
-            if (NativeWinImports.GetProcessMitigationPolicy(CurrentProcess, CFGFlag, out Flags, BufferSize))
-            {
-                if ((Flags & 0x1) != 0)
-                    return true;
-            }
-            return false;
-        }
-
         public Unicorn(Arch arch, Mode mode)
         {
             _error = uc_open(arch, mode, out _uc);
@@ -121,12 +104,6 @@ namespace Brovan.Core.Emulation
             if (_error != UCErrors.UC_ERR_OK)
                 throw new UnicornException($"Couldn't open a unicorn instance (error {_error})");
 
-            if (IsCFGEnabled())
-            {
-                _error = UCErrors.UC_ERR_CFG;
-                throw new UnicornException("Unicorn doesn't support CFG Mitigation which is currently enabled in the process. if this is a custom/fork build, please use a PE editor to set the CFG flag to 0. if this is an official release build, please open a github issue.");
-            }
-
             this.mode = mode;
         }
 
@@ -134,12 +111,6 @@ namespace Brovan.Core.Emulation
         {
             if (instance == IntPtr.Zero)
                 throw new UnicornException("Invalid unicorn instance.");
-
-            if (IsCFGEnabled())
-            {
-                _error = UCErrors.UC_ERR_CFG;
-                throw new UnicornException("Unicorn doesn't support CFG Mitigation which is currently enabled in the process. if this is a custom/fork build, please use a PE editor to set the CFG flag to 0.");
-            }
 
             _uc = instance;
         }

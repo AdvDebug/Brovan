@@ -65,18 +65,3 @@ Read access is more permissive, but only when the host environment is compatible
 This design allows software to access the resources it needs while reducing the risk of unintended modification of the host system and maintaining a controlled analysis environment.
 
 </details>
-
-<details>
-<summary><b>What's up with Brovan and Control Flow Guard?</b></summary>
-
----
-
-As most of unicorn users would know, the emulator's JIT (TCG) doesn't support CFG because of the way it jumps to the generated code, which is incompatible with the mitigation.
-
-Currently unicorn doesn't have a fix, and looks like it won't come any time soon, as looks like they have other issues in the engine that they want to take care of.
-
-All unicorn programs running on windows, if they need to do anything real with unicorn, it needs to disable CFG. not just Brovan. this is usually done via the project settings and isn't ever mentioned, but the reason it is mentioned in Brovan is because the .NET Compiler doesn't support controlling the linker directly, so it is mentioned so people are aware.
-
-The post-build automatically disables it when building for Windows via a custom code task, it can also restart the process with the mitigation disabled if the task failed during compilation.
-
-</details>

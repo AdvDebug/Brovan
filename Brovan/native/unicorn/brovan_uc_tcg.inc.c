@@ -1275,6 +1275,17 @@ static bool brov_page_has_tbs_impl(struct uc_struct *uc, uint64_t ram_addr)
     return p && p->first_tb;
 }
 
+static void brov_release_impl(struct uc_struct *uc)
+{
+    TCGContext *s = uc->tcg_ctx;
+
+    g_free(s->brov_slot_map);
+    s->brov_slot_map = NULL;
+    free(s->brov_pending);
+    s->brov_pending = NULL;
+    s->brov_pending_count = 0;
+}
+
 static void brov_install(struct uc_struct *uc)
 {
     uc->brov.info = brov_info_impl;
@@ -1286,6 +1297,7 @@ static void brov_install(struct uc_struct *uc)
     uc->brov.set_budget = brov_set_budget_impl;
     uc->brov.budget_ptr = brov_budget_ptr_impl;
     uc->brov.page_has_tbs = brov_page_has_tbs_impl;
+    uc->brov.release = brov_release_impl;
 
     /* Starts on so that the first uc_emu_start() does not have to flush the
      * blocks a restored cache just installed. */
