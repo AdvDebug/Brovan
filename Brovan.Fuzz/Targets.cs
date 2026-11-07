@@ -650,13 +650,17 @@ internal static unsafe class VulkanBootstrap
 
             IntPtr instExt = Extensions(IntPtr.Zero, out uint instExtCount);
 
-            // Returning VK_TRUE from the messenger stops invalid calls before the driver.
+            // Returning VK_TRUE from the messenger stops invalid calls before the driver. A message the
+            // layer drops past its duplicate limit never reaches the messenger, so the limit is off.
             Validating = HasLayer(ValidationLayer);
             IntPtr layerName = Marshal.StringToHGlobalAnsi(ValidationLayer);
             IntPtr* layers = stackalloc IntPtr[1];
             layers[0] = layerName;
             if (Validating)
+            {
                 setenv("VK_KHRONOS_VALIDATION_DEBUG_ACTION", "VK_DBG_LAYER_ACTION_IGNORE", 1);
+                setenv("VK_LAYER_ENABLE_MESSAGE_LIMIT", "false", 1);
+            }
 
             byte* ici = stackalloc byte[64]; new Span<byte>(ici, 64).Clear();
             *(int*)ici = 1;

@@ -243,6 +243,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int QueueFamilySize = BrovVulkLayout.StructSize["VkQueueFamilyProperties"];
         private static readonly int FormatPropertiesSize = BrovVulkLayout.StructSize["VkFormatProperties"];
         private static readonly int FormatPropertiesOptimal = BrovVulkLayout.MemberOffset["VkFormatProperties.optimalTilingFeatures"];
+        private static readonly int MemoryPropertiesSize = BrovVulkLayout.StructSize["VkPhysicalDeviceMemoryProperties"];
+        private static readonly int MemoryPropertiesTypeCount = BrovVulkLayout.MemberOffset["VkPhysicalDeviceMemoryProperties.memoryTypeCount"];
         private static readonly int CommandPoolQueueFamily = BrovVulkLayout.MemberOffset["VkCommandPoolCreateInfo.queueFamilyIndex"];
         private static readonly int CommandBufferAllocatePool = BrovVulkLayout.MemberOffset["VkCommandBufferAllocateInfo.commandPool"];
 
@@ -322,6 +324,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             public uint MaxVertexInputBindings;
             public uint MaxVertexInputAttributes;
             public uint MaxTransformFeedbackBuffers;
+            public uint MemoryTypeCount;
             public bool R8Storage;
             public bool Rg8Storage;
             public bool Etc2Transcode;
@@ -481,6 +484,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             gaps.MaxVertexInputBindings = *(uint*)(limits + LimitsVertexInputBindings);
             gaps.MaxVertexInputAttributes = *(uint*)(limits + LimitsVertexInputAttributes);
             ProbeExtensionLimits(physicalDevice, gaps);
+
+            byte* memory = stackalloc byte[MemoryPropertiesSize];
+            new Span<byte>(memory, MemoryPropertiesSize).Clear();
+            BrovVulkApi.vkGetPhysicalDeviceMemoryProperties(physicalDevice, (IntPtr)memory);
+            gaps.MemoryTypeCount = Math.Min(*(uint*)(memory + MemoryPropertiesTypeCount), BrovVulkConstants.VK_MAX_MEMORY_TYPES);
 
             if ((gaps.ImplementedBits & RelocationBits) != 0)
             {

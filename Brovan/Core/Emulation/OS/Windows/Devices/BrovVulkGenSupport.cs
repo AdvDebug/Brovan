@@ -3929,6 +3929,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void CheckColorRange(uint first, uint count) => CheckSlots(first, count, CallColorLimit, "color attachments");
 
+        public void CheckMemoryType(IntPtr device, uint index)
+        {
+            uint count = DeviceGapsOf(device)?.MemoryTypeCount ?? 0;
+            if (index >= count)
+                throw new InvalidOperationException($"BrovVulk generic: memory type {index} of {count}.");
+        }
+
         public void CheckViewportRange(uint first, uint count) => CheckSlots(first, count, DeviceGapsOf(CallDevice)?.MaxViewports ?? 0, "viewports");
 
         public void CheckVertexBindingRange(uint first, uint count) => CheckSlots(first, count, DeviceGapsOf(CallDevice)?.MaxVertexInputBindings ?? 0, "vertex bindings");

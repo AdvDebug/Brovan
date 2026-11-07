@@ -222,6 +222,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong bounceSize = r.ReadU64();
             // The import path rewrites allocationSize, so the guest's own size is taken first.
             ulong requested = *(ulong*)(ai + 16);
+            uint memoryTypeIndex = *(uint*)(ai + 24);
+            st.CheckMemoryType(device, memoryTypeIndex);
             if (!st.HasHostIds(1))
                 return BrovVulkConstants.VK_ERROR_OUT_OF_HOST_MEMORY;
 
@@ -258,7 +260,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     ImportStats.Record(ImportOutcome.GuestRangeNotResolvable, size);
                 else if (((ulong)host & (di.Alignment - 1)) != 0)
                     ImportStats.Record(ImportOutcome.HostPointerMisaligned, size);
-                else if (!ImportTypeBitsAllow(device, di, host, *(uint*)(ai + 24)))
+                else if (!ImportTypeBitsAllow(device, di, host, memoryTypeIndex))
                     ImportStats.Record(ImportOutcome.MemoryTypeNotImportable, size);
                 else if ((pin = inst.PinBacking(host, aligned)) == IntPtr.Zero)
                     ImportStats.Record(ImportOutcome.BackingNotPinnable, size);
