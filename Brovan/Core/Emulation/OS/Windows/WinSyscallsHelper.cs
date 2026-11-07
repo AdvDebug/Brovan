@@ -133,16 +133,18 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <returns>True if the path matched a registered device.</returns>
         public bool TryCreateDevice(string Path, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler, out NTSTATUS Status)
         {
-            return TryCreateDevice(Path, EaBuffer, out InternalPath, out Handler, out _, out Status);
+            return TryCreateDevice(Path, EaBuffer, out InternalPath, out Handler, out _, out Status, out _);
         }
 
         /// <param name="Pipe">The pipe endpoint when the path named one, null for every other device.</param>
-        internal bool TryCreateDevice(string Path, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler, out GuestNamedPipe Pipe, out NTSTATUS Status)
+        internal bool TryCreateDevice(string Path, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler, out GuestNamedPipe Pipe, out NTSTATUS Status,
+            out ulong Information)
         {
             InternalPath = null;
             Handler = null;
             Pipe = null;
             Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+            Information = NtCreateFile.FILE_OPENED_INFORMATION;
 
             string DevicePath = TranslatePipeAlias(NormalizeDevicePath(Path, SyntheticVolumeGuid));
             if (!DeviceRegistry.Value.TryGetValue(DevicePath, out IWinDevice Device))
@@ -154,7 +156,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Status = Device is NamedPipeDevice PipeDevice
                 ? PipeDevice.CreatePipe(DevicePath, out InternalPath, out Handler, out Pipe)
-                : Device.Create(Emulator, DevicePath, EaBuffer ?? Array.Empty<byte>(), out InternalPath, out Handler);
+                : Device.Create(Emulator, DevicePath, EaBuffer ?? Array.Empty<byte>(), out InternalPath, out Handler, out Information);
 
             if (Status == NTSTATUS.STATUS_SUCCESS && (string.IsNullOrEmpty(InternalPath) || Handler == null))
                 Status = NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
@@ -443,6 +445,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Win32kQueuePort.ReleasePort(Emulator, WinEmulatedThread.TryGetState(Thread));
             NtTimerHelpers.RundownTimers(Emulator, Thread);
             AlpcMessaging.DeliverConnectReplies(Emulator, Thread.ThreadId);
+            WinEmulatedThread.TryGetState(Thread)?.MmcssRegistration?.Leave(Emulator);
 
             bool Current = Emulator.CurrentThreadId == (int)Thread.ThreadId;
             if (!Current && Thread.HostWorker != -1)
@@ -2424,7 +2427,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             int Low = Realtime ? 16 : 1;
             int High = Realtime ? 31 : 15;
 
-            if (State.PrioritySaturation != 0)
+            if (State.ActualBasePriority != 0)
+                Thread.BasePriority = State.ActualBasePriority;
+            else if (State.PrioritySaturation != 0)
                 Thread.BasePriority = State.PrioritySaturation > 0 ? High : Low;
             else
                 Thread.BasePriority = Math.Clamp((int)CurrentPriority + State.PriorityIncrement, Low, High);
@@ -2442,6 +2447,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal int QueryThreadBasePriorityIncrement(EmulatedThread Thread)
         {
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (State.ActualBasePriority != 0)
+                return State.ActualBasePriority - (int)CurrentPriority;
+
             return State.PrioritySaturation != 0 ? 16 * State.PrioritySaturation : Thread.BasePriority - (int)CurrentPriority;
         }
         public User CurrentUser = User.Standard;
@@ -2501,6 +2509,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal WinObjectDirectory AppContainerDirectory { get; private set; }
         internal readonly KnownDlls KnownDlls = new();
         internal readonly DxgkProcess DxgkProcess = new();
+        internal readonly DeviceNodes DeviceNodes = new();
         internal readonly CompositionProcess Composition = new();
         private readonly WinObjectDirectory[] NamedObjectRoots;
         private BinaryEmulator Emulator;
@@ -2766,6 +2775,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal readonly AfdDevice.HostConnects AfdConnects = new AfdDevice.HostConnects();
         internal readonly AfdDevice.PendingRequests AfdRequests = new AfdDevice.PendingRequests();
         internal readonly PipeRequestQueue PipeRequests = new PipeRequestQueue();
+        private Mmcss MmcssState;
+        internal Mmcss Mmcss => MmcssState ??= new Mmcss(this);
         internal KernelFileTable KernelFiles;
         internal KernelFileReads KernelFileReads;
         internal KernelFileInformation KernelFileInformation;
@@ -5407,6 +5418,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int DcAttrBackgroundColorOffset = 0xB4;
         private const int DcAttrTextColorOffset = 0xBC;
         private const int DcAttrBackgroundModeOffset = 0xE0;
+        private const int DcAttrTextAlignOffset = 0x110;
         private const uint TransparentBackgroundMode = 1;
         private const int DcAttrSelectedBrushOffset = 0xA0;
         private const int DcAttrSelectedPenOffset = 0xA8;
@@ -5583,6 +5595,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             Opaque = Emulator.ReadMemoryUInt(DcAttr + DcAttrBackgroundModeOffset) != TransparentBackgroundMode;
         }
 
+        // DC_ATTR holds the alignment GDI applies, with TA_RIGHT already flipped for a right-to-left layout.
+        public uint ReadDcTextAlign(ulong Hdc)
+        {
+            ulong DcAttr = GetDcAttributeAddress(Hdc);
+            return DcAttr == 0 ? 0 : Emulator.ReadMemoryUInt(DcAttr + DcAttrTextAlignOffset);
+        }
+
         public ulong ReadDcSelectedBrush(ulong Hdc)
         {
             ulong DcAttr = GetDcAttributeAddress(Hdc);
@@ -5639,6 +5658,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const uint GdiBatchNoRectFlag = 0x80000000u;
         private const int GdiBatchTextOutStringOffset = 0x54;
+        private const int GdiBatchTextOutAlignOffset = 0x48;
 
         // NT: the system service entry flushes the GDI batch before any win32k service.
         public void FlushGdiBatch()
@@ -5771,7 +5791,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Count > (uint)Payload / 2)
                 return;
 
-            string Text = System.Text.Encoding.Unicode.GetString(Entry.Slice(GdiBatchTextOutStringOffset, (int)Count * 2));
+            // Glyph indices are any 16-bit value, so the units are kept as recorded.
+            string Text = new string(MemoryMarshal.Cast<byte, char>(Entry.Slice(GdiBatchTextOutStringOffset, (int)Count * 2)));
+            uint Align = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(GdiBatchTextOutAlignOffset));
 
             GetBatchViewportShift(Hdc, RecordViewport, out int ShiftX, out int ShiftY);
             X = unchecked(X + ShiftX);
@@ -5783,9 +5805,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong Hwnd = Win32kHelper.GetHwndFromDc(Emulator, Hdc);
             if (Hwnd == 0)
-                Win32kHelper.TryRenderTextToDcBitmap(Emulator, Hdc, Text, X, Y, Options & ~GdiBatchNoRectFlag, HasRect ? Rect : null);
-            else
-                EnqueueTextRender(Hwnd, Hdc, Win32kHelper.ResolveDcFont(Emulator, Hdc), Text, X, Y, Rect.Left, Rect.Top, Rect.Right, Rect.Bottom, Options);
+            {
+                Win32kHelper.TryRenderTextToDcBitmap(Emulator, Hdc, Text, X, Y, Options & ~GdiBatchNoRectFlag, Align, HasRect ? Rect : null);
+                return;
+            }
+
+            Win32kHelper.EnqueueWindowText(Emulator, Hwnd, Hdc, Text, X, Y, Options, Align, Rect);
         }
 
         private void RunGdiBatchTextOutRect(ulong Hdc, ReadOnlySpan<byte> Entry)
@@ -6243,11 +6268,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public bool RasterizeText(IntPtr Font, string Text, Span<uint> Pixels, int Width, int Height,
-            int X, int Y, uint TextColor, uint BackColor, bool Opaque)
+            int X, int Y, uint TextColor, uint BackColor, bool Opaque, uint Options)
         {
             EnsureDesktopDisplay();
             if (DesktopDisplay is GuiThreadManager guiManager)
-                return guiManager.RasterizeText(Font, Text ?? string.Empty, Pixels, Width, Height, X, Y, TextColor, BackColor, Opaque);
+                return guiManager.RasterizeText(Font, Text ?? string.Empty, Pixels, Width, Height, X, Y, TextColor, BackColor, Opaque, Options);
 
             return false;
         }
@@ -6261,6 +6286,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return guiManager.GetTextMetrics(Font, out Metrics);
 
             return false;
+        }
+
+        public bool TryGetRealizedFonts(out ITextMetricsSupport Support)
+        {
+            Support = null;
+            EnsureDesktopDisplay();
+            return DesktopDisplay is GuiThreadManager guiManager && guiManager.TryGetRealizedFonts(out Support);
         }
 
         private ulong EnsureUserServerInfo()
@@ -6516,7 +6548,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             DefaultTextFontResolved = true;
             DefaultTextFont = CreateHostFont(new FontDescription(
                 -GetMessageFontPixels(Win32kDpi.GetEffectiveDpi(Emulator)),
-                0, MessageFontWeight, false, false, false, MessageFontCharSet, 0, MessageFontFace));
+                0, MessageFontWeight, false, false, false, MessageFontCharSet, 0, MessageFontFace, OutPrecision: 0,
+                Quality: MessageFontQuality));
 
             return DefaultTextFont;
         }
@@ -6565,11 +6598,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static void WriteSystemLogFont(Span<byte> Font, int Height)
         {
             FontDescription Description = new FontDescription(Height, 0, MessageFontWeight, false, false, false,
-                MessageFontCharSet, 0, MessageFontFace);
-            WriteLogFont(Font, Description, OutPrecision: 0, ClipPrecision: 0, Quality: MessageFontQuality);
+                MessageFontCharSet, 0, MessageFontFace, OutPrecision: 0, Quality: MessageFontQuality);
+            WriteLogFont(Font, Description, ClipPrecision: 0);
         }
 
-        internal static void WriteLogFont(Span<byte> Font, in FontDescription Description, byte OutPrecision, byte ClipPrecision, byte Quality)
+        internal static void WriteLogFont(Span<byte> Font, in FontDescription Description, byte ClipPrecision)
         {
             Font = Font.Slice(0, LogFontSize);
             Font.Clear();
@@ -6581,9 +6614,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             Font[21] = Description.Underline ? (byte)1 : (byte)0;
             Font[22] = Description.StrikeOut ? (byte)1 : (byte)0;
             Font[23] = Description.CharSet;
-            Font[24] = OutPrecision;
+            Font[24] = Description.OutPrecision;
             Font[25] = ClipPrecision;
-            Font[26] = Quality;
+            Font[26] = Description.Quality;
             Font[27] = Description.PitchAndFamily;
             Encoding.Unicode.GetBytes(Description.FaceName, Font.Slice(LogFontFaceNameOffset, LogFontFaceNameChars * sizeof(char)));
         }
@@ -9362,6 +9395,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             InitializeSyntheticWindowsVersionRegistryDefaults();
             Win32kDxgk.PublishDriverKey(this);
+            Win32kDxgk.StartDisplayIdentity(this, Emulator);
             InitializeSyntheticKnownFolderDescriptions();
             InitializeSyntheticSteamRegistry();
 
@@ -10074,6 +10108,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Text = DecodeRegistryString(Value.Data);
             return true;
+        }
+
+        internal uint ReadRegistryDword(WinRegKey RegKey, string ValueName)
+        {
+            return TryGetRegistryValue(RegKey, ValueName, out ValueNode Value) && Value.Type == RegDword
+                && Value.Data != null && Value.Data.Length >= sizeof(uint)
+                ? BinaryPrimitives.ReadUInt32LittleEndian(Value.Data)
+                : 0;
         }
 
         internal static string DecodeRegistryString(byte[] Data)
@@ -11129,18 +11171,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Entry.Object != null && Entry.Object.ObjectType == HandleType.FileHandle)
                 {
                     WinFile Closing = Entry.Object as WinFile;
-                    if (Closing?.Pipe != null && HandleManager.CountHandlesByObjectId(Closing.ObjectId) <= 1)
-                    {
-                        PipeRequests.CompleteFile(Emulator, Closing, NTSTATUS.STATUS_PIPE_BROKEN);
-                        Closing.Pipe.Dispose();
-                        Closing.Pipe = null;
-                    }
-
-                    if (Closing?.Handler?.Target is AfdDevice Endpoint && HandleManager.CountHandlesByObjectId(Closing.ObjectId) <= 1)
-                    {
-                        AfdRequests.EndpointClosed(Emulator, Endpoint);
-                        Endpoint.Dispose();
-                    }
+                    if (Closing?.Handler?.Target is IWinDeviceFile DeviceFile && HandleManager.CountHandlesByObjectId(Closing.ObjectId) <= 1)
+                        DeviceFile.Closed(Emulator, Closing);
 
                     KernelFiles?.ReleaseHandle(Handle);
 

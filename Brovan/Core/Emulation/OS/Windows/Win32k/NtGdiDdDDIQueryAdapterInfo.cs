@@ -58,6 +58,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint RegistryStatusSuccess = 0;
         private const uint RegistryStatusBufferOverflow = 1;
         private const uint RegistryTranslatePathSlack = 16;
+        private const string IdentityDriverVersion = "DriverVersion";
         private const int DriverDescriptionSize = 8192;
 
         private const uint WarpPrivateVersion = 2;
@@ -97,18 +98,24 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Size == 0 || Size > DriverDescriptionSize)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
+            AdapterIdentity Identity = null;
+            if (ReadsIdentity(Type) && !Win32kDxgk.TryGetIdentity(Instance, Adapter, out Identity, out NTSTATUS Parked))
+                return Parked;
+
             Span<byte> Data = Instance.WinHelper.ReadMemorySpan(DataPtr, Size);
             if (Data.IsEmpty)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            NTSTATUS Status = Answer(Instance, Adapter, Type, Data, out int Written);
+            NTSTATUS Status = Answer(Instance, Adapter, Identity, Type, Data, out int Written);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
             return Instance.WriteMemory(DataPtr, Data.Slice(0, Written)) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_INVALID_PARAMETER;
         }
 
-        private static NTSTATUS Answer(BinaryEmulator Instance, DxgkAdapter Adapter, uint Type, Span<byte> Data, out int Written)
+        private static bool ReadsIdentity(uint Type) => Type == PhysicalAdapterDeviceIds || Type == DriverDescriptionRender;
+
+        private static NTSTATUS Answer(BinaryEmulator Instance, DxgkAdapter Adapter, AdapterIdentity Identity, uint Type, Span<byte> Data, out int Written)
         {
             bool Render = Adapter.Kind == DxgkAdapterKind.BasicRender;
             Written = Data.Length;
@@ -183,8 +190,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     if (BinaryPrimitives.ReadUInt32LittleEndian(Data) != 0)
                         return NTSTATUS.STATUS_INVALID_PARAMETER;
                     Data.Slice(4).Clear();
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(4), Adapter.VendorId);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(8), Adapter.DeviceId);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(4), Identity.VendorId);
+                    BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(8), Identity.DeviceId);
                     BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(24), Adapter.BusType);
                     return NTSTATUS.STATUS_SUCCESS;
 
@@ -193,7 +200,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     return NTSTATUS.STATUS_SUCCESS;
 
                 case DriverDescriptionRender when Render && Data.Length == DriverDescriptionSize:
-                    WriteString(Data, Adapter.Description);
+                    WriteString(Data, Identity.Description);
                     return NTSTATUS.STATUS_SUCCESS;
 
                 case ParavirtualizationRender when Render && Data.Length == 1:
@@ -239,8 +246,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (WinHelper.TryGetRegistryValue(Key, Win32kDxgk.OpenGlDriverNameValue + Suffix, out ValueNode Value)
                     && (Value.Type == WinSysHelper.RegSz || Value.Type == WinSysHelper.RegMultiSz))
                     Name = WinSysHelper.DecodeRegistryString(Value.Data);
-                Version = ReadDword(WinHelper, Key, Win32kDxgk.OpenGlVersionValue + Suffix);
-                Flags = ReadDword(WinHelper, Key, Win32kDxgk.OpenGlFlagsValue + Suffix);
+                Version = WinHelper.ReadRegistryDword(Key, Win32kDxgk.OpenGlVersionValue + Suffix);
+                Flags = WinHelper.ReadRegistryDword(Key, Win32kDxgk.OpenGlFlagsValue + Suffix);
             }
 
             if (Name.Length >= MaxPathCharacters)
@@ -251,14 +258,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Data.Slice(0, OffsetOpenGlVersion).Clear();
             Encoding.Unicode.GetBytes(Name, Data);
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private static uint ReadDword(WinSysHelper WinHelper, WinRegKey Key, string Name)
-        {
-            return WinHelper.TryGetRegistryValue(Key, Name, out ValueNode Value) && Value.Type == WinSysHelper.RegDword
-                && Value.Data != null && Value.Data.Length >= 4
-                ? BinaryPrimitives.ReadUInt32LittleEndian(Value.Data)
-                : 0;
         }
 
         // NT reports buffer overflow in the record (DxgkpQueryRegistry).
@@ -292,6 +291,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 Key = string.Concat(Key, "\\", Name.Slice(0, Split));
                 Name = Name.Slice(Split + 1);
+            }
+            else if (Name.Equals(IdentityDriverVersion, StringComparison.OrdinalIgnoreCase)
+                && !Win32kDxgk.TryGetIdentity(Instance, Adapter, out _, out NTSTATUS Parked))
+            {
+                return Parked;
             }
 
             if (!Instance.WinHelper.TryReadRegistryValue(Key, Name.ToString(), out ValueNode Value))

@@ -20,7 +20,8 @@ namespace Brovan.Android
     {
         private const int InitialCoverage = 64 * 1024;
         private const int MaximumCoverage = 32 * 1024 * 1024;
-        private const byte SansSerifTrueType = 0x27;
+        // FF_SWISS and variable pitch without TMPF_TRUETYPE, because the face has no TrueType tables for the guest.
+        private const byte SansSerifRaster = 0x21;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct TextRequest
@@ -82,7 +83,7 @@ namespace Brovan.Android
             metrics.LastChar = 0xFFFF;
             metrics.DefaultChar = 0x3F;
             metrics.BreakChar = 0x20;
-            metrics.PitchAndFamily = SansSerifTrueType;
+            metrics.PitchAndFamily = SansSerifRaster;
             return true;
         }
 

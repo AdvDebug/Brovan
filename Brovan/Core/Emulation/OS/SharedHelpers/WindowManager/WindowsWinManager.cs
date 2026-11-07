@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -882,36 +883,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             width = 0;
             height = 0;
 
-            if (text == null)
-                text = string.Empty;
+            text ??= string.Empty;
 
-            lock (MetricsLock)
-            {
-                IntPtr hdc = EnsureMetricsDc();
-                if (hdc == IntPtr.Zero)
-                    return false;
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero || !GetTextExtentPoint32W(selected.Dc, text, text.Length, out SIZE size))
+                return false;
 
-                IntPtr previous = font != IntPtr.Zero ? SelectObject(hdc, font) : IntPtr.Zero;
-                bool measured = GetTextExtentPoint32W(hdc, text, text.Length, out SIZE size);
-                bool haveHeight = false;
-                int emptyHeight = 0;
-
-                if (text.Length == 0 && GetTextMetricsW(hdc, out TEXTMETRICW empty))
-                {
-                    haveHeight = true;
-                    emptyHeight = empty.tmHeight;
-                }
-
-                if (previous != IntPtr.Zero)
-                    SelectObject(hdc, previous);
-
-                if (!measured)
-                    return false;
-
-                width = size.cx;
-                height = haveHeight ? emptyHeight : size.cy;
-            }
-
+            width = size.cx;
+            height = text.Length == 0 && GetTextMetricsW(selected.Dc, out TEXTMETRICW empty) ? empty.tmHeight : size.cy;
             return true;
         }
 
@@ -926,8 +905,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 lfUnderline = description.Underline ? (byte)1 : (byte)0,
                 lfStrikeOut = description.StrikeOut ? (byte)1 : (byte)0,
                 lfCharSet = description.CharSet,
+                lfOutPrecision = description.OutPrecision,
                 lfPitchAndFamily = description.PitchAndFamily,
-                lfQuality = CleartypeQuality,
+                lfQuality = description.Quality,
                 lfFaceName = description.FaceName ?? string.Empty,
             };
 
@@ -1016,48 +996,216 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         {
             metrics = default;
 
-            lock (MetricsLock)
-            {
-                IntPtr hdc = EnsureMetricsDc();
-                if (hdc == IntPtr.Zero)
-                    return false;
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero || !GetTextMetricsW(selected.Dc, out TEXTMETRICW native))
+                return false;
 
-                IntPtr previous = font != IntPtr.Zero ? SelectObject(hdc, font) : IntPtr.Zero;
-                bool read = GetTextMetricsW(hdc, out TEXTMETRICW native);
-
-                if (previous != IntPtr.Zero)
-                    SelectObject(hdc, previous);
-
-                if (!read)
-                    return false;
-
-                metrics.Height = native.tmHeight;
-                metrics.Ascent = native.tmAscent;
-                metrics.Descent = native.tmDescent;
-                metrics.InternalLeading = native.tmInternalLeading;
-                metrics.ExternalLeading = native.tmExternalLeading;
-                metrics.AveCharWidth = native.tmAveCharWidth;
-                metrics.MaxCharWidth = native.tmMaxCharWidth;
-                metrics.Weight = native.tmWeight;
-                metrics.Overhang = native.tmOverhang;
-                metrics.DigitizedAspectX = native.tmDigitizedAspectX;
-                metrics.DigitizedAspectY = native.tmDigitizedAspectY;
-                metrics.FirstChar = native.tmFirstChar;
-                metrics.LastChar = native.tmLastChar;
-                metrics.DefaultChar = native.tmDefaultChar;
-                metrics.BreakChar = native.tmBreakChar;
-                metrics.Italic = native.tmItalic;
-                metrics.Underlined = native.tmUnderlined;
-                metrics.StruckOut = native.tmStruckOut;
-                metrics.PitchAndFamily = native.tmPitchAndFamily;
-                metrics.CharSet = native.tmCharSet;
-            }
-
+            metrics.Height = native.tmHeight;
+            metrics.Ascent = native.tmAscent;
+            metrics.Descent = native.tmDescent;
+            metrics.InternalLeading = native.tmInternalLeading;
+            metrics.ExternalLeading = native.tmExternalLeading;
+            metrics.AveCharWidth = native.tmAveCharWidth;
+            metrics.MaxCharWidth = native.tmMaxCharWidth;
+            metrics.Weight = native.tmWeight;
+            metrics.Overhang = native.tmOverhang;
+            metrics.DigitizedAspectX = native.tmDigitizedAspectX;
+            metrics.DigitizedAspectY = native.tmDigitizedAspectY;
+            metrics.FirstChar = native.tmFirstChar;
+            metrics.LastChar = native.tmLastChar;
+            metrics.DefaultChar = native.tmDefaultChar;
+            metrics.BreakChar = native.tmBreakChar;
+            metrics.Italic = native.tmItalic;
+            metrics.Underlined = native.tmUnderlined;
+            metrics.StruckOut = native.tmStruckOut;
+            metrics.PitchAndFamily = native.tmPitchAndFamily;
+            metrics.CharSet = native.tmCharSet;
             return true;
         }
 
+        public unsafe uint GetFontData(IntPtr font, uint table, uint offset, Span<byte> buffer)
+        {
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero)
+                return ITextMetricsSupport.NoFontData;
+
+            fixed (byte* data = buffer)
+                return GetFontData(selected.Dc, table, offset, buffer.IsEmpty ? null : data, (uint)buffer.Length);
+        }
+
+        public unsafe string GetRealizedFace(IntPtr font)
+        {
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero)
+                return null;
+
+            char* face = stackalloc char[FaceNameChars + 1];
+            face[FaceNameChars] = '\0';
+            return GetTextFaceW(selected.Dc, FaceNameChars, face) > 0 ? new string(face) : null;
+        }
+
+        public bool HasRealizedFontFacts => true;
+
+        public unsafe bool GetOutlineTextMetrics(IntPtr font, out OutlineTextMetricsData metrics)
+        {
+            metrics = null;
+            int fixedSize = OutlineTextMetricsData.HeadSize + 4 * IntPtr.Size;
+
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero)
+                return false;
+
+            ulong diff = 0;
+            uint size = NtGdiGetOutlineTextMetricsInternalW(selected.Dc, 0, null, &diff);
+            if (size < fixedSize || size > MaxOutlineTextMetricsBytes)
+                return false;
+
+            byte[] image = new byte[size];
+            fixed (byte* data = image)
+            {
+                if (NtGdiGetOutlineTextMetricsInternalW(selected.Dc, size, data, &diff) != size)
+                    return false;
+            }
+
+            uint[] offsets = new uint[4];
+            for (int i = 0; i < offsets.Length; i++)
+            {
+                ulong offset = IntPtr.Size == 8
+                    ? BinaryPrimitives.ReadUInt64LittleEndian(image.AsSpan(OutlineTextMetricsData.HeadSize + i * 8))
+                    : BinaryPrimitives.ReadUInt32LittleEndian(image.AsSpan(OutlineTextMetricsData.HeadSize + i * 4));
+                offsets[i] = offset >= (ulong)fixedSize && offset < size ? (uint)(offset - (ulong)fixedSize) : uint.MaxValue;
+            }
+
+            metrics = new OutlineTextMetricsData
+            {
+                Image = image,
+                NamesStart = fixedSize,
+                NameOffsets = offsets,
+                Diff = diff,
+            };
+            return true;
+        }
+
+        public unsafe bool GetCharWidths(IntPtr font, uint first, ReadOnlySpan<ushort> codes, CharWidthFlags flags, Span<uint> widths)
+        {
+            if (widths.IsEmpty || (!codes.IsEmpty && codes.Length != widths.Length))
+                return false;
+
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero)
+                return false;
+
+            fixed (ushort* chars = codes)
+            fixed (uint* output = widths)
+                return NtGdiGetCharWidthW(selected.Dc, first, (uint)widths.Length, codes.IsEmpty ? null : chars, (uint)flags, output) != 0;
+        }
+
+        public unsafe bool GetCharAbcWidths(IntPtr font, uint first, ReadOnlySpan<ushort> codes, AbcWidthFlags flags, Span<uint> abc)
+        {
+            int count = abc.Length / 3;
+            if (count == 0 || abc.Length != count * 3 || (!codes.IsEmpty && codes.Length != count))
+                return false;
+
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero)
+                return false;
+
+            fixed (ushort* chars = codes)
+            fixed (uint* output = abc)
+                return NtGdiGetCharABCWidthsW(selected.Dc, first, (uint)count, codes.IsEmpty ? null : chars, (uint)flags, output) != 0;
+        }
+
+        public unsafe uint GetGlyphOutline(IntPtr font, ushort code, uint format, in Mat2Data matrix, bool ignoreRotation,
+            out GlyphMetricsData metrics, Span<byte> buffer)
+        {
+            metrics = default;
+
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero)
+                return ITextMetricsSupport.NoFontData;
+
+            GlyphMetricsData written;
+            Mat2Data transform = matrix;
+            uint result;
+            fixed (byte* data = buffer)
+                result = NtGdiGetGlyphOutline(selected.Dc, code, format, &written, (uint)buffer.Length, buffer.IsEmpty ? null : data,
+                    &transform, ignoreRotation ? 1 : 0);
+
+            if (result != ITextMetricsSupport.NoFontData)
+                metrics = written;
+
+            return result;
+        }
+
+        public unsafe uint GetGlyphIndices(IntPtr font, bool countGlyphs, ReadOnlySpan<ushort> text, Span<ushort> indices, uint mode,
+            bool subset)
+        {
+            if (!countGlyphs && text.Length != indices.Length)
+                return ITextMetricsSupport.NoFontData;
+
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero)
+                return ITextMetricsSupport.NoFontData;
+
+            if (countGlyphs)
+                return NtGdiGetGlyphIndicesWInternal(selected.Dc, null, 0, null, 0, subset ? 1 : 0);
+
+            // NT counts the font's glyphs when every argument is zero, so an empty run still passes buffers.
+            ushort none = 0;
+            ushort unused = 0;
+            fixed (ushort* source = text)
+            fixed (ushort* target = indices)
+                return NtGdiGetGlyphIndicesWInternal(selected.Dc, text.IsEmpty ? &none : source, text.Length,
+                    indices.IsEmpty ? &unused : target, mode, subset ? 1 : 0);
+        }
+
+        public unsafe uint GetKerningPairs(IntPtr font, Span<KerningPairData> pairs)
+        {
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero)
+                return 0;
+
+            fixed (KerningPairData* output = pairs)
+                return NtGdiGetKerningPairs(selected.Dc, (uint)pairs.Length, pairs.IsEmpty ? null : output);
+        }
+
+        public unsafe uint GetUnicodeRanges(IntPtr font, Span<byte> glyphSet)
+        {
+            using MetricsFont selected = new MetricsFont(font);
+            if (selected.Dc == IntPtr.Zero)
+                return 0;
+
+            uint size = NtGdiGetFontUnicodeRanges(selected.Dc, null);
+            if (size == 0 || (uint)glyphSet.Length < size)
+                return size;
+
+            fixed (byte* output = glyphSet)
+                return NtGdiGetFontUnicodeRanges(selected.Dc, output) == size ? size : 0;
+        }
+
+        private ref struct MetricsFont
+        {
+            public readonly IntPtr Dc;
+            private readonly IntPtr _previous;
+
+            public MetricsFont(IntPtr font)
+            {
+                Monitor.Enter(MetricsLock);
+                Dc = EnsureMetricsDc();
+                _previous = Dc != IntPtr.Zero && font != IntPtr.Zero ? SelectObject(Dc, font) : IntPtr.Zero;
+            }
+
+            public void Dispose()
+            {
+                if (_previous != IntPtr.Zero)
+                    SelectObject(Dc, _previous);
+
+                Monitor.Exit(MetricsLock);
+            }
+        }
+
         public unsafe bool RasterizeText(IntPtr font, string text, Span<uint> pixels, int width, int height,
-            int x, int y, uint textColor, uint backColor, bool opaque)
+            int x, int y, uint textColor, uint backColor, bool opaque, uint options)
         {
             int Count = width * height;
             if (width <= 0 || height <= 0 || pixels.Length < Count)
@@ -1078,7 +1226,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 SetBkMode(hdc, opaque ? OPAQUE : TRANSPARENT);
 
                 RECT rect = new RECT { Left = 0, Top = 0, Right = width, Bottom = height };
-                bool drawn = ExtTextOutW(hdc, x, y, opaque ? ETO_OPAQUE : 0u, ref rect,
+                uint draw = (opaque ? ITextMetricsSupport.EtoOpaque : 0u) | (options & ITextMetricsSupport.EtoGlyphIndex);
+                bool drawn = ExtTextOutW(hdc, x, y, draw, ref rect,
                     text ?? string.Empty, (uint)(text?.Length ?? 0), IntPtr.Zero);
 
                 // The DIB bits are only current once the batch is flushed.
@@ -2231,6 +2380,36 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [DllImport("gdi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
 
+        [DllImport("gdi32.dll")]
+        private static extern unsafe uint GetFontData(IntPtr hdc, uint dwTable, uint dwOffset, byte* pvBuffer, uint cjBuffer);
+
+        [DllImport("gdi32.dll")]
+        private static extern unsafe int GetTextFaceW(IntPtr hdc, int c, char* lpName);
+
+        // gdi32 does not pass every argument a guest can give, so these call the win32u syscalls directly.
+        [DllImport("win32u.dll")]
+        private static extern unsafe uint NtGdiGetOutlineTextMetricsInternalW(IntPtr hdc, uint cjotm, byte* potm, ulong* ptmd);
+
+        [DllImport("win32u.dll")]
+        private static extern unsafe int NtGdiGetCharWidthW(IntPtr hdc, uint first, uint count, ushort* chars, uint flags, uint* buffer);
+
+        [DllImport("win32u.dll")]
+        private static extern unsafe int NtGdiGetCharABCWidthsW(IntPtr hdc, uint first, uint count, ushort* chars, uint flags, uint* buffer);
+
+        [DllImport("win32u.dll")]
+        private static extern unsafe uint NtGdiGetGlyphOutline(IntPtr hdc, ushort code, uint format, GlyphMetricsData* metrics,
+            uint size, byte* buffer, Mat2Data* matrix, int ignoreRotation);
+
+        [DllImport("win32u.dll")]
+        private static extern unsafe uint NtGdiGetGlyphIndicesWInternal(IntPtr hdc, ushort* text, int count, ushort* indices, uint mode,
+            int subset);
+
+        [DllImport("win32u.dll")]
+        private static extern unsafe uint NtGdiGetKerningPairs(IntPtr hdc, uint count, KerningPairData* pairs);
+
+        [DllImport("win32u.dll")]
+        private static extern unsafe uint NtGdiGetFontUnicodeRanges(IntPtr hdc, byte* glyphSet);
+
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         private static extern IntPtr GetDC(IntPtr hWnd);
 
@@ -2274,7 +2453,6 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private const int TRANSPARENT = 1;
         private const int OPAQUE = 2;
-        private const uint ETO_OPAQUE = 0x0002;
         private const uint BI_RGB = 0;
         private const uint DIB_RGB_COLORS = 0;
 
@@ -2348,7 +2526,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [DllImport("gdi32.dll", SetLastError = true)]
         private static extern IntPtr CreateSolidBrush(int crColor);
 
-        private const byte CleartypeQuality = 5;
+        private const int FaceNameChars = 32;
+
+        // Four names of at most LF_FULLFACESIZE characters each, with room to spare.
+        private const uint MaxOutlineTextMetricsBytes = 0x2000;
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct LOGFONTW

@@ -148,6 +148,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         public int PriorityIncrement { get; set; }
         public int PrioritySaturation { get; set; }
 
+        // An absolute base priority that overrides the class rules (KeSetActualBasePriorityThread). 0 means none.
+        public int ActualBasePriority { get; set; }
+
+        internal MmThreadClient MmcssRegistration { get; set; }
+
         public bool HiddenFromDebugger { get; set; }
         public string Description { get; set; }
         public long CreateTime { get; set; }

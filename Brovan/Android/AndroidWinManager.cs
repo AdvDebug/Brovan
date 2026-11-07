@@ -13,6 +13,7 @@ namespace Brovan.Android
         private const uint SIZE_RESTORED = 0;
 
         private static AndroidWinManager _current;
+        private static long _nextFont;
 
         private readonly AndroidGdiSurface _gdi = new();
 
@@ -114,7 +115,7 @@ namespace Brovan.Android
         }
 
         public bool RasterizeText(IntPtr font, string text, Span<uint> pixels, int width, int height,
-            int x, int y, uint textColor, uint backColor, bool opaque)
+            int x, int y, uint textColor, uint backColor, bool opaque, uint options)
         {
             int count = width * height;
             if (width <= 0 || height <= 0 || pixels.Length < count)
@@ -177,7 +178,7 @@ namespace Brovan.Android
 
         public IntPtr CreateFont(in FontDescription description)
         {
-            return IntPtr.Zero;
+            return (IntPtr)Interlocked.Increment(ref _nextFont);
         }
 
         public void DeleteFont(IntPtr font)

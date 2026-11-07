@@ -10,8 +10,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint PolygonType = 1;
         private const uint PolylineType = 2;
         private const int PointSize = 8;
-        private const uint MaxFigures = 0x9C4000;
-        private const ulong MaxPoints = 0x4E2000;
+        private const uint MaxFigures = Win32kHelper.MaxGdiBufferBytes / sizeof(uint);
+        private const ulong MaxPoints = Win32kHelper.MaxGdiBufferBytes / PointSize;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {

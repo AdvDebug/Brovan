@@ -157,10 +157,11 @@ namespace Brovan.Core.Emulation.OS.Windows
     /// </summary>
     internal static class BrovVulkProc
     {
-        private static IntPtr Library;
-        private static bool LibraryTried;
+        private static readonly Lazy<IntPtr> Library = new Lazy<IntPtr>(LoadLibrary, LazyThreadSafetyMode.ExecutionAndPublication);
 
         internal static IntPtr HostInstance;
+
+        internal static IntPtr HostLoader => Library.Value;
 
         private static readonly IntPtr[] Globals = new IntPtr[BrovVulkApi.CommandCount];
 
@@ -187,18 +188,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Proc;
         }
 
+        private static IntPtr LoadLibrary()
+        {
+            IntPtr Handle;
+            if (GeneralHelper.IsWindows)
+                NativeLibrary.TryLoad("vulkan-1.dll", out Handle);
+            else if (!NativeLibrary.TryLoad("libvulkan.so.1", out Handle))
+                NativeLibrary.TryLoad("libvulkan.so", out Handle);
+            return Handle;
+        }
+
         private static IntPtr Resolve(string Name, string[]? Aliases)
         {
-            if (!LibraryTried)
-            {
-                LibraryTried = true;
-                if (GeneralHelper.IsWindows)
-                    NativeLibrary.TryLoad("vulkan-1.dll", out Library);
-                else if (!NativeLibrary.TryLoad("libvulkan.so.1", out Library))
-                    NativeLibrary.TryLoad("libvulkan.so", out Library);
-            }
-
-            if (Library != IntPtr.Zero && NativeLibrary.TryGetExport(Library, Name, out IntPtr Export) && Export != IntPtr.Zero)
+            IntPtr Loader = Library.Value;
+            if (Loader != IntPtr.Zero && NativeLibrary.TryGetExport(Loader, Name, out IntPtr Export) && Export != IntPtr.Zero)
                 return Export;
 
             if (HostInstance != IntPtr.Zero)
@@ -905,6 +908,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public uint IdOf(IntPtr ptr, string type) => ptr != IntPtr.Zero && _ids.TryGetValue((ptr, type), out uint id) ? id : 0;
 
+        private readonly Dictionary<IntPtr, IntPtr> _displayPicks = new Dictionary<IntPtr, IntPtr>();
+
+        // The one device of the physical device's instance that reports the display adapter LUID.
+        public IntPtr DisplayHolder(IntPtr physicalDevice)
+        {
+            uint id = IdOf(physicalDevice, "VkPhysicalDevice");
+            if (id == 0 || !_handles.TryGetValue(id, out HandleEntry e)
+                || !_handles.TryGetValue(e.Parent, out HandleEntry instance) || instance.Type != "VkInstance")
+                return IntPtr.Zero;
+
+            if (!_displayPicks.TryGetValue(instance.Ptr, out IntPtr pick))
+                _displayPicks[instance.Ptr] = pick = VulkanStandIns.PickDisplayDevice(instance.Ptr);
+            return pick;
+        }
+
         public IntPtr InstanceOfDevice(IntPtr device)
         {
             uint id = IdOf(device, "VkDevice");
@@ -1036,6 +1054,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                             break;
                         case "VkDescriptorSet":
                             ReleaseSet(e.Ptr);
+                            break;
+                        case "VkInstance":
+                            _displayPicks.Remove(e.Ptr);
                             break;
                         case "VkDevice":
                             _devicePhysical.Remove(e.Ptr);

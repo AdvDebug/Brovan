@@ -625,14 +625,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         }
 
         public bool RasterizeText(IntPtr font, string text, Span<uint> pixels, int width, int height,
-            int x, int y, uint textColor, uint backColor, bool opaque)
+            int x, int y, uint textColor, uint backColor, bool opaque, uint options)
         {
             if (_disposed || !WaitForInitialization())
                 return false;
 
             ITextMetricsSupport support = _textMetrics;
             return support != null && support.RasterizeText(font, text ?? string.Empty, pixels, width, height,
-                x, y, textColor, backColor, opaque);
+                x, y, textColor, backColor, opaque, options);
         }
 
         public IntPtr CreateFont(in FontDescription description)
@@ -651,6 +651,21 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             ITextMetricsSupport support = _textMetrics;
             return support == null ? Array.Empty<FontFamilyData>() : support.EnumerateFontFamilies(faceName, charSet);
+        }
+
+        // Use the backend within one call and never store it.
+        public bool TryGetRealizedFonts(out ITextMetricsSupport support)
+        {
+            support = null;
+            if (_disposed || !WaitForInitialization())
+                return false;
+
+            ITextMetricsSupport text = _textMetrics;
+            if (text == null || !text.HasRealizedFontFacts)
+                return false;
+
+            support = text;
+            return true;
         }
 
         // Queued text draws may still use this font.

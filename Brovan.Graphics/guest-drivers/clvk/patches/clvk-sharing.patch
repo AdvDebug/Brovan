@@ -1,0 +1,3144 @@
+--- a/clvk/src/CMakeLists.txt
++++ b/clvk/src/CMakeLists.txt
+@@ -62,6 +62,10 @@
+   event.cpp
+   image_format.cpp
+   init.cpp
++  interop.cpp
++  interop_d3d10.cpp
++  interop_dxgi.cpp
++  interop_gl.cpp
+   kernel.cpp
+   kmt.cpp
+   log.cpp
+--- a/clvk/src/api.cpp
++++ b/clvk/src/api.cpp
+@@ -12,6 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++#include "api.hpp"
+ #include "cl_headers.hpp"
+ #include "icd.hpp"
+ #include "image_format.hpp"
+@@ -30,8 +31,6 @@
+ 
+ #define CLVK_API_CALL CL_API_CALL
+ 
+-namespace {
+-
+ // Validation functions
+ bool is_valid_platform(cl_platform_id platform) {
+     return platform != nullptr && icd_downcast(platform)->is_valid();
+@@ -98,6 +97,8 @@
+     return true;
+ }
+ 
++namespace {
++
+ bool is_same_context(cl_command_queue queue, cl_mem mem) {
+     return icd_downcast(queue)->context() == icd_downcast(mem)->context();
+ }
+@@ -309,6 +310,24 @@
+     EXTENSION_ENTRYPOINT(clGetSemaphoreInfoKHR),
+     EXTENSION_ENTRYPOINT(clRetainSemaphoreKHR),
+     EXTENSION_ENTRYPOINT(clReleaseSemaphoreKHR),
++#ifdef _WIN32
++    EXTENSION_ENTRYPOINT(clGetGLContextInfoKHR),
++    EXTENSION_ENTRYPOINT(clCreateFromGLBuffer),
++    EXTENSION_ENTRYPOINT(clCreateFromGLTexture),
++    EXTENSION_ENTRYPOINT(clCreateFromGLTexture2D),
++    EXTENSION_ENTRYPOINT(clCreateFromGLTexture3D),
++    EXTENSION_ENTRYPOINT(clCreateFromGLRenderbuffer),
++    EXTENSION_ENTRYPOINT(clGetGLObjectInfo),
++    EXTENSION_ENTRYPOINT(clGetGLTextureInfo),
++    EXTENSION_ENTRYPOINT(clEnqueueAcquireGLObjects),
++    EXTENSION_ENTRYPOINT(clEnqueueReleaseGLObjects),
++    EXTENSION_ENTRYPOINT(clGetDeviceIDsFromD3D10KHR),
++    EXTENSION_ENTRYPOINT(clCreateFromD3D10BufferKHR),
++    EXTENSION_ENTRYPOINT(clCreateFromD3D10Texture2DKHR),
++    EXTENSION_ENTRYPOINT(clCreateFromD3D10Texture3DKHR),
++    EXTENSION_ENTRYPOINT(clEnqueueAcquireD3D10ObjectsKHR),
++    EXTENSION_ENTRYPOINT(clEnqueueReleaseD3D10ObjectsKHR),
++#endif
+ #undef EXTENSION_ENTRYPOINT
+ #undef FUNC_PTR
+ };
+@@ -1201,6 +1220,19 @@
+                 context->properties().size() * sizeof(cl_context_properties);
+         }
+         break;
++#ifdef _WIN32
++    case CL_CONTEXT_D3D10_PREFER_SHARED_RESOURCES_KHR:
++        if (context->interop() == nullptr ||
++            context->interop()->api() != cvk_interop_api::d3d10) {
++            ret = CL_INVALID_VALUE;
++            break;
++        }
++        val_uint = context->interop()->prefers_shared_resources() ? CL_TRUE
++                                                                  : CL_FALSE;
++        copy_ptr = &val_uint;
++        size_ret = sizeof(cl_bool);
++        break;
++#endif
+     default:
+         ret = CL_INVALID_VALUE;
+         break;
+@@ -2179,6 +2211,17 @@
+         copy_ptr = memobj->properties().data();
+         ret_size = memobj->properties().size() * sizeof(cl_mem_properties);
+         break;
++#ifdef _WIN32
++    case CL_MEM_D3D10_RESOURCE_KHR:
++        if (memobj->interop() == nullptr ||
++            memobj->interop()->device()->api() != cvk_interop_api::d3d10) {
++            return CL_INVALID_D3D10_RESOURCE_KHR;
++        }
++        val_ptr = memobj->interop()->external();
++        copy_ptr = &val_ptr;
++        ret_size = sizeof(val_ptr);
++        break;
++#endif
+     default:
+         ret = CL_INVALID_VALUE;
+     }
+@@ -4778,6 +4821,17 @@
+         copy_ptr = &val_uint;
+         ret_size = sizeof(val_uint);
+         break;
++#ifdef _WIN32
++    case CL_IMAGE_D3D10_SUBRESOURCE_KHR:
++        if (img->interop() == nullptr ||
++            img->interop()->device()->api() != cvk_interop_api::d3d10) {
++            return CL_INVALID_D3D10_RESOURCE_KHR;
++        }
++        val_uint = img->interop()->subresource();
++        copy_ptr = &val_uint;
++        ret_size = sizeof(val_uint);
++        break;
++#endif
+     default:
+         ret = CL_INVALID_VALUE;
+     }
+@@ -6458,6 +6512,17 @@
+     clEnqueueWaitForEvents,
+     clEnqueueBarrier,
+     clGetExtensionFunctionAddress,
++#ifdef _WIN32
++    clCreateFromGLBuffer,
++    clCreateFromGLTexture2D,
++    clCreateFromGLTexture3D,
++    clCreateFromGLRenderbuffer,
++    clGetGLObjectInfo,
++    clGetGLTextureInfo,
++    clEnqueueAcquireGLObjects,
++    clEnqueueReleaseGLObjects,
++    clGetGLContextInfoKHR,
++#else
+     nullptr, // clCreateFromGLBuffer;
+     nullptr, // clCreateFromGLTexture2D;
+     nullptr, // clCreateFromGLTexture3D;
+@@ -6467,13 +6532,23 @@
+     nullptr, // clEnqueueAcquireGLObjects;
+     nullptr, // clEnqueueReleaseGLObjects;
+     nullptr, // clGetGLContextInfoKHR;
++#endif
+ 
++#ifdef _WIN32
++    clGetDeviceIDsFromD3D10KHR,
++    clCreateFromD3D10BufferKHR,
++    clCreateFromD3D10Texture2DKHR,
++    clCreateFromD3D10Texture3DKHR,
++    clEnqueueAcquireD3D10ObjectsKHR,
++    clEnqueueReleaseD3D10ObjectsKHR,
++#else
+     nullptr, // clGetDeviceIDsFromD3D10KHR;
+     nullptr, // clCreateFromD3D10BufferKHR;
+     nullptr, // clCreateFromD3D10Texture2DKHR;
+     nullptr, // clCreateFromD3D10Texture3DKHR;
+     nullptr, // clEnqueueAcquireD3D10ObjectsKHR;
+     nullptr, // clEnqueueReleaseD3D10ObjectsKHR;
++#endif
+ 
+     // OpenCL 1.1
+     clSetEventCallback,
+@@ -6509,7 +6584,11 @@
+     clEnqueueMarkerWithWaitList,
+     clEnqueueBarrierWithWaitList,
+     clGetExtensionFunctionAddressForPlatform,
++#ifdef _WIN32
++    clCreateFromGLTexture,
++#else
+     nullptr, // clCreateFromGLTexture;
++#endif
+ 
+     /* cl_khr_d3d11_sharing */
+     nullptr, // clGetDeviceIDsFromD3D11KHR;
+--- /dev/null
++++ b/clvk/src/api.hpp
+@@ -0,0 +1,50 @@
++// Copyright 2026 The clvk authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#pragma once
++
++#include <vector>
++
++#include "cl_headers.hpp"
++
++// api.cpp helpers that other files use.
++
++struct cvk_command_queue;
++struct cvk_mem;
++
++bool is_valid_platform(cl_platform_id platform);
++bool is_valid_context(cl_context context);
++bool is_valid_mem_object(cl_mem mem);
++bool is_valid_command_queue(cl_command_queue queue);
++bool is_valid_event_wait_list(cl_uint num_events_in_wait_list,
++                              const cl_event* event_wait_list);
++
++cl_int cvk_enqueue_barrier_with_wait_list(cvk_command_queue* command_queue,
++                                          cl_uint num_events_in_wait_list,
++                                          const cl_event* event_wait_list,
++                                          cl_event* event);
++
++cl_int cvk_enqueue_image_copy(cvk_command_queue* queue,
++                              cl_command_type command_type, cvk_mem* image,
++                              bool blocking, const size_t* origin,
++                              const size_t* region, size_t row_pitch,
++                              size_t slice_pitch, void* ptr,
++                              cl_uint num_events_in_wait_list,
++                              const cl_event* event_wait_list, cl_event* event);
++
++cl_mem cvk_create_image(cl_context context, cl_mem_flags flags,
++                        const cl_image_format* image_format,
++                        const cl_image_desc* image_desc, void* host_ptr,
++                        std::vector<cl_mem_properties>&& properties,
++                        cl_int* errcode_ret);
+--- a/clvk/src/context.hpp
++++ b/clvk/src/context.hpp
+@@ -15,6 +15,7 @@
+ #pragma once
+ 
+ #include "device.hpp"
++#include "interop.hpp"
+ #include "objects.hpp"
+ #include "unit.hpp"
+ 
+@@ -85,13 +86,23 @@
+             case CL_PRINTF_CALLBACK_ARM:
+                 m_printf_callback = (cvk_printf_callback_t)m_properties[i + 1];
+                 break;
++            case CL_CONTEXT_INTEROP_USER_SYNC:
++                break;
+             case 0:
+                 break;
+             default:
+-                return CL_INVALID_PROPERTY;
++                if (!cvk_is_interop_context_property(property)) {
++                    return CL_INVALID_PROPERTY;
++                }
++                break;
+             }
+         }
+-        return CL_SUCCESS;
++        cvk_interop_device* created = nullptr;
++        cl_int err = cvk_create_interop_device(
++            m_device, m_properties.empty() ? nullptr : m_properties.data(),
++            &created);
++        m_interop.reset(created);
++        return err;
+     }
+ 
+     const std::vector<cl_context_properties>& properties() const {
+@@ -99,6 +110,7 @@
+     }
+ 
+     cvk_device* device() const { return m_device; }
++    cvk_interop_device* interop() const { return m_interop.get(); }
+     unsigned num_devices() const { return 1u; }
+     bool has_device(const cvk_device* device) const {
+         return device == m_device;
+@@ -149,6 +161,8 @@
+ 
+     std::mutex m_queue_image_init_lock;
+     cvk_command_queue* m_queue_image_init = nullptr;
++
++    std::unique_ptr<cvk_interop_device> m_interop;
+ };
+ 
+ static inline cvk_context* icd_downcast(cl_context context) {
+--- a/clvk/src/device.cpp
++++ b/clvk/src/device.cpp
+@@ -613,6 +613,13 @@
+         MAKE_NAME_VERSION(1, 0, 0, "cl_khr_spirv_linkonce_odr"),
+     };
+ 
++#ifdef _WIN32
++    m_extensions.push_back({CL_KHR_D3D10_SHARING_EXTENSION_VERSION,
++                            CL_KHR_D3D10_SHARING_EXTENSION_NAME});
++    m_extensions.push_back({CL_KHR_GL_SHARING_EXTENSION_VERSION,
++                            CL_KHR_GL_SHARING_EXTENSION_NAME});
++#endif
++
+     if (m_properties.apiVersion >= VK_MAKE_VERSION(1, 1, 0)) {
+         m_extensions.push_back(
+             MAKE_NAME_VERSION(1, 0, 0, "cl_khr_device_uuid"));
+@@ -1393,4 +1400,28 @@
+     if (display != nullptr && display->native_identity()) {
+         m_identity = display;
+     }
++
++    if (m_devices.empty()) {
++        return;
++    }
++    for (auto& ext : m_devices[0]->extensions()) {
++        bool everywhere = true;
++        for (auto dev : m_devices) {
++            auto& list = dev->extensions();
++            everywhere &= std::any_of(list.begin(), list.end(),
++                                      [&ext](const cl_name_version& other) {
++                                          return strcmp(other.name, ext.name) ==
++                                                 0;
++                                      });
++        }
++        bool listed = std::any_of(m_extensions.begin(), m_extensions.end(),
++                                  [&ext](const cl_name_version& other) {
++                                      return strcmp(other.name, ext.name) == 0;
++                                  });
++        if (everywhere && !listed) {
++            m_extensions.push_back(ext);
++            m_extension_string += ext.name;
++            m_extension_string += " ";
++        }
++    }
+ }
+--- a/clvk/src/device.hpp
++++ b/clvk/src/device.hpp
+@@ -997,6 +997,27 @@
+ 
+     const std::vector<cvk_device*>& devices() const { return m_devices; }
+ 
++    std::vector<cvk_device*> devices_with_luid(const void* luid) const {
++        std::vector<cvk_device*> found;
++        for (auto dev : m_devices) {
++            if (dev->luid_valid() &&
++                memcmp(dev->luid(), luid, CL_LUID_SIZE_KHR) == 0) {
++                found.push_back(dev);
++            }
++        }
++        return found;
++    }
++
++    std::vector<cvk_device*> devices_with_uuid(const void* uuid) const {
++        std::vector<cvk_device*> found;
++        for (auto dev : m_devices) {
++            if (memcmp(dev->uuid(), uuid, CL_UUID_SIZE_KHR) == 0) {
++                found.push_back(dev);
++            }
++        }
++        return found;
++    }
++
+     const std::vector<cl_name_version>& extensions() const {
+         return m_extensions;
+     }
+--- /dev/null
++++ b/clvk/src/interop.cpp
+@@ -0,0 +1,584 @@
++// Copyright 2026 The clvk authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#include <condition_variable>
++#include <memory>
++
++#include <cstring>
++
++#include "api.hpp"
++#include "context.hpp"
++#include "interop.hpp"
++#include "log.hpp"
++#include "memory.hpp"
++#include "queue.hpp"
++
++#ifdef _WIN32
++cl_int cvk_create_d3d10_interop(cvk_device* device,
++                                const cl_context_properties* properties,
++                                cvk_interop_device** created);
++cl_int cvk_create_gl_interop(cvk_device* device,
++                             const cl_context_properties* properties,
++                             cvk_interop_device** created);
++#endif
++
++cvk_interop_object::~cvk_interop_object() {
++    m_device->remove_wrapped(m_external, m_subresource);
++}
++
++cl_int cvk_interop_object::set_layout(size_t row_bytes, size_t rows,
++                                      size_t slices, uint64_t max_bytes) {
++    if (row_bytes == 0 || rows == 0 || slices == 0 ||
++        row_bytes > max_bytes / rows ||
++        uint64_t(row_bytes) * rows > max_bytes / slices) {
++        return CL_OUT_OF_RESOURCES;
++    }
++    uint64_t total = uint64_t(row_bytes) * rows * slices;
++    if (total > SIZE_MAX) {
++        return CL_OUT_OF_RESOURCES;
++    }
++    try {
++        m_host.resize(static_cast<size_t>(total));
++    } catch (const std::bad_alloc&) {
++        return CL_OUT_OF_HOST_MEMORY;
++    }
++    m_row_bytes = row_bytes;
++    m_rows = rows;
++    m_slices = slices;
++    return CL_SUCCESS;
++}
++
++void cvk_interop_object::pack(const uint8_t* mapped, size_t row_pitch,
++                              size_t depth_pitch) {
++    for (size_t slice = 0; slice < m_slices; slice++) {
++        for (size_t row = 0; row < m_rows; row++) {
++            memcpy(m_host.data() + (slice * m_rows + row) * m_row_bytes,
++                   mapped + slice * depth_pitch + row * row_pitch, m_row_bytes);
++        }
++    }
++}
++
++void cvk_interop_object::unpack(uint8_t* mapped, size_t row_pitch,
++                                size_t depth_pitch) const {
++    for (size_t slice = 0; slice < m_slices; slice++) {
++        for (size_t row = 0; row < m_rows; row++) {
++            memcpy(mapped + slice * depth_pitch + row * row_pitch,
++                   m_host.data() + (slice * m_rows + row) * m_row_bytes,
++                   m_row_bytes);
++        }
++    }
++}
++
++cl_int cvk_interop_check_create(cl_context context, cl_mem_flags flags) {
++    if (!is_valid_context(context)) {
++        return CL_INVALID_CONTEXT;
++    }
++    const cl_mem_flags access =
++        CL_MEM_READ_WRITE | CL_MEM_WRITE_ONLY | CL_MEM_READ_ONLY;
++    int set = ((flags & CL_MEM_READ_WRITE) != 0) +
++              ((flags & CL_MEM_WRITE_ONLY) != 0) +
++              ((flags & CL_MEM_READ_ONLY) != 0);
++    if ((flags & ~access) != 0 || set > 1) {
++        return CL_INVALID_VALUE;
++    }
++    return CL_SUCCESS;
++}
++
++void cvk_interop_set_error(cl_int* errcode_ret, cl_int err) {
++    if (errcode_ret != nullptr) {
++        *errcode_ret = err;
++    }
++}
++
++uint64_t cvk_interop_max_bytes(cl_context context) {
++    return icd_downcast(context)->device()->max_mem_alloc_size();
++}
++
++cl_mem cvk_interop_create_buffer(cl_context context, cl_mem_flags flags,
++                                 size_t size,
++                                 std::unique_ptr<cvk_interop_object> object,
++                                 cl_int* errcode_ret) {
++    cl_int err;
++    auto buffer = cvk_buffer::create(icd_downcast(context), flags, size,
++                                     nullptr, {}, &err);
++    if (buffer == nullptr) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++    buffer->set_interop(std::move(object));
++    cvk_interop_set_error(errcode_ret, CL_SUCCESS);
++    return buffer.release();
++}
++
++cl_mem cvk_interop_create_image(cl_context context, cl_mem_flags flags,
++                                const cl_image_format& format,
++                                const cl_image_desc& desc,
++                                std::unique_ptr<cvk_interop_object> object,
++                                cl_int* errcode_ret) {
++    cl_int err;
++    cl_mem image =
++        cvk_create_image(context, flags, &format, &desc, nullptr, {}, &err);
++    if (image == nullptr) {
++        cvk_interop_set_error(errcode_ret,
++                              err == CL_IMAGE_FORMAT_NOT_SUPPORTED
++                                  ? CL_INVALID_IMAGE_FORMAT_DESCRIPTOR
++                                  : err);
++        return nullptr;
++    }
++    icd_downcast(image)->set_interop(std::move(object));
++    cvk_interop_set_error(errcode_ret, CL_SUCCESS);
++    return image;
++}
++
++bool cvk_interop_device::add_wrapped(void* external, uint32_t subresource) {
++    std::lock_guard<std::mutex> lock(m_lock);
++    return m_wrapped.emplace(external, subresource).second;
++}
++
++cl_int
++cvk_interop_device::capture(const std::vector<cvk_interop_object*>& objects) {
++    for (auto object : objects) {
++        cl_int err = object->capture();
++        if (err != CL_SUCCESS) {
++            return err;
++        }
++    }
++    return CL_SUCCESS;
++}
++
++cl_int
++cvk_interop_device::publish(const std::vector<cvk_interop_object*>& objects) {
++    cl_int status = CL_SUCCESS;
++    for (auto object : objects) {
++        if (object->publish() != CL_SUCCESS) {
++            status = CL_OUT_OF_RESOURCES;
++        }
++    }
++    return status;
++}
++
++void cvk_interop_device::remove_wrapped(void* external, uint32_t subresource) {
++    std::lock_guard<std::mutex> lock(m_lock);
++    m_wrapped.erase({external, subresource});
++}
++
++cl_int cvk_interop_device::mark(const std::vector<cvk_interop_object*>& objects,
++                                bool acquire, std::vector<bool>* moves) {
++    std::lock_guard<std::mutex> lock(m_lock);
++    cl_int error = acquire ? already_acquired_error() : not_acquired_error();
++    moves->assign(objects.size(), false);
++    for (auto object : objects) {
++        if (object->m_acquired == acquire && error != CL_SUCCESS) {
++            return error;
++        }
++    }
++    for (size_t i = 0; i < objects.size(); i++) {
++        (*moves)[i] = objects[i]->m_acquired != acquire;
++        objects[i]->m_acquired = acquire;
++    }
++    return CL_SUCCESS;
++}
++
++void cvk_interop_device::unmark(const std::vector<cvk_interop_object*>& objects,
++                                const std::vector<bool>& moves, bool acquired) {
++    std::lock_guard<std::mutex> lock(m_lock);
++    for (size_t i = 0; i < objects.size(); i++) {
++        if (moves[i]) {
++            objects[i]->m_acquired = acquired;
++        }
++    }
++}
++
++void cvk_interop_device::report_user_event_wait() {
++    std::lock_guard<std::mutex> lock(m_lock);
++    if (!m_reported_user_event) {
++        m_reported_user_event = true;
++        cvk_warn("A release waits for an incomplete user event before it "
++                 "returns; it does not return until that event completes.");
++    }
++}
++
++namespace {
++
++// Holds a release command until its publish is done. The executor runs and
++// deletes the commands of a queue in order, so once the release command has
++// started, none of the earlier moves still holds a memory object.
++struct cvk_interop_gate {
++    void start() {
++        std::lock_guard<std::mutex> lock(m_lock);
++        m_started = true;
++        m_cv.notify_all();
++    }
++
++    void wait_started() {
++        std::unique_lock<std::mutex> lock(m_lock);
++        m_cv.wait(lock, [this] { return m_started; });
++    }
++
++    void finish(cl_int status) {
++        std::lock_guard<std::mutex> lock(m_lock);
++        m_status = status;
++        m_finished = true;
++        m_cv.notify_all();
++    }
++
++    cl_int wait_finished() {
++        std::unique_lock<std::mutex> lock(m_lock);
++        m_cv.wait(lock, [this] { return m_finished; });
++        return m_status;
++    }
++
++private:
++    std::mutex m_lock;
++    std::condition_variable m_cv;
++    bool m_started = false;
++    bool m_finished = false;
++    cl_int m_status = CL_COMPLETE;
++};
++
++struct cvk_command_interop final : public cvk_command {
++    cvk_command_interop(cvk_command_queue* queue, cl_command_type type,
++                        std::shared_ptr<cvk_interop_gate> gate)
++        : cvk_command(type, queue), m_gate(std::move(gate)) {}
++
++private:
++    cl_int do_action() override final {
++        if (!m_gate) {
++            return CL_COMPLETE;
++        }
++        m_gate->start();
++        return m_gate->wait_finished();
++    }
++
++    std::shared_ptr<cvk_interop_gate> m_gate;
++};
++
++struct cvk_interop_request {
++    cvk_command_queue* queue = nullptr;
++    cvk_interop_device* device = nullptr;
++    std::vector<cvk_mem*> mems;
++    std::vector<cvk_interop_object*> objects;
++};
++
++cl_int collect(cvk_interop_api api, cl_command_queue queue, cl_uint num_objects,
++               const cl_mem* mem_objects, cl_uint num_events_in_wait_list,
++               const cl_event* event_wait_list, cvk_interop_request* request) {
++    if (!is_valid_command_queue(queue)) {
++        return CL_INVALID_COMMAND_QUEUE;
++    }
++    if ((num_objects == 0) != (mem_objects == nullptr)) {
++        return CL_INVALID_VALUE;
++    }
++    auto command_queue = icd_downcast(queue);
++    auto device = command_queue->context()->interop();
++    if (device == nullptr || device->api() != api) {
++        return CL_INVALID_CONTEXT;
++    }
++    for (cl_uint i = 0; i < num_objects; i++) {
++        if (!is_valid_mem_object(mem_objects[i])) {
++            return CL_INVALID_MEM_OBJECT;
++        }
++        auto mem = icd_downcast(mem_objects[i]);
++        auto object = mem->interop();
++        if (object == nullptr || object->device() != device) {
++            return device->foreign_object_error();
++        }
++        request->mems.push_back(mem);
++        request->objects.push_back(object);
++    }
++    if (!is_valid_event_wait_list(num_events_in_wait_list, event_wait_list)) {
++        return CL_INVALID_EVENT_WAIT_LIST;
++    }
++    request->queue = command_queue;
++    request->device = device;
++    return CL_SUCCESS;
++}
++
++cl_int enqueue_move(cvk_command_queue* queue, cvk_mem* mem,
++                    cvk_interop_object* object, bool into_mem,
++                    cl_uint num_events, const cl_event* events,
++                    cl_event* done) {
++    if (mem->is_buffer_type()) {
++        auto cmd = new cvk_command_buffer_host_copy(
++            queue, into_mem ? CL_COMMAND_WRITE_BUFFER : CL_COMMAND_READ_BUFFER,
++            static_cast<cvk_buffer*>(mem), object->host_data(), 0,
++            object->host_size());
++        return queue->enqueue_command_with_deps(cmd, false, num_events, events,
++                                                done);
++    }
++
++    auto image = static_cast<cvk_image*>(mem);
++    const size_t origin[3] = {0, 0, 0};
++    size_t region[3] = {image->width(), std::max<size_t>(image->height(), 1),
++                        1};
++    switch (image->type()) {
++    case CL_MEM_OBJECT_IMAGE3D:
++        region[2] = image->depth();
++        break;
++    case CL_MEM_OBJECT_IMAGE2D_ARRAY:
++        region[2] = image->array_size();
++        break;
++    case CL_MEM_OBJECT_IMAGE1D_ARRAY:
++        region[1] = image->array_size();
++        break;
++    default:
++        break;
++    }
++    return cvk_enqueue_image_copy(
++        queue, into_mem ? CL_COMMAND_WRITE_IMAGE : CL_COMMAND_READ_IMAGE, mem,
++        false, origin, region, object->row_pitch(), object->slice_pitch(),
++        object->host_data(), num_events, events, done);
++}
++
++void release_events(std::vector<cl_event>& events) {
++    for (auto event : events) {
++        icd_downcast(event)->release();
++    }
++    events.clear();
++}
++
++std::vector<cvk_interop_object*>
++changed_objects(const std::vector<cvk_interop_object*>& objects,
++                const std::vector<bool>& changes) {
++    std::vector<cvk_interop_object*> changed;
++    for (size_t i = 0; i < objects.size(); i++) {
++        if (changes[i]) {
++            changed.push_back(objects[i]);
++        }
++    }
++    return changed;
++}
++
++bool has_incomplete_user_event(cl_uint num_events, const cl_event* events) {
++    for (cl_uint i = 0; i < num_events; i++) {
++        auto event = icd_downcast(events[i]);
++        if (event->is_user_event() && !event->completed()) {
++            return true;
++        }
++    }
++    return false;
++}
++
++} // namespace
++
++cl_int cvk_interop_acquire(cvk_interop_api api, cl_command_queue queue,
++                           cl_uint num_objects, const cl_mem* mem_objects,
++                           cl_uint num_events_in_wait_list,
++                           const cl_event* event_wait_list, cl_event* event) {
++    cvk_interop_request request;
++    cl_int err = collect(api, queue, num_objects, mem_objects,
++                         num_events_in_wait_list, event_wait_list, &request);
++    if (err != CL_SUCCESS || num_objects == 0) {
++        return err;
++    }
++
++    std::vector<bool> changes;
++    err = request.device->mark(request.objects, true, &changes);
++    if (err != CL_SUCCESS) {
++        return err;
++    }
++
++    auto changed = changed_objects(request.objects, changes);
++    if (!changed.empty()) {
++        err = request.device->capture(changed);
++    }
++
++    std::vector<cl_event> moves;
++    for (size_t i = 0; i < request.objects.size() && err == CL_SUCCESS; i++) {
++        if (!changes[i]) {
++            continue;
++        }
++        cl_event done;
++        err =
++            enqueue_move(request.queue, request.mems[i], request.objects[i],
++                         true, num_events_in_wait_list, event_wait_list, &done);
++        if (err == CL_SUCCESS) {
++            moves.push_back(done);
++        }
++    }
++
++    if (err == CL_SUCCESS) {
++        auto cmd = new cvk_command_interop(
++            request.queue, request.device->acquire_command(), nullptr);
++        if (moves.empty()) {
++            err = request.queue->enqueue_command_with_deps(
++                cmd, false, num_events_in_wait_list, event_wait_list, event);
++        } else {
++            err = request.queue->enqueue_command_with_deps(
++                cmd, false, static_cast<cl_uint>(moves.size()), moves.data(),
++                event);
++        }
++    }
++
++    release_events(moves);
++    if (err != CL_SUCCESS) {
++        request.device->unmark(request.objects, changes, false);
++    }
++    return err;
++}
++
++cl_int cvk_interop_release(cvk_interop_api api, cl_command_queue queue,
++                           cl_uint num_objects, const cl_mem* mem_objects,
++                           cl_uint num_events_in_wait_list,
++                           const cl_event* event_wait_list, cl_event* event) {
++    cvk_interop_request request;
++    cl_int err = collect(api, queue, num_objects, mem_objects,
++                         num_events_in_wait_list, event_wait_list, &request);
++    if (err != CL_SUCCESS || num_objects == 0) {
++        return err;
++    }
++
++    std::vector<bool> changes;
++    err = request.device->mark(request.objects, false, &changes);
++    if (err != CL_SUCCESS) {
++        return err;
++    }
++    if (std::find(changes.begin(), changes.end(), true) == changes.end()) {
++        auto cmd = new cvk_command_interop(
++            request.queue, request.device->release_command(), nullptr);
++        return request.queue->enqueue_command_with_deps(
++            cmd, false, num_events_in_wait_list, event_wait_list, event);
++    }
++    if (has_incomplete_user_event(num_events_in_wait_list, event_wait_list)) {
++        request.device->report_user_event_wait();
++    }
++
++    // The objects come back only after the wait list and every command
++    // already in the queue.
++    cl_event barrier = nullptr;
++    err = cvk_enqueue_barrier_with_wait_list(
++        request.queue, num_events_in_wait_list, event_wait_list, &barrier);
++
++    std::vector<cl_event> moves;
++    for (size_t i = 0; i < request.objects.size() && err == CL_SUCCESS; i++) {
++        if (!changes[i]) {
++            continue;
++        }
++        cl_event done;
++        err = enqueue_move(request.queue, request.mems[i], request.objects[i],
++                           false, 1, &barrier, &done);
++        if (err == CL_SUCCESS) {
++            moves.push_back(done);
++        }
++    }
++
++    auto gate = std::make_shared<cvk_interop_gate>();
++    if (err == CL_SUCCESS) {
++        auto cmd = new cvk_command_interop(
++            request.queue, request.device->release_command(), gate);
++        err = request.queue->enqueue_command_with_deps(
++            cmd, false, static_cast<cl_uint>(moves.size()), moves.data(),
++            event);
++    }
++    if (err == CL_SUCCESS) {
++        err = request.queue->flush();
++    }
++
++    cl_int status = err == CL_SUCCESS ? CL_COMPLETE : err;
++    for (auto done : moves) {
++        if (icd_downcast(done)->wait() != CL_COMPLETE) {
++            status = CL_OUT_OF_RESOURCES;
++        }
++    }
++    // A failed move makes the executor skip the release command's action.
++    if (status == CL_COMPLETE) {
++        gate->wait_started();
++        if (request.device->publish(
++                changed_objects(request.objects, changes)) != CL_SUCCESS) {
++            status = CL_OUT_OF_RESOURCES;
++        }
++    }
++    gate->finish(status);
++
++    release_events(moves);
++    if (barrier != nullptr) {
++        icd_downcast(barrier)->release();
++    }
++    if (err != CL_SUCCESS) {
++        request.device->unmark(request.objects, changes, true);
++    }
++    return err;
++}
++
++namespace {
++
++bool property_api(cl_context_properties property, cvk_interop_api* api) {
++#ifdef _WIN32
++    switch (property) {
++    case CL_CONTEXT_D3D10_DEVICE_KHR:
++        *api = cvk_interop_api::d3d10;
++        return true;
++    case CL_GL_CONTEXT_KHR:
++    case CL_WGL_HDC_KHR:
++    case CL_EGL_DISPLAY_KHR:
++    case CL_GLX_DISPLAY_KHR:
++    case CL_CGL_SHAREGROUP_KHR:
++        *api = cvk_interop_api::gl;
++        return true;
++    default:
++        return false;
++    }
++#else
++    UNUSED(property);
++    UNUSED(api);
++    return false;
++#endif
++}
++
++} // namespace
++
++bool cvk_is_interop_context_property(cl_context_properties property) {
++    cvk_interop_api api;
++    return property_api(property, &api);
++}
++
++cl_int cvk_interop_named_api(const cl_context_properties* properties,
++                             bool* named, cvk_interop_api* api) {
++    *named = false;
++    for (auto property = properties; property != nullptr && property[0] != 0;
++         property += 2) {
++        cvk_interop_api found;
++        if (property[1] == 0 || !property_api(property[0], &found)) {
++            continue;
++        }
++        if (*named && found != *api) {
++            return CL_INVALID_OPERATION;
++        }
++        *named = true;
++        *api = found;
++    }
++    return CL_SUCCESS;
++}
++
++cl_int cvk_create_interop_device(cvk_device* device,
++                                 const cl_context_properties* properties,
++                                 cvk_interop_device** created) {
++    *created = nullptr;
++    bool named;
++    cvk_interop_api api;
++    cl_int err = cvk_interop_named_api(properties, &named, &api);
++    if (err != CL_SUCCESS || !named) {
++        return err;
++    }
++#ifdef _WIN32
++    switch (api) {
++    case cvk_interop_api::d3d10:
++        return cvk_create_d3d10_interop(device, properties, created);
++    case cvk_interop_api::gl:
++        return cvk_create_gl_interop(device, properties, created);
++    }
++#endif
++    UNUSED(device);
++    return CL_SUCCESS;
++}
+--- /dev/null
++++ b/clvk/src/interop.hpp
+@@ -0,0 +1,168 @@
++// Copyright 2026 The clvk authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#pragma once
++
++#include <cstdint>
++#include <memory>
++#include <mutex>
++#include <set>
++#include <utility>
++#include <vector>
++
++#include "cl_headers.hpp"
++
++struct cvk_command_queue;
++struct cvk_device;
++
++enum class cvk_interop_api
++{
++    d3d10,
++    gl
++};
++
++struct cvk_interop_device;
++
++// The content of one memory object that belongs to an object of another API.
++// The client copies between that object and a host block packed as the
++// memory object's region; the core moves the block in and out of the memory
++// object on the command queue.
++struct cvk_interop_object {
++    cvk_interop_object(cvk_interop_device* device, void* external,
++                       uint32_t subresource)
++        : m_device(device), m_external(external), m_subresource(subresource) {}
++    virtual ~cvk_interop_object();
++
++    // External content into the host block, and back. The device runs them,
++    // on the thread its API needs.
++    CHECK_RETURN virtual cl_int capture() = 0;
++    CHECK_RETURN virtual cl_int publish() = 0;
++
++    cvk_interop_device* device() const { return m_device; }
++    void* external() const { return m_external; }
++    uint32_t subresource() const { return m_subresource; }
++
++    // Sizes the host block for rows of row_bytes, rows per slice, slices.
++    // CL_OUT_OF_RESOURCES above max_bytes.
++    CHECK_RETURN cl_int set_layout(size_t row_bytes, size_t rows, size_t slices,
++                                   uint64_t max_bytes);
++    // Between the host block and a mapped view with its own pitches.
++    void pack(const uint8_t* mapped, size_t row_pitch, size_t depth_pitch);
++    void unpack(uint8_t* mapped, size_t row_pitch, size_t depth_pitch) const;
++
++    uint8_t* host_data() { return m_host.data(); }
++    size_t host_size() const { return m_host.size(); }
++    size_t row_pitch() const { return m_row_bytes; }
++    size_t slice_pitch() const { return m_row_bytes * m_rows; }
++
++private:
++    friend struct cvk_interop_device;
++    cvk_interop_device* m_device;
++    void* m_external;
++    uint32_t m_subresource;
++    bool m_acquired = false;
++    std::vector<uint8_t> m_host;
++    size_t m_row_bytes = 0;
++    size_t m_rows = 0;
++    size_t m_slices = 0;
++};
++
++// The checks every create-from call starts with: the context, then the flags.
++CHECK_RETURN cl_int cvk_interop_check_create(cl_context context,
++                                             cl_mem_flags flags);
++// A memory object for an external object; the object is attached to it. On
++// failure the object is destroyed and nullptr returned.
++cl_mem cvk_interop_create_buffer(cl_context context, cl_mem_flags flags,
++                                 size_t size,
++                                 std::unique_ptr<cvk_interop_object> object,
++                                 cl_int* errcode_ret);
++cl_mem cvk_interop_create_image(cl_context context, cl_mem_flags flags,
++                                const cl_image_format& format,
++                                const cl_image_desc& desc,
++                                std::unique_ptr<cvk_interop_object> object,
++                                cl_int* errcode_ret);
++void cvk_interop_set_error(cl_int* errcode_ret, cl_int err);
++// The largest host block a memory object of the context can have.
++uint64_t cvk_interop_max_bytes(cl_context context);
++
++// One per context that names an external device.
++struct cvk_interop_device {
++    explicit cvk_interop_device(cvk_interop_api api) : m_api(api) {}
++    virtual ~cvk_interop_device() = default;
++
++    cvk_interop_api api() const { return m_api; }
++
++    virtual cl_command_type acquire_command() const = 0;
++    virtual cl_command_type release_command() const = 0;
++    // For a memory object that does not come from this API.
++    virtual cl_int foreign_object_error() const = 0;
++    // For an acquire or release that would not change an object's state;
++    // CL_SUCCESS when the API defines no error for it.
++    virtual cl_int already_acquired_error() const = 0;
++    virtual cl_int not_acquired_error() const = 0;
++
++    // Every object moves through the host block, whether the external
++    // object is shared or not.
++    bool prefers_shared_resources() const { return false; }
++
++    // The objects of one acquire or release, in list order. The default runs
++    // them on the calling thread.
++    CHECK_RETURN virtual cl_int
++    capture(const std::vector<cvk_interop_object*>& objects);
++    CHECK_RETURN virtual cl_int
++    publish(const std::vector<cvk_interop_object*>& objects);
++
++    // False when this subresource of the external object already has a
++    // memory object.
++    bool add_wrapped(void* external, uint32_t subresource);
++    void remove_wrapped(void* external, uint32_t subresource);
++
++    // Sets the objects' state. An object moves only when its state changes;
++    // moves[i] says whether objects[i] does. An API with errors for a call
++    // that changes nothing fails the whole call before any object changes.
++    CHECK_RETURN cl_int mark(const std::vector<cvk_interop_object*>& objects,
++                             bool acquire, std::vector<bool>* moves);
++    void unmark(const std::vector<cvk_interop_object*>& objects,
++                const std::vector<bool>& moves, bool acquired);
++
++    void report_user_event_wait();
++
++private:
++    cvk_interop_api m_api;
++    std::mutex m_lock;
++    std::set<std::pair<void*, uint32_t>> m_wrapped;
++    bool m_reported_user_event = false;
++};
++
++CHECK_RETURN cl_int cvk_interop_acquire(
++    cvk_interop_api api, cl_command_queue queue, cl_uint num_objects,
++    const cl_mem* mem_objects, cl_uint num_events_in_wait_list,
++    const cl_event* event_wait_list, cl_event* event);
++
++CHECK_RETURN cl_int cvk_interop_release(
++    cvk_interop_api api, cl_command_queue queue, cl_uint num_objects,
++    const cl_mem* mem_objects, cl_uint num_events_in_wait_list,
++    const cl_event* event_wait_list, cl_event* event);
++
++// Context properties of the sharing APIs. A list names the API whose
++// properties it sets to a non-default value; CL_INVALID_OPERATION when it
++// names two.
++bool cvk_is_interop_context_property(cl_context_properties property);
++CHECK_RETURN cl_int cvk_interop_named_api(
++    const cl_context_properties* properties, bool* named, cvk_interop_api* api);
++// The named API's factory reads the whole list. *created stays nullptr when
++// the list makes no external device.
++CHECK_RETURN cl_int cvk_create_interop_device(
++    cvk_device* device, const cl_context_properties* properties,
++    cvk_interop_device** created);
+--- /dev/null
++++ b/clvk/src/interop_d3d10.cpp
+@@ -0,0 +1,432 @@
++// Copyright 2026 The clvk authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#ifdef _WIN32
++
++#include <cstring>
++#include <memory>
++
++#include "api.hpp"
++#include "context.hpp"
++#include "interop.hpp"
++#include "interop_dxgi.hpp"
++#include "memory.hpp"
++
++#define CLVK_API_CALL CL_API_CALL
++
++namespace {
++
++struct cvk_d3d10_interop final : public cvk_interop_device {
++    explicit cvk_d3d10_interop(ID3D10Device* device)
++        : cvk_interop_device(cvk_interop_api::d3d10), m_device(device) {
++        m_device->AddRef();
++    }
++    ~cvk_d3d10_interop() override { m_device->Release(); }
++
++    cl_command_type acquire_command() const override {
++        return CL_COMMAND_ACQUIRE_D3D10_OBJECTS_KHR;
++    }
++    cl_command_type release_command() const override {
++        return CL_COMMAND_RELEASE_D3D10_OBJECTS_KHR;
++    }
++    cl_int foreign_object_error() const override {
++        return CL_INVALID_MEM_OBJECT;
++    }
++    cl_int already_acquired_error() const override {
++        return CL_D3D10_RESOURCE_ALREADY_ACQUIRED_KHR;
++    }
++    cl_int not_acquired_error() const override {
++        return CL_D3D10_RESOURCE_NOT_ACQUIRED_KHR;
++    }
++
++    ID3D10Device* d3d() const { return m_device; }
++
++private:
++    ID3D10Device* m_device;
++};
++
++// One subresource of a Direct3D 10 resource, moved through a staging copy of
++// it.
++struct cvk_d3d10_object final : public cvk_interop_object {
++    cvk_d3d10_object(cvk_d3d10_interop* device, ID3D10Resource* resource,
++                     UINT subresource)
++        : cvk_interop_object(device, resource, subresource),
++          m_d3d(device->d3d()), m_resource(resource) {
++        m_resource->AddRef();
++    }
++
++    ~cvk_d3d10_object() override {
++        if (m_staging != nullptr) {
++            m_staging->Release();
++        }
++        m_resource->Release();
++    }
++
++    void set_staging(ID3D10Resource* staging, D3D10_RESOURCE_DIMENSION kind) {
++        m_staging = staging;
++        m_kind = kind;
++    }
++
++    cl_int capture() override {
++        m_d3d->CopySubresourceRegion(m_staging, 0, 0, 0, 0, m_resource,
++                                     subresource(), nullptr);
++        uint8_t* data;
++        size_t row_pitch;
++        size_t depth_pitch;
++        if (!map(D3D10_MAP_READ, &data, &row_pitch, &depth_pitch)) {
++            return CL_OUT_OF_RESOURCES;
++        }
++        pack(data, row_pitch, depth_pitch);
++        unmap();
++        return CL_SUCCESS;
++    }
++
++    cl_int publish() override {
++        uint8_t* data;
++        size_t row_pitch;
++        size_t depth_pitch;
++        if (!map(D3D10_MAP_WRITE, &data, &row_pitch, &depth_pitch)) {
++            return CL_OUT_OF_RESOURCES;
++        }
++        unpack(data, row_pitch, depth_pitch);
++        unmap();
++        m_d3d->CopySubresourceRegion(m_resource, subresource(), 0, 0, 0,
++                                     m_staging, 0, nullptr);
++        return CL_SUCCESS;
++    }
++
++private:
++    bool map(D3D10_MAP type, uint8_t** data, size_t* row_pitch,
++             size_t* depth_pitch) {
++        HRESULT hr;
++        void* mapped = nullptr;
++        *row_pitch = 0;
++        *depth_pitch = 0;
++        if (m_kind == D3D10_RESOURCE_DIMENSION_BUFFER) {
++            hr = static_cast<ID3D10Buffer*>(m_staging)->Map(type, 0, &mapped);
++        } else if (m_kind == D3D10_RESOURCE_DIMENSION_TEXTURE2D) {
++            D3D10_MAPPED_TEXTURE2D texture;
++            hr = static_cast<ID3D10Texture2D*>(m_staging)->Map(0, type, 0,
++                                                               &texture);
++            mapped = texture.pData;
++            *row_pitch = texture.RowPitch;
++        } else {
++            D3D10_MAPPED_TEXTURE3D texture;
++            hr = static_cast<ID3D10Texture3D*>(m_staging)->Map(0, type, 0,
++                                                               &texture);
++            mapped = texture.pData;
++            *row_pitch = texture.RowPitch;
++            *depth_pitch = texture.DepthPitch;
++        }
++        *data = static_cast<uint8_t*>(mapped);
++        return SUCCEEDED(hr) && mapped != nullptr;
++    }
++
++    void unmap() {
++        if (m_kind == D3D10_RESOURCE_DIMENSION_BUFFER) {
++            static_cast<ID3D10Buffer*>(m_staging)->Unmap();
++        } else if (m_kind == D3D10_RESOURCE_DIMENSION_TEXTURE2D) {
++            static_cast<ID3D10Texture2D*>(m_staging)->Unmap(0);
++        } else {
++            static_cast<ID3D10Texture3D*>(m_staging)->Unmap(0);
++        }
++    }
++
++    ID3D10Device* m_d3d;
++    ID3D10Resource* m_resource;
++    ID3D10Resource* m_staging = nullptr;
++    D3D10_RESOURCE_DIMENSION m_kind = D3D10_RESOURCE_DIMENSION_UNKNOWN;
++};
++
++// The checks every create shares, in the order of the extension's error
++// list. On success the object holds the resource and its wrapped entry.
++cl_int start_object(cl_context ctx, cl_mem_flags flags,
++                    ID3D10Resource* resource, D3D10_RESOURCE_DIMENSION kind,
++                    bool subresource_exists, UINT subresource, UINT usage,
++                    UINT sample_count,
++                    std::unique_ptr<cvk_d3d10_object>* object) {
++    cl_int err = cvk_interop_check_create(ctx, flags);
++    if (err != CL_SUCCESS) {
++        return err;
++    }
++    if (resource != nullptr && !subresource_exists) {
++        return CL_INVALID_VALUE;
++    }
++    if (resource == nullptr) {
++        return CL_INVALID_D3D10_RESOURCE_KHR;
++    }
++    D3D10_RESOURCE_DIMENSION actual;
++    resource->GetType(&actual);
++    auto interop = icd_downcast(ctx)->interop();
++    if (actual != kind || interop == nullptr ||
++        interop->api() != cvk_interop_api::d3d10 ||
++        !cvk_dxgi_can_share(usage, sample_count)) {
++        return CL_INVALID_D3D10_RESOURCE_KHR;
++    }
++    auto device = static_cast<cvk_d3d10_interop*>(interop);
++    ID3D10Device* owner = nullptr;
++    resource->GetDevice(&owner);
++    if (owner != nullptr) {
++        owner->Release();
++    }
++    if (owner != device->d3d() || !device->add_wrapped(resource, subresource)) {
++        return CL_INVALID_D3D10_RESOURCE_KHR;
++    }
++    object->reset(new cvk_d3d10_object(device, resource, subresource));
++    return CL_SUCCESS;
++}
++
++ID3D10Device* d3d_of(const std::unique_ptr<cvk_d3d10_object>& object) {
++    return static_cast<cvk_d3d10_interop*>(object->device())->d3d();
++}
++
++} // namespace
++
++cl_int cvk_create_d3d10_interop(cvk_device* device,
++                                const cl_context_properties* properties,
++                                cvk_interop_device** created) {
++    ID3D10Device* d3d_device = nullptr;
++    for (auto property = properties; property[0] != 0; property += 2) {
++        if (property[0] == CL_CONTEXT_D3D10_DEVICE_KHR) {
++            d3d_device = reinterpret_cast<ID3D10Device*>(property[1]);
++        }
++    }
++    LUID luid;
++    if (!device->luid_valid() || !cvk_dxgi_device_luid(d3d_device, &luid) ||
++        memcmp(device->luid(), &luid, sizeof(luid)) != 0) {
++        return CL_INVALID_D3D10_DEVICE_KHR;
++    }
++    *created = new cvk_d3d10_interop(d3d_device);
++    return CL_SUCCESS;
++}
++
++cl_int CLVK_API_CALL clGetDeviceIDsFromD3D10KHR(
++    cl_platform_id platform, cl_d3d10_device_source_khr d3d_device_source,
++    void* d3d_object, cl_d3d10_device_set_khr d3d_device_set,
++    cl_uint num_entries, cl_device_id* devices, cl_uint* num_devices) {
++    if (!is_valid_platform(platform)) {
++        return CL_INVALID_PLATFORM;
++    }
++    if ((d3d_device_source != CL_D3D10_DEVICE_KHR &&
++         d3d_device_source != CL_D3D10_DXGI_ADAPTER_KHR) ||
++        (d3d_device_set != CL_PREFERRED_DEVICES_FOR_D3D10_KHR &&
++         d3d_device_set != CL_ALL_DEVICES_FOR_D3D10_KHR) ||
++        d3d_object == nullptr) {
++        return CL_INVALID_VALUE;
++    }
++
++    LUID luid;
++    bool known = d3d_device_source == CL_D3D10_DEVICE_KHR
++                     ? cvk_dxgi_device_luid(
++                           static_cast<ID3D10Device*>(d3d_object), &luid)
++                     : cvk_dxgi_adapter_luid(
++                           static_cast<IDXGIAdapter*>(d3d_object), &luid);
++    if (!known) {
++        return CL_INVALID_VALUE;
++    }
++
++    auto found = icd_downcast(platform)->devices_with_luid(&luid);
++    if (found.empty()) {
++        return CL_DEVICE_NOT_FOUND;
++    }
++    if (devices != nullptr) {
++        for (cl_uint i = 0; i < num_entries && i < found.size(); i++) {
++            devices[i] = found[i];
++        }
++    }
++    if (num_devices != nullptr) {
++        *num_devices = static_cast<cl_uint>(found.size());
++    }
++    return CL_SUCCESS;
++}
++
++cl_mem CLVK_API_CALL clCreateFromD3D10BufferKHR(cl_context context,
++                                                cl_mem_flags flags,
++                                                ID3D10Buffer* resource,
++                                                cl_int* errcode_ret) {
++    D3D10_BUFFER_DESC desc = {};
++    if (resource != nullptr) {
++        resource->GetDesc(&desc);
++    }
++    std::unique_ptr<cvk_d3d10_object> object;
++    cl_int err =
++        start_object(context, flags, resource, D3D10_RESOURCE_DIMENSION_BUFFER,
++                     true, 0, desc.Usage, 1, &object);
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++
++    D3D10_BUFFER_DESC staging_desc = {
++        desc.ByteWidth, D3D10_USAGE_STAGING, 0,
++        D3D10_CPU_ACCESS_READ | D3D10_CPU_ACCESS_WRITE, 0};
++    ID3D10Buffer* staging = nullptr;
++    if (FAILED(
++            d3d_of(object)->CreateBuffer(&staging_desc, nullptr, &staging))) {
++        cvk_interop_set_error(errcode_ret, CL_OUT_OF_RESOURCES);
++        return nullptr;
++    }
++    object->set_staging(staging, D3D10_RESOURCE_DIMENSION_BUFFER);
++    err = object->set_layout(desc.ByteWidth, 1, 1,
++                             cvk_interop_max_bytes(context));
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++
++    return cvk_interop_create_buffer(context, flags, desc.ByteWidth,
++                                     std::move(object), errcode_ret);
++}
++
++cl_mem CLVK_API_CALL clCreateFromD3D10Texture2DKHR(cl_context context,
++                                                   cl_mem_flags flags,
++                                                   ID3D10Texture2D* resource,
++                                                   UINT subresource,
++                                                   cl_int* errcode_ret) {
++    D3D10_TEXTURE2D_DESC desc = {};
++    if (resource != nullptr) {
++        resource->GetDesc(&desc);
++    }
++    UINT width = 0, height = 0, depth = 0;
++    bool exists = cvk_dxgi_subresource_extent(
++        desc.Width, desc.Height, 1, desc.MipLevels, desc.ArraySize, subresource,
++        &width, &height, &depth);
++    std::unique_ptr<cvk_d3d10_object> object;
++    cl_int err = start_object(
++        context, flags, resource, D3D10_RESOURCE_DIMENSION_TEXTURE2D, exists,
++        subresource, desc.Usage, desc.SampleDesc.Count, &object);
++    cl_image_format format;
++    size_t element_size = 0;
++    if (err == CL_SUCCESS &&
++        !cvk_dxgi_image_format(desc.Format, &format, &element_size)) {
++        err = CL_INVALID_IMAGE_FORMAT_DESCRIPTOR;
++    }
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++
++    D3D10_TEXTURE2D_DESC staging_desc = {width,
++                                         height,
++                                         1,
++                                         1,
++                                         desc.Format,
++                                         {1, 0},
++                                         D3D10_USAGE_STAGING,
++                                         0,
++                                         D3D10_CPU_ACCESS_READ |
++                                             D3D10_CPU_ACCESS_WRITE,
++                                         0};
++    ID3D10Texture2D* staging = nullptr;
++    if (FAILED(d3d_of(object)->CreateTexture2D(&staging_desc, nullptr,
++                                               &staging))) {
++        cvk_interop_set_error(errcode_ret, CL_OUT_OF_RESOURCES);
++        return nullptr;
++    }
++    object->set_staging(staging, D3D10_RESOURCE_DIMENSION_TEXTURE2D);
++    err = object->set_layout(width * element_size, height, 1,
++                             cvk_interop_max_bytes(context));
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++
++    cl_image_desc image_desc = {};
++    image_desc.image_type = CL_MEM_OBJECT_IMAGE2D;
++    image_desc.image_width = width;
++    image_desc.image_height = height;
++    return cvk_interop_create_image(context, flags, format, image_desc,
++                                    std::move(object), errcode_ret);
++}
++
++cl_mem CLVK_API_CALL clCreateFromD3D10Texture3DKHR(cl_context context,
++                                                   cl_mem_flags flags,
++                                                   ID3D10Texture3D* resource,
++                                                   UINT subresource,
++                                                   cl_int* errcode_ret) {
++    D3D10_TEXTURE3D_DESC desc = {};
++    if (resource != nullptr) {
++        resource->GetDesc(&desc);
++    }
++    UINT width = 0, height = 0, depth = 0;
++    bool exists = cvk_dxgi_subresource_extent(
++        desc.Width, desc.Height, desc.Depth, desc.MipLevels, 1, subresource,
++        &width, &height, &depth);
++    std::unique_ptr<cvk_d3d10_object> object;
++    cl_int err = start_object(context, flags, resource,
++                              D3D10_RESOURCE_DIMENSION_TEXTURE3D, exists,
++                              subresource, desc.Usage, 1, &object);
++    cl_image_format format;
++    size_t element_size = 0;
++    if (err == CL_SUCCESS &&
++        !cvk_dxgi_image_format(desc.Format, &format, &element_size)) {
++        err = CL_INVALID_IMAGE_FORMAT_DESCRIPTOR;
++    }
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++
++    D3D10_TEXTURE3D_DESC staging_desc = {width,
++                                         height,
++                                         depth,
++                                         1,
++                                         desc.Format,
++                                         D3D10_USAGE_STAGING,
++                                         0,
++                                         D3D10_CPU_ACCESS_READ |
++                                             D3D10_CPU_ACCESS_WRITE,
++                                         0};
++    ID3D10Texture3D* staging = nullptr;
++    if (FAILED(d3d_of(object)->CreateTexture3D(&staging_desc, nullptr,
++                                               &staging))) {
++        cvk_interop_set_error(errcode_ret, CL_OUT_OF_RESOURCES);
++        return nullptr;
++    }
++    object->set_staging(staging, D3D10_RESOURCE_DIMENSION_TEXTURE3D);
++    err = object->set_layout(width * element_size, height, depth,
++                             cvk_interop_max_bytes(context));
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++
++    cl_image_desc image_desc = {};
++    image_desc.image_type = CL_MEM_OBJECT_IMAGE3D;
++    image_desc.image_width = width;
++    image_desc.image_height = height;
++    image_desc.image_depth = depth;
++    return cvk_interop_create_image(context, flags, format, image_desc,
++                                    std::move(object), errcode_ret);
++}
++
++cl_int CLVK_API_CALL clEnqueueAcquireD3D10ObjectsKHR(
++    cl_command_queue command_queue, cl_uint num_objects,
++    const cl_mem* mem_objects, cl_uint num_events_in_wait_list,
++    const cl_event* event_wait_list, cl_event* event) {
++    return cvk_interop_acquire(cvk_interop_api::d3d10, command_queue,
++                               num_objects, mem_objects,
++                               num_events_in_wait_list, event_wait_list, event);
++}
++
++cl_int CLVK_API_CALL clEnqueueReleaseD3D10ObjectsKHR(
++    cl_command_queue command_queue, cl_uint num_objects,
++    const cl_mem* mem_objects, cl_uint num_events_in_wait_list,
++    const cl_event* event_wait_list, cl_event* event) {
++    return cvk_interop_release(cvk_interop_api::d3d10, command_queue,
++                               num_objects, mem_objects,
++                               num_events_in_wait_list, event_wait_list, event);
++}
++
++#endif
+--- /dev/null
++++ b/clvk/src/interop_dxgi.cpp
+@@ -0,0 +1,133 @@
++// Copyright 2026 The clvk authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#ifdef _WIN32
++
++#include <algorithm>
++
++#include "interop_dxgi.hpp"
++
++namespace {
++
++struct dxgi_image_format {
++    DXGI_FORMAT dxgi;
++    cl_channel_order order;
++    cl_channel_type type;
++    size_t element_size;
++};
++
++// cl_khr_d3d10_sharing, "Direct3D 10 formats and corresponding OpenCL image
++// formats".
++const dxgi_image_format formats[] = {
++    {DXGI_FORMAT_R32G32B32A32_FLOAT, CL_RGBA, CL_FLOAT, 16},
++    {DXGI_FORMAT_R32G32B32A32_UINT, CL_RGBA, CL_UNSIGNED_INT32, 16},
++    {DXGI_FORMAT_R32G32B32A32_SINT, CL_RGBA, CL_SIGNED_INT32, 16},
++    {DXGI_FORMAT_R16G16B16A16_FLOAT, CL_RGBA, CL_HALF_FLOAT, 8},
++    {DXGI_FORMAT_R16G16B16A16_UNORM, CL_RGBA, CL_UNORM_INT16, 8},
++    {DXGI_FORMAT_R16G16B16A16_UINT, CL_RGBA, CL_UNSIGNED_INT16, 8},
++    {DXGI_FORMAT_R16G16B16A16_SNORM, CL_RGBA, CL_SNORM_INT16, 8},
++    {DXGI_FORMAT_R16G16B16A16_SINT, CL_RGBA, CL_SIGNED_INT16, 8},
++    {DXGI_FORMAT_B8G8R8A8_UNORM, CL_BGRA, CL_UNORM_INT8, 4},
++    {DXGI_FORMAT_R8G8B8A8_UNORM, CL_RGBA, CL_UNORM_INT8, 4},
++    {DXGI_FORMAT_R8G8B8A8_UINT, CL_RGBA, CL_UNSIGNED_INT8, 4},
++    {DXGI_FORMAT_R8G8B8A8_SNORM, CL_RGBA, CL_SNORM_INT8, 4},
++    {DXGI_FORMAT_R8G8B8A8_SINT, CL_RGBA, CL_SIGNED_INT8, 4},
++    {DXGI_FORMAT_R32G32_FLOAT, CL_RG, CL_FLOAT, 8},
++    {DXGI_FORMAT_R32G32_UINT, CL_RG, CL_UNSIGNED_INT32, 8},
++    {DXGI_FORMAT_R32G32_SINT, CL_RG, CL_SIGNED_INT32, 8},
++    {DXGI_FORMAT_R16G16_FLOAT, CL_RG, CL_HALF_FLOAT, 4},
++    {DXGI_FORMAT_R16G16_UNORM, CL_RG, CL_UNORM_INT16, 4},
++    {DXGI_FORMAT_R16G16_UINT, CL_RG, CL_UNSIGNED_INT16, 4},
++    {DXGI_FORMAT_R16G16_SNORM, CL_RG, CL_SNORM_INT16, 4},
++    {DXGI_FORMAT_R16G16_SINT, CL_RG, CL_SIGNED_INT16, 4},
++    {DXGI_FORMAT_R8G8_UNORM, CL_RG, CL_UNORM_INT8, 2},
++    {DXGI_FORMAT_R8G8_UINT, CL_RG, CL_UNSIGNED_INT8, 2},
++    {DXGI_FORMAT_R8G8_SNORM, CL_RG, CL_SNORM_INT8, 2},
++    {DXGI_FORMAT_R8G8_SINT, CL_RG, CL_SIGNED_INT8, 2},
++    {DXGI_FORMAT_R32_FLOAT, CL_R, CL_FLOAT, 4},
++    {DXGI_FORMAT_R32_UINT, CL_R, CL_UNSIGNED_INT32, 4},
++    {DXGI_FORMAT_R32_SINT, CL_R, CL_SIGNED_INT32, 4},
++    {DXGI_FORMAT_R16_FLOAT, CL_R, CL_HALF_FLOAT, 2},
++    {DXGI_FORMAT_R16_UNORM, CL_R, CL_UNORM_INT16, 2},
++    {DXGI_FORMAT_R16_UINT, CL_R, CL_UNSIGNED_INT16, 2},
++    {DXGI_FORMAT_R16_SNORM, CL_R, CL_SNORM_INT16, 2},
++    {DXGI_FORMAT_R16_SINT, CL_R, CL_SIGNED_INT16, 2},
++    {DXGI_FORMAT_R8_UNORM, CL_R, CL_UNORM_INT8, 1},
++    {DXGI_FORMAT_R8_UINT, CL_R, CL_UNSIGNED_INT8, 1},
++    {DXGI_FORMAT_R8_SNORM, CL_R, CL_SNORM_INT8, 1},
++    {DXGI_FORMAT_R8_SINT, CL_R, CL_SIGNED_INT8, 1},
++};
++
++} // namespace
++
++bool cvk_dxgi_image_format(DXGI_FORMAT format, cl_image_format* image_format,
++                           size_t* element_size) {
++    for (auto& entry : formats) {
++        if (entry.dxgi == format) {
++            image_format->image_channel_order = entry.order;
++            image_format->image_channel_data_type = entry.type;
++            *element_size = entry.element_size;
++            return true;
++        }
++    }
++    return false;
++}
++
++bool cvk_dxgi_subresource_extent(UINT width, UINT height, UINT depth,
++                                 UINT mip_levels, UINT array_size,
++                                 UINT subresource, UINT* sub_width,
++                                 UINT* sub_height, UINT* sub_depth) {
++    if (mip_levels == 0 || array_size == 0 ||
++        subresource / mip_levels >= array_size) {
++        return false;
++    }
++    UINT mip = subresource % mip_levels;
++    *sub_width = std::max(1u, width >> mip);
++    *sub_height = std::max(1u, height >> mip);
++    *sub_depth = std::max(1u, depth >> mip);
++    return true;
++}
++
++// D3D11_USAGE_IMMUTABLE has the same value.
++bool cvk_dxgi_can_share(UINT usage, UINT sample_count) {
++    return usage != D3D10_USAGE_IMMUTABLE && sample_count <= 1;
++}
++
++bool cvk_dxgi_adapter_luid(IDXGIAdapter* adapter, LUID* luid) {
++    DXGI_ADAPTER_DESC desc;
++    if (adapter == nullptr || FAILED(adapter->GetDesc(&desc))) {
++        return false;
++    }
++    *luid = desc.AdapterLuid;
++    return true;
++}
++
++bool cvk_dxgi_device_luid(IUnknown* device, LUID* luid) {
++    IDXGIDevice* dxgi_device = nullptr;
++    if (device == nullptr ||
++        FAILED(device->QueryInterface(__uuidof(IDXGIDevice),
++                                      reinterpret_cast<void**>(&dxgi_device)))) {
++        return false;
++    }
++    IDXGIAdapter* adapter = nullptr;
++    bool found = SUCCEEDED(dxgi_device->GetAdapter(&adapter)) &&
++                 cvk_dxgi_adapter_luid(adapter, luid);
++    if (adapter != nullptr) {
++        adapter->Release();
++    }
++    dxgi_device->Release();
++    return found;
++}
++
++#endif
+--- /dev/null
++++ b/clvk/src/interop_dxgi.hpp
+@@ -0,0 +1,45 @@
++// Copyright 2026 The clvk authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#pragma once
++
++#ifdef _WIN32
++
++#include <dxgi.h>
++
++#include "cl_headers.hpp"
++
++// The parts of Direct3D sharing that DXGI defines, the same for every
++// Direct3D version.
++
++// The image format of a DXGI format, from the table of the sharing
++// extensions. False when the format has no image format.
++bool cvk_dxgi_image_format(DXGI_FORMAT format, cl_image_format* image_format,
++                           size_t* element_size);
++
++// The extent of one subresource of a texture with this size, mip levels and
++// array size. False when the subresource does not exist.
++bool cvk_dxgi_subresource_extent(UINT width, UINT height, UINT depth,
++                                 UINT mip_levels, UINT array_size,
++                                 UINT subresource, UINT* sub_width,
++                                 UINT* sub_height, UINT* sub_depth);
++
++// Whether a resource with this usage and sample count may be shared.
++bool cvk_dxgi_can_share(UINT usage, UINT sample_count);
++
++bool cvk_dxgi_adapter_luid(IDXGIAdapter* adapter, LUID* luid);
++// For a Direct3D device: the LUID of the adapter it was created on.
++bool cvk_dxgi_device_luid(IUnknown* device, LUID* luid);
++
++#endif
+--- /dev/null
++++ b/clvk/src/interop_gl.cpp
+@@ -0,0 +1,1276 @@
++// Copyright 2026 The clvk authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#ifdef _WIN32
++
++#include <windows.h>
++
++#include <algorithm>
++#include <climits>
++#include <condition_variable>
++#include <cstring>
++#include <deque>
++#include <functional>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++
++#include "api.hpp"
++#include "context.hpp"
++#include "device.hpp"
++#include "init.hpp"
++#include "interop.hpp"
++#include "kmt.hpp"
++#include "memory.hpp"
++
++#define CLVK_API_CALL CL_API_CALL
++
++namespace {
++
++using GLenum = unsigned int;
++using GLint = int;
++using GLuint = unsigned int;
++using GLsizei = int;
++using GLint64 = int64_t;
++using GLintptr = intptr_t;
++using GLsizeiptr = intptr_t;
++
++// gl.h, glext.h, wglext.h
++constexpr GLenum GL_BYTE = 0x1400;
++constexpr GLenum GL_UNSIGNED_BYTE = 0x1401;
++constexpr GLenum GL_SHORT = 0x1402;
++constexpr GLenum GL_UNSIGNED_SHORT = 0x1403;
++constexpr GLenum GL_INT = 0x1404;
++constexpr GLenum GL_UNSIGNED_INT = 0x1405;
++constexpr GLenum GL_FLOAT = 0x1406;
++constexpr GLenum GL_HALF_FLOAT = 0x140B;
++constexpr GLenum GL_RED = 0x1903;
++constexpr GLenum GL_RGBA = 0x1908;
++constexpr GLenum GL_RG = 0x8227;
++constexpr GLenum GL_RED_INTEGER = 0x8D94;
++constexpr GLenum GL_RG_INTEGER = 0x8228;
++constexpr GLenum GL_RGBA_INTEGER = 0x8D99;
++constexpr GLenum GL_PACK_ALIGNMENT = 0x0D05;
++constexpr GLenum GL_UNPACK_ALIGNMENT = 0x0CF5;
++constexpr GLenum GL_TEXTURE_1D = 0x0DE0;
++constexpr GLenum GL_TEXTURE_2D = 0x0DE1;
++constexpr GLenum GL_TEXTURE_3D = 0x806F;
++constexpr GLenum GL_TEXTURE_RECTANGLE = 0x84F5;
++constexpr GLenum GL_TEXTURE_CUBE_MAP = 0x8513;
++constexpr GLenum GL_TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515;
++constexpr GLenum GL_TEXTURE_CUBE_MAP_NEGATIVE_Z = 0x851A;
++constexpr GLenum GL_TEXTURE_1D_ARRAY = 0x8C18;
++constexpr GLenum GL_TEXTURE_2D_ARRAY = 0x8C1A;
++constexpr GLenum GL_TEXTURE_BUFFER = 0x8C2A;
++constexpr GLenum GL_TEXTURE_WIDTH = 0x1000;
++constexpr GLenum GL_TEXTURE_HEIGHT = 0x1001;
++constexpr GLenum GL_TEXTURE_INTERNAL_FORMAT = 0x1003;
++constexpr GLenum GL_TEXTURE_TARGET = 0x1006;
++constexpr GLenum GL_TEXTURE_DEPTH = 0x8071;
++constexpr GLenum GL_TEXTURE_BASE_LEVEL = 0x813C;
++constexpr GLenum GL_BUFFER_SIZE = 0x8764;
++constexpr GLenum GL_RENDERBUFFER = 0x8D41;
++constexpr GLenum GL_RENDERBUFFER_WIDTH = 0x8D42;
++constexpr GLenum GL_RENDERBUFFER_HEIGHT = 0x8D43;
++constexpr GLenum GL_RENDERBUFFER_INTERNAL_FORMAT = 0x8D44;
++constexpr GLenum GL_RENDERBUFFER_SAMPLES = 0x8CAB;
++constexpr GLenum GL_RGBA8 = 0x8058;
++constexpr GLenum GL_RGBA16 = 0x805B;
++constexpr GLenum GL_RGBA32F = 0x8814;
++constexpr GLenum GL_RGBA16F = 0x881A;
++constexpr GLenum GL_R8 = 0x8229;
++constexpr GLenum GL_R16 = 0x822A;
++constexpr GLenum GL_RG8 = 0x822B;
++constexpr GLenum GL_RG16 = 0x822C;
++constexpr GLenum GL_R16F = 0x822D;
++constexpr GLenum GL_R32F = 0x822E;
++constexpr GLenum GL_RG16F = 0x822F;
++constexpr GLenum GL_RG32F = 0x8230;
++constexpr GLenum GL_R8I = 0x8231;
++constexpr GLenum GL_R8UI = 0x8232;
++constexpr GLenum GL_R16I = 0x8233;
++constexpr GLenum GL_R16UI = 0x8234;
++constexpr GLenum GL_R32I = 0x8235;
++constexpr GLenum GL_R32UI = 0x8236;
++constexpr GLenum GL_RG8I = 0x8237;
++constexpr GLenum GL_RG8UI = 0x8238;
++constexpr GLenum GL_RG16I = 0x8239;
++constexpr GLenum GL_RG16UI = 0x823A;
++constexpr GLenum GL_RG32I = 0x823B;
++constexpr GLenum GL_RG32UI = 0x823C;
++constexpr GLenum GL_SRGB8_ALPHA8 = 0x8C43;
++constexpr GLenum GL_RGBA32UI = 0x8D70;
++constexpr GLenum GL_RGBA16UI = 0x8D76;
++constexpr GLenum GL_RGBA8UI = 0x8D7C;
++constexpr GLenum GL_RGBA32I = 0x8D82;
++constexpr GLenum GL_RGBA16I = 0x8D88;
++constexpr GLenum GL_RGBA8I = 0x8D8E;
++constexpr GLenum GL_R8_SNORM = 0x8F94;
++constexpr GLenum GL_RG8_SNORM = 0x8F95;
++constexpr GLenum GL_RGBA8_SNORM = 0x8F97;
++constexpr GLenum GL_R16_SNORM = 0x8F98;
++constexpr GLenum GL_RG16_SNORM = 0x8F99;
++constexpr GLenum GL_RGBA16_SNORM = 0x8F9B;
++constexpr GLenum GL_TEXTURE_MAX_LEVEL = 0x813D;
++constexpr GLenum GL_EXTENSIONS = 0x1F03;
++constexpr GLenum GL_MAJOR_VERSION = 0x821B;
++constexpr GLenum GL_MINOR_VERSION = 0x821C;
++constexpr GLenum GL_NUM_EXTENSIONS = 0x821D;
++constexpr int WGL_CONTEXT_MAJOR_VERSION_ARB = 0x2091;
++constexpr int WGL_CONTEXT_MINOR_VERSION_ARB = 0x2092;
++constexpr int WGL_CONTEXT_PROFILE_MASK_ARB = 0x9126;
++constexpr int WGL_CONTEXT_CORE_PROFILE_BIT_ARB = 0x1;
++
++// The extension's table of GL internal formats and their CL image formats,
++// with the GL client format of a tightly packed transfer.
++struct gl_format {
++    GLenum internal_format;
++    GLenum storage_format;
++    cl_channel_order order;
++    cl_channel_type type;
++    GLenum format;
++    GLenum data_type;
++    uint32_t element_size;
++};
++
++constexpr gl_format gl_formats[] = {
++    {GL_RGBA8, GL_RGBA8, CL_RGBA, CL_UNORM_INT8, GL_RGBA, GL_UNSIGNED_BYTE, 4},
++    {GL_SRGB8_ALPHA8, GL_SRGB8_ALPHA8, CL_sRGBA, CL_UNORM_INT8, GL_RGBA,
++     GL_UNSIGNED_BYTE, 4},
++    {GL_RGBA, GL_RGBA8, CL_RGBA, CL_UNORM_INT8, GL_RGBA, GL_UNSIGNED_BYTE, 4},
++    {GL_RGBA8I, GL_RGBA8I, CL_RGBA, CL_SIGNED_INT8, GL_RGBA_INTEGER, GL_BYTE,
++     4},
++    {GL_RGBA16I, GL_RGBA16I, CL_RGBA, CL_SIGNED_INT16, GL_RGBA_INTEGER,
++     GL_SHORT, 8},
++    {GL_RGBA32I, GL_RGBA32I, CL_RGBA, CL_SIGNED_INT32, GL_RGBA_INTEGER, GL_INT,
++     16},
++    {GL_RGBA8UI, GL_RGBA8UI, CL_RGBA, CL_UNSIGNED_INT8, GL_RGBA_INTEGER,
++     GL_UNSIGNED_BYTE, 4},
++    {GL_RGBA16UI, GL_RGBA16UI, CL_RGBA, CL_UNSIGNED_INT16, GL_RGBA_INTEGER,
++     GL_UNSIGNED_SHORT, 8},
++    {GL_RGBA32UI, GL_RGBA32UI, CL_RGBA, CL_UNSIGNED_INT32, GL_RGBA_INTEGER,
++     GL_UNSIGNED_INT, 16},
++    {GL_RGBA8_SNORM, GL_RGBA8_SNORM, CL_RGBA, CL_SNORM_INT8, GL_RGBA, GL_BYTE,
++     4},
++    {GL_RGBA16, GL_RGBA16, CL_RGBA, CL_UNORM_INT16, GL_RGBA, GL_UNSIGNED_SHORT,
++     8},
++    {GL_RGBA16_SNORM, GL_RGBA16_SNORM, CL_RGBA, CL_SNORM_INT16, GL_RGBA,
++     GL_SHORT, 8},
++    {GL_RGBA16F, GL_RGBA16F, CL_RGBA, CL_HALF_FLOAT, GL_RGBA, GL_HALF_FLOAT, 8},
++    {GL_RGBA32F, GL_RGBA32F, CL_RGBA, CL_FLOAT, GL_RGBA, GL_FLOAT, 16},
++    {GL_R8, GL_R8, CL_R, CL_UNORM_INT8, GL_RED, GL_UNSIGNED_BYTE, 1},
++    {GL_R8_SNORM, GL_R8_SNORM, CL_R, CL_SNORM_INT8, GL_RED, GL_BYTE, 1},
++    {GL_R16, GL_R16, CL_R, CL_UNORM_INT16, GL_RED, GL_UNSIGNED_SHORT, 2},
++    {GL_R16_SNORM, GL_R16_SNORM, CL_R, CL_SNORM_INT16, GL_RED, GL_SHORT, 2},
++    {GL_R16F, GL_R16F, CL_R, CL_HALF_FLOAT, GL_RED, GL_HALF_FLOAT, 2},
++    {GL_R32F, GL_R32F, CL_R, CL_FLOAT, GL_RED, GL_FLOAT, 4},
++    {GL_R8I, GL_R8I, CL_R, CL_SIGNED_INT8, GL_RED_INTEGER, GL_BYTE, 1},
++    {GL_R16I, GL_R16I, CL_R, CL_SIGNED_INT16, GL_RED_INTEGER, GL_SHORT, 2},
++    {GL_R32I, GL_R32I, CL_R, CL_SIGNED_INT32, GL_RED_INTEGER, GL_INT, 4},
++    {GL_R8UI, GL_R8UI, CL_R, CL_UNSIGNED_INT8, GL_RED_INTEGER, GL_UNSIGNED_BYTE,
++     1},
++    {GL_R16UI, GL_R16UI, CL_R, CL_UNSIGNED_INT16, GL_RED_INTEGER,
++     GL_UNSIGNED_SHORT, 2},
++    {GL_R32UI, GL_R32UI, CL_R, CL_UNSIGNED_INT32, GL_RED_INTEGER,
++     GL_UNSIGNED_INT, 4},
++    {GL_RG8, GL_RG8, CL_RG, CL_UNORM_INT8, GL_RG, GL_UNSIGNED_BYTE, 2},
++    {GL_RG8_SNORM, GL_RG8_SNORM, CL_RG, CL_SNORM_INT8, GL_RG, GL_BYTE, 2},
++    {GL_RG16, GL_RG16, CL_RG, CL_UNORM_INT16, GL_RG, GL_UNSIGNED_SHORT, 4},
++    {GL_RG16_SNORM, GL_RG16_SNORM, CL_RG, CL_SNORM_INT16, GL_RG, GL_SHORT, 4},
++    {GL_RG16F, GL_RG16F, CL_RG, CL_HALF_FLOAT, GL_RG, GL_HALF_FLOAT, 4},
++    {GL_RG32F, GL_RG32F, CL_RG, CL_FLOAT, GL_RG, GL_FLOAT, 8},
++    {GL_RG8I, GL_RG8I, CL_RG, CL_SIGNED_INT8, GL_RG_INTEGER, GL_BYTE, 2},
++    {GL_RG16I, GL_RG16I, CL_RG, CL_SIGNED_INT16, GL_RG_INTEGER, GL_SHORT, 4},
++    {GL_RG32I, GL_RG32I, CL_RG, CL_SIGNED_INT32, GL_RG_INTEGER, GL_INT, 8},
++    {GL_RG8UI, GL_RG8UI, CL_RG, CL_UNSIGNED_INT8, GL_RG_INTEGER,
++     GL_UNSIGNED_BYTE, 2},
++    {GL_RG16UI, GL_RG16UI, CL_RG, CL_UNSIGNED_INT16, GL_RG_INTEGER,
++     GL_UNSIGNED_SHORT, 4},
++    {GL_RG32UI, GL_RG32UI, CL_RG, CL_UNSIGNED_INT32, GL_RG_INTEGER,
++     GL_UNSIGNED_INT, 8},
++};
++
++const gl_format* find_format(GLint internal_format) {
++    for (const auto& format : gl_formats) {
++        if (format.internal_format == static_cast<GLenum>(internal_format)) {
++            return &format;
++        }
++    }
++    return nullptr;
++}
++
++bool is_cube_face(GLenum target) {
++    return target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
++           target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z;
++}
++
++// mesa_glinterop.h, structure version 3.
++struct mesa_glinterop_device_info {
++    uint32_t version;
++    uint32_t pci_segment_group;
++    uint32_t pci_bus;
++    uint32_t pci_device;
++    uint32_t pci_function;
++    uint32_t vendor_id;
++    uint32_t device_id;
++    uint32_t driver_data_size;
++    void* driver_data;
++    uint8_t device_uuid[CL_UUID_SIZE_KHR];
++};
++
++// WGL entry points come from the ICD itself, which opengl32 loads by the
++// adapter's OpenGL driver name; its DrvGetProcAddress needs no current
++// context. The ICD and opengl32 stay loaded until the process exits.
++struct gl_api {
++    BOOL(WINAPI* make_current)(HDC, HGLRC);
++    BOOL(WINAPI* delete_context)(HGLRC);
++    HANDLE(WINAPI* create_pbuffer)(HDC, int, int, int, const int*);
++    HDC(WINAPI* get_pbuffer_dc)(HANDLE);
++    BOOL(WINAPI* destroy_pbuffer)(HANDLE);
++    HGLRC(WINAPI* create_context_attribs)(HDC, HGLRC, const int*);
++    int (*query_device_info)(HDC, HGLRC, mesa_glinterop_device_info*);
++    void(APIENTRY* get_integer)(GLenum, GLint*);
++    const unsigned char*(APIENTRY* get_string_i)(GLenum, GLuint);
++    void(APIENTRY* pixel_store)(GLenum, GLint);
++    void(APIENTRY* finish)();
++    void(APIENTRY* get_buffer_size)(GLuint, GLenum, GLint64*);
++    void(APIENTRY* get_buffer_data)(GLuint, GLintptr, GLsizeiptr, void*);
++    void(APIENTRY* set_buffer_data)(GLuint, GLintptr, GLsizeiptr, const void*);
++    void(APIENTRY* get_texture_parameter)(GLuint, GLenum, GLint*);
++    void(APIENTRY* get_texture_level_parameter)(GLuint, GLint, GLenum, GLint*);
++    void(APIENTRY* get_texture_image)(GLuint, GLint, GLint, GLint, GLint,
++                                      GLsizei, GLsizei, GLsizei, GLenum, GLenum,
++                                      GLsizei, void*);
++    void(APIENTRY* set_texture_image_1d)(GLuint, GLint, GLint, GLsizei, GLenum,
++                                         GLenum, const void*);
++    void(APIENTRY* set_texture_image_2d)(GLuint, GLint, GLint, GLint, GLsizei,
++                                         GLsizei, GLenum, GLenum, const void*);
++    void(APIENTRY* set_texture_image_3d)(GLuint, GLint, GLint, GLint, GLint,
++                                         GLsizei, GLsizei, GLsizei, GLenum,
++                                         GLenum, const void*);
++    void(APIENTRY* get_renderbuffer_parameter)(GLuint, GLenum, GLint*);
++    void(APIENTRY* create_textures)(GLenum, GLsizei, GLuint*);
++    void(APIENTRY* texture_storage_2d)(GLuint, GLsizei, GLenum, GLsizei,
++                                       GLsizei);
++    void(APIENTRY* delete_textures)(GLsizei, const GLuint*);
++    void(APIENTRY* copy_image)(GLuint, GLenum, GLint, GLint, GLint, GLint,
++                               GLuint, GLenum, GLint, GLint, GLint, GLint,
++                               GLsizei, GLsizei, GLsizei);
++};
++
++template <typename T> bool resolve(FARPROC proc, T* entry) {
++    *entry = reinterpret_cast<T>(proc);
++    return proc != nullptr;
++}
++
++bool resolve_api(HMODULE opengl32, HMODULE icd, gl_api* api) {
++    using get_proc_t = PROC(WINAPI*)(LPCSTR);
++    auto get =
++        reinterpret_cast<get_proc_t>(GetProcAddress(icd, "DrvGetProcAddress"));
++    if (get == nullptr) {
++        return false;
++    }
++    return resolve(GetProcAddress(opengl32, "wglMakeCurrent"),
++                   &api->make_current) &&
++           resolve(GetProcAddress(opengl32, "wglDeleteContext"),
++                   &api->delete_context) &&
++           resolve(get("wglCreatePbufferARB"), &api->create_pbuffer) &&
++           resolve(get("wglGetPbufferDCARB"), &api->get_pbuffer_dc) &&
++           resolve(get("wglDestroyPbufferARB"), &api->destroy_pbuffer) &&
++           resolve(get("wglCreateContextAttribsARB"),
++                   &api->create_context_attribs) &&
++           resolve(get("wglMesaGLInteropQueryDeviceInfo"),
++                   &api->query_device_info) &&
++           resolve(get("glGetIntegerv"), &api->get_integer) &&
++           resolve(get("glGetStringi"), &api->get_string_i) &&
++           resolve(get("glPixelStorei"), &api->pixel_store) &&
++           resolve(get("glFinish"), &api->finish) &&
++           resolve(get("glGetNamedBufferParameteri64v"),
++                   &api->get_buffer_size) &&
++           resolve(get("glGetNamedBufferSubData"), &api->get_buffer_data) &&
++           resolve(get("glNamedBufferSubData"), &api->set_buffer_data) &&
++           resolve(get("glGetTextureParameteriv"),
++                   &api->get_texture_parameter) &&
++           resolve(get("glGetTextureLevelParameteriv"),
++                   &api->get_texture_level_parameter) &&
++           resolve(get("glGetTextureSubImage"), &api->get_texture_image) &&
++           resolve(get("glTextureSubImage1D"), &api->set_texture_image_1d) &&
++           resolve(get("glTextureSubImage2D"), &api->set_texture_image_2d) &&
++           resolve(get("glTextureSubImage3D"), &api->set_texture_image_3d) &&
++           resolve(get("glGetNamedRenderbufferParameteriv"),
++                   &api->get_renderbuffer_parameter) &&
++           resolve(get("glCreateTextures"), &api->create_textures) &&
++           resolve(get("glTextureStorage2D"), &api->texture_storage_2d) &&
++           resolve(get("glDeleteTextures"), &api->delete_textures) &&
++           resolve(get("glCopyImageSubData"), &api->copy_image);
++}
++
++const gl_api* load_api(HDC hdc) {
++    static std::mutex lock;
++    static const gl_api* loaded = nullptr;
++    std::lock_guard<std::mutex> guard(lock);
++    if (loaded != nullptr) {
++        return loaded;
++    }
++    std::wstring icd_name;
++    HMODULE icd = nullptr;
++    HMODULE opengl32 = nullptr;
++    if (!cvk_kmt_opengl_icd(hdc, &icd_name) ||
++        !GetModuleHandleExW(0, icd_name.c_str(), &icd)) {
++        return nullptr;
++    }
++    auto api = std::make_unique<gl_api>();
++    if (!GetModuleHandleExW(0, L"opengl32.dll", &opengl32) ||
++        !resolve_api(opengl32, icd, api.get())) {
++        if (opengl32 != nullptr) {
++            FreeLibrary(opengl32);
++        }
++        FreeLibrary(icd);
++        return nullptr;
++    }
++    loaded = api.release();
++    return loaded;
++}
++
++// The current context has the calls the worker makes: GL 4.5, or the
++// extensions that bring them.
++bool has_transfer_calls(const gl_api& gl) {
++    GLint major = 0, minor = 0;
++    gl.get_integer(GL_MAJOR_VERSION, &major);
++    gl.get_integer(GL_MINOR_VERSION, &minor);
++    if (major > 4 || (major == 4 && minor >= 5)) {
++        return true;
++    }
++    static const char* const needed[] = {"GL_ARB_direct_state_access",
++                                         "GL_ARB_get_texture_sub_image",
++                                         "GL_ARB_copy_image"};
++    bool found[3] = {};
++    GLint count = 0;
++    gl.get_integer(GL_NUM_EXTENSIONS, &count);
++    for (GLint i = 0; i < count; i++) {
++        auto name = reinterpret_cast<const char*>(
++            gl.get_string_i(GL_EXTENSIONS, static_cast<GLuint>(i)));
++        for (size_t n = 0; name != nullptr && n < 3; n++) {
++            found[n] = found[n] || strcmp(name, needed[n]) == 0;
++        }
++    }
++    return found[0] && found[1] && found[2];
++}
++
++cl_int query_device_uuid(HDC hdc, HGLRC context, uint8_t* uuid) {
++    const gl_api* api =
++        hdc != nullptr && context != nullptr ? load_api(hdc) : nullptr;
++    if (api == nullptr) {
++        return CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR;
++    }
++    mesa_glinterop_device_info info = {};
++    info.version = 3;
++    if (api->query_device_info(hdc, context, &info) != 0 || info.version < 3) {
++        return CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR;
++    }
++    memcpy(uuid, info.device_uuid, CL_UUID_SIZE_KHR);
++    return CL_SUCCESS;
++}
++
++// One thread per process makes every GL call of every CL context. It owns a
++// 1x1 pbuffer to make its contexts current on, keeps the last context
++// current, and dispatches its messages between requests, so a message sent
++// to every top-level window does not stall on it. It lives until the
++// process exits, as the command queue executors do.
++class gl_worker {
++public:
++    static gl_worker* get(const gl_api* api, HDC hdc, int pixel_format) {
++        static std::mutex lock;
++        static gl_worker* started = nullptr;
++        std::lock_guard<std::mutex> guard(lock);
++        if (started == nullptr) {
++            auto worker = std::make_unique<gl_worker>(api);
++            if (worker->start(hdc, pixel_format)) {
++                started = worker.release();
++            }
++        }
++        return started;
++    }
++
++    explicit gl_worker(const gl_api* api) : m_api(api) {}
++
++    const gl_api& api() const { return *m_api; }
++
++    // Runs work with context current; with no context, as it is.
++    cl_int run(HGLRC context, const std::function<cl_int()>& work) {
++        request job{context, &work};
++        std::unique_lock<std::mutex> lock(m_lock);
++        m_queue.push_back(&job);
++        SetEvent(m_wake);
++        m_done.wait(lock, [&job] { return job.done; });
++        return job.result;
++    }
++
++    cl_int create_context(HGLRC share, HGLRC* created) {
++        return run(nullptr, [&]() -> cl_int {
++            // GL_TEXTURE_TARGET is a core profile query.
++            static const int attributes[] = {WGL_CONTEXT_MAJOR_VERSION_ARB,
++                                             3,
++                                             WGL_CONTEXT_MINOR_VERSION_ARB,
++                                             2,
++                                             WGL_CONTEXT_PROFILE_MASK_ARB,
++                                             WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
++                                             0};
++            HGLRC context =
++                m_api->create_context_attribs(m_dc, share, attributes);
++            if (context == nullptr) {
++                return CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR;
++            }
++            if (!m_api->make_current(m_dc, context)) {
++                m_current = nullptr;
++                m_api->delete_context(context);
++                return CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR;
++            }
++            m_current = context;
++            if (!has_transfer_calls(*m_api)) {
++                m_api->make_current(nullptr, nullptr);
++                m_current = nullptr;
++                m_api->delete_context(context);
++                return CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR;
++            }
++            m_api->pixel_store(GL_PACK_ALIGNMENT, 1);
++            m_api->pixel_store(GL_UNPACK_ALIGNMENT, 1);
++            *created = context;
++            return CL_SUCCESS;
++        });
++    }
++
++    void destroy_context(HGLRC context) {
++        cl_int err = run(nullptr, [&]() -> cl_int {
++            if (m_current == context) {
++                m_api->make_current(nullptr, nullptr);
++                m_current = nullptr;
++            }
++            m_api->delete_context(context);
++            return CL_SUCCESS;
++        });
++        UNUSED(err);
++    }
++
++private:
++    struct request {
++        HGLRC context;
++        const std::function<cl_int()>* work;
++        cl_int result = CL_SUCCESS;
++        bool done = false;
++    };
++
++    bool start(HDC hdc, int pixel_format) {
++        m_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++        if (m_wake == nullptr) {
++            return false;
++        }
++        std::thread thread(
++            [this, hdc, pixel_format] { main(hdc, pixel_format); });
++        std::unique_lock<std::mutex> lock(m_lock);
++        m_done.wait(lock, [this] { return m_state != state::starting; });
++        if (m_state == state::failed) {
++            lock.unlock();
++            thread.join();
++            CloseHandle(m_wake);
++            return false;
++        }
++        thread.detach();
++        return true;
++    }
++
++    void main(HDC hdc, int pixel_format) {
++        HANDLE pbuffer =
++            m_api->create_pbuffer(hdc, pixel_format, 1, 1, nullptr);
++        if (pbuffer != nullptr) {
++            m_dc = m_api->get_pbuffer_dc(pbuffer);
++            if (m_dc == nullptr) {
++                m_api->destroy_pbuffer(pbuffer);
++            }
++        }
++        {
++            std::lock_guard<std::mutex> lock(m_lock);
++            m_state = m_dc != nullptr ? state::running : state::failed;
++        }
++        m_done.notify_all();
++        if (m_dc == nullptr) {
++            return;
++        }
++
++        for (;;) {
++            MsgWaitForMultipleObjectsEx(1, &m_wake, INFINITE, QS_ALLINPUT,
++                                        MWMO_INPUTAVAILABLE);
++            MSG message;
++            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
++                TranslateMessage(&message);
++                DispatchMessageW(&message);
++            }
++            for (;;) {
++                request* job;
++                {
++                    std::lock_guard<std::mutex> lock(m_lock);
++                    if (m_queue.empty()) {
++                        break;
++                    }
++                    job = m_queue.front();
++                    m_queue.pop_front();
++                }
++                cl_int result = execute(*job);
++                {
++                    std::lock_guard<std::mutex> lock(m_lock);
++                    job->result = result;
++                    job->done = true;
++                }
++                m_done.notify_all();
++            }
++        }
++    }
++
++    cl_int execute(const request& job) {
++        if (job.context != nullptr && job.context != m_current) {
++            if (!m_api->make_current(m_dc, job.context)) {
++                m_current = nullptr;
++                return CL_OUT_OF_RESOURCES;
++            }
++            m_current = job.context;
++        }
++        return (*job.work)();
++    }
++
++    enum class state
++    {
++        starting,
++        running,
++        failed
++    };
++
++    const gl_api* m_api;
++    HANDLE m_wake = nullptr;
++    HDC m_dc = nullptr;
++    HGLRC m_current = nullptr;
++    std::mutex m_lock;
++    std::condition_variable m_done;
++    std::deque<request*> m_queue;
++    state m_state = state::starting;
++};
++
++struct cvk_gl_interop final : public cvk_interop_device {
++    cvk_gl_interop(gl_worker* worker, HGLRC context)
++        : cvk_interop_device(cvk_interop_api::gl), m_worker(worker),
++          m_context(context) {}
++    ~cvk_gl_interop() override { m_worker->destroy_context(m_context); }
++
++    cl_command_type acquire_command() const override {
++        return CL_COMMAND_ACQUIRE_GL_OBJECTS;
++    }
++    cl_command_type release_command() const override {
++        return CL_COMMAND_RELEASE_GL_OBJECTS;
++    }
++    cl_int foreign_object_error() const override {
++        return CL_INVALID_GL_OBJECT;
++    }
++    cl_int already_acquired_error() const override { return CL_SUCCESS; }
++    cl_int not_acquired_error() const override { return CL_SUCCESS; }
++
++    cl_int capture(const std::vector<cvk_interop_object*>& objects) override {
++        return run(
++            [&]() -> cl_int { return cvk_interop_device::capture(objects); });
++    }
++
++    cl_int publish(const std::vector<cvk_interop_object*>& objects) override {
++        return run([&]() -> cl_int {
++            cl_int status = cvk_interop_device::publish(objects);
++            api().finish();
++            return status;
++        });
++    }
++
++    cl_int run(const std::function<cl_int()>& work) {
++        return m_worker->run(m_context, work);
++    }
++
++    const gl_api& api() const { return m_worker->api(); }
++
++private:
++    gl_worker* m_worker;
++    HGLRC m_context;
++};
++
++// What a GL object looks like when its CL memory object is made. Every later
++// transfer is bounded by it, whatever the application does to the GL object.
++struct gl_shape {
++    cl_gl_object_type type = 0;
++    const gl_format* format = nullptr;
++    uint64_t buffer_size = 0;
++    GLsizei width = 1;
++    GLsizei height = 1;
++    GLsizei depth = 1;
++    GLint zoffset = 0;
++    GLuint transfer = 0;
++};
++
++// One GL object, or one level or cube face of a texture. A renderbuffer
++// moves through a texture of the same format, since GL reads and writes
++// images only of textures.
++struct cvk_gl_object final : public cvk_interop_object {
++    cvk_gl_object(cvk_gl_interop* device, GLuint name, GLenum target,
++                  GLint level, const gl_shape& shape)
++        : cvk_interop_object(device, reinterpret_cast<void*>(uintptr_t(name)),
++                             static_cast<uint32_t>(level)),
++          m_gl(device), m_name(name), m_target(target), m_level(level),
++          m_shape(shape) {}
++
++    ~cvk_gl_object() override {
++        if (m_shape.transfer != 0) {
++            GLuint transfer = m_shape.transfer;
++            cl_int err = m_gl->run([&]() -> cl_int {
++                m_gl->api().delete_textures(1, &transfer);
++                return CL_SUCCESS;
++            });
++            UNUSED(err);
++        }
++    }
++
++    cl_int capture() override {
++        const gl_api& gl = m_gl->api();
++        switch (m_shape.type) {
++        case CL_GL_OBJECT_BUFFER:
++            gl.get_buffer_data(m_name, 0, static_cast<GLsizeiptr>(host_size()),
++                               host_data());
++            break;
++        case CL_GL_OBJECT_RENDERBUFFER:
++            gl.copy_image(m_name, GL_RENDERBUFFER, 0, 0, 0, 0, m_shape.transfer,
++                          GL_TEXTURE_2D, 0, 0, 0, 0, m_shape.width,
++                          m_shape.height, 1);
++            read(m_shape.transfer, 0);
++            break;
++        default:
++            read(m_name, m_level);
++            break;
++        }
++        return CL_SUCCESS;
++    }
++
++    cl_int publish() override {
++        const gl_api& gl = m_gl->api();
++        switch (m_shape.type) {
++        case CL_GL_OBJECT_BUFFER:
++            gl.set_buffer_data(m_name, 0, static_cast<GLsizeiptr>(host_size()),
++                               host_data());
++            break;
++        case CL_GL_OBJECT_RENDERBUFFER:
++            write(m_shape.transfer, 0);
++            gl.copy_image(m_shape.transfer, GL_TEXTURE_2D, 0, 0, 0, 0, m_name,
++                          GL_RENDERBUFFER, 0, 0, 0, 0, m_shape.width,
++                          m_shape.height, 1);
++            break;
++        default:
++            write(m_name, m_level);
++            break;
++        }
++        return CL_SUCCESS;
++    }
++
++    cl_gl_object_type type() const { return m_shape.type; }
++    GLuint name() const { return m_name; }
++    GLenum target() const { return m_target; }
++    GLint level() const { return m_level; }
++
++private:
++    void read(GLuint texture, GLint level) {
++        m_gl->api().get_texture_image(
++            texture, level, 0, 0, m_shape.zoffset, m_shape.width,
++            m_shape.height, m_shape.depth, m_shape.format->format,
++            m_shape.format->data_type, static_cast<GLsizei>(host_size()),
++            host_data());
++    }
++
++    void write(GLuint texture, GLint level) {
++        const gl_api& gl = m_gl->api();
++        const gl_format& format = *m_shape.format;
++        switch (m_shape.type) {
++        case CL_GL_OBJECT_TEXTURE1D:
++            gl.set_texture_image_1d(texture, level, 0, m_shape.width,
++                                    format.format, format.data_type,
++                                    host_data());
++            break;
++        case CL_GL_OBJECT_TEXTURE2D_ARRAY:
++        case CL_GL_OBJECT_TEXTURE3D:
++            write_layers(texture, level);
++            break;
++        default:
++            // A cube map face is a layer of the texture.
++            if (is_cube_face(m_target)) {
++                write_layers(texture, level);
++                break;
++            }
++            gl.set_texture_image_2d(texture, level, 0, 0, m_shape.width,
++                                    m_shape.height, format.format,
++                                    format.data_type, host_data());
++            break;
++        }
++    }
++
++    void write_layers(GLuint texture, GLint level) {
++        const gl_format& format = *m_shape.format;
++        m_gl->api().set_texture_image_3d(texture, level, 0, 0, m_shape.zoffset,
++                                         m_shape.width, m_shape.height,
++                                         m_shape.depth, format.format,
++                                         format.data_type, host_data());
++    }
++
++    cvk_gl_interop* m_gl;
++    GLuint m_name;
++    GLenum m_target;
++    GLint m_level;
++    gl_shape m_shape;
++};
++
++cl_gl_object_type texture_object_type(GLenum target) {
++    switch (target) {
++    case GL_TEXTURE_1D:
++        return CL_GL_OBJECT_TEXTURE1D;
++    case GL_TEXTURE_1D_ARRAY:
++        return CL_GL_OBJECT_TEXTURE1D_ARRAY;
++    case GL_TEXTURE_2D:
++    case GL_TEXTURE_RECTANGLE:
++        return CL_GL_OBJECT_TEXTURE2D;
++    case GL_TEXTURE_2D_ARRAY:
++        return CL_GL_OBJECT_TEXTURE2D_ARRAY;
++    case GL_TEXTURE_3D:
++        return CL_GL_OBJECT_TEXTURE3D;
++    case GL_TEXTURE_BUFFER:
++        return CL_GL_OBJECT_TEXTURE_BUFFER;
++    default:
++        return is_cube_face(target) ? CL_GL_OBJECT_TEXTURE2D : 0;
++    }
++}
++
++cvk_gl_interop* gl_interop_of(cl_context context) {
++    auto interop = icd_downcast(context)->interop();
++    if (interop == nullptr || interop->api() != cvk_interop_api::gl) {
++        return nullptr;
++    }
++    return static_cast<cvk_gl_interop*>(interop);
++}
++
++cvk_gl_object* gl_object_of(cl_mem mem) {
++    auto object = icd_downcast(mem)->interop();
++    if (object == nullptr || object->device()->api() != cvk_interop_api::gl) {
++        return nullptr;
++    }
++    return static_cast<cvk_gl_object*>(object);
++}
++
++// The context checks come first for GL, then the flags.
++cl_int check_create(cl_context context, cl_mem_flags flags,
++                    cvk_gl_interop** device) {
++    if (!is_valid_context(context) || gl_interop_of(context) == nullptr) {
++        return CL_INVALID_CONTEXT;
++    }
++    *device = gl_interop_of(context);
++    return cvk_interop_check_create(context, flags);
++}
++
++cl_int describe_buffer(const gl_api& gl, GLuint buffer, gl_shape* shape) {
++    GLint64 size = 0;
++    gl.get_buffer_size(buffer, GL_BUFFER_SIZE, &size);
++    if (size <= 0) {
++        return CL_INVALID_GL_OBJECT;
++    }
++    shape->type = CL_GL_OBJECT_BUFFER;
++    shape->buffer_size = static_cast<uint64_t>(size);
++    return CL_SUCCESS;
++}
++
++// q of the texture completeness rules: the last level of a full mipmap
++// chain from the base level, and no more than the maximum level.
++GLint last_level(const gl_api& gl, GLenum target, GLuint texture, GLint base,
++                 GLint max_level) {
++    if (target == GL_TEXTURE_RECTANGLE) {
++        return base;
++    }
++    GLint width = 0, height = 0, depth = 0;
++    gl.get_texture_level_parameter(texture, base, GL_TEXTURE_WIDTH, &width);
++    gl.get_texture_level_parameter(texture, base, GL_TEXTURE_HEIGHT, &height);
++    gl.get_texture_level_parameter(texture, base, GL_TEXTURE_DEPTH, &depth);
++    GLint size = width;
++    if (target != GL_TEXTURE_1D && target != GL_TEXTURE_1D_ARRAY) {
++        size = std::max(size, height);
++    }
++    if (target == GL_TEXTURE_3D) {
++        size = std::max(size, depth);
++    }
++    GLint levels = 0;
++    while (size > 1) {
++        size >>= 1;
++        levels++;
++    }
++    return std::min(base + levels, max_level);
++}
++
++cl_int describe_texture(const gl_api& gl, GLenum target, GLint level,
++                        GLuint texture, gl_shape* shape) {
++    GLint actual = 0;
++    gl.get_texture_parameter(texture, GL_TEXTURE_TARGET, &actual);
++    GLenum expected = is_cube_face(target) ? GL_TEXTURE_CUBE_MAP : target;
++    if (texture == 0 || static_cast<GLenum>(actual) != expected) {
++        return CL_INVALID_GL_OBJECT;
++    }
++    GLint base = 0, max_level = 0;
++    gl.get_texture_parameter(texture, GL_TEXTURE_BASE_LEVEL, &base);
++    gl.get_texture_parameter(texture, GL_TEXTURE_MAX_LEVEL, &max_level);
++    if (level < 0 || level < base ||
++        level > last_level(gl, target, texture, base, max_level)) {
++        return CL_INVALID_MIP_LEVEL;
++    }
++    GLint width = 0, height = 0, depth = 0, internal_format = 0;
++    gl.get_texture_level_parameter(texture, level, GL_TEXTURE_WIDTH, &width);
++    gl.get_texture_level_parameter(texture, level, GL_TEXTURE_HEIGHT, &height);
++    gl.get_texture_level_parameter(texture, level, GL_TEXTURE_DEPTH, &depth);
++    gl.get_texture_level_parameter(texture, level, GL_TEXTURE_INTERNAL_FORMAT,
++                                   &internal_format);
++    if (width <= 0 || height <= 0 || depth <= 0) {
++        return CL_INVALID_GL_OBJECT;
++    }
++    shape->format = find_format(internal_format);
++    if (shape->format == nullptr) {
++        return CL_INVALID_IMAGE_FORMAT_DESCRIPTOR;
++    }
++    if (target == GL_TEXTURE_BUFFER) {
++        return CL_INVALID_OPERATION;
++    }
++    shape->type = texture_object_type(target);
++    shape->width = width;
++    shape->height = height;
++    shape->depth = depth;
++    if (is_cube_face(target)) {
++        shape->zoffset =
++            static_cast<GLint>(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
++        shape->depth = 1;
++    }
++    return CL_SUCCESS;
++}
++
++cl_int describe_renderbuffer(const gl_api& gl, GLuint renderbuffer,
++                             gl_shape* shape) {
++    GLint width = 0, height = 0, internal_format = 0, samples = 0;
++    gl.get_renderbuffer_parameter(renderbuffer, GL_RENDERBUFFER_WIDTH, &width);
++    gl.get_renderbuffer_parameter(renderbuffer, GL_RENDERBUFFER_HEIGHT,
++                                  &height);
++    gl.get_renderbuffer_parameter(renderbuffer, GL_RENDERBUFFER_INTERNAL_FORMAT,
++                                  &internal_format);
++    gl.get_renderbuffer_parameter(renderbuffer, GL_RENDERBUFFER_SAMPLES,
++                                  &samples);
++    if (renderbuffer == 0 || width <= 0 || height <= 0) {
++        return CL_INVALID_GL_OBJECT;
++    }
++    shape->format = find_format(internal_format);
++    if (shape->format == nullptr) {
++        return CL_INVALID_IMAGE_FORMAT_DESCRIPTOR;
++    }
++    if (samples > 0) {
++        return CL_INVALID_OPERATION;
++    }
++    GLuint transfer = 0;
++    gl.create_textures(GL_TEXTURE_2D, 1, &transfer);
++    if (transfer == 0) {
++        return CL_OUT_OF_RESOURCES;
++    }
++    gl.texture_storage_2d(transfer, 1, shape->format->storage_format, width,
++                          height);
++    shape->type = CL_GL_OBJECT_RENDERBUFFER;
++    shape->width = width;
++    shape->height = height;
++    shape->transfer = transfer;
++    return CL_SUCCESS;
++}
++
++cl_mem create_image(cl_context context, cl_mem_flags flags,
++                    cvk_gl_interop* device, GLuint name, GLenum target,
++                    GLint level, const gl_shape& shape, cl_int* errcode_ret) {
++    auto object =
++        std::make_unique<cvk_gl_object>(device, name, target, level, shape);
++    // A texture transfer gives GL its size as a GLsizei.
++    uint64_t limit =
++        std::min<uint64_t>(cvk_interop_max_bytes(context), INT_MAX);
++    size_t row_bytes = size_t(shape.width) * shape.format->element_size;
++    cl_image_desc desc = {};
++    desc.image_width = shape.width;
++    cl_int err;
++    switch (shape.type) {
++    case CL_GL_OBJECT_TEXTURE1D:
++        desc.image_type = CL_MEM_OBJECT_IMAGE1D;
++        err = object->set_layout(row_bytes, 1, 1, limit);
++        break;
++    case CL_GL_OBJECT_TEXTURE1D_ARRAY:
++        desc.image_type = CL_MEM_OBJECT_IMAGE1D_ARRAY;
++        desc.image_array_size = shape.height;
++        err = object->set_layout(row_bytes, 1, shape.height, limit);
++        break;
++    case CL_GL_OBJECT_TEXTURE2D_ARRAY:
++        desc.image_type = CL_MEM_OBJECT_IMAGE2D_ARRAY;
++        desc.image_height = shape.height;
++        desc.image_array_size = shape.depth;
++        err = object->set_layout(row_bytes, shape.height, shape.depth, limit);
++        break;
++    case CL_GL_OBJECT_TEXTURE3D:
++        desc.image_type = CL_MEM_OBJECT_IMAGE3D;
++        desc.image_height = shape.height;
++        desc.image_depth = shape.depth;
++        err = object->set_layout(row_bytes, shape.height, shape.depth, limit);
++        break;
++    default:
++        desc.image_type = CL_MEM_OBJECT_IMAGE2D;
++        desc.image_height = shape.height;
++        err = object->set_layout(row_bytes, shape.height, 1, limit);
++        break;
++    }
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++    cl_image_format format = {shape.format->order, shape.format->type};
++    return cvk_interop_create_image(context, flags, format, desc,
++                                    std::move(object), errcode_ret);
++}
++
++cl_mem create_from_texture(cl_context context, cl_mem_flags flags,
++                           GLenum target, GLint level, GLuint texture,
++                           cl_int* errcode_ret) {
++    cvk_gl_interop* device = nullptr;
++    cl_int err = check_create(context, flags, &device);
++    if (err == CL_SUCCESS && texture_object_type(target) == 0) {
++        err = CL_INVALID_VALUE;
++    }
++    gl_shape shape;
++    if (err == CL_SUCCESS) {
++        err = device->run([&] {
++            return describe_texture(device->api(), target, level, texture,
++                                    &shape);
++        });
++    }
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++    return create_image(context, flags, device, texture, target, level, shape,
++                        errcode_ret);
++}
++
++struct gl_binding {
++    cl_platform_id platform = nullptr;
++    HGLRC context = nullptr;
++    HDC hdc = nullptr;
++};
++
++// WGL is the only window-system binding on Windows.
++cl_int read_gl_binding(const cl_context_properties* properties,
++                       gl_binding* binding) {
++    for (auto property = properties; property[0] != 0; property += 2) {
++        switch (property[0]) {
++        case CL_CONTEXT_PLATFORM:
++            binding->platform = reinterpret_cast<cl_platform_id>(property[1]);
++            break;
++        case CL_GL_CONTEXT_KHR:
++            binding->context = reinterpret_cast<HGLRC>(property[1]);
++            break;
++        case CL_WGL_HDC_KHR:
++            binding->hdc = reinterpret_cast<HDC>(property[1]);
++            break;
++        case CL_EGL_DISPLAY_KHR:
++        case CL_GLX_DISPLAY_KHR:
++        case CL_CGL_SHAREGROUP_KHR:
++            if (property[1] != 0) {
++                return CL_INVALID_OPERATION;
++            }
++            break;
++        default:
++            break;
++        }
++    }
++    return CL_SUCCESS;
++}
++
++} // namespace
++
++cl_int cvk_create_gl_interop(cvk_device* device,
++                             const cl_context_properties* properties,
++                             cvk_interop_device** created) {
++    gl_binding binding;
++    cl_int err = read_gl_binding(properties, &binding);
++    if (err != CL_SUCCESS || binding.context == nullptr) {
++        return err;
++    }
++    HDC hdc = binding.hdc;
++    uint8_t uuid[CL_UUID_SIZE_KHR];
++    err = query_device_uuid(hdc, binding.context, uuid);
++    if (err != CL_SUCCESS) {
++        return err;
++    }
++    int pixel_format = GetPixelFormat(hdc);
++    if (memcmp(device->uuid(), uuid, CL_UUID_SIZE_KHR) != 0 ||
++        pixel_format <= 0) {
++        return CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR;
++    }
++    gl_worker* worker = gl_worker::get(load_api(hdc), hdc, pixel_format);
++    if (worker == nullptr) {
++        return CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR;
++    }
++    HGLRC own = nullptr;
++    err = worker->create_context(binding.context, &own);
++    if (err != CL_SUCCESS) {
++        return err;
++    }
++    *created = new cvk_gl_interop(worker, own);
++    return CL_SUCCESS;
++}
++
++cl_int CLVK_API_CALL clGetGLContextInfoKHR(
++    const cl_context_properties* properties, cl_gl_context_info param_name,
++    size_t param_value_size, void* param_value, size_t* param_value_size_ret) {
++    if (properties == nullptr) {
++        return CL_INVALID_GL_SHAREGROUP_REFERENCE_KHR;
++    }
++    for (auto property = properties; property[0] != 0; property += 2) {
++        if (property[0] != CL_CONTEXT_PLATFORM &&
++            property[0] != CL_CONTEXT_INTEROP_USER_SYNC &&
++            !cvk_is_interop_context_property(property[0])) {
++            return CL_INVALID_VALUE;
++        }
++    }
++    bool named;
++    cvk_interop_api api;
++    gl_binding binding;
++    cl_int err = cvk_interop_named_api(properties, &named, &api);
++    if (err == CL_SUCCESS) {
++        err = read_gl_binding(properties, &binding);
++    }
++    if (err != CL_SUCCESS) {
++        return err;
++    }
++    cl_platform_id platform = binding.platform;
++    if (platform != nullptr && !is_valid_platform(platform)) {
++        return CL_INVALID_PLATFORM;
++    }
++    if (param_name != CL_CURRENT_DEVICE_FOR_GL_CONTEXT_KHR &&
++        param_name != CL_DEVICES_FOR_GL_CONTEXT_KHR) {
++        return CL_INVALID_VALUE;
++    }
++    uint8_t uuid[CL_UUID_SIZE_KHR];
++    err = query_device_uuid(binding.hdc, binding.context, uuid);
++    if (err != CL_SUCCESS) {
++        return err;
++    }
++
++    const cvk_platform* plat = platform != nullptr
++                                   ? icd_downcast(platform)
++                                   : get_or_init_global_state()->platform();
++    auto found = plat->devices_with_uuid(uuid);
++    if (param_name == CL_CURRENT_DEVICE_FOR_GL_CONTEXT_KHR &&
++        found.size() > 1) {
++        found.resize(1);
++    }
++    size_t size = found.size() * sizeof(cl_device_id);
++    if (param_value != nullptr && param_value_size < size) {
++        return CL_INVALID_VALUE;
++    }
++    if (param_value != nullptr) {
++        for (size_t i = 0; i < found.size(); i++) {
++            static_cast<cl_device_id*>(param_value)[i] = found[i];
++        }
++    }
++    if (param_value_size_ret != nullptr) {
++        *param_value_size_ret = size;
++    }
++    return CL_SUCCESS;
++}
++
++cl_mem CLVK_API_CALL clCreateFromGLBuffer(cl_context context,
++                                          cl_mem_flags flags, cl_GLuint bufobj,
++                                          cl_int* errcode_ret) {
++    cvk_gl_interop* device = nullptr;
++    cl_int err = check_create(context, flags, &device);
++    gl_shape shape;
++    if (err == CL_SUCCESS) {
++        err = device->run(
++            [&] { return describe_buffer(device->api(), bufobj, &shape); });
++    }
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++    auto object = std::make_unique<cvk_gl_object>(device, bufobj, 0, 0, shape);
++    uint64_t limit =
++        std::min<uint64_t>(cvk_interop_max_bytes(context), INTPTR_MAX);
++    if (shape.buffer_size > limit) {
++        cvk_interop_set_error(errcode_ret, CL_OUT_OF_RESOURCES);
++        return nullptr;
++    }
++    err =
++        object->set_layout(static_cast<size_t>(shape.buffer_size), 1, 1, limit);
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++    return cvk_interop_create_buffer(context, flags,
++                                     static_cast<size_t>(shape.buffer_size),
++                                     std::move(object), errcode_ret);
++}
++
++cl_mem CLVK_API_CALL clCreateFromGLTexture(cl_context context,
++                                           cl_mem_flags flags,
++                                           cl_GLenum texture_target,
++                                           cl_GLint miplevel, cl_GLuint texture,
++                                           cl_int* errcode_ret) {
++    return create_from_texture(context, flags, texture_target, miplevel,
++                               texture, errcode_ret);
++}
++
++cl_mem CLVK_API_CALL clCreateFromGLTexture2D(
++    cl_context context, cl_mem_flags flags, cl_GLenum texture_target,
++    cl_GLint miplevel, cl_GLuint texture, cl_int* errcode_ret) {
++    if (texture_target != GL_TEXTURE_2D &&
++        texture_target != GL_TEXTURE_RECTANGLE &&
++        !is_cube_face(texture_target)) {
++        cl_int err = CL_INVALID_VALUE;
++        if (!is_valid_context(context) || gl_interop_of(context) == nullptr) {
++            err = CL_INVALID_CONTEXT;
++        }
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++    return create_from_texture(context, flags, texture_target, miplevel,
++                               texture, errcode_ret);
++}
++
++cl_mem CLVK_API_CALL clCreateFromGLTexture3D(
++    cl_context context, cl_mem_flags flags, cl_GLenum texture_target,
++    cl_GLint miplevel, cl_GLuint texture, cl_int* errcode_ret) {
++    if (texture_target != GL_TEXTURE_3D) {
++        cl_int err = CL_INVALID_VALUE;
++        if (!is_valid_context(context) || gl_interop_of(context) == nullptr) {
++            err = CL_INVALID_CONTEXT;
++        }
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++    return create_from_texture(context, flags, texture_target, miplevel,
++                               texture, errcode_ret);
++}
++
++cl_mem CLVK_API_CALL clCreateFromGLRenderbuffer(cl_context context,
++                                                cl_mem_flags flags,
++                                                cl_GLuint renderbuffer,
++                                                cl_int* errcode_ret) {
++    cvk_gl_interop* device = nullptr;
++    cl_int err = check_create(context, flags, &device);
++    gl_shape shape;
++    if (err == CL_SUCCESS) {
++        err = device->run([&] {
++            return describe_renderbuffer(device->api(), renderbuffer, &shape);
++        });
++    }
++    if (err != CL_SUCCESS) {
++        cvk_interop_set_error(errcode_ret, err);
++        return nullptr;
++    }
++    return create_image(context, flags, device, renderbuffer, GL_RENDERBUFFER,
++                        0, shape, errcode_ret);
++}
++
++cl_int CLVK_API_CALL clGetGLObjectInfo(cl_mem memobj,
++                                       cl_gl_object_type* gl_object_type,
++                                       cl_GLuint* gl_object_name) {
++    if (!is_valid_mem_object(memobj)) {
++        return CL_INVALID_MEM_OBJECT;
++    }
++    auto object = gl_object_of(memobj);
++    if (object == nullptr) {
++        return CL_INVALID_GL_OBJECT;
++    }
++    if (gl_object_type != nullptr) {
++        *gl_object_type = object->type();
++    }
++    if (gl_object_name != nullptr) {
++        *gl_object_name = object->name();
++    }
++    return CL_SUCCESS;
++}
++
++cl_int CLVK_API_CALL clGetGLTextureInfo(cl_mem memobj,
++                                        cl_gl_texture_info param_name,
++                                        size_t param_value_size,
++                                        void* param_value,
++                                        size_t* param_value_size_ret) {
++    if (!is_valid_mem_object(memobj)) {
++        return CL_INVALID_MEM_OBJECT;
++    }
++    auto object = gl_object_of(memobj);
++    if (object == nullptr || object->type() == CL_GL_OBJECT_BUFFER ||
++        object->type() == CL_GL_OBJECT_RENDERBUFFER) {
++        return CL_INVALID_GL_OBJECT;
++    }
++    cl_GLenum target = object->target();
++    cl_GLint level = object->level();
++    const void* value;
++    size_t size;
++    switch (param_name) {
++    case CL_GL_TEXTURE_TARGET:
++        value = &target;
++        size = sizeof(target);
++        break;
++    case CL_GL_MIPMAP_LEVEL:
++        value = &level;
++        size = sizeof(level);
++        break;
++    default:
++        return CL_INVALID_VALUE;
++    }
++    if (param_value != nullptr) {
++        if (param_value_size < size) {
++            return CL_INVALID_VALUE;
++        }
++        memcpy(param_value, value, size);
++    }
++    if (param_value_size_ret != nullptr) {
++        *param_value_size_ret = size;
++    }
++    return CL_SUCCESS;
++}
++
++cl_int CLVK_API_CALL clEnqueueAcquireGLObjects(cl_command_queue command_queue,
++                                               cl_uint num_objects,
++                                               const cl_mem* mem_objects,
++                                               cl_uint num_events_in_wait_list,
++                                               const cl_event* event_wait_list,
++                                               cl_event* event) {
++    return cvk_interop_acquire(cvk_interop_api::gl, command_queue, num_objects,
++                               mem_objects, num_events_in_wait_list,
++                               event_wait_list, event);
++}
++
++cl_int CLVK_API_CALL clEnqueueReleaseGLObjects(cl_command_queue command_queue,
++                                               cl_uint num_objects,
++                                               const cl_mem* mem_objects,
++                                               cl_uint num_events_in_wait_list,
++                                               const cl_event* event_wait_list,
++                                               cl_event* event) {
++    return cvk_interop_release(cvk_interop_api::gl, command_queue, num_objects,
++                               mem_objects, num_events_in_wait_list,
++                               event_wait_list, event);
++}
++
++#endif
+--- a/clvk/src/kmt.cpp
++++ b/clvk/src/kmt.cpp
+@@ -23,6 +23,7 @@
+ namespace {
+ 
+ // d3dkmthk.h and d3dukmdt.h
++constexpr int KmtQueryUmOpenGlInfo = 2;
+ constexpr int KmtQueryRegistry = 48;
+ constexpr UINT RegistryAdapterKey = 1;
+ constexpr UINT RegistryStatusSuccess = 0;
+@@ -33,6 +34,19 @@
+     UINT Adapter;
+ };
+ 
++struct OpenAdapterFromHdc {
++    HDC Dc;
++    UINT Adapter;
++    LUID AdapterLuid;
++    UINT VidPnSourceId;
++};
++
++struct OpenGlInfo {
++    WCHAR IcdFileName[MAX_PATH];
++    ULONG Version;
++    ULONG Flags;
++};
++
+ struct QueryAdapterInfo {
+     UINT Adapter;
+     int Type;
+@@ -56,11 +70,13 @@
+ };
+ 
+ using OpenFn = LONG(APIENTRY*)(OpenAdapterFromLuid*);
++using OpenHdcFn = LONG(APIENTRY*)(OpenAdapterFromHdc*);
+ using QueryFn = LONG(APIENTRY*)(QueryAdapterInfo*);
+ using CloseFn = LONG(APIENTRY*)(CloseAdapter*);
+ 
+ struct kmt_entries {
+     OpenFn open = nullptr;
++    OpenHdcFn open_hdc = nullptr;
+     QueryFn query = nullptr;
+     CloseFn close = nullptr;
+ 
+@@ -71,6 +87,8 @@
+         }
+         open = reinterpret_cast<OpenFn>(
+             GetProcAddress(gdi, "D3DKMTOpenAdapterFromLuid"));
++        open_hdc = reinterpret_cast<OpenHdcFn>(
++            GetProcAddress(gdi, "D3DKMTOpenAdapterFromHdc"));
+         query = reinterpret_cast<QueryFn>(
+             GetProcAddress(gdi, "D3DKMTQueryAdapterInfo"));
+         close =
+@@ -152,6 +170,30 @@
+     return true;
+ }
+ 
++bool cvk_kmt_opengl_icd(void* hdc, std::wstring* file_name) {
++    const auto& kmt = entries();
++    if (kmt.open_hdc == nullptr || kmt.query == nullptr ||
++        kmt.close == nullptr) {
++        return false;
++    }
++    OpenAdapterFromHdc args{};
++    args.Dc = static_cast<HDC>(hdc);
++    if (kmt.open_hdc(&args) != 0) {
++        return false;
++    }
++    OpenGlInfo info{};
++    QueryAdapterInfo query{args.Adapter, KmtQueryUmOpenGlInfo, &info,
++                           sizeof(info)};
++    bool found = kmt.query(&query) == 0;
++    close_adapter(args.Adapter);
++    info.IcdFileName[MAX_PATH - 1] = L'\0';
++    if (!found || info.IcdFileName[0] == L'\0') {
++        return false;
++    }
++    file_name->assign(info.IcdFileName);
++    return true;
++}
++
+ #else
+ 
+ bool cvk_kmt_has_adapter(const uint8_t*) { return false; }
+@@ -161,4 +203,6 @@
+     return false;
+ }
+ 
++bool cvk_kmt_opengl_icd(void*, std::wstring*) { return false; }
++
+ #endif
+--- a/clvk/src/kmt.hpp
++++ b/clvk/src/kmt.hpp
+@@ -22,3 +22,7 @@
+ bool cvk_kmt_has_adapter(const uint8_t* luid);
+ bool cvk_kmt_read_adapter_string(const uint8_t* luid, const wchar_t* name,
+                                  std::string* value);
++
++// The OpenGL ICD of the adapter that shows the device context, as opengl32
++// finds it.
++bool cvk_kmt_opengl_icd(void* hdc, std::wstring* file_name);
+--- a/clvk/src/memory.hpp
++++ b/clvk/src/memory.hpp
+@@ -19,6 +19,7 @@
+ 
+ #include "device.hpp"
+ #include "event.hpp"
++#include "interop.hpp"
+ #include "objects.hpp"
+ #include "utils.hpp"
+ 
+@@ -192,6 +193,10 @@
+     }
+ 
+     uint32_t map_count() const { return m_map_count; }
++    cvk_interop_object* interop() const { return m_interop.get(); }
++    void set_interop(std::unique_ptr<cvk_interop_object> interop) {
++        m_interop = std::move(interop);
++    }
+     cvk_mem* parent() const { return m_parent; }
+     size_t parent_offset() const { return m_parent_offset; }
+     void* host_ptr() const { return m_host_ptr; }
+@@ -316,6 +321,8 @@
+     void unmap_memory();
+     void flush_memory(VkDeviceSize offset, VkDeviceSize size);
+ 
++    // Declared first so that it goes after the memory it shares.
++    std::unique_ptr<cvk_interop_object> m_interop;
+     cl_mem_object_type m_type;
+     std::mutex m_map_lock;
+     cl_mem_flags m_flags;

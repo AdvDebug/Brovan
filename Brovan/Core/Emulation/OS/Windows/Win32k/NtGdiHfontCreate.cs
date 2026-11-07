@@ -42,7 +42,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Data[22] != 0,
                 Data[23],
                 Data[27],
-                ReadFaceName(Data));
+                ReadFaceName(Data),
+                Data[24],
+                Data[26]);
 
             ulong Handle = Win32kHelper.CreateFont(Instance, Description, Data.Slice(0, Win32kHelper.StoredEnumLogFontSize).ToArray());
             Instance.SetLastWinError(Handle == 0 ? Win32kHelper.ERROR_INVALID_PARAMETER : 0u);

@@ -57,14 +57,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!Instance.WinHelper.TryGetPrimaryMonitorRect(out _, out _, out _, out _))
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
+            AdapterIdentity Shown = null;
+            if (EnumeratingAdapters && !Win32kDxgk.TryGetIdentity(Instance, Win32kDxgk.Display, out Shown, out NTSTATUS Parked))
+                return Parked;
+
             int Written = (int)Math.Min(Size, DisplayDeviceSize) - OffsetDeviceName;
             Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan((ulong)Written);
             Buffer = Buffer.Slice(0, Written);
             Buffer.Clear();
 
             WriteField(Buffer, OffsetDeviceName, DeviceNameCharacters, EnumeratingAdapters ? Win32kDisplayConfig.AdapterName : MonitorName);
-            WriteField(Buffer, OffsetDeviceString, DeviceStringCharacters, EnumeratingAdapters ? Win32kDxgk.Display.Description : Win32kDisplayConfig.MonitorFriendlyName);
-            WriteField(Buffer, OffsetDeviceId, DeviceStringCharacters, EnumeratingAdapters ? Win32kDxgk.Display.HardwareId : MonitorId);
+            WriteField(Buffer, OffsetDeviceString, DeviceStringCharacters, EnumeratingAdapters ? Shown.Description : Win32kDisplayConfig.MonitorFriendlyName);
+            WriteField(Buffer, OffsetDeviceId, DeviceStringCharacters, EnumeratingAdapters ? Shown.HardwareId : MonitorId);
             WriteField(Buffer, OffsetDeviceKey, DeviceStringCharacters, EnumeratingAdapters ? Win32kDxgk.DisplayVideoKey : MonitorKey);
 
             uint StateFlags = EnumeratingAdapters

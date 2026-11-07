@@ -12,24 +12,76 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         BasicRender,
     }
 
+    internal sealed class AdapterIdentity
+    {
+        internal uint VendorId { get; init; }
+        internal uint DeviceId { get; init; }
+        internal string Description { get; init; }
+        internal string ProviderName { get; init; }
+        internal string DriverVersion { get; init; }
+        internal string HardwareId { get; init; }
+        internal string InstanceId { get; init; }
+        internal string DeviceInterface { get; init; }
+        internal byte[] DeviceUuid { get; init; }
+        internal bool HasLocation { get; init; }
+        internal uint Bus { get; init; }
+        internal ushort Device { get; init; }
+        internal ushort Function { get; init; }
+
+        internal const string DisplayInterfaceClass = "{1024e4c9-47c9-48d3-b4a8-f9df78523b53}";
+
+        // Subsystem and revision are 0, as the guest's DXGI reports them.
+        internal static AdapterIdentity ForPci(uint VendorId, uint DeviceId, string Description, string ProviderName,
+            string DriverVersion, byte[] DeviceUuid, bool HasLocation, uint Bus, ushort Device, ushort Function)
+        {
+            string HardwareId = $@"PCI\VEN_{VendorId:X4}&DEV_{DeviceId:X4}&SUBSYS_00000000&REV_00";
+            return new AdapterIdentity
+            {
+                VendorId = VendorId,
+                DeviceId = DeviceId,
+                Description = Description,
+                ProviderName = ProviderName,
+                DriverVersion = DriverVersion,
+                HardwareId = HardwareId,
+                InstanceId = HardwareId + @"\0",
+                DeviceInterface = @"\\?\" + HardwareId.Replace('\\', '#') + "#0#" + DisplayInterfaceClass,
+                DeviceUuid = DeviceUuid,
+                HasLocation = HasLocation,
+                Bus = Bus,
+                Device = Device,
+                Function = Function,
+            };
+        }
+
+        internal static readonly AdapterIdentity Synthetic = ForPci(0, 0, "Brovan Display Adapter", "Brovan", null, null, false, 0, 0, 0);
+    }
+
     internal sealed class DxgkAdapter
     {
+        private AdapterIdentity _identity;
+
         internal DxgkAdapterKind Kind { get; init; }
         internal uint LuidLowPart { get; init; }
         internal int LuidHighPart { get; init; }
         internal uint SourceCount { get; init; }
         internal uint AdapterType { get; init; }
         internal uint BusType { get; init; }
-        internal uint VendorId { get; init; }
-        internal uint DeviceId { get; init; }
-        internal string Description { get; init; }
-        internal string HardwareId { get; init; }
-        internal string InstanceId { get; init; }
-        internal string DeviceInterface { get; init; }
         internal string UniqueId { get; init; }
         internal ulong DedicatedVideoMemory { get; init; }
 
+        internal AdapterIdentity Identity
+        {
+            get => Volatile.Read(ref _identity);
+            init => _identity = value;
+        }
+
+        internal string DriverKeyPath { get; set; }
+
+        internal bool TryPublishIdentity(AdapterIdentity Value) => Interlocked.CompareExchange(ref _identity, Value, null) == null;
+
         internal bool MatchesLuid(uint LowPart, int HighPart) => LowPart == LuidLowPart && HighPart == LuidHighPart;
+
+        internal ulong Luid => LuidLowPart | ((ulong)(uint)LuidHighPart << 32);
     }
 
     internal sealed class GuestGpuDriver
@@ -71,11 +123,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         // D3DKMT_ADAPTERINFO: hAdapter, LUID, NumOfSources, bPrecisePresentRegionsPreferred.
         internal const int AdapterInfoSize = 20;
 
-        private const string DisplayInterfaceClass = "{1024e4c9-47c9-48d3-b4a8-f9df78523b53}";
-
-        private const string ControlSet = @"\Registry\Machine\System\CurrentControlSet\";
-        private const string DisplayClass = "{4d36e968-e325-11ce-bfc1-08002be10318}";
-        private const string DisplayClassKey = ControlSet + @"Control\Class\" + DisplayClass;
+        internal const string DisplayClass = "{4d36e968-e325-11ce-bfc1-08002be10318}";
+        private const string DisplayClassKey = DeviceNodes.ControlSet + @"Control\Class\" + DisplayClass;
         private const int MaxClassInstances = 10000;
         internal const string WowSuffix = "Wow";
         internal const string OpenGlDriverNameValue = "OpenGLDriverName";
@@ -83,7 +132,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const string OpenGlFlagsValue = "OpenGLFlags";
         private const string OpenClDriverNameValue = "OpenCLDriverName";
 
-        internal const string DisplayVideoKey = ControlSet + @"Control\Video\{00000000-0000-0000-0000-000000000000}\0000";
+        private const string DisplayVideoRoot = DeviceNodes.ControlSet + @"Control\Video\{7E2C1F4A-5B3D-4E8A-9C61-2D4B8F0A1E35}";
+        internal const string DisplayVideoKey = DisplayVideoRoot + @"\0000";
+        private const string DisplayVideoSubKey = DisplayVideoRoot + @"\Video";
+
+        private const int ProbeShutdownWaitMilliseconds = 2000;
+        private static Task<AdapterIdentity> DisplayProbe;
+        private static int ProbeEnded;
 
         internal static readonly GuestGpuDriver[] GuestDrivers =
         {
@@ -110,10 +165,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             SourceCount = 1,
             AdapterType = DisplaySupported,
             BusType = 1,
-            Description = "Brovan Display Adapter",
-            HardwareId = @"PCI\VEN_0000&DEV_0000&SUBSYS_00000000&REV_00",
-            InstanceId = @"PCI\VEN_0000&DEV_0000&SUBSYS_00000000&REV_00\0",
-            DeviceInterface = @"\\?\PCI#VEN_0000&DEV_0000&SUBSYS_00000000&REV_00#0#" + DisplayInterfaceClass,
             UniqueId = "{B73ADCCD-99F6-4B2B-831E-47E106405C20}",
             DedicatedVideoMemory = DisplayDedicatedVideoMemory,
         };
@@ -126,13 +177,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             SourceCount = 0,
             AdapterType = RenderSupported | SoftwareDevice | AcgSupported,
             BusType = 3,
-            VendorId = 0x1414,
-            DeviceId = 0x8C,
-            Description = "Microsoft Basic Render Driver",
-            HardwareId = @"ROOT\BasicRender",
-            InstanceId = @"ROOT\BasicRender\0000",
-            DeviceInterface = @"\\?\ROOT#BasicRender#0000#" + DisplayInterfaceClass,
             UniqueId = "{FD011EF1-249B-4D83-AA9C-CC5C9FDADA67}",
+            Identity = new AdapterIdentity
+            {
+                VendorId = 0x1414,
+                DeviceId = 0x8C,
+                Description = "Microsoft Basic Render Driver",
+                HardwareId = @"ROOT\BasicRender",
+                InstanceId = @"ROOT\BasicRender\0000",
+                DeviceInterface = @"\\?\ROOT#BasicRender#0000#" + AdapterIdentity.DisplayInterfaceClass,
+            },
         };
 
         private static readonly DxgkAdapter[] Adapters = { Display, BasicRender };
@@ -150,15 +204,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return null;
         }
 
-        private static string EnumKey(DxgkAdapter Adapter) => ControlSet + @"Enum\" + Adapter.InstanceId;
-
         internal static bool TryGetDriverKey(WinSysHelper WinHelper, DxgkAdapter Adapter, out string DriverKey)
         {
             DriverKey = null;
-            if (!WinHelper.TryReadRegistryString(EnumKey(Adapter), "Driver", out string Driver) || Driver.Length == 0)
+            string Driver = Adapter.DriverKeyPath;
+            if (Driver == null && (Adapter.Identity is not { } Identity
+                || !WinHelper.TryReadRegistryString(DeviceNodes.EnumKeyPath(Identity.InstanceId), "Driver", out Driver) || Driver.Length == 0))
                 return false;
 
-            DriverKey = ControlSet + @"Control\Class\" + Driver;
+            DriverKey = DeviceNodes.ClassKeyPath(Driver);
             return true;
         }
 
@@ -169,12 +223,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Instance == null)
                 return;
 
-            string EnumPath = EnumKey(Display);
             string DriverKey = DisplayClassKey + "\\" + Instance;
-            if (!WinHelper.CreateRegistryKeyPath(EnumPath, true, out _) || !WinHelper.CreateRegistryKeyPath(DriverKey, true, out _))
+            if (!WinHelper.CreateRegistryKeyPath(DriverKey, true, out _))
                 return;
 
-            WinHelper.SetRegistryValue(EnumPath, "Driver", WinSysHelper.RegSz, Encoding.Unicode.GetBytes(DisplayClass + "\\" + Instance + "\0"));
+            Display.DriverKeyPath = DisplayClass + "\\" + Instance;
             foreach (GuestGpuDriver Driver in GuestDrivers)
             {
                 PublishDriverValues(WinHelper, DriverKey, Driver, "System32", string.Empty);
@@ -194,6 +247,152 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             foreach ((string Name, uint Value) in Driver.Dwords)
                 WinHelper.SetRegistryValue(DriverKey, Name + Suffix, WinSysHelper.RegDword, BitConverter.GetBytes(Value));
         }
+
+        // The first process of a session asks the host, and later ones read the record it leaves.
+        internal static void StartDisplayIdentity(WinSysHelper WinHelper, BinaryEmulator Emulator)
+        {
+            if (HostDisplayGpu.Disabled)
+            {
+                PublishDisplayIdentity(WinHelper, AdapterIdentity.Synthetic);
+                return;
+            }
+
+            if (HostDisplayGpu.TryReadSessionRecord(out AdapterIdentity Recorded))
+            {
+                PublishDisplayIdentity(WinHelper, Recorded);
+                return;
+            }
+
+            Task<AdapterIdentity> Probe = Task.Factory.StartNew(RunProbe, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            Volatile.Write(ref DisplayProbe, Probe);
+            Probe.ContinueWith(_ =>
+            {
+                if (Volatile.Read(ref ProbeEnded) == 0)
+                    Emulator.WakeSignal.Bump();
+            }, TaskContinuationOptions.ExecuteSynchronously);
+        }
+
+        private static AdapterIdentity RunProbe()
+        {
+            AdapterIdentity Found = null;
+            try
+            {
+                Found = HostDisplayGpu.Probe(out string Reason);
+                if (Found == null)
+                    Utils.LogError($"[Win32kDxgk] The display adapter keeps the synthetic identity: {Reason}");
+            }
+            catch (Exception Error)
+            {
+                Utils.LogError($"[Win32kDxgk] The host display GPU probe failed: {Error.Message}");
+            }
+
+            if (Found != null && Volatile.Read(ref ProbeEnded) == 0)
+                HostDisplayGpu.WriteSessionRecord(Found);
+            return Found;
+        }
+
+        internal static void EndDisplayProbe()
+        {
+            Volatile.Write(ref ProbeEnded, 1);
+            Volatile.Read(ref DisplayProbe)?.Wait(ProbeShutdownWaitMilliseconds);
+        }
+
+        internal static bool HasUnpublishedProbe => Display.Identity == null && Volatile.Read(ref DisplayProbe) is { IsCompleted: true };
+
+        internal static void PublishProbeResult(WinSysHelper WinHelper)
+        {
+            Task<AdapterIdentity> Probe = Volatile.Read(ref DisplayProbe);
+            AdapterIdentity Found = Probe is { IsCompletedSuccessfully: true } ? Probe.Result : null;
+            PublishDisplayIdentity(WinHelper, Found ?? AdapterIdentity.Synthetic);
+        }
+
+        // Call it before any output or callback, because a parked call starts again from the top.
+        internal static bool TryGetIdentity(BinaryEmulator Instance, DxgkAdapter Adapter, out AdapterIdentity Identity, out NTSTATUS Parked)
+        {
+            Parked = NTSTATUS.STATUS_SUCCESS;
+            Identity = Adapter.Identity;
+            if (Identity != null)
+                return true;
+
+            Task<AdapterIdentity> Probe = Volatile.Read(ref DisplayProbe);
+            if (Probe == null || Probe.IsCompleted)
+            {
+                PublishProbeResult(Instance.WinHelper);
+                Identity = Adapter.Identity;
+                return true;
+            }
+
+            if (Instance.WinHelper.TryRetrySyscallWhenDone(Probe))
+            {
+                Parked = NTSTATUS.STATUS_PENDING;
+                return false;
+            }
+
+            Identity = AdapterIdentity.Synthetic;
+            return true;
+        }
+
+        private static void PublishDisplayIdentity(WinSysHelper WinHelper, AdapterIdentity Identity)
+        {
+            if (!Display.TryPublishIdentity(Identity))
+                return;
+
+            WriteVideoKeys(WinHelper, Identity);
+            if (!string.IsNullOrEmpty(Identity.DriverVersion) && TryGetDriverKey(WinHelper, Display, out string DriverKey))
+                SetString(WinHelper, DriverKey, "DriverVersion", Identity.DriverVersion);
+            WinHelper.DeviceNodes.TryAdd(WinHelper, BuildDisplayNode(WinHelper.DeviceNodes.Root, Identity));
+        }
+
+        private static DeviceNode BuildDisplayNode(DeviceNode Root, AdapterIdentity Identity)
+        {
+            DeviceNode Node = new DeviceNode
+            {
+                InstanceId = Identity.InstanceId,
+                Parent = Root,
+                Status = DeviceNodes.StatusNtEnumerator | DeviceNodes.StatusNtDriver | DeviceNodes.StatusDisableable
+                    | DeviceNodes.StatusStarted | DeviceNodes.StatusDriverLoaded,
+            };
+
+            Node.SetString(DeviceNodes.DeviceDesc, Identity.Description);
+            Node.SetStringList(DeviceNodes.HardwareIds, Identity.HardwareId);
+            Node.SetString(DeviceNodes.Class, "Display");
+            Node.SetGuid(DeviceNodes.ClassGuid, new Guid(DisplayClass));
+            if (Display.DriverKeyPath != null)
+                Node.SetString(DeviceNodes.Driver, Display.DriverKeyPath);
+            if (!string.IsNullOrEmpty(Identity.ProviderName))
+            {
+                Node.SetString(DeviceNodes.Manufacturer, Identity.ProviderName);
+                Node.SetString(DeviceNodes.DriverProvider, Identity.ProviderName);
+            }
+            if (!string.IsNullOrEmpty(Identity.DriverVersion))
+                Node.SetString(DeviceNodes.DriverVersion, Identity.DriverVersion);
+
+            Node.SetUInt64(DeviceNodes.AdapterLuid, Display.Luid);
+            if (Identity.HasLocation)
+            {
+                Node.SetUInt32(DeviceNodes.BusNumber, Identity.Bus);
+                Node.SetUInt32(DeviceNodes.Address, ((uint)Identity.Device << 16) | Identity.Function);
+            }
+
+            return Node;
+        }
+
+        private static void WriteVideoKeys(WinSysHelper WinHelper, AdapterIdentity Identity)
+        {
+            if (!WinHelper.CreateRegistryKeyPath(DisplayVideoKey, true, out _) || !WinHelper.CreateRegistryKeyPath(DisplayVideoSubKey, true, out _))
+                return;
+
+            SetString(WinHelper, DisplayVideoKey, "ProviderName", Identity.ProviderName ?? string.Empty);
+            SetString(WinHelper, DisplayVideoKey, "DriverDesc", Identity.Description);
+            if (!string.IsNullOrEmpty(Identity.DriverVersion))
+                SetString(WinHelper, DisplayVideoKey, "DriverVersion", Identity.DriverVersion);
+            if (Display.DriverKeyPath != null)
+                SetString(WinHelper, DisplayVideoSubKey, "Driver", Display.DriverKeyPath);
+            SetString(WinHelper, DisplayVideoSubKey, "DeviceDesc", Identity.Description);
+        }
+
+        private static void SetString(WinSysHelper WinHelper, string Key, string Name, string Value) =>
+            WinHelper.SetRegistryValue(Key, Name, WinSysHelper.RegSz, Encoding.Unicode.GetBytes(Value + "\0"));
 
         private static string FirstFreeClassInstance(WinSysHelper WinHelper)
         {

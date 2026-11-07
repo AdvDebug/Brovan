@@ -2728,7 +2728,7 @@ namespace Brovan.Generators
                     post.Insert(0, "                VulkanStandIns.Properties(p0, p1);");
                     return false;
                 case "vkGetPhysicalDeviceProperties2":
-                    post.Insert(0, "                VulkanStandIns.Properties2(p0, p1);");
+                    post.Insert(0, "                VulkanStandIns.Properties2(st, p0, p1);");
                     return false;
                 case "vkGetPhysicalDeviceFormatProperties":
                     b.Append("                p1 = VulkanStandIns.QueryFormat(p0, p1);\n");

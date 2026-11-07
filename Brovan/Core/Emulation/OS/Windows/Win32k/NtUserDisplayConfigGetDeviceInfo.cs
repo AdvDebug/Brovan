@@ -22,8 +22,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 DxgkAdapter Adapter = Win32kDxgk.FindByLuid(Header.Slice(8));
                 bool WithSource = Id != Win32kDisplayConfig.NoSource;
 
-                if (Size != Win32kDisplayConfig.DisplayInfoSize || Adapter == null || (WithSource && Id >= Adapter.SourceCount)
-                    || !Win32kDisplayConfig.WriteDisplayInfo(Instance, PacketPtr, Adapter, WithSource))
+                if (Size != Win32kDisplayConfig.DisplayInfoSize || Adapter == null || (WithSource && Id >= Adapter.SourceCount))
+                    return Win32kDisplayConfig.Complete(Instance, NTSTATUS.STATUS_INVALID_PARAMETER);
+
+                if (!Win32kDxgk.TryGetIdentity(Instance, Adapter, out AdapterIdentity Identity, out NTSTATUS Parked))
+                    return Parked;
+
+                if (!Win32kDisplayConfig.WriteDisplayInfo(Instance, PacketPtr, Adapter, Identity, WithSource))
                 {
                     return Win32kDisplayConfig.Complete(Instance, NTSTATUS.STATUS_INVALID_PARAMETER);
                 }

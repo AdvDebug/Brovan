@@ -237,6 +237,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_IN_PAGE_ERROR = 0xC0000006,
         STATUS_INVALID_HANDLE = 0xC0000008,
         STATUS_INVALID_PARAMETER = 0xC000000D,
+        STATUS_NO_SUCH_DEVICE = 0xC000000E,
         STATUS_INVALID_DEVICE_REQUEST = 0xC0000010,
         STATUS_FILE_CORRUPT_ERROR = 0xC0000102,
         STATUS_INVALID_MESSAGE = 0xC0000702,
@@ -318,6 +319,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_INVALID_ADDRESS = 0xC0000141,
         STATUS_MAPPED_FILE_SIZE_ZERO = 0xC000011E,
         STATUS_TOO_MANY_OPENED_FILES = 0xC000011F,
+        STATUS_TOO_MANY_THREADS = 0xC0000129,
         STATUS_FILE_INVALID = 0xC0000098,
         STATUS_PRIVILEGED_INSTRUCTION = 0xC0000096,
         STATUS_INTEGER_DIVIDE_BY_ZERO = 0xC0000094,
@@ -351,8 +353,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_APP_INIT_FAILURE = 0xC0000145,
         STATUS_MAPPED_ALIGNMENT = 0xC0000220,
         STATUS_NOT_FOUND = 0xC0000225,
+        STATUS_PROPSET_NOT_FOUND = 0xC0000230,
         STATUS_NO_MATCH = 0xC0000272,
         STATUS_INVALID_IMAGE_HASH = 0xC0000428,
+        STATUS_INVALID_TASK_NAME = 0xC0000500,
+        STATUS_INVALID_TASK_INDEX = 0xC0000501,
+        STATUS_THREAD_ALREADY_IN_TASK = 0xC0000502,
         STATUS_ALREADY_INITIALIZED = 0xC0000510,
         STATUS_SXS_CANT_GEN_ACTCTX = 0xC0150002,
         STATUS_GRAPHICS_PRESENT_INVALID_WINDOW = 0xC01E000F,
@@ -1383,6 +1389,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         string DeviceName { get; }
 
         NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler);
+
+        NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler,
+            out ulong Information)
+        {
+            Information = NtCreateFile.FILE_OPENED_INFORMATION;
+            return Create(Instance, DevicePath, EaBuffer, out InternalPath, out Handler);
+        }
+    }
+
+    public interface IWinDeviceFile
+    {
+        // The last handle of the file object is closing.
+        void Closed(BinaryEmulator Instance, WinFile File);
     }
 
     public interface IHandleObject

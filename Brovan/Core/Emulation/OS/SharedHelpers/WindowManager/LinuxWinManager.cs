@@ -1905,7 +1905,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         }
 
         public unsafe bool RasterizeText(IntPtr font, string text, Span<uint> pixels, int width, int height,
-            int x, int y, uint textColor, uint backColor, bool opaque)
+            int x, int y, uint textColor, uint backColor, bool opaque, uint options)
         {
             int count = width * height;
             if (_xDisplay == IntPtr.Zero || width <= 0 || height <= 0 || pixels.Length < count)

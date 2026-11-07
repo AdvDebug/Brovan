@@ -92,6 +92,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         internal static string Directory => _directory ??= Path.Combine(AppContext.BaseDirectory, DirectoryName, SessionId);
 
+        internal static string OpenDirectory
+        {
+            get
+            {
+                lock (Sync)
+                    return TryOpen() ? Directory : null;
+            }
+        }
+
         internal static void CreatePrivateDirectory(string Location)
         {
             System.IO.Directory.CreateDirectory(Location);

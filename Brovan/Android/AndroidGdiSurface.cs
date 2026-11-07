@@ -10,7 +10,7 @@ namespace Brovan.Android
     {
         private const int DefaultBackground = unchecked((int)0xFFFFFFFF);
 
-        private const uint EtoClipped = 0x0004;
+        private const uint EtoClipped = ITextMetricsSupport.EtoClipped;
 
         private const int MaximumWindows = 32;
 

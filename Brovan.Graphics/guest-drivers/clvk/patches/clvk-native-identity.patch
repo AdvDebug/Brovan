@@ -1,0 +1,437 @@
+--- a/clvk/src/CMakeLists.txt
++++ b/clvk/src/CMakeLists.txt
+@@ -63,6 +63,7 @@
+   image_format.cpp
+   init.cpp
+   kernel.cpp
++  kmt.cpp
+   log.cpp
+   memory.cpp
+   printf.cpp
+--- a/clvk/src/config.def
++++ b/clvk/src/config.def
+@@ -81,6 +81,19 @@
+ // Specify the vendor string to report for the device.
+ PROPERTY(std::string, vendor, "Unknown vendor")
+ 
++// Report the identity strings below, as the vendor's own driver does, instead
++// of clvk's.
++PROPERTY(bool, native_identity, false)
++PROPERTY(std::string, device_vendor, "")
++PROPERTY(std::string, platform_name, "")
++PROPERTY(std::string, platform_vendor, "")
++PROPERTY(std::string, platform_version_text, "")
++PROPERTY(std::string, icd_suffix, "")
++PROPERTY(std::string, device_version_text, "")
++PROPERTY(std::string, c_version_text, "")
++// Empty means clvk's own driver version string.
++PROPERTY(std::string, driver_version, "")
++
+ // Override the reported device name.
+ OPTION(std::string, device_name, "")
+ 
+--- a/clvk/src/device.cpp
++++ b/clvk/src/device.cpp
+@@ -22,6 +22,7 @@
+ #include "device.hpp"
+ #include "init.hpp"
+ #include "kernel.hpp"
++#include "kmt.hpp"
+ #include "log.hpp"
+ #include "memory.hpp"
+ #include "utils.hpp"
+@@ -122,6 +123,11 @@
+     m_clvk_properties = create_cvk_device_properties(
+         m_properties.deviceName, m_properties.vendorID, m_properties.deviceID,
+         m_properties.driverVersion, m_driver_properties.driverID);
++
++    if (m_clvk_properties->native_identity() && luid_valid()) {
++        cvk_kmt_read_adapter_string(luid(), L"DriverVersion",
++                                    &m_adapter_driver_version);
++    }
+ }
+ 
+ void cvk_device::init_driver_behaviors() {
+@@ -1160,6 +1166,10 @@
+ }
+ 
+ std::string cvk_device::vendor() const {
++    if (native_identity()) {
++        return m_clvk_properties->device_vendor();
++    }
++
+     // Is this a Khronos vendor ID?
+     if (m_properties.vendorID > 0xFFFF) {
+         return vulkan_vendor_id_string(
+@@ -1368,3 +1378,19 @@
+     }
+     return CL_SUCCESS;
+ }
++
++void cvk_platform::finalize() {
++    cvk_device* display = nullptr;
++    for (auto dev : m_devices) {
++        if (dev->luid_valid() && cvk_kmt_has_adapter(dev->luid())) {
++            display = dev;
++            break;
++        }
++    }
++    if (display == nullptr && m_devices.size() == 1) {
++        display = m_devices[0];
++    }
++    if (display != nullptr && display->native_identity()) {
++        m_identity = display;
++    }
++}
+--- a/clvk/src/device.hpp
++++ b/clvk/src/device.hpp
+@@ -517,18 +517,35 @@
+     std::string version_string() const {
+         return "OpenCL " + std::to_string(CL_VERSION_MAJOR(version())) + "." +
+                std::to_string(CL_VERSION_MINOR(version())) + " " +
+-               version_desc();
++               (native_identity() ? m_clvk_properties->device_version_text()
++                                  : version_desc());
+     }
+ 
+     std::string c_version_string() const {
+         return "OpenCL C " + std::to_string(CL_VERSION_MAJOR(c_version())) +
+                "." + std::to_string(CL_VERSION_MINOR(c_version())) + " " +
+-               version_desc();
++               (native_identity() ? m_clvk_properties->c_version_text()
++                                  : version_desc());
++    }
++
++    bool native_identity() const {
++        return m_clvk_properties->native_identity();
+     }
+ 
++    const cvk_device_properties& identity() const { return *m_clvk_properties; }
++
+     std::string profile() const { return "FULL_PROFILE"; }
+ 
+     std::string driver_version() const {
++        if (native_identity()) {
++            if (!m_adapter_driver_version.empty()) {
++                return m_adapter_driver_version;
++            }
++            auto native = m_clvk_properties->driver_version();
++            if (!native.empty()) {
++                return native;
++            }
++        }
+         return std::to_string(CL_VERSION_MAJOR(version())) + "." +
+                std::to_string(CL_VERSION_MINOR(version())) + " " +
+                version_desc();
+@@ -908,6 +925,7 @@
+     spv_target_env m_vulkan_spirv_env;
+ 
+     std::unique_ptr<cvk_device_properties> m_clvk_properties;
++    std::string m_adapter_driver_version;
+ 
+     TRACE_TRACK_VAR(device_track);
+ };
+@@ -948,23 +966,34 @@
+ 
+     cl_version version() const { return config.opencl_version; }
+ 
++    // Called once, after every device exists.
++    void finalize();
++
+     std::string version_string() const {
+         std::string ret = "OpenCL ";
+         auto ver = version();
+         ret += std::to_string(CL_VERSION_MAJOR(ver));
+         ret += ".";
+         ret += std::to_string(CL_VERSION_MINOR(ver));
+-        ret += " clvk";
++        ret += " ";
++        ret += m_identity ? m_identity->identity().platform_version_text()
++                          : "clvk";
+         return ret;
+     }
+ 
+-    std::string name() const { return "clvk"; }
++    std::string name() const {
++        return m_identity ? m_identity->identity().platform_name() : "clvk";
++    }
+ 
+-    std::string vendor() const { return "clvk"; }
++    std::string vendor() const {
++        return m_identity ? m_identity->identity().platform_vendor() : "clvk";
++    }
+ 
+     std::string profile() const { return "FULL_PROFILE"; }
+ 
+-    std::string icd_suffix() const { return "clvk"; }
++    std::string icd_suffix() const {
++        return m_identity ? m_identity->identity().icd_suffix() : "clvk";
++    }
+ 
+     const std::vector<cvk_device*>& devices() const { return m_devices; }
+ 
+@@ -987,6 +1016,7 @@
+     std::vector<cl_name_version> m_extensions;
+     std::string m_extension_string;
+     std::vector<cvk_device*> m_devices;
++    cvk_device* m_identity = nullptr;
+ };
+ 
+ static inline cvk_platform* icd_downcast(cl_platform_id platform) {
+--- a/clvk/src/device_properties.cpp
++++ b/clvk/src/device_properties.cpp
+@@ -96,7 +96,30 @@
+ };
+ 
+ struct cvk_device_properties_intel : public cvk_device_properties_virtual {
++    cvk_device_properties_intel(const uint32_t driverVersion,
++                                const VkDriverId driverID)
++        : m_driverVersion(driverVersion), m_driverID(driverID) {}
++
+     std::string vendor() const override final { return "Intel Corporation"; }
++    bool native_identity() const override final { return true; }
++    std::string device_vendor() const override final {
++        return "Intel(R) Corporation";
++    }
++    std::string platform_name() const override final {
++        return "Intel(R) OpenCL Graphics";
++    }
++    std::string platform_vendor() const override final {
++        return "Intel(R) Corporation";
++    }
++    std::string icd_suffix() const override final { return "INTEL"; }
++    std::string device_version_text() const override final { return "NEO "; }
++    std::string driver_version() const override final {
++        if (m_driverID != VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS) {
++            return "";
++        }
++        return std::to_string(m_driverVersion >> 14) + "." +
++               std::to_string(m_driverVersion & 0x3FFF);
++    }
+     uint32_t max_first_cmd_batch_size() const override final { return 10; }
+     uint32_t max_cmd_group_size() const override final { return 1; }
+     std::set<std::string> clspv_native_builtins() const override final {
+@@ -124,6 +147,10 @@
+     image_format_set disabled_image_formats() const override final {
+         return image_format_set{{CL_RGB, CL_UNORM_SHORT_565}};
+     }
++
++private:
++    const uint32_t m_driverVersion;
++    const VkDriverId m_driverID;
+ };
+ 
+ static bool isIntelDevice(const char* name, const uint32_t vendorID) {
+@@ -309,7 +336,7 @@
+     } else if (strcmp(name, "Adreno (TM) 640") == 0) {
+         RETURN(cvk_device_properties_adreno_640);
+     } else if (isIntelDevice(name, vendorID)) {
+-        RETURN(cvk_device_properties_intel);
++        RETURN(cvk_device_properties_intel, driverVersion, driverID);
+     } else if (isAMDDevice(name, vendorID)) {
+         RETURN(cvk_device_properties_amd);
+     } else if (strcmp(name, "Samsung Xclipse 920") == 0) {
+--- a/clvk/src/init.cpp
++++ b/clvk/src/init.cpp
+@@ -288,6 +288,7 @@
+     } else {
+         cvk_info("Initialised %zu devices", num_devices);
+     }
++    m_platform->finalize();
+ }
+ 
+ void clvk_global_state::term_platform() { delete m_platform; }
+--- /dev/null
++++ b/clvk/src/kmt.cpp
+@@ -0,0 +1,164 @@
++// Copyright 2026 The clvk authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#include "kmt.hpp"
++
++#ifdef _WIN32
++
++#include <windows.h>
++
++#include <cstring>
++
++namespace {
++
++// d3dkmthk.h and d3dukmdt.h
++constexpr int KmtQueryRegistry = 48;
++constexpr UINT RegistryAdapterKey = 1;
++constexpr UINT RegistryStatusSuccess = 0;
++constexpr int MaxValueChars = 128;
++
++struct OpenAdapterFromLuid {
++    LUID AdapterLuid;
++    UINT Adapter;
++};
++
++struct QueryAdapterInfo {
++    UINT Adapter;
++    int Type;
++    void* Data;
++    UINT DataSize;
++};
++
++struct CloseAdapter {
++    UINT Adapter;
++};
++
++struct RegistryInfo {
++    UINT QueryType;
++    UINT QueryFlags;
++    WCHAR ValueName[MAX_PATH];
++    ULONG ValueType;
++    ULONG PhysicalAdapterIndex;
++    ULONG OutputValueSize;
++    UINT Status;
++    alignas(8) WCHAR Output[MaxValueChars];
++};
++
++using OpenFn = LONG(APIENTRY*)(OpenAdapterFromLuid*);
++using QueryFn = LONG(APIENTRY*)(QueryAdapterInfo*);
++using CloseFn = LONG(APIENTRY*)(CloseAdapter*);
++
++struct kmt_entries {
++    OpenFn open = nullptr;
++    QueryFn query = nullptr;
++    CloseFn close = nullptr;
++
++    kmt_entries() {
++        HMODULE gdi = LoadLibraryW(L"gdi32.dll");
++        if (gdi == nullptr) {
++            return;
++        }
++        open = reinterpret_cast<OpenFn>(
++            GetProcAddress(gdi, "D3DKMTOpenAdapterFromLuid"));
++        query = reinterpret_cast<QueryFn>(
++            GetProcAddress(gdi, "D3DKMTQueryAdapterInfo"));
++        close =
++            reinterpret_cast<CloseFn>(GetProcAddress(gdi, "D3DKMTCloseAdapter"));
++    }
++};
++
++const kmt_entries& entries() {
++    static const kmt_entries loaded;
++    return loaded;
++}
++
++bool open_adapter(const uint8_t* luid, UINT* adapter) {
++    const auto& kmt = entries();
++    if (kmt.open == nullptr || kmt.close == nullptr) {
++        return false;
++    }
++    OpenAdapterFromLuid args{};
++    memcpy(&args.AdapterLuid, luid, sizeof(args.AdapterLuid));
++    if (kmt.open(&args) != 0) {
++        return false;
++    }
++    *adapter = args.Adapter;
++    return true;
++}
++
++void close_adapter(UINT adapter) {
++    CloseAdapter args{adapter};
++    entries().close(&args);
++}
++
++} // namespace
++
++bool cvk_kmt_has_adapter(const uint8_t* luid) {
++    UINT adapter;
++    if (!open_adapter(luid, &adapter)) {
++        return false;
++    }
++    close_adapter(adapter);
++    return true;
++}
++
++bool cvk_kmt_read_adapter_string(const uint8_t* luid, const wchar_t* name,
++                                 std::string* value) {
++    const auto& kmt = entries();
++    UINT adapter;
++    if (kmt.query == nullptr || wcslen(name) >= MAX_PATH ||
++        !open_adapter(luid, &adapter)) {
++        return false;
++    }
++
++    RegistryInfo info{};
++    info.QueryType = RegistryAdapterKey;
++    info.ValueType = REG_SZ;
++    wcscpy_s(info.ValueName, name);
++    QueryAdapterInfo args{adapter, KmtQueryRegistry, &info, sizeof(info)};
++    bool found = kmt.query(&args) == 0 && info.Status == RegistryStatusSuccess &&
++                 info.OutputValueSize <= sizeof(info.Output);
++    close_adapter(adapter);
++    if (!found) {
++        return false;
++    }
++
++    size_t chars = info.OutputValueSize / sizeof(WCHAR);
++    while (chars > 0 && info.Output[chars - 1] == L'\0') {
++        chars--;
++    }
++    if (chars == 0) {
++        return false;
++    }
++    int bytes = WideCharToMultiByte(CP_UTF8, 0, info.Output, (int)chars,
++                                    nullptr, 0, nullptr, nullptr);
++    if (bytes <= 0) {
++        return false;
++    }
++    value->resize(bytes);
++    WideCharToMultiByte(CP_UTF8, 0, info.Output, (int)chars, value->data(),
++                        bytes, nullptr, nullptr);
++    return true;
++}
++
++#else
++
++bool cvk_kmt_has_adapter(const uint8_t*) { return false; }
++
++bool cvk_kmt_read_adapter_string(const uint8_t*, const wchar_t*,
++                                 std::string*) {
++    return false;
++}
++
++#endif
+--- /dev/null
++++ b/clvk/src/kmt.hpp
+@@ -0,0 +1,24 @@
++// Copyright 2026 The clvk authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#pragma once
++
++#include <cstdint>
++#include <string>
++
++// The kernel graphics adapter with the given LUID, as a vendor ICD reaches its
++// own adapter. Both return false where there is no such adapter.
++bool cvk_kmt_has_adapter(const uint8_t* luid);
++bool cvk_kmt_read_adapter_string(const uint8_t* luid, const wchar_t* name,
++                                 std::string* value);

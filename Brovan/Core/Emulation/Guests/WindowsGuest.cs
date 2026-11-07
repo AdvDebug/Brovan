@@ -74,6 +74,14 @@ namespace Brovan.Core.Emulation.Guests
         private const uint Wow64TlsWow64InfoOffset = 0xE10 + 10 * 4;
         private const uint TebWowTebOffset32 = 0xFDC;
         private const uint TebWowTebOffset64 = 0x180C;
+
+        private const uint TebStaticUnicodeMaximumLength64 = 0x125A;
+        private const uint TebStaticUnicodeBufferPointer64 = 0x1260;
+        private const uint TebStaticUnicodeBuffer64 = 0x1268;
+        private const uint TebStaticUnicodeMaximumLength32 = 0xBFA;
+        private const uint TebStaticUnicodeBufferPointer32 = 0xBFC;
+        private const uint TebStaticUnicodeBuffer32 = 0xC00;
+        private const ushort StaticUnicodeBufferBytes = 0x20A;
         private const uint NativeTebWow64InfoSlotOffset = 0x1480 + 10 * 8;
         private const uint PageSize = 0x1000;
         public ulong LdrInitializeThunk { get; internal set; }
@@ -301,6 +309,8 @@ namespace Brovan.Core.Emulation.Guests
         {
             if (WinHelper == null)
                 return;
+
+            OS.Windows.Win32k.Win32kDxgk.EndDisplayProbe();
 
             lock (Instance.KernelLock)
             {
@@ -1632,9 +1642,16 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(Teb + 0x17A0, (ulong)0ul);
             Instance._emulator.WriteMemory(Teb + TebSameTebFlagsOffset64, SameTebFlags, 2);
             Instance._emulator.WriteMemory(Teb + 0x180C, (uint)0u);
+            WriteStaticUnicodeString64(Instance, Teb);
 
             Win32kDpi.ApplyThreadContext(Instance, Teb);
             return Teb;
+        }
+
+        private static void WriteStaticUnicodeString64(BinaryEmulator Instance, ulong Teb)
+        {
+            Instance._emulator.WriteMemory(Teb + TebStaticUnicodeMaximumLength64, StaticUnicodeBufferBytes, 2);
+            Instance._emulator.WriteMemory(Teb + TebStaticUnicodeBufferPointer64, Teb + TebStaticUnicodeBuffer64, 8);
         }
 
         private static ushort BuildSameTebFlags(uint CreateFlags, bool InitialThread)
@@ -1684,6 +1701,8 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(Teb + 0x34, 0u);
             Instance._emulator.WriteMemory(Teb + TebSameTebFlagsOffset32, SameTebFlags, 2);
             Instance._emulator.WriteMemory(Teb + TebWowTebOffset32, unchecked((uint)-(long)TebSize), 4);
+            Instance._emulator.WriteMemory(Teb + TebStaticUnicodeMaximumLength32, StaticUnicodeBufferBytes, 2);
+            Instance._emulator.WriteMemory(Teb + TebStaticUnicodeBufferPointer32, (uint)(Teb + TebStaticUnicodeBuffer32), 4);
             if (WowSyscallGate != 0)
                 Instance._emulator.WriteMemory(Teb + 0xC0, (uint)WowSyscallGate);
 
@@ -1704,6 +1723,7 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(NativeTeb + 0x1478, Thread.StackAddress, 8);
             Instance._emulator.WriteMemory(NativeTeb + TebSameTebFlagsOffset64, SameTebFlags, 2);
             Instance._emulator.WriteMemory(NativeTeb + TebWowTebOffset64, (uint)TebSize, 4);
+            WriteStaticUnicodeString64(Instance, NativeTeb);
 
             // The WOW64 TLS slots live in the native TEB. The 32-bit ones belong to the program.
             Instance._emulator.WriteMemory(NativeTeb + NativeTebWow64InfoSlotOffset, Teb + Wow64InfoOffset, 8);

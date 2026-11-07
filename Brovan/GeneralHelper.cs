@@ -146,6 +146,18 @@ namespace Brovan
 
         [DllImport("ntdll.dll")]
         public static extern unsafe int NtQueryVolumeInformationFile(IntPtr FileHandle, ulong* IoStatusBlock, void* FsInformation, uint Length, int FsInformationClass);
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+        public static extern uint CM_Get_Device_ID_List_SizeW(out uint Length, string Filter, uint Flags);
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+        public static extern unsafe uint CM_Get_Device_ID_ListW(string Filter, char* Buffer, uint Length, uint Flags);
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+        public static extern unsafe uint CM_Locate_DevNodeW(out uint DevInst, char* DeviceId, uint Flags);
+
+        [DllImport("cfgmgr32.dll")]
+        public static extern unsafe uint CM_Get_DevNode_PropertyW(uint DevInst, void* PropertyKey, out uint PropertyType, void* Buffer, ref uint BufferSize, uint Flags);
     }
 
     internal class NativeUnixImports

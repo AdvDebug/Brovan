@@ -13,7 +13,7 @@ using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
-    internal sealed class AfdDevice : IDisposable
+    internal sealed class AfdDevice : IDisposable, IWinDeviceFile
     {
         private const int FsctlAfdBase = 0x12;
 
@@ -131,6 +131,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (EaBuffer != null && EaBuffer.Length > 0)
                 TryParseCreationData(EaBuffer);
+        }
+
+        public void Closed(BinaryEmulator Instance, WinFile File)
+        {
+            Instance.WinHelper.AfdRequests.EndpointClosed(Instance, this);
+            Dispose();
         }
 
         public void Dispose()

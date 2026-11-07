@@ -58,7 +58,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return DirectoryStatus;
 
             if (!NtCreateFile.IsRootRelativeName(FullName, AttributesRoot) &&
-                Instance.WinHelper.TryCreateDevice(Normalized, Array.Empty<byte>(), out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus))
+                Instance.WinHelper.TryCreateDevice(Normalized, Array.Empty<byte>(), out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus, out ulong DeviceInformation))
             {
                 if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
                 {
@@ -66,7 +66,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return DeviceStatus;
                 }
 
-                return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler, DevicePipe, OpenOptions, Inherit);
+                return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler, DevicePipe, OpenOptions, Inherit, DeviceInformation);
             }
 
             string Path = ResolveNtPath(Instance, FullName, AttributesRoot);

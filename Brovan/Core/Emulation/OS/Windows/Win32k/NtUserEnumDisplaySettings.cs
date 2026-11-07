@@ -1,4 +1,5 @@
 using System.Text;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -49,8 +50,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (ModeNumber != EnumCurrentSettings && ModeNumber != EnumRegistrySettings && ModeNumber != 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (!Instance.WinHelper.TryGetPrimaryMonitorRect(out int Left, out int Top, out int Right, out int Bottom))
+            if (!Instance.WinHelper.TryGetPrimaryMonitorRect(out int Left, out int Top, out _, out _))
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
+
+            // NT reports the mode in physical pixels whatever the caller's DPI awareness.
+            uint Width = (uint)Math.Max(HostDisplayMetrics.ScreenWidth, 0);
+            uint Height = (uint)Math.Max(HostDisplayMetrics.ScreenHeight, 0);
 
             Instance._emulator.WriteMemory(DevModePtr + OffsetDeviceName, Win32kDisplayConfig.AdapterName + "\0", Encoding.Unicode);
             Instance._emulator.WriteMemory(DevModePtr + OffsetSpecVersion, SpecVersion, 2);
@@ -63,8 +68,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance._emulator.WriteMemory(DevModePtr + OffsetDisplayOrientation, 0u, 4);
             Instance._emulator.WriteMemory(DevModePtr + OffsetLogPixels, (ushort)LogPixels, 2);
             Instance._emulator.WriteMemory(DevModePtr + OffsetBitsPerPel, BitsPerPixel, 4);
-            Instance._emulator.WriteMemory(DevModePtr + OffsetPelsWidth, (uint)(Right - Left), 4);
-            Instance._emulator.WriteMemory(DevModePtr + OffsetPelsHeight, (uint)(Bottom - Top), 4);
+            Instance._emulator.WriteMemory(DevModePtr + OffsetPelsWidth, Width, 4);
+            Instance._emulator.WriteMemory(DevModePtr + OffsetPelsHeight, Height, 4);
             Instance._emulator.WriteMemory(DevModePtr + OffsetDisplayFlags, 0u, 4);
             Instance._emulator.WriteMemory(DevModePtr + OffsetDisplayFrequency, Instance.WinHelper.GetPrimaryDisplayFrequency(), 4);
 

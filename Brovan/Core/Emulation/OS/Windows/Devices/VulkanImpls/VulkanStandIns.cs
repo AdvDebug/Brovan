@@ -45,13 +45,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const string CpuDeviceName = "cpuDevice";
 
         private const uint StPhysicalDeviceFeatures2 = 1000059000u;
-        private const uint ApiVersion11 = (1u << 22) | (1u << 12);
+        internal const uint ApiVersion11 = (1u << 22) | (1u << 12);
         private const uint ApiVersion12 = (1u << 22) | (2u << 12);
+        internal const uint ApiVersion13 = (1u << 22) | (3u << 12);
         private const uint StPhysicalDeviceVulkan12Features = 51u;
         private const uint StPhysicalDeviceVulkan13Features = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
         private const uint StPhysicalDeviceDescriptorIndexingFeatures = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
         private const uint StPhysicalDeviceInlineUniformBlockFeatures = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_FEATURES;
         private const uint StPhysicalDeviceVulkan14Features = 55u;
+        private const uint StPhysicalDeviceIdProperties = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+        private const uint StPhysicalDeviceVulkan11Properties = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES;
         private const uint StPhysicalDeviceTransformFeedbackFeaturesExt = 1000028000u;
         private const uint StPhysicalDeviceRobustness2FeaturesExt = 1000286000u;
         private const uint StPhysicalDeviceBufferDeviceAddressFeatures = (uint)BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
@@ -161,7 +164,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         private static readonly int Properties2Properties = BrovVulkLayout.MemberOffset["VkPhysicalDeviceProperties2.properties"];
-        private static readonly int PropertiesDeviceType = BrovVulkLayout.MemberOffset["VkPhysicalDeviceProperties.deviceType"];
+        internal static readonly int PropertiesDeviceType = BrovVulkLayout.MemberOffset["VkPhysicalDeviceProperties.deviceType"];
         private static readonly int PropertiesLimits = BrovVulkLayout.MemberOffset["VkPhysicalDeviceProperties.limits"];
         private static readonly int LimitsDrawIndirectCount = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxDrawIndirectCount"];
         private static readonly int LimitsSamplerAnisotropy = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxSamplerAnisotropy"];
@@ -182,6 +185,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int LimitsVertexInputBindings = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxVertexInputBindings"];
         private static readonly int LimitsVertexInputAttributes = BrovVulkLayout.MemberOffset["VkPhysicalDeviceLimits.maxVertexInputAttributes"];
 
+        internal static readonly int IdPropertiesSize = BrovVulkLayout.StructSize["VkPhysicalDeviceIDProperties"];
+        internal static readonly int IdDeviceUuid = BrovVulkLayout.MemberOffset["VkPhysicalDeviceIDProperties.deviceUUID"];
+        internal static readonly int IdDeviceLuid = BrovVulkLayout.MemberOffset["VkPhysicalDeviceIDProperties.deviceLUID"];
+        private static readonly int IdDeviceNodeMask = BrovVulkLayout.MemberOffset["VkPhysicalDeviceIDProperties.deviceNodeMask"];
+        internal static readonly int IdDeviceLuidValid = BrovVulkLayout.MemberOffset["VkPhysicalDeviceIDProperties.deviceLUIDValid"];
+        private static readonly int Vulkan11DeviceLuid = BrovVulkLayout.MemberOffset["VkPhysicalDeviceVulkan11Properties.deviceLUID"];
+        private static readonly int Vulkan11DeviceNodeMask = BrovVulkLayout.MemberOffset["VkPhysicalDeviceVulkan11Properties.deviceNodeMask"];
+        private static readonly int Vulkan11DeviceLuidValid = BrovVulkLayout.MemberOffset["VkPhysicalDeviceVulkan11Properties.deviceLUIDValid"];
+        internal const int UuidSize = 16;
+        internal const int MaxPhysicalDevices = 16;
+
         private static void ProbeExtensionLimits(IntPtr physicalDevice, DeviceGaps gaps)
         {
             if (gaps.ApiVersion < ApiVersion11)
@@ -195,10 +209,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             byte* push = stackalloc byte[pushSize];
             byte* inlineBlocks = stackalloc byte[inlineSize];
             byte* feedback = stackalloc byte[feedbackSize];
+            byte* id = stackalloc byte[IdPropertiesSize];
             new Span<byte>(properties, size).Clear();
             new Span<byte>(push, pushSize).Clear();
             new Span<byte>(inlineBlocks, inlineSize).Clear();
             new Span<byte>(feedback, feedbackSize).Clear();
+            new Span<byte>(id, IdPropertiesSize).Clear();
+            *(int*)id = BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+            *(IntPtr*)(feedback + VkOffsets.NodePNext) = (IntPtr)id;
             *(int*)properties = BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
             *(IntPtr*)(properties + VkOffsets.NodePNext) = (IntPtr)push;
             *(int*)push = BrovVulkConstants.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES;
@@ -210,6 +228,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             gaps.MaxPushDescriptors = *(uint*)(push + BrovVulkLayout.MemberOffset["VkPhysicalDevicePushDescriptorProperties.maxPushDescriptors"]);
             gaps.MaxInlineUniformBlockSize = *(uint*)(inlineBlocks + BrovVulkLayout.MemberOffset["VkPhysicalDeviceInlineUniformBlockProperties.maxInlineUniformBlockSize"]);
             gaps.MaxTransformFeedbackBuffers = *(uint*)(feedback + BrovVulkLayout.MemberOffset["VkPhysicalDeviceTransformFeedbackPropertiesEXT.maxTransformFeedbackBuffers"]);
+            gaps.DeviceUuid = new ReadOnlySpan<byte>(id + IdDeviceUuid, UuidSize).ToArray();
         }
         private static readonly int ImageFormatPropertiesSize = BrovVulkLayout.StructSize["VkImageFormatProperties"];
         private static readonly int ImageFormatMaxWidth = BrovVulkLayout.MemberOffset["VkImageFormatProperties.maxExtent"] + BrovVulkLayout.MemberOffset["VkExtent3D.width"];
@@ -281,6 +300,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             public int ImplementedBits;
             public int HostBits;
             public uint ApiVersion;
+            public int DeviceType;
+            public byte[]? DeviceUuid;
             public string[] Missing = Array.Empty<string>();
             public Dictionary<string, uint> HostExtensions = new Dictionary<string, uint>(StringComparer.Ordinal);
             public SpirvRelocation Relocation = new SpirvRelocation(-1, -1, -1);
@@ -435,7 +456,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             new Span<byte>(properties, size).Clear();
             BrovVulkApi.vkGetPhysicalDeviceProperties(physicalDevice, (IntPtr)properties);
             gaps.ApiVersion = *(uint*)(properties + BrovVulkGenExt.PropertiesApiVersion);
-            if (*(int*)(properties + PropertiesDeviceType) == BrovVulkConstants.VK_PHYSICAL_DEVICE_TYPE_CPU || Array.IndexOf(Forced, CpuDeviceName) >= 0)
+            gaps.DeviceType = *(int*)(properties + PropertiesDeviceType);
+            if (gaps.DeviceType == BrovVulkConstants.VK_PHYSICAL_DEVICE_TYPE_CPU || Array.IndexOf(Forced, CpuDeviceName) >= 0)
                 gaps.HostBits |= HostCpuDeviceBit;
             byte* limits = properties + PropertiesLimits;
 
@@ -588,17 +610,26 @@ namespace Brovan.Core.Emulation.OS.Windows
                 *(float*)(properties + PropertiesLimits + LimitsSamplerAnisotropy) = 16f;
         }
 
-        internal static void Properties2(IntPtr physicalDevice, IntPtr properties2)
+        internal static void Properties2(GenState st, IntPtr physicalDevice, IntPtr properties2)
         {
             if (properties2 == IntPtr.Zero)
                 return;
 
             Properties(physicalDevice, properties2 + Properties2Properties);
             DeviceGaps gaps = Gaps(physicalDevice);
+            bool? display = null;
             for (IntPtr node = *(IntPtr*)(properties2 + VkOffsets.NodePNext); node != IntPtr.Zero; node = *(IntPtr*)(node + VkOffsets.NodePNext))
             {
                 switch (*(uint*)node)
                 {
+                    case StPhysicalDeviceIdProperties:
+                        if (display ??= IsDisplayAdapter(st, physicalDevice))
+                            WriteAdapterLuid(node, IdDeviceLuid, IdDeviceNodeMask, IdDeviceLuidValid);
+                        break;
+                    case StPhysicalDeviceVulkan11Properties:
+                        if (display ??= IsDisplayAdapter(st, physicalDevice))
+                            WriteAdapterLuid(node, Vulkan11DeviceLuid, Vulkan11DeviceNodeMask, Vulkan11DeviceLuidValid);
+                        break;
                     case StPhysicalDeviceMaintenance5Properties:
                         if ((gaps.ImplementedBits & Maintenance5Bit) != 0)
                             new Span<byte>((void*)(node + FeatureBits), Maintenance5PropertiesSize - FeatureBits).Clear();
@@ -609,6 +640,55 @@ namespace Brovan.Core.Emulation.OS.Windows
                         break;
                 }
             }
+        }
+
+        private static int HolderMismatchLogged;
+
+        // A WDDM driver reports the LUID of its D3DKMT adapter.
+        private static bool IsDisplayAdapter(GenState st, IntPtr physicalDevice)
+        {
+            IntPtr holder = st.DisplayHolder(physicalDevice);
+            if (holder != IntPtr.Zero && Volatile.Read(ref HolderMismatchLogged) == 0)
+            {
+                byte[]? published = Win32k.Win32kDxgk.Display.Identity?.DeviceUuid;
+                byte[]? held = Gaps(holder).DeviceUuid;
+                if (published != null && held != null && !published.AsSpan().SequenceEqual(held)
+                    && Interlocked.Exchange(ref HolderMismatchLogged, 1) == 0)
+                    Utils.LogError("[VulkanStandIns] The Vulkan device that reports the display adapter LUID is not the device the display adapter names.");
+            }
+
+            return holder == physicalDevice;
+        }
+
+        internal static IntPtr PickDisplayDevice(IntPtr instance)
+        {
+            uint count = MaxPhysicalDevices;
+            IntPtr* devices = stackalloc IntPtr[MaxPhysicalDevices];
+            if (BrovVulkApi.vkEnumeratePhysicalDevices(instance, (IntPtr)(&count), (IntPtr)devices) < 0 || count == 0)
+                return IntPtr.Zero;
+
+            count = Math.Min(count, MaxPhysicalDevices);
+            byte[]? published = Win32k.Win32kDxgk.Display.Identity?.DeviceUuid;
+            Span<int> types = stackalloc int[(int)count];
+            Span<uint> versions = stackalloc uint[(int)count];
+            for (int i = 0; i < count; i++)
+            {
+                DeviceGaps gaps = Gaps(devices[i]);
+                if (published != null && gaps.DeviceUuid != null && published.AsSpan().SequenceEqual(gaps.DeviceUuid))
+                    return devices[i];
+                types[i] = gaps.DeviceType;
+                versions[i] = gaps.ApiVersion;
+            }
+
+            int chosen = Win32k.HostDisplayGpu.Select(types, versions);
+            return chosen < 0 ? IntPtr.Zero : devices[chosen];
+        }
+
+        private static void WriteAdapterLuid(IntPtr node, int luid, int nodeMask, int luidValid)
+        {
+            Win32k.Win32kDxgk.WriteLuid(new Span<byte>((void*)(node + luid), 8), Win32k.Win32kDxgk.Display);
+            *(uint*)(node + nodeMask) = 1;
+            *(uint*)(node + luidValid) = 1;
         }
 
         // A format the host cannot know becomes UNDEFINED.

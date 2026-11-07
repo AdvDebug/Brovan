@@ -4,7 +4,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtGdiGetTextCharsetInfo : IWinSyscall
     {
-        private const uint AnsiCharset = 0;
         private const int FontSignatureSize = 24;
         private const uint BasicLatinRangeBit = 1;
         private const uint Latin1CodePageBit = 1;
@@ -32,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             Instance.SetLastWinError(0);
-            Instance.SetRawSyscallReturn(AnsiCharset);
+            Instance.SetRawSyscallReturn(Win32kHelper.GetDcCharSet(Instance, Hdc));
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

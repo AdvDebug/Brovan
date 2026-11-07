@@ -1,0 +1,10 @@
+--- a/src/gallium/frontends/wgl/stw_st.c
++++ b/src/gallium/frontends/wgl/stw_st.c
+@@ -264,6 +264,7 @@
+ #ifdef GALLIUM_ZINK
+          if (stw_dev->zink &&
+              i < ST_ATTACHMENT_DEPTH_STENCIL &&
++             stwfb->fb->owner != STW_FRAMEBUFFER_PBUFFER &&
+              stw_dev->screen->resource_create_drawable) {
+ 
+             struct kopper_loader_info loader_info;

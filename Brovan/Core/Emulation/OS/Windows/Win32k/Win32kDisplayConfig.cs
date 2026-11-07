@@ -173,7 +173,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Instance.WriteMemory(Destination + HeaderSize, Tail);
         }
 
-        internal static bool WriteDisplayInfo(BinaryEmulator Instance, ulong Destination, DxgkAdapter Adapter, bool WithSource)
+        internal static bool WriteDisplayInfo(BinaryEmulator Instance, ulong Destination, DxgkAdapter Adapter, AdapterIdentity Identity, bool WithSource)
         {
             // The monitor lookup can use the shared buffer, so it runs first.
             uint Monitor = WithSource ? (uint)Instance.WinHelper.GetPrimaryMonitorHandle() : 0;
@@ -182,11 +182,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Span<byte> Block = Info.Slice(DisplayInfoAdapter, AdapterBlockSize);
             BinaryPrimitives.WriteUInt32LittleEndian(Block, Adapter.BusType);
-            BinaryPrimitives.WriteUInt32LittleEndian(Block.Slice(AdapterBlockVendorId), Adapter.VendorId);
-            BinaryPrimitives.WriteUInt32LittleEndian(Block.Slice(AdapterBlockDeviceId), Adapter.DeviceId);
+            BinaryPrimitives.WriteUInt32LittleEndian(Block.Slice(AdapterBlockVendorId), Identity.VendorId);
+            BinaryPrimitives.WriteUInt32LittleEndian(Block.Slice(AdapterBlockDeviceId), Identity.DeviceId);
             BinaryPrimitives.WriteUInt32LittleEndian(Block.Slice(AdapterBlockDriverVersion), Win32kDxgk.WddmVersion);
-            WriteString(Block.Slice(AdapterBlockDescription, DescriptionCharacters * 2), Adapter.Description);
-            WriteString(Block.Slice(AdapterBlockInterface, InterfaceCharacters * 2), Adapter.DeviceInterface);
+            WriteString(Block.Slice(AdapterBlockDescription, DescriptionCharacters * 2), Identity.Description);
+            WriteString(Block.Slice(AdapterBlockInterface, InterfaceCharacters * 2), Identity.DeviceInterface);
             Block.CopyTo(Info.Slice(DisplayInfoRenderAdapter));
 
             if (WithSource)

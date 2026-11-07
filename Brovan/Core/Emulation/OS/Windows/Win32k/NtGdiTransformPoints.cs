@@ -1,6 +1,4 @@
-using System.Buffers;
 using System.Buffers.Binary;
-using Brovan.Core.Settings;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -9,8 +7,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         private const int DeviceToWorld = 0;
         private const int WorldToDeviceFix = 2;
-        private const int MaxPoints = 0x4E2000;
         private const int PointSize = 8;
+        private const int MaxPoints = (int)(Win32kHelper.MaxGdiBufferBytes / PointSize);
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -33,23 +31,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             // NT allows the input and output arrays to overlap.
-            int Bytes = Count * PointSize;
-            bool Pooled = (uint)Bytes <= MemoryBudget.PooledIoBytes;
-            byte[] Points = Pooled ? ArrayPool<byte>.Shared.Rent(Bytes) : new byte[Bytes];
+            using CallBuffer Points = new CallBuffer(Count * PointSize);
             bool Done = false;
-            try
+            if (Instance.ReadMemory(SourcePtr, Points.Span))
             {
-                Span<byte> Data = Points.AsSpan(0, Bytes);
-                if (Instance.ReadMemory(SourcePtr, Data))
-                {
-                    Transform(Instance, Hdc, Mode, Data);
-                    Done = Instance.WriteMemory(DestinationPtr, Data);
-                }
-            }
-            finally
-            {
-                if (Pooled)
-                    ArrayPool<byte>.Shared.Return(Points);
+                Transform(Instance, Hdc, Mode, Points.Span);
+                Done = Instance.WriteMemory(DestinationPtr, Points.Span);
             }
 
             Instance.SetRawSyscallReturn(Done ? 1UL : 0UL);

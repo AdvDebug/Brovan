@@ -99,13 +99,38 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         public bool TopDown;
     }
 
+    internal readonly ref struct CallBuffer
+    {
+        private readonly byte[] Rented;
+        private readonly bool Pooled;
+        internal readonly Span<byte> Span;
+
+        internal CallBuffer(int Length)
+        {
+            Pooled = (uint)Length <= MemoryBudget.PooledIoBytes;
+            Rented = Pooled ? ArrayPool<byte>.Shared.Rent(Length) : new byte[Length];
+            Span = Rented.AsSpan(0, Length);
+        }
+
+        public void Dispose()
+        {
+            if (Pooled)
+                ArrayPool<byte>.Shared.Return(Rented);
+        }
+    }
+
     internal static class Win32kHelper
     {
-        private const uint EtoOpaque = 0x0002;
-        private const uint EtoClipped = 0x0004;
+        private const uint EtoOpaque = ITextMetricsSupport.EtoOpaque;
+        private const uint EtoClipped = ITextMetricsSupport.EtoClipped;
 
         private const uint USER_TIMER_MINIMUM = 0x0000000A;
         private const uint USER_TIMER_MAXIMUM = 0x7FFFFFFF;
+
+        // NT refuses a buffer larger than this, or a count whose entries would need one, before it does any work.
+        internal const uint MaxGdiBufferBytes = 0x2710000;
+
+        internal const uint GdiError = ITextMetricsSupport.NoFontData;
 
         internal const uint ERROR_SUCCESS = 0;
         internal const uint ERROR_INVALID_HANDLE = 6;
@@ -1128,13 +1153,158 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Font.HostFont;
         }
 
+        // NT names the face it realized, which can differ from the requested one.
         internal static string GetDcFaceName(BinaryEmulator Instance, ulong Hdc)
         {
-            return ResolveDcFontObject(Instance, Hdc)?.Description.FaceName ?? Instance.WinHelper.DefaultFaceName;
+            string Realized = TryGetRealizedFont(Instance, Hdc, out ITextMetricsSupport Text, out IntPtr Font)
+                ? Text.GetRealizedFace(Font)
+                : null;
+
+            return Realized
+                ?? ResolveDcFontObject(Instance, Hdc)?.Description.FaceName
+                ?? Instance.WinHelper.DefaultFaceName;
         }
 
+        internal static bool TryGetRealizedFont(BinaryEmulator Instance, ulong Hdc, out ITextMetricsSupport Text, out IntPtr Font)
+        {
+            Font = IntPtr.Zero;
+            if (!Instance.WinHelper.TryGetRealizedFonts(out Text))
+                return false;
+
+            Font = ResolveDcFont(Instance, Hdc);
+            if (Font != IntPtr.Zero)
+                return true;
+
+            Text = null;
+            return false;
+        }
+
+        // Text is null on a backend without realized-font facts, and the caller then measures each character.
+        internal static bool TryGetWidthSource(BinaryEmulator Instance, ulong Hdc, out ITextMetricsSupport Text, out IntPtr Font)
+        {
+            Font = ResolveDcFont(Instance, Hdc);
+            return TryGetWidthSource(Instance, Font, out Text);
+        }
+
+        private static bool TryGetWidthSource(BinaryEmulator Instance, IntPtr Font, out ITextMetricsSupport Text) =>
+            !Instance.WinHelper.TryGetRealizedFonts(out Text) || Font != IntPtr.Zero;
+
+        // Without realized-font facts the font is raster, so A and C are 0 and a code is its own glyph index.
+        internal static bool TryGetCharWidths(BinaryEmulator Instance, ITextMetricsSupport Text, IntPtr Font, bool Abc, uint First,
+            ReadOnlySpan<ushort> Codes, uint Flags, Span<uint> Output)
+        {
+            if (Text != null)
+            {
+                return Abc
+                    ? Text.GetCharAbcWidths(Font, First, Codes, (AbcWidthFlags)Flags, Output)
+                    : Text.GetCharWidths(Font, First, Codes, (CharWidthFlags)Flags, Output);
+            }
+
+            int[] Cache = GetCharAdvanceWidthCache(Instance, Font);
+            uint IntegerFlag = Abc ? (uint)AbcWidthFlags.Integer : (uint)CharWidthFlags.Integer;
+            bool Integer = (Flags & IntegerFlag) != 0;
+            int Stride = Abc ? 3 : 1;
+            int Count = Output.Length / Stride;
+
+            for (int Index = 0; Index < Count; Index++)
+            {
+                char Character = (char)(Codes.IsEmpty ? First + (uint)Index : Codes[Index]);
+                int Width = GetCharAdvanceWidth(Instance, Font, Cache, Character, FallbackCharWidth);
+                Span<uint> Entry = Output.Slice(Index * Stride, Stride);
+                Entry.Clear();
+                Entry[Abc ? 1 : 0] = Integer ? (uint)Width : BitConverter.SingleToUInt32Bits(Width);
+            }
+
+            return true;
+        }
+
+        private const int FallbackCharWidth = 8;
+
+        internal static bool CopyCharWidths(BinaryEmulator Instance, ulong Hdc, uint First, uint Count, ulong CodesPtr, uint Flags,
+            ulong BufferPtr, bool Abc)
+        {
+            if (!IsKnownDc(Instance, Hdc))
+            {
+                Instance.SetLastWinError(ERROR_INVALID_HANDLE);
+                return false;
+            }
+
+            if (!TryGetWidthSource(Instance, Hdc, out ITextMetricsSupport Text, out IntPtr Font))
+                return false;
+
+            int EntryBytes = Abc ? 12 : 4;
+            int ChunkEntries = NtReadFile.IoChunkBytes / (EntryBytes + 2);
+            for (uint Done = 0; Done < Count;)
+            {
+                int Entries = (int)Math.Min(Count - Done, (uint)ChunkEntries);
+                int OutputBytes = Entries * EntryBytes;
+                Span<byte> Scratch = Instance.WinHelper.Shared.GetSpan((ulong)Entries * (ulong)(EntryBytes + 2)).Slice(0, Entries * (EntryBytes + 2));
+                Span<byte> Output = Scratch.Slice(0, OutputBytes);
+                Span<byte> Codes = CodesPtr != 0 ? Scratch.Slice(OutputBytes, Entries * 2) : Span<byte>.Empty;
+
+                if (!Codes.IsEmpty && !Instance.ReadMemory(CodesPtr + (ulong)Done * 2, Codes, (uint)Codes.Length))
+                    return false;
+
+                if (!TryGetCharWidths(Instance, Text, Font, Abc, First + Done, MemoryMarshal.Cast<byte, ushort>(Codes), Flags,
+                        MemoryMarshal.Cast<byte, uint>(Output)))
+                    return false;
+
+                if (!Instance.WriteMemory(BufferPtr + (ulong)Done * (ulong)EntryBytes, Output))
+                    return false;
+
+                Done += (uint)Entries;
+            }
+
+            return true;
+        }
+
+        internal static uint GetGlyphIndices(BinaryEmulator Instance, ulong Hdc, ulong TextPtr, int Count, ulong IndicesPtr, uint Mode,
+            bool Subset)
+        {
+            if (Count < 0 || !IsKnownDc(Instance, Hdc))
+                return GdiError;
+
+            bool CountGlyphs = Count == 0 && TextPtr == 0 && IndicesPtr == 0 && Mode == 0;
+            if (!CountGlyphs && (uint)Count > MaxGlyphIndices)
+                return GdiError;
+
+            if (!TryGetRealizedFont(Instance, Hdc, out ITextMetricsSupport Text, out IntPtr Font))
+                return GdiError;
+
+            uint KnownMode = Mode <= 1 ? Mode : 0;
+            if (CountGlyphs || Count == 0)
+                return Text.GetGlyphIndices(Font, CountGlyphs, ReadOnlySpan<ushort>.Empty, Span<ushort>.Empty, KnownMode, Subset);
+
+            int ChunkChars = NtReadFile.IoChunkBytes / 4;
+            for (int Done = 0; Done < Count;)
+            {
+                int Chars = Math.Min(Count - Done, ChunkChars);
+                Span<byte> Scratch = Instance.WinHelper.Shared.GetSpan((ulong)Chars * 4).Slice(0, Chars * 4);
+                Span<byte> Source = Scratch.Slice(0, Chars * 2);
+                Span<byte> Target = Scratch.Slice(Chars * 2, Chars * 2);
+
+                if (!Instance.ReadMemory(TextPtr + (ulong)Done * 2, Source, (uint)Source.Length))
+                    return GdiError;
+
+                uint Mapped = Text.GetGlyphIndices(Font, false, MemoryMarshal.Cast<byte, ushort>(Source),
+                    MemoryMarshal.Cast<byte, ushort>(Target), KnownMode, Subset);
+                if (Mapped == GdiError || !Instance.WriteMemory(IndicesPtr + (ulong)Done * 2, Target))
+                    return GdiError;
+
+                Done += Chars;
+            }
+
+            return (uint)Count;
+        }
+
+        private const uint MaxGlyphIndices = MaxGdiBufferBytes / (2 * sizeof(ushort));
+
+        // NT reports the realized charset, which is never DEFAULT_CHARSET.
         internal static byte GetDcCharSet(BinaryEmulator Instance, ulong Hdc)
         {
+            if (Instance.WinHelper.GetTextMetrics(ResolveDcFont(Instance, Hdc), out TextMetricsData Metrics))
+                return Metrics.CharSet;
+
             Win32kFont Font = ResolveDcFontObject(Instance, Hdc);
             return Font != null ? Font.Description.CharSet : DefaultCharSet;
         }
@@ -1681,9 +1851,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private static ulong CreateStockFont(BinaryEmulator Instance, in StockFont Font, bool Stock = true)
         {
             FontDescription Description = new FontDescription(Font.Height, Font.Width, Font.Weight, false, false, false,
-                Font.CharSet, Font.PitchAndFamily, Font.FaceName);
+                Font.CharSet, Font.PitchAndFamily, Font.FaceName, Font.OutPrecision, Font.Quality);
             byte[] EnumLogFont = new byte[StoredEnumLogFontSize];
-            WinSysHelper.WriteLogFont(EnumLogFont, Description, Font.OutPrecision, Font.ClipPrecision, Font.Quality);
+            WinSysHelper.WriteLogFont(EnumLogFont, Description, Font.ClipPrecision);
             return CreateFont(Instance, Description, EnumLogFont, Stock, Public: true);
         }
 
@@ -1784,7 +1954,43 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Copy;
         }
 
-        internal static bool TryRenderTextToDcBitmap(BinaryEmulator Instance, ulong Hdc, string Text, int X, int Y, uint Options, GdiClipRect? Rect)
+        internal static void EnqueueWindowText(BinaryEmulator Instance, ulong Hwnd, ulong Hdc, string Text, int X, int Y, uint Options,
+            uint Align, in GdiClipRect Bounds)
+        {
+            IntPtr Font = ResolveDcFont(Instance, Hdc);
+            if ((Align & (TaCenter | TaBaseline)) != 0 && !string.IsNullOrEmpty(Text))
+            {
+                if (!TryMeasureDcText(Instance, Font, Text, Options, Align, out int Width, out int Height, out int Ascent))
+                    return;
+
+                AlignBox(Align, Width, Height, Ascent, ref X, ref Y);
+            }
+
+            Instance.WinHelper.EnqueueTextRender(Hwnd, Hdc, Font, Text, X, Y, Bounds.Left, Bounds.Top, Bounds.Right, Bounds.Bottom, Options);
+        }
+
+        private static void AlignBox(uint Align, int Width, int Height, int Ascent, ref int X, ref int Y)
+        {
+            uint Horizontal = Align & TaCenter;
+            if (Horizontal == TaCenter)
+                X -= (Width + 1) / 2;
+            else if (Horizontal == TaRight)
+                X -= Width;
+
+            uint Vertical = Align & TaBaseline;
+            if (Vertical == TaBottom)
+                Y -= Height;
+            else if (Vertical == TaBaseline)
+                Y -= Ascent;
+        }
+
+        private const uint TaRight = 0x2;
+        private const uint TaCenter = 0x6;
+        private const uint TaBottom = 0x8;
+        private const uint TaBaseline = 0x18;
+
+        internal static bool TryRenderTextToDcBitmap(BinaryEmulator Instance, ulong Hdc, string Text, int X, int Y, uint Options, uint Align,
+            GdiClipRect? Rect)
         {
             Win32kState State = GetState(Instance);
             if (!State.DeviceContexts.TryGetValue(Hdc, out Win32kDeviceContext Dc) || Dc.Hwnd != 0 || Dc.SelectedBitmap == 0)
@@ -1815,22 +2021,66 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return true;
 
             IntPtr Font = ResolveDcFont(Instance, Hdc);
-            if (!Instance.WinHelper.MeasureText(Font, Text, out int TextWidth, out int TextHeight) || !IsBlitExtentValid(TextWidth, TextHeight))
+            if (!TryMeasureDcText(Instance, Font, Text, Options, Align, out int TextWidth, out int TextHeight, out int Ascent)
+                || !IsBlitExtentValid(TextWidth, TextHeight))
                 return false;
 
+            AlignBox(Align, TextWidth, TextHeight, Ascent, ref X, ref Y);
             int Count = TextWidth * TextHeight;
             uint[] Rented = RentGuiPixels(Count, out bool Pooled);
             try
             {
                 Span<uint> Pixels = Rented.AsSpan(0, Count);
                 return TryReadBitmapBlock(Instance, Bitmap, X, Y, TextWidth, TextHeight, Pixels)
-                    && Instance.WinHelper.RasterizeText(Font, Text, Pixels, TextWidth, TextHeight, 0, 0, TextColor, BackColor, Opaque)
+                    && Instance.WinHelper.RasterizeText(Font, Text, Pixels, TextWidth, TextHeight, 0, 0, TextColor, BackColor, Opaque, Options)
                     && TryBlitBlockIntoBitmap(Instance, Bitmap, X, Y, TextWidth, TextHeight, Pixels, TextWidth, TextHeight, SrcCopyRop, 0, Clip);
             }
             finally
             {
                 if (Pooled)
                     ArrayPool<uint>.Shared.Return(Rented);
+            }
+        }
+
+        private static bool TryMeasureDcText(BinaryEmulator Instance, IntPtr Font, string Text, uint Options, uint Align,
+            out int Width, out int Height, out int Ascent)
+        {
+            Width = 0;
+            Height = 0;
+            Ascent = 0;
+            bool GlyphIndex = (Options & ITextMetricsSupport.EtoGlyphIndex) != 0;
+            TextMetricsData Metrics = default;
+            if ((GlyphIndex || (Align & TaBaseline) == TaBaseline) && !Instance.WinHelper.GetTextMetrics(Font, out Metrics))
+                return false;
+
+            Ascent = Metrics.Ascent;
+            if (!GlyphIndex)
+                return Instance.WinHelper.MeasureText(Font, Text, out Width, out Height);
+
+            uint[] Widths = ArrayPool<uint>.Shared.Rent(Text.Length);
+            try
+            {
+                Span<uint> Advances = Widths.AsSpan(0, Text.Length);
+                uint Flags = (uint)(CharWidthFlags.Integer | CharWidthFlags.GlyphIndices);
+                if (!TryGetWidthSource(Instance, Font, out ITextMetricsSupport Source)
+                    || !TryGetCharWidths(Instance, Source, Font, false, 0, MemoryMarshal.Cast<char, ushort>(Text.AsSpan()), Flags,
+                        Advances))
+                    return false;
+
+                long Total = 0;
+                foreach (uint Advance in Advances)
+                    Total += (int)Advance;
+
+                if (Total <= 0 || Total > int.MaxValue)
+                    return false;
+
+                Width = (int)Total;
+                Height = Metrics.Height;
+                return true;
+            }
+            finally
+            {
+                ArrayPool<uint>.Shared.Return(Widths);
             }
         }
 

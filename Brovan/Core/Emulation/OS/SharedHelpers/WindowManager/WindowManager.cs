@@ -897,7 +897,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         bool StrikeOut,
         byte CharSet,
         byte PitchAndFamily,
-        string FaceName);
+        string FaceName,
+        byte OutPrecision,
+        byte Quality);
 
     public sealed class FontFamilyData
     {
@@ -933,16 +935,116 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         bool GetTextMetrics(IntPtr font, out TextMetricsData metrics);
 
-        // The buffer is top-down 32 bit, the colours are COLORREF.
+        // The buffer is top-down 32 bit, the colours are COLORREF. The caller has already clipped and filled the rectangle.
         bool RasterizeText(IntPtr font, string text, Span<uint> pixels, int width, int height,
-            int x, int y, uint textColor, uint backColor, bool opaque);
+            int x, int y, uint textColor, uint backColor, bool opaque, uint options);
 
+        // A backend without per-font objects still returns a non-zero token, because zero means failure.
         IntPtr CreateFont(in FontDescription description);
 
         void DeleteFont(IntPtr font);
 
         // No face name asks for every face, a face name for that family's styles.
         IReadOnlyList<FontFamilyData> EnumerateFontFamilies(string faceName, byte charSet);
+
+        // True when the members below give GDI's answer for every font, so a failure is final. They never get a zero font.
+        bool HasRealizedFontFacts => false;
+
+        uint GetFontData(IntPtr font, uint table, uint offset, Span<byte> buffer) => NoFontData;
+
+        string GetRealizedFace(IntPtr font) => null;
+
+        bool GetOutlineTextMetrics(IntPtr font, out OutlineTextMetricsData metrics)
+        {
+            metrics = null;
+            return false;
+        }
+
+        // An empty codes span means the run from first. Values are ints or float bits, as the flags say.
+        bool GetCharWidths(IntPtr font, uint first, ReadOnlySpan<ushort> codes, CharWidthFlags flags, Span<uint> widths) => false;
+
+        // An empty codes span means the run from first. A, B and C are ints or float bits, as the flags say.
+        bool GetCharAbcWidths(IntPtr font, uint first, ReadOnlySpan<ushort> codes, AbcWidthFlags flags, Span<uint> abc) => false;
+
+        uint GetGlyphOutline(IntPtr font, ushort code, uint format, in Mat2Data matrix, bool ignoreRotation,
+            out GlyphMetricsData metrics, Span<byte> buffer)
+        {
+            metrics = default;
+            return NoFontData;
+        }
+
+        uint GetGlyphIndices(IntPtr font, bool countGlyphs, ReadOnlySpan<ushort> text, Span<ushort> indices, uint mode,
+            bool subset) => NoFontData;
+
+        uint GetKerningPairs(IntPtr font, Span<KerningPairData> pairs) => 0;
+
+        // Returns the GLYPHSET size and writes the set only when the span holds it.
+        uint GetUnicodeRanges(IntPtr font, Span<byte> glyphSet) => 0;
+
+        public const uint NoFontData = 0xFFFFFFFF;
+        public const uint EtoOpaque = 0x0002;
+        public const uint EtoClipped = 0x0004;
+        public const uint EtoGlyphIndex = 0x0010;
+    }
+
+    [Flags]
+    public enum CharWidthFlags : uint
+    {
+        None = 0,
+        Overhang = 0x1,
+        Integer = 0x2,
+        GlyphIndices = 0x8,
+    }
+
+    [Flags]
+    public enum AbcWidthFlags : uint
+    {
+        None = 0,
+        Integer = 0x1,
+        GlyphIndices = 0x2,
+    }
+
+    // The host's OUTLINETEXTMETRICW. Head is the part x86 and x64 share, and Diff is TMDIFF.
+    // NameOffsets index Names, with uint.MaxValue for a missing name.
+    public sealed class OutlineTextMetricsData
+    {
+        public const int HeadSize = 200;
+
+        public byte[] Image;
+        public int NamesStart;
+        public uint[] NameOffsets;
+        public ulong Diff;
+
+        public ReadOnlySpan<byte> Head => Image.AsSpan(0, HeadSize);
+        public ReadOnlySpan<byte> Names => Image.AsSpan(NamesStart);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GlyphMetricsData
+    {
+        public uint BlackBoxX;
+        public uint BlackBoxY;
+        public int OriginX;
+        public int OriginY;
+        public short CellIncX;
+        public short CellIncY;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Mat2Data
+    {
+        public uint M11;
+        public uint M12;
+        public uint M21;
+        public uint M22;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KerningPairData
+    {
+        public ushort First;
+        public ushort Second;
+        public int Amount;
     }
 
     public interface IDisplayConnection : IDisposable

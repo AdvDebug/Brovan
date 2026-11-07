@@ -170,12 +170,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return NTSTATUS.STATUS_ACCESS_VIOLATION;
         }
 
-        internal bool NeedsService => PendingBuffers.Count != 0 || Gpu.HasBlocked;
+        internal bool NeedsService => PendingBuffers.Count != 0 || Gpu.HasBlocked || Win32kDxgk.HasUnpublishedProbe;
 
         // Buffers retire first, because a retire can free room for a present that holds up its context.
         // A HashSet allows Remove while it is enumerated.
         internal void Service(BinaryEmulator Instance)
         {
+            if (Win32kDxgk.HasUnpublishedProbe)
+                Win32kDxgk.PublishProbeResult(Instance.WinHelper);
+
             foreach (DxgkCompositionBuffer Buffer in PendingBuffers)
             {
                 Buffer.RetireConsumed(Instance);

@@ -8,7 +8,7 @@ using System.Threading;
 namespace Brovan.Core.Emulation.OS.Windows
 {
     // Keeps no data of its own, because an end inherited by another process must see every unread byte.
-    internal sealed class GuestNamedPipe : IDisposable
+    internal sealed class GuestNamedPipe : IDisposable, IWinDeviceFile
     {
         internal const string DeviceName = "\\Device\\NamedPipe";
 
@@ -430,6 +430,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x1C), HostStreamQuotaBytes);
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x20), Ended ? PipeStateClosing : PipeStateConnected);
             BinaryPrimitives.WriteUInt32LittleEndian(Destination.Slice(0x24), Kind == HostStreamKind.Input ? PipeEndServer : PipeEndClient);
+        }
+
+        public void Closed(BinaryEmulator Instance, WinFile File)
+        {
+            Instance.WinHelper.PipeRequests.CompleteFile(Instance, File, NTSTATUS.STATUS_PIPE_BROKEN);
+            Dispose();
+            File.Pipe = null;
         }
 
         public void Dispose()
