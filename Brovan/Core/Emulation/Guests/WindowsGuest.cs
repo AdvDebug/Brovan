@@ -104,6 +104,13 @@ namespace Brovan.Core.Emulation.Guests
 
         private const ulong TebSameTebFlagsOffset64 = 0x17EE;
         private const ulong TebSameTebFlagsOffset32 = 0xFCA;
+
+        internal const ulong TebStackBaseOffset64 = 0x08;
+        internal const ulong TebStackLimitOffset64 = 0x10;
+        internal const ulong TebDeallocationStackOffset64 = 0x1478;
+        internal const ulong TebStackBaseOffset32 = 0x04;
+        internal const ulong TebStackLimitOffset32 = 0x08;
+        internal const ulong TebDeallocationStackOffset32 = 0xE0C;
         private const ushort TEB_SAME_TEB_FLAG_SKIP_THREAD_ATTACH = 0x0008;
         private const ushort TEB_SAME_TEB_FLAG_INITIAL_THREAD = 0x0400;
         private const ushort TEB_SAME_TEB_FLAG_LOADER_WORKER = 0x2000;
@@ -1625,9 +1632,9 @@ namespace Brovan.Core.Emulation.Guests
             ulong Teb = Instance.MapUniqueAddress(0x2000, MemoryProtection.ReadWrite);
             Instance._emulator.WriteMemoryByte(Teb, 0, 0x2000);
             Instance._emulator.WriteMemory(Teb, ulong.MaxValue, 8);
-            Instance._emulator.WriteMemory(Teb + 0x8, Thread.StackAddress + Thread.StackSize);
-            Instance._emulator.WriteMemory(Teb + 0x10, EffectiveStackLimit(Thread));
-            Instance._emulator.WriteMemory(Teb + 0x1478, Thread.StackAddress, 8);
+            Instance._emulator.WriteMemory(Teb + TebStackBaseOffset64, Thread.StackAddress + Thread.StackSize);
+            Instance._emulator.WriteMemory(Teb + TebStackLimitOffset64, EffectiveStackLimit(Thread));
+            Instance._emulator.WriteMemory(Teb + TebDeallocationStackOffset64, Thread.StackAddress, 8);
             Instance._emulator.WriteMemory(Teb + 0x18, 0UL, 8);
             Instance._emulator.WriteMemory(Teb + 0x20, 0UL, 8);
             Instance._emulator.WriteMemory(Teb + 0x28, 0UL, 8);
@@ -1691,9 +1698,9 @@ namespace Brovan.Core.Emulation.Guests
             ulong StackLimit = EffectiveStackLimit(Thread);
 
             Instance._emulator.WriteMemory(Teb + 0x0, 0xFFFFFFFFu);
-            Instance._emulator.WriteMemory(Teb + 0x4, (uint)StackBase);
-            Instance._emulator.WriteMemory(Teb + 0x8, (uint)StackLimit);
-            Instance._emulator.WriteMemory(Teb + 0xE0C, (uint)Thread.StackAddress);
+            Instance._emulator.WriteMemory(Teb + TebStackBaseOffset32, (uint)StackBase);
+            Instance._emulator.WriteMemory(Teb + TebStackLimitOffset32, (uint)StackLimit);
+            Instance._emulator.WriteMemory(Teb + TebDeallocationStackOffset32, (uint)Thread.StackAddress);
             Instance._emulator.WriteMemory(Teb + 0x18, (uint)Teb);
             Instance._emulator.WriteMemory(Teb + 0x20, WinHelper.PID);
             Instance._emulator.WriteMemory(Teb + 0x24, Thread.ThreadId);
@@ -1714,13 +1721,13 @@ namespace Brovan.Core.Emulation.Guests
             Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x20, (ushort)0x8664, 2);
             Instance._emulator.WriteMemory(Teb + Wow64InfoOffset + 0x22, (ushort)0x014C, 2);
 
-            Instance._emulator.WriteMemory(NativeTeb + 0x08, StackBase, 8);
-            Instance._emulator.WriteMemory(NativeTeb + 0x10, StackLimit, 8);
+            Instance._emulator.WriteMemory(NativeTeb + TebStackBaseOffset64, StackBase, 8);
+            Instance._emulator.WriteMemory(NativeTeb + TebStackLimitOffset64, StackLimit, 8);
             Instance._emulator.WriteMemory(NativeTeb + 0x30, NativeTeb, 8);
             Instance._emulator.WriteMemory(NativeTeb + 0x40, (ulong)WinHelper.PID, 8);
             Instance._emulator.WriteMemory(NativeTeb + 0x48, (ulong)Thread.ThreadId, 8);
             Instance._emulator.WriteMemory(NativeTeb + 0x60, NativePEB, 8);
-            Instance._emulator.WriteMemory(NativeTeb + 0x1478, Thread.StackAddress, 8);
+            Instance._emulator.WriteMemory(NativeTeb + TebDeallocationStackOffset64, Thread.StackAddress, 8);
             Instance._emulator.WriteMemory(NativeTeb + TebSameTebFlagsOffset64, SameTebFlags, 2);
             Instance._emulator.WriteMemory(NativeTeb + TebWowTebOffset64, (uint)TebSize, 4);
             WriteStaticUnicodeString64(Instance, NativeTeb);

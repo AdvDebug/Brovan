@@ -60,9 +60,48 @@
             android:id="@+id/debugger"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:background="#F00D1117"
+            android:background="@color/background"
             android:orientation="vertical"
             android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/menu_tip"
+            style="@style/StatusChip"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="16dp"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:text="@string/player_menu_tip"
+            android:textColor="@color/text_primary"
+            android:textSize="14sp"
+            android:visibility="gone" />
+
+        <LinearLayout
+            android:id="@+id/closing"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#E6000000"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <com.google.android.material.progressindicator.CircularProgressIndicator
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:indeterminate="true" />
+
+            <TextView
+                android:id="@+id/closing_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:textColor="@color/text_primary"
+                android:textSize="16sp" />
+        </LinearLayout>
     </FrameLayout>
 
     <dev.brovan.app.TaskbarView

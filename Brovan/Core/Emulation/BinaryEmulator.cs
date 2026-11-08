@@ -3251,6 +3251,13 @@ namespace Brovan.Core.Emulation
                 if (SchedulerExiting)
                     return true;
 
+                // A debugger pause asked for while every thread waits has no slice to end after.
+                if (EscapeScheduler)
+                {
+                    EscapeScheduler = false;
+                    return true;
+                }
+
                 long SchedulerTick = ++MlfqSchedulerTick;
                 long PassEpoch = WakeSignal.Current;
                 long PassHostEpoch = WakeSignal.HostCurrent;
@@ -3502,7 +3509,7 @@ namespace Brovan.Core.Emulation
                         if (WinHelper != null)
                         {
                             TriggerEventMessage($"[-] Thread {ImmaBeEmulatedOOO.ThreadId} jumped to a NULL address from 0x{RipBeforeSlice:X}.", LogFlags.Issues);
-                            TraceStackModuleFrames("[-] NULL call");
+                            TraceCallStack("[-] NULL call");
                         }
                     }
 
@@ -3613,7 +3620,7 @@ namespace Brovan.Core.Emulation
                     : " [no region]";
                 TriggerEventMessage($"[-] Invalid memory {GetAction(Type)} related to the address 0x{Address:X} at {(WinHelper != null ? DescribeAddress(Rip) : $"0x{Rip:X}")}.{RegionInfo}", LogFlags.Issues);
                 if (WinHelper != null)
-                    TraceStackModuleFrames("[-] Invalid memory");
+                    TraceCallStack("[-] Invalid memory");
             }
 
             bool Continue = false;

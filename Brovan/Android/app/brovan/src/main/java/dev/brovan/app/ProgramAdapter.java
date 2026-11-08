@@ -42,13 +42,11 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
     interface Listener {
         void onLaunch(Program program);
 
-        void onLongPress(Program program);
-
-        void onSettings(Program program);
+        void onActions(Program program);
     }
 
     enum Style {
-        GRID(R.string.library_style_grid, R.drawable.ic_style_grid, R.layout.item_app, 176, 64, 15f, true, 0f),
+        GRID(R.string.library_style_grid, R.drawable.ic_style_grid, R.layout.item_app_tile, 176, 0, 15f, false, 0f),
         COMPACT(R.string.library_style_compact, R.drawable.ic_style_compact, R.layout.item_app, 112, 48, 13f, false, 0f),
         LIST(R.string.library_style_list, R.drawable.ic_style_list, R.layout.item_app_row, 0, 52, 15f, true, 0f),
         LARGE(R.string.library_style_large, R.drawable.ic_style_large, R.layout.item_app_row, 0, 84, 18f, true, 0f),
@@ -200,7 +198,10 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         holder.detail.setTextColor(failed ? holder.itemView.getContext().getColor(R.color.log_error)
                 : Theming.color(holder.itemView.getContext(), Palette.Role.TEXT_SECONDARY));
         holder.detail.setVisibility(style.detail || failed ? View.VISIBLE : View.GONE);
-        holder.itemView.findViewById(R.id.app_settings).setOnClickListener(view -> listener.onSettings(program));
+        holder.actions.setOnClickListener(view -> listener.onActions(program));
+        holder.itemView.setScaleX(1f);
+        holder.itemView.setScaleY(1f);
+        holder.itemView.setAlpha(1f);
 
         if (style.artDp > 0) {
             int size = Math.round(style.artDp * holder.art.getResources().getDisplayMetrics().density);
@@ -213,12 +214,13 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
             }
         }
 
-        Integer tint = tints.get(iconKey(program));
+        String key = iconKey(program);
+        Integer tint = tints.get(key);
         holder.art.setBackground(backdrop(tint != null ? tint : monogramColor(program.name())));
 
         holder.itemView.setOnClickListener(view -> listener.onLaunch(program));
         holder.itemView.setOnLongClickListener(view -> {
-            listener.onLongPress(program);
+            listener.onActions(program);
             return true;
         });
 
@@ -226,7 +228,7 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
             holder.play.setOnClickListener(view -> listener.onLaunch(program));
         }
 
-        bindIcon(holder, program);
+        bindIcon(holder, program, key);
     }
 
     @Override
@@ -239,8 +241,7 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
                 program.executableName().getBytes(StandardCharsets.UTF_8));
     }
 
-    private void bindIcon(Holder holder, Program program) {
-        String key = iconKey(program);
+    private void bindIcon(Holder holder, Program program, String key) {
         holder.key = key;
 
         Bitmap ready = icons.get(key);
@@ -367,6 +368,7 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         final TextView name;
         final TextView detail;
         final View play;
+        final View actions;
 
         String key;
 
@@ -377,6 +379,7 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
             name = view.findViewById(R.id.name);
             detail = view.findViewById(R.id.detail);
             play = view.findViewById(R.id.play);
+            actions = view.findViewById(R.id.actions);
         }
     }
 

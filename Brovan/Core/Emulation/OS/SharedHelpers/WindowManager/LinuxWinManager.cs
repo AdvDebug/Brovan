@@ -1073,14 +1073,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (virtualKey == 0)
                 return;
 
+            uint messageKey = Win32kHelper.UnsidedVirtualKey(virtualKey, out uint scanCode);
             bool altHeld = (key.State & X11.Mod1Mask) != 0;
-            bool system = altHeld || virtualKey == VK_MENU || virtualKey == VK_F10;
+            bool system = altHeld || messageKey == VK_MENU || messageKey == VK_F10;
 
             uint message = down
                 ? (system ? WM_SYSKEYDOWN : WM_KEYDOWN)
                 : (system ? WM_SYSKEYUP : WM_KEYUP);
 
-            HostEventQueue.Enqueue(message, virtualKey, BuildKeyLParam(virtualKey, down, altHeld), window);
+            HostEventQueue.Enqueue(message, messageKey, BuildKeyLParam(scanCode, down, altHeld), window);
         }
 
         private static void EnqueuePointer(uint message, ulong keys, int x, int y, int rootX, int rootY, ulong window)
@@ -1482,10 +1483,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return keys;
         }
 
-        private static ulong BuildKeyLParam(uint virtualKey, bool down, bool altHeld)
+        private static ulong BuildKeyLParam(uint scanCode, bool down, bool altHeld)
         {
-            uint scanCode = Win32kHelper.MapVirtualKey(virtualKey, Win32kHelper.MapVirtualKeyToScanCodeEx);
-
             ulong lParam = 1;
             lParam |= (ulong)(scanCode & 0xFF) << 16;
 

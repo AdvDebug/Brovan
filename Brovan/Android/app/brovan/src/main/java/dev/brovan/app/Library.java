@@ -37,6 +37,7 @@ final class Library {
     static final String KEY_ARGUMENTS = "arguments";
     static final String KEY_WORKING_DIRECTORY = "working_directory";
     private static final String KEY_DIRECTORY = "directory";
+    private static final int MIN_NAME_KEY = 3;
     private static final Object STORE_GATE = new Object();
 
     private final File root;
@@ -229,7 +230,7 @@ final class Library {
             String id = UUID.randomUUID().toString();
             Properties values = new Properties();
             values.setProperty(KEY_DIRECTORY, directory.getName());
-            values.setProperty(KEY_NAME, directory.getName());
+            values.setProperty(KEY_NAME, displayName(directory, executableRelativePath));
             values.setProperty(KEY_EXECUTABLE, executableRelativePath);
             write(record(id), values);
             return readProgram(id);
@@ -591,6 +592,38 @@ final class Library {
         }
 
         return name.replaceAll("[^A-Za-z0-9 ._-]", "_").trim();
+    }
+
+    // A launcher can carry its engine's name, so a resource name is used only when it matches the folder or file name.
+    private static String displayName(File directory, String executableRelativePath) throws IOException {
+        String folder = nameKey(directory.getName());
+        String file = nameKey(stripExtension(new File(executableRelativePath).getName()));
+        String chosen = null;
+
+        for (String candidate : ExeIcon.versionNames(child(directory, executableRelativePath))) {
+            String key = candidate == null ? "" : nameKey(candidate);
+            boolean same = key.length() >= MIN_NAME_KEY && (related(key, folder) || related(key, file));
+            if (same && (chosen == null || candidate.length() < chosen.length())) {
+                chosen = candidate;
+            }
+        }
+
+        return chosen != null ? chosen : directory.getName();
+    }
+
+    private static boolean related(String key, String other) {
+        return other.length() >= MIN_NAME_KEY && (key.startsWith(other) || other.startsWith(key));
+    }
+
+    private static String nameKey(String name) {
+        StringBuilder key = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (Character.isLetterOrDigit(c)) {
+                key.append(Character.toLowerCase(c));
+            }
+        }
+        return key.toString();
     }
 
     private static String stripExtension(String name) {

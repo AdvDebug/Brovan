@@ -5,6 +5,7 @@ import org.json.JSONObject;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.Locale;
 import java.util.Properties;
 
 import dev.brovan.BrovanSurfaceView;
@@ -47,12 +48,29 @@ final class ProgramSettings {
         write("pointer", Integer.toString(value));
     }
 
+    // Widget.Brovan.SpeedSlider holds the same range.
+    private static final float SPEED_MIN = 0.4f;
+    private static final float SPEED_MAX = 3f;
+
+    private static float clampSpeed(float value) {
+        return Math.max(SPEED_MIN, Math.min(value, SPEED_MAX));
+    }
+
+    // The Material slider throws when its value is not on one of its steps.
+    static float snapSpeed(float value) {
+        return Math.round(clampSpeed(value) * 10f) / 10f;
+    }
+
+    static String formatSpeed(float value) {
+        return String.format(Locale.US, "%.1fx", value);
+    }
+
     float pointerSpeed() {
         float storedDefault = defaults.pointerSpeed();
-        float fallback = Float.isFinite(storedDefault) ? Math.max(0.4f, Math.min(storedDefault, 3f)) : 1f;
+        float fallback = Float.isFinite(storedDefault) ? clampSpeed(storedDefault) : 1f;
         try {
             float value = Float.parseFloat(values.getProperty("pointer_speed", Float.toString(fallback)));
-            return Float.isFinite(value) ? Math.max(0.4f, Math.min(value, 3f)) : fallback;
+            return Float.isFinite(value) ? clampSpeed(value) : fallback;
         } catch (NumberFormatException malformed) {
             return fallback;
         }
@@ -63,7 +81,7 @@ final class ProgramSettings {
     }
 
     String controlLayout() { return values.getProperty("layout", defaults.controlLayout()); }
-    int network() { return integer("network", defaults.network(), Settings.NETWORK_MODES.length); }
+    int network() { return integer("network", defaults.network(), Settings.NETWORK_MODE_COUNT); }
     int renderScale() { return integer("render_scale", defaults.renderScale(), Settings.RENDER_SCALES.length); }
     int lowMemory() { return integer("low_memory", defaults.lowMemory(), Settings.LOW_MEMORY_LEVELS.length); }
     boolean jitCache() { return bool("jit_cache", defaults.jitCache()); }

@@ -273,19 +273,15 @@ namespace Brovan
             if (_lastAddressModule != null && Address >= _lastAddressModuleStart && Address < _lastAddressModuleEnd)
                 return _lastAddressModule;
 
-            for (int i = 0; i < Emulator.WinHelper.WinModules.Count; i++)
+            WinModule Module = BinaryEmulator.FindModuleContaining(Emulator.WinHelper, Address);
+            if (Module != null)
             {
-                WinModule Module = Emulator.WinHelper.WinModules[i];
-                if (Address >= Module.MappedBase && Address < Module.MappedBase + Module.SizeOfImage)
-                {
-                    _lastAddressModule = Module;
-                    _lastAddressModuleStart = Module.MappedBase;
-                    _lastAddressModuleEnd = Module.MappedBase + Module.SizeOfImage;
-                    return Module;
-                }
+                _lastAddressModule = Module;
+                _lastAddressModuleStart = Module.MappedBase;
+                _lastAddressModuleEnd = Module.MappedBase + Module.SizeOfImage;
             }
 
-            return null;
+            return Module;
         }
 
         private static LinuxLoadedModule FindLinuxModuleByAddress(ulong Address)

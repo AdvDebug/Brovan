@@ -9,9 +9,9 @@
     android:focusable="true"
     android:fontFamily="monospace"
     android:maxLines="2"
-    android:paddingStart="12dp"
+    android:paddingStart="@dimen/debug_row_padding"
     android:paddingTop="3dp"
-    android:paddingEnd="12dp"
+    android:paddingEnd="@dimen/debug_row_padding"
     android:paddingBottom="3dp"
     android:textColor="@color/text_primary"
-    android:textSize="11sp" />
+    android:textSize="@dimen/debug_row_text" />

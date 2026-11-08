@@ -9,8 +9,6 @@
     <string name="program_arguments">Arguments</string>
     <string name="program_directory">Start in</string>
     <string name="program_directory_hint">Windows path or a folder relative to the executable. Leave empty for its folder.</string>
-    <string name="program_speed_hint">Leave empty to use the global default.</string>
-    <string name="program_speed_range">Enter a value from 0.4 to 3.</string>
     <string name="program_control_layout">Control layout</string>
     <string name="program_default_value">Default (%1$s)</string>
     <string name="program_reset">Reset overrides</string>
@@ -21,7 +19,6 @@
     <string name="program_stopped">The program stopped unexpectedly.</string>
     <string name="program_last_run">Last run</string>
     <string name="program_last_run_failed">Last run failed</string>
-    <string name="program_advanced_hint">Vulkan compatibility may cause rendering errors. Developer mode slows execution.</string>
     <string name="setting_on">On</string>
     <string name="setting_off">Off</string>
 
@@ -30,8 +27,6 @@
     <string name="nav_about">About</string>
     <string name="nav_windows">Runtimes</string>
     <string name="nav_files">Files</string>
-    <string name="nav_open">Open navigation</string>
-    <string name="nav_close">Close navigation</string>
 
     <string name="setup_step_of">Step %1$d of %2$d</string>
     <string name="setup_skip">Skip</string>
@@ -80,7 +75,6 @@
     <string name="library_add_title">Add a program</string>
     <string name="library_add_folder">Add folder</string>
     <string name="library_add_file">Add single .exe</string>
-    <string name="library_importing">Importing…</string>
     <string name="library_remove">Remove</string>
     <string name="library_pick_executable">Choose the program to launch</string>
     <string name="library_search">Search programs</string>
@@ -96,10 +90,8 @@
     <string name="library_style_shelf">Shelf</string>
     <string name="library_play">Play</string>
 
-    <string name="settings_title">Settings</string>
     <string name="settings_graphics">Graphics</string>
     <string name="settings_advanced">Advanced</string>
-    <string name="settings_network_summary">How much network access programs get.</string>
     <string name="settings_controls">On-screen controls</string>
     <string name="settings_network">Network access</string>
     <string name="settings_jit_cache">JIT code cache</string>
@@ -111,9 +103,7 @@
     <string name="settings_low_memory">Low memory mode</string>
     <string name="settings_low_memory_summary">Uses smaller caches and reports less memory. Programs may run slower.</string>
     <string name="settings_render_scale">Render scale</string>
-    <string name="settings_render_scale_summary">Lower resolution uses less memory, with a softer picture.</string>
     <string name="settings_pointer">Touch behaviour</string>
-    <string name="settings_edit_controls">Control layout</string>
     <string name="settings_developer">Developer mode</string>
     <string name="settings_developer_summary">Starts at the debugger prompt. Slower execution.</string>
     <string name="settings_dxvk">DXVK</string>
@@ -122,8 +112,6 @@
     <string name="settings_dxvk_version_latest">Latest release</string>
     <string name="settings_dxvk_install">Install DXVK</string>
     <string name="settings_dxvk_install_again">Reinstall DXVK</string>
-    <string name="settings_dxvk_installed">DXVK %1$s installed.</string>
-    <string name="settings_dxvk_missing">Not installed.</string>
     <string name="settings_dxvk_working">Downloading DXVK…</string>
     <string name="settings_dxvk_done">DXVK installed.</string>
     <string name="settings_dxvk_failed">Download failed. Check the connection and try again.</string>
@@ -198,15 +186,12 @@
     <string name="about_discord_copied">Discord username copied: %1$s</string>
     <string name="about_tagline">Run Windows programs on Android</string>
 
-    <string name="windows_media_hint">Import system files from your Windows installation media.</string>
+    <string name="windows_media_hint">Import the system files from a Windows ISO, WIM or ESD file.</string>
     <string name="windows_title">Windows system files</string>
-    <string name="windows_installed">Installed.</string>
-    <string name="windows_missing">Not installed.</string>
     <string name="windows_open_page">Get a Windows ISO</string>
-    <string name="windows_choose">Select ISO, WIM or ESD</string>
+    <string name="windows_choose">Choose file</string>
     <string name="windows_chosen">Selected: %1$s</string>
     <string name="windows_install">Import</string>
-    <string name="windows_storage">The extracted files are stored uncompressed. Keep several GB of free space.</string>
     <string name="windows_runtimes_title">Visual C++ runtimes</string>
     <string name="windows_runtimes">Install the Visual C++ runtimes</string>
     <string name="windows_runtimes_again">Update the Visual C++ runtimes</string>
@@ -267,8 +252,6 @@
     <string name="player_send">Send</string>
     <string name="player_debugger">Debugger</string>
     <string name="player_menu_hint">These settings are kept for this program</string>
-    <string name="player_pointer_section">Pointer</string>
-    <string name="player_actions">Program</string>
     <string name="player_sensitivity">Drag sensitivity</string>
     <string name="player_sensitivity_summary">How far the pointer travels for the same finger movement.</string>
     <string name="player_escape">Send Esc</string>
@@ -282,13 +265,12 @@
     <string name="debug_run">Run</string>
     <string name="debug_continue">Continue</string>
     <string name="debug_pause">Pause</string>
-    <string name="debug_step">Step</string>
+    <string name="debug_step">Step into</string>
     <string name="debug_step_over">Step over</string>
     <string name="debug_goto">Go to</string>
-    <string name="debug_refresh">Refresh</string>
+    <string name="debug_program">Program</string>
 
     <string name="debug_tab_log">Log</string>
-    <string name="debug_tab_disassembly">Disassembly</string>
     <string name="debug_tab_registers">Registers</string>
     <string name="debug_tab_stack">Call stack</string>
     <string name="debug_tab_threads">Threads</string>
@@ -310,4 +292,74 @@
     <string name="debug_pausing">Breaking after the running slice…</string>
     <string name="debug_not_started">The program is loaded and waiting. Run starts it.</string>
     <string name="debug_stats">%1$d threads · %2$d modules · %3$s instructions</string>
+    <string name="debug_run_here">Run to here</string>
+    <string name="debug_toggle_breakpoint">Set or remove breakpoint</string>
+    <string name="debug_show_memory">Show in memory</string>
+    <string name="debug_copy_address">Copy address</string>
+    <string name="debug_copied">Address copied.</string>
+    <string name="debug_breakpoints_hint">Tap a line in the disassembly to set a breakpoint. Long-press a line for more.</string>
+    <string name="debug_stack_guessed">\? = found by scanning the stack, it may be wrong</string>
+    <string name="debug_history">Command history</string>
+    <string name="debug_history_empty">No commands sent yet.</string>
+    <string name="debug_memory_previous">Previous page</string>
+    <string name="debug_memory_next">Next page</string>
+    <string name="debug_memory_range">%1$s · %2$d bytes</string>
+
+    <string name="settings_control_layout_summary">Place and size the on-screen buttons.</string>
+    <string name="runtime_installed">Installed</string>
+    <string name="runtime_missing">Not installed</string>
+    <string name="runtime_dxvk_installed">%1$s installed</string>
+    <string name="runtime_install">Install</string>
+    <string name="runtime_update">Update</string>
+    <string name="runtime_reinstall">Reinstall</string>
+    <string name="no_browser">No browser is available on this device.</string>
+    <string name="library_more">More options</string>
+    <string name="library_remove_title">Remove %1$s?</string>
+    <string name="library_remove_body">This deletes the program and its files from Brovan\'s storage. It cannot be undone.</string>
+    <string name="library_save_failed">Could not save: %1$s</string>
+    <string name="program_use_default">Use default</string>
+    <string name="player_keyboard">Keyboard</string>
+    <string name="player_escape_short">Esc</string>
+    <string name="player_more">More</string>
+    <string name="player_menu_tip">Swipe from the edge or press Back for the menu</string>
+    <string name="player_closing">Closing %1$s…</string>
+    <string name="player_status_stopping">Stopping…</string>
+    <string name="player_status_finished">Finished</string>
+    <string name="player_status_stopped">Stopped</string>
+    <string name="player_start_failed">Could not start the emulator (%1$d).</string>
+    <string name="theme_custom">Custom colours</string>
+    <string name="theme_custom_summary">Change each colour of the theme.</string>
+
+    <string-array name="control_schemes">
+        <item>Touch only</item>
+        <item>Joystick (WASD)</item>
+        <item>Joystick (arrows)</item>
+        <item>D-pad (arrows)</item>
+        <item>Mouse touchpad</item>
+        <item>Custom layout</item>
+    </string-array>
+    <string-array name="pointer_modes">
+        <item>Touch drags with the button held</item>
+        <item>Drag moves the cursor, tap clicks</item>
+        <item>Whole screen is a trackpad</item>
+    </string-array>
+    <string-array name="network_modes">
+        <item>None</item>
+        <item>Loopback</item>
+        <item>Full</item>
+    </string-array>
+    <string-array name="render_scales">
+        <item>Full</item>
+        <item>85%</item>
+        <item>75%</item>
+        <item>60%</item>
+        <item>50%</item>
+    </string-array>
+    <string-array name="low_memory_levels">
+        <item>Off</item>
+        <item>Minimal</item>
+        <item>Medium</item>
+        <item>High</item>
+        <item>Aggressive</item>
+    </string-array>
 </resources>

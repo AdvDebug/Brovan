@@ -382,9 +382,10 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
     private void showPresets() {
         ControlOverlay.Scheme[] schemes = {ControlOverlay.Scheme.WASD, ControlOverlay.Scheme.ARROWS,
                 ControlOverlay.Scheme.DPAD, ControlOverlay.Scheme.TOUCHPAD};
+        String[] names = getResources().getStringArray(R.array.control_schemes);
         CharSequence[] labels = new CharSequence[schemes.length];
         for (int i = 0; i < schemes.length; i++) {
-            labels[i] = schemes[i].label();
+            labels[i] = names[schemes[i].ordinal()];
         }
 
         Theming.dialog(this)

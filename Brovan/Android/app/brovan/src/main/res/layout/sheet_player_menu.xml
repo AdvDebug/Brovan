@@ -7,11 +7,36 @@
         android:orientation="vertical" android:padding="20dp">
         <TextView android:id="@+id/title" android:layout_width="match_parent"
             android:layout_height="wrap_content" android:maxLines="1" android:ellipsize="end"
-            android:textColor="@color/text_primary" android:textSize="20sp" />
-        <TextView style="@style/SettingsSummary" android:text="@string/player_menu_hint" />
+            android:textColor="@color/text_primary" android:textSize="22sp" />
         <com.google.android.material.button.MaterialButton android:id="@+id/resume"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginTop="12dp" android:text="@string/player_resume" />
+            android:layout_marginTop="16dp" android:minHeight="56dp" android:text="@string/player_resume"
+            app:icon="@drawable/ic_play" app:iconGravity="textStart" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" android:layout_marginStart="-4dp" android:layout_marginEnd="-4dp"
+            android:orientation="horizontal">
+            <LinearLayout android:id="@+id/keyboard" style="@style/PlayerTile">
+                <ImageView style="@style/PlayerTileIcon" android:src="@drawable/ic_keyboard" />
+                <TextView style="@style/PlayerTileLabel" android:text="@string/player_keyboard" />
+            </LinearLayout>
+            <LinearLayout android:id="@+id/windows" style="@style/PlayerTile">
+                <ImageView style="@style/PlayerTileIcon" android:src="@drawable/ic_window" />
+                <TextView style="@style/PlayerTileLabel" android:text="@string/player_windows" />
+            </LinearLayout>
+            <LinearLayout android:id="@+id/escape" style="@style/PlayerTile"
+                android:contentDescription="@string/player_escape">
+                <ImageView style="@style/PlayerTileIcon" android:src="@drawable/ic_close" />
+                <TextView style="@style/PlayerTileLabel" android:text="@string/player_escape_short"
+                    android:importantForAccessibility="no" />
+            </LinearLayout>
+            <LinearLayout android:id="@+id/quit" style="@style/PlayerTile">
+                <ImageView style="@style/PlayerTileIcon" android:src="@drawable/ic_power"
+                    android:tint="@color/log_error" />
+                <TextView style="@style/PlayerTileLabel" android:text="@string/player_quit"
+                    android:textColor="@color/log_error" />
+            </LinearLayout>
+        </LinearLayout>
+
         <TextView style="@style/SectionLabel" android:text="@string/player_controls" />
         <LinearLayout style="@style/SettingsChoiceRow">
             <TextView style="@style/SettingsChoiceLabel" android:text="@string/player_pointer" />
@@ -21,36 +46,28 @@
             <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_controls" />
             <TextView android:id="@+id/controls" style="@style/SettingsChoiceValue" />
         </LinearLayout>
-        <LinearLayout style="@style/SettingsChoiceRow">
-            <TextView style="@style/SettingsChoiceLabel" android:text="@string/player_sensitivity" />
-            <TextView android:id="@+id/sensitivity_value" style="@style/SettingsChoiceValue"
-                android:drawableEnd="@null" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" android:orientation="horizontal" android:gravity="center_vertical">
+            <TextView style="@style/SettingsRowTitle" android:layout_width="0dp" android:layout_weight="1"
+                android:text="@string/player_sensitivity" />
+            <TextView android:id="@+id/sensitivity_value" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:textColor="@color/accent" android:textSize="14sp" />
         </LinearLayout>
         <com.google.android.material.slider.Slider android:id="@+id/sensitivity"
-            android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:stepSize="0.1" android:valueFrom="0.4" android:valueTo="3.0"
-            app:labelBehavior="gone" />
-        <TextView style="@style/SectionLabel" android:text="@string/player_actions" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/windows"
-            style="@style/Widget.Brovan.SheetAction" android:text="@string/player_windows"
-            app:icon="@drawable/ic_window" />
+            style="@style/Widget.Brovan.SpeedSlider" />
+        <TextView style="@style/SettingsSummary" android:text="@string/player_menu_hint" />
+
+        <TextView style="@style/SectionLabel" android:text="@string/player_more" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/redraw"
+            style="@style/Widget.Brovan.SheetAction" android:text="@string/player_redraw"
+            app:icon="@drawable/ic_refresh" />
         <com.google.android.material.button.MaterialButton android:id="@+id/console"
             style="@style/Widget.Brovan.SheetAction" android:text="@string/player_show_console"
             app:icon="@drawable/ic_keyboard"
             android:visibility="gone" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/escape"
-            style="@style/Widget.Brovan.SheetAction" android:text="@string/player_escape"
-            app:icon="@drawable/ic_keyboard" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/redraw"
-            style="@style/Widget.Brovan.SheetAction" android:text="@string/player_redraw"
-            app:icon="@drawable/ic_refresh" />
         <com.google.android.material.button.MaterialButton android:id="@+id/debugger"
             style="@style/Widget.Brovan.SheetAction" android:text="@string/player_debugger"
             app:icon="@drawable/ic_files"
             android:visibility="gone" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/quit"
-            style="@style/Widget.Brovan.SheetAction" android:text="@string/player_quit"
-            app:icon="@drawable/ic_power"
-            android:textColor="@color/log_error" app:iconTint="@color/log_error" />
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>

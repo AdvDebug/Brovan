@@ -2,53 +2,83 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent" android:layout_height="match_parent" android:fillViewport="true">
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:orientation="vertical" android:paddingHorizontal="20dp" android:paddingBottom="24dp">
-        <TextView style="@style/SectionLabel" android:text="@string/settings_graphics" />
-        <LinearLayout style="@style/SettingsChoiceRow">
-            <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_render_scale" />
-            <TextView android:id="@+id/render_scale" style="@style/SettingsChoiceValue" />
-        </LinearLayout>
-        <TextView style="@style/SectionLabel" android:text="@string/player_controls" />
-        <LinearLayout style="@style/SettingsChoiceRow">
-            <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_controls" />
-            <TextView android:id="@+id/controls" style="@style/SettingsChoiceValue" />
-        </LinearLayout>
-        <LinearLayout style="@style/SettingsChoiceRow">
-            <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_pointer" />
-            <TextView android:id="@+id/pointer" style="@style/SettingsChoiceValue" />
-        </LinearLayout>
-        <com.google.android.material.button.MaterialButton android:id="@+id/edit_controls"
-            style="@style/Widget.Material3.Button.TextButton" android:layout_width="wrap_content"
-            android:layout_height="wrap_content" android:text="@string/program_control_layout" />
-        <TextView style="@style/SectionLabel" android:text="@string/settings_advanced" />
-        <LinearLayout style="@style/SettingsChoiceRow">
-            <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_network" />
-            <TextView android:id="@+id/network" style="@style/SettingsChoiceValue" />
-        </LinearLayout>
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/jit_cache" android:layout_width="match_parent"
-            android:layout_height="wrap_content" android:minHeight="56dp"
-            android:text="@string/settings_jit_cache" android:textColor="@color/text_primary" />
-        <TextView style="@style/SettingsSummary" android:text="@string/settings_jit_cache_summary" />
-        <LinearLayout style="@style/SettingsChoiceRow">
-            <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_low_memory" />
-            <TextView android:id="@+id/low_memory" style="@style/SettingsChoiceValue" />
-        </LinearLayout>
-        <TextView style="@style/SettingsSummary" android:text="@string/settings_low_memory_summary" />
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/relax_vulkan" android:layout_width="match_parent"
-            android:layout_height="wrap_content" android:minHeight="56dp"
-            android:text="@string/settings_relax_vulkan" android:textColor="@color/text_primary" />
-        <TextView style="@style/SettingsSummary" android:text="@string/settings_relax_vulkan_summary" />
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/sustained" android:layout_width="match_parent"
-            android:layout_height="wrap_content" android:minHeight="56dp"
-            android:text="@string/settings_sustained" android:textColor="@color/text_primary" />
-        <TextView style="@style/SettingsSummary" android:text="@string/settings_sustained_summary" />
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/developer" android:layout_width="match_parent"
-            android:layout_height="wrap_content" android:minHeight="56dp"
-            android:text="@string/settings_developer" android:textColor="@color/text_primary" />
-        <TextView style="@style/SettingsSummary" android:text="@string/settings_developer_summary" />
+        android:orientation="vertical" android:paddingHorizontal="16dp" android:paddingBottom="24dp">
+        <TextView style="@style/SectionLabel.Group" android:layout_marginTop="8dp" android:text="@string/settings_graphics" />
+        <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+            <LinearLayout style="@style/SettingsGroupBody">
+                <LinearLayout style="@style/SettingsChoiceRow.Group">
+                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_render_scale" />
+                    <TextView android:id="@+id/render_scale" style="@style/SettingsChoiceValue" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <TextView style="@style/SectionLabel.Group" android:text="@string/player_controls" />
+        <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+            <LinearLayout style="@style/SettingsGroupBody">
+                <LinearLayout style="@style/SettingsChoiceRow.Group">
+                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_controls" />
+                    <TextView android:id="@+id/controls" style="@style/SettingsChoiceValue" />
+                </LinearLayout>
+                <LinearLayout style="@style/SettingsChoiceRow.Group">
+                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_pointer" />
+                    <TextView android:id="@+id/pointer" style="@style/SettingsChoiceValue" />
+                </LinearLayout>
+                <LinearLayout android:id="@+id/edit_controls" style="@style/SettingsSwitchRow">
+                    <LinearLayout style="@style/SettingsSwitchText">
+                        <TextView style="@style/SettingsRowTitle" android:text="@string/program_control_layout" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_control_layout_summary" />
+                    </LinearLayout>
+                    <ImageView style="@style/SettingsChevron" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <TextView style="@style/SectionLabel.Group" android:text="@string/settings_advanced" />
+        <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+            <LinearLayout style="@style/SettingsGroupBody">
+                <LinearLayout style="@style/SettingsChoiceRow.Group">
+                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_network" />
+                    <TextView android:id="@+id/network" style="@style/SettingsChoiceValue" />
+                </LinearLayout>
+                <LinearLayout style="@style/SettingsChoiceRow.Group">
+                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_low_memory" />
+                    <TextView android:id="@+id/low_memory" style="@style/SettingsChoiceValue" />
+                    <TextView style="@style/SettingsRowSummary" android:text="@string/settings_low_memory_summary" />
+                </LinearLayout>
+                <LinearLayout style="@style/SettingsSwitchRow">
+                    <LinearLayout style="@style/SettingsSwitchText">
+                        <TextView style="@style/SettingsRowTitle" android:text="@string/settings_jit_cache" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_jit_cache_summary" />
+                    </LinearLayout>
+                    <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/jit_cache"
+                        style="@style/SettingsSwitch" android:contentDescription="@string/settings_jit_cache" />
+                </LinearLayout>
+                <LinearLayout style="@style/SettingsSwitchRow">
+                    <LinearLayout style="@style/SettingsSwitchText">
+                        <TextView style="@style/SettingsRowTitle" android:text="@string/settings_relax_vulkan" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_relax_vulkan_summary" />
+                    </LinearLayout>
+                    <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/relax_vulkan"
+                        style="@style/SettingsSwitch" android:contentDescription="@string/settings_relax_vulkan" />
+                </LinearLayout>
+                <LinearLayout style="@style/SettingsSwitchRow">
+                    <LinearLayout style="@style/SettingsSwitchText">
+                        <TextView style="@style/SettingsRowTitle" android:text="@string/settings_sustained" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_sustained_summary" />
+                    </LinearLayout>
+                    <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/sustained"
+                        style="@style/SettingsSwitch" android:contentDescription="@string/settings_sustained" />
+                </LinearLayout>
+                <LinearLayout style="@style/SettingsSwitchRow">
+                    <LinearLayout style="@style/SettingsSwitchText">
+                        <TextView style="@style/SettingsRowTitle" android:text="@string/settings_developer" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_developer_summary" />
+                    </LinearLayout>
+                    <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/developer"
+                        style="@style/SettingsSwitch" android:contentDescription="@string/settings_developer" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
 </ScrollView>

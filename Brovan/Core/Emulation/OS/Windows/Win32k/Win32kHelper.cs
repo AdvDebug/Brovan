@@ -1682,6 +1682,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return false;
         }
 
+        internal static uint UnsidedVirtualKey(uint VirtualKey, out uint ScanCodeEx)
+        {
+            if (!TryGetKeyMapping(VirtualKey, out Win32kKeyMapping Mapping))
+            {
+                ScanCodeEx = 0;
+                return VirtualKey;
+            }
+
+            ScanCodeEx = Mapping.Extended ? ExtendedScanCodePrefix | Mapping.ScanCode : Mapping.ScanCode;
+            return Mapping.VirtualKey;
+        }
+
         private static bool TryGetKeyMapping(uint VirtualKey, out Win32kKeyMapping Mapping)
         {
             for (int i = 0; i < KeyMappings.Length; i++)

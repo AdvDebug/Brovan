@@ -7,9 +7,9 @@
     android:focusable="true"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingStart="18dp"
+    android:paddingStart="16dp"
     android:paddingTop="12dp"
-    android:paddingEnd="18dp"
+    android:paddingEnd="16dp"
     android:paddingBottom="12dp">
 
     <TextView
@@ -18,7 +18,7 @@
         android:layout_height="wrap_content"
         android:layout_weight="1"
         android:textColor="@color/text_primary"
-        android:textSize="15sp" />
+        android:textSize="16sp" />
 
     <View
         android:id="@+id/role_swatch"

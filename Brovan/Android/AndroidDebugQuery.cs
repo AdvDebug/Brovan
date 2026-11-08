@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using Brovan.Analysis;
 using Brovan.Core.Emulation;
 using Brovan.Core.Emulation.Guests;
@@ -284,26 +285,30 @@ namespace Brovan.Android
                 return;
             }
 
-            if (!Stopped)
+            // The walk runs on the UI thread, so it reads the context saved at the stop and never waits for the lock.
+            BinaryEmulator emulator = Variables.Emulator;
+            if (emulator == null || !Stopped || !Monitor.TryEnter(emulator.KernelLock))
                 return;
 
-            // Without a call trace the stack is scanned for return-address candidates, the same fallback the
-            // console call stack uses.
-            RefreshContext(thread);
-            ulong stackPointer = Helpers.GetThreadStackPointer(thread);
-            uint pointerSize = Variables.Arch == BinaryArchitecture.x64 ? 8u : 4u;
-
-            for (int i = 0, number = 0; i < maxFrames * 8 && number < maxFrames; i++)
+            try
             {
-                ulong slot = stackPointer + ((ulong)i * pointerSize);
-                ulong value = ReadPointer(slot, pointerSize);
-                if (value == 0 || Handlers.FindModuleByAddress(value) == null)
-                    continue;
+                if (!Stopped)
+                    return;
 
-                text.Append(number++).Append('|')
-                    .Append(Hex(value)).Append('|')
-                    .Append(Clean(Symbol(value))).Append('|')
-                    .Append(Hex(slot)).Append("|raw\n");
+                List<StackFrameRecord> walked = new List<StackFrameRecord>();
+                PeStackUnwinder.Walk(emulator, thread, thread.Context, maxFrames, walked);
+                for (int i = 0; i < walked.Count; i++)
+                {
+                    StackFrameRecord frame = walked[i];
+                    text.Append(i).Append('|')
+                        .Append(Hex(frame.Ip)).Append('|')
+                        .Append(Clean(Symbol(frame.Ip))).Append('|')
+                        .Append(Hex(frame.Sp)).Append(frame.Unwound ? "|unwound\n" : "|raw\n");
+                }
+            }
+            finally
+            {
+                Monitor.Exit(emulator.KernelLock);
             }
         }
 
@@ -405,16 +410,6 @@ namespace Brovan.Android
         {
             if (Stopped)
                 Helpers.RefreshThreadContext(thread);
-        }
-
-        private static ulong ReadPointer(ulong address, uint size)
-        {
-            BinaryEmulator emulator = Variables.Emulator;
-            if (emulator == null || address == 0 || !emulator.IsRegionMapped(address, size))
-                return 0;
-
-            byte[] data = emulator.ReadMemory(address, size);
-            return size == 8 ? BitConverter.ToUInt64(data) : BitConverter.ToUInt32(data);
         }
 
         private static int ModuleCount()

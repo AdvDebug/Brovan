@@ -1,4 +1,5 @@
 using Brovan.Core.Emulation.OS.SharedHelpers;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 
 namespace Brovan.Android
 {
@@ -82,14 +83,18 @@ namespace Brovan.Android
 
         public static void Key(bool down, uint virtualKey, uint scanCode)
         {
-            if (virtualKey == VK_MENU)
+            uint messageKey = Win32kHelper.UnsidedVirtualKey(virtualKey, out uint mappedScanCode);
+            if (mappedScanCode != 0)
+                scanCode = mappedScanCode;
+
+            if (messageKey == VK_MENU)
                 _altHeld = down;
 
             uint message = down
                 ? (_altHeld ? WM_SYSKEYDOWN : WM_KEYDOWN)
                 : (_altHeld ? WM_SYSKEYUP : WM_KEYUP);
 
-            HostEventQueue.Enqueue(message, virtualKey, BuildKeyLParam(scanCode, virtualKey, down, _altHeld));
+            HostEventQueue.Enqueue(message, messageKey, BuildKeyLParam(scanCode, virtualKey, down, _altHeld));
         }
 
         private static volatile bool _focused;
@@ -121,7 +126,7 @@ namespace Brovan.Android
             ulong lParam = 1;
             lParam |= (ulong)(scanCode & 0xFF) << 16;
 
-            if (IsExtendedKey(virtualKey))
+            if (IsExtendedKey(virtualKey) || (scanCode & 0xFF00) == Win32kHelper.ExtendedScanCodePrefix)
                 lParam |= 1UL << 24;
 
             if (altHeld)

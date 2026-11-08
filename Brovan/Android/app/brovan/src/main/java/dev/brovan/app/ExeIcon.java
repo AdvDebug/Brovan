@@ -6,11 +6,17 @@ import android.graphics.BitmapFactory;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
 
 final class ExeIcon {
 
     private static final int RT_ICON = 3;
     private static final int RT_GROUP_ICON = 14;
+    private static final int RT_VERSION = 16;
+    private static final int MAX_VERSION_BYTES = 64 * 1024;
+    private static final int VERSION_BLOCK_HEADER = 6;
+    private static final int STRING_FILE_INFO_DEPTH = 1;
+    private static final int VERSION_STRING_DEPTH = 3;
     private static final int MAX_EDGE = 256;
     private static final int MAX_IMAGE_BYTES = 8 * 1024 * 1024;
     private static final int SECTION_FIELDS = 4;
@@ -34,14 +40,111 @@ final class ExeIcon {
         }
     }
 
+    static String[] versionNames(File exe) {
+        String[] names = new String[2];
+        try (RandomAccessFile handle = new RandomAccessFile(exe, "r")) {
+            new ExeIcon(handle).readVersionNames(names);
+        } catch (IOException | RuntimeException unusable) {
+            return new String[2];
+        }
+        return names;
+    }
+
+    private void readVersionNames(String[] names) throws IOException {
+        if (!openResources()) {
+            return;
+        }
+
+        long entry = firstLeaf(firstChild(subDirectory(resourceRoot, RT_VERSION)));
+        if (entry < 0) {
+            return;
+        }
+
+        byte[] data = bytes(toOffset(u32(entry)), (int) Math.min(u32(entry + 4), MAX_VERSION_BYTES));
+        if (data != null) {
+            collectNames(data, 0, data.length, 0, names);
+        }
+    }
+
+    // VS_VERSIONINFO, StringFileInfo, StringTable and String share one layout: length, value length, type,
+    // a UTF-16 key, then the value and the children, each aligned to 4 bytes.
+    private static void collectNames(byte[] data, int at, int end, int depth, String[] names) {
+        while (at + VERSION_BLOCK_HEADER <= end) {
+            int blockLength = int16(data, at);
+            if (blockLength < VERSION_BLOCK_HEADER || at + blockLength > end) {
+                return;
+            }
+
+            int blockEnd = at + blockLength;
+            int keyStart = at + VERSION_BLOCK_HEADER;
+            int keyEnd = utf16End(data, keyStart, blockEnd);
+            String key = new String(data, keyStart, keyEnd - keyStart, StandardCharsets.UTF_16LE);
+            boolean text = int16(data, at + 4) == 1;
+            int valueLength = int16(data, at + 2) * (text ? 2 : 1);
+            int value = Math.min(align4(keyEnd + 2), blockEnd);
+            int valueEnd = Math.min(value + valueLength, blockEnd);
+
+            if (depth == VERSION_STRING_DEPTH) {
+                store(key, data, value, valueEnd, names);
+            } else if (depth != STRING_FILE_INFO_DEPTH || key.equals("StringFileInfo")) {
+                collectNames(data, Math.min(align4(valueEnd), blockEnd), blockEnd, depth + 1, names);
+            }
+
+            at = align4(blockEnd);
+        }
+    }
+
+    private static void store(String key, byte[] data, int from, int to, String[] names) {
+        int slot = key.equals("FileDescription") ? 0 : key.equals("ProductName") ? 1 : -1;
+        if (slot < 0 || names[slot] != null) {
+            return;
+        }
+
+        int end = utf16End(data, from, to);
+        String value = new String(data, from, end - from, StandardCharsets.UTF_16LE).trim();
+        if (!value.isEmpty()) {
+            names[slot] = value;
+        }
+    }
+
+    private static int utf16End(byte[] data, int from, int to) {
+        while (from + 2 <= to && int16(data, from) != 0) {
+            from += 2;
+        }
+
+        return from;
+    }
+
+    private static int align4(int at) {
+        return (at + 3) & ~3;
+    }
+
     private Bitmap best() throws IOException {
-        if (u16(0) != 0x5A4D) {
+        if (!openResources()) {
             return null;
+        }
+
+        long icons = subDirectory(resourceRoot, RT_ICON);
+        if (icons < 0) {
+            return null;
+        }
+
+        long entry = firstLeaf(firstChild(subDirectory(resourceRoot, RT_GROUP_ICON)));
+        if (entry < 0) {
+            return null;
+        }
+
+        return fromGroup(bytes(toOffset(u32(entry)), (int) u32(entry + 4)), icons);
+    }
+
+    private boolean openResources() throws IOException {
+        if (u16(0) != 0x5A4D) {
+            return false;
         }
 
         long pe = u32(0x3C);
         if (u32(pe) != 0x00004550) {
-            return null;
+            return false;
         }
 
         int sectionCount = u16(pe + 6);
@@ -59,42 +162,22 @@ final class ExeIcon {
             directoryCountAt = optional + 108;
             directories = optional + 112;
         } else {
-            return null;
+            return false;
         }
 
         if (u32(directoryCountAt) < 3) {
-            return null;
+            return false;
         }
 
         long resourceRva = u32(directories + 2 * 8);
         if (resourceRva == 0) {
-            return null;
+            return false;
         }
 
         readSections(optional + optionalSize, sectionCount);
 
         resourceRoot = toOffset(resourceRva);
-        if (resourceRoot < 0) {
-            return null;
-        }
-
-        long groups = subDirectory(resourceRoot, RT_GROUP_ICON);
-        long icons = subDirectory(resourceRoot, RT_ICON);
-        if (groups < 0 || icons < 0) {
-            return null;
-        }
-
-        long group = firstChild(groups);
-        if (group < 0) {
-            return null;
-        }
-
-        long entry = firstLeaf(group);
-        if (entry < 0) {
-            return null;
-        }
-
-        return fromGroup(bytes(toOffset(u32(entry)), (int) u32(entry + 4)), icons);
+        return resourceRoot >= 0;
     }
 
     private Bitmap fromGroup(byte[] group, long icons) throws IOException {

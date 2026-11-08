@@ -4,7 +4,6 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Typeface;
-import android.text.InputType;
 import android.util.AttributeSet;
 import android.util.TypedValue;
 import android.view.Choreographer;
@@ -13,11 +12,11 @@ import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 
+import dev.brovan.input.KeyInputConnection;
 import dev.brovan.input.KeyMap;
 import dev.brovan.input.VirtualKey;
 
@@ -51,7 +50,6 @@ public class TerminalView extends View {
     private static final int VK_BACK = VirtualKey.BACKSPACE.code();
     private static final int VK_RETURN = VirtualKey.ENTER.code();
     private static final int VK_DELETE = VirtualKey.DELETE.code();
-    private static final int MAX_IME_DELETES = 64;
 
     // Campbell colors, then the xterm palette.
     private static final int[] PALETTE = buildPalette();
@@ -303,35 +301,23 @@ public class TerminalView extends View {
         return true;
     }
 
-    // TYPE_NULL keeps the IME from replaying hardware keys out of order.
     @Override
     public InputConnection onCreateInputConnection(EditorInfo info) {
-        info.inputType = InputType.TYPE_NULL;
-        info.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI
-                | EditorInfo.IME_ACTION_NONE;
-
-        return new BaseInputConnection(this, false) {
-            // Clear composing text so the IME does not send it twice.
+        return KeyInputConnection.create(this, info, new KeyInputConnection.Target() {
             @Override
-            public boolean commitText(CharSequence value, int newCursorPosition) {
-                type(value);
-                getEditable().clear();
-                return true;
+            public void type(CharSequence text) {
+                TerminalView.this.type(text);
             }
 
             @Override
-            public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-                for (int i = 0; i < Math.min(beforeLength, MAX_IME_DELETES); i++) {
+            public void delete(boolean forward) {
+                if (forward) {
+                    press(VK_DELETE, '\0');
+                } else {
                     press(VK_BACK, '\b');
                 }
-
-                for (int i = 0; i < Math.min(afterLength, MAX_IME_DELETES); i++) {
-                    press(VK_DELETE, '\0');
-                }
-
-                return true;
             }
-        };
+        });
     }
 
     @Override

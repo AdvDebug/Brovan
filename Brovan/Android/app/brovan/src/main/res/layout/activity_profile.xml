@@ -15,8 +15,8 @@
     <ScrollView android:layout_width="match_parent" android:layout_height="0dp"
         android:layout_weight="1" android:fillViewport="true">
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:orientation="vertical" android:paddingHorizontal="20dp" android:paddingBottom="24dp">
-            <TextView style="@style/SectionLabel" android:text="@string/program_launch" />
+            android:orientation="vertical" android:paddingHorizontal="16dp" android:paddingBottom="24dp">
+            <TextView style="@style/SectionLabel.Group" android:layout_marginTop="8dp" android:text="@string/program_launch" />
             <com.google.android.material.textfield.TextInputLayout
                 style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
@@ -47,70 +47,107 @@
             <com.google.android.material.textfield.TextInputLayout
                 style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp" android:hint="@string/program_directory"
+                android:hint="@string/program_directory"
                 app:helperText="@string/program_directory_hint">
                 <com.google.android.material.textfield.TextInputEditText
                     android:id="@+id/profile_directory" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:inputType="textUri" android:maxLines="1" />
             </com.google.android.material.textfield.TextInputLayout>
-            <TextView style="@style/SectionLabel" android:text="@string/player_controls" />
-            <LinearLayout style="@style/SettingsChoiceRow">
-                <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_controls" />
-                <TextView android:id="@+id/profile_controls" style="@style/SettingsChoiceValue" />
-            </LinearLayout>
-            <LinearLayout style="@style/SettingsChoiceRow">
-                <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_pointer" />
-                <TextView android:id="@+id/profile_pointer" style="@style/SettingsChoiceValue" />
-            </LinearLayout>
-            <com.google.android.material.textfield.TextInputLayout
-                android:id="@+id/profile_pointer_speed_container"
-                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-                android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp" android:hint="@string/player_sensitivity"
-                app:helperText="@string/program_speed_hint" app:expandedHintEnabled="false">
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/profile_pointer_speed" android:layout_width="match_parent"
-                    android:layout_height="wrap_content" android:inputType="numberDecimal" android:maxLines="1" />
-            </com.google.android.material.textfield.TextInputLayout>
-            <com.google.android.material.button.MaterialButton android:id="@+id/profile_layout"
-                style="@style/Widget.Material3.Button.TextButton" android:layout_width="wrap_content"
-                android:layout_height="wrap_content" android:text="@string/program_control_layout" />
-            <TextView style="@style/SectionLabel" android:text="@string/settings_advanced" />
-            <LinearLayout style="@style/SettingsChoiceRow">
-                <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_network" />
-                <TextView android:id="@+id/profile_network" style="@style/SettingsChoiceValue" />
-            </LinearLayout>
-            <LinearLayout style="@style/SettingsChoiceRow">
-                <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_render_scale" />
-                <TextView android:id="@+id/profile_scale" style="@style/SettingsChoiceValue" />
-            </LinearLayout>
-            <LinearLayout style="@style/SettingsChoiceRow">
-                <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_low_memory" />
-                <TextView android:id="@+id/profile_memory" style="@style/SettingsChoiceValue" />
-            </LinearLayout>
-            <TextView style="@style/SettingsSummary" android:text="@string/settings_low_memory_summary" />
-            <LinearLayout style="@style/SettingsChoiceRow">
-                <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_jit_cache" />
-                <TextView android:id="@+id/profile_jit" style="@style/SettingsChoiceValue" />
-            </LinearLayout>
-            <LinearLayout style="@style/SettingsChoiceRow">
-                <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_relax_vulkan" />
-                <TextView android:id="@+id/profile_vulkan" style="@style/SettingsChoiceValue" />
-            </LinearLayout>
-            <TextView style="@style/SettingsSummary" android:text="@string/settings_relax_vulkan_summary" />
-            <LinearLayout style="@style/SettingsChoiceRow">
-                <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_sustained" />
-                <TextView android:id="@+id/profile_sustained" style="@style/SettingsChoiceValue" />
-            </LinearLayout>
-            <TextView style="@style/SettingsSummary" android:text="@string/settings_sustained_summary" />
-            <LinearLayout style="@style/SettingsChoiceRow">
-                <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_developer" />
-                <TextView android:id="@+id/profile_developer" style="@style/SettingsChoiceValue" />
-            </LinearLayout>
-            <TextView style="@style/SettingsSummary" android:text="@string/settings_developer_summary" />
+
+            <TextView style="@style/SectionLabel.Group" android:text="@string/settings_graphics" />
+            <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+                <LinearLayout style="@style/SettingsGroupBody">
+                    <LinearLayout style="@style/SettingsChoiceRow.Group">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_render_scale" />
+                        <TextView android:id="@+id/profile_scale" style="@style/SettingsChoiceValue" />
+                    </LinearLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <TextView style="@style/SectionLabel.Group" android:text="@string/player_controls" />
+            <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+                <LinearLayout style="@style/SettingsGroupBody">
+                    <LinearLayout style="@style/SettingsChoiceRow.Group">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_controls" />
+                        <TextView android:id="@+id/profile_controls" style="@style/SettingsChoiceValue" />
+                    </LinearLayout>
+                    <LinearLayout style="@style/SettingsChoiceRow.Group">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_pointer" />
+                        <TextView android:id="@+id/profile_pointer" style="@style/SettingsChoiceValue" />
+                    </LinearLayout>
+                    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                        android:orientation="vertical" android:paddingStart="16dp" android:paddingEnd="16dp"
+                        android:paddingTop="12dp" android:paddingBottom="4dp">
+                        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:orientation="horizontal" android:gravity="center_vertical">
+                            <TextView style="@style/SettingsRowTitle" android:layout_width="0dp"
+                                android:layout_weight="1" android:text="@string/player_sensitivity" />
+                            <TextView android:id="@+id/profile_pointer_speed_value" android:layout_width="wrap_content"
+                                android:layout_height="wrap_content" android:textColor="@color/accent"
+                                android:textSize="14sp" />
+                        </LinearLayout>
+                        <com.google.android.material.slider.Slider android:id="@+id/profile_pointer_speed"
+                            style="@style/Widget.Brovan.SpeedSlider" />
+                        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                            android:orientation="horizontal" android:gravity="center_vertical">
+                            <TextView style="@style/SettingsSummary" android:layout_width="0dp"
+                                android:layout_weight="1" android:layout_marginTop="0dp"
+                                android:text="@string/player_sensitivity_summary" />
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/profile_pointer_speed_default"
+                                style="@style/Widget.Material3.Button.TextButton" android:layout_width="wrap_content"
+                                android:layout_height="wrap_content" android:layout_marginStart="8dp"
+                                android:text="@string/program_use_default" android:visibility="gone" />
+                        </LinearLayout>
+                    </LinearLayout>
+                    <LinearLayout android:id="@+id/profile_layout" style="@style/SettingsSwitchRow">
+                        <LinearLayout style="@style/SettingsSwitchText">
+                            <TextView style="@style/SettingsRowTitle" android:text="@string/program_control_layout" />
+                            <TextView style="@style/SettingsRowSummary" android:text="@string/settings_control_layout_summary" />
+                        </LinearLayout>
+                        <ImageView style="@style/SettingsChevron" />
+                    </LinearLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <TextView style="@style/SectionLabel.Group" android:text="@string/settings_advanced" />
+            <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+                <LinearLayout style="@style/SettingsGroupBody">
+                    <LinearLayout style="@style/SettingsChoiceRow.Group">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_network" />
+                        <TextView android:id="@+id/profile_network" style="@style/SettingsChoiceValue" />
+                    </LinearLayout>
+                    <LinearLayout style="@style/SettingsChoiceRow.Group">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_low_memory" />
+                        <TextView android:id="@+id/profile_memory" style="@style/SettingsChoiceValue" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_low_memory_summary" />
+                    </LinearLayout>
+                    <LinearLayout style="@style/SettingsChoiceRow.Group">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_jit_cache" />
+                        <TextView android:id="@+id/profile_jit" style="@style/SettingsChoiceValue" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_jit_cache_summary" />
+                    </LinearLayout>
+                    <LinearLayout style="@style/SettingsChoiceRow.Group">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_relax_vulkan" />
+                        <TextView android:id="@+id/profile_vulkan" style="@style/SettingsChoiceValue" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_relax_vulkan_summary" />
+                    </LinearLayout>
+                    <LinearLayout style="@style/SettingsChoiceRow.Group">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_sustained" />
+                        <TextView android:id="@+id/profile_sustained" style="@style/SettingsChoiceValue" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_sustained_summary" />
+                    </LinearLayout>
+                    <LinearLayout style="@style/SettingsChoiceRow.Group">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_developer" />
+                        <TextView android:id="@+id/profile_developer" style="@style/SettingsChoiceValue" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_developer_summary" />
+                    </LinearLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
             <com.google.android.material.button.MaterialButton android:id="@+id/profile_reset"
-                style="@style/Widget.Material3.Button.TextButton" android:layout_width="wrap_content"
-                android:layout_height="wrap_content" android:layout_marginTop="16dp"
+                style="@style/Widget.Material3.Button.OutlinedButton" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:layout_marginTop="20dp"
                 android:text="@string/program_reset" />
         </LinearLayout>
     </ScrollView>

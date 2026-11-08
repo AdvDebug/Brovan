@@ -387,17 +387,17 @@ namespace Brovan
                 return;
             }
 
-            PrintHighlight("[*] No traced frames for this thread. Showing raw stack return-address candidates instead.", true);
-            ulong Sp = ReadStackPointerForConvention();
-            ulong PointerSize = Variables.Arch == BinaryArchitecture.x64 ? 8UL : 4UL;
-            for (int i = 0; i < MaxFrames; i++)
+            if (Emulator == null || !Emulator.TryGetThread(ThreadId, out EmulatedThread Thread) || Thread == null)
             {
-                ulong Slot = Sp + ((ulong)i * PointerSize);
-                ulong Value = ReadPointerSizedStackValue(Slot);
-                if (Value == 0)
-                    continue;
-                Console.WriteLine($"#{i,-2} [0x{Slot:X}] {FormatAddressWithSymbol(Value)}");
+                PrintHighlight($"[-] Thread {ThreadId} not found.", true);
+                return;
             }
+
+            PrintHighlight("[*] No traced frames for this thread. Showing the unwound stack, ? marks a frame found by a stack scan.", true);
+            List<StackFrameRecord> Walked = new();
+            PeStackUnwinder.Walk(Emulator, Thread, Thread.Context, MaxFrames, Walked);
+            for (int i = 0; i < Walked.Count; i++)
+                Console.WriteLine($"#{i,-2} {FormatAddressWithSymbol(Walked[i].Ip)} sp=0x{Walked[i].Sp:X}{(Walked[i].Unwound ? "" : " ?")}");
         }
 
         public static void PrintAllCallStacks(int MaxFrames)

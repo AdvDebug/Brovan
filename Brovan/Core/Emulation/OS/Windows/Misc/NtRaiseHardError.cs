@@ -1,4 +1,3 @@
-using System;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -33,7 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Instance.TriggerEventMessage($"[-] NtRaiseHardError -> {ErrorStatus} (0x{(uint)ErrorStatus:X8}){Parameters}", LogFlags.Issues);
 
                     TraceFailFastRecord(Instance, (uint)ErrorStatus);
-                    Instance.TraceStackModuleFrames("[-] NtRaiseHardError");
+                    Instance.TraceCallStack("[-] NtRaiseHardError");
                 }
 
                 return NTSTATUS.STATUS_SUCCESS;
@@ -89,27 +88,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
 
                 Instance.TriggerEventMessage($"[-] NtRaiseHardError raised at {Instance.DescribeAddress(ExceptionAddress)}", LogFlags.Issues);
-
-                const int ExceptionRecordSize = 0x98;
-                int Printed = 0;
-                for (int k = 0; k < 128 && Printed < 6; k++)
-                {
-                    ulong CallerSlot = Slot + ExceptionRecordSize + (ulong)k * 8;
-                    if (!Instance.IsRegionMapped(CallerSlot, 8))
-                        break;
-
-                    ulong Value = Instance.ReadMemoryULong(CallerSlot);
-                    if (Value == 0 || Value == ExceptionAddress)
-                        continue;
-
-                    string Described = Instance.DescribeAddress(Value);
-                    if (Described.StartsWith("0x", StringComparison.Ordinal))
-                        continue;
-
-                    Instance.TriggerEventMessage($"[-] NtRaiseHardError     caller {Described}", LogFlags.Issues);
-                    Printed++;
-                }
-
                 return;
             }
         }

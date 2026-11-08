@@ -26,6 +26,7 @@ import android.widget.TextView;
 import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
@@ -40,7 +41,6 @@ import android.util.Log;
 import android.widget.Toast;
 import java.util.ArrayDeque;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import dev.brovan.BrovanNative;
@@ -63,7 +63,6 @@ public class PlayerActivity extends AppCompatActivity
     private static final String EXTRA_DIRECTORY = "directory";
     private static final String EXTRA_EXECUTABLE = "executable";
     private static final String EXTRA_NAME = "name";
-    /** Same order as Settings.NETWORK_MODES. */
     private static final String EXTRA_DEVELOPER = "developer";
     private static final String EXTRA_CONTROLS = "controls";
     private static final String EXTRA_SUSTAINED = "sustained";
@@ -86,8 +85,8 @@ public class PlayerActivity extends AppCompatActivity
     private static final int VK_ESCAPE = 0x1B;
     private static final int ESCAPE_SCAN_CODE = 1;
     private static final long KEY_HOLD_MS = 70;
-    private static final float SPEED_MIN = 0.4f;
-    private static final float SPEED_MAX = 3f;
+    private static final long MENU_TIP_DELAY_MS = 1500;
+    private static final long MENU_TIP_SHOW_MS = 5000;
     private static final float MENU_FRACTION = 0.45f;
     private static final float MENU_LIMIT = 0.92f;
     private static final int MENU_MIN_DP = 320;
@@ -107,6 +106,9 @@ public class PlayerActivity extends AppCompatActivity
     private boolean viewChosen;
     private boolean programEnded;
     private boolean keyboardOffered;
+    private boolean keyboardPending;
+    private TextView menuTip;
+    private View closing;
     private int surfaceSoftInputMode;
     private final Rect visibleFrame = new Rect();
     private final int[] panelOrigin = new int[2];
@@ -188,6 +190,7 @@ public class PlayerActivity extends AppCompatActivity
         if (hasFocus) {
             goFullscreen();
             offerKeyboard();
+            showPendingKeyboard();
         }
     }
 
@@ -235,7 +238,9 @@ public class PlayerActivity extends AppCompatActivity
 
         surface.setPointerMode(BrovanSurfaceView.PointerMode.values()[
                 getIntent().getIntExtra(EXTRA_POINTER, 0)]);
-        PointerState.setSpeed(snapSpeed(getIntent().getFloatExtra(EXTRA_POINTER_SPEED, 1f)));
+        PointerState.setSpeed(ProgramSettings.snapSpeed(getIntent().getFloatExtra(EXTRA_POINTER_SPEED, 1f)));
+        menuTip = findViewById(R.id.menu_tip);
+        closing = findViewById(R.id.closing);
         status = findViewById(R.id.status);
         log = findViewById(R.id.log);
         logScroll = findViewById(R.id.log_scroll);
@@ -258,7 +263,7 @@ public class PlayerActivity extends AppCompatActivity
             if (!text.isEmpty()) {
                 append("[/] > " + text);
                 command.setText("");
-                debugger.send(text);
+                debugger.submit(text);
             }
         });
 
@@ -289,12 +294,13 @@ public class PlayerActivity extends AppCompatActivity
             }
         }
         start();
+        offerMenuTip();
     }
 
     private void start() {
         int status = BrovanNative.init(getFilesDir().getAbsolutePath());
         if (status != BrovanNative.STATUS_OK) {
-            fail("Could not start the emulator (" + status + ").");
+            fail(getString(R.string.player_start_failed, status));
             return;
         }
 
@@ -368,6 +374,9 @@ public class PlayerActivity extends AppCompatActivity
             return;
         }
 
+        menuTip.animate().cancel();
+        menuTip.setVisibility(View.GONE);
+
         View view = getLayoutInflater().inflate(R.layout.sheet_player_menu, null);
         bindMenu(view);
 
@@ -392,18 +401,14 @@ public class PlayerActivity extends AppCompatActivity
         ((TextView) view.findViewById(R.id.title)).setText(getIntent().getStringExtra(EXTRA_NAME));
 
         BrovanSurfaceView.PointerMode[] modes = BrovanSurfaceView.PointerMode.values();
-        String[] modeLabels = new String[modes.length];
-        for (int i = 0; i < modes.length; i++) {
-            modeLabels[i] = modes[i].label();
-        }
+        String[] modeLabels = getResources().getStringArray(R.array.pointer_modes);
 
         TextView pointer = view.findViewById(R.id.pointer);
         pointer.setText(modeLabels[getIntent().getIntExtra(EXTRA_POINTER, 0)]);
         pointer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         View pointerRow = (View) pointer.getParent();
         pointerRow.setFocusable(true);
-        pointerRow.setOnClickListener(button -> Theming.dialog(this)
-                .setTitle(R.string.player_pointer)
+        pointerRow.setOnClickListener(button -> Theming.rowDialog(pointer)
                 .setSingleChoiceItems(modeLabels, getIntent().getIntExtra(EXTRA_POINTER, 0), (dialog, position) -> {
                     surface.setPointerMode(modes[position]);
                     pointer.setText(modeLabels[position]);
@@ -417,18 +422,14 @@ public class PlayerActivity extends AppCompatActivity
                 }).setNegativeButton(android.R.string.cancel, null).show());
 
         ControlOverlay.Scheme[] schemes = ControlOverlay.Scheme.values();
-        String[] schemeLabels = new String[schemes.length];
-        for (int i = 0; i < schemes.length; i++) {
-            schemeLabels[i] = schemes[i].label();
-        }
+        String[] schemeLabels = getResources().getStringArray(R.array.control_schemes);
 
         TextView scheme = view.findViewById(R.id.controls);
         scheme.setText(schemeLabels[controls.scheme().ordinal()]);
         scheme.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         View schemeRow = (View) scheme.getParent();
         schemeRow.setFocusable(true);
-        schemeRow.setOnClickListener(button -> Theming.dialog(this)
-                .setTitle(R.string.settings_controls)
+        schemeRow.setOnClickListener(button -> Theming.rowDialog(scheme)
                 .setSingleChoiceItems(schemeLabels, controls.scheme().ordinal(), (dialog, position) -> {
                     controls.apply(schemes[position]);
                     scheme.setText(schemeLabels[position]);
@@ -443,11 +444,11 @@ public class PlayerActivity extends AppCompatActivity
 
         TextView speedValue = view.findViewById(R.id.sensitivity_value);
         Slider speed = view.findViewById(R.id.sensitivity);
-        speed.setValue(snapSpeed(program.pointerSpeed()));
-        speedValue.setText(formatSpeed(speed.getValue()));
+        speed.setValue(ProgramSettings.snapSpeed(program.pointerSpeed()));
+        speedValue.setText(ProgramSettings.formatSpeed(speed.getValue()));
         speed.addOnChangeListener((slider, value, fromUser) -> {
             PointerState.setSpeed(value);
-            speedValue.setText(formatSpeed(value));
+            speedValue.setText(ProgramSettings.formatSpeed(value));
         });
 
         // Dragging the slider reports every step it passes through, and each one would rewrite the manifest.
@@ -465,6 +466,11 @@ public class PlayerActivity extends AppCompatActivity
                     showSaveFailure(failure);
                 }
             }
+        });
+
+        view.findViewById(R.id.keyboard).setOnClickListener(button -> {
+            dismissMenu();
+            toggleKeyboard();
         });
 
         view.findViewById(R.id.windows).setOnClickListener(button -> {
@@ -531,14 +537,42 @@ public class PlayerActivity extends AppCompatActivity
         ui.postDelayed(() -> BrovanNative.injectKey(false, VK_ESCAPE, ESCAPE_SCAN_CODE), KEY_HOLD_MS);
     }
 
-    /** The slider only accepts a value that lands on one of its steps. */
-    private static float snapSpeed(float value) {
-        float bounded = Math.max(SPEED_MIN, Math.min(value, SPEED_MAX));
-        return Math.round(bounded * 10f) / 10f;
+    private void toggleKeyboard() {
+        WindowInsetsCompat insets = ViewCompat.getRootWindowInsets(surface);
+        if (insets != null && insets.isVisible(WindowInsetsCompat.Type.ime())) {
+            surface.hideKeyboard();
+            return;
+        }
+
+        // The keyboard must not resize the guest window, because the program would get WM_SIZE.
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
+        keyboardPending = true;
+        if (hasWindowFocus()) {
+            showPendingKeyboard();
+        }
     }
 
-    private static String formatSpeed(float value) {
-        return String.format(Locale.US, "%.1fx", value);
+    private void showPendingKeyboard() {
+        if (!keyboardPending || consoleShown) {
+            return;
+        }
+
+        keyboardPending = false;
+        surface.showKeyboard();
+    }
+
+    private void offerMenuTip() {
+        int left = settings.menuTipsLeft();
+        if (left <= 0 || developerMode || isFinishing()) {
+            return;
+        }
+
+        settings.setMenuTipsLeft(left - 1);
+        menuTip.setAlpha(0f);
+        menuTip.setVisibility(View.VISIBLE);
+        menuTip.animate().alpha(1f).setStartDelay(MENU_TIP_DELAY_MS).withEndAction(() ->
+                menuTip.animate().alpha(0f).setStartDelay(MENU_TIP_SHOW_MS)
+                        .withEndAction(() -> menuTip.setVisibility(View.GONE)));
     }
 
     private void showWindows() {
@@ -573,8 +607,13 @@ public class PlayerActivity extends AppCompatActivity
         debugger.setVisibility(visible ? View.GONE : View.VISIBLE);
         if (visible) {
             focusShownView();
+            offerKeyboard();
             BrovanNative.requestRepaint();
             return;
+        }
+
+        if (consoleShown) {
+            terminal.hideKeyboard();
         }
 
         if (logStale) {
@@ -616,7 +655,7 @@ public class PlayerActivity extends AppCompatActivity
     }
 
     private void offerKeyboard() {
-        if (keyboardOffered || !consoleShown || !hasWindowFocus()) {
+        if (keyboardOffered || !consoleShown || !hasWindowFocus() || debugger.getVisibility() == View.VISIBLE) {
             return;
         }
 
@@ -696,7 +735,11 @@ public class PlayerActivity extends AppCompatActivity
         }
 
         quitting = true;
-        setStatus("Stopping...");
+        surface.hideKeyboard();
+        ((TextView) findViewById(R.id.closing_text))
+                .setText(getString(R.string.player_closing, getIntent().getStringExtra(EXTRA_NAME)));
+        closing.setVisibility(View.VISIBLE);
+        setStatus(getString(R.string.player_status_stopping));
         BrovanNative.requestClose();
 
         // The developer-mode command loop never reports an exit; "exit" is only consumed once the guest
@@ -843,10 +886,15 @@ public class PlayerActivity extends AppCompatActivity
     }
 
     @Override
+    public void onShowProgram() {
+        toggleDebugger();
+    }
+
+    @Override
     public void onExit(int reason) {
         finishRun(reason == 0 ? null : getString(R.string.program_stopped));
         append(reason == 0 ? "[*] The program closed." : "[-] The program stopped unexpectedly.");
-        setStatus(reason == 0 ? "Finished" : "Stopped");
+        setStatus(getString(reason == 0 ? R.string.player_status_finished : R.string.player_status_stopped));
         runOnUiThread(() -> {
             if (quitting || (!developerMode && !consoleShown)) {
                 finish();

@@ -1268,6 +1268,10 @@ namespace Brovan
         /// </summary>
         internal static void RunGuestCode(Action Run)
         {
+            // A stop made outside the scheduler leaves EscapeScheduler set, and only a pending pause may keep it.
+            if (Emulator != null && !DebuggerPauseRequested)
+                Emulator.EscapeScheduler = false;
+
             GuestExecuting = true;
             try
             {

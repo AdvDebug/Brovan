@@ -11,6 +11,7 @@ import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.google.android.material.appbar.MaterialToolbar;
+import com.google.android.material.slider.Slider;
 import com.google.android.material.textfield.TextInputLayout;
 
 import java.io.IOException;
@@ -18,14 +19,13 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 
-import dev.brovan.BrovanSurfaceView;
-import dev.brovan.input.ControlOverlay;
 
 public class ProfileActivity extends AppCompatActivity {
 
     private static final int REQUEST_CONTROLS = 1;
     private static final String STATE_CHANGES = "changes";
     private static final String STATE_BASELINE = "baseline";
+    private static final String STATE_SPEED = "speed";
 
     private Library library;
     private Settings defaults;
@@ -36,7 +36,10 @@ public class ProfileActivity extends AppCompatActivity {
     private EditText executable;
     private EditText arguments;
     private EditText workingDirectory;
-    private EditText pointerSpeed;
+    private Slider pointerSpeed;
+    private TextView pointerSpeedValue;
+    private View pointerSpeedDefault;
+    private String speed;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -72,13 +75,26 @@ public class ProfileActivity extends AppCompatActivity {
         arguments = findViewById(R.id.profile_arguments);
         workingDirectory = findViewById(R.id.profile_directory);
         pointerSpeed = findViewById(R.id.profile_pointer_speed);
+        pointerSpeedValue = findViewById(R.id.profile_pointer_speed_value);
+        pointerSpeedDefault = findViewById(R.id.profile_pointer_speed_default);
         name.setText(program.name());
         executable.setText(program.executableName());
         arguments.setText(program.arguments());
         workingDirectory.setText(program.workingDirectory());
-        pointerSpeed.setText(currentValues().getProperty("pointer_speed", ""));
-        ((TextInputLayout) findViewById(R.id.profile_pointer_speed_container))
-                .setPlaceholderText(getString(R.string.program_default_value, Float.toString(defaults.pointerSpeed())));
+        speed = state != null && state.containsKey(STATE_SPEED)
+                ? state.getString(STATE_SPEED, "")
+                : currentValues().getProperty("pointer_speed", "");
+        pointerSpeed.addOnChangeListener((slider, value, fromUser) -> {
+            if (fromUser) {
+                speed = Float.toString(ProgramSettings.snapSpeed(value));
+                bindSpeed();
+            }
+        });
+        pointerSpeedDefault.setOnClickListener(view -> {
+            speed = "";
+            bindSpeed();
+        });
+        bindSpeed();
         baseline = state == null ? null : state.getBundle(STATE_BASELINE);
         if (baseline == null) {
             baseline = new Bundle();
@@ -102,7 +118,8 @@ public class ProfileActivity extends AppCompatActivity {
             for (String key : ProgramSettings.OVERRIDE_KEYS) {
                 changes.put(key, null);
             }
-            pointerSpeed.setText("");
+            speed = "";
+            bindSpeed();
             bindOptions();
         });
 
@@ -133,20 +150,17 @@ public class ProfileActivity extends AppCompatActivity {
     }
 
     private void bindOptions() {
-        String[] schemes = new String[ControlOverlay.Scheme.values().length];
-        for (int index = 0; index < schemes.length; index++) {
-            schemes[index] = ControlOverlay.Scheme.values()[index].label();
-        }
-        String[] pointers = new String[BrovanSurfaceView.PointerMode.values().length];
-        for (int index = 0; index < pointers.length; index++) {
-            pointers[index] = BrovanSurfaceView.PointerMode.values()[index].label();
-        }
         ProgramSettings own = effective();
-        choice(R.id.profile_controls, "controls", schemes, defaults.controlScheme(), own.controlScheme());
-        choice(R.id.profile_pointer, "pointer", pointers, defaults.pointerMode(), own.pointerMode());
-        choice(R.id.profile_network, "network", Settings.NETWORK_MODES, defaults.network(), own.network());
-        choice(R.id.profile_scale, "render_scale", Settings.RENDER_SCALE_LABELS, defaults.renderScale(), own.renderScale());
-        choice(R.id.profile_memory, "low_memory", Settings.LOW_MEMORY_LABELS, defaults.lowMemory(), own.lowMemory());
+        choice(R.id.profile_controls, "controls", getResources().getStringArray(R.array.control_schemes),
+                defaults.controlScheme(), own.controlScheme());
+        choice(R.id.profile_pointer, "pointer", getResources().getStringArray(R.array.pointer_modes),
+                defaults.pointerMode(), own.pointerMode());
+        choice(R.id.profile_network, "network", getResources().getStringArray(R.array.network_modes),
+                defaults.network(), own.network());
+        choice(R.id.profile_scale, "render_scale", getResources().getStringArray(R.array.render_scales),
+                defaults.renderScale(), own.renderScale());
+        choice(R.id.profile_memory, "low_memory", getResources().getStringArray(R.array.low_memory_levels),
+                defaults.lowMemory(), own.lowMemory());
         toggle(R.id.profile_jit, "jit_cache", defaults.jitCache(), own.jitCache());
         toggle(R.id.profile_vulkan, "relax_vulkan", defaults.relaxVulkan(), own.relaxVulkan());
         toggle(R.id.profile_sustained, "sustained", defaults.sustainedPerformance(), own.sustainedPerformance());
@@ -162,7 +176,7 @@ public class ProfileActivity extends AppCompatActivity {
         CharSequence[] options = new CharSequence[labels.length + 1];
         options[0] = inherited;
         System.arraycopy(labels, 0, options, 1, labels.length);
-        View.OnClickListener listener = view -> Theming.dialog(this)
+        View.OnClickListener listener = view -> Theming.rowDialog(value)
                 .setSingleChoiceItems(options, overridden ? currentIndex + 1 : 0, (dialog, index) -> {
                     changes.put(key, index == 0 ? null : Integer.toString(index - 1));
                     bindOptions();
@@ -180,7 +194,7 @@ public class ProfileActivity extends AppCompatActivity {
         TextView value = findViewById(id);
         value.setText(overridden ? getString(current ? R.string.setting_on : R.string.setting_off) : inherited);
         CharSequence[] options = {inherited, getString(R.string.setting_on), getString(R.string.setting_off)};
-        View.OnClickListener listener = view -> Theming.dialog(this)
+        View.OnClickListener listener = view -> Theming.rowDialog(value)
                 .setSingleChoiceItems(options, overridden ? (current ? 1 : 2) : 0, (dialog, index) -> {
                     changes.put(key, index == 0 ? null : Boolean.toString(index == 1));
                     bindOptions();
@@ -189,6 +203,24 @@ public class ProfileActivity extends AppCompatActivity {
         value.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         ((View) value.getParent()).setFocusable(true);
         ((View) value.getParent()).setOnClickListener(listener);
+    }
+
+    private void bindSpeed() {
+        float fallback = ProgramSettings.snapSpeed(defaults.pointerSpeed());
+        float value = fallback;
+        if (!speed.isEmpty()) {
+            try {
+                value = ProgramSettings.snapSpeed(Float.parseFloat(speed));
+            } catch (NumberFormatException malformed) {
+                speed = "";
+            }
+        }
+
+        pointerSpeed.setValue(value);
+        pointerSpeedValue.setText(speed.isEmpty()
+                ? getString(R.string.program_default_value, ProgramSettings.formatSpeed(fallback))
+                : ProgramSettings.formatSpeed(value));
+        pointerSpeedDefault.setVisibility(speed.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
     private void pickExecutable() {
@@ -215,18 +247,6 @@ public class ProfileActivity extends AppCompatActivity {
         if (!workingDirectory.getText().toString().equals(baseline.getString(Library.KEY_WORKING_DIRECTORY))) {
             updates.put(Library.KEY_WORKING_DIRECTORY, workingDirectory.getText().toString().trim());
         }
-        String speed = pointerSpeed.getText().toString().trim();
-        if (!speed.isEmpty()) {
-            try {
-                float parsed = Float.parseFloat(speed);
-                if (!Float.isFinite(parsed) || parsed < 0.4f || parsed > 3f) {
-                    throw new NumberFormatException();
-                }
-            } catch (NumberFormatException invalid) {
-                pointerSpeed.setError(getString(R.string.program_speed_range));
-                return;
-            }
-        }
         if (updates.containsKey("pointer_speed") || !speed.equals(baseline.getString("pointer_speed"))) {
             updates.put("pointer_speed", speed.isEmpty() ? null : speed);
         }
@@ -246,7 +266,7 @@ public class ProfileActivity extends AppCompatActivity {
                 || !executable.getText().toString().equals(baseline.getString(Library.KEY_EXECUTABLE))
                 || !arguments.getText().toString().equals(baseline.getString(Library.KEY_ARGUMENTS))
                 || !workingDirectory.getText().toString().equals(baseline.getString(Library.KEY_WORKING_DIRECTORY))
-                || !pointerSpeed.getText().toString().equals(baseline.getString("pointer_speed"));
+                || !speed.equals(baseline.getString("pointer_speed"));
     }
 
     private void close() {
@@ -268,6 +288,7 @@ public class ProfileActivity extends AppCompatActivity {
         }
         state.putBundle(STATE_CHANGES, saved);
         state.putBundle(STATE_BASELINE, baseline);
+        state.putString(STATE_SPEED, speed);
     }
 
     @Override

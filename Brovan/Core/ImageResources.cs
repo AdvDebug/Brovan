@@ -132,7 +132,7 @@ namespace Brovan.Core
         {
             DataRva = 0;
             DataSize = 0;
-            if (!TryGetResourceDirectory(Image, out uint Root))
+            if (!TryGetDataDirectory(Image, ResourceDataDirectoryIndex, out uint Root, out _) || Root == 0)
                 return false;
 
             if (!TryFindDirectoryEntry(Image, Root, Root, Type, out uint TypeDirectory, out bool IsDirectory) || !IsDirectory)
@@ -185,9 +185,10 @@ namespace Brovan.Core
             }
         }
 
-        private static bool TryGetResourceDirectory<TImage>(TImage Image, out uint Root) where TImage : struct, IImageReader
+        internal static bool TryGetDataDirectory<TImage>(TImage Image, uint Index, out uint Rva, out uint Size) where TImage : struct, IImageReader
         {
-            Root = 0;
+            Rva = 0;
+            Size = 0;
             Span<byte> Field = stackalloc byte[4];
             if (!Image.TryRead(ImageStream.NtHeadersOffsetField, Field))
                 return false;
@@ -206,15 +207,16 @@ namespace Brovan.Core
                 OptionalHeaderMagic64 => DataDirectoryCountOffset64,
                 _ => -1
             };
-            if (CountOffset < 0 || !Image.TryRead(Optional + (uint)CountOffset, Field) || BinaryPrimitives.ReadUInt32LittleEndian(Field) <= ResourceDataDirectoryIndex)
+            if (CountOffset < 0 || !Image.TryRead(Optional + (uint)CountOffset, Field) || BinaryPrimitives.ReadUInt32LittleEndian(Field) <= Index)
                 return false;
 
-            uint Directory = Optional + (uint)CountOffset + 4 + ResourceDataDirectoryIndex * DataDirectorySize;
-            if (!Image.TryRead(Directory, Field))
+            Span<byte> Entry = stackalloc byte[DataDirectorySize];
+            if (!Image.TryRead(Optional + (uint)CountOffset + 4 + Index * DataDirectorySize, Entry))
                 return false;
 
-            Root = BinaryPrimitives.ReadUInt32LittleEndian(Field);
-            return Root != 0;
+            Rva = BinaryPrimitives.ReadUInt32LittleEndian(Entry);
+            Size = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(4));
+            return true;
         }
 
         private static bool TryFindDirectoryEntry<TImage>(TImage Image, uint Root, uint Directory, uint Id, out uint Target, out bool IsDirectory) where TImage : struct, IImageReader

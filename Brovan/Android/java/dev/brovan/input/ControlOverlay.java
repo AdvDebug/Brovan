@@ -21,22 +21,12 @@ import java.util.Set;
 public class ControlOverlay extends FrameLayout {
 
     public enum Scheme {
-        NONE("Touch only"),
-        WASD("Joystick (WASD)"),
-        ARROWS("Joystick (arrows)"),
-        DPAD("D-pad (arrows)"),
-        TOUCHPAD("Mouse touchpad"),
-        CUSTOM("Custom layout");
-
-        private final String label;
-
-        Scheme(String label) {
-            this.label = label;
-        }
-
-        public String label() {
-            return label;
-        }
+        NONE,
+        WASD,
+        ARROWS,
+        DPAD,
+        TOUCHPAD,
+        CUSTOM
     }
 
     public interface EditListener {

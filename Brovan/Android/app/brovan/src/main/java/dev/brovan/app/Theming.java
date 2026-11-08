@@ -180,6 +180,15 @@ final class Theming {
         return dialog(context, new Settings(context).palette());
     }
 
+    static MaterialAlertDialogBuilder rowDialog(View value) {
+        MaterialAlertDialogBuilder builder = dialog(value.getContext());
+        View label = ((ViewGroup) value.getParent()).getChildAt(0);
+        if (label instanceof TextView && label != value) {
+            builder.setTitle(((TextView) label).getText());
+        }
+        return builder;
+    }
+
     static MaterialAlertDialogBuilder dialog(Context context, Palette palette) {
         MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(context);
 
@@ -195,11 +204,14 @@ final class Theming {
     }
 
     private static void paint(View view, Palette from, Palette to) {
-        if (view.getBackground() != null) {
+        // A card keeps references to its background layers, so it is repainted through its setters, not mutate().
+        boolean ownsLayers = view instanceof MaterialCardView;
+
+        if (!ownsLayers && view.getBackground() != null) {
             view.setBackground(repaint(view.getBackground().mutate(), from, to));
         }
 
-        if (view.getForeground() != null) {
+        if (!ownsLayers && view.getForeground() != null) {
             view.setForeground(repaint(view.getForeground().mutate(), from, to));
         }
 
@@ -256,6 +268,10 @@ final class Theming {
             TextView text = (TextView) view;
             text.setTextColor(remap(text.getTextColors(), from, to));
             text.setHintTextColor(remap(text.getHintTextColors(), from, to));
+
+            if (text.getCompoundDrawableTintList() != null) {
+                text.setCompoundDrawableTintList(remap(text.getCompoundDrawableTintList(), from, to));
+            }
         }
 
         if (view instanceof Toolbar) {

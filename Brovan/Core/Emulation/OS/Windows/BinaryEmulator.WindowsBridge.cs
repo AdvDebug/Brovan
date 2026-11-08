@@ -1716,9 +1716,9 @@ namespace Brovan.Core.Emulation
             if (Teb != 0)
             {
                 if (Native)
-                    _emulator.WriteMemory(Teb + 0x10, Thread.StackLimit, 8);
+                    _emulator.WriteMemory(Teb + WindowsGuest.TebStackLimitOffset64, Thread.StackLimit, 8);
                 else
-                    _emulator.WriteMemory(Teb + 0x8, (uint)Thread.StackLimit);
+                    _emulator.WriteMemory(Teb + WindowsGuest.TebStackLimitOffset32, (uint)Thread.StackLimit);
             }
 
             return Status;
@@ -3387,32 +3387,6 @@ namespace Brovan.Core.Emulation
             return Address >= Module.MappedBase && Address < Module.MappedBase + Module.SizeOfImage;
         }
 
-        private bool InsideAnyWinModule(ulong Address)
-        {
-            return InsideAnyWinModule(Address, WinHelper);
-        }
-
-        private static bool InsideAnyWinModule(ulong Address, WinSysHelper Helper)
-        {
-            if (Helper == null)
-                return false;
-
-            List<WinModule> Modules = Helper.WinModules;
-            for (int i = 0; i < Modules.Count; i++)
-            {
-                WinModule Module = Modules[i];
-                if (Address >= Module.MappedBase && Address < Module.MappedBase + Module.SizeOfImage)
-                    return true;
-            }
-
-            return false;
-        }
-
-        private WinModule FindModuleByAddress(ulong Address)
-        {
-            return FindModuleByAddress(Address, WinHelper);
-        }
-
         internal string DescribeAddress(ulong Address)
         {
             WinModule Module = FindModuleByAddress(Address, WinHelper);
@@ -3425,29 +3399,16 @@ namespace Brovan.Core.Emulation
                 : $"{Module.Name}+0x{Address - Module.MappedBase:X} (0x{Address:X})";
         }
 
-        /// <summary>
-        /// Scans the current stack for return addresses that land inside a mapped module. Used when the guest is
-        /// about to die and no code hooks are available to walk the frames properly.
-        /// </summary>
-        internal void TraceStackModuleFrames(string Prefix, int MaxFrames = 16)
+        internal void TraceCallStack(string Prefix, int MaxFrames = 16)
         {
-            ulong StackPointer = ReadRegister(IsX64Guest ? Registers.UC_X86_REG_RSP : Registers.UC_X86_REG_ESP);
-            uint PointerSize = (uint)WinHelper.PointerSize;
-            int Found = 0;
+            CpuContext Live = new();
+            if (!ReadGprBatch(Live))
+                return;
 
-            for (int i = 0; i < 256 && Found < MaxFrames; i++)
-            {
-                ulong Slot = StackPointer + (ulong)i * PointerSize;
-                if (!IsRegionMapped(Slot, PointerSize))
-                    break;
-
-                ulong Value = WinHelper.ReadPointer(Slot);
-                if (Value == 0 || FindModuleByAddress(Value, WinHelper) == null)
-                    continue;
-
-                TriggerEventMessage($"{Prefix}     [0x{Slot:X}] {DescribeAddress(Value)}", LogFlags.Issues);
-                Found++;
-            }
+            List<StackFrameRecord> Frames = new(MaxFrames);
+            PeStackUnwinder.Walk(this, CurrentThread, Live, MaxFrames, Frames);
+            foreach (StackFrameRecord Frame in Frames)
+                TriggerEventMessage($"{Prefix}     [sp 0x{Frame.Sp:X}] {DescribeAddress(Frame.Ip)}{(Frame.Unwound ? "" : " ?")}", LogFlags.Issues);
         }
 
         private WinModule FindModuleByAddress(ulong Address, WinSysHelper Helper)
@@ -3455,20 +3416,27 @@ namespace Brovan.Core.Emulation
             if (_lastAddressModule != null && Address >= _lastAddressModuleStart && Address < _lastAddressModuleEnd)
                 return _lastAddressModule;
 
+            WinModule Module = FindModuleContaining(Helper, Address);
+            if (Module != null)
+            {
+                _lastAddressModule = Module;
+                _lastAddressModuleStart = Module.MappedBase;
+                _lastAddressModuleEnd = Module.MappedBase + Module.SizeOfImage;
+            }
+
+            return Module;
+        }
+
+        internal static WinModule FindModuleContaining(WinSysHelper Helper, ulong Address)
+        {
             if (Helper == null)
                 return null;
 
             List<WinModule> Modules = Helper.WinModules;
             for (int i = 0; i < Modules.Count; i++)
             {
-                WinModule Module = Modules[i];
-                if (Address >= Module.MappedBase && Address < Module.MappedBase + Module.SizeOfImage)
-                {
-                    _lastAddressModule = Module;
-                    _lastAddressModuleStart = Module.MappedBase;
-                    _lastAddressModuleEnd = Module.MappedBase + Module.SizeOfImage;
-                    return Module;
-                }
+                if (InsideWinModule(Address, Modules[i]))
+                    return Modules[i];
             }
 
             return null;
@@ -3481,20 +3449,29 @@ namespace Brovan.Core.Emulation
                 section = _lastSectionLookupResult;
                 return true;
             }
-            foreach (PortableBinarySection s in module.Sections.Values)
+            if (TryFindSection(module, address, out section))
             {
-                ulong start = module.MappedBase + s.VirtualAddress;
-                ulong end = start + Math.Max(s.VirtualSize, s.RawSize);
-                if (address >= start && address < end)
+                _lastSectionLookupAddress = address;
+                _lastSectionLookupResult = section;
+                _lastSectionLookupModule = module;
+                return true;
+            }
+            return false;
+        }
+
+        internal static bool TryFindSection(WinModule Module, ulong Address, out PortableBinarySection Section)
+        {
+            foreach (PortableBinarySection Candidate in Module.Sections.Values)
+            {
+                ulong Start = Module.MappedBase + Candidate.VirtualAddress;
+                if (Address >= Start && Address < Start + Math.Max(Candidate.VirtualSize, Candidate.RawSize))
                 {
-                    section = s;
-                    _lastSectionLookupAddress = address;
-                    _lastSectionLookupResult = s;
-                    _lastSectionLookupModule = module;
+                    Section = Candidate;
                     return true;
                 }
             }
-            section = default;
+
+            Section = default;
             return false;
         }
 
@@ -3529,7 +3506,7 @@ namespace Brovan.Core.Emulation
                         return;
                     }
                 }
-                else if (!InsideAnyWinModule(Address, Helper))
+                else if (FindModuleContaining(Helper, Address) == null)
                 {
                     if ((Settings.Flags & LogFlags.General) != 0)
                         TriggerEventMessage($"[/] [CFT] {MainModule.Name} (0x{PreviousRip:X}) -> 0x{Address:X} (NO MODULE)", LogFlags.General);

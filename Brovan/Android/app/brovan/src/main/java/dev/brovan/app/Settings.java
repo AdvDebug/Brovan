@@ -6,14 +6,12 @@ import android.content.SharedPreferences;
 /** User-visible run options. */
 final class Settings {
 
-    static final String[] NETWORK_MODES = {"None", "Loopback", "Full"};
+    static final int NETWORK_MODE_COUNT = 3;
 
     static final float[] RENDER_SCALES = {1f, 0.85f, 0.75f, 0.6f, 0.5f};
-    static final String[] RENDER_SCALE_LABELS = {"Full", "85%", "75%", "60%", "50%"};
 
     /** Must match the platform.low-memory values the emulator accepts. */
     static final String[] LOW_MEMORY_LEVELS = {"off", "minimal", "medium", "high", "aggressive"};
-    static final String[] LOW_MEMORY_LABELS = {"Off", "Minimal", "Medium", "High", "Aggressive"};
 
     private static final String FILE = "brovan";
     private static final String KEY_NETWORK = "network";
@@ -30,6 +28,8 @@ final class Settings {
     private static final String KEY_DXVK_VERSION = "dxvk_version";
     private static final String KEY_POINTER_SPEED = "pointer_speed";
     private static final String KEY_LIBRARY_STYLE = "library_style";
+    private static final String KEY_MENU_TIPS_LEFT = "menu_tips_left";
+    private static final int MENU_TIPS = 3;
 
     private final SharedPreferences preferences;
 
@@ -153,6 +153,14 @@ final class Settings {
 
     void setPointerSpeed(float value) {
         preferences.edit().putFloat(KEY_POINTER_SPEED, value).apply();
+    }
+
+    int menuTipsLeft() {
+        return preferences.getInt(KEY_MENU_TIPS_LEFT, MENU_TIPS);
+    }
+
+    void setMenuTipsLeft(int value) {
+        preferences.edit().putInt(KEY_MENU_TIPS_LEFT, value).apply();
     }
 
     int libraryStyle() {
