@@ -1,16 +1,20 @@
 using System;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Brovan.Core.Emulation.OS.SharedHelpers;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 
 namespace Brovan.Android
 {
-    internal sealed class AndroidWinManager : IDisplayConnection, IGdiRenderSupport, ITextRenderSupport, ITextMetricsSupport
+    internal sealed class AndroidWinManager : IDisplayConnection, IGdiRenderSupport, ITextRenderSupport, ITextMetricsSupport, ITopLevelWindowHost
     {
         private const int EFD_CLOEXEC = 0x80000;
         private const int EFD_NONBLOCK = 0x800;
 
+        private const uint WM_MOVE = 0x0003;
         private const uint WM_SIZE = 0x0005;
         private const uint SIZE_RESTORED = 0;
+        private const uint SIZE_MAXIMIZED = 2;
 
         private static AndroidWinManager _current;
         private static long _nextFont;
@@ -24,6 +28,10 @@ namespace Brovan.Android
         private AndroidWindow _window;
         private volatile bool _disposed;
 
+        // GUI thread only.
+        private readonly Dictionary<IntPtr, AndroidTopLevel> _topLevels = new();
+        private bool _firstLayerShown;
+
         public AndroidWinManager()
         {
             if (!AndroidHost.IsActive)
@@ -31,6 +39,7 @@ namespace Brovan.Android
 
             _wakeFd = Posix.EventFd(0, EFD_CLOEXEC | EFD_NONBLOCK);
             HostEventQueue.RawMouseAvailable = true;
+            AndroidHost.TopLevelMode = false;
             _current = this;
         }
 
@@ -65,43 +74,119 @@ namespace Brovan.Android
             return _window;
         }
 
+        public bool TopLevelsAvailable => AndroidHost.LayersAvailable;
+
+        public bool SupportsLayered => true;
+
+        public void UseTopLevels()
+        {
+            AndroidHost.TopLevelMode = true;
+            _publishedWidth = AndroidHost.Width;
+            _publishedHeight = AndroidHost.Height;
+        }
+
+        public bool TryCreateTopLevel(in TopLevelFrame frame, ITopLevelWindow owner, out ITopLevelWindow window)
+        {
+            window = null;
+            if (_disposed)
+                return false;
+
+            IntPtr native = AndroidHost.CreateLayer(out int layer);
+            if (native == IntPtr.Zero)
+                return false;
+
+            AndroidTopLevel created = new(this, layer, native, frame, owner as AndroidTopLevel);
+            _topLevels[native] = created;
+
+            if (!_firstLayerShown)
+            {
+                _firstLayerShown = true;
+                AndroidInput.ReplayFocus();
+                AndroidHost.NotifyPlayer(AndroidHost.PlayerWindowCreated);
+            }
+
+            created.Place();
+            window = created;
+            return true;
+        }
+
+        public void Restack(ReadOnlySpan<ITopLevelWindow> topToBottom)
+        {
+            for (int i = 0; i < topToBottom.Length; i++)
+                ((AndroidTopLevel)topToBottom[i]).SetOrder(topToBottom.Length - i);
+        }
+
         public void PumpEvents()
         {
             if (_disposed)
                 return;
 
+            if (AndroidHost.TopLevelMode)
+            {
+                PlaceForSurface();
+                foreach (AndroidTopLevel topLevel in _topLevels.Values)
+                    topLevel.Flush();
+
+                return;
+            }
+
             PublishSurfaceSize();
             _gdi.Flush();
+        }
+
+        private void PlaceForSurface()
+        {
+            if (!TryTakeSurfaceSize(out _, out _))
+                return;
+
+            foreach (AndroidTopLevel topLevel in _topLevels.Values)
+                topLevel.Refill();
         }
 
         // The Surface carries no resize stream of its own, so the guest window would keep the size the guest
         // asked for while the Vulkan surface reports the Surface.
         private void PublishSurfaceSize()
         {
-            int width = AndroidHost.Width;
-            int height = AndroidHost.Height;
-
-            if (width <= 0 || height <= 0 || (width == _publishedWidth && height == _publishedHeight))
+            if (!TryTakeSurfaceSize(out int width, out int height))
                 return;
-
-            _publishedWidth = width;
-            _publishedHeight = height;
 
             HostEventQueue.Enqueue(WM_SIZE, SIZE_RESTORED, HostEventQueue.MakeLParam(width, height));
             HostEventQueue.MarkRepaint();
         }
 
+        private bool TryTakeSurfaceSize(out int width, out int height)
+        {
+            width = AndroidHost.Width;
+            height = AndroidHost.Height;
+            if (width <= 0 || height <= 0 || (width == _publishedWidth && height == _publishedHeight))
+                return false;
+
+            _publishedWidth = width;
+            _publishedHeight = height;
+            return true;
+        }
+
         public void ExecuteGdiPrimitive(IntPtr windowHandle, GdiPrimitive primitive)
         {
-            if (!_disposed)
+            if (_disposed)
+                return;
+
+            if (!AndroidHost.TopLevelMode)
                 _gdi.Execute(primitive);
+            else if (_topLevels.TryGetValue(windowHandle, out AndroidTopLevel topLevel))
+                AndroidGdiSurface.Execute(topLevel.Buffer, primitive);
         }
 
         // Android draws with one system face, so a font handle selects nothing.
         public void RenderText(IntPtr windowHandle, ulong hwnd, IntPtr font, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options, GdiClipRect[] clip)
         {
-            if (!_disposed)
+            if (_disposed)
+                return;
+
+            if (!AndroidHost.TopLevelMode)
                 _gdi.DrawText(hwnd, text, x, y, rectLeft, rectTop, rectRight, rectBottom, options, clip);
+            else if (_topLevels.TryGetValue(windowHandle, out AndroidTopLevel topLevel))
+                AndroidGdiSurface.DrawText(topLevel.Buffer, text, x, y, rectLeft, rectTop, rectRight, rectBottom, options, clip);
         }
 
         public bool MeasureText(IntPtr font, string text, out int width, out int height)
@@ -256,8 +341,346 @@ namespace Brovan.Android
             _window?.Dispose();
             _window = null;
 
+            foreach (AndroidTopLevel topLevel in new List<AndroidTopLevel>(_topLevels.Values))
+                topLevel.Dispose();
+
             if (ReferenceEquals(_current, this))
+            {
+                AndroidHost.TopLevelMode = false;
                 _current = null;
+            }
+        }
+
+        private sealed class AndroidTopLevel : ITopLevelWindow
+        {
+            private readonly AndroidWinManager _manager;
+            private readonly int _layer;
+            private readonly ulong _guest;
+            private IntPtr _native;
+
+            private AndroidTopLevel _owner;
+            private uint _style;
+            private uint _exStyle;
+            private string _title;
+            private WindowState _state;
+            private bool _shown;
+            private int _order;
+
+            private int _requestedX;
+            private int _requestedY;
+            private int _requestedWidth;
+            private int _requestedHeight;
+            private int _x;
+            private int _y;
+            private int _width;
+            private int _height;
+            private bool _fillReported;
+
+            private bool _keyed;
+            private int _key;
+            private float _alpha = 1f;
+
+            private AndroidGdiSurface.WindowBuffer _layered;
+            private int _layeredX;
+            private int _layeredY;
+            private int _layeredWidth;
+            private int _layeredHeight;
+
+            private readonly record struct LayerState(int X, int Y, int Width, int Height, int Z, bool Shown, float Alpha);
+            private LayerState? _applied;
+
+            internal readonly AndroidGdiSurface.WindowBuffer Buffer = new();
+
+            internal AndroidTopLevel(AndroidWinManager manager, int layer, IntPtr native, in TopLevelFrame frame, AndroidTopLevel owner)
+            {
+                _manager = manager;
+                _layer = layer;
+                _native = native;
+                _guest = frame.Window;
+                _owner = owner;
+                _style = frame.Style;
+                _exStyle = frame.ExStyle;
+                _title = frame.Title ?? string.Empty;
+                _state = WindowState.Normal;
+                _requestedX = frame.ClientX;
+                _requestedY = frame.ClientY;
+                _requestedWidth = frame.ClientWidth;
+                _requestedHeight = frame.ClientHeight;
+            }
+
+            // A phone has no window manager, so an unowned window with a caption fills the screen.
+            private bool FillsScreen => _owner == null && Win32kHelper.HasCaption(_style);
+
+            internal void Place()
+            {
+                if (_layered != null)
+                {
+                    _x = _layeredX;
+                    _y = _layeredY;
+                    _width = _layeredWidth;
+                    _height = _layeredHeight;
+                    Apply();
+                    return;
+                }
+
+                int surfaceWidth = AndroidHost.Width;
+                int surfaceHeight = AndroidHost.Height;
+                bool fills = FillsScreen && surfaceWidth > 0 && surfaceHeight > 0;
+
+                _x = fills ? 0 : _requestedX;
+                _y = fills ? 0 : _requestedY;
+                _width = Math.Max(fills ? surfaceWidth : _requestedWidth, 1);
+                _height = Math.Max(fills ? surfaceHeight : _requestedHeight, 1);
+
+                if (Buffer.Resize(_width, _height))
+                    HostEventQueue.MarkRepaint(_guest);
+
+                Apply();
+
+                if (!fills)
+                {
+                    _fillReported = false;
+                    return;
+                }
+
+                if (_fillReported || _requestedWidth <= 0 || _requestedHeight <= 0)
+                    return;
+
+                _fillReported = true;
+                if (_requestedX != 0 || _requestedY != 0)
+                    HostEventQueue.Enqueue(WM_MOVE, 0, 0, _guest);
+
+                if (_requestedWidth != surfaceWidth || _requestedHeight != surfaceHeight)
+                {
+                    uint sizeType = _state == WindowState.Maximized ? SIZE_MAXIMIZED : SIZE_RESTORED;
+                    HostEventQueue.Enqueue(WM_SIZE, sizeType, HostEventQueue.MakeLParam(surfaceWidth, surfaceHeight), _guest);
+                }
+            }
+
+            internal void Refill()
+            {
+                _fillReported = false;
+                Place();
+            }
+
+            internal void SetOrder(int order)
+            {
+                if (order == _order)
+                    return;
+
+                _order = order;
+                Apply();
+            }
+
+            private void Apply()
+            {
+                if (_native == IntPtr.Zero)
+                    return;
+
+                LayerState state = new(_x, _y, _width, _height, _order, _shown && _state != WindowState.Minimized, _alpha);
+                if (state == _applied)
+                    return;
+
+                _applied = state;
+                AndroidHost.ApplyLayer(_layer, state.X, state.Y, state.Width, state.Height, state.Z, state.Shown, state.Alpha);
+            }
+
+            internal void Flush()
+            {
+                if (!_shown || _native == IntPtr.Zero)
+                    return;
+
+                if (_layered != null)
+                {
+                    if (_layered.Dirty && _layered.Width != 0)
+                        AndroidGdiSurface.Post(_native, _layered.Pixels, _layered.Width, _layered.Height, false, 0, true);
+
+                    _layered.Dirty = false;
+                    return;
+                }
+
+                if (Buffer.Dirty && Buffer.Width != 0)
+                    AndroidGdiSurface.Post(_native, Buffer.Pixels, Buffer.Width, Buffer.Height, _keyed, _key, false);
+
+                Buffer.Dirty = false;
+            }
+
+            public string Title
+            {
+                get => _title;
+                set
+                {
+                    _title = value ?? string.Empty;
+                    if (FillsScreen)
+                        AndroidHost.WindowTitle = _title;
+                }
+            }
+
+            public int Width
+            {
+                get => _width;
+                set { }
+            }
+
+            public int Height
+            {
+                get => _height;
+                set { }
+            }
+
+            public bool Visible
+            {
+                get => _shown;
+                set => SetShown(value);
+            }
+
+            public WindowState State
+            {
+                get => _state;
+                set
+                {
+                    _state = value;
+                    if (_state == WindowState.Minimized)
+                        Apply();
+                    else
+                        Refill();
+                }
+            }
+
+            public bool Resizable => true;
+
+            public bool Decorated
+            {
+                get => false;
+                set { }
+            }
+
+            public IntPtr NativeHandle => _native;
+
+            public void SetFrame(uint style, uint exStyle)
+            {
+                bool keptMaximized = FillsScreen;
+                _style = style;
+                _exStyle = exStyle;
+
+                if ((exStyle & Win32kHelper.WindowExStyleLayered) == 0)
+                    ForgetLayered();
+
+                if (keptMaximized != FillsScreen)
+                    Place();
+                else
+                    Apply();
+            }
+
+            public void SetOwner(ITopLevelWindow owner)
+            {
+                bool keptMaximized = FillsScreen;
+                _owner = owner as AndroidTopLevel;
+                if (keptMaximized != FillsScreen)
+                    Place();
+            }
+
+            public void SetClientBounds(int x, int y, int width, int height)
+            {
+                _requestedX = x;
+                _requestedY = y;
+                _requestedWidth = width;
+                _requestedHeight = height;
+                Place();
+            }
+
+            // The guest drops input to a disabled window itself.
+            public void SetEnabled(bool enabled)
+            {
+            }
+
+            public void SetShown(bool shown)
+            {
+                if (shown == _shown)
+                    return;
+
+                _shown = shown;
+                Apply();
+            }
+
+            // Restack orders the layers, and Android focus belongs to the whole player.
+            public void Activate()
+            {
+            }
+
+            public void SetLayeredAttributes(uint colorKey, byte alpha, uint flags)
+            {
+                if ((_exStyle & Win32kHelper.WindowExStyleLayered) == 0)
+                    return;
+
+                ForgetLayered();
+                _keyed = (flags & LayeredPixels.ColorKey) != 0;
+                _key = AndroidGdiSurface.ToPixel(colorKey);
+                _alpha = (flags & LayeredPixels.Alpha) != 0 ? alpha / 255f : 1f;
+                Buffer.Dirty = true;
+                Apply();
+            }
+
+            public void UpdateLayered(LayeredUpdate update)
+            {
+                if ((_exStyle & Win32kHelper.WindowExStyleLayered) == 0 || update.Width <= 0 || update.Height <= 0)
+                    return;
+
+                _keyed = false;
+                _layered ??= new AndroidGdiSurface.WindowBuffer();
+                _layered.Resize(update.Width, update.Height, 0);
+                LayeredPixels.Apply(update, MemoryMarshal.Cast<int, uint>(_layered.Pixels.AsSpan(0, _layered.Width * _layered.Height)));
+
+                _alpha = (update.Flags & LayeredPixels.Alpha) != 0 ? update.ConstantAlpha / 255f : 1f;
+                _layered.Dirty = true;
+                _layeredWidth = update.Width;
+                _layeredHeight = update.Height;
+                _layeredX = update.X;
+                _layeredY = update.Y;
+                Place();
+            }
+
+            private void ForgetLayered()
+            {
+                _layered = null;
+                _keyed = false;
+                _alpha = 1f;
+                Buffer.Dirty = true;
+            }
+
+            public void Present()
+            {
+            }
+
+            // Touch input has no pointer to move or confine.
+            public void WarpCursor(int clientX, int clientY)
+            {
+            }
+
+            public void SetCursorClip(bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom)
+            {
+            }
+
+            public void SetCursorVisible(bool visible)
+            {
+            }
+
+            public void Show() => SetShown(true);
+
+            public void Hide() => SetShown(false);
+
+            public void Close() => Dispose();
+
+            public void Dispose()
+            {
+                if (_native == IntPtr.Zero)
+                    return;
+
+                _manager._topLevels.Remove(_native);
+                AndroidNative.NativeWindowRelease(_native);
+                _native = IntPtr.Zero;
+                AndroidHost.ReleaseLayer(_layer);
+            }
         }
 
         private sealed class AndroidWindow : IWindow

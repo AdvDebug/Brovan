@@ -24,10 +24,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public string DeviceName => "\\Device\\BrovVulk";
 
-        internal void ReleaseHostMemory()
+        internal bool ReleaseHostMemory()
         {
             lock (Lock)
-                GenState.Dispose();
+                return GenState.TryDispose();
         }
 
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
@@ -246,7 +246,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static class PostStats
         {
-            private static readonly BrovVulkStats Log = new BrovVulkStats("BROVVULK_POST_STATS", "BrovVulk post stats:", Describe);
+            private static readonly PeriodicStats Log = new PeriodicStats("BROVVULK_POST_STATS", "BrovVulk post stats:", Describe);
 
             private static long _posted;
             private static long _failed;

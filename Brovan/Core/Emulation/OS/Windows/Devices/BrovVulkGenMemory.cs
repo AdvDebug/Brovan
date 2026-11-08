@@ -654,7 +654,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         private static class ImportStats
         {
-            private static readonly BrovVulkStats Log = new BrovVulkStats("BROVVULK_IMPORT_STATS", "BrovVulk import stats:", Describe);
+            private static readonly PeriodicStats Log = new PeriodicStats("BROVVULK_IMPORT_STATS", "BrovVulk import stats:", Describe);
 
             internal static bool Enabled => Log.Enabled;
 

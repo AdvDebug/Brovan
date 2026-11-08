@@ -158,9 +158,12 @@ namespace Brovan.Core.Emulation
 
         OS.SharedHelpers.DpiAwareness GuestDpiAwareness { get; }
 
-        IntPtr EnsureHostWindowHandle(ulong GuestHwnd);
+        // The hold keeps the host window for a guest surface until ReleaseHostWindowHold.
+        IntPtr EnsureHostWindowHandle(ulong GuestHwnd, out object Hold);
 
-        void EnsureHostXlibSurfaceHandles(out IntPtr Connection, out IntPtr Window);
+        void ReleaseHostWindowHold(object Hold);
+
+        IntPtr HostXcbConnection();
 
         // Takes ownership of Host. The last guest handle closes it.
         ulong AddSharedGpuMemoryHandle(SafeHandle Host);

@@ -799,9 +799,9 @@ namespace Brovan.Core.Emulation
     {
         private const ulong PageSize = 0x1000;
         private const ulong PageMask = PageSize - 1;
-        private const ulong Present = 1UL << 0;
-        private const ulong LargePage = 1UL << 7;
-        private const ulong NoExecute = 1UL << 63;
+        private const ulong Present = GuestPageEntries.Present;
+        private const ulong LargePage = GuestPageEntries.LargePage;
+        private const ulong NoExecute = GuestPageEntries.NoExecute;
         private const ulong ViewWindowOffset = 0x4_0000_0000UL;
         private const ulong ViewChunk = 2UL << 20;
 

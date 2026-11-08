@@ -48,6 +48,7 @@ extern void brovan_select_window(unsigned long long hwnd);
 extern int brovan_debug_query(const char *request, char *buffer, int capacity);
 extern void brovan_debug_pause(void);
 extern void brovan_set_player_sink(void *sink);
+extern void brovan_set_layer_sinks(void *create, void *apply, void *release);
 extern void brovan_terminal_key(int down, int virtualKey, int character, int controlKeyState);
 extern void brovan_terminal_resize(int columns, int rows);
 extern int brovan_terminal_snapshot(int *buffer, int capacity, int scrollBack);
@@ -61,6 +62,10 @@ static jmethodID g_onTextMetrics;
 static jmethodID g_onTextBitmap;
 static jmethodID g_onSpawn;
 static jmethodID g_onPlayer;
+static jclass g_layers;
+static jmethodID g_layerCreate;
+static jmethodID g_layerApply;
+static jmethodID g_layerRelease;
 static pthread_key_t g_attachment_key;
 static int g_attachment_key_ready;
 
@@ -229,6 +234,97 @@ static void on_player(int event) {
     }
 
     detach(attachment);
+}
+
+static int clear_exception(JNIEnv *env) {
+    if (!(*env)->ExceptionCheck(env)) {
+        return 0;
+    }
+
+    (*env)->ExceptionDescribe(env);
+    (*env)->ExceptionClear(env);
+    return 1;
+}
+
+static void *layer_create(int id) {
+    Attachment attachment = attach();
+    JNIEnv *env = attachment.env;
+    if (env == NULL) {
+        return NULL;
+    }
+
+    ANativeWindow *window = NULL;
+    jobject surface = (*env)->CallStaticObjectMethod(env, g_layers, g_layerCreate, (jint)id);
+    if (!clear_exception(env) && surface != NULL) {
+        window = ANativeWindow_fromSurface(env, surface);
+    }
+
+    if (surface != NULL) {
+        (*env)->DeleteLocalRef(env, surface);
+    }
+
+    if (window == NULL) {
+        (*env)->CallStaticVoidMethod(env, g_layers, g_layerRelease, (jint)id);
+        clear_exception(env);
+    }
+
+    detach(attachment);
+    return window;
+}
+
+static void layer_apply(int id, int x, int y, int width, int height, int z, int shown, float alpha) {
+    Attachment attachment = attach();
+    JNIEnv *env = attachment.env;
+    if (env == NULL) {
+        return;
+    }
+
+    (*env)->CallStaticVoidMethod(env, g_layers, g_layerApply, (jint)id, (jint)x, (jint)y, (jint)width, (jint)height,
+                                 (jint)z, shown != 0 ? JNI_TRUE : JNI_FALSE, (jfloat)alpha);
+    clear_exception(env);
+    detach(attachment);
+}
+
+static void layer_release(int id) {
+    Attachment attachment = attach();
+    JNIEnv *env = attachment.env;
+    if (env == NULL) {
+        return;
+    }
+
+    (*env)->CallStaticVoidMethod(env, g_layers, g_layerRelease, (jint)id);
+    clear_exception(env);
+    detach(attachment);
+}
+
+static void find_layers(JNIEnv *env) {
+    jclass layers = (*env)->FindClass(env, "dev/brovan/GuestLayers");
+    if (clear_exception(env) || layers == NULL) {
+        return;
+    }
+
+    jmethodID available = (*env)->GetStaticMethodID(env, layers, "available", "()Z");
+    if (!clear_exception(env) && available != NULL && (*env)->CallStaticBooleanMethod(env, layers, available)
+        && !clear_exception(env)) {
+        g_layerCreate = (*env)->GetStaticMethodID(env, layers, "create", "(I)Landroid/view/Surface;");
+        g_layerApply = (*env)->GetStaticMethodID(env, layers, "apply", "(IIIIIIZF)V");
+        g_layerRelease = (*env)->GetStaticMethodID(env, layers, "release", "(I)V");
+        if (!clear_exception(env) && g_layerCreate != NULL && g_layerApply != NULL && g_layerRelease != NULL) {
+            g_layers = (jclass)(*env)->NewGlobalRef(env, layers);
+        }
+    }
+
+    (*env)->DeleteLocalRef(env, layers);
+}
+
+static void register_layers(JNIEnv *env) {
+    if (g_layers == NULL) {
+        find_layers(env);
+    }
+
+    if (g_layers != NULL) {
+        brovan_set_layer_sinks((void *)&layer_create, (void *)&layer_apply, (void *)&layer_release);
+    }
 }
 
 #define TEXT_FIELD_COUNT 8
@@ -498,6 +594,7 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
         brovan_set_text_sink((void *)&on_text);
         brovan_set_spawn_sink((void *)&on_spawn);
         brovan_set_player_sink((void *)&on_player);
+        register_layers(env);
         trap_sigill();
     } else {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "brovan_init failed: %d", status);

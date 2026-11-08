@@ -108,6 +108,12 @@ namespace Brovan.Core.Settings
 
         public static int ActivationContextBytes { get; private set; }
 
+        // Live WHP backing windows of one process. Each reserves 16 MiB of host addresses.
+        public static int BackingWindows { get; private set; }
+
+        // Host windows of one process. Windows has no limit, because a recreated window loses its activation state.
+        public static int HostTopLevels { get; private set; }
+
         // The guest Vulkan ICD sizes its descriptor pool raise budget from this figure.
         public static ulong GuestPhysicalBytes { get; private set; }
 
@@ -156,6 +162,8 @@ namespace Brovan.Core.Settings
             SideBySideManifestBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 256));
             ActivationContextAssemblies = (int)Pick(Off: 64, Minimal: 64, Medium: 48, High: 32, Aggressive: 16);
             ActivationContextBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 128));
+            BackingWindows = (int)Pick(Off: 524288, Minimal: 262144, Medium: 131072, High: 65536, Aggressive: 32768);
+            HostTopLevels = GeneralHelper.IsWindows ? int.MaxValue : (int)Pick(Off: 4096, Minimal: 2048, Medium: 512, High: 256, Aggressive: 128);
             ulong PhysicalMegabytes = Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
 
             GuestPhysicalBytes = Megabytes(PhysicalMegabytes);

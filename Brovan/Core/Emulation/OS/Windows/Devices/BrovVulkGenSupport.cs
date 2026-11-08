@@ -3,44 +3,12 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Threading;
 using Brovan.Core.Helpers;
 using Brovan.Core.Settings;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
-    // The counters are plain fields, so every caller holds BrovVulkDevice.Lock.
-    internal sealed class BrovVulkStats
-    {
-        private const int ReportInterval = 256;
-
-        private readonly string _title;
-        private readonly Action<StringBuilder> _describe;
-        private int _sinceReport;
-
-        internal readonly bool Enabled;
-
-        internal BrovVulkStats(string variable, string title, Action<StringBuilder> describe)
-        {
-            Enabled = string.Equals(Environment.GetEnvironmentVariable(variable), "1", StringComparison.Ordinal);
-            _title = title;
-            _describe = describe;
-        }
-
-        internal void Tick()
-        {
-            if (++_sinceReport < ReportInterval)
-                return;
-
-            _sinceReport = 0;
-            StringBuilder sb = new StringBuilder(_title);
-            _describe(sb);
-            Utils.LogError(sb.ToString());
-            Utils.FlushLog();
-        }
-    }
-
     internal sealed unsafe class GenReader
     {
         private byte[] _data;
@@ -542,6 +510,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Pins of the guest backing that the host driver reads.
         private readonly Dictionary<uint, IntPtr> _importedMem = new();
         private IGuestMemory? _importMemory;
+        private sealed class SurfaceHold
+        {
+            public IGuestMemory Owner;
+            public object Hold;
+            public int Users;
+        }
+
+        private readonly Dictionary<IntPtr, SurfaceHold> _surfaceHolds = new();
+        private readonly Dictionary<IntPtr, SurfaceHold> _swapchainHolds = new();
         private readonly Dictionary<uint, ulong> _memorySizes = new Dictionary<uint, ulong>();
         private readonly Dictionary<IntPtr, DeviceImport> _deviceImports = new Dictionary<IntPtr, DeviceImport>();
         private readonly Dictionary<IntPtr, IntPtr> _devicePhysical = new Dictionary<IntPtr, IntPtr>();
@@ -1068,9 +1045,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                             break;
                         case "VkSurfaceKHR":
                             Wsi.Forget(e.Ptr, e.Type);
+                            if (_surfaceHolds.Remove(e.Ptr, out SurfaceHold surfaceHold))
+                                DropSurfaceHold(surfaceHold);
                             break;
                         case "VkSwapchainKHR":
                             Wsi.Forget(e.Ptr, e.Type);
+                            if (_swapchainHolds.Remove(e.Ptr, out SurfaceHold swapchainHold))
+                                DropSurfaceHold(swapchainHold);
                             _swapchainExtents.Remove(e.Ptr);
                             _swapchainImageCounts.Remove(e.Ptr);
                             ScrubSwapchain(e.Ptr);
@@ -4013,18 +3994,69 @@ namespace Brovan.Core.Emulation.OS.Windows
             _retainedBytes -= kept.Bytes;
         }
 
-        public void Dispose()
+        public void KeepHostWindowHold(IntPtr surface, IGuestMemory owner, object hold)
+        {
+            if (hold == null)
+                return;
+
+            if (_surfaceHolds.Remove(surface, out SurfaceHold stale))
+                DropSurfaceHold(stale);
+            _surfaceHolds[surface] = new SurfaceHold { Owner = owner, Hold = hold, Users = 1 };
+        }
+
+        public void NoteSwapchain(IntPtr swapchain, in BrovVulkWsi.SwapchainPlan plan)
+        {
+            Wsi.NoteSwapchain(swapchain, plan);
+            if (swapchain == IntPtr.Zero)
+                return;
+
+            if (_swapchainHolds.Remove(swapchain, out SurfaceHold stale))
+                DropSurfaceHold(stale);
+
+            if (plan.Surface != IntPtr.Zero && _surfaceHolds.TryGetValue(plan.Surface, out SurfaceHold hold))
+            {
+                hold.Users++;
+                _swapchainHolds[swapchain] = hold;
+            }
+        }
+
+        private static void DropSurfaceHold(SurfaceHold hold)
+        {
+            if (--hold.Users == 0)
+                hold.Owner.ReleaseHostWindowHold(hold.Hold);
+        }
+
+        private static void ReleaseSurfaceHold(SurfaceHold hold)
+        {
+            if (hold.Users <= 0)
+                return;
+
+            hold.Users = 0;
+            hold.Owner.ReleaseHostWindowHold(hold.Hold);
+        }
+
+        public void Dispose() => TryDispose();
+
+        // False when the driver may still use what it was given, which then stays.
+        public bool TryDispose()
         {
             foreach (IntPtr ownerKey in _ownerKeys.Values)
                 BrovVulkProc.RemoveOwner(ownerKey);
             _ownerKeys.Clear();
             if (!Retire.Drain(this, RetireDrainMilliseconds))
-                return;
+                return false;
             foreach ((IntPtr[] Blocks, long Bytes) kept in _retained.Values)
                 FreeRetained(kept);
             _retained.Clear();
             _retainedBytes = 0;
             _arena.FreeAll();
+            foreach (SurfaceHold hold in _surfaceHolds.Values)
+                ReleaseSurfaceHold(hold);
+            foreach (SurfaceHold hold in _swapchainHolds.Values)
+                ReleaseSurfaceHold(hold);
+            _surfaceHolds.Clear();
+            _swapchainHolds.Clear();
+            return true;
         }
 
     }

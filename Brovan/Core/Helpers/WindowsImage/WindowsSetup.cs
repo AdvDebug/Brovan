@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using Brovan.Core.Emulation.OS.Windows;
 using Microsoft.Win32.SafeHandles;
 
 namespace Brovan.Core.Helpers.WindowsImage
@@ -27,6 +28,9 @@ namespace Brovan.Core.Helpers.WindowsImage
 
         public static bool InstallRuntimes(string BaseDirectory, bool LicenseAccepted, Action<string> Report, Func<bool>? Confirm, Action<long, long, long, long>? Progress = null)
         {
+            if (GuestsAreRunning(BaseDirectory, Report))
+                return false;
+
             if (!LicenseAccepted)
             {
                 Report(VisualCppRuntimeImporter.LicenseNotice);
@@ -76,6 +80,9 @@ namespace Brovan.Core.Helpers.WindowsImage
 
             try
             {
+                if (GuestsAreRunning(BaseDirectory, Report))
+                    return false;
+
                 string? Location = Options.Media;
 
                 if (Options.MediaDescriptor >= 0)
@@ -120,6 +127,16 @@ namespace Brovan.Core.Helpers.WindowsImage
             {
                 Media?.Dispose();
             }
+        }
+
+        // An import deletes and rewrites files that a running guest has open or mapped.
+        private static bool GuestsAreRunning(string BaseDirectory, Action<string> Report)
+        {
+            if (!GuestSession.HasLiveGuests(BaseDirectory, out string Session))
+                return false;
+
+            Report($"[-] A program is still running from this Brovan folder (session {Session}). Close it, then try again.");
+            return true;
         }
 
         private static string Describe(Exception Error)

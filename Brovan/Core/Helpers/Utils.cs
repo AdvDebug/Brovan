@@ -381,4 +381,35 @@ namespace Brovan.Core.Helpers
             Console.Write("\u001b[H\u001b[2J\u001b[3J"); // Virtual console support
         }
     }
+
+    // The counters are plain fields, so every caller holds the lock that guards them.
+    internal sealed class PeriodicStats
+    {
+        private const int ReportInterval = 256;
+
+        private readonly string _title;
+        private readonly Action<StringBuilder> _describe;
+        private int _sinceReport;
+
+        internal readonly bool Enabled;
+
+        internal PeriodicStats(string variable, string title, Action<StringBuilder> describe)
+        {
+            Enabled = string.Equals(Environment.GetEnvironmentVariable(variable), "1", StringComparison.Ordinal);
+            _title = title;
+            _describe = describe;
+        }
+
+        internal void Tick()
+        {
+            if (++_sinceReport < ReportInterval)
+                return;
+
+            _sinceReport = 0;
+            StringBuilder sb = new StringBuilder(_title);
+            _describe(sb);
+            Utils.LogError(sb.ToString());
+            Utils.FlushLog();
+        }
+    }
 }

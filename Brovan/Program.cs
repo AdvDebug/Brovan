@@ -107,9 +107,9 @@ namespace Brovan
             Console.WriteLine("  --render-scale <f>");
             Console.WriteLine("                    Fraction of the window the program renders at, from 0.25 to 1. Below 1 its");
             Console.WriteLine("                    render targets get smaller and the display scales the result back up. Android only.");
-            Console.WriteLine("  --install-windows Extract the system libraries, NLS tables and registry hives Brovan needs from");
-            Console.WriteLine("                    the Windows installation media given by --windows-iso, then the Visual C++");
-            Console.WriteLine("                    runtimes, then exit.");
+            Console.WriteLine("  --install-windows Extract the system libraries, registry hives and the other C:\\Windows files");
+            Console.WriteLine("                    Brovan needs from the Windows installation media given by --windows-iso, then");
+            Console.WriteLine("                    the Visual C++ runtimes, then exit.");
             Console.WriteLine("  --install-runtimes");
             Console.WriteLine("                    Download only the Visual C++ runtimes into WindowsLibs, then exit. Useful when");
             Console.WriteLine("                    the Windows system files are already in place.");

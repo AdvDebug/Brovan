@@ -131,13 +131,17 @@ internal sealed unsafe class FuzzGuest : IGuestMemory, IDisposable
 
     public DpiAwareness GuestDpiAwareness => DpiAwareness.PerMonitor;
 
-    public IntPtr EnsureHostWindowHandle(ulong GuestHwnd) => IntPtr.Zero;
-
-    public void EnsureHostXlibSurfaceHandles(out IntPtr Connection, out IntPtr Window)
+    public IntPtr EnsureHostWindowHandle(ulong GuestHwnd, out object Hold)
     {
-        Connection = IntPtr.Zero;
-        Window = IntPtr.Zero;
+        Hold = null;
+        return IntPtr.Zero;
     }
+
+    public void ReleaseHostWindowHold(object Hold)
+    {
+    }
+
+    public IntPtr HostXcbConnection() => IntPtr.Zero;
 
     public ulong AddSharedGpuMemoryHandle(SafeHandle Host)
     {

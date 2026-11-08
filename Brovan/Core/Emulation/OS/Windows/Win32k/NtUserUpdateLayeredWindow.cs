@@ -90,7 +90,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Window.LayeredByUpdate = true;
             Instance.WinHelper.MaterializeUserWindow(Window);
 
-            if (Instance.WinHelper.UsesTopLevelHost && Window.ParentHwnd == 0)
+            if (Instance.WinHelper.HostSupportsLayered && Window.ParentHwnd == 0)
             {
                 LayeredUpdate Update = new LayeredUpdate
                 {
@@ -121,7 +121,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
             else if (SourceDc != 0 && Win32kHelper.IsBlitExtentValid(Width, Height))
             {
-                // A child window or a single surface host has no layered host window, so the surface is drawn opaque.
+                // A child window, or a host without layered windows, has no layered host window, so the surface is drawn opaque.
                 int Count = Width * Height;
                 uint[] Pixels = ArrayPool<uint>.Shared.Rent(Count);
                 try

@@ -4563,7 +4563,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             bool Present = false;
             if (HostEventQueue.ConsumeRepaint())
             {
-                InvalidateWholeWindow(Instance, Instance.WinHelper.GetWindow(Presented));
+                if (Instance.WinHelper.UsesTopLevelHost)
+                {
+                    foreach (ulong TopLevel in Instance.WinHelper.TopLevelWindows)
+                    {
+                        WinWindow Shown = Instance.WinHelper.GetWindow(TopLevel);
+                        if (Shown != null && Shown.Visible && !Shown.Destroyed)
+                            InvalidateWholeWindow(Instance, Shown);
+                    }
+                }
+                else
+                {
+                    InvalidateWholeWindow(Instance, Instance.WinHelper.GetWindow(Presented));
+                }
+
                 Present = true;
             }
 
@@ -4600,6 +4613,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     continue;
 
                 ulong Root = Source != 0 ? Source : Presented;
+                if (Event.ScreenPoint && !TryRouteScreenPointer(Instance, in Event, ref Root))
+                    continue;
 
                 if (Message == HostEventQueue.RawMouseMotion)
                 {
@@ -4648,6 +4663,35 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (Present)
                 Instance.WinHelper.PresentDesktop();
+        }
+
+        // NT gives pointer input to the capture window wherever the point is, but wheel input to the window under the
+        // point (CMouseProcessor::ProcessMouseWheel). A disabled window under the point takes none.
+        private static bool TryRouteScreenPointer(BinaryEmulator Instance, in HostEventQueue.HostEvent Event, ref ulong Root)
+        {
+            bool Wheel = Event.Message == WM_MOUSEWHEEL || Event.Message == WM_MOUSEHWHEEL;
+            ulong Capture = Wheel ? 0 : GetCaptureWindow(Instance);
+            if (Capture != 0 && Instance.WinHelper.GetRootWindow(Instance.WinHelper.GetWindow(Capture)) is WinWindow CaptureRoot)
+            {
+                Root = CaptureRoot.Hwnd;
+                return true;
+            }
+
+            WinWindow Hit = TopLevelFromPoint(Instance, (short)(Event.LParam & 0xFFFF), (short)((Event.LParam >> 16) & 0xFFFF));
+            if (Hit == null)
+            {
+                ulong Foreground = Instance.WinHelper.GetForegroundWindow();
+                if (Foreground != 0)
+                    Root = Foreground;
+
+                return true;
+            }
+
+            if ((Hit.Style & WindowStyleDisabled) != 0)
+                return false;
+
+            Root = Hit.Hwnd;
+            return true;
         }
 
         // The host window can lag behind a guest move, so the point goes through the screen.
@@ -5208,7 +5252,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return ChildFromPoint(Instance, Root, (short)(LParam & 0xFFFF) - OriginX, (short)((LParam >> 16) & 0xFFFF) - OriginY, 0);
             }
 
-            if (Message < WM_MOUSEMOVE || Message > WM_RBUTTONUP)
+            // NT sends every button to the capture window, or else to the window under the point (ProcessMouseButton).
+            if (Message < WM_MOUSEMOVE || Message > WM_XBUTTONUP)
                 return Root;
 
             int X = (short)(LParam & 0xFFFF);
@@ -5368,6 +5413,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const int FrameCaption = 23;
         private const int FrameSmallCaption = 23;
 
+        internal static bool HasCaption(uint Style) => (Style & WindowStyleCaption) == WindowStyleCaption;
+
         // Follows AdjustWindowRectEx. No menu is ever drawn, so a menu bar adds no height.
         internal static void GetFrameInsets(BinaryEmulator Instance, WinWindow Window, out int Left, out int Top, out int Right, out int Bottom)
         {
@@ -5395,7 +5442,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Right = Border;
             Bottom = Border;
 
-            if ((Style & WindowStyleCaption) == WindowStyleCaption)
+            if (HasCaption(Style))
                 Top += WinSysHelper.ScaleMetric((ExStyle & WindowExStyleToolWindow) != 0 ? FrameSmallCaption : FrameCaption, Dpi);
         }
 
@@ -5440,13 +5487,35 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Found;
         }
 
-        private static ulong HitTest(BinaryEmulator Instance, WinWindow Window, int X, int Y)
+        private static WinWindow TopLevelFromPoint(BinaryEmulator Instance, int X, int Y)
         {
-            if (Window == null || Window.Destroyed || !Window.Visible || (Window.ExStyle & WindowExStyleTransparent) != 0)
-                return 0;
+            List<ulong> TopLevel = Instance.WinHelper.TopLevelWindows;
+            for (int i = TopLevel.Count - 1; i >= 0; i--)
+            {
+                WinWindow Window = Instance.WinHelper.GetWindow(TopLevel[i]);
+                if (ContainsPoint(Instance, Window, X, Y))
+                    return Window;
+            }
+
+            return null;
+        }
+
+        // NT parks a minimized window at -32000, so no point is in it.
+        private static bool ContainsPoint(BinaryEmulator Instance, WinWindow Window, int X, int Y)
+        {
+            if (Window == null || Window.Destroyed || !Window.Visible || (Window.Style & WindowStyleMinimize) != 0
+                || (Window.ExStyle & WindowExStyleTransparent) != 0)
+            {
+                return false;
+            }
 
             GetAbsoluteWindowPosition(Instance, Window, out int Left, out int Top);
-            if (X < Left || Y < Top || X >= Left + (int)Window.Width || Y >= Top + (int)Window.Height)
+            return X >= Left && Y >= Top && X < Left + (int)Window.Width && Y < Top + (int)Window.Height;
+        }
+
+        private static ulong HitTest(BinaryEmulator Instance, WinWindow Window, int X, int Y)
+        {
+            if (!ContainsPoint(Instance, Window, X, Y))
                 return 0;
 
             foreach (ulong Child in Window.Children)

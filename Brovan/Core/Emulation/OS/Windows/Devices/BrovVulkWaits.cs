@@ -596,7 +596,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static class Stats
         {
-            private static readonly BrovVulkStats Log = new BrovVulkStats("BROVVULK_WAIT_STATS", "BrovVulk wait stats:", Describe);
+            private static readonly PeriodicStats Log = new PeriodicStats("BROVVULK_WAIT_STATS", "BrovVulk wait stats:", Describe);
 
             private static readonly long[] Fallbacks = new long[Enum.GetValues<FallbackReason>().Length];
             private static long _parks;

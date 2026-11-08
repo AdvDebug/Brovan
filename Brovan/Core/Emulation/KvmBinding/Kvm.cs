@@ -779,14 +779,12 @@ namespace Brovan.Core.Emulation
 
         private bool TryTouchWatchedPage(ulong errorCode)
         {
-            const ulong Present = 0x1;
-            const ulong Write = 0x2;
-            if (_untouchedPages == 0 || (errorCode & Present) != 0)
+            if (_untouchedPages == 0 || (errorCode & GuestPageEntries.FaultPresent) != 0)
                 return false;
 
             ulong pageBase = ReadRegister(Registers.UC_X86_REG_CR2) & ~KvmConstants.PageMask;
             if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || !page.Untouched || page.Permissions == KvmMemoryPermission.None ||
-                ((errorCode & Write) != 0 && (page.Permissions & KvmMemoryPermission.Write) == 0))
+                ((errorCode & GuestPageEntries.FaultWrite) != 0 && (page.Permissions & KvmMemoryPermission.Write) == 0))
                 return false;
 
             TouchWatchedPage(pageBase, page);
@@ -3124,18 +3122,9 @@ namespace Brovan.Core.Emulation
             unsafe
             {
                 ulong* pt = (ulong*)ptPtr;
-                ulong entry = 0;
-                if (permissions != KvmMemoryPermission.None)
-                {
-                    entry = pageBase | KvmConstants.PageTableEntryPresent;
-                    if ((permissions & KvmMemoryPermission.Write) != 0)
-                        entry |= KvmConstants.PageTableEntryWritable;
-
-                    if (pageBase < KvmConstants.InternalPageTableBase)
-                        entry |= KvmConstants.PageTableEntryUser;
-                    else if ((permissions & KvmMemoryPermission.Execute) == 0)
-                        entry |= KvmConstants.PageTableEntryNoExecute;
-                }
+                ulong entry = GuestPageEntries.Leaf(pageBase, permissions != KvmMemoryPermission.None,
+                    (permissions & KvmMemoryPermission.Write) != 0, (permissions & KvmMemoryPermission.Execute) != 0,
+                    KvmConstants.InternalPageTableBase);
 
                 ulong old;
                 if (_watchedPages == 0)
@@ -3157,7 +3146,7 @@ namespace Brovan.Core.Emulation
                         page.Written = true;
                 }
 
-                return (old & ~entry & (KvmConstants.PageTableEntryPresent | KvmConstants.PageTableEntryWritable)) != 0;
+                return GuestPageEntries.RemovesAccess(old, entry);
             }
         }
 
@@ -4108,12 +4097,19 @@ namespace Brovan.Core.Emulation
 
         private bool IsPageAccessible(ulong pageAddress, bool write)
         {
-            if (!IsGuestRange(pageAddress, KvmConstants.PageSize) || _trappedPages.ContainsKey(pageAddress)) return false;
-            if (!_mappedPages.TryGetValue(pageAddress, out MappedPage page) || page == null || page.HostPage == IntPtr.Zero)
+            if (!TryGetBackedPage(pageAddress, out MappedPage page))
                 return false;
 
-            KvmMemoryPermission needed = write ? KvmMemoryPermission.Write : KvmMemoryPermission.Read;
-            return (page.Permissions & needed) != 0;
+            KvmMemoryPermission perm = page.Permissions;
+            return GuestPageEntries.Allows((perm & KvmMemoryPermission.Read) != 0, (perm & KvmMemoryPermission.Write) != 0,
+                (perm & KvmMemoryPermission.Execute) != 0, write ? GuestAccess.Write : GuestAccess.Read);
+        }
+
+        private bool TryGetBackedPage(ulong pageAddress, out MappedPage page)
+        {
+            page = null;
+            return IsGuestRange(pageAddress, KvmConstants.PageSize) && !_trappedPages.ContainsKey(pageAddress)
+                && _mappedPages.TryGetValue(pageAddress, out page) && page != null && page.HostPage != IntPtr.Zero;
         }
 
         private unsafe bool HandleTrappedAccess(ref LinuxKvmMmioExit mmio, ulong physAddr, uint len, bool isWrite)
@@ -4174,8 +4170,8 @@ namespace Brovan.Core.Emulation
                 ulong faultAddress = ReadRegister(Registers.UC_X86_REG_CR2);
                 ulong faultPage = faultAddress & ~KvmConstants.PageMask;
 
-                bool write = (errorCode & 0x2) != 0;
-                bool fetch = (errorCode & 0x10) != 0;
+                bool write = (errorCode & GuestPageEntries.FaultWrite) != 0;
+                bool fetch = (errorCode & GuestPageEntries.FaultFetch) != 0;
 
                 // No-access pages are not present, so the present bit cannot tell mapped from unmapped.
                 bool mapped = _mappedPages.TryGetValue(faultPage, out MappedPage faulted)
@@ -4290,10 +4286,15 @@ namespace Brovan.Core.Emulation
         private bool IsStaleFault(ulong errorCode)
         {
             ulong page = ReadRegister(Registers.UC_X86_REG_CR2) & ~KvmConstants.PageMask;
-            if (!IsPageAccessible(page, (errorCode & 0x2) != 0))
+            if (!TryGetBackedPage(page, out MappedPage mapped))
                 return false;
 
-            EnsureVirtualMapping(page, _mappedPages[page].Permissions);
+            KvmMemoryPermission perm = mapped.Permissions;
+            if (!GuestPageEntries.IsStaleFault(errorCode, (perm & KvmMemoryPermission.Read) != 0,
+                    (perm & KvmMemoryPermission.Write) != 0, (perm & KvmMemoryPermission.Execute) != 0))
+                return false;
+
+            EnsureVirtualMapping(page, perm);
             return true;
         }
 

@@ -14,7 +14,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint WM_MOUSEMOVE = 0x0200;
         private const int InitialCapacity = 256;
 
-        // Window is 0 on a single surface backend. A pointer position is relative to the origin.
+        // Window is 0 on a single surface backend. A pointer position is relative to the origin. A screen pointer
+        // carries a guest screen point and no window, and the guest finds the window under it.
         internal struct HostEvent
         {
             public uint Message;
@@ -24,6 +25,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             public bool HasOrigin;
             public int OriginX;
             public int OriginY;
+            public bool ScreenPoint;
         }
 
         private static readonly object InputSync = new();
@@ -222,6 +224,18 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 HasOrigin = true,
                 OriginX = originX,
                 OriginY = originY
+            });
+        }
+
+        public static void EnqueueScreenPointer(uint message, ulong wParam, int screenX, int screenY)
+        {
+            Enqueue(new HostEvent
+            {
+                Message = message,
+                WParam = wParam,
+                LParam = MakeLParam(screenX, screenY),
+                HasOrigin = true,
+                ScreenPoint = true,
             });
         }
 
@@ -1101,8 +1115,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
     }
 
     /// <summary>
-    /// The client rectangle is in guest screen coordinates. The host window takes the guest's DPI awareness, so
-    /// these are host screen coordinates too.
+    /// The client rectangle is in guest screen coordinates, which are host pixels unless the host virtualizes the
+    /// guest's DPI awareness (Windows only).
     /// </summary>
     public struct TopLevelFrame
     {
@@ -1169,6 +1183,45 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public uint Flags;
     }
 
+    public static class LayeredPixels
+    {
+        public const uint ColorKey = 1;
+        public const uint Alpha = 2;
+        private const byte SourceAlpha = 1;
+
+        // The target holds premultiplied 0xAARRGGBB. The host applies the constant alpha to the whole window.
+        public static void Apply(LayeredUpdate update, Span<uint> target)
+        {
+            if (update.Pixels == null || update.Width <= 0 || update.Height <= 0 || (long)update.Width * update.Height > target.Length
+                || update.DirtyWidth <= 0 || update.DirtyHeight <= 0 || (long)update.DirtyWidth * update.DirtyHeight > update.Pixels.Length)
+            {
+                return;
+            }
+
+            int left = Math.Max(update.DirtyLeft, 0);
+            int top = Math.Max(update.DirtyTop, 0);
+            int right = (int)Math.Min((long)update.DirtyLeft + update.DirtyWidth, update.Width);
+            int bottom = (int)Math.Min((long)update.DirtyTop + update.DirtyHeight, update.Height);
+            if (right <= left)
+                return;
+
+            bool keyed = (update.Flags & ColorKey) != 0;
+            uint keyRgb = HostColor.FromColorRef(update.ColorKey);
+            uint opaque = (update.Flags & Alpha) != 0 && update.AlphaFormat == SourceAlpha ? 0 : 0xFF000000;
+
+            for (int row = top; row < bottom; row++)
+            {
+                ReadOnlySpan<uint> source = update.Pixels.AsSpan((row - update.DirtyTop) * update.DirtyWidth + left - update.DirtyLeft, right - left);
+                Span<uint> destination = target.Slice(row * update.Width + left, right - left);
+                for (int i = 0; i < source.Length; i++)
+                {
+                    uint pixel = source[i];
+                    destination[i] = keyed && (pixel & 0x00FFFFFF) == keyRgb ? 0 : pixel | opaque;
+                }
+            }
+        }
+    }
+
     public interface ITopLevelWindow : IWindow
     {
         void SetFrame(uint style, uint exStyle);
@@ -1190,7 +1243,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
     public interface ITopLevelWindowHost
     {
-        ITopLevelWindow CreateTopLevel(in TopLevelFrame frame, ITopLevelWindow owner);
+        bool TopLevelsAvailable { get; }
+
+        bool SupportsLayered { get; }
+
+        void UseTopLevels();
+
+        bool TryCreateTopLevel(in TopLevelFrame frame, ITopLevelWindow owner, out ITopLevelWindow window);
 
         void Restack(ReadOnlySpan<ITopLevelWindow> topToBottom);
     }

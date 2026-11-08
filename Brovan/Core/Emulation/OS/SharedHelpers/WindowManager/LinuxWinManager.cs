@@ -69,6 +69,39 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         [LibraryImport("libX11.so.6")]
         public static partial int XIconifyWindow(IntPtr display, IntPtr window, int screen);
 
+        [LibraryImport("libX11.so.6")]
+        public static partial int XMoveResizeWindow(IntPtr display, IntPtr window, int x, int y, uint width, uint height);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XRaiseWindow(IntPtr display, IntPtr window);
+
+        [LibraryImport("libX11.so.6")]
+        public static unsafe partial int XRestackWindows(IntPtr display, IntPtr* windows, int count);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XSetTransientForHint(IntPtr display, IntPtr window, IntPtr owner);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XDeleteProperty(IntPtr display, IntPtr window, IntPtr property);
+
+        [LibraryImport("libX11.so.6")]
+        public static partial int XChangeWindowAttributes(IntPtr display, IntPtr window, nuint valueMask, ref XSetWindowAttributes attributes);
+
+        public const int USPosition = 1 << 0;
+        public const int USSize = 1 << 1;
+        public const int PWinGravity = 1 << 9;
+        public const int StaticGravity = 10;
+        public const uint CWOverrideRedirect = 1 << 9;
+        public const int XA_ATOM = 4;
+        public const int XA_WM_TRANSIENT_FOR = 68;
+
+        // Brovan sets only OverrideRedirect, so the struct declares just that field at its LP64 offset.
+        [StructLayout(LayoutKind.Explicit, Size = 112)]
+        public struct XSetWindowAttributes
+        {
+            [FieldOffset(88)] public int OverrideRedirect;
+        }
+
         [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
         public static partial int XStoreName(IntPtr display, IntPtr window, string windowName);
 
@@ -211,6 +244,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static partial int XUngrabPointer(IntPtr display, IntPtr time);
 
         public const int GrabModeAsync = 1;
+        public const int GrabSuccess = 0;
 
         [LibraryImport("libX11.so.6")]
         public static partial int XCloseDisplay(IntPtr display);
@@ -405,6 +439,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         }
 
         [StructLayout(LayoutKind.Explicit)]
+        public struct XAnyEvent
+        {
+            [FieldOffset(0)] public int Type;
+            [FieldOffset(32)] public IntPtr Window;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
         public struct XButtonEvent
         {
             [FieldOffset(0)] public int Type;
@@ -556,7 +597,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public static unsafe partial nint Write(int fd, void* buffer, nuint count);
     }
 
-    internal sealed class LinuxWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport, IGdiRenderSupport, IKeyboardTranslateSupport
+    internal sealed class LinuxWinManager : IDisplayConnection, ITextRenderSupport, ITextMetricsSupport, IGdiRenderSupport, IKeyboardTranslateSupport, ITopLevelWindowHost
     {
         private const uint WM_SIZE = 0x0005;
         private const uint WM_MOVE = 0x0003;
@@ -642,6 +683,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private IntPtr _wmProtocols;
         private IntPtr _wmDeleteWindow;
+        private IntPtr[]? _deleteProtocol;
         private IntPtr _netWmName;
         private IntPtr _netWmState;
         private IntPtr _netWmStateFullscreen;
@@ -650,6 +692,21 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private IntPtr _netWmStateHidden;
         private IntPtr _motifWmHints;
         private IntPtr _utf8String;
+        private IntPtr _netWmWindowType;
+        private IntPtr _netWmWindowTypeNormal;
+        private IntPtr _netWmWindowTypeDialog;
+        private IntPtr _netActiveWindow;
+        private IntPtr _emptyCursor;
+        private IntPtr _pointerGrab;
+
+        // GUI thread only. An activation the guest asked for comes back as FocusIn, which is not host input.
+        private readonly Dictionary<IntPtr, LinuxTopLevel> _topLevels = new();
+        private readonly HashSet<IntPtr> _requestedActivations = new();
+        private IntPtr _latestActivation;
+        private ulong _focusLeftWindow;
+        private long _focusLeftDeadline;
+        private const int ActivationEchoMilliseconds = 100;
+        private IntPtr[] _restackScratch = Array.Empty<IntPtr>();
 
         /// <summary>
         /// Xlib aborts the process from its default error handler. Guest code and the Vulkan ICD both
@@ -708,6 +765,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             _netWmStateHidden = X11.XInternAtom(_xDisplay, "_NET_WM_STATE_HIDDEN", 0);
             _motifWmHints = X11.XInternAtom(_xDisplay, "_MOTIF_WM_HINTS", 0);
             _utf8String = X11.XInternAtom(_xDisplay, "UTF8_STRING", 0);
+            _netWmWindowType = X11.XInternAtom(_xDisplay, "_NET_WM_WINDOW_TYPE", 0);
+            _netWmWindowTypeNormal = X11.XInternAtom(_xDisplay, "_NET_WM_WINDOW_TYPE_NORMAL", 0);
+            _netWmWindowTypeDialog = X11.XInternAtom(_xDisplay, "_NET_WM_WINDOW_TYPE_DIALOG", 0);
+            _netActiveWindow = X11.XInternAtom(_xDisplay, "_NET_ACTIVE_WINDOW", 0);
 
             X11.XkbSetDetectableAutoRepeat(_xDisplay, 1, out _);
 
@@ -847,7 +908,22 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 TranslateEvent(ref nativeEvent);
             }
 
+            // Focus that moved to another window of the guest is no focus change for the application. The FocusIn that
+            // answers a pending activation can come in a later batch.
+            if (_focusLeftWindow != 0 && (_requestedActivations.Count == 0 || Environment.TickCount64 >= _focusLeftDeadline))
+            {
+                ReportFocusChange(WM_KILLFOCUS, _focusLeftWindow);
+                _focusLeftWindow = 0;
+            }
+
             X11.XFlush(_xDisplay);
+        }
+
+        // After a host focus change, a later FocusIn is host focus and no longer answers a pending activation.
+        private void ReportFocusChange(uint message, ulong window)
+        {
+            _requestedActivations.Clear();
+            HostEventQueue.Enqueue(message, 0, 0, window);
         }
 
         public unsafe void WaitForEvents(int timeoutMilliseconds)
@@ -856,6 +932,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return;
 
             bool displayLive = !_disposed && _xDisplay != IntPtr.Zero && _connectionFd >= 0;
+
+            if (_focusLeftWindow != 0)
+            {
+                int remaining = (int)Math.Max(_focusLeftDeadline - Environment.TickCount64, 0);
+                if (timeoutMilliseconds < 0 || remaining < timeoutMilliseconds)
+                    timeoutMilliseconds = remaining;
+            }
 
             // Xlib buffers events on the client side, so the socket can be quiet while a decoded event is
             // already waiting. Polling the descriptor without this check sleeps on top of pending input.
@@ -898,6 +981,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private unsafe void TranslateEvent(ref X11.XEvent nativeEvent)
         {
+            if (nativeEvent.Type != X11.GenericEvent && TryTranslateTopLevelEvent(ref nativeEvent))
+                return;
+
             switch (nativeEvent.Type)
             {
                 case X11.GenericEvent:
@@ -908,37 +994,21 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
                 case X11.KeyPress:
                 case X11.KeyRelease:
-                    {
-                        ref X11.XKeyEvent key = ref Unsafe.As<X11.XEvent, X11.XKeyEvent>(ref nativeEvent);
-
-                        uint virtualKey = KeysymToVirtualKey(LookupKeysym((byte)key.Keycode));
-                        if (virtualKey == 0)
-                            return;
-
-                        bool down = nativeEvent.Type == X11.KeyPress;
-                        bool altHeld = (key.State & X11.Mod1Mask) != 0;
-                        bool system = altHeld || virtualKey == VK_MENU || virtualKey == VK_F10;
-
-                        uint message = down
-                            ? (system ? WM_SYSKEYDOWN : WM_KEYDOWN)
-                            : (system ? WM_SYSKEYUP : WM_KEYUP);
-
-                        HostEventQueue.Enqueue(message, virtualKey, BuildKeyLParam(virtualKey, down, altHeld));
-                        return;
-                    }
+                    EnqueueKey(ref Unsafe.As<X11.XEvent, X11.XKeyEvent>(ref nativeEvent), nativeEvent.Type == X11.KeyPress, 0);
+                    return;
 
                 case X11.ButtonPress:
                 case X11.ButtonRelease:
                     {
                         ref X11.XButtonEvent button = ref Unsafe.As<X11.XEvent, X11.XButtonEvent>(ref nativeEvent);
-                        TranslateButton(ref button, nativeEvent.Type == X11.ButtonPress);
+                        TranslateButton(ref button, nativeEvent.Type == X11.ButtonPress, 0);
                         return;
                     }
 
                 case X11.MotionNotify:
                     {
                         ref X11.XMotionEvent motion = ref Unsafe.As<X11.XEvent, X11.XMotionEvent>(ref nativeEvent);
-                        HostEventQueue.Enqueue(WM_MOUSEMOVE, StateToMouseKeys(motion.State), HostEventQueue.MakeLParam(motion.X, motion.Y));
+                        EnqueuePointer(WM_MOUSEMOVE, StateToMouseKeys(motion.State), motion.X, motion.Y, motion.XRoot, motion.YRoot, 0);
                         return;
                     }
 
@@ -997,21 +1067,44 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
         }
 
-        private void TranslateButton(ref X11.XButtonEvent button, bool pressed)
+        private void EnqueueKey(ref X11.XKeyEvent key, bool down, ulong window)
+        {
+            uint virtualKey = KeysymToVirtualKey(LookupKeysym((byte)key.Keycode));
+            if (virtualKey == 0)
+                return;
+
+            bool altHeld = (key.State & X11.Mod1Mask) != 0;
+            bool system = altHeld || virtualKey == VK_MENU || virtualKey == VK_F10;
+
+            uint message = down
+                ? (system ? WM_SYSKEYDOWN : WM_KEYDOWN)
+                : (system ? WM_SYSKEYUP : WM_KEYUP);
+
+            HostEventQueue.Enqueue(message, virtualKey, BuildKeyLParam(virtualKey, down, altHeld), window);
+        }
+
+        private static void EnqueuePointer(uint message, ulong keys, int x, int y, int rootX, int rootY, ulong window)
+        {
+            if (window == 0)
+                HostEventQueue.Enqueue(message, keys, HostEventQueue.MakeLParam(x, y));
+            else
+                HostEventQueue.EnqueuePointer(message, keys, HostEventQueue.MakeLParam(x, y), window, rootX - x, rootY - y);
+        }
+
+        private void TranslateButton(ref X11.XButtonEvent button, bool pressed, ulong window)
         {
             uint keys = StateToMouseKeys(button.State);
-            ulong position = HostEventQueue.MakeLParam(button.X, button.Y);
 
             switch (button.Button)
             {
                 case 1:
-                    HostEventQueue.Enqueue(pressed ? WM_LBUTTONDOWN : WM_LBUTTONUP, keys, position);
+                    EnqueuePointer(pressed ? WM_LBUTTONDOWN : WM_LBUTTONUP, keys, button.X, button.Y, button.XRoot, button.YRoot, window);
                     return;
                 case 2:
-                    HostEventQueue.Enqueue(pressed ? WM_MBUTTONDOWN : WM_MBUTTONUP, keys, position);
+                    EnqueuePointer(pressed ? WM_MBUTTONDOWN : WM_MBUTTONUP, keys, button.X, button.Y, button.XRoot, button.YRoot, window);
                     return;
                 case 3:
-                    HostEventQueue.Enqueue(pressed ? WM_RBUTTONDOWN : WM_RBUTTONUP, keys, position);
+                    EnqueuePointer(pressed ? WM_RBUTTONDOWN : WM_RBUTTONUP, keys, button.X, button.Y, button.XRoot, button.YRoot, window);
                     return;
 
                 case 4:
@@ -1021,15 +1114,304 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                         return;
 
                     short delta = button.Button == 4 ? (short)120 : (short)-120;
-                    HostEventQueue.Enqueue(WM_MOUSEWHEEL, keys | ((ulong)(ushort)delta << 16), HostEventQueue.MakeLParam(button.XRoot, button.YRoot));
+                    HostEventQueue.Enqueue(WM_MOUSEWHEEL, keys | ((ulong)(ushort)delta << 16), HostEventQueue.MakeLParam(button.XRoot, button.YRoot), window);
                     return;
 
                 case 8:
                 case 9:
                     uint xbutton = button.Button == 8 ? 1u : 2u;
-                    HostEventQueue.Enqueue(pressed ? WM_XBUTTONDOWN : WM_XBUTTONUP, keys | ((ulong)xbutton << 16), position);
+                    EnqueuePointer(pressed ? WM_XBUTTONDOWN : WM_XBUTTONUP, keys | ((ulong)xbutton << 16), button.X, button.Y, button.XRoot, button.YRoot, window);
                     return;
             }
+        }
+
+        private bool TryTranslateTopLevelEvent(ref X11.XEvent nativeEvent)
+        {
+            if (_topLevels.Count == 0)
+                return false;
+
+            IntPtr handle = nativeEvent.Type == X11.ConfigureNotify
+                ? Unsafe.As<X11.XEvent, X11.XConfigureEvent>(ref nativeEvent).Window
+                : Unsafe.As<X11.XEvent, X11.XAnyEvent>(ref nativeEvent).Window;
+
+            if (!_topLevels.TryGetValue(handle, out LinuxTopLevel? topLevel) || topLevel == null)
+                return false;
+
+            ulong guest = topLevel.Guest;
+            switch (nativeEvent.Type)
+            {
+                case X11.KeyPress:
+                case X11.KeyRelease:
+                    EnqueueKey(ref Unsafe.As<X11.XEvent, X11.XKeyEvent>(ref nativeEvent), nativeEvent.Type == X11.KeyPress, guest);
+                    return true;
+
+                case X11.ButtonPress:
+                case X11.ButtonRelease:
+                    TranslateButton(ref Unsafe.As<X11.XEvent, X11.XButtonEvent>(ref nativeEvent), nativeEvent.Type == X11.ButtonPress, guest);
+                    return true;
+
+                case X11.MotionNotify:
+                    {
+                        ref X11.XMotionEvent motion = ref Unsafe.As<X11.XEvent, X11.XMotionEvent>(ref nativeEvent);
+                        EnqueuePointer(WM_MOUSEMOVE, StateToMouseKeys(motion.State), motion.X, motion.Y, motion.XRoot, motion.YRoot, guest);
+                        return true;
+                    }
+
+                case X11.Expose:
+                case X11.GraphicsExpose:
+                    HostEventQueue.MarkRepaint(guest);
+                    return true;
+
+                case X11.ConfigureNotify:
+                    {
+                        ref X11.XConfigureEvent configure = ref Unsafe.As<X11.XEvent, X11.XConfigureEvent>(ref nativeEvent);
+
+                        // Only our own requests move an override-redirect window.
+                        if (topLevel.OverrideRedirect)
+                            return true;
+
+                        if (X11.XTranslateCoordinates(_xDisplay, handle, X11.XRootWindow(_xDisplay, _screen), 0, 0, out int rootX, out int rootY, out _) != 0)
+                        {
+                            topLevel.OnConfigured(rootX, rootY, configure.Width, configure.Height);
+                            HostEventQueue.Enqueue(WM_MOVE, 0, HostEventQueue.MakeLParam(rootX, rootY), guest);
+                        }
+
+                        HostEventQueue.Enqueue(WM_SIZE, topLevel.Maximized ? SIZE_MAXIMIZED : SIZE_RESTORED, HostEventQueue.MakeLParam(configure.Width, configure.Height), guest);
+                        return true;
+                    }
+
+                case X11.PropertyNotify:
+                    {
+                        ref X11.XPropertyEvent property = ref Unsafe.As<X11.XEvent, X11.XPropertyEvent>(ref nativeEvent);
+                        if (property.Atom != _netWmState)
+                            return true;
+
+                        ReadNetWmState(handle, out bool hidden, out bool maximized);
+                        if (topLevel.OnStateChanged(hidden, maximized))
+                        {
+                            HostEventQueue.Enqueue(WM_SIZE, hidden ? SIZE_MINIMIZED : maximized ? SIZE_MAXIMIZED : SIZE_RESTORED,
+                                hidden ? 0 : HostEventQueue.MakeLParam(topLevel.Width, topLevel.Height), guest);
+                        }
+
+                        return true;
+                    }
+
+                case X11.FocusIn:
+                    _focusLeftWindow = 0;
+                    topLevel.ApplyCursorClip(true);
+                    if (_requestedActivations.Remove(handle))
+                    {
+                        if (handle == _latestActivation)
+                            _requestedActivations.Clear();
+
+                        return true;
+                    }
+
+                    ReportFocusChange(WM_SETFOCUS, guest);
+                    return true;
+
+                case X11.FocusOut:
+                    topLevel.ApplyCursorClip(false);
+                    _focusLeftWindow = guest;
+                    _focusLeftDeadline = Environment.TickCount64 + ActivationEchoMilliseconds;
+                    return true;
+
+                case X11.ClientMessage:
+                    {
+                        ref X11.XClientMessageEvent client = ref Unsafe.As<X11.XEvent, X11.XClientMessageEvent>(ref nativeEvent);
+                        if (client.MessageType == _wmProtocols && client.Data0 == _wmDeleteWindow)
+                            HostEventQueue.RequestClose(guest);
+
+                        return true;
+                    }
+            }
+
+            return true;
+        }
+
+        public bool TopLevelsAvailable => _xDisplay != IntPtr.Zero;
+
+        // No compositor is assumed, so the guest draws layered windows opaque.
+        public bool SupportsLayered => false;
+
+        public void UseTopLevels()
+        {
+        }
+
+        public bool TryCreateTopLevel(in TopLevelFrame frame, ITopLevelWindow owner, out ITopLevelWindow window)
+        {
+            window = null!;
+            if (_disposed || _xDisplay == IntPtr.Zero)
+                return false;
+
+            // A popup without a caption is a menu, tooltip or dropdown, which no window manager places or decorates.
+            bool overrideRedirect = (frame.Style & Win32kHelper.WindowStylePopup) != 0 && !Win32kHelper.HasCaption(frame.Style);
+
+            IntPtr handle = X11.XCreateSimpleWindow(_xDisplay, X11.XRootWindow(_xDisplay, _screen), frame.ClientX, frame.ClientY,
+                (uint)Math.Max(frame.ClientWidth, 1), (uint)Math.Max(frame.ClientHeight, 1), 0, _blackPixel, _whitePixel);
+            if (handle == IntPtr.Zero)
+                return false;
+
+            if (overrideRedirect)
+                SetOverrideRedirect(handle);
+
+            X11.XSelectInput(_xDisplay, handle, WindowEventMask);
+
+            LinuxTopLevel created = new(this, _xDisplay, handle, frame, overrideRedirect);
+            _topLevels[handle] = created;
+
+            if (!overrideRedirect)
+            {
+                SetDeleteProtocol(handle);
+                SetClassHint(handle, "Brovan", frame.Title);
+                created.SetFrame(frame.Style, frame.ExStyle);
+                created.SetOwner(owner);
+            }
+
+            created.Title = frame.Title;
+            created.SetClientBounds(frame.ClientX, frame.ClientY, frame.ClientWidth, frame.ClientHeight);
+            window = created;
+            return true;
+        }
+
+        private void SetOverrideRedirect(IntPtr handle)
+        {
+            X11.XSetWindowAttributes attributes = default;
+            attributes.OverrideRedirect = 1;
+            X11.XChangeWindowAttributes(_xDisplay, handle, X11.CWOverrideRedirect, ref attributes);
+        }
+
+        // The window manager orders managed windows, so only the top one is raised.
+        public unsafe void Restack(ReadOnlySpan<ITopLevelWindow> topToBottom)
+        {
+            if (_restackScratch.Length < topToBottom.Length)
+                _restackScratch = new IntPtr[topToBottom.Length];
+
+            IntPtr[] popups = _restackScratch;
+            int count = 0;
+            IntPtr topManaged = IntPtr.Zero;
+
+            foreach (ITopLevelWindow window in topToBottom)
+            {
+                LinuxTopLevel topLevel = (LinuxTopLevel)window;
+                if (topLevel.OverrideRedirect)
+                    popups[count++] = topLevel.NativeHandle;
+                else if (topManaged == IntPtr.Zero)
+                    topManaged = topLevel.NativeHandle;
+            }
+
+            if (topManaged != IntPtr.Zero)
+                X11.XRaiseWindow(_xDisplay, topManaged);
+
+            if (count != 0)
+            {
+                X11.XRaiseWindow(_xDisplay, popups[0]);
+                fixed (IntPtr* list = popups)
+                    X11.XRestackWindows(_xDisplay, list, count);
+            }
+
+            X11.XFlush(_xDisplay);
+        }
+
+        internal void RequestActivation(IntPtr handle)
+        {
+            if (_netActiveWindow == IntPtr.Zero)
+                return;
+
+            _requestedActivations.Add(handle);
+            _latestActivation = handle;
+
+            SendRootClientMessage(handle, _netActiveWindow, 1, IntPtr.Zero, IntPtr.Zero);
+            X11.XFlush(_xDisplay);
+        }
+
+        internal void SetWindowType(IntPtr handle, bool dialog)
+        {
+            if (_netWmWindowType == IntPtr.Zero)
+                return;
+
+            IntPtr type = dialog ? _netWmWindowTypeDialog : _netWmWindowTypeNormal;
+            unsafe
+            {
+                X11.XChangeProperty(_xDisplay, handle, _netWmWindowType, (IntPtr)X11.XA_ATOM, 32, X11.PropModeReplace, (IntPtr)(&type), 1);
+            }
+        }
+
+        internal void ApplyPlacementHints(IntPtr handle, int x, int y, int width, int height)
+        {
+            X11.XSizeHints hints = default;
+            hints.Flags = X11.USPosition | X11.USSize | X11.PWinGravity | X11.PMinSize;
+            hints.X = x;
+            hints.Y = y;
+            hints.Width = width;
+            hints.Height = height;
+            hints.MinWidth = 1;
+            hints.MinHeight = 1;
+            hints.WinGravity = X11.StaticGravity;
+            X11.XSetWMNormalHints(_xDisplay, handle, ref hints);
+        }
+
+        private unsafe IntPtr EnsureEmptyCursor(IntPtr handle)
+        {
+            if (_emptyCursor != IntPtr.Zero)
+                return _emptyCursor;
+
+            ulong bits = 0;
+            IntPtr pixmap = X11.XCreateBitmapFromData(_xDisplay, handle, (IntPtr)(&bits), 8, 8);
+            if (pixmap == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            X11.XColor blank = default;
+            _emptyCursor = X11.XCreatePixmapCursor(_xDisplay, pixmap, pixmap, ref blank, ref blank, 0, 0);
+            X11.XFreePixmap(_xDisplay, pixmap);
+            return _emptyCursor;
+        }
+
+        internal void ForgetTopLevel(IntPtr handle)
+        {
+            _topLevels.Remove(handle);
+            _requestedActivations.Remove(handle);
+        }
+
+        private const uint PointerGrabEventMask = (uint)(X11.ButtonPressMask | X11.ButtonReleaseMask | X11.PointerMotionMask);
+
+        // X11 confines a grab to a window, not a rectangle. An ungrab also ends the implicit grab of a held button,
+        // so only the window that grabbed releases it.
+        internal void ConfinePointer(IntPtr handle, bool confine)
+        {
+            if (confine)
+            {
+                if (X11.XGrabPointer(_xDisplay, handle, 0, PointerGrabEventMask, X11.GrabModeAsync, X11.GrabModeAsync, handle, IntPtr.Zero, IntPtr.Zero) == X11.GrabSuccess)
+                    _pointerGrab = handle;
+            }
+            else
+            {
+                if (_pointerGrab != handle)
+                    return;
+
+                X11.XUngrabPointer(_xDisplay, IntPtr.Zero);
+                _pointerGrab = IntPtr.Zero;
+            }
+
+            X11.XFlush(_xDisplay);
+        }
+
+        internal void SetCursorVisible(IntPtr handle, bool visible)
+        {
+            if (visible)
+            {
+                X11.XUndefineCursor(_xDisplay, handle);
+            }
+            else
+            {
+                IntPtr cursor = EnsureEmptyCursor(handle);
+                if (cursor == IntPtr.Zero)
+                    return;
+
+                X11.XDefineCursor(_xDisplay, handle, cursor);
+            }
+
+            X11.XFlush(_xDisplay);
         }
 
         private void ReportWindowState(LinuxWindow window, IntPtr handle)
@@ -1283,6 +1665,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     window.Dispose();
             }
 
+            foreach (LinuxTopLevel topLevel in new List<LinuxTopLevel>(_topLevels.Values))
+                topLevel.Dispose();
+
             if (_xDisplay != IntPtr.Zero)
             {
                 if (_fontStruct != IntPtr.Zero)
@@ -1343,9 +1728,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _whitePixel);
 
             X11.XSelectInput(_xDisplay, window, WindowEventMask);
-
-            IntPtr[] protocols = { _wmDeleteWindow };
-            X11.XSetWMProtocols(_xDisplay, window, protocols, protocols.Length);
+            SetDeleteProtocol(window);
 
             SetTitle(window, options.Title ?? string.Empty);
             SetClassHint(window, options.AppId, options.Title);
@@ -1355,6 +1738,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             X11.XFlush(_xDisplay);
             return window;
+        }
+
+        private void SetDeleteProtocol(IntPtr window)
+        {
+            _deleteProtocol ??= new[] { _wmDeleteWindow };
+            X11.XSetWMProtocols(_xDisplay, window, _deleteProtocol, _deleteProtocol.Length);
         }
 
         internal void SetTitle(IntPtr window, string title)
@@ -1453,22 +1842,23 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             if (_netWmState == IntPtr.Zero || firstProperty == IntPtr.Zero)
                 return;
 
+            SendRootClientMessage(window, _netWmState, add ? 1 : 0, firstProperty, secondProperty);
+        }
+
+        private void SendRootClientMessage(IntPtr window, IntPtr messageType, IntPtr data0, IntPtr data1, IntPtr data2)
+        {
             X11.XEvent nativeEvent = default;
             ref X11.XClientMessageEvent client = ref Unsafe.As<X11.XEvent, X11.XClientMessageEvent>(ref nativeEvent);
             client.Type = X11.ClientMessage;
             client.Window = window;
-            client.MessageType = _netWmState;
+            client.MessageType = messageType;
             client.Format = 32;
-            client.Data0 = (IntPtr)(add ? 1 : 0);
-            client.Data1 = firstProperty;
-            client.Data2 = secondProperty;
+            client.Data0 = data0;
+            client.Data1 = data1;
+            client.Data2 = data2;
 
-            X11.XSendEvent(
-                _xDisplay,
-                X11.XRootWindow(_xDisplay, _screen),
-                0,
-                X11.SubstructureNotifyMask | X11.SubstructureRedirectMask,
-                ref nativeEvent);
+            X11.XSendEvent(_xDisplay, X11.XRootWindow(_xDisplay, _screen), 0,
+                X11.SubstructureNotifyMask | X11.SubstructureRedirectMask, ref nativeEvent);
         }
 
         internal bool DestroyWindow(IntPtr handle)
@@ -2160,6 +2550,231 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return true;
         }
 
+        private sealed class LinuxTopLevel : ITopLevelWindow
+        {
+            private readonly LinuxWinManager _manager;
+            private readonly IntPtr _display;
+            private IntPtr _window;
+            private uint _style;
+            private string _title = string.Empty;
+            private bool _shown;
+            private WindowState _state;
+            private bool _hidden;
+            private bool _maximized;
+            private int _width;
+            private int _height;
+            private bool _configured;
+            private int _configuredX;
+            private int _configuredY;
+            private int _configuredWidth;
+            private int _configuredHeight;
+            private bool _cursorClipped;
+
+            internal readonly ulong Guest;
+            internal readonly bool OverrideRedirect;
+
+            internal LinuxTopLevel(LinuxWinManager manager, IntPtr display, IntPtr window, in TopLevelFrame frame, bool overrideRedirect)
+            {
+                _manager = manager;
+                _display = display;
+                _window = window;
+                _style = frame.Style;
+                _width = Math.Max(frame.ClientWidth, 1);
+                _height = Math.Max(frame.ClientHeight, 1);
+                Guest = frame.Window;
+                OverrideRedirect = overrideRedirect;
+            }
+
+            internal bool Maximized => _maximized;
+
+            public string Title
+            {
+                get => _title;
+                set
+                {
+                    _title = value ?? string.Empty;
+                    if (_window != IntPtr.Zero && !OverrideRedirect)
+                        _manager.SetTitle(_window, _title + " - Brovan");
+                }
+            }
+
+            public int Width
+            {
+                get => _width;
+                set { }
+            }
+
+            public int Height
+            {
+                get => _height;
+                set { }
+            }
+
+            public bool Visible
+            {
+                get => _shown;
+                set => SetShown(value);
+            }
+
+            public WindowState State
+            {
+                get => _state;
+                set
+                {
+                    _state = value;
+                    if (_shown && !OverrideRedirect)
+                        _manager.ApplyState(_window, _state);
+                }
+            }
+
+            public bool Resizable => true;
+
+            public bool Decorated
+            {
+                get => !OverrideRedirect && Win32kHelper.HasCaption(_style);
+                set { }
+            }
+
+            public IntPtr NativeHandle => _window;
+
+            public void SetFrame(uint style, uint exStyle)
+            {
+                _style = style;
+                if (!OverrideRedirect)
+                    _manager.ApplyDecorations(_window, Win32kHelper.HasCaption(style));
+            }
+
+            public void SetOwner(ITopLevelWindow owner)
+            {
+                if (OverrideRedirect)
+                    return;
+
+                if (owner != null)
+                    X11.XSetTransientForHint(_display, _window, owner.NativeHandle);
+                else
+                    X11.XDeleteProperty(_display, _window, (IntPtr)X11.XA_WM_TRANSIENT_FOR);
+
+                _manager.SetWindowType(_window, owner != null && Win32kHelper.HasCaption(_style));
+            }
+
+            // A window manager that ignores StaticGravity shifts the client by its frame on every request,
+            // so a request for the place the client already has would move it again.
+            public void SetClientBounds(int x, int y, int width, int height)
+            {
+                _width = Math.Max(width, 1);
+                _height = Math.Max(height, 1);
+                if (_configured && x == _configuredX && y == _configuredY && _width == _configuredWidth && _height == _configuredHeight)
+                    return;
+
+                if (!OverrideRedirect)
+                    _manager.ApplyPlacementHints(_window, x, y, _width, _height);
+
+                X11.XMoveResizeWindow(_display, _window, x, y, (uint)_width, (uint)_height);
+                X11.XFlush(_display);
+            }
+
+            // The guest drops input to a disabled window itself.
+            public void SetEnabled(bool enabled)
+            {
+            }
+
+            public void SetShown(bool shown)
+            {
+                if (shown == _shown)
+                    return;
+
+                _shown = shown;
+                if (shown)
+                {
+                    X11.XMapWindow(_display, _window);
+                    if (!OverrideRedirect && _state != WindowState.Normal)
+                        _manager.ApplyState(_window, _state);
+                }
+                else
+                {
+                    X11.XUnmapWindow(_display, _window);
+                }
+
+                X11.XFlush(_display);
+            }
+
+            // The window manager gives focus to managed windows only.
+            public void Activate()
+            {
+                if (_shown && !OverrideRedirect)
+                    _manager.RequestActivation(_window);
+            }
+
+            public void SetLayeredAttributes(uint colorKey, byte alpha, uint flags)
+            {
+            }
+
+            public void UpdateLayered(LayeredUpdate update)
+            {
+            }
+
+            public void WarpCursor(int clientX, int clientY)
+            {
+                X11.XWarpPointer(_display, IntPtr.Zero, _window, 0, 0, 0, 0, clientX, clientY);
+                X11.XFlush(_display);
+            }
+
+            public void SetCursorClip(bool enabled, int clientLeft, int clientTop, int clientRight, int clientBottom)
+            {
+                _cursorClipped = enabled;
+                ApplyCursorClip(true);
+            }
+
+            internal void ApplyCursorClip(bool focused) => _manager.ConfinePointer(_window, _cursorClipped && focused);
+
+            public void SetCursorVisible(bool visible) => _manager.SetCursorVisible(_window, visible);
+
+            internal bool OnStateChanged(bool hidden, bool maximized)
+            {
+                if (_hidden == hidden && _maximized == maximized)
+                    return false;
+
+                _hidden = hidden;
+                _maximized = maximized;
+                return true;
+            }
+
+            internal void OnConfigured(int x, int y, int width, int height)
+            {
+                _configured = true;
+                _configuredX = x;
+                _configuredY = y;
+                _configuredWidth = width;
+                _configuredHeight = height;
+                _width = Math.Max(width, 1);
+                _height = Math.Max(height, 1);
+            }
+
+            public void Present()
+            {
+            }
+
+            public void Show() => SetShown(true);
+
+            public void Hide() => SetShown(false);
+
+            public void Close() => Dispose();
+
+            public void Dispose()
+            {
+                if (_window == IntPtr.Zero)
+                    return;
+
+                if (_cursorClipped)
+                    _manager.ConfinePointer(_window, false);
+
+                _manager.ForgetTopLevel(_window);
+                X11.XDestroyWindow(_display, _window);
+                X11.XFlush(_display);
+                _window = IntPtr.Zero;
+            }
+        }
+
         public sealed class LinuxWindow : IWindow
         {
             private readonly LinuxWinManager _manager;
@@ -2175,11 +2790,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             private bool _hidden;
             private bool _maximized;
             private readonly bool _resizable;
-            private IntPtr _emptyCursor;
             private bool _cursorClipped;
-
-            private const uint PointerGrabEventMask =
-                (uint)(X11.ButtonPressMask | X11.ButtonReleaseMask | X11.PointerMotionMask);
 
             internal LinuxWindow(LinuxWinManager manager, IntPtr display, IntPtr window, WindowOptions options)
             {
@@ -2295,51 +2906,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 ApplyCursorClip(true);
             }
 
-            internal void ApplyCursorClip(bool focused)
-            {
-                if (!_cursorClipped || !focused)
-                {
-                    X11.XUngrabPointer(_display, IntPtr.Zero);
-                    X11.XFlush(_display);
-                    return;
-                }
+            internal void ApplyCursorClip(bool focused) => _manager.ConfinePointer(_window, _cursorClipped && focused);
 
-                X11.XGrabPointer(_display, _window, 0, PointerGrabEventMask, X11.GrabModeAsync, X11.GrabModeAsync,
-                    _window, IntPtr.Zero, IntPtr.Zero);
-                X11.XFlush(_display);
-            }
-
-            public unsafe void SetCursorVisible(bool visible)
+            public void SetCursorVisible(bool visible)
             {
                 EnsureAlive();
-
-                if (visible)
-                {
-                    X11.XUndefineCursor(_display, _window);
-                    X11.XFlush(_display);
-                    return;
-                }
-
-                if (_emptyCursor == IntPtr.Zero)
-                {
-                    byte* Bits = stackalloc byte[8];
-                    for (int i = 0; i < 8; i++)
-                        Bits[i] = 0;
-
-                    IntPtr Pixmap = X11.XCreateBitmapFromData(_display, _window, (IntPtr)Bits, 8, 8);
-                    if (Pixmap == IntPtr.Zero)
-                        return;
-
-                    X11.XColor Blank = default;
-                    _emptyCursor = X11.XCreatePixmapCursor(_display, Pixmap, Pixmap, ref Blank, ref Blank, 0, 0);
-                    X11.XFreePixmap(_display, Pixmap);
-                }
-
-                if (_emptyCursor == IntPtr.Zero)
-                    return;
-
-                X11.XDefineCursor(_display, _window, _emptyCursor);
-                X11.XFlush(_display);
+                _manager.SetCursorVisible(_window, visible);
             }
 
             public void Present()

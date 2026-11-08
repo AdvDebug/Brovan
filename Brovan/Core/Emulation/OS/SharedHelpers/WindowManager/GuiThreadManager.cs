@@ -2,10 +2,13 @@
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 using Brovan.Core.Helpers;
+using Brovan.Core.Settings;
 
 namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
@@ -20,6 +23,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         SetCursorClip,
         SetCursorVisible,
         EnsureTopLevel,
+        ReleaseTopLevelHold,
         HideTopLevels,
         Shutdown,
     }
@@ -53,7 +57,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         }
     }
 
-    // Pending, Applying, Applied and PendingLayered need the present lock. Host and ApplyingLayered are GUI thread only.
+    // Pending, Applying, Applied and PendingLayered need the present lock. Host, ApplyingLayered and the flags
+    // after it are GUI thread only.
     internal sealed class TopLevelEntry
     {
         public readonly ulong Window;
@@ -65,6 +70,10 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         public bool Queued;
         public bool Destroyed;
         public ITopLevelWindow Host;
+        public bool LayeredByUpdate;
+        public bool Evicted;
+        public bool CreateFailureLogged;
+        public long LastShown;
 
         public TopLevelEntry(ulong window)
         {
@@ -97,6 +106,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const int ShutdownTimeoutMilliseconds = 2000;
         private const int DrainBudget = 4096;
 
+        private static readonly bool TopLevelWindowsDisabled = Environment.GetEnvironmentVariable("BROVAN_NO_TOP_LEVEL_WINDOWS") == "1";
+
         /// <summary>
         /// The wait is armed on both the host event source and the wake object, so this only bounds how long a
         /// dropped wake can stall the loop; it is not the rate at which events are noticed.
@@ -115,6 +126,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private ITextMetricsSupport _textMetrics;
         private IKeyboardTranslateSupport _keyboardTranslate;
         private ITopLevelWindowHost _topLevelHost;
+        private bool _layeredSupported;
 
         private volatile IWindow _window;
         private volatile bool _disposed;
@@ -150,12 +162,19 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private ulong[] _pendingStacking;
         private ulong? _pendingActivation;
 
-        // GUI thread only.
+        // GUI thread only. An orphaned host window outlived its guest window and goes when its last hold does.
         private readonly Dictionary<ulong, ITopLevelWindow> _hostWindows = new();
-        private readonly HashSet<ITopLevelWindow> _surfaceHosts = new();
+        private readonly Dictionary<ITopLevelWindow, int> _surfaceHolds = new();
+        private readonly HashSet<ITopLevelWindow> _orphanedHosts = new();
         private List<TopLevelEntry> _applyingTopLevels = new();
         private List<TopLevelEntry> _applyingDestroyed = new();
         private ITopLevelWindow[] _stackScratch = Array.Empty<ITopLevelWindow>();
+        private long _showClock;
+
+        // GUI thread only.
+        private readonly SortedSet<TopLevelEntry> _evictable = new(Comparer<TopLevelEntry>.Create(static (Left, Right) =>
+            Left.LastShown != Right.LastShown ? Left.LastShown.CompareTo(Right.LastShown) : Left.Window.CompareTo(Right.Window)));
+        private readonly Dictionary<ulong, int> _ownedHosts = new();
 
         public GuiThreadManager(Func<IDisplayConnection> displayFactory)
         {
@@ -275,6 +294,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         public bool SupportsTopLevels => !_disposed && WaitForInitialization() && _topLevelHost != null;
 
+        public bool SupportsLayered => SupportsTopLevels && _layeredSupported;
+
         public void EnqueueTopLevel(in TopLevelFrame frame)
         {
             if (_disposed)
@@ -385,14 +406,35 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         /// <summary>
         /// Blocks until the GUI thread answers.
         /// </summary>
-        public IntPtr EnsureTopLevelHandle(ulong window)
+        public IntPtr EnsureTopLevelHandle(ulong window, out object hold)
         {
+            hold = null;
             if (!SupportsTopLevels)
                 return IntPtr.Zero;
 
-            TaskCompletionSource<IntPtr> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<(ITopLevelWindow Host, IntPtr Handle)> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
             Submit(new GuiCommand { Kind = GuiCommandKind.EnsureTopLevel, Hwnd = window, Request = completion });
-            return WaitForGuiThread(completion.Task, nameof(EnsureTopLevelHandle));
+            WaitForGuiThread(completion.Task, nameof(EnsureTopLevelHandle));
+
+            // A late answer still took a hold.
+            if (!completion.Task.IsCompleted)
+            {
+                completion.Task.ContinueWith(static (answer, state) => ((GuiThreadManager)state).ReleaseTopLevelHold(answer.Result.Host),
+                    this, TaskScheduler.Default);
+                return IntPtr.Zero;
+            }
+
+            (ITopLevelWindow host, IntPtr handle) = completion.Task.Result;
+            hold = host;
+            return handle;
+        }
+
+        public void ReleaseTopLevelHold(object hold)
+        {
+            if (_disposed || hold is not ITopLevelWindow host)
+                return;
+
+            Submit(new GuiCommand { Kind = GuiCommandKind.ReleaseTopLevelHold, Request = host });
         }
 
         public void HideTopLevels()
@@ -781,7 +823,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _textRender = _display as ITextRenderSupport;
                 _textMetrics = _display as ITextMetricsSupport;
                 _keyboardTranslate = _display as IKeyboardTranslateSupport;
-                _topLevelHost = _display as ITopLevelWindowHost;
+
+                if (_display is ITopLevelWindowHost topLevelHost && topLevelHost.TopLevelsAvailable && !TopLevelWindowsDisabled)
+                {
+                    _topLevelHost = topLevelHost;
+                    _layeredSupported = topLevelHost.SupportsLayered;
+                    topLevelHost.UseTopLevels();
+                }
             }
             catch (Exception ex)
             {
@@ -900,11 +948,15 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     ApplyPendingTopLevels();
                     ITopLevelWindow host = EnsureHostWindow(command.Hwnd, 0);
                     if (host != null)
-                        _surfaceHosts.Add(host);
+                        CollectionsMarshal.GetValueRefOrAddDefault(_surfaceHolds, host, out _)++;
 
-                    ((TaskCompletionSource<IntPtr>)command.Request).SetResult(host?.NativeHandle ?? IntPtr.Zero);
+                    ((TaskCompletionSource<(ITopLevelWindow, IntPtr)>)command.Request).SetResult((host, host?.NativeHandle ?? IntPtr.Zero));
                     return;
                 }
+
+                case GuiCommandKind.ReleaseTopLevelHold:
+                    ReleaseHold((ITopLevelWindow)command.Request);
+                    return;
 
                 case GuiCommandKind.HideTopLevels:
                     foreach (ITopLevelWindow TopLevel in _hostWindows.Values)
@@ -1012,6 +1064,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             lock (_presentSync)
                 baseline = entry.Applied.GetValueOrDefault();
 
+            // An owner created below may evict, and this window is not a candidate while it changes.
+            _evictable.Remove(entry);
+
             TopLevelFrame record = frame;
             ITopLevelWindow host = entry.Host;
 
@@ -1030,8 +1085,9 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 if (baseline.Owner != frame.Owner)
                     host.SetOwner(frame.Owner != 0 ? EnsureHostWindow(frame.Owner, 1) : null);
 
-                if (frame.LayeredByAttributes && (!baseline.LayeredByAttributes || frameChanged || baseline.LayeredFlags != frame.LayeredFlags
-                    || baseline.LayeredColorKey != frame.LayeredColorKey || baseline.LayeredAlpha != frame.LayeredAlpha))
+                if (_layeredSupported && frame.LayeredByAttributes && (!baseline.LayeredByAttributes || frameChanged
+                    || baseline.LayeredFlags != frame.LayeredFlags || baseline.LayeredColorKey != frame.LayeredColorKey
+                    || baseline.LayeredAlpha != frame.LayeredAlpha))
                 {
                     host.SetLayeredAttributes(frame.LayeredColorKey, frame.LayeredAlpha, frame.LayeredFlags);
                 }
@@ -1059,8 +1115,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 if (baseline.Visible != frame.Visible)
                     host.SetShown(frame.Visible);
 
+                if ((frame.ExStyle & Win32kHelper.WindowExStyleLayered) == 0)
+                    entry.LayeredByUpdate = false;
+
                 foreach (LayeredUpdate update in layered)
+                {
+                    entry.LayeredByUpdate = true;
                     host.UpdateLayered(update);
+                }
             }
             catch (Exception ex)
             {
@@ -1073,9 +1135,31 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             lock (_presentSync)
             {
+                MoveOwnedHost(entry.Applied?.Owner ?? 0, record.Owner);
                 entry.Applied = record;
                 entry.Applying = null;
             }
+
+            if (record.Visible)
+                entry.LastShown = ++_showClock;
+            else if (!entry.LayeredByUpdate)
+                _evictable.Add(entry);
+        }
+
+        private void MoveOwnedHost(ulong from, ulong to)
+        {
+            if (from == to)
+                return;
+
+            if (from != 0)
+            {
+                ref int count = ref CollectionsMarshal.GetValueRefOrNullRef(_ownedHosts, from);
+                if (!Unsafe.IsNullRef(ref count) && --count == 0)
+                    _ownedHosts.Remove(from);
+            }
+
+            if (to != 0)
+                CollectionsMarshal.GetValueRefOrAddDefault(_ownedHosts, to, out _)++;
         }
 
         // An owned host window needs a host owner to stay above it.
@@ -1100,20 +1184,40 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return entry.Host ?? CreateHostWindow(entry, frame, depth);
         }
 
-        // CreateTopLevel makes the window hidden and normal. The rest of the frame is applied as a change.
+        // TryCreateTopLevel makes the window hidden and normal. The rest of the frame is applied as a change.
         private ITopLevelWindow CreateHostWindow(TopLevelEntry entry, in TopLevelFrame frame, int depth)
         {
             ITopLevelWindow owner = frame.Owner != 0 ? EnsureHostWindow(frame.Owner, depth + 1) : null;
 
-            ITopLevelWindow host;
+            ITopLevelWindow host = null;
+            string failure = "the host refused it";
             try
             {
-                host = _topLevelHost.CreateTopLevel(frame, owner);
+                if (_hostWindows.Count + _orphanedHosts.Count >= MemoryBudget.HostTopLevels && !TryEvictHostWindow(frame.Owner))
+                    failure = "the host window budget is used up";
+                else
+                    _topLevelHost.TryCreateTopLevel(frame, owner, out host);
             }
             catch (Exception ex)
             {
-                Utils.LogError($"[GuiThreadManager] Top-level window {entry.Window:X} creation failed: {ex.Message}");
+                failure = ex.Message;
+            }
+
+            if (host == null)
+            {
+                if (!entry.CreateFailureLogged)
+                {
+                    entry.CreateFailureLogged = true;
+                    Utils.LogError($"[GuiThreadManager] Top-level window {entry.Window:X} has no host window: {failure}");
+                }
+
                 return null;
+            }
+
+            if (entry.Evicted)
+            {
+                entry.Evicted = false;
+                HostEventQueue.MarkRepaint(entry.Window);
             }
 
             TopLevelFrame created = frame;
@@ -1129,7 +1233,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             _hostWindows[entry.Window] = host;
 
             lock (_presentSync)
+            {
+                MoveOwnedHost(0, created.Owner);
                 entry.Applied = created;
+            }
+
+            if (!entry.LayeredByUpdate)
+                _evictable.Add(entry);
 
             return host;
         }
@@ -1141,6 +1251,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return;
 
             entry.Host = null;
+            _evictable.Remove(entry);
             if (_hostWindows.TryGetValue(entry.Window, out ITopLevelWindow mapped) && mapped == host)
                 _hostWindows.Remove(entry.Window);
 
@@ -1148,11 +1259,13 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             List<ITopLevelWindow> owned = null;
             lock (_presentSync)
             {
+                MoveOwnedHost(entry.Applied?.Owner ?? 0, 0);
                 foreach (TopLevelEntry candidate in _topLevels.Values)
                 {
                     if (candidate.Host == null || candidate.Applied is not TopLevelFrame applied || applied.Owner != entry.Window)
                         continue;
 
+                    MoveOwnedHost(entry.Window, 0);
                     applied.Owner = 0;
                     candidate.Applied = applied;
                     (owned ??= new List<ITopLevelWindow>()).Add(candidate.Host);
@@ -1165,10 +1278,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                     RunHostCall(ownedWindow, static window => window.SetOwner(null));
             }
 
-            // A guest swapchain may still present to this HWND, and destroying it faults the host driver.
+            // A guest swapchain may still present to this window, and destroying it faults the host driver.
             // The host destroys owned windows with their owner, so it keeps no owner either.
-            if (_surfaceHosts.Contains(host))
+            if (_surfaceHolds.ContainsKey(host))
             {
+                _orphanedHosts.Add(host);
                 RunHostCall(host, static window =>
                 {
                     window.SetOwner(null);
@@ -1178,6 +1292,38 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             }
 
             RunHostCall(host, static window => window.Dispose());
+        }
+
+        private void ReleaseHold(ITopLevelWindow host)
+        {
+            ref int count = ref CollectionsMarshal.GetValueRefOrNullRef(_surfaceHolds, host);
+            if (Unsafe.IsNullRef(ref count) || --count > 0)
+                return;
+
+            _surfaceHolds.Remove(host);
+            if (_orphanedHosts.Remove(host))
+                RunHostCall(host, static window => window.Dispose());
+        }
+
+        // A window made layered by an update keeps its pixels only in its host window, so it is never evicted.
+        private bool TryEvictHostWindow(ulong keep)
+        {
+            TopLevelEntry victim = null;
+            foreach (TopLevelEntry entry in _evictable)
+            {
+                if (entry.Window != keep && !_ownedHosts.ContainsKey(entry.Window) && !_surfaceHolds.ContainsKey(entry.Host))
+                {
+                    victim = entry;
+                    break;
+                }
+            }
+
+            if (victim == null)
+                return false;
+
+            DestroyHostWindow(victim);
+            victim.Evicted = true;
+            return true;
         }
 
         private void Restack(ulong[] topToBottom)
@@ -1238,6 +1384,18 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             try
             {
+                foreach (ITopLevelWindow host in _hostWindows.Values)
+                    RunHostCall(host, static topLevel => topLevel.Dispose());
+
+                foreach (ITopLevelWindow host in _orphanedHosts)
+                    RunHostCall(host, static topLevel => topLevel.Dispose());
+
+                _hostWindows.Clear();
+                _orphanedHosts.Clear();
+                _surfaceHolds.Clear();
+                _evictable.Clear();
+                _ownedHosts.Clear();
+
                 window?.Dispose();
                 _display?.Dispose();
                 completion.SetResult(true);

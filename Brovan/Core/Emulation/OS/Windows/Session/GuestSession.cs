@@ -597,6 +597,32 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        internal static bool HasLiveGuests(string BaseDirectory, out string Session)
+        {
+            Session = string.Empty;
+            string[] Candidates;
+
+            try
+            {
+                Candidates = System.IO.Directory.GetDirectories(Path.Combine(BaseDirectory, DirectoryName));
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                return false;
+            }
+
+            foreach (string Candidate in Candidates)
+            {
+                if (!File.Exists(Path.Combine(Candidate, TableFileName)) || !HasLiveMember(Candidate))
+                    continue;
+
+                Session = Path.GetFileName(Candidate);
+                return true;
+            }
+
+            return false;
+        }
+
         private static bool HasLiveMember(string SessionDirectory)
         {
             try

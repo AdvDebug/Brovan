@@ -317,10 +317,19 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             return window;
         }
 
-        public ITopLevelWindow CreateTopLevel(in TopLevelFrame frame, ITopLevelWindow owner)
+        public bool TopLevelsAvailable => true;
+
+        public bool SupportsLayered => true;
+
+        public void UseTopLevels()
         {
+        }
+
+        public bool TryCreateTopLevel(in TopLevelFrame frame, ITopLevelWindow owner, out ITopLevelWindow created)
+        {
+            created = null;
             if (_disposed)
-                throw new ObjectDisposedException(nameof(WindowsWinManager));
+                return false;
 
             ApplyDpiAwareness(frame.DpiAwareness);
 
@@ -343,7 +352,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 IntPtr.Zero);
 
             if (hwnd == IntPtr.Zero)
-                throw new InvalidOperationException("CreateWindowExW failed.");
+                return false;
 
             WindowsWindow window = new(this, hwnd, frame, style, exStyle);
             Windows[hwnd] = window;
@@ -361,7 +370,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 EnableWindow(hwnd, false);
 
             window.SetClientBounds(frame.ClientX, frame.ClientY, frame.ClientWidth, frame.ClientHeight);
-            return window;
+            created = window;
+            return true;
         }
 
         // A window inserted behind a topmost window becomes topmost, so each band is restacked on its own.

@@ -160,16 +160,16 @@ namespace Brovan.Core.Emulation
         public const ulong PageMask = PageSize - 1;
 
         public const ulong InternalPageTableBase = 0x0000007000000000UL;
-        public const ulong PageTableEntryPresent = 1UL << 0;
-        public const ulong PageTableEntryWritable = 1UL << 1;
-        public const ulong PageTableEntryUser = 1UL << 2;
-        public const ulong PageTableEntryAccessed = 1UL << 5;
-        public const ulong PageTableEntryDirty = 1UL << 6;
-        public const ulong PageTableEntryLargePage = 1UL << 7;
+        public const ulong PageTableEntryPresent = GuestPageEntries.Present;
+        public const ulong PageTableEntryWritable = GuestPageEntries.Writable;
+        public const ulong PageTableEntryUser = GuestPageEntries.User;
+        public const ulong PageTableEntryAccessed = GuestPageEntries.Accessed;
+        public const ulong PageTableEntryDirty = GuestPageEntries.Dirty;
+        public const ulong PageTableEntryLargePage = GuestPageEntries.LargePage;
         // A software bit, set on a not-present PDE that still names its page table.
         public const ulong PageTableEntryWithheld = 1UL << 9;
-        public const ulong PageTableEntryNoExecute = 1UL << 63;
-        public const ulong PageTableEntryAddressMask = 0x000FFFFFFFFFF000UL;
+        public const ulong PageTableEntryNoExecute = GuestPageEntries.NoExecute;
+        public const ulong PageTableEntryAddressMask = GuestPageEntries.AddressMask;
 
         public const ushort KernelCodeSelector = 0x08;
         public const ushort KernelDataSelector = 0x10;

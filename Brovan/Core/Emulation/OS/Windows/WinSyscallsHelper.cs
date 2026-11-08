@@ -278,16 +278,31 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        internal static void ReleaseBrovVulk()
+        private static bool ReleaseBrovVulk()
         {
             if (!DeviceRegistry.IsValueCreated)
-                return;
+                return true;
 
+            bool Released = true;
             foreach (IWinDevice Device in DeviceRegistry.Value.Values)
             {
                 if (Device is BrovVulkDevice Vulkan)
-                    Vulkan.ReleaseHostMemory();
+                    Released &= Vulkan.ReleaseHostMemory();
             }
+
+            return Released;
+        }
+
+        // While the driver may still present to a host window, the display that owns it stays.
+        internal void ReleaseHostResources()
+        {
+            if (!ReleaseBrovVulk())
+                return;
+
+            IDisplayConnection Display = DesktopDisplay;
+            DesktopDisplay = null;
+            DesktopWindow = null;
+            Display?.Dispose();
         }
 
         // I/O that NtCancelSynchronousIoFile can cancel.
@@ -8387,6 +8402,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         private bool? TopLevelHost;
+        private bool LayeredHost;
 
         // Fixed once the display exists.
         public bool UsesTopLevelHost
@@ -8400,11 +8416,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return false;
 
                     TopLevelHost = DesktopDisplay is GuiThreadManager GuiManager && GuiManager.SupportsTopLevels;
+                    LayeredHost = TopLevelHost.Value && ((GuiThreadManager)DesktopDisplay).SupportsLayered;
                 }
 
                 return TopLevelHost.Value;
             }
         }
+
+        public bool HostSupportsLayered => UsesTopLevelHost && LayeredHost;
 
         private HashSet<ulong> PresentedTopLevels = new();
         private HashSet<ulong> PresentingTopLevels = new();
@@ -8478,8 +8497,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
         }
 
-        private IntPtr EnsureTopLevelHostHandle(GuiThreadManager GuiManager, ulong GuestHwnd)
+        private IntPtr EnsureTopLevelHostHandle(GuiThreadManager GuiManager, ulong GuestHwnd, out object Hold)
         {
+            Hold = null;
             WinWindow Root = GetRootWindow(GetWindow(GuestHwnd)) ?? GetForegroundOrTopVisibleWindow();
 
             if (Root == null)
@@ -8487,7 +8507,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             BuildTopLevelFrame(Root, out TopLevelFrame Frame);
             GuiManager.EnqueueTopLevel(Frame);
-            return GuiManager.EnsureTopLevelHandle(Root.Hwnd);
+            return GuiManager.EnsureTopLevelHandle(Root.Hwnd, out Hold);
         }
 
         public WinWindow GetRootWindow(WinWindow Window)
@@ -8543,36 +8563,29 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// presents to, or IntPtr.Zero if no host window backend is available. A zero guest window means the
         /// foreground one.
         /// </summary>
-        public IntPtr EnsureHostWindowHandle(ulong GuestHwnd)
+        public IntPtr EnsureHostWindowHandle(ulong GuestHwnd, out object Hold)
         {
+            Hold = null;
             if (UsesTopLevelHost)
-                return EnsureTopLevelHostHandle((GuiThreadManager)DesktopDisplay, GuestHwnd);
+                return EnsureTopLevelHostHandle((GuiThreadManager)DesktopDisplay, GuestHwnd, out Hold);
 
             EnsureDesktopWindow();
             return DesktopWindow?.NativeHandle ?? IntPtr.Zero;
         }
 
-        public void EnsureHostXlibSurfaceHandles(out IntPtr connection, out IntPtr window)
+        public void ReleaseHostWindowHold(object Hold)
+        {
+            if (Hold != null && DesktopDisplay is GuiThreadManager GuiManager)
+                GuiManager.ReleaseTopLevelHold(Hold);
+        }
+
+        public IntPtr HostXcbConnection()
         {
             if (!GeneralHelper.IsLinux)
-            {
-                connection = IntPtr.Zero;
-                window = IntPtr.Zero;
-                return;
-            }
+                return IntPtr.Zero;
 
             EnsureDesktopDisplay();
-            EnsureDesktopWindow();
-            if (DesktopDisplay == null || DesktopWindow == null)
-            {
-                connection = IntPtr.Zero;
-                window = IntPtr.Zero;
-                return;
-            }
-
-            IntPtr xDisplay = DesktopDisplay.NativeHandle;
-            connection = BrovVulkLinuxWsi.XGetXCBConnection(xDisplay);
-            window = DesktopWindow.NativeHandle;
+            return DesktopDisplay == null ? IntPtr.Zero : BrovVulkLinuxWsi.XGetXCBConnection(DesktopDisplay.NativeHandle);
         }
 
         private WinWindow GetTopLevelWindow()

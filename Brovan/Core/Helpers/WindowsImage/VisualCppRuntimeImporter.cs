@@ -47,7 +47,7 @@ namespace Brovan.Core.Helpers.WindowsImage
                 long Done = 0;
                 byte[] Manifest = Download(Client, ResolveManifest(Client), Count => Progress?.Invoke(0, 0, Done += Count, 0));
 
-                string Libraries = Path.Combine(BaseDirectory, "WindowsLibs");
+                string Libraries = Path.Combine(BaseDirectory, WindowsImageImporter.LibrariesDirectory);
 
                 RuntimePackage[] Packages =
                 {

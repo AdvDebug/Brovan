@@ -75,6 +75,7 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
+        attachLayers(true);
         BrovanNative.setSurface(holder.getSurface(), getResources().getDisplayMetrics().densityDpi);
         BrovanNative.injectFocus(true);
     }
@@ -88,6 +89,13 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
     public void surfaceDestroyed(SurfaceHolder holder) {
         BrovanNative.injectFocus(false);
         BrovanNative.clearSurface();
+        attachLayers(false);
+    }
+
+    private void attachLayers(boolean attached) {
+        if (GuestLayers.available()) {
+            GuestLayers.setParent(attached ? getSurfaceControl() : null);
+        }
     }
 
     public void setPointerMode(PointerMode value) {

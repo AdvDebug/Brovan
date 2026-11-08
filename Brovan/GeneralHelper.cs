@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Brovan.Core.Emulation;
 using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Helpers;
+using Brovan.Core.Helpers.WindowsImage;
 using Brovan.Core;
 using Microsoft.Win32.SafeHandles;
 using System.Runtime.Versioning;
@@ -229,37 +230,8 @@ namespace Brovan
         /// returns true for android too.
         /// </summary>
         public static bool IsLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
-        public static string WindowsLibsPath = Path.Combine(AppContext.BaseDirectory, "WindowsLibs");
-
-        public static string System32
-        {
-            get
-            {
-                if (IsWindows)
-                {
-                    return "C:\\Windows\\System32";
-                }
-                else
-                {
-                    return Path.Combine(AppContext.BaseDirectory, "WindowsLibs");
-                }
-            }
-        }
-
-        public static string SysWOW64
-        {
-            get
-            {
-                if (IsWindows)
-                {
-                    return "C:\\Windows\\SysWOW64";
-                }
-                else
-                {
-                    return Path.Combine(AppContext.BaseDirectory, "WindowsLibs\\SysWOW64");
-                }
-            }
-        }
+        public static readonly string WindowsLibsPath = Path.Combine(AppContext.BaseDirectory, WindowsImageImporter.LibrariesDirectory);
+        public static readonly string WindowsLibsWow64Path = Path.Combine(WindowsLibsPath, "SysWOW64");
 
         private delegate IntPtr GetPebPtr();
 
@@ -274,7 +246,7 @@ namespace Brovan
             bool Wow64View = IsWow64 || Arch == BinaryArchitecture.x86;
 
             string ShippedPath = Wow64View
-                ? Path.Combine(WindowsLibsPath, "SysWOW64")
+                ? WindowsLibsWow64Path
                 : WindowsLibsPath;
 
             string BasePath;
@@ -317,32 +289,63 @@ namespace Brovan
             return Result;
         }
 
-        private static readonly Dictionary<string, Dictionary<string, string>> ShippedLibraryIndex = new(StringComparer.Ordinal);
+        private readonly record struct ShippedEntry(string FullPath, bool IsDirectory);
+
+        private readonly record struct ShippedIndex(Dictionary<string, ShippedEntry> Entries, DateTime Written);
+
+        private static readonly Dictionary<string, ShippedIndex> ShippedLibraryIndex = new(StringComparer.Ordinal);
+        private static readonly EnumerationOptions ShippedEntryOptions = new EnumerationOptions { AttributesToSkip = 0, IgnoreInaccessible = false };
+
+        // Adding, removing or renaming an entry changes the write time of its directory.
+        internal static void ForgetChangedShippedDirectories()
+        {
+            lock (ShippedLibraryIndex)
+            {
+                foreach (KeyValuePair<string, ShippedIndex> Pair in ShippedLibraryIndex)
+                {
+                    if (System.IO.Directory.GetLastWriteTimeUtc(Pair.Key) != Pair.Value.Written)
+                        ShippedLibraryIndex.Remove(Pair.Key);
+                }
+            }
+        }
 
         private static string ResolveShippedLibraryCase(string Directory, string FileName)
         {
-            Dictionary<string, string> Index;
+            ShippedEntry Entry = FindShippedEntry(Directory, FileName);
+            return Entry.IsDirectory ? null : Entry.FullPath;
+        }
+
+        private static ShippedEntry FindShippedEntry(string Directory, string Name)
+        {
+            Dictionary<string, ShippedEntry> Index;
 
             lock (ShippedLibraryIndex)
             {
-                if (!ShippedLibraryIndex.TryGetValue(Directory, out Index))
+                if (ShippedLibraryIndex.TryGetValue(Directory, out ShippedIndex Indexed))
                 {
-                    Index = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    Index = Indexed.Entries;
+                }
+                else
+                {
+                    Index = new Dictionary<string, ShippedEntry>(StringComparer.OrdinalIgnoreCase);
+                    DateTime Written = System.IO.Directory.GetLastWriteTimeUtc(Directory);
 
                     try
                     {
-                        foreach (string Entry in System.IO.Directory.EnumerateFiles(Directory))
-                            Index[Path.GetFileName(Entry)] = Entry;
+                        FileSystemEnumerable<ShippedEntry> Entries = new FileSystemEnumerable<ShippedEntry>(Directory,
+                            static (ref FileSystemEntry Item) => new ShippedEntry(Item.ToFullPath(), Item.IsDirectory), ShippedEntryOptions);
+                        foreach (ShippedEntry Entry in Entries)
+                            Index[Path.GetFileName(Entry.FullPath)] = Entry;
                     }
                     catch (DirectoryNotFoundException)
                     {
                     }
 
-                    ShippedLibraryIndex[Directory] = Index;
+                    ShippedLibraryIndex[Directory] = new ShippedIndex(Index, Written);
                 }
             }
 
-            return Index.TryGetValue(FileName, out string Actual) ? Actual : null;
+            return Index.TryGetValue(Name, out ShippedEntry Found) ? Found : default;
         }
 
         public static bool DumpApiSetMap()
@@ -1471,15 +1474,14 @@ namespace Brovan
 
         public static class IO
         {
-            private static readonly object WindowsLibsIndexLock = new();
-            private static Dictionary<string, string> WindowsLibsFileIndex;
-
             private static readonly object DriveMapLock = new();
             private static readonly Dictionary<char, string> DriveMappings = new();
             private static readonly HashSet<string> AllowedRoots = new(IsWindows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             private static readonly HashSet<string> ReadOnlyRoots = new(IsWindows ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             private static readonly Dictionary<string, string> LinuxMountMappings = new(StringComparer.Ordinal);
-            private static readonly Dictionary<string, string> WindowsMountMappings = new(StringComparer.OrdinalIgnoreCase);
+            private static readonly Dictionary<string, WindowsMount> WindowsMountMappings = new(StringComparer.OrdinalIgnoreCase);
+
+            private readonly record struct WindowsMount(string HostRoot, string[] Excluded);
 
             public static string VirtualFileSystemRoot = Path.Combine(AppContext.BaseDirectory, "VirtualFS");
             public static string LinuxVirtualFileSystemRoot = Path.Combine(VirtualFileSystemRoot, "Linux");
@@ -1499,12 +1501,47 @@ namespace Brovan
             // System32 and SysWOW64 file names this process never reads from VirtualFS.
             public static HashSet<string> SystemCopyNames;
 
-            public static void BeginGuest(bool Wow64Redirect)
+            public static void BeginGuest(BinaryFormat Format, BinaryArchitecture Architecture)
             {
-                Wow64FileRedirectDefault = Wow64Redirect;
+                Wow64FileRedirectDefault = Format == BinaryFormat.PE && Architecture == BinaryArchitecture.x86;
                 SystemCopyNames = null;
+
+                if (Format == BinaryFormat.PE && !IsWindows)
+                    UseImportedSystemRoot();
             }
 
+            private static bool SystemRootReported;
+
+            // An import can run in a live process, so each guest looks for the imported C:\Windows again.
+            private static void UseImportedSystemRoot()
+            {
+                string Root = WindowsImageImporter.FindSystemRoot(AppContext.BaseDirectory, out bool Current);
+                string Problem = null;
+
+                if (Root == null)
+                {
+                    RemoveWindowsMountMapping(WindowsDirectoryPath);
+                    Problem = "have no SystemRoot";
+                }
+                else if (!SetWindowsMountMapping(WindowsDirectoryPath, Root, WindowsImageImporter.LibraryFolders))
+                {
+                    Problem = "have a SystemRoot that could not be mounted";
+                }
+                else if (!Current)
+                {
+                    Problem = "have an older SystemRoot";
+                }
+
+                if (Problem != null && !SystemRootReported)
+                {
+                    SystemRootReported = true;
+                    Utils.LogError($"[IO] The imported Windows files {Problem}. Import Windows again for file dialogs and other parts that read C:\\Windows.");
+                }
+
+                ForgetChangedShippedDirectories();
+            }
+
+            private const string WindowsDirectoryPath = "C:\\Windows";
             private const string System32WindowsPath = "C:\\Windows\\System32";
             private const string SysWow64WindowsPath = "C:\\Windows\\SysWOW64";
             private const string SysnativeWindowsPath = "C:\\Windows\\Sysnative";
@@ -2319,13 +2356,29 @@ namespace Brovan
                 return Map;
             }
 
-            public static bool SetWindowsMountMapping(string GuestDirectory, string HostRoot)
+            public static bool SetWindowsMountMapping(string GuestDirectory, string HostRoot, string[] Excluded = null)
             {
-                if (!EnsureWindowsMountMapping(GuestDirectory, HostRoot))
+                if (!EnsureWindowsMountMapping(GuestDirectory, HostRoot, Excluded))
                     return false;
 
                 RefreshAllowedRoots();
                 return true;
+            }
+
+            public static void RemoveWindowsMountMapping(string GuestDirectory)
+            {
+                string NormalizedGuestDirectory = CanonicalizeWindowsAbsolutePath(GuestDirectory);
+                if (string.IsNullOrEmpty(NormalizedGuestDirectory))
+                    return;
+
+                bool Removed;
+                lock (DriveMapLock)
+                {
+                    Removed = WindowsMountMappings.Remove(NormalizedGuestDirectory);
+                }
+
+                if (Removed)
+                    RefreshAllowedRoots();
             }
 
             /// <returns>the emulated windows path of the program image, or HostImagePath unchanged when nothing is mounted.</returns>
@@ -2386,24 +2439,32 @@ namespace Brovan
 
                 StringComparison Comparison = IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
+                string BestGuest = null;
+                string BestRoot = null;
+
                 lock (DriveMapLock)
                 {
-                    foreach (KeyValuePair<string, string> Pair in WindowsMountMappings)
+                    foreach (KeyValuePair<string, WindowsMount> Pair in WindowsMountMappings)
                     {
-                        string Root = Pair.Value.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-                        if (string.Equals(Full, Root, Comparison))
-                            return Pair.Key;
-
-                        if (!Full.StartsWith(Root + Path.DirectorySeparatorChar, Comparison))
+                        string Root = Pair.Value.HostRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                        if (BestRoot != null && Root.Length <= BestRoot.Length)
                             continue;
 
-                        string Relative = Full.Substring(Root.Length + 1).Replace(Path.DirectorySeparatorChar, '\\');
-                        return Pair.Key + "\\" + Relative;
+                        if (string.Equals(Full, Root, Comparison) || Full.StartsWith(Root + Path.DirectorySeparatorChar, Comparison))
+                        {
+                            BestGuest = Pair.Key;
+                            BestRoot = Root;
+                        }
                     }
                 }
 
-                return null;
+                if (BestRoot == null)
+                    return null;
+
+                if (Full.Length == BestRoot.Length)
+                    return BestGuest;
+
+                return BestGuest + "\\" + Full.Substring(BestRoot.Length + 1).Replace(Path.DirectorySeparatorChar, '\\');
             }
 
             /// <remarks>
@@ -2462,25 +2523,25 @@ namespace Brovan
 
                 if (RawWinPath.StartsWith("\\KnownDlls\\", StringComparison.OrdinalIgnoreCase))
                 {
-                    string KnownDllLeaf = Path.GetFileName(RawWinPath);
+                    string KnownDllLeaf = GetWindowsFileName(RawWinPath);
                     if (!string.IsNullOrEmpty(KnownDllLeaf))
                         RawWinPath = @"C:\Windows\System32\\" + KnownDllLeaf;
                 }
                 else if (RawWinPath.StartsWith("\\KnownDlls32\\", StringComparison.OrdinalIgnoreCase))
                 {
-                    string KnownDllLeaf = Path.GetFileName(RawWinPath);
+                    string KnownDllLeaf = GetWindowsFileName(RawWinPath);
                     if (!string.IsNullOrEmpty(KnownDllLeaf))
                         RawWinPath = @"C:\Windows\SysWOW64\\" + KnownDllLeaf;
                 }
 
                 if (!LooksLikeAbsoluteWindowsPath(RawWinPath) && !RawWinPath.StartsWith("\\", StringComparison.Ordinal))
                 {
-                    string LeafOnly = Path.GetFileName(RawWinPath);
+                    string LeafOnly = GetWindowsFileName(RawWinPath);
                     if (!string.IsNullOrEmpty(LeafOnly) && string.Equals(LeafOnly, RawWinPath, StringComparison.OrdinalIgnoreCase))
                     {
                         if (Wow64FileRedirect && !NativeSystemView)
                         {
-                            string Wow64LeafPath = TryResolveFromWindowsLibsRelative(Path.Combine(WindowsLibsPath, "SysWOW64"), LeafOnly);
+                            string Wow64LeafPath = TryResolveFromWindowsLibsRelative(WindowsLibsWow64Path, LeafOnly);
                             if (!string.IsNullOrEmpty(Wow64LeafPath))
                                 return Wow64LeafPath;
                         }
@@ -2911,7 +2972,7 @@ namespace Brovan
 
                 lock (DriveMapLock)
                 {
-                    foreach (KeyValuePair<string, string> Pair in WindowsMountMappings)
+                    foreach (KeyValuePair<string, WindowsMount> Pair in WindowsMountMappings)
                     {
                         string Mount = Pair.Key;
                         if (WinPath.Length < Mount.Length || Mount.Length <= BestLength)
@@ -2923,8 +2984,11 @@ namespace Brovan
                         if (!WinPath.AsSpan(0, Mount.Length).Equals(Mount.AsSpan(), StringComparison.OrdinalIgnoreCase))
                             continue;
 
+                        if (IsExcludedFromMount(WinPath, Mount.Length, Pair.Value.Excluded))
+                            continue;
+
                         BestLength = Mount.Length;
-                        BestRoot = Pair.Value;
+                        BestRoot = Pair.Value.HostRoot;
                     }
                 }
 
@@ -2934,6 +2998,24 @@ namespace Brovan
                 string Relative = WinPath.Length == BestLength ? string.Empty : WinPath.Substring(BestLength + 1);
                 HostPath = Relative.Length == 0 ? BestRoot : CombineWindowsRelativePath(BestRoot, Relative);
                 return true;
+            }
+
+            private static bool IsExcludedFromMount(string WinPath, int MountLength, string[] Excluded)
+            {
+                if (Excluded == null || WinPath.Length == MountLength)
+                    return false;
+
+                ReadOnlySpan<char> Rest = WinPath.AsSpan(MountLength + 1);
+                int Separator = Rest.IndexOf('\\');
+                ReadOnlySpan<char> Child = Separator < 0 ? Rest : Rest.Slice(0, Separator);
+
+                foreach (string Name in Excluded)
+                {
+                    if (Child.Equals(Name, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+
+                return false;
             }
 
             internal static bool IsWindowsRootedPath(string PathValue)
@@ -3076,7 +3158,7 @@ namespace Brovan
                 }
             }
 
-            private static bool EnsureWindowsMountMapping(string GuestDirectory, string HostRoot)
+            private static bool EnsureWindowsMountMapping(string GuestDirectory, string HostRoot, string[] Excluded = null)
             {
                 string NormalizedGuestDirectory = CanonicalizeWindowsAbsolutePath(GuestDirectory);
 
@@ -3100,7 +3182,7 @@ namespace Brovan
 
                 lock (DriveMapLock)
                 {
-                    WindowsMountMappings[NormalizedGuestDirectory] = NormalizedHostRoot;
+                    WindowsMountMappings[NormalizedGuestDirectory] = new WindowsMount(NormalizedHostRoot, Excluded);
                 }
 
                 try
@@ -3378,14 +3460,14 @@ namespace Brovan
                         }
                     }
 
-                    foreach (KeyValuePair<string, string> Pair in WindowsMountMappings)
+                    foreach (KeyValuePair<string, WindowsMount> Pair in WindowsMountMappings)
                     {
-                        if (string.IsNullOrWhiteSpace(Pair.Value))
+                        if (string.IsNullOrWhiteSpace(Pair.Value.HostRoot))
                             continue;
 
                         try
                         {
-                            ReadOnlyRoots.Add(Path.GetFullPath(Pair.Value));
+                            ReadOnlyRoots.Add(Path.GetFullPath(Pair.Value.HostRoot));
                         }
                         catch
                         {
@@ -4359,14 +4441,14 @@ namespace Brovan
                 if (Normalized.StartsWith(SysWow64Prefix, StringComparison.OrdinalIgnoreCase))
                 {
                     string Rel = Normalized.Substring(SysWow64Prefix.Length);
-                    return TryResolveFromWindowsLibsRelative(Path.Combine(WindowsLibsPath, "SysWOW64"), Rel);
+                    return TryResolveFromWindowsLibsRelative(WindowsLibsWow64Path, Rel);
                 }
 
-                if (Normalized.StartsWith("\\KnownDlls\\", StringComparison.OrdinalIgnoreCase) || Normalized.StartsWith("\\KnownDlls32\\", StringComparison.OrdinalIgnoreCase))
-                {
-                    string Leaf = Path.GetFileName(Normalized);
-                    return TryResolveFromWindowsLibsByLeaf(Leaf);
-                }
+                if (Normalized.StartsWith("\\KnownDlls\\", StringComparison.OrdinalIgnoreCase))
+                    return TryResolveFromWindowsLibsRelative(WindowsLibsPath, GetWindowsFileName(Normalized));
+
+                if (Normalized.StartsWith("\\KnownDlls32\\", StringComparison.OrdinalIgnoreCase))
+                    return TryResolveFromWindowsLibsRelative(WindowsLibsWow64Path, GetWindowsFileName(Normalized));
 
                 return null;
             }
@@ -4384,8 +4466,28 @@ namespace Brovan
                 if (!string.IsNullOrEmpty(Full) && HostPathExists(Full))
                     return Full;
 
-                string Leaf = Path.GetFileName(WindowsRelative);
-                return TryResolveFromWindowsLibsByLeaf(Leaf);
+                // A relative name resolves only in its own folder, not to another language's or architecture's file.
+                string Resolved = ResolveShippedRelativeCase(BaseDir, WindowsRelative);
+                return Resolved == null ? null : GetSandboxedFullPath(Resolved, CreateDirectories: false, ReadOnly: true);
+            }
+
+            private static string ResolveShippedRelativeCase(string BaseDir, string WindowsRelative)
+            {
+                string Current = BaseDir;
+                string[] Components = WindowsRelative.Split(WindowsPathSeparators, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < Components.Length; i++)
+                {
+                    if (Components[i] == "." || Components[i] == "..")
+                        return null;
+
+                    ShippedEntry Entry = FindShippedEntry(Current, Components[i]);
+                    if (Entry.FullPath == null || (i < Components.Length - 1 && !Entry.IsDirectory))
+                        return null;
+
+                    Current = Entry.FullPath;
+                }
+
+                return Current;
             }
 
             private static string TryResolveFromWindowsLibsByLeaf(string Leaf)
@@ -4393,50 +4495,8 @@ namespace Brovan
                 if (string.IsNullOrWhiteSpace(Leaf))
                     return null;
 
-                EnsureWindowsLibsIndex();
-
-                lock (WindowsLibsIndexLock)
-                {
-                    if (WindowsLibsFileIndex != null && WindowsLibsFileIndex.TryGetValue(Leaf, out string Found))
-                        return Found;
-                }
-
-                return null;
-            }
-
-            private static void EnsureWindowsLibsIndex()
-            {
-                lock (WindowsLibsIndexLock)
-                {
-                    if (WindowsLibsFileIndex != null)
-                        return;
-
-                    WindowsLibsFileIndex = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-                    try
-                    {
-                        if (!Directory.Exists(WindowsLibsPath))
-                            return;
-
-                        foreach (string FilePath in Directory.EnumerateFiles(WindowsLibsPath, "*", SearchOption.AllDirectories))
-                        {
-                            string Leaf = Path.GetFileName(FilePath);
-                            if (string.IsNullOrEmpty(Leaf))
-                                continue;
-
-                            if (!WindowsLibsFileIndex.ContainsKey(Leaf))
-                            {
-                                string Full = GetSandboxedFullPath(FilePath, CreateDirectories: false, ReadOnly: true);
-                                if (!string.IsNullOrEmpty(Full))
-                                    WindowsLibsFileIndex[Leaf] = Full;
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Utils.LogError($"[IO] Failed to build WindowsLibs Index: {ex.Message}");
-                    }
-                }
+                string Found = ResolveShippedLibraryCase(WindowsLibsPath, Leaf) ?? ResolveShippedLibraryCase(WindowsLibsWow64Path, Leaf);
+                return Found == null ? null : GetSandboxedFullPath(Found, CreateDirectories: false, ReadOnly: true);
             }
         }
     }

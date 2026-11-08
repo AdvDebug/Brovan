@@ -123,23 +123,98 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             *(int*)Info = BrovVulkConstants.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
             *(byte**)(Info + InstanceInfoApp) = App;
 
+            HashSet<string> Before = LoadedLibraries(null);
             IntPtr Instance = IntPtr.Zero;
-            int Created = Create(Info, null, &Instance);
-            if (Created != 0 || Instance == IntPtr.Zero)
-            {
-                Reason = $"vkCreateInstance returned {Created}";
-                return null;
-            }
-
-            delegate* unmanaged<IntPtr, void*, void> Destroy = (delegate* unmanaged<IntPtr, void*, void>)Proc(Gipa, Instance, "vkDestroyInstance\0"u8);
+            delegate* unmanaged<IntPtr, void*, void> Destroy = null;
             try
             {
+                int Created = Create(Info, null, &Instance);
+                if (Created != 0 || Instance == IntPtr.Zero)
+                {
+                    Reason = $"vkCreateInstance returned {Created}";
+                    return null;
+                }
+
+                Destroy = (delegate* unmanaged<IntPtr, void*, void>)Proc(Gipa, Instance, "vkDestroyInstance\0"u8);
                 return ProbeInstance(Gipa, Instance, out Reason);
             }
             finally
             {
+                KeepLoadedSince(Before);
                 if (Destroy != null)
                     Destroy(Instance, null);
+            }
+        }
+
+        // An ELF host runs the TSD destructors of an exiting thread by address. A host driver can unload a library
+        // that left one for the probe thread, so every library that the probe caused to load stays loaded.
+        private static void KeepLoadedSince(HashSet<string> Before)
+        {
+            if (Before == null)
+                return;
+
+            HashSet<string> Added = LoadedLibraries(Before);
+            if (Added == null)
+                return;
+
+            foreach (string Library in Added)
+            {
+                if (!NativeLibrary.TryLoad(Library, out _))
+                    Utils.LogError($"[HostDisplayGpu] Cannot keep {Library} loaded");
+            }
+        }
+
+        private sealed class LibraryScan
+        {
+            internal readonly HashSet<string> Paths = new HashSet<string>(StringComparer.Ordinal);
+            internal HashSet<string> Known;
+            internal Exception Failure;
+        }
+
+        private static HashSet<string> LoadedLibraries(HashSet<string> Known)
+        {
+            if (GeneralHelper.IsWindows || !NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "dl_iterate_phdr", out IntPtr Iterate))
+                return null;
+
+            LibraryScan Scan = new LibraryScan { Known = Known };
+            GCHandle Handle = GCHandle.Alloc(Scan);
+            try
+            {
+                ((delegate* unmanaged<delegate* unmanaged<IntPtr, nuint, IntPtr, int>, IntPtr, int>)Iterate)(&AddLibrary, GCHandle.ToIntPtr(Handle));
+            }
+            finally
+            {
+                Handle.Free();
+            }
+
+            if (Scan.Failure != null)
+            {
+                Utils.LogError($"[HostDisplayGpu] Cannot list the host libraries: {Scan.Failure.Message}");
+                return null;
+            }
+
+            return Scan.Paths;
+        }
+
+        [UnmanagedCallersOnly]
+        private static int AddLibrary(IntPtr Info, nuint Size, IntPtr Data)
+        {
+            LibraryScan Scan = (LibraryScan)GCHandle.FromIntPtr(Data).Target;
+            try
+            {
+                byte* Name = *(byte**)(Info + IntPtr.Size);
+                if (Name != null && *Name == (byte)'/')
+                {
+                    string Library = Marshal.PtrToStringUTF8((IntPtr)Name);
+                    if (Scan.Known == null || !Scan.Known.Contains(Library))
+                        Scan.Paths.Add(Library);
+                }
+                return 0;
+            }
+            catch (Exception Error)
+            {
+                Scan.Failure = Error;
+                return 1;
             }
         }
 

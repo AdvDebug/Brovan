@@ -53,10 +53,11 @@ namespace Brovan.Core.Emulation
 
         bool IGuestMemory.ReadMemory(ulong Address, Span<byte> Destination) => ReadMemory(Address, Destination);
 
-        IntPtr IGuestMemory.EnsureHostWindowHandle(ulong GuestHwnd) => WinHelper.EnsureHostWindowHandle(GuestHwnd);
+        IntPtr IGuestMemory.EnsureHostWindowHandle(ulong GuestHwnd, out object Hold) => WinHelper.EnsureHostWindowHandle(GuestHwnd, out Hold);
 
-        void IGuestMemory.EnsureHostXlibSurfaceHandles(out IntPtr Connection, out IntPtr Window) =>
-            WinHelper.EnsureHostXlibSurfaceHandles(out Connection, out Window);
+        void IGuestMemory.ReleaseHostWindowHold(object Hold) => WinHelper.ReleaseHostWindowHold(Hold);
+
+        IntPtr IGuestMemory.HostXcbConnection() => WinHelper.HostXcbConnection();
 
         // DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, as NT maps them for a section.
         private const AccessMask SharedGpuMemoryAccess = AccessMask.StandardRightsRequired | AccessMask.SectionQuery | AccessMask.SectionMapWrite | AccessMask.SectionMapRead;

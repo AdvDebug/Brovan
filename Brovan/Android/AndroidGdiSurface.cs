@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using Brovan.Core.Emulation.OS.SharedHelpers;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 using Brovan.Core.Settings;
 
 namespace Brovan.Android
@@ -19,7 +20,7 @@ namespace Brovan.Android
             new GdiClipRect { Left = int.MinValue, Top = int.MinValue, Right = int.MaxValue, Bottom = int.MaxValue },
         };
 
-        private sealed class WindowBuffer
+        internal sealed class WindowBuffer
         {
             public int[] Pixels = Array.Empty<int>();
             public int Width;
@@ -30,6 +31,30 @@ namespace Brovan.Android
             public int ClipTop;
             public int ClipRight;
             public int ClipBottom;
+
+            public bool Resize(int width, int height, int background = DefaultBackground)
+            {
+                width = Math.Max(width, 1);
+                height = Math.Max(height, 1);
+                if (!Win32kHelper.IsBlitExtentValid(width, height))
+                {
+                    width = 0;
+                    height = 0;
+                }
+
+                if (width == Width && height == Height)
+                    return false;
+
+                int count = width * height;
+                if (count > Pixels.Length || count < Pixels.Length / 2)
+                    Pixels = new int[count];
+
+                Width = width;
+                Height = height;
+                Pixels.AsSpan(0, count).Fill(background);
+                Dirty = true;
+                return true;
+            }
         }
 
         private readonly object _sync = new();
@@ -46,22 +71,27 @@ namespace Brovan.Android
                 if (target == null)
                     return;
 
-                if (primitive.Kind == GdiPrimitiveKind.Copy)
-                {
-                    CopyWithin(target, primitive);
-                }
-                else
-                {
-                    foreach (GdiClipRect rect in primitive.Clip ?? Unclipped)
-                    {
-                        SetClip(target, rect.Left, rect.Top, rect.Right, rect.Bottom);
-                        Draw(target, primitive);
-                    }
-                }
-
-                target.Dirty = true;
+                Execute(target, primitive);
                 _lastDrawn = primitive.Hwnd;
             }
+        }
+
+        public static void Execute(WindowBuffer target, in GdiPrimitive primitive)
+        {
+            if (primitive.Kind == GdiPrimitiveKind.Copy)
+            {
+                CopyWithin(target, primitive);
+            }
+            else
+            {
+                foreach (GdiClipRect rect in primitive.Clip ?? Unclipped)
+                {
+                    SetClip(target, rect.Left, rect.Top, rect.Right, rect.Bottom);
+                    Draw(target, primitive);
+                }
+            }
+
+            target.Dirty = true;
         }
 
         public void DrawText(ulong hwnd, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options, GdiClipRect[] clip)
@@ -72,35 +102,38 @@ namespace Brovan.Android
             lock (_sync)
             {
                 WindowBuffer target = Resolve(hwnd);
-                if (target == null)
-                    return;
-
-                if (!AndroidText.Rasterize(text, out AndroidTextBitmap bitmap))
-                    return;
-
-                int left = 0;
-                int top = 0;
-                int right = target.Width;
-                int bottom = target.Height;
-
-                if ((options & EtoClipped) != 0 && rectRight > rectLeft && rectBottom > rectTop)
-                {
-                    left = Math.Max(left, rectLeft);
-                    top = Math.Max(top, rectTop);
-                    right = Math.Min(right, rectRight);
-                    bottom = Math.Min(bottom, rectBottom);
-                }
-
-                // TA_TOP: the reference point is the top of the cell, not the baseline.
-                foreach (GdiClipRect rect in clip ?? Unclipped)
-                {
-                    Blend(target, bitmap, x - bitmap.Padding, y - bitmap.Padding, Math.Max(left, rect.Left), Math.Max(top, rect.Top),
-                        Math.Min(right, rect.Right), Math.Min(bottom, rect.Bottom));
-                }
-
-                target.Dirty = true;
-                _lastDrawn = hwnd;
+                if (target != null && DrawText(target, text, x, y, rectLeft, rectTop, rectRight, rectBottom, options, clip))
+                    _lastDrawn = hwnd;
             }
+        }
+
+        public static bool DrawText(WindowBuffer target, string text, int x, int y, int rectLeft, int rectTop, int rectRight, int rectBottom, uint options, GdiClipRect[] clip)
+        {
+            if (string.IsNullOrEmpty(text) || !AndroidText.Rasterize(text, out AndroidTextBitmap bitmap))
+                return false;
+
+            int left = 0;
+            int top = 0;
+            int right = target.Width;
+            int bottom = target.Height;
+
+            if ((options & EtoClipped) != 0 && rectRight > rectLeft && rectBottom > rectTop)
+            {
+                left = Math.Max(left, rectLeft);
+                top = Math.Max(top, rectTop);
+                right = Math.Min(right, rectRight);
+                bottom = Math.Min(bottom, rectBottom);
+            }
+
+            // TA_TOP: the reference point is the top of the cell, not the baseline.
+            foreach (GdiClipRect rect in clip ?? Unclipped)
+            {
+                Blend(target, bitmap, x - bitmap.Padding, y - bitmap.Padding, Math.Max(left, rect.Left), Math.Max(top, rect.Top),
+                    Math.Min(right, rect.Right), Math.Min(bottom, rect.Bottom));
+            }
+
+            target.Dirty = true;
+            return true;
         }
 
         public void Flush()
@@ -150,14 +183,7 @@ namespace Brovan.Android
             if (width <= 0 || height <= 0)
                 return null;
 
-            if (buffer.Width != width || buffer.Height != height || buffer.Pixels.Length == 0)
-            {
-                buffer.Pixels = new int[width * height];
-                buffer.Width = width;
-                buffer.Height = height;
-                Array.Fill(buffer.Pixels, DefaultBackground);
-            }
-
+            buffer.Resize(width, height);
             return buffer;
         }
 
@@ -313,9 +339,12 @@ namespace Brovan.Android
             }
         }
 
-        private static unsafe void Post(IntPtr window, WindowBuffer source)
+        private static void Post(IntPtr window, WindowBuffer source) => Post(window, source.Pixels, source.Width, source.Height, false, 0, false);
+
+        // A premultiplied source is 0xAARRGGBB and the window takes RGBA bytes, so red and blue swap.
+        public static unsafe void Post(IntPtr window, int[] source, int width, int height, bool keyed, int key, bool premultiplied)
         {
-            AndroidNative.NativeWindowSetBuffersGeometry(window, source.Width, source.Height, AndroidNative.WindowFormatRgba8888);
+            AndroidNative.NativeWindowSetBuffersGeometry(window, width, height, AndroidNative.WindowFormatRgba8888);
 
             AndroidNative.NativeWindowBuffer buffer;
             if (AndroidNative.NativeWindowLock(window, &buffer, IntPtr.Zero) != 0)
@@ -323,18 +352,33 @@ namespace Brovan.Android
 
             try
             {
-                int rows = Math.Min(buffer.Height, source.Height);
-                int columns = Math.Min(buffer.Width, source.Width);
+                int rows = Math.Min(buffer.Height, height);
+                int columns = Math.Min(buffer.Width, width);
                 int* destination = (int*)buffer.Bits;
 
-                fixed (int* pixels = source.Pixels)
+                fixed (int* pixels = source)
                 {
                     for (int y = 0; y < rows; y++)
                     {
-                        int* sourceRow = pixels + (y * source.Width);
+                        int* sourceRow = pixels + (y * width);
                         int* destinationRow = destination + (y * buffer.Stride);
-                        for (int x = 0; x < columns; x++)
-                            destinationRow[x] = sourceRow[x];
+                        if (premultiplied)
+                        {
+                            for (int x = 0; x < columns; x++)
+                            {
+                                int pixel = sourceRow[x];
+                                destinationRow[x] = (pixel & unchecked((int)0xFF00FF00)) | ((pixel >> 16) & 0xFF) | ((pixel & 0xFF) << 16);
+                            }
+                        }
+                        else if (keyed)
+                        {
+                            for (int x = 0; x < columns; x++)
+                                destinationRow[x] = sourceRow[x] == key ? 0 : sourceRow[x];
+                        }
+                        else
+                        {
+                            new ReadOnlySpan<int>(sourceRow, columns).CopyTo(new Span<int>(destinationRow, columns));
+                        }
                     }
                 }
             }
@@ -379,7 +423,7 @@ namespace Brovan.Android
             }
         }
 
-        private static int ToPixel(uint colorRef)
+        internal static int ToPixel(uint colorRef)
         {
             return unchecked((int)(0xFF000000u | (colorRef & 0x00FFFFFFu)));
         }

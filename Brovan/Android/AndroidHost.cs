@@ -15,6 +15,11 @@ namespace Brovan.Android
         public const int PlayerWindowCreated = 3;
 
         private static IntPtr _playerSink;
+        private static IntPtr _layerCreate;
+        private static IntPtr _layerApply;
+        private static IntPtr _layerRelease;
+        private static int _nextLayerId;
+        private static volatile bool _topLevelMode;
 
         private static readonly object SurfaceSync = new();
         private static readonly ManualResetEventSlim SurfaceReady = new(false);
@@ -64,6 +69,43 @@ namespace Brovan.Android
             IntPtr sink = Volatile.Read(ref _playerSink);
             if (sink != IntPtr.Zero)
                 ((delegate* unmanaged<int, void>)sink)(playerEvent);
+        }
+
+        public static void SetLayerSinks(IntPtr create, IntPtr apply, IntPtr release)
+        {
+            Volatile.Write(ref _layerCreate, create);
+            Volatile.Write(ref _layerApply, apply);
+            Volatile.Write(ref _layerRelease, release);
+        }
+
+        public static bool LayersAvailable => Volatile.Read(ref _layerRelease) != IntPtr.Zero;
+
+        // The caller releases the reference that comes with the returned window.
+        public static unsafe IntPtr CreateLayer(out int id)
+        {
+            id = Interlocked.Increment(ref _nextLayerId);
+            IntPtr sink = Volatile.Read(ref _layerCreate);
+            return sink == IntPtr.Zero ? IntPtr.Zero : ((delegate* unmanaged<int, IntPtr>)sink)(id);
+        }
+
+        public static unsafe void ApplyLayer(int id, int x, int y, int width, int height, int z, bool shown, float alpha)
+        {
+            IntPtr sink = Volatile.Read(ref _layerApply);
+            if (sink != IntPtr.Zero)
+                ((delegate* unmanaged<int, int, int, int, int, int, int, float, void>)sink)(id, x, y, width, height, z, shown ? 1 : 0, alpha);
+        }
+
+        public static unsafe void ReleaseLayer(int id)
+        {
+            IntPtr sink = Volatile.Read(ref _layerRelease);
+            if (sink != IntPtr.Zero)
+                ((delegate* unmanaged<int, void>)sink)(id);
+        }
+
+        public static bool TopLevelMode
+        {
+            get => _topLevelMode;
+            set => _topLevelMode = value;
         }
 
         public static void SetSurface(IntPtr window, int width, int height, int densityDpi)

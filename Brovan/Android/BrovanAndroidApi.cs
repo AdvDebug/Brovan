@@ -8,6 +8,7 @@ using System.Threading;
 using Brovan.Core.Emulation;
 using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Emulation.OS.Windows;
+using Brovan.Core.Emulation.OS.Windows.Win32k;
 using Brovan.Core.Helpers;
 using Brovan.Core.Helpers.WindowsImage;
 using Brovan.Core.Settings;
@@ -318,6 +319,9 @@ namespace Brovan.Android
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_player_sink")]
         public static void SetPlayerSink(IntPtr sink) => AndroidHost.SetPlayerSink(sink);
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_set_layer_sinks")]
+        public static void SetLayerSinks(IntPtr create, IntPtr apply, IntPtr release) => AndroidHost.SetLayerSinks(create, apply, release);
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_terminal_key")]
         public static void TerminalKey(int down, int virtualKey, int character, int controlKeyState)
         {
@@ -385,6 +389,12 @@ namespace Brovan.Android
         {
             Guard(() =>
             {
+                if (AndroidHost.TopLevelMode)
+                {
+                    HostEventQueue.Enqueue(Win32kHelper.WM_SETFOCUS, 0, 0, hwnd);
+                    return;
+                }
+
                 AndroidGuestWindows.Select(hwnd);
                 AndroidWinManager.Current?.InvalidateSurface();
                 HostEventQueue.MarkRepaint();

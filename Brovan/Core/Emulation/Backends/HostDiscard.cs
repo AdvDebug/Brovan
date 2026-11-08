@@ -13,13 +13,14 @@ namespace Brovan.Core.Emulation
 
         internal static readonly bool Disabled = Environment.GetEnvironmentVariable("BROVAN_NO_HOST_MEM_DISCARD") == "1";
 
-        internal static void Release(IntPtr Start, ulong Size)
+        internal static bool Release(IntPtr Start, ulong Size)
         {
             bool Released = GeneralHelper.IsWindows
                 ? NativeWinImports.VirtualFree(Start, (UIntPtr)Size, MemDecommit)
                 : NativeUnixImports.Madvise(Start, (UIntPtr)Size, MadvDontNeed) == 0;
             if (!Released)
                 Utils.LogError($"[HostDiscard] Discard of 0x{Size:X} host bytes at 0x{Start.ToInt64():X} failed with {Marshal.GetLastWin32Error()}.");
+            return Released;
         }
     }
 

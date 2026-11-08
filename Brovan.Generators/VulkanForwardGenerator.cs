@@ -1774,40 +1774,51 @@ namespace Brovan.Generators
                     "                ulong gh = r.Remaining >= 8 ? r.ReadU64() : 0;\n" +
                     HostIdGuard("1u") +
                     "                System.IntPtr surf = System.IntPtr.Zero;\n" +
+                    "                System.IntPtr hostWin = inst.EnsureHostWindowHandle(gh, out object hold);\n" +
+                    "                if (hostWin == System.IntPtr.Zero)\n" +
+                    "                {\n" +
+                    "                    inst.ReleaseHostWindowHold(hold);\n" +
+                    "                    w.WriteU32(0u);\n" +
+                    "                    return -3;\n" +
+                    "                }\n" +
                     "                int rr;\n" +
                     "                if (Brovan.Android.AndroidHost.IsActive)\n" +
                     "                {\n" +
-                    "                    System.IntPtr awin = inst.EnsureHostWindowHandle(gh);\n" +
                     "                    byte* ci = stackalloc byte[32];\n" +
                     "                    for (int z = 0; z < 32; z++) ci[z] = 0;\n" +
                     "                    *(int*)(ci + 0) = " + "1000008000" + ";\n" +
-                    "                    *(void**)(ci + 24) = (void*)awin;\n" +
+                    "                    *(void**)(ci + 24) = (void*)hostWin;\n" +
                     "                    rr = (int)Brovan.Android.AndroidVulkanWsi.vkCreateAndroidSurfaceKHR(vi, (System.IntPtr)ci, System.IntPtr.Zero, (System.IntPtr)(&surf));\n" +
                     "                }\n" +
                     "                else if (Brovan.GeneralHelper.IsLinux)\n" +
                     "                {\n" +
-                    "                    System.IntPtr xdpy; System.IntPtr xwin;\n" +
-                    "                    inst.EnsureHostXlibSurfaceHandles(out xdpy, out xwin);\n" +
+                    "                    System.IntPtr xdpy = inst.HostXcbConnection();\n" +
                     "                    byte* ci = stackalloc byte[40];\n" +
                     "                    for (int z = 0; z < 40; z++) ci[z] = 0;\n" +
                     "                    *(int*)(ci + 0) = 1000005000;\n" +
                     "                    *(void**)(ci + 24) = (void*)xdpy;\n" +
-                    "                    *(uint*)(ci + 32) = (uint)xwin;\n" +
+                    "                    *(uint*)(ci + 32) = (uint)hostWin;\n" +
                     "                    rr = (int)BrovVulkLinuxWsi.vkCreateXcbSurfaceKHR(vi, (System.IntPtr)ci, System.IntPtr.Zero, (System.IntPtr)(&surf));\n" +
                     "                }\n" +
                     "                else\n" +
                     "                {\n" +
-                    "                    System.IntPtr hwnd = inst.EnsureHostWindowHandle(gh);\n" +
                     "                    System.IntPtr hinst = BrovVulkGenNative.GetModuleHandleW(System.IntPtr.Zero);\n" +
                     "                    byte* ci = stackalloc byte[40];\n" +
                     "                    for (int z = 0; z < 40; z++) ci[z] = 0;\n" +
                     "                    *(int*)(ci + 0) = 1000009000;\n" +
                     "                    *(void**)(ci + 24) = (void*)hinst;\n" +
-                    "                    *(void**)(ci + 32) = (void*)hwnd;\n" +
+                    "                    *(void**)(ci + 32) = (void*)hostWin;\n" +
                     "                    rr = (int)BrovVulkApi.vkCreateWin32SurfaceKHR(vi, (System.IntPtr)ci, System.IntPtr.Zero, (System.IntPtr)(&surf));\n" +
                     "                }\n" +
                     "                if (rr >= 0 && surf == System.IntPtr.Zero) rr = -3;\n" +
-                    "                w.WriteU32(rr >= 0 ? st.Register(surf, \"VkSurfaceKHR\", viId) : 0u);\n" +
+                    "                if (rr < 0)\n" +
+                    "                {\n" +
+                    "                    inst.ReleaseHostWindowHold(hold);\n" +
+                    "                    w.WriteU32(0u);\n" +
+                    "                    return rr;\n" +
+                    "                }\n" +
+                    "                w.WriteU32(st.Register(surf, \"VkSurfaceKHR\", viId));\n" +
+                    "                st.KeepHostWindowHold(surf, inst, hold);\n" +
                     "                return rr;\n            }\n";
             if (c.Name == "vkEnumerateInstanceExtensionProperties")
                 return "                return BrovVulkGenExt.Instance(w);\n";
@@ -3079,7 +3090,7 @@ namespace Brovan.Generators
                     if (ci == null || dev == null || outp == null)
                         return;
                     b.Append("                BrovVulkWsi.SwapchainPlan wsiPlan = st.Wsi.ReconcileSwapchain(").Append(dev).Append(", ").Append(ci).Append(", st, inst);\n");
-                    post.Add("                if (rr >= 0) st.Wsi.NoteSwapchain(" + outp + ", wsiPlan);");
+                    post.Add("                if (rr >= 0) st.NoteSwapchain(" + outp + ", wsiPlan);");
                     return;
                 }
 
