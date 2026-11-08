@@ -17,7 +17,7 @@ final class ProgramSettings {
 
     static final String[] OVERRIDE_KEYS = {
             "controls", "pointer", "pointer_speed", "layout", "network", "jit_cache",
-            "relax_vulkan", "low_memory", "render_scale", "sustained", "developer"
+            "relax_vulkan", "low_memory", "render_scale", "display_scale", "sustained", "developer"
     };
 
     private final Library library;
@@ -78,6 +78,14 @@ final class ProgramSettings {
 
     void setPointerSpeed(float value) throws IOException {
         write("pointer_speed", Float.toString(value));
+    }
+
+    int displayScale() {
+        return integer("display_scale", defaults.displayScale(), Settings.DISPLAY_DPIS.length);
+    }
+
+    void setDisplayScale(int value) throws IOException {
+        write("display_scale", Integer.toString(value));
     }
 
     String controlLayout() { return values.getProperty("layout", defaults.controlLayout()); }

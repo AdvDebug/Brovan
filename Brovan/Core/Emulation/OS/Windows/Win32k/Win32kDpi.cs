@@ -33,6 +33,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint DpiFieldMask = 0x1FF;
         private const int DpiFieldShift = 8;
 
+        private const uint SpiSetLogicalDpiOverride = 0x009F;
+
         private const ulong TebContextOffset = 0x8E8;
 
         private const ulong WindowContextOffset = 0x120;
@@ -228,15 +230,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static void DrainHostDpiChange(BinaryEmulator Instance)
         {
             uint NewDpi = HostEventQueue.ConsumeDpiChange();
-            if (NewDpi == 0)
+            if (NewDpi == 0 || Instance.WinHelper == null)
                 return;
 
-            Instance.WinHelper?.RefreshDisplayDependentState();
+            Instance.WinHelper.RefreshDisplayDependentState();
+            BroadcastScaleChange(Instance);
 
             if (GetAwareness(Instance) != AwarenessPerMonitor)
                 return;
 
-            ulong Hwnd = Instance.WinHelper?.GetForegroundWindow() ?? 0;
+            ulong Hwnd = Instance.WinHelper.GetForegroundWindow();
             WinWindow Window = Hwnd == 0 ? null : Instance.WinHelper.GetWindow(Hwnd);
             if (Window == null)
                 return;
@@ -253,6 +256,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance._emulator.WriteMemory(Rect + 0x0C, (uint)(Top + (int)Window.Height), 4);
 
             Win32kHelper.PostMessage(Instance, Hwnd, Win32kHelper.WM_DPICHANGED, (NewDpi << 16) | NewDpi, Rect);
+        }
+
+        // NT sends the setting change to every window before the display change (UserNotifyUniversalScaleFactorChanged).
+        private static void BroadcastScaleChange(BinaryEmulator Instance)
+        {
+            ulong Resolution = HostEventQueue.MakeLParam(GetScreenWidth(Instance), GetScreenHeight(Instance));
+            Win32kHelper.BroadcastNotification(Instance, Win32kHelper.WM_SETTINGCHANGE, SpiSetLogicalDpiOverride, 0, WithoutSender: true);
+            Win32kHelper.BroadcastNotification(Instance, Win32kHelper.WM_DISPLAYCHANGE, Win32kHelper.DisplayBitsPerPixel, Resolution, WithoutSender: true);
         }
 
         internal static void SeedFromImage(BinaryEmulator Instance, WinModule Module)

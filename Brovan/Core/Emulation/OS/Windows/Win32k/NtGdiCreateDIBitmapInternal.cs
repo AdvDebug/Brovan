@@ -10,7 +10,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint BI_RGB = 0;
         private const uint BI_BITFIELDS = 3;
         private const ushort MonochromeBitsPerPixel = 1;
-        private const ushort DisplayBitsPerPixel = 32;
         private const int RowCopyChunkBytes = 0x10000;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -33,7 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if ((Init & CbmInit) != 0 && InitialBits != 0)
                 Initialise = TryReadHeader(Instance, HeaderAddress, out SourceWidth, out SourceHeight, out SourceBitsPerPixel);
 
-            ushort BitsPerPixel = Initialise ? SourceBitsPerPixel : (Hdc == 0 ? MonochromeBitsPerPixel : DisplayBitsPerPixel);
+            ushort BitsPerPixel = Initialise ? SourceBitsPerPixel : (Hdc == 0 ? MonochromeBitsPerPixel : Win32kHelper.DisplayBitsPerPixel);
 
             ulong Handle = Win32kHelper.CreateBitmap(Instance, Width, Height, 1, BitsPerPixel, false, false);
             if (Handle == 0 || !Win32kHelper.TryGetBitmap(Instance, Handle, out Win32kBitmap Bitmap))

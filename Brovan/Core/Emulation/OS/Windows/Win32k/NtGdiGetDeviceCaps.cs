@@ -44,7 +44,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return Index switch
             {
                 2 => 1, // TECHNOLOGY: DT_RASDISPLAY
-                12 => 32, // BITSPIXEL
+                12 => Win32kHelper.DisplayBitsPerPixel, // BITSPIXEL
                 14 => 1, // PLANES
                 24 => -1, // NUMCOLORS
                 38 => RasterCaps,

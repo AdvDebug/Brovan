@@ -161,8 +161,11 @@ namespace Brovan.Android
         {
             Guard(() =>
             {
-                AndroidHost.SetSurface(nativeWindow, width, height, densityDpi);
+                bool dpiChanged = AndroidHost.SetSurface(nativeWindow, width, height, densityDpi);
                 HostDisplayMetrics.Invalidate();
+
+                if (dpiChanged)
+                    HostEventQueue.MarkDpiChanged(HostDisplayMetrics.SystemDpi);
 
                 if (nativeWindow != IntPtr.Zero)
                     AndroidInput.Resize(AndroidHost.Width, AndroidHost.Height);

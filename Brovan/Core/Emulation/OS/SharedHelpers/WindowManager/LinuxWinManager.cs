@@ -626,6 +626,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const uint MK_SHIFT = 0x0004;
         private const uint MK_CONTROL = 0x0008;
         private const uint MK_MBUTTON = 0x0010;
+        private const uint MK_XBUTTON1 = 0x0020;
+        private const uint MK_XBUTTON2 = 0x0040;
 
         private const uint VK_MENU = 0x12;
         private const uint VK_F10 = 0x79;
@@ -1096,34 +1098,34 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         {
             uint keys = StateToMouseKeys(button.State);
 
-            switch (button.Button)
+            // X delivers wheel notches as press/release pairs; Win32 has a single wheel message.
+            if (button.Button is 4 or 5)
             {
-                case 1:
-                    EnqueuePointer(pressed ? WM_LBUTTONDOWN : WM_LBUTTONUP, keys, button.X, button.Y, button.XRoot, button.YRoot, window);
-                    return;
-                case 2:
-                    EnqueuePointer(pressed ? WM_MBUTTONDOWN : WM_MBUTTONUP, keys, button.X, button.Y, button.XRoot, button.YRoot, window);
-                    return;
-                case 3:
-                    EnqueuePointer(pressed ? WM_RBUTTONDOWN : WM_RBUTTONUP, keys, button.X, button.Y, button.XRoot, button.YRoot, window);
-                    return;
-
-                case 4:
-                case 5:
-                    // X delivers wheel notches as press/release pairs; Win32 has a single wheel message.
-                    if (!pressed)
-                        return;
-
+                if (pressed)
+                {
                     short delta = button.Button == 4 ? (short)120 : (short)-120;
                     HostEventQueue.Enqueue(WM_MOUSEWHEEL, keys | ((ulong)(ushort)delta << 16), HostEventQueue.MakeLParam(button.XRoot, button.YRoot), window);
-                    return;
+                }
 
-                case 8:
-                case 9:
-                    uint xbutton = button.Button == 8 ? 1u : 2u;
-                    EnqueuePointer(pressed ? WM_XBUTTONDOWN : WM_XBUTTONUP, keys | ((ulong)xbutton << 16), button.X, button.Y, button.XRoot, button.YRoot, window);
-                    return;
+                return;
             }
+
+            (uint down, uint up, uint flag, ulong xbutton) = button.Button switch
+            {
+                1 => (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON, 0UL),
+                2 => (WM_MBUTTONDOWN, WM_MBUTTONUP, MK_MBUTTON, 0UL),
+                3 => (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON, 0UL),
+                8 => (WM_XBUTTONDOWN, WM_XBUTTONUP, MK_XBUTTON1, 1UL),
+                9 => (WM_XBUTTONDOWN, WM_XBUTTONUP, MK_XBUTTON2, 2UL),
+                _ => default,
+            };
+
+            if (down == 0)
+                return;
+
+            // X reports the button state before the event, and a Win32 button message carries the state after it.
+            keys = pressed ? keys | flag : keys & ~flag;
+            EnqueuePointer(pressed ? down : up, keys | (xbutton << 16), button.X, button.Y, button.XRoot, button.YRoot, window);
         }
 
         private bool TryTranslateTopLevelEvent(ref X11.XEvent nativeEvent)

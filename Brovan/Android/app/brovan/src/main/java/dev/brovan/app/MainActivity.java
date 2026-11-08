@@ -793,6 +793,8 @@ public class MainActivity extends AppCompatActivity {
                 settings::setPointerMode);
         choice(view, R.id.render_scale, getResources().getStringArray(R.array.render_scales), settings.renderScale(),
                 settings::setRenderScale);
+        choice(view, R.id.display_scale, Settings.displayScaleLabels(this), settings.displayScale(),
+                settings::setDisplayScale);
         choice(view, R.id.low_memory, getResources().getStringArray(R.array.low_memory_levels), settings.lowMemory(),
                 settings::setLowMemory);
         view.findViewById(R.id.edit_controls).setOnClickListener(button ->

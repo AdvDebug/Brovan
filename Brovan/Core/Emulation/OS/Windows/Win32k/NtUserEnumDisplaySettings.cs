@@ -35,7 +35,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint DmDisplayFrequency = 0x00400000;
 
         private const ushort SpecVersion = 0x0401;
-        private const uint BitsPerPixel = 32;
         private const uint LogPixels = 96;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -67,7 +66,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance._emulator.WriteMemory(DevModePtr + OffsetPositionY, (uint)Top, 4);
             Instance._emulator.WriteMemory(DevModePtr + OffsetDisplayOrientation, 0u, 4);
             Instance._emulator.WriteMemory(DevModePtr + OffsetLogPixels, (ushort)LogPixels, 2);
-            Instance._emulator.WriteMemory(DevModePtr + OffsetBitsPerPel, BitsPerPixel, 4);
+            Instance._emulator.WriteMemory(DevModePtr + OffsetBitsPerPel, (uint)Win32kHelper.DisplayBitsPerPixel, 4);
             Instance._emulator.WriteMemory(DevModePtr + OffsetPelsWidth, Width, 4);
             Instance._emulator.WriteMemory(DevModePtr + OffsetPelsHeight, Height, 4);
             Instance._emulator.WriteMemory(DevModePtr + OffsetDisplayFlags, 0u, 4);

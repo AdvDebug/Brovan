@@ -10,6 +10,11 @@
                     <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_render_scale" />
                     <TextView android:id="@+id/render_scale" style="@style/SettingsChoiceValue" />
                 </LinearLayout>
+                <LinearLayout style="@style/SettingsChoiceRow.Group">
+                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_display_scale" />
+                    <TextView android:id="@+id/display_scale" style="@style/SettingsChoiceValue" />
+                    <TextView style="@style/SettingsRowSummary" android:text="@string/settings_display_scale_summary" />
+                </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

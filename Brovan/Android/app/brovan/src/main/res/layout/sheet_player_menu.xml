@@ -55,6 +55,26 @@
         </LinearLayout>
         <com.google.android.material.slider.Slider android:id="@+id/sensitivity"
             style="@style/Widget.Brovan.SpeedSlider" />
+
+        <TextView style="@style/SectionLabel" android:text="@string/player_display" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" android:orientation="horizontal" android:gravity="center_vertical">
+            <TextView style="@style/SettingsRowTitle" android:layout_width="0dp" android:layout_weight="1"
+                android:text="@string/settings_display_scale" />
+            <TextView android:id="@+id/display_scale_value" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:textColor="@color/accent" android:textSize="14sp" />
+        </LinearLayout>
+        <com.google.android.material.slider.Slider android:id="@+id/display_scale"
+            style="@style/Widget.Brovan.ScaleSlider" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="horizontal" android:gravity="center_vertical">
+            <TextView style="@style/SettingsSummary" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_marginTop="0dp" android:text="@string/player_display_scale_summary" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/display_scale_auto"
+                style="@style/Widget.Material3.Button.TextButton" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:layout_marginStart="8dp"
+                android:text="@string/display_scale_auto" android:visibility="gone" />
+        </LinearLayout>
         <TextView style="@style/SettingsSummary" android:text="@string/player_menu_hint" />
 
         <TextView style="@style/SectionLabel" android:text="@string/player_more" />

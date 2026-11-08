@@ -235,6 +235,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WM_SYSCHAR = 0x0106;
         internal const uint WM_SYSDEADCHAR = 0x0107;
         internal const uint WM_DPICHANGED = 0x02E0;
+        internal const uint WM_SETTINGCHANGE = 0x001A;
+        internal const uint WM_DISPLAYCHANGE = 0x007E;
         internal const uint WM_INPUT = 0x00FF;
         internal const uint WM_MOUSEMOVE = 0x0200;
         internal const uint WM_LBUTTONDOWN = 0x0201;
@@ -267,6 +269,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint QS_INPUT = QS_MOUSE | QS_KEY | QS_RAWINPUT | QS_TOUCH | QS_POINTER;
         internal const uint QS_ALLEVENTS = QS_INPUT | QS_POSTMESSAGE | QS_TIMER | QS_PAINT | QS_HOTKEY;
         internal const uint QS_ALLINPUT = QS_ALLEVENTS | QS_SENDMESSAGE;
+
+        internal const ushort DisplayBitsPerPixel = 32;
 
         private const uint WA_INACTIVE = 0;
         private const uint WA_ACTIVE = 1;
@@ -3022,7 +3026,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private static ulong EnsureDisplaySurfaceBitmap(BinaryEmulator Instance, Win32kState State)
         {
             if (State.DisplaySurfaceBitmap == 0)
-                State.DisplaySurfaceBitmap = CreateBitmap(Instance, HostDisplayMetrics.ScreenWidth, HostDisplayMetrics.ScreenHeight, 1, 32, false, false);
+                State.DisplaySurfaceBitmap = CreateBitmap(Instance, HostDisplayMetrics.ScreenWidth, HostDisplayMetrics.ScreenHeight, 1, DisplayBitsPerPixel, false, false);
 
             return State.DisplaySurfaceBitmap;
         }
@@ -3534,7 +3538,30 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Instance.WinHelper.GetWindow(Hwnd) == null)
                 return;
 
+            AddNotification(Instance, GetState(Instance), Hwnd, Message, WParam, LParam, WithoutSender);
+            Instance.WakeSignal.Bump();
+        }
+
+        // NT sends broadcast notifications to hidden top-level windows too.
+        internal static void BroadcastNotification(BinaryEmulator Instance, uint Message, ulong WParam, ulong LParam, bool WithoutSender)
+        {
+            WinSysHelper Helper = Instance.WinHelper;
+            List<ulong> TopLevel = Helper.TopLevelWindows;
+            if (TopLevel.Count == 0)
+                return;
+
             Win32kState State = GetState(Instance);
+            for (int i = TopLevel.Count - 1; i >= 0; i--)
+            {
+                if (Helper.GetWindow(TopLevel[i]) != null)
+                    AddNotification(Instance, State, TopLevel[i], Message, WParam, LParam, WithoutSender);
+            }
+
+            Instance.WakeSignal.Bump();
+        }
+
+        private static void AddNotification(BinaryEmulator Instance, Win32kState State, ulong Hwnd, uint Message, ulong WParam, ulong LParam, bool WithoutSender)
+        {
             Win32kMessage Notification = new Win32kMessage(Hwnd, Message, WParam, LParam, unchecked((uint)Instance.EmulatedTickCount64), State.CursorScreenX, State.CursorScreenY, 0, true);
 
             if (Instance.WinHelper.SupportsUserCallbacks)
@@ -3547,8 +3574,6 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             {
                 QueueNotificationMessage(State, Notification);
             }
-
-            Instance.WakeSignal.Bump();
         }
 
         private static void QueueNotificationMessage(Win32kState State, in Win32kMessage Notification)
@@ -5147,12 +5172,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 && CanActivateImplicitly(Window);
         }
 
-        // NT: hidden windows get it too.
         private static void PostActivateApp(BinaryEmulator Instance, bool Active, bool FromHost)
         {
-            List<ulong> TopLevel = Instance.WinHelper.TopLevelWindows;
-            for (int i = TopLevel.Count - 1; i >= 0; i--)
-                PostNotification(Instance, TopLevel[i], WM_ACTIVATEAPP, Active ? 1UL : 0UL, 0, FromHost);
+            BroadcastNotification(Instance, WM_ACTIVATEAPP, Active ? 1UL : 0UL, 0, FromHost);
         }
 
         internal static void MoveFocus(BinaryEmulator Instance, ulong Focus, bool FromHost)

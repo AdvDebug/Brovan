@@ -1,15 +1,19 @@
 package dev.brovan;
 
 import android.content.Context;
+import android.graphics.Point;
+import android.graphics.Rect;
 import android.os.Build;
 import android.util.AttributeSet;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
@@ -37,6 +41,14 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
         TRACKPAD
     }
 
+    public static final int AUTO_DPI = 0;
+
+    public static final int BASE_DPI = 96;
+    public static final int DPI_STEP = 24;
+
+    private static final int DESKTOP_WIDTH = 1280;
+    private static final int DESKTOP_HEIGHT = 720;
+
     private static final int TAP_SLOP = 40;
     private static final int TAP_TIMEOUT_MS = 400;
     private static final float TRACKPAD_SPEED = 1.6f;
@@ -45,6 +57,8 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
     private static final int TYPED_DOWN = 1 << 16;
 
     private PointerMode mode = PointerMode.DRAG;
+    private int displayDpi = AUTO_DPI;
+    private int reportedDpi;
     private boolean keyboardWanted;
     private final ArrayDeque<Integer> typing = new ArrayDeque<>();
     private final Runnable typeNext = this::typeNext;
@@ -82,13 +96,56 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         attachLayers(true);
-        BrovanNative.setSurface(holder.getSurface(), getResources().getDisplayMetrics().densityDpi);
+        publishSurface(holder.getSurface());
         BrovanNative.injectFocus(true);
     }
 
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-        BrovanNative.setSurface(holder.getSurface(), getResources().getDisplayMetrics().densityDpi);
+        publishSurface(holder.getSurface());
+    }
+
+    private void publishSurface(Surface surface) {
+        reportedDpi = displayDpi != AUTO_DPI ? displayDpi : autoDpi();
+        BrovanNative.setSurface(surface, reportedDpi);
+    }
+
+    public void setDisplayDpi(int dpi) {
+        displayDpi = dpi;
+        Surface surface = getHolder().getSurface();
+        if (surface != null && surface.isValid()) {
+            publishSurface(surface);
+        }
+    }
+
+    // Uses the full window size, which stays the same while system bars or a menu shrink the surface.
+    private int autoDpi() {
+        WindowManager windows = getContext().getSystemService(WindowManager.class);
+        int width;
+        int height;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Rect bounds = windows.getMaximumWindowMetrics().getBounds();
+            width = bounds.width();
+            height = bounds.height();
+        } else {
+            Point size = new Point();
+            windows.getDefaultDisplay().getRealSize(size);
+            width = size.x;
+            height = size.y;
+        }
+        return autoDpi(width, height, getResources().getDisplayMetrics().densityDpi);
+    }
+
+    public int reportedDpi() {
+        return reportedDpi;
+    }
+
+    private static int autoDpi(int width, int height, int densityDpi) {
+        int longSide = Math.max(width, height);
+        int shortSide = Math.min(width, height);
+        int dpi = Math.min(longSide * BASE_DPI / DESKTOP_WIDTH, shortSide * BASE_DPI / DESKTOP_HEIGHT);
+        dpi = Math.min(dpi, densityDpi) / DPI_STEP * DPI_STEP;
+        return Math.max(dpi, BASE_DPI);
     }
 
     @Override

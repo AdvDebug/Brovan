@@ -42,6 +42,7 @@ import android.widget.Toast;
 import java.util.ArrayDeque;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 import dev.brovan.BrovanNative;
 import dev.brovan.BrovanSurfaceView;
@@ -71,6 +72,7 @@ public class PlayerActivity extends AppCompatActivity
     private static final String EXTRA_ARGUMENTS = "arguments";
     private static final String EXTRA_SETTINGS = "settings_json";
     private static final String EXTRA_POINTER_SPEED = "pointer_speed";
+    private static final String EXTRA_DISPLAY_SCALE = "display_scale";
     private static final String EXTRA_GUEST_DIRECTORY = "guest_directory";
     private static final String EXTRA_SESSION = "session";
     private static final String EXTRA_TOKEN = "token";
@@ -155,7 +157,8 @@ public class PlayerActivity extends AppCompatActivity
                 .putExtra(EXTRA_SUSTAINED, own.sustainedPerformance())
                 .putExtra(EXTRA_LAYOUT, own.controlLayout())
                 .putExtra(EXTRA_POINTER, own.pointerMode())
-                .putExtra(EXTRA_POINTER_SPEED, own.pointerSpeed());
+                .putExtra(EXTRA_POINTER_SPEED, own.pointerSpeed())
+                .putExtra(EXTRA_DISPLAY_SCALE, own.displayScale());
     }
 
     static Intent spawnIntent(Context context, Class<?> target, Intent parent, File directory, File image,
@@ -219,6 +222,7 @@ public class PlayerActivity extends AppCompatActivity
             return;
         }
         surface = findViewById(R.id.surface);
+        surface.setDisplayDpi(Settings.DISPLAY_DPIS[displayScale()]);
         terminal = findViewById(R.id.terminal);
         terminalPanel = findViewById(R.id.terminal_panel);
         terminalStatus = findViewById(R.id.terminal_status);
@@ -452,21 +456,16 @@ public class PlayerActivity extends AppCompatActivity
         });
 
         // Dragging the slider reports every step it passes through, and each one would rewrite the manifest.
-        speed.addOnSliderTouchListener(new Slider.OnSliderTouchListener() {
-            @Override
-            public void onStartTrackingTouch(Slider slider) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(Slider slider) {
-                getIntent().putExtra(EXTRA_POINTER_SPEED, slider.getValue());
-                try {
-                    program.setPointerSpeed(slider.getValue());
-                } catch (IOException failure) {
-                    showSaveFailure(failure);
-                }
+        onRelease(speed, released -> {
+            getIntent().putExtra(EXTRA_POINTER_SPEED, released.getValue());
+            try {
+                program.setPointerSpeed(released.getValue());
+            } catch (IOException failure) {
+                showSaveFailure(failure);
             }
         });
+
+        bindDisplayScale(view);
 
         view.findViewById(R.id.keyboard).setOnClickListener(button -> {
             dismissMenu();
@@ -512,6 +511,75 @@ public class PlayerActivity extends AppCompatActivity
             dismissMenu();
             quit();
         });
+    }
+
+    private int displayScale() {
+        return getIntent().getIntExtra(EXTRA_DISPLAY_SCALE, 0);
+    }
+
+    private void bindDisplayScale(View view) {
+        TextView value = view.findViewById(R.id.display_scale_value);
+        Slider slider = view.findViewById(R.id.display_scale);
+        View automatic = view.findViewById(R.id.display_scale_auto);
+        slider.setValueTo(Settings.DISPLAY_DPIS.length - 1);
+        slider.setValueFrom(1);
+
+        Runnable show = () -> {
+            int scale = displayScale();
+            boolean auto = scale == 0;
+            int dpi = auto ? surface.reportedDpi() : Settings.DISPLAY_DPIS[scale];
+            slider.setValue(auto ? Settings.displayScaleOf(dpi) : scale);
+            if (!auto) {
+                value.setText(Settings.formatDpi(this, dpi));
+            } else if (dpi == 0) {
+                value.setText(R.string.display_scale_auto);
+            } else {
+                value.setText(getString(R.string.player_display_scale_auto, Settings.formatDpi(this, dpi)));
+            }
+            automatic.setVisibility(auto ? View.GONE : View.VISIBLE);
+        };
+        show.run();
+
+        slider.addOnChangeListener((changed, position, fromUser) -> {
+            if (fromUser) {
+                value.setText(Settings.formatDpi(this, Settings.DISPLAY_DPIS[Math.round(position)]));
+            }
+        });
+        onRelease(slider, released -> {
+            applyDisplayScale(Math.round(released.getValue()));
+            show.run();
+        });
+        automatic.setOnClickListener(button -> {
+            applyDisplayScale(0);
+            show.run();
+        });
+    }
+
+    private static void onRelease(Slider slider, Consumer<Slider> action) {
+        slider.addOnSliderTouchListener(new Slider.OnSliderTouchListener() {
+            @Override
+            public void onStartTrackingTouch(Slider touched) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(Slider touched) {
+                action.accept(touched);
+            }
+        });
+    }
+
+    private void applyDisplayScale(int index) {
+        if (index == displayScale()) {
+            return;
+        }
+
+        getIntent().putExtra(EXTRA_DISPLAY_SCALE, index);
+        surface.setDisplayDpi(Settings.DISPLAY_DPIS[index]);
+        try {
+            program.setDisplayScale(index);
+        } catch (IOException failure) {
+            showSaveFailure(failure);
+        }
     }
 
     private void resize(View sheet) {

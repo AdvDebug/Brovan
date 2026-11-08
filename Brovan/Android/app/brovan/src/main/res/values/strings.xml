@@ -103,6 +103,10 @@
     <string name="settings_low_memory">Low memory mode</string>
     <string name="settings_low_memory_summary">Uses smaller caches and reports less memory. Programs may run slower.</string>
     <string name="settings_render_scale">Render scale</string>
+    <string name="settings_display_scale">Display scale</string>
+    <string name="settings_display_scale_summary">Size of text and controls in Windows programs. Automatic keeps a desktop-sized screen.</string>
+    <string name="display_scale_auto">Automatic</string>
+    <string name="display_scale_value">%1$d%% · %2$d DPI</string>
     <string name="settings_pointer">Touch behaviour</string>
     <string name="settings_developer">Developer mode</string>
     <string name="settings_developer_summary">Starts at the debugger prompt. Slower execution.</string>
@@ -254,6 +258,9 @@
     <string name="player_menu_hint">These settings are kept for this program</string>
     <string name="player_sensitivity">Drag sensitivity</string>
     <string name="player_sensitivity_summary">How far the pointer travels for the same finger movement.</string>
+    <string name="player_display">Display</string>
+    <string name="player_display_scale_auto">%1$s, automatic</string>
+    <string name="player_display_scale_summary">Programs that cannot rescale while running use it at their next start.</string>
     <string name="player_escape">Send Esc</string>
     <string name="player_show_console">Show console</string>
     <string name="player_show_window">Show window</string>

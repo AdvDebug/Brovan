@@ -15,6 +15,7 @@ namespace Brovan.Android
         private const uint WM_SIZE = 0x0005;
         private const uint SIZE_RESTORED = 0;
         private const uint SIZE_MAXIMIZED = 2;
+        private const int MaxFillRefusals = 3;
 
         private static AndroidWinManager _current;
         private static long _nextFont;
@@ -375,6 +376,7 @@ namespace Brovan.Android
             private int _width;
             private int _height;
             private bool _fillReported;
+            private int _fillRefusals;
 
             private bool _keyed;
             private int _key;
@@ -411,6 +413,8 @@ namespace Brovan.Android
             // A phone has no window manager, so an unowned window with a caption fills the screen.
             private bool FillsScreen => _owner == null && Win32kHelper.HasCaption(_style);
 
+            private bool FillAccepted => _fillRefusals <= MaxFillRefusals;
+
             internal void Place()
             {
                 if (_layered != null)
@@ -425,7 +429,7 @@ namespace Brovan.Android
 
                 int surfaceWidth = AndroidHost.Width;
                 int surfaceHeight = AndroidHost.Height;
-                bool fills = FillsScreen && surfaceWidth > 0 && surfaceHeight > 0;
+                bool fills = FillsScreen && FillAccepted && surfaceWidth > 0 && surfaceHeight > 0;
 
                 _x = fills ? 0 : _requestedX;
                 _y = fills ? 0 : _requestedY;
@@ -460,6 +464,7 @@ namespace Brovan.Android
             internal void Refill()
             {
                 _fillReported = false;
+                _fillRefusals = 0;
                 Place();
             }
 
@@ -582,6 +587,12 @@ namespace Brovan.Android
 
             public void SetClientBounds(int x, int y, int width, int height)
             {
+                if (_fillReported && (x != 0 || y != 0 || width != AndroidHost.Width || height != AndroidHost.Height))
+                {
+                    _fillRefusals++;
+                    _fillReported = false;
+                }
+
                 _requestedX = x;
                 _requestedY = y;
                 _requestedWidth = width;

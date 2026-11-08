@@ -289,15 +289,23 @@
         <item name="android:textColor">@color/text_secondary</item>
     </style>
 
-    <style name="Widget.Brovan.SpeedSlider" parent="Widget.Material3.Slider">
+    <style name="Widget.Brovan.Slider" parent="Widget.Material3.Slider">
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">wrap_content</item>
+        <item name="labelBehavior">gone</item>
+        <item name="tickVisible">false</item>
+    </style>
+
+    <style name="Widget.Brovan.SpeedSlider" parent="Widget.Brovan.Slider">
         <item name="android:stepSize">0.1</item>
         <item name="android:valueFrom">0.4</item>
         <item name="android:valueTo">3.0</item>
         <item name="android:contentDescription">@string/player_sensitivity</item>
-        <item name="labelBehavior">gone</item>
-        <item name="tickVisible">false</item>
+    </style>
+
+    <style name="Widget.Brovan.ScaleSlider" parent="Widget.Brovan.Slider">
+        <item name="android:stepSize">1</item>
+        <item name="android:contentDescription">@string/settings_display_scale</item>
     </style>
 
     <style name="Widget.Brovan.DebugAction" parent="Widget.Material3.Button.TextButton.Icon">

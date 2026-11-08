@@ -108,24 +108,22 @@ namespace Brovan.Android
             set => _topLevelMode = value;
         }
 
-        public static void SetSurface(IntPtr window, int width, int height, int densityDpi)
+        public static bool SetSurface(IntPtr window, int width, int height, int densityDpi)
         {
             IntPtr previous;
+            bool dpiChanged;
 
             lock (SurfaceSync)
             {
                 previous = _nativeWindow;
                 if (previous == window && window != IntPtr.Zero)
-                {
-                    StoreMetrics(window, width, height, densityDpi);
-                    return;
-                }
+                    return StoreMetrics(window, width, height, densityDpi);
 
                 if (window != IntPtr.Zero)
                     AndroidNative.NativeWindowAcquire(window);
 
                 _nativeWindow = window;
-                StoreMetrics(window, width, height, densityDpi);
+                dpiChanged = StoreMetrics(window, width, height, densityDpi);
             }
 
             if (previous != IntPtr.Zero)
@@ -140,6 +138,8 @@ namespace Brovan.Android
             {
                 SurfaceReady.Reset();
             }
+
+            return dpiChanged;
         }
 
         // Later surfaces come and go as the activity leaves the front, and a guest behind another one
@@ -222,7 +222,7 @@ namespace Brovan.Android
             }
         }
 
-        private static void StoreMetrics(IntPtr window, int width, int height, int densityDpi)
+        private static bool StoreMetrics(IntPtr window, int width, int height, int densityDpi)
         {
             if (width <= 0 && window != IntPtr.Zero)
                 width = AndroidNative.NativeWindowGetWidth(window);
@@ -233,8 +233,12 @@ namespace Brovan.Android
             Volatile.Write(ref _width, width > 0 ? width : 0);
             Volatile.Write(ref _height, height > 0 ? height : 0);
 
-            if (densityDpi > 0)
-                Volatile.Write(ref _densityDpi, densityDpi);
+            if (densityDpi <= 0)
+                return false;
+
+            int previous = _densityDpi;
+            Volatile.Write(ref _densityDpi, densityDpi);
+            return previous > 0 && previous != densityDpi;
         }
     }
 }

@@ -159,6 +159,8 @@ public class ProfileActivity extends AppCompatActivity {
                 defaults.network(), own.network());
         choice(R.id.profile_scale, "render_scale", getResources().getStringArray(R.array.render_scales),
                 defaults.renderScale(), own.renderScale());
+        choice(R.id.profile_display_scale, "display_scale", Settings.displayScaleLabels(this),
+                defaults.displayScale(), own.displayScale());
         choice(R.id.profile_memory, "low_memory", getResources().getStringArray(R.array.low_memory_levels),
                 defaults.lowMemory(), own.lowMemory());
         toggle(R.id.profile_jit, "jit_cache", defaults.jitCache(), own.jitCache());

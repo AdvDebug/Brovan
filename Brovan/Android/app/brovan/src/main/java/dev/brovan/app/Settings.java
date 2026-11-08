@@ -3,12 +3,19 @@ package dev.brovan.app;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import dev.brovan.BrovanSurfaceView;
+
 /** User-visible run options. */
 final class Settings {
 
     static final int NETWORK_MODE_COUNT = 3;
 
     static final float[] RENDER_SCALES = {1f, 0.85f, 0.75f, 0.6f, 0.5f};
+
+    // The emulator ignores a DPI above 480.
+    private static final int MAX_DPI = 480;
+
+    static final int[] DISPLAY_DPIS = displayDpis();
 
     /** Must match the platform.low-memory values the emulator accepts. */
     static final String[] LOW_MEMORY_LEVELS = {"off", "minimal", "medium", "high", "aggressive"};
@@ -21,6 +28,7 @@ final class Settings {
     private static final String KEY_RELAX_VULKAN = "relax_vulkan";
     private static final String KEY_LOW_MEMORY = "low_memory";
     private static final String KEY_RENDER_SCALE = "render_scale";
+    private static final String KEY_DISPLAY_SCALE = "display_scale";
     private static final String KEY_SUSTAINED = "sustained";
     private static final String KEY_SETUP_DISMISSED = "setup_dismissed";
     private static final String KEY_CONTROL_LAYOUT = "control_layout";
@@ -82,7 +90,7 @@ final class Settings {
     /** Index into LOW_MEMORY_LEVELS. */
     int lowMemory() {
         try {
-            return clampLowMemory(preferences.getInt(KEY_LOW_MEMORY, 0));
+            return clampIndex(preferences.getInt(KEY_LOW_MEMORY, 0), LOW_MEMORY_LEVELS.length);
         } catch (ClassCastException storedAsSwitch) {
             // Older builds stored this key as a boolean, with true meaning the strongest level.
             int level = preferences.getBoolean(KEY_LOW_MEMORY, false) ? LOW_MEMORY_LEVELS.length - 1 : 0;
@@ -92,32 +100,65 @@ final class Settings {
     }
 
     void setLowMemory(int value) {
-        preferences.edit().putInt(KEY_LOW_MEMORY, clampLowMemory(value)).apply();
+        preferences.edit().putInt(KEY_LOW_MEMORY, clampIndex(value, LOW_MEMORY_LEVELS.length)).apply();
     }
 
     String lowMemoryLevel() {
         return LOW_MEMORY_LEVELS[lowMemory()];
     }
 
-    private static int clampLowMemory(int value) {
-        return value < 0 || value >= LOW_MEMORY_LEVELS.length ? 0 : value;
-    }
-
     /** Index into RENDER_SCALES. */
     int renderScale() {
-        return clampScale(preferences.getInt(KEY_RENDER_SCALE, 0));
+        return clampIndex(preferences.getInt(KEY_RENDER_SCALE, 0), RENDER_SCALES.length);
     }
 
     void setRenderScale(int value) {
-        preferences.edit().putInt(KEY_RENDER_SCALE, clampScale(value)).apply();
+        preferences.edit().putInt(KEY_RENDER_SCALE, clampIndex(value, RENDER_SCALES.length)).apply();
     }
 
     float renderScaleValue() {
         return RENDER_SCALES[renderScale()];
     }
 
-    private static int clampScale(int value) {
-        return value < 0 || value >= RENDER_SCALES.length ? 0 : value;
+    /** Index into DISPLAY_DPIS. */
+    int displayScale() {
+        return clampIndex(preferences.getInt(KEY_DISPLAY_SCALE, 0), DISPLAY_DPIS.length);
+    }
+
+    void setDisplayScale(int value) {
+        preferences.edit().putInt(KEY_DISPLAY_SCALE, clampIndex(value, DISPLAY_DPIS.length)).apply();
+    }
+
+    static int displayScaleOf(int dpi) {
+        int index = (dpi - BrovanSurfaceView.BASE_DPI) / BrovanSurfaceView.DPI_STEP + 1;
+        return Math.max(1, Math.min(index, DISPLAY_DPIS.length - 1));
+    }
+
+    static String formatDpi(Context context, int dpi) {
+        return context.getString(R.string.display_scale_value, dpi * 100 / BrovanSurfaceView.BASE_DPI, dpi);
+    }
+
+    static String[] displayScaleLabels(Context context) {
+        String[] labels = new String[DISPLAY_DPIS.length];
+        labels[0] = context.getString(R.string.display_scale_auto);
+        for (int i = 1; i < labels.length; i++) {
+            labels[i] = formatDpi(context, DISPLAY_DPIS[i]);
+        }
+        return labels;
+    }
+
+    private static int[] displayDpis() {
+        int steps = (MAX_DPI - BrovanSurfaceView.BASE_DPI) / BrovanSurfaceView.DPI_STEP + 1;
+        int[] dpis = new int[steps + 1];
+        dpis[0] = BrovanSurfaceView.AUTO_DPI;
+        for (int i = 0; i < steps; i++) {
+            dpis[i + 1] = BrovanSurfaceView.BASE_DPI + i * BrovanSurfaceView.DPI_STEP;
+        }
+        return dpis;
+    }
+
+    private static int clampIndex(int value, int count) {
+        return value < 0 || value >= count ? 0 : value;
     }
 
     /** Trades peak clocks for a rate the device can hold once it is warm. */
