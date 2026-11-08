@@ -5,6 +5,7 @@ import android.graphics.Point;
 import android.graphics.Rect;
 import android.os.Build;
 import android.util.AttributeSet;
+import android.util.DisplayMetrics;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -51,6 +52,9 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
 
     private static final int TAP_SLOP = 40;
     private static final int TAP_TIMEOUT_MS = 400;
+    private static final int PAIR_TIMEOUT_MS = 100;
+    private static final float PAIR_SPREAD_MM = 30f;
+    private static final int NOTCH_TRAVEL_PX = 48;
     private static final float TRACKPAD_SPEED = 1.6f;
     private static final float HOVER_SPEED = 1f;
     private static final long TYPING_STEP_MS = 40;
@@ -75,7 +79,17 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
     private long downAt;
     private boolean secondFinger;
     private boolean moving;
+    private boolean pressPending;
+    private final Runnable pressLeft = this::pressLeft;
     private int pointerId = MotionEvent.INVALID_POINTER_ID;
+    private int pairId = MotionEvent.INVALID_POINTER_ID;
+    private float pairX1;
+    private float pairY1;
+    private float pairX2;
+    private float pairY2;
+    private boolean scrolling;
+    private float scrollY;
+    private float scrollCarry;
 
     public BrovanSurfaceView(Context context) {
         super(context);
@@ -184,27 +198,43 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
                 travelled = 0f;
                 downAt = event.getEventTime();
                 secondFinger = false;
-                moving = mode == PointerMode.DRAG;
+                moving = false;
+                pairId = MotionEvent.INVALID_POINTER_ID;
+                scrolling = false;
 
-                if (moving) {
+                // The press waits for a second finger, so a right click or a scroll does not click first.
+                if (mode == PointerMode.DRAG) {
                     cursorX = lastX;
                     cursorY = lastY;
                     move();
-                    buttons |= BrovanNative.MK_LBUTTON;
-                    inject(BrovanNative.POINTER_DOWN);
+                    pressPending = true;
+                    postDelayed(pressLeft, PAIR_TIMEOUT_MS);
                 }
 
                 return true;
             }
 
             case MotionEvent.ACTION_POINTER_DOWN:
-                // A second finger means the gesture is a right click, so whatever the first one started
-                // has to be let go of before it turns into a drag.
+                cancelPress();
+                if (!secondFinger && event.getPointerCount() == 2 && travelled < TAP_SLOP
+                        && event.getEventTime() - downAt <= PAIR_TIMEOUT_MS) {
+                    startPair(event, event.getActionIndex());
+                } else if (!scrolling) {
+                    pairId = MotionEvent.INVALID_POINTER_ID;
+                }
+
+                // A second finger means the gesture is a right click or a scroll, so whatever the first one
+                // started has to be let go of before it turns into a drag.
                 secondFinger = true;
                 releaseLeft();
                 return true;
 
             case MotionEvent.ACTION_MOVE: {
+                if (scrolling) {
+                    scroll(event);
+                    return true;
+                }
+
                 int index = event.findPointerIndex(pointerId);
                 if (index < 0) {
                     return true;
@@ -216,11 +246,19 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
                 lastY = event.getY(index);
                 travelled += Math.abs(dx) + Math.abs(dy);
 
+                if (pairId != MotionEvent.INVALID_POINTER_ID && pairHeld(event)) {
+                    return true;
+                }
+
                 // The cursor stays where it is until the finger has travelled far enough to mean a move,
                 // so a tap clicks the spot the guest is already pointing at instead of jumping to the finger.
                 if (!moving) {
                     if (travelled < TAP_SLOP) {
                         return true;
+                    }
+
+                    if (cancelPress()) {
+                        pressLeft();
                     }
 
                     moving = true;
@@ -243,14 +281,18 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
 
             case MotionEvent.ACTION_UP: {
                 boolean tapped = travelled < TAP_SLOP && event.getEventTime() - downAt < TAP_TIMEOUT_MS;
+                boolean pressWasPending = cancelPress();
                 pointerId = MotionEvent.INVALID_POINTER_ID;
+                pairId = MotionEvent.INVALID_POINTER_ID;
                 releaseLeft();
 
-                if (secondFinger) {
+                if (scrolling) {
+                    scrolling = false;
+                } else if (secondFinger) {
                     if (tapped) {
                         PointerState.click(BrovanNative.BUTTON_RIGHT);
                     }
-                } else if (mode != PointerMode.DRAG && tapped) {
+                } else if (pressWasPending || (mode != PointerMode.DRAG && tapped)) {
                     PointerState.click(BrovanNative.BUTTON_LEFT);
                 }
 
@@ -258,12 +300,118 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
             }
 
             case MotionEvent.ACTION_CANCEL:
+                cancelPress();
                 pointerId = MotionEvent.INVALID_POINTER_ID;
+                pairId = MotionEvent.INVALID_POINTER_ID;
+                scrolling = false;
                 releaseLeft();
                 return true;
 
             default:
                 return super.onTouchEvent(event);
+        }
+    }
+
+    private void pressLeft() {
+        pressPending = false;
+        moving = true;
+        buttons |= BrovanNative.MK_LBUTTON;
+        inject(BrovanNative.POINTER_DOWN);
+    }
+
+    private boolean cancelPress() {
+        if (!pressPending) {
+            return false;
+        }
+
+        pressPending = false;
+        removeCallbacks(pressLeft);
+        return true;
+    }
+
+    // Two thumbs on a game land apart or one after the other, so only a close pair that lands together can scroll.
+    private void startPair(MotionEvent event, int index) {
+        int first = event.findPointerIndex(pointerId);
+        if (first < 0) {
+            return;
+        }
+
+        float x1 = event.getX(first);
+        float y1 = event.getY(first);
+        float x2 = event.getX(index);
+        float y2 = event.getY(index);
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        double spreadMm = Math.hypot((x2 - x1) / metrics.xdpi, (y2 - y1) / metrics.ydpi) * 25.4;
+        if (spreadMm > PAIR_SPREAD_MM) {
+            return;
+        }
+
+        pairId = event.getPointerId(index);
+        pairX1 = x1;
+        pairY1 = y1;
+        pairX2 = x2;
+        pairY2 = y2;
+    }
+
+    // A pinch, a sideways swipe or one finger held still gives the touch back to the pointer.
+    private boolean pairHeld(MotionEvent event) {
+        int first = event.findPointerIndex(pointerId);
+        int second = event.findPointerIndex(pairId);
+        if (first < 0 || second < 0) {
+            pairId = MotionEvent.INVALID_POINTER_ID;
+            return false;
+        }
+
+        float x1 = event.getX(first);
+        float y1 = event.getY(first);
+        float x2 = event.getX(second);
+        float y2 = event.getY(second);
+        float dx1 = x1 - pairX1;
+        float dy1 = y1 - pairY1;
+        float dx2 = x2 - pairX2;
+        float dy2 = y2 - pairY2;
+
+        if (Math.max(Math.abs(dx1) + Math.abs(dy1), Math.abs(dx2) + Math.abs(dy2)) < TAP_SLOP) {
+            return true;
+        }
+
+        float meanDx = (dx1 + dx2) / 2f;
+        float meanDy = (dy1 + dy2) / 2f;
+        double spreadChange = Math.abs(Math.hypot(x2 - x1, y2 - y1) - Math.hypot(pairX2 - pairX1, pairY2 - pairY1));
+        if (dy1 * dy2 <= 0f || Math.abs(meanDy) <= Math.abs(meanDx) || spreadChange >= Math.abs(meanDy) / 2f) {
+            pairId = MotionEvent.INVALID_POINTER_ID;
+            return false;
+        }
+
+        scrolling = true;
+        scrollY = (y1 + y2) / 2f;
+        scrollCarry = 0f;
+
+        if (mode == PointerMode.DRAG) {
+            cursorX = (x1 + x2) / 2f;
+            cursorY = scrollY;
+            move();
+        }
+
+        return true;
+    }
+
+    private void scroll(MotionEvent event) {
+        int first = event.findPointerIndex(pointerId);
+        int second = event.findPointerIndex(pairId);
+        if (first < 0 || second < 0) {
+            return;
+        }
+
+        float y = (event.getY(first) + event.getY(second)) / 2f;
+        scrollCarry += y - scrollY;
+        scrollY = y;
+
+        float notch = NOTCH_TRAVEL_PX * Math.max(reportedDpi, BASE_DPI) / (float) BASE_DPI;
+        int notches = (int) (scrollCarry / notch);
+        if (notches != 0) {
+            scrollCarry -= notches * notch;
+            PointerState.scroll(notches);
         }
     }
 
